@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -63,6 +63,13 @@ status_t matmul_context_t::validate() {
     apilog_error("Weights size is not valid");
     return status_t::failure;
   }
+
+  data_type_t weight_data_type = weights->get_data_type();
+  if (weight_data_type == data_type_t::u4 &&
+      weights->get_quant_subtype() != quant_subtype_t::asymmetric) {
+    apilog_error("U4 weights must be quantized with asymmetric zero point");
+    return status_t::failure;
+  }
   if (weights->is_quantized()) {
     unsigned long scale_nelems = compute_product(weights->get_quant_scale_size());
     unsigned long N = weights_size.at(weights_size.size()-1);
@@ -84,6 +91,7 @@ status_t matmul_context_t::validate() {
     
     if (weights->get_quant_subtype() == quant_subtype_t::asymmetric) {
       unsigned long zero_nelems = compute_product(weights->get_quant_zero_size());
+      data_type_t zero_data_type = weights->get_quant_zero_data_type();
       // Zero point supports same granularities as scale
       bool zp_is_per_tensor = (zero_nelems == 1);
       bool zp_is_per_channel = (zero_nelems == N);
@@ -92,6 +100,18 @@ status_t matmul_context_t::validate() {
       
       if (!(zp_is_per_tensor || zp_is_per_channel || zp_is_per_group)) {
         apilog_error("Weights quant zero supports per tensor, per channel, or per group quantization");
+        return status_t::failure;
+      }
+      // WOQ: U4 requires bf16 or s8 zero point
+      if (weight_data_type == data_type_t::u4) {
+        if (zero_data_type != data_type_t::bf16 && zero_data_type != data_type_t::s8) {
+          apilog_error("Weights quant zero supports only bf16 or s8 data type for u4 tensor");
+          return status_t::failure;
+        }
+      }
+      else if (zero_data_type != data_type_t::s32 && zero_data_type != data_type_t::s8 &&
+               zero_data_type != data_type_t::u8) {
+        apilog_error("Weights quant zero supports only s32, s8, or u8 data type for weights tensor");
         return status_t::failure;
       }
     }

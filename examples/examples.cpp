@@ -69,6 +69,7 @@ int main() {
     run_lowoha_matmul_f16_test();
     matmul_woq_bf16_kernel_example();
     run_lowoha_matmul_woq_bf16s4_test();
+    run_lowoha_matmul_woq_bf16u4_test();
     run_lowoha_matmul_int8_caching_test();
 
     /** Group GEMM operator functionality examples.

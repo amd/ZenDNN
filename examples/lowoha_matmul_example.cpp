@@ -265,6 +265,106 @@ int run_lowoha_matmul_woq_bf16s4_test() {
   return OK;
 }
 
+int run_lowoha_matmul_woq_bf16u4_test() {
+  try {
+    // ========== Matrix Dimensions ==========
+    constexpr int M = 16, K = 128, N = 64;
+    constexpr int GROUP_SIZE = 32;
+    constexpr int NUM_GROUPS = K / GROUP_SIZE;  // = 4 groups
+
+    log_info("LOWOHA WOQ BF16xU4 matmul example with per-group quantization");
+    log_info("Matrix dimensions: M=", M, " K=", K, " N=", N);
+    log_info("Group size: ", GROUP_SIZE, ", Number of groups: ", NUM_GROUPS);
+
+    // ========== Create Weight Scale Tensor (per-group, BF16) ==========
+    // Dimensions {NUM_GROUPS, N} - one scale per group per output channel
+    std::vector<bfloat16_t> wei_scale(NUM_GROUPS * N);
+    for (int g = 0; g < NUM_GROUPS; ++g) {
+      for (int n = 0; n < N; ++n) {
+        wei_scale[g * N + n] = bfloat16_t(1.0f + 0.1f * g);
+      }
+    }
+
+    // ========== Create Zero Point Tensor (per-group, BF16) ==========
+    // Dimensions {NUM_GROUPS, N} - one zp per group per output channel
+    std::vector<bfloat16_t> wei_zp(NUM_GROUPS * N);
+    for (int g = 0; g < NUM_GROUPS; ++g) {
+      for (int n = 0; n < N; ++n) {
+        wei_zp[g * N + n] = bfloat16_t(static_cast<float>(g % 4));
+      }
+    }
+
+    // ========== Create U4 Packed Weights ==========
+    // U4 weights are packed: 2 values per byte, range [0, 15]
+    size_t packed_weight_size = (K * N + 1) / 2;
+    std::vector<int8_t> weights(packed_weight_size);
+    int8_t u4_val = 3 & 0x0F;
+    int8_t packed_val = u4_val | (u4_val << 4);
+    std::fill(weights.begin(), weights.end(), packed_val);
+
+    // ========== Create BF16 Input ==========
+    std::vector<int16_t> input(M * K);
+    // Fill with bf16 representation of 1.0f (0x3F80)
+    std::fill(input.begin(), input.end(), 0x3F80);
+
+    // ========== Output Tensor ==========
+    std::vector<float> output(M * N, 0.0f);
+
+    // ========== Setup LOWOHA Parameters for WOQ ==========
+    matmul_data_types matmul_dtype;
+    matmul_dtype.src = data_type_t::bf16;
+    matmul_dtype.wei = data_type_t::u4;
+    matmul_dtype.dst = data_type_t::f32;
+    matmul_dtype.bias = data_type_t::none;
+    matmul_dtype.compute = data_type_t::none;
+
+    matmul_params params;
+    params.dtypes = matmul_dtype;
+
+    // Setup per-group quantization parameters with BF16 scale and BF16 zero point
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::bf16;
+    params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
+
+    params.quant_params.wei_zp.buff = wei_zp.data();
+    // This will trigger simulated WOQ path (int4 -> bf16 conversion)
+    params.quant_params.wei_zp.dt = data_type_t::bf16;
+    params.quant_params.wei_zp.dims = {NUM_GROUPS, N};
+
+    matmul_batch_params_t batch_params;
+    batch_params.Batch_A = 1;
+    batch_params.Batch_B = 1;
+
+    // ========== Execute LOWOHA WOQ Kernel ==========
+    log_info("Executing LOWOHA simulated WOQ BF16xU4 kernel with per-group quantization...");
+    status_t status = matmul_direct(
+                        'r',  // layout: row-major
+                        false, false,  // transA, transB
+                        M, N, K,
+                        1.0f, input.data(), K,
+                        weights.data(), N,
+                        nullptr,  // no bias
+                        0.0f, output.data(), N,
+                        true,  // is_weights_const
+                        batch_params, params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA WOQ BF16xU4 kernel execution failed.");
+      return NOT_OK;
+    }
+
+    log_info("LOWOHA WOQ BF16xU4 matmul executed successfully!");
+    log_info("Output[0,0] = ", output[0]);
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
 /**
  * @brief Test INT8 matmul with zero-point compensation caching
  *

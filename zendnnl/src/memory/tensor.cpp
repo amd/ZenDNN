@@ -1290,13 +1290,6 @@ status_t tensor_t::validate_quant_zero() {
   //compute zero stride
   quant->zero_stride = compute_quant_stride(quant->zero_size);
 
-  //check zero data type
-  if (quant->zero_data_type != data_type_t::s32 &&
-      quant->zero_data_type != data_type_t::s8 &&
-      quant->zero_data_type != data_type_t::u8) {
-    apilog_error(name, " unsupported zero data type.");
-    return status_t::memory_bad_quant;
-  }
   return status_t::success;
 }
 

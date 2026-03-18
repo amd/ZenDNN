@@ -83,30 +83,60 @@ status_t matmul_bf16s4_avx512_kernel_t::execute(const context_type &context_,
   unsigned int offset_out     = (output_dim == 3) ? output_tensor.get_stride(
                                   output_dim-3) : 0;
 
-  if (output_tensor.get_data_type() == data_type_t::f32) {
-    for (auto bs=0; bs<batch_size; ++bs) {
-      aocl_gemm_bf16s4f32of32(order, trans_input, trans_weight,
-                              m,n,k,
-                              alpha,
-                              input_raw_handle + bs * offset_src, lda, input_format,
-                              (is_reordered_weights && weight_dim==2) ?
-                              reorder_weights : weights_raw_handle + bs * offset_wei,
-                              ldb, weight_format, beta,
-                              (float *)output_raw_handle + bs * offset_out, ldc,
-                              aocl_dlp_po_ptr);
+  if (weight_tensor.get_data_type() == data_type_t::s4) {
+    if (output_tensor.get_data_type() == data_type_t::f32) {
+      for (auto bs=0; bs<batch_size; ++bs) {
+        aocl_gemm_bf16s4f32of32(order, trans_input, trans_weight,
+                                m,n,k,
+                                alpha,
+                                input_raw_handle + bs * offset_src, lda, input_format,
+                                (is_reordered_weights && weight_dim==2) ?
+                                reorder_weights : weights_raw_handle + bs * offset_wei,
+                                ldb, weight_format, beta,
+                                (float *)output_raw_handle + bs * offset_out, ldc,
+                                aocl_dlp_po_ptr);
+      }
+    }
+    else if (output_tensor.get_data_type() == data_type_t::bf16) {
+      for (auto bs=0; bs<batch_size; ++bs) {
+        aocl_gemm_bf16s4f32obf16(order, trans_input, trans_weight,
+                                 m,n,k,
+                                 alpha,
+                                 input_raw_handle + bs * offset_src, lda, input_format,
+                                 (is_reordered_weights && weight_dim==2) ?
+                                 reorder_weights : weights_raw_handle + bs * offset_wei,
+                                 ldb, weight_format, beta,
+                                 (int16_t *)output_raw_handle + bs * offset_out,
+                                 ldc, aocl_dlp_po_ptr);
+      }
     }
   }
-  else if (output_tensor.get_data_type() == data_type_t::bf16) {
-    for (auto bs=0; bs<batch_size; ++bs) {
-      aocl_gemm_bf16s4f32obf16(order, trans_input, trans_weight,
-                               m,n,k,
-                               alpha,
-                               input_raw_handle + bs * offset_src, lda, input_format,
-                               (is_reordered_weights && weight_dim==2) ?
-                               reorder_weights : weights_raw_handle + bs * offset_wei,
-                               ldb, weight_format, beta,
-                               (int16_t *)output_raw_handle + bs * offset_out,
-                               ldc, aocl_dlp_po_ptr);
+  else if (weight_tensor.get_data_type() == data_type_t::u4) {
+    if (output_tensor.get_data_type() == data_type_t::f32) {
+      for (auto bs=0; bs<batch_size; ++bs) {
+        aocl_gemm_bf16u4f32of32(order, trans_input, trans_weight,
+                                m,n,k,
+                                alpha,
+                                input_raw_handle + bs * offset_src, lda, input_format,
+                                (is_reordered_weights && weight_dim==2) ?
+                                (uint8_t *)reorder_weights : (uint8_t *)weights_raw_handle + bs * offset_wei,
+                                ldb, weight_format, beta,
+                                (float *)output_raw_handle + bs * offset_out, ldc,
+                                aocl_dlp_po_ptr);
+      }
+    }
+    else if (output_tensor.get_data_type() == data_type_t::bf16) {
+      for (auto bs=0; bs<batch_size; ++bs) {
+        aocl_gemm_bf16u4f32obf16(order, trans_input, trans_weight,
+                                 m,n,k,
+                                 alpha,
+                                 input_raw_handle + bs * offset_src, lda, input_format,
+                                 (is_reordered_weights && weight_dim==2) ?
+                                 (uint8_t *)reorder_weights : (uint8_t *)weights_raw_handle + bs * offset_wei,
+                                 ldb, weight_format, beta,
+                                 (int16_t *)output_raw_handle + bs * offset_out,
+                                 ldc, aocl_dlp_po_ptr);
+      }
     }
   }
   return status_t::success;

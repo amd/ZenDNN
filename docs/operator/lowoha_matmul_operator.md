@@ -119,7 +119,8 @@ struct matmul_data_types {
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
 | F16 | F16 | FP32 | F16/FP32 | Half-precision (requires AVX512-FP16 or AVX-NE-CONVERT ISA) |
-| BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ) |
+| BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), symmetric |
+| BF16 | U4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
 | U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 | S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 | BF16 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
@@ -247,10 +248,14 @@ struct matmul_quantization_params_t {
 | INT8       | Output  | Scale      | F32, BF16                          | F32, BF16 *(BF16 converted to F32)* |
 | INT8       | Output  | Zero-Point | S8, U8, S32                        | S32                                 |
 | WOQ (S4)   | Weights | Scale      | F32, BF16                          | ✗ *(WOQ always dispatches to DLP)*  |
-| WOQ (S4)   | Weights | Zero-Point | S8                                 | ✗ *(WOQ always dispatches to DLP)*  |
+| WOQ (S4)   | Weights | Zero-Point | ✗ *(symmetric, no zero-point)*     | ✗ *(WOQ always dispatches to DLP)* |
+| WOQ (U4)   | Weights | Scale      | F32, BF16                          | ✗ *(WOQ always dispatches to DLP)*  |
+| WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
 
 > **Notes:**
-> - **WOQ Routing:** When `dtypes.src = BF16` and `dtypes.wei = S4`, the kernel selector always forces `aocl_dlp_blocked` regardless of the requested algorithm.
+> - **WOQ Routing:** When `dtypes.src = BF16` and `dtypes.wei = S4/U4`, the kernel selector forces a DLP backend. When `wei_zp.dt = s8`, the `aocl_dlp_blocked` kernel is used (native DLP path). When `wei_zp.dt = bf16`, the kernel selector forces a simulated DLP backend.
+> - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
+> - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
 
 
 ## Usage Examples
@@ -376,9 +381,9 @@ int lowoha_batched_matmul_example() {
 }
 ```
 
-### Example 3: WOQ MatMul with BF16 Input and S4 Weights
+### Example 3: WOQ MatMul with BF16 Input and S4 Weights (Symmetric)
 
-This example demonstrates Weight-Only Quantization (WOQ) with per-group quantization, commonly used in LLM inference:
+This example demonstrates Weight-Only Quantization (WOQ) with signed 4-bit weights and per-group quantization, commonly used in LLM inference:
 
 ```cpp
 int lowoha_woq_bf16s4_matmul_example() {
@@ -394,14 +399,6 @@ int lowoha_woq_bf16s4_matmul_example() {
   for (int g = 0; g < NUM_GROUPS; ++g) {
     for (int n = 0; n < N; ++n) {
       wei_scale[g * N + n] = 1.0f + 0.1f * g;  // Varying scales per group
-    }
-  }
-  
-  // Create zero point tensor (per-group: {NUM_GROUPS, N})
-  std::vector<int8_t> wei_zp(NUM_GROUPS * N);
-  for (int g = 0; g < NUM_GROUPS; ++g) {
-    for (int n = 0; n < N; ++n) {
-      wei_zp[g * N + n] = static_cast<int8_t>(g % 4);  // zp = 0, 1, 2, 3
     }
   }
   
@@ -435,10 +432,6 @@ int lowoha_woq_bf16s4_matmul_example() {
   params.quant_params.wei_scale.dt = data_type_t::f32;
   params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
   
-  params.quant_params.wei_zp.buff = wei_zp.data();
-  params.quant_params.wei_zp.dt = data_type_t::s8;
-  params.quant_params.wei_zp.dims = {NUM_GROUPS, N};
-  
   // Batch parameters
   matmul_batch_params_t batch_params;
   batch_params.Batch_A = 1;
@@ -464,11 +457,24 @@ int lowoha_woq_bf16s4_matmul_example() {
 ```
 
 **Key Points for WOQ:**
-- **S4 Weight Packing**: Weights are stored as 4-bit signed integers, with 2 values packed per byte (low nibble and high nibble).
-- **Quantization Granularity**: Per-group quantization divides K dimension into groups, each with its own scale/zero-point.
+- **S4 Weight Packing**: Weights are stored as 4-bit signed integers (range [-8, 7]), with 2 values packed per byte (low nibble and high nibble). S4 uses symmetric quantization — no zero-point is passed to the DLP kernel.
+- **U4 Weight Packing**: Weights are stored as 4-bit unsigned integers (range [0, 15]), with 2 values packed per byte. U4 uses asymmetric quantization with a zero-point. The zero-point data type can be `s8` (integer domain) or `bf16` (float domain), which determines the dequantization formula.
+- **Quantization Granularity**: Per-group quantization divides K dimension into groups, each with its own scale (and zero-point for U4). The group size must be even and must divide K evenly.
 - **Constant Weights**: `is_weights_const = true` is required for WOQ to enable weight reordering and caching.
-- **Dequantization Formula**: `dequant_value = (s4_weight - zero_point) * scale`
+- **Dequantization Formula (S4)**: `dequant_value = s4_weight * scale`
+- **Dequantization Formulas (U4)**: The formula depends on the zero-point data type:
 
+| Zero-Point Type | Formula | Description |
+|-----------------|---------|-------------|
+| `s8` (integer domain) | `dequant = (u4_weight - zp) * scale` | Standard affine dequantization with integer zero-point |
+| `bf16` (float domain) | `dequant = (u4_weight - 8) * scale + zp` | Asymmetric dequantization with midpoint shift (8 = midpoint of [0, 15]) and float zero-point added post-scaling |
+
+- **Kernel Selection**: When `wei_zp.dt = s8`, the `aocl_dlp_blocked` kernel is used (native DLP path). When `wei_zp.dt = bf16`, the simulated `aocl_dlp` kernel is used.
+
+**Key Differences from S4 WOQ:**
+- **Weight type**: `data_type_t::u4` (unsigned, range [0, 15]) vs `data_type_t::s4` (signed, range [-8, 7])
+- **Zero-point**: Required for U4 (asymmetric). S4 does not use zero-point in the DLP kernel. U4 zero-point can be `s8` or `bf16`.
+- **Dequantization**: Depends on zero-point data type — see the dequantization formulas table above.
 
 ### Example 4: INT8 MatMul with Zero-Point Compensation Caching
 

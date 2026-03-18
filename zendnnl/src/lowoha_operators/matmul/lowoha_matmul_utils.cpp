@@ -224,10 +224,10 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   }
 
   // Check quantization parameters
-  // WOQ (Weight-Only Quantization) is supported for BF16 src with S4 weights
+  // WOQ (Weight-Only Quantization) is supported for BF16 src with S4/U4 weights
   // Only weight scale and weight zero point are allowed for WOQ
   const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
-                      (params.dtypes.wei == data_type_t::s4);
+                      (params.dtypes.wei == data_type_t::s4 || params.dtypes.wei == data_type_t::u4);
 
   // INT8 quantization: s8 weights
   const bool is_int8 = params.dtypes.wei == data_type_t::s8;
@@ -265,9 +265,9 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
 
   if (params.quant_params.src_scale.buff) {
     int64_t nelems = std::accumulate(
-        params.quant_params.src_scale.dims.begin(),
-        params.quant_params.src_scale.dims.end(),
-        int64_t{1}, std::multiplies<int64_t>());
+                       params.quant_params.src_scale.dims.begin(),
+                       params.quant_params.src_scale.dims.end(),
+                       int64_t{1}, std::multiplies<int64_t>());
     if (nelems != 1) {
       bool is_supported_src = (params.dtypes.src == data_type_t::s8 ||
                                params.dtypes.src == data_type_t::bf16 ||
@@ -282,14 +282,14 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
       if (!(is_supported_src && is_symmetric && is_supported_dst &&
             (is_per_token || is_per_group))) {
         log_error("Source quant scale: per-token/per-group requires s8/bf16/f32 src, "
-          "symmetric quantization, and f32/bf16 output");
+                  "symmetric quantization, and f32/bf16 output");
         return status_t::failure;
       }
       int64_t wei_scale_nelems = params.quant_params.wei_scale.buff
-        ? std::accumulate(params.quant_params.wei_scale.dims.begin(),
-                          params.quant_params.wei_scale.dims.end(),
-                          int64_t{1}, std::multiplies<int64_t>())
-        : 0;
+                                 ? std::accumulate(params.quant_params.wei_scale.dims.begin(),
+                                     params.quant_params.wei_scale.dims.end(),
+                                     int64_t{1}, std::multiplies<int64_t>())
+                                 : 0;
       if (is_per_token && wei_scale_nelems != static_cast<int64_t>(N)) {
         log_error("Per-token source scale requires per-channel weight scale "
                   "(expected ", N, " elements, got ", wei_scale_nelems, ")");
@@ -321,6 +321,17 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
       !is_woq && !is_int8) {
     log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights) or INT8");
     return status_t::failure;
+  }
+  if (params.dtypes.wei == data_type_t::u4) {
+    if (!params.quant_params.wei_zp.buff) {
+      log_error("Weights quant zero is mandatory for u4 weights");
+      return status_t::failure;
+    }
+    if (params.quant_params.wei_zp.dt != data_type_t::bf16 &&
+        params.quant_params.wei_zp.dt != data_type_t::s8) {
+      log_error("Weights quant zero supports only bf16 or s8 data type (mandatory) for u4 weights");
+      return status_t::failure;
+    }
   }
 
   // Validate data types
@@ -746,7 +757,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::aocl_dlp_blocked : static_cast<matmul_algo_t>(algo);
   bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
-                (params.dtypes.wei == data_type_t::s4);
+                (params.dtypes.wei == data_type_t::s4 || params.dtypes.wei == data_type_t::u4);
   bool is_f16 = (params.dtypes.src == data_type_t::f16) &&
                 (params.dtypes.wei == data_type_t::f16) &&
                 (params.dtypes.dst == data_type_t::f16 ||
@@ -785,7 +796,8 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         if (params.dtypes.wei == data_type_t::bf16) {
           if (M == 1 && num_threads == 1) {
             kernel = native::bf16_gemv_best_algo(N, K, num_threads);
-          } else {
+          }
+          else {
             kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
           }
         }
@@ -804,12 +816,17 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   }
 
   // Force aocl_dlp or aocl_dlp_blocked for WOQ (Weight-Only Quantization) cases
-  if (is_woq && (kernel != matmul_algo_t::aocl_dlp &&
-                 kernel != matmul_algo_t::aocl_dlp_blocked)) {
-    log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
+  if (is_woq && kernel != matmul_algo_t::aocl_dlp &&
+      kernel != matmul_algo_t::aocl_dlp_blocked) {
     kernel = matmul_algo_t::aocl_dlp_blocked;
+    log_info("WOQ detected, switching to DLP kernel");
   }
 
+  // Use simulated WOQ for U4 weights when zero-point is bf16
+  if (params.dtypes.wei == data_type_t::u4 &&
+      params.quant_params.wei_zp.dt == data_type_t::bf16) {
+    kernel = matmul_algo_t::aocl_dlp;
+  }
   size_t src_scale_nelems = 1;
   for (auto d : params.quant_params.src_scale.dims) {
     src_scale_nelems *= static_cast<size_t>(d);

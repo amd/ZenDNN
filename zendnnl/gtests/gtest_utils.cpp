@@ -455,6 +455,16 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
         buf_ptr[i] = low_nibble | (high_nibble << 4);
       }
     }
+    else if (dtype_ == data_type::u4) {
+      std::uniform_int_distribution<int> dist_u4(0, 15);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        uint8_t low_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        uint8_t high_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
     }
@@ -545,6 +555,15 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = packed_val;
       }
     }
+    else if (dtype_ == data_type::u4) {
+      uint8_t u4_val = static_cast<uint8_t>(val_) & 0x0F;
+      uint8_t packed_val = u4_val | (u4_val << 4);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        buf_ptr[i] = packed_val;
+      }
+    }
     else {
       log_warning("tensor ", utensor.get_name(), " unsupported data type.");
     }
@@ -602,6 +621,26 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
       uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<uint8_t>(dist(gen)); });
     }
+    else if (dtype_ == data_type::s4) {
+      std::uniform_int_distribution<int> dist_s4(-8, 7);
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        int8_t low_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        int8_t high_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
+    else if (dtype_ == data_type::u4) {
+      std::uniform_int_distribution<int> dist_u4(0, 15);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        uint8_t low_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        uint8_t high_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
     else {
       log_warning("tensor ", udstensor.get_name(), " unsupported data type.");
     }
@@ -646,6 +685,26 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::s4) {
+      std::uniform_int_distribution<int> dist_s4(-8, 7);
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        int8_t low_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        int8_t high_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
+    else if (dtype_ == data_type::u4) {
+      std::uniform_int_distribution<int> dist_u4(0, 15);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        uint8_t low_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        uint8_t high_nibble = static_cast<uint8_t>(dist_u4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
     }
     else {
       log_warning("tensor ", btensor.get_name(), " unsupported data type.");
@@ -1576,7 +1635,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
         // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
         bool is_woq = (src_data_type == data_type_t::bf16 &&
-                       wei_data_type == data_type_t::s4);
+                       (wei_data_type == data_type_t::s4 || wei_data_type == data_type_t::u4));
 
         // Check if weight is INT8 (s8)
         bool is_wei_s8 = wei_data_type == data_type_t::s8;

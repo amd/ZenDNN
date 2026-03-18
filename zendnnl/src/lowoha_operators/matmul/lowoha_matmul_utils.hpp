@@ -268,6 +268,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const);
+
 /**
  * @brief Get the auto-tuner version number
  *

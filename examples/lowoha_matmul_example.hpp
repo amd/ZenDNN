@@ -65,6 +65,20 @@ int run_lowoha_matmul_f16_test();
  */
 int run_lowoha_matmul_woq_bf16s4_test();
 
+/** @fn run_lowoha_matmul_woq_bf16u4_test
+ *  @brief Demonstrates LOWOHA WOQ matmul with BF16 input and U4 weights.
+ *
+ *  This example demonstrates weight-only quantization (WOQ) with per-group
+ *  quantization using unsigned 4-bit (U4) weights and BF16 scales/zero-points.
+ *
+ *  Configuration:
+ *    - Input: BF16 [M, K]
+ *    - Weights: U4 packed [K, N]
+ *    - Output: F32 [M, N]
+ *    - Per-group quantization with BF16 scale and BF16 zero point (simulated WOQ)
+ */
+int run_lowoha_matmul_woq_bf16u4_test();
+
 /** @fn run_lowoha_matmul_int8_caching_test
  *  @brief Demonstrates INT8 matmul with zero-point compensation caching.
  *

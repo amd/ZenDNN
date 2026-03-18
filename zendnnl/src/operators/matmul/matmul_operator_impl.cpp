@@ -283,6 +283,13 @@ status_t matmul_impl_t::validate() {
 
     if (input->get_quant_subtype() == quant_subtype_t::asymmetric) {
       auto zero_nelems = compute_product(input->get_quant_zero_size());
+      data_type_t zero_data_type = input->get_quant_zero_data_type();
+      if (zero_data_type != data_type_t::s32 &&
+          zero_data_type != data_type_t::s8 &&
+          zero_data_type != data_type_t::u8) {
+        apilog_error("Input quant zero supports only s32, s8, or u8 data type for input tensor");
+        return status_t::failure;
+      }
       if (zero_nelems != 1) {
         apilog_error("Source quant zero supports only per-tensor");
         return status_t::failure;
@@ -316,6 +323,13 @@ status_t matmul_impl_t::validate() {
 
     if (output->get_quant_subtype() == quant_subtype_t::asymmetric) {
       auto zero_nelems = compute_product(output->get_quant_zero_size());
+      data_type_t zero_data_type = output->get_quant_zero_data_type();
+      if (zero_data_type != data_type_t::s32 &&
+          zero_data_type != data_type_t::s8 &&
+          zero_data_type != data_type_t::u8) {
+        apilog_error("Output quant zero supports only s32, s8, or u8 data type for output tensor");
+        return status_t::failure;
+      }
       // TODO: Expand this support for different granularities
       if (zero_nelems != 1) {
         apilog_error("Output quant zero supports only per-tensor");
@@ -330,8 +344,16 @@ status_t matmul_impl_t::validate() {
     forced_kernel = "aocl_dlp_blocked";
   }
 
-  if (weights->get_layout() & uint16_t(tensor_layout_t::blocked) ||
-      weights->get_layout() & uint16_t(tensor_layout_t::blocked_aocl)) {
+  // U4 does not have full support in AOCL-DLP, force reference kernel
+  if (weights && weights->get_data_type() == data_type_t::u4 &&
+      forced_kernel != "reference") {
+    apilog_info("Weight tensor is U4, forcing reference kernel");
+    forced_kernel = "reference";
+  }
+
+  if (weights->get_data_type() != data_type_t::u4 &&
+      (weights->get_layout() & uint16_t(tensor_layout_t::blocked) ||
+      weights->get_layout() & uint16_t(tensor_layout_t::blocked_aocl))) {
     apilog_info("Weight tensor is prepacked, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
   }
@@ -425,13 +447,13 @@ status_t matmul_impl_t::validate_forced_kernel() {
         return status_t::failure;
       }
     }
-    else if (wt_dtype == data_type_t::s4) {
-      // WOQ: Weight-Only Quantization - s4 weights with bf16/f32 input
-      if (!((in_dtype == data_type_t::f32) || (in_dtype == data_type_t::bf16)) ||
+    else if (wt_dtype == data_type_t::s4 || wt_dtype == data_type_t::u4) {
+      // WOQ: Weight-Only Quantization - s4/u4 weights with bf16 input
+      if (!(in_dtype == data_type_t::bf16) ||
           !((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16)) ||
           (out_order == "ba")) {
         log_error("<", get_name(),
-                  "> forced reference kernel for WOQ needs bf16/f32 input/output and non-transposed dst.");
+                  "> forced reference kernel for WOQ needs bf16 input and f32/bf16 output and non-transposed dst.");
         return status_t::failure;
       }
       // Check that weights are quantized (required for WOQ)

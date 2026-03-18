@@ -5,7 +5,7 @@
 
 ## Overview
 
-This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32, BF16, F16 (half-precision), INT8 data types, and Weight-Only Quantization (WOQ) with S4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (FP32 2D-matmul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
+This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32, BF16, F16 (half-precision), INT8 data types, and Weight-Only Quantization (WOQ) with S4/U4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (FP32 2D-matmul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
 
 > **Note:** F16 (half-precision) matmul requires specific ISA support on the CPU. It is supported only on platforms with **AVX512-FP16** or **AVX-NE-CONVERT** instructions. On unsupported hardware, F16 operations will return `status_t::isa_unsupported` and tests/examples will be gracefully skipped.
 
@@ -219,15 +219,17 @@ Weight-Only Quantization (WOQ) is a specialized quantization technique where **o
 | Parameter | Supported Values | Description |
 |-----------|------------------|-------------|
 | Input (Src) | BF16 | Source activations in BFloat16 |
-| Weights | S4 (signed 4-bit) | Packed weights (2 values per byte) |
+| Weights | S4 (signed 4-bit) or U4 (unsigned 4-bit) | Packed weights (2 values per byte) |
 | Output | FP32, BF16 | Destination data type |
 | Bias | FP32 | Optional bias vector |
 
-### S4 Weight Format
+### S4/U4 Weight Format
 
-S4 weights use **signed 4-bit integers** with a range of [-8, 7]. Two S4 values are packed into a single byte:
-- **Low nibble** (bits 0-3): First S4 value
-- **High nibble** (bits 4-7): Second S4 value
+S4 weights use **signed 4-bit integers** with a range of [-8, 7]. U4 weights use **unsigned 4-bit integers** with a range of [0, 15]. Two 4-bit values are packed into a single byte:
+- **Low nibble** (bits 0-3): First value
+- **High nibble** (bits 4-7): Second value
+
+S4 uses symmetric quantization (no zero-point in the DLP kernel). U4 uses asymmetric quantization with an S8 zero-point.
 
 ### WOQ Quantization Granularity
 
@@ -243,16 +245,28 @@ WOQ supports flexible quantization granularity for weight scales and zero-points
 
 ### WOQ Dequantization Formula
 
-The dequantization process to recover floating-point values from S4 weights:
+The dequantization process to recover floating-point values from quantized weights:
 
+**S4 (symmetric):**
 $$
-W_{dequant} = \text{Scale} \cdot (W_{s4} - \text{ZeroPoint})
+W_{dequant} = \text{Scale} \cdot W_{s4}
+$$
+
+**U4 (asymmetric, integer-domain zero-point):**
+$$
+W_{dequant} = (W_{u4} - \text{ZeroPoint}_{int8}) \cdot \text{Scale}
+$$
+**U4 (asymmetric, float-domain zero-point):**
+$$
+W_{dequant} = (W_{u4} - 8) \cdot \text{Scale} + \text{ZeroPoint}_{float}
 $$
 
 Where:
-- \( W_{s4} \): Quantized S4 weight value
+- \( W_{s4} \): Quantized S4 weight value (signed, range [-8, 7])
+- \( W_{u4} \): Quantized U4 weight value (unsigned, range [0, 15])
 - \( \text{Scale} \): Per-tensor, per-channel, or per-group scale factor
-- \( \text{ZeroPoint} \): Optional zero-point offset (for asymmetric quantization)
+- \( \text{ZeroPoint}_{int8} \): Integer (S8) zero-point offset used for integer-domain U4 dequantization
+- \( \text{ZeroPoint}_{float} \): Floating-point (e.g., BF16) zero-point offset used for float-domain U4 dequantization
 
 ### WOQ Tensor Creation Example
 
@@ -267,21 +281,22 @@ auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                data_type_t::s4,
                1.0, "weights", wei_scale);
 
-// Optionally with zero-point for asymmetric quantization:
+// U4 weights with zero-point (asymmetric quantization):
 auto wei_zp = tensor_factory.uniform_tensor({1, MATMUL_N},
               data_type_t::s8,
               0, "zp_tensor");
 
-auto weights_asym = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
-                    data_type_t::s4,
-                    1.0, "weights", wei_scale, wei_zp);
+auto weights_u4 = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
+                  data_type_t::u4,
+                  1.0, "weights", wei_scale, wei_zp);
 ```
 
 ### WOQ Supported Quantization Configurations
 
 | Parameter | Scale (mandatory) | Zero-Point | Granularity |
 |-----------|-------------------|------------|-------------|
-| Weights (S4) | Yes (FP32/BF16) | Optional (S8) | Per-tensor, per-channel, or per-group |
+| Weights (S4) | Yes (FP32/BF16) | No (symmetric) | Per-tensor, per-channel, or per-group |
+| Weights (U4) | Yes (FP32/BF16) | Yes (S8/BF16, asymmetric) | Per-tensor, per-channel, or per-group |
 
 ## Supported Configurations
 This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
@@ -292,7 +307,8 @@ This table provides a detailed overview of supported configurations for matrix m
 | BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       | AVX512+         |
 | F16              | F16                 | FP32               | F16, FP32                      | N/A   | N/A       | AVX512-FP16 or AVX-NE-CONVERT |
 | UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       | AVX2+           |
-| BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Optional  | AVX512+         |
+| BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | No        | AVX512+         |
+| BF16             | U4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Yes (S8/BF16)  | AVX512+         |
 ---
 | Activation     | Description                     |
 |----------------|---------------------------------|
@@ -344,11 +360,13 @@ Indicates the precision of the values stored in the tensor.
 - **BF16**: 16-bit Brain Floating Point
 - **F16**: 16-bit IEEE 754 Half-Precision Floating Point (requires AVX512-FP16 or AVX-NE-CONVERT ISA)
 - **INT8/S8/U8**: 8-bit signed/unsigned integer (for quantization)
-- **S4**: 4-bit signed integer (for WOQ, packed 2 values per byte)
+- **S4**: 4-bit signed integer (for WOQ symmetric, packed 2 values per byte)
+- **U4**: 4-bit unsigned integer (for WOQ asymmetric, packed 2 values per byte)
 ```cpp
 tensor.set_data_type(data_type_t::f32);
 tensor.set_data_type(data_type_t::f16);  // For F16 half-precision
-tensor.set_data_type(data_type_t::s4);  // For WOQ weights
+tensor.set_data_type(data_type_t::s4);   // For WOQ weights (symmetric)
+tensor.set_data_type(data_type_t::u4);   // For WOQ weights (asymmetric)
 ```
 ---
 #### Storage
@@ -936,9 +954,10 @@ int matmul_woq_bf16_kernel_example() {
 ```
 
 **Key Points for WOQ:**
-- **S4 Weight Tensor**: Created with `data_type_t::s4` and an associated scale tensor.
+- **S4 Weight Tensor**: Created with `data_type_t::s4` and an associated scale tensor. S4 uses symmetric quantization (no zero-point).
+- **U4 Weight Tensor**: Created with `data_type_t::u4` with both scale and zero-point tensors. U4 uses asymmetric quantization with an S8 zero-point.
 - **Per-channel Scale**: Scale tensor with dimensions `{1, N}` provides one scale value per output channel.
-- **Dequantization**: During computation, S4 weights are dequantized using the formula: `W_dequant = scale * W_s4`.
+- **Dequantization**: S4: `W_dequant = scale * W_s4`. U4: `W_dequant = (W_u4 - 8) * scale + zp_float`.
 - **BF16 Input**: Source activations remain in BFloat16 for accuracy.
 - **Post-ops Support**: WOQ MatMul supports the same post-operations as regular MatMul (ReLU, GELU, SiLU, binary ops, etc.).
 

@@ -46,15 +46,17 @@ inline void read_quant_params(const tensor_t &tensor,
   }
 }
 
-// Extract nibble from packed S4 byte (low nibble if is_low_nibble=true, else high nibble)
-inline int8_t extract_s4_nibble(int8_t packed_byte, bool is_low_nibble) {
-  int8_t s4_value = is_low_nibble ? (packed_byte & 0x0F) : ((
-                      packed_byte >> 4) & 0x0F);
-  // Sign extend from bit 3
-  if (s4_value & 0x08) {
-    s4_value |= 0xF0;
+// Extract nibble from packed 4-bit byte (low nibble if is_low_nibble=true, else high nibble)
+// For s4 (signed int4): sign-extends from bit 3, yielding range [-8, 7]
+// For u4 (unsigned int4): returns raw nibble, yielding range [0, 15]
+inline int8_t extract_4bit_nibble(int8_t packed_byte, bool is_low_nibble,
+                                  data_type_t dt) {
+  uint8_t ubyte = static_cast<uint8_t>(packed_byte);
+  int8_t value = is_low_nibble ? (ubyte & 0x0F) : ((ubyte >> 4) & 0x0F);
+  if (dt == data_type_t::s4 && (value & 0x08)) {
+    value |= 0xF0;
   }
-  return s4_value;
+  return value;
 }
 
 void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
@@ -316,7 +318,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                   input_dtype == data_type_t::f32) &&
                                  weight_dtype == data_type_t::s8;
   bool is_woq                  = input_dtype == data_type_t::bf16 &&
-                                 weight_dtype == data_type_t::s4;
+                                 (weight_dtype == data_type_t::s4 || weight_dtype == data_type_t::u4);
   // Interim buffer  size
   size_t output_size = batch_size*M*N;
   // Interim accumulation buffer with float type
@@ -355,8 +357,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                              bias_dtype, output_dtype, quant_param);
   }
   else if (is_woq) {
-    // WOQ: Weight-Only Quantization (BF16/F32 input, S4 weights)
-    // Convert S4 weights to BF16 and use compute_matmul
+    // WOQ: Weight-Only Quantization (BF16 input, S4/U4 weights)
+    // Convert S4/U4 weights to BF16 and use compute_matmul
     scale_and_zero_point_t quant_param;
     if (weight_tensor.is_quantized()) {
       read_quant_params(weight_tensor, quant_param.wei_scale, quant_param.wei_zp);
@@ -365,7 +367,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
       log_error("WOQ requires quantized weights with scale factors");
       return status_t::failure;
     }
-
+    bool is_float_domain = quant_param.wei_zp.dt == data_type_t::bf16;
     // Allocate tensor for dequantized BF16 weights
     size_t weight_nelem = batch_size * K * N;
     tensor_t bf16_weight_tensor = tensor_t()
@@ -385,7 +387,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
     // The tensor's physical layout depends on its order (ab vs ba)
     const int8_t *packed_weights = (const int8_t *)weights;
     auto wei_scale_size = quant_param.wei_scale.size;
-    bool has_zp = (quant_param.wei_zp.buff != nullptr);
+    bool has_zp = (quant_param.wei_zp.buff != nullptr &&
+                   weight_dtype == data_type_t::u4);
 
     // Determine quantization granularity:
     // - Per-tensor:  wei_scale_size == 1
@@ -414,9 +417,10 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
           size_t packed_byte_idx = unpacked_idx / 2;
           bool is_low_nibble = (unpacked_idx % 2) == 0;
 
-          // Extract S4 value
+          // Extract s4/u4 value
           int8_t packed_byte = packed_weights[packed_byte_idx];
-          int8_t s4_value = extract_s4_nibble(packed_byte, is_low_nibble);
+          int8_t value_4bit = extract_4bit_nibble(packed_byte, is_low_nibble,
+                                                  weight_dtype);
 
           // Get scale based on quantization granularity
           // - Per-tensor:  index = 0
@@ -459,8 +463,15 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                       zp_idx);
           }
 
-          // Dequantize: (s4_value - zero_point) * scale
-          float dequant_value = (static_cast<float>(s4_value) - zp) * scale;
+          float dequant_value = 0.0f;
+          // If the weights are s4 or the domain is not float, use the symmetric quantization formula
+          if (weight_dtype == data_type_t::s4 || !is_float_domain) {
+            dequant_value = (static_cast<float>(value_4bit) - zp) * scale;
+          }
+          // If the weights are u4 and the domain is float, use the asymmetric quantization formula
+          else if (weight_dtype == data_type_t::u4) {
+            dequant_value = (static_cast<float>(value_4bit) - 8) * scale + zp;
+          }
 
           // Store in standard K x N layout (untranspose if needed)
           size_t bf16_idx = bs * K * N + k * N + n;
@@ -832,7 +843,7 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
   bool src_scale_per_group = (src_scale_size > static_cast<size_t>(M) &&
                               src_scale_size % static_cast<size_t>(M) == 0);
   int src_num_groups = src_scale_per_group
-    ? static_cast<int>(src_scale_size) / M : 1;
+                       ? static_cast<int>(src_scale_size) / M : 1;
   int src_group_size = src_scale_per_group ? K / src_num_groups : K;
   int wei_num_groups = 1;
   bool wei_scale_per_group = (wei_scale_size > static_cast<size_t>(N) &&
@@ -887,22 +898,25 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
               if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
                 float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
                 float grp_src_scale = read_and_cast<float>(quant_param.src_scale.buff,
-                    quant_param.src_scale.dt, i * src_num_groups + g);
-                if (grp_src_scale == 0.f) grp_src_scale = 1.f;
+                                      quant_param.src_scale.dt, i * src_num_groups + g);
+                if (grp_src_scale == 0.f) {
+                  grp_src_scale = 1.f;
+                }
                 src_val = static_cast<int32_t>(std::nearbyint(ip_f32 / grp_src_scale)) +
                           src_zero_point;
-              } else {
+              }
+              else {
                 src_val = read_and_cast<int32_t>(input, input_dtype, ip_idx);
               }
               group_sum += src_val *
                            read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
             }
             float grp_scale = read_and_cast<float>(quant_param.src_scale.buff,
-                quant_param.src_scale.dt, i * src_num_groups + g);
+                                                   quant_param.src_scale.dt, i * src_num_groups + g);
             float grp_val = static_cast<float>(group_sum) * grp_scale;
             if (wei_scale_per_group) {
               grp_val *= read_and_cast<float>(quant_param.wei_scale.buff,
-                  quant_param.wei_scale.dt, g * N + j);
+                                              quant_param.wei_scale.dt, g * N + j);
             }
             sum += grp_val;
           }
