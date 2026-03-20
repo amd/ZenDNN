@@ -420,6 +420,7 @@ const char *granularity_to_string(granularity_type_t granularity) {
     case granularity_type_t::invalid: return "invalid";
     case granularity_type_t::per_tensor: return "per_tensor";
     case granularity_type_t::per_channel: return "per_channel";
+    case granularity_type_t::per_token: return "per_token";
     case granularity_type_t::per_group: return "per_group";
     case granularity_type_t::mixed: return "mixed";
     default: return "unknown";
@@ -719,7 +720,8 @@ status_t compute_dynamic_quant_params(const void *src, reorder_params_t &params)
   //============================================================================
   // Per-Channel Quantization (Row or Column)
   //============================================================================
-  if (granularity == granularity_type_t::per_channel) {
+  if (granularity == granularity_type_t::per_channel ||
+      granularity == granularity_type_t::per_token) {
     bool is_per_row = is_per_channel_row_dims(scale_dims, shape);
     
     if (is_per_row) {

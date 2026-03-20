@@ -17,9 +17,12 @@
 #ifndef _LOWOHA_REORDER_COMMON_HPP
 #define _LOWOHA_REORDER_COMMON_HPP
 
+#define LOWOHA_REORDER_GRAIN_SIZE 1024
+
 #include "memory/memory_utils.hpp"
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 
 namespace zendnnl {
 namespace lowoha {
@@ -277,6 +280,29 @@ struct reorder_params_t {
     return false;
   }
 };
+
+/**
+ * @brief Get dynamic quantization per-token algorithm override
+ *
+ * Reads ZENDNNL_DYNAMIC_QUANT_ALGO environment variable once on first call.
+ *   0 (or unset) = default (respects API algo: native -> vector fused,
+ *                  reference -> scalar unfused)
+ *   1 = vector fused,   2 = vector unfused,
+ *   3 = scalar fused,   4 = scalar unfused
+ *
+ * @return algorithm override value (0-4)
+ */
+inline int32_t get_dynamic_quant_algo_override() {
+  static const int32_t val = []() -> int32_t {
+    const char *env = std::getenv("ZENDNNL_DYNAMIC_QUANT_ALGO");
+    if (env) {
+      int32_t v = std::atoi(env);
+      if (v >= 1 && v <= 4) return v;
+    }
+    return 0;
+  }();
+  return val;
+}
 
 } // namespace reorder
 } // namespace lowoha

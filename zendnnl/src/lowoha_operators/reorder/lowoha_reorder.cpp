@@ -19,6 +19,7 @@
 #include "lowoha_operators/reorder/reorder_kernels.hpp"
 #include "lowoha_operators/reorder/per_token_avx512_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+
 #include "common/zendnnl_global.hpp"
 
 #include <omp.h>
@@ -648,7 +649,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
 
   // Fast path: Contiguous memory with per-tensor quantization
   if (!params.has_src_strides() || params.is_src_contiguous()) {
-    constexpr int64_t grain_size = 1024;  // Minimum elements per thread
+    constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
     zendnnl_parallel_for(0, static_cast<int64_t>(nelems), grain_size,
       [&](int64_t begin, int64_t end) {
         const uint8_t *src_ptr = static_cast<const uint8_t *>(src) + begin * src_elem_size;
@@ -825,6 +826,140 @@ static bool dispatch_fused_per_token(const void *src, void *dst,
   return dispatched;
 }
 
+/**
+ * @brief Dispatch fused per-token dynamic quantization (scalar reference path)
+ *
+ * Same fused per-row logic as the native AVX-512 dispatch, but uses scalar
+ * C++ kernels.  Used when algo == reference.
+ *
+ * Each kernel manages its own OMP parallel region internally.
+ *
+ * @return true if a matching kernel was dispatched, false otherwise
+ */
+static bool dispatch_fused_per_token_ref(const void *src, void *dst,
+                                          const reorder_params_t &params,
+                                          int64_t M, int64_t N) {
+  const auto scale_dt = params.quant_params.scale.dt;
+  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+    return false;
+
+  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  std::vector<float> scale_f32_tmp;
+  float *scale_f32;
+
+  if (scale_is_bf16) {
+    scale_f32_tmp.resize(M);
+    scale_f32 = scale_f32_tmp.data();
+  } else {
+    scale_f32 = static_cast<float *>(params.quant_params.scale.buff);
+  }
+
+  const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+  bool dispatched = false;
+
+  if (is_symmetric) {
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_bf16_s8_ref(
+          static_cast<const uint16_t *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_f32_s8_ref(
+          static_cast<const float *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    }
+  } else {
+    int32_t *zp_out = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_bf16_u8_ref(
+          static_cast<const uint16_t *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_f32_u8_ref(
+          static_cast<const float *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    }
+  }
+
+  if (dispatched && scale_is_bf16) {
+    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    for (int64_t m = 0; m < M; ++m)
+      bf16_out[m] = float_to_bf16(scale_f32[m]);
+  }
+
+  return dispatched;
+}
+
+/**
+ * @brief Dispatch unfused 2-pass per-token dynamic quantization (AVX-512 path)
+ *
+ * Pass 1: compute per-row scale/zp (parallel over M rows, AVX-512).
+ * Pass 2: quantize (parallel over M*N contiguous elements, AVX-512).
+ * Better thread utilization than fused kernels when M < num_threads.
+ *
+ * @return true if a matching kernel was dispatched, false otherwise
+ */
+[[maybe_unused]]
+static bool dispatch_unfused_per_token(const void *src, void *dst,
+                                        const reorder_params_t &params,
+                                        int64_t M, int64_t N) {
+  const auto scale_dt = params.quant_params.scale.dt;
+  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+    return false;
+
+  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  std::vector<float> scale_f32_tmp;
+  float *scale_f32;
+
+  if (scale_is_bf16) {
+    scale_f32_tmp.resize(M);
+    scale_f32 = scale_f32_tmp.data();
+  } else {
+    scale_f32 = static_cast<float *>(params.quant_params.scale.buff);
+  }
+
+  const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+  bool dispatched = false;
+
+  if (is_symmetric) {
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_bf16_s8_unfused_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_f32_s8_unfused_native(
+          static_cast<const float *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    }
+  } else {
+    int32_t *zp_out = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_bf16_u8_unfused_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_f32_u8_unfused_native(
+          static_cast<const float *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    }
+  }
+
+  if (dispatched && scale_is_bf16) {
+    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    for (int64_t m = 0; m < M; ++m)
+      bf16_out[m] = float_to_bf16(scale_f32[m]);
+  }
+
+  return dispatched;
+}
+
 status_t reorder_direct(const void *src, void *dst,
                          reorder_params_t params) {
   // Compute nelems from shape - shape is mandatory
@@ -861,18 +996,21 @@ status_t reorder_direct(const void *src, void *dst,
     const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
 
     // Build log string for API and profile logging
-    [[maybe_unused]] std::ostringstream ss_dq;
+    [[maybe_unused]] std::string dq_params_str;
     if (apilog_info_enabled() || is_profile) {
-      ss_dq << "LOWOHA reorder_direct (dynamic_quant): nelems=" << nelems
-            << ", mode=" << (is_symmetric ? "symmetric" : "asymmetric")
-            << ", src_dtype=" << reorder_data_type_to_string(params.src_dtype)
-            << ", dst_dtype=" << reorder_data_type_to_string(params.dst_dtype)
-            << ", granularity=" << granularity_to_string(
-                   get_single_granularity(params.quant_params.scale.dims, params.src_shape))
-            << ", dst=" << (dst == nullptr ? "nullptr (compute only)" : "valid");
+      std::ostringstream ss_tmp;
+      ss_tmp << "M=" << params.M()
+             << ", K=" << params.N()
+             << ", mode=" << (is_symmetric ? "symmetric" : "asymmetric")
+             << ", src_dtype=" << reorder_data_type_to_string(params.src_dtype)
+             << ", dst_dtype=" << reorder_data_type_to_string(params.dst_dtype)
+             << ", granularity=" << granularity_to_string(
+                    get_single_granularity(params.quant_params.scale.dims, params.src_shape))
+             << ", dst=" << (dst == nullptr ? "nullptr (compute only)" : "valid");
+      dq_params_str = ss_tmp.str();
 
       if (apilog_info_enabled()) {
-        apilog_info(ss_dq.str());
+        apilog_info("LOWOHA reorder_direct: " + dq_params_str);
       }
     }
 
@@ -890,19 +1028,52 @@ status_t reorder_direct(const void *src, void *dst,
     // Fused per-token path: when granularity is per-channel-row (M,1)
     // and dst is provided, use fused kernel that computes scale/zp and
     // quantizes in one cache-friendly pass per row.
+    //
+    // ZENDNNL_DYNAMIC_QUANT_ALGO overrides:
+    //   0 (or unset) = default behavior (respects API algo selection:
+    //                   native -> vector fused, reference -> scalar unfused)
+    //   1 = vector fused,   2 = vector unfused,
+    //   3 = scalar fused,   4 = scalar unfused
     //------------------------------------------------------------------
     const auto &scale_dims_dq = params.quant_params.scale.dims;
     reorder_algo_t algo_dq = select_reorder_algo(params, nelems);
 
-    if (dst != nullptr && params.is_2d() && algo_dq == reorder_algo_t::native &&
+    static const int32_t dq_algo_override = get_dynamic_quant_algo_override();
+
+    if (dst != nullptr && params.is_2d() &&
         (!params.has_src_strides() || params.is_src_contiguous()) &&
         is_per_channel_row_dims(scale_dims_dq, params.src_shape)) {
 
-      if (dispatch_fused_per_token(src, dst, params, params.M(), params.N())) {
+      if (((dq_algo_override == 0 && algo_dq == reorder_algo_t::native) ||
+           dq_algo_override == 1) &&
+          dispatch_fused_per_token(src, dst, params, params.M(), params.N())) {
         if (is_profile) {
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
           profiler.tbp_stop();
-          profilelog_verbose(ss_dq.str(),
-                             ", algo=native (fused per-token), time=",
+          profilelog_verbose(dq_log,
+                             ", kernel=native (fused per-token), time=",
+                             profiler.tbp_elapsedtime(),
+                             profiler.get_res_str());
+        }
+        return status_t::success;
+      } else if (dq_algo_override == 2 &&
+          dispatch_unfused_per_token(src, dst, params, params.M(), params.N())) {
+        if (is_profile) {
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          profiler.tbp_stop();
+          profilelog_verbose(dq_log,
+                             ", kernel=native (unfused per-token), time=",
+                             profiler.tbp_elapsedtime(),
+                             profiler.get_res_str());
+        }
+        return status_t::success;
+      } else if (dq_algo_override == 3 &&
+          dispatch_fused_per_token_ref(src, dst, params, params.M(), params.N())) {
+        if (is_profile) {
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          profiler.tbp_stop();
+          profilelog_verbose(dq_log,
+                             ", kernel=reference (fused per-token), time=",
                              profiler.tbp_elapsedtime(),
                              profiler.get_res_str());
         }
@@ -917,8 +1088,9 @@ status_t reorder_direct(const void *src, void *dst,
     }
 
     if (is_profile) {
+      std::string dq_log = "LOWOHA reorder_direct (Dynamic_Compute): " + dq_params_str;
       profiler.tbp_stop();
-      profilelog_verbose(ss_dq.str(), ", time=", profiler.tbp_elapsedtime(),
+      profilelog_verbose(dq_log, ", time=", profiler.tbp_elapsedtime(),
                          profiler.get_res_str());
     }
     // If dst is nullptr, only compute scale/zp and return
@@ -950,13 +1122,17 @@ status_t reorder_direct(const void *src, void *dst,
   if (apilog_info_enabled() || is_profile) {
     float scale_val = get_scale_value(params.quant_params.scale);
     int zp_val = get_zero_point_value(params.quant_params.zero_point);
-    ss << "LOWOHA reorder_direct: nelems=" << nelems
+    ss << "LOWOHA reorder_direct (Static_Quantize): M=" << params.M()
+       << ", K=" << params.N()
        << ", src_dtype=" << reorder_data_type_to_string(params.src_dtype)
        << ", dst_dtype=" << reorder_data_type_to_string(params.dst_dtype)
        << ", scale=" << scale_val
        << ", zero_point=" << zp_val
-       << ", algo=" << reorder_algo_to_string(algo)
-       << ", granularity=" << granularity_to_string(get_granularity_type(params));
+       << ", kernel=" << reorder_algo_to_string(algo)
+       << ", granularity=" << granularity_to_string(
+              (params.quant_params.zero_point.buff == nullptr)
+                  ? get_single_granularity(params.quant_params.scale.dims, params.src_shape)
+                  : get_granularity_type(params));
 
     // Add stride information to log
     if (params.has_src_strides()) {

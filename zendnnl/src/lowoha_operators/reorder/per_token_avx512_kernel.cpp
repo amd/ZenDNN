@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/reorder/per_token_avx512_kernel.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 #include <immintrin.h>
 #include <cstring>
@@ -26,6 +28,8 @@
 namespace zendnnl {
 namespace lowoha {
 namespace reorder {
+
+using zendnnl::lowoha::matmul::zendnnl_parallel_for;
 
 //==============================================================================
 // BF16 <-> F32 conversion helpers (AVX-512F)
@@ -722,6 +726,619 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
     for (; j < N; ++j) {
       int32_t q = static_cast<int32_t>(
           std::nearbyint(row_src[j] / scale)) + zp;
+      q = std::max(0, std::min(255, q));
+      row_dst[j] = static_cast<uint8_t>(q);
+    }
+  }
+}
+
+//==============================================================================
+// UNFUSED 2-PASS:  Per-Token Dynamic Quantization  (AVX-512F)
+//==============================================================================
+//
+// Two-pass vectorized kernels with different parallelization per pass:
+//   Pass 1 — Statistics:  parallel over M rows.  Each thread computes
+//            absmax (symmetric) or min/max (asymmetric) for its rows
+//            using AVX-512, then writes scale (and zp) to the output arrays.
+//   Pass 2 — Quantize:   parallel over M*N contiguous elements.  Each
+//            thread quantizes its chunk using the pre-computed per-row
+//            scales, with AVX-512 vectorization.
+//
+// The key advantage over fused kernels is Pass 2 parallelism: when M is
+// small (e.g. M=1) but N is large, the fused kernel can only use M threads,
+// while this unfused Pass 2 distributes M*N elements across all threads.
+//==============================================================================
+
+// --- BF16 -> S8 Symmetric (unfused 2-pass AVX-512) ---
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_quant_bf16_s8_unfused_native(const uint16_t *src,
+                                                     int8_t *dst,
+                                                     float *scales,
+                                                     int64_t M, int64_t N) {
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  // -- Pass 1: per-row absmax + scale (parallel over M) -------------------
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+
+    __m512 vam0 = _mm512_setzero_ps();
+    __m512 vam1 = _mm512_setzero_ps();
+    __m512 vam2 = _mm512_setzero_ps();
+    __m512 vam3 = _mm512_setzero_ps();
+
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 48)));
+
+      __m512 a0 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f0), abs_mask));
+      __m512 a1 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f1), abs_mask));
+      __m512 a2 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f2), abs_mask));
+      __m512 a3 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f3), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f0, abs_mask, vinf), vam0, a0);
+      vam1 = _mm512_mask_max_ps(vam1, finite_mask(f1, abs_mask, vinf), vam1, a1);
+      vam2 = _mm512_mask_max_ps(vam2, finite_mask(f2, abs_mask, vinf), vam2, a2);
+      vam3 = _mm512_mask_max_ps(vam3, finite_mask(f3, abs_mask, vinf), vam3, a3);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 af = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f, abs_mask, vinf), vam0, af);
+    }
+
+    vam0 = _mm512_max_ps(_mm512_max_ps(vam0, vam1),
+                          _mm512_max_ps(vam2, vam3));
+    float absmax = _mm512_reduce_max_ps(vam0);
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v))
+        absmax = std::max(absmax, std::abs(v));
+    }
+
+    float scale;
+    compute_symmetric_scale_from_absmax(absmax, scale);
+    scales[m] = scale;
+  }
+
+  // -- Pass 2: quantize (parallel over M*N contiguous elements) -----------
+  const int64_t total = M * N;
+  constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
+  zendnnl_parallel_for(0, total, grain_size,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+    while (begin < end) {
+      const int64_t m = begin / N;
+      const int64_t row_end = std::min((m + 1) * N, end);
+      const int64_t count = row_end - begin;
+      const uint16_t *csrc = src + begin;
+      int8_t *cdst = dst + begin;
+      const __m512 vscale = _mm512_set1_ps(scales[m]);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(cdst) & 63) == 0;
+
+      int64_t k = 0;
+      for (; k + 63 < count; k += 64) {
+        __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k)));
+        __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 16)));
+        __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 32)));
+        __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 48)));
+        __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(f0, vscale));
+        __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(f1, vscale));
+        __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(f2, vscale));
+        __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(f3, vscale));
+        __m128i s0 = _mm512_cvtsepi32_epi8(r0);
+        __m128i s1 = _mm512_cvtsepi32_epi8(r1);
+        __m128i s2 = _mm512_cvtsepi32_epi8(r2);
+        __m128i s3 = _mm512_cvtsepi32_epi8(r3);
+        store_4x16_s8(cdst + k, s0, s1, s2, s3, cl_ok);
+      }
+      for (; k + 15 < count; k += 16) {
+        __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k)));
+        __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(f, vscale));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(cdst + k),
+                         _mm512_cvtsepi32_epi8(r));
+      }
+      for (; k < count; ++k) {
+        float v = bf16_scalar_to_f32(csrc[k]);
+        int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m]));
+        q = std::max(-128, std::min(127, q));
+        cdst[k] = static_cast<int8_t>(q);
+      }
+      begin = row_end;
+    }
+  });
+}
+
+// --- F32 -> S8 Symmetric (unfused 2-pass AVX-512) ---
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_quant_f32_s8_unfused_native(const float *src,
+                                                    int8_t *dst,
+                                                    float *scales,
+                                                    int64_t M, int64_t N) {
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  // -- Pass 1: per-row absmax + scale (parallel over M) -------------------
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const float *row_src = src + m * N;
+
+    __m512 vam0 = _mm512_setzero_ps();
+    __m512 vam1 = _mm512_setzero_ps();
+    __m512 vam2 = _mm512_setzero_ps();
+    __m512 vam3 = _mm512_setzero_ps();
+
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = _mm512_loadu_ps(row_src + j);
+      __m512 f1 = _mm512_loadu_ps(row_src + j + 16);
+      __m512 f2 = _mm512_loadu_ps(row_src + j + 32);
+      __m512 f3 = _mm512_loadu_ps(row_src + j + 48);
+      __m512 a0 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f0), abs_mask));
+      __m512 a1 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f1), abs_mask));
+      __m512 a2 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f2), abs_mask));
+      __m512 a3 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f3), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f0, abs_mask, vinf), vam0, a0);
+      vam1 = _mm512_mask_max_ps(vam1, finite_mask(f1, abs_mask, vinf), vam1, a1);
+      vam2 = _mm512_mask_max_ps(vam2, finite_mask(f2, abs_mask, vinf), vam2, a2);
+      vam3 = _mm512_mask_max_ps(vam3, finite_mask(f3, abs_mask, vinf), vam3, a3);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = _mm512_loadu_ps(row_src + j);
+      __m512 af = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f, abs_mask, vinf), vam0, af);
+    }
+
+    vam0 = _mm512_max_ps(_mm512_max_ps(vam0, vam1),
+                          _mm512_max_ps(vam2, vam3));
+    float absmax = _mm512_reduce_max_ps(vam0);
+    for (; j < N; ++j)
+      if (std::isfinite(row_src[j]))
+        absmax = std::max(absmax, std::abs(row_src[j]));
+
+    float scale;
+    compute_symmetric_scale_from_absmax(absmax, scale);
+    scales[m] = scale;
+  }
+
+  // -- Pass 2: quantize (parallel over M*N contiguous elements) -----------
+  const int64_t total = M * N;
+  constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
+  zendnnl_parallel_for(0, total, grain_size,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+    while (begin < end) {
+      const int64_t m = begin / N;
+      const int64_t row_end = std::min((m + 1) * N, end);
+      const int64_t count = row_end - begin;
+      const float *csrc = src + begin;
+      int8_t *cdst = dst + begin;
+      const __m512 vscale = _mm512_set1_ps(scales[m]);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(cdst) & 63) == 0;
+
+      int64_t k = 0;
+      for (; k + 63 < count; k += 64) {
+        __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k), vscale));
+        __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 16), vscale));
+        __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 32), vscale));
+        __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 48), vscale));
+        __m128i s0 = _mm512_cvtsepi32_epi8(r0);
+        __m128i s1 = _mm512_cvtsepi32_epi8(r1);
+        __m128i s2 = _mm512_cvtsepi32_epi8(r2);
+        __m128i s3 = _mm512_cvtsepi32_epi8(r3);
+        store_4x16_s8(cdst + k, s0, s1, s2, s3, cl_ok);
+      }
+      for (; k + 15 < count; k += 16) {
+        __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k), vscale));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(cdst + k), _mm512_cvtsepi32_epi8(r));
+      }
+      for (; k < count; ++k) {
+        int32_t q = static_cast<int32_t>(std::nearbyint(csrc[k] / scales[m]));
+        q = std::max(-128, std::min(127, q));
+        cdst[k] = static_cast<int8_t>(q);
+      }
+      begin = row_end;
+    }
+  });
+}
+
+// --- BF16 -> U8 Asymmetric (unfused 2-pass AVX-512) ---
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_quant_bf16_u8_unfused_native(const uint16_t *src,
+                                                     uint8_t *dst,
+                                                     float *scales,
+                                                     int32_t *zps,
+                                                     int64_t M, int64_t N) {
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  // -- Pass 1: per-row min/max + scale/zp (parallel over M) ---------------
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+
+    __m512 vmin0 = _mm512_set1_ps(std::numeric_limits<float>::max());
+    __m512 vmax0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
+    __m512 vmin1 = vmin0, vmax1 = vmax0;
+    __m512 vmin2 = vmin0, vmax2 = vmax0;
+    __m512 vmin3 = vmin0, vmax3 = vmax0;
+
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 48)));
+      __mmask16 k0 = finite_mask(f0, abs_mask, vinf);
+      __mmask16 k1 = finite_mask(f1, abs_mask, vinf);
+      __mmask16 k2 = finite_mask(f2, abs_mask, vinf);
+      __mmask16 k3 = finite_mask(f3, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k0, vmin0, f0);
+      vmax0 = _mm512_mask_max_ps(vmax0, k0, vmax0, f0);
+      vmin1 = _mm512_mask_min_ps(vmin1, k1, vmin1, f1);
+      vmax1 = _mm512_mask_max_ps(vmax1, k1, vmax1, f1);
+      vmin2 = _mm512_mask_min_ps(vmin2, k2, vmin2, f2);
+      vmax2 = _mm512_mask_max_ps(vmax2, k2, vmax2, f2);
+      vmin3 = _mm512_mask_min_ps(vmin3, k3, vmin3, f3);
+      vmax3 = _mm512_mask_max_ps(vmax3, k3, vmax3, f3);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __mmask16 k = finite_mask(f, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k, vmin0, f);
+      vmax0 = _mm512_mask_max_ps(vmax0, k, vmax0, f);
+    }
+
+    vmin0 = _mm512_min_ps(_mm512_min_ps(vmin0, vmin1),
+                           _mm512_min_ps(vmin2, vmin3));
+    vmax0 = _mm512_max_ps(_mm512_max_ps(vmax0, vmax1),
+                           _mm512_max_ps(vmax2, vmax3));
+    float row_min = _mm512_reduce_min_ps(vmin0);
+    float row_max = _mm512_reduce_max_ps(vmax0);
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v)) {
+        row_min = std::min(row_min, v);
+        row_max = std::max(row_max, v);
+      }
+    }
+
+    float scale;
+    int32_t zp;
+    compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
+    scales[m] = scale;
+    zps[m]    = zp;
+  }
+
+  // -- Pass 2: quantize (parallel over M*N contiguous elements) -----------
+  const int64_t total = M * N;
+  constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
+  zendnnl_parallel_for(0, total, grain_size,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+    while (begin < end) {
+      const int64_t m = begin / N;
+      const int64_t row_end = std::min((m + 1) * N, end);
+      const int64_t count = row_end - begin;
+      const uint16_t *csrc = src + begin;
+      uint8_t *cdst = dst + begin;
+      const __m512  vscale = _mm512_set1_ps(scales[m]);
+      const __m512i vzp = _mm512_set1_epi32(zps[m]);
+      const __m512i vlo = _mm512_set1_epi32(0);
+      const __m512i vhi = _mm512_set1_epi32(255);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(cdst) & 63) == 0;
+
+      int64_t k = 0;
+      for (; k + 63 < count; k += 64) {
+        __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k)));
+        __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 16)));
+        __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 32)));
+        __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k + 48)));
+        __m512i r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(f0, vscale)), vzp)));
+        __m512i r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(f1, vscale)), vzp)));
+        __m512i r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(f2, vscale)), vzp)));
+        __m512i r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(f3, vscale)), vzp)));
+        __m128i u0 = _mm512_cvtusepi32_epi8(r0);
+        __m128i u1 = _mm512_cvtusepi32_epi8(r1);
+        __m128i u2 = _mm512_cvtusepi32_epi8(r2);
+        __m128i u3 = _mm512_cvtusepi32_epi8(r3);
+        store_4x16_u8(cdst + k, u0, u1, u2, u3, cl_ok);
+      }
+      for (; k + 15 < count; k += 16) {
+        __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(csrc + k)));
+        __m512i r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(f, vscale)), vzp)));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(cdst + k),
+                         _mm512_cvtusepi32_epi8(r));
+      }
+      for (; k < count; ++k) {
+        float v = bf16_scalar_to_f32(csrc[k]);
+        int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m])) + zps[m];
+        q = std::max(0, std::min(255, q));
+        cdst[k] = static_cast<uint8_t>(q);
+      }
+      begin = row_end;
+    }
+  });
+}
+
+// --- F32 -> U8 Asymmetric (unfused 2-pass AVX-512) ---
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_quant_f32_u8_unfused_native(const float *src,
+                                                    uint8_t *dst,
+                                                    float *scales,
+                                                    int32_t *zps,
+                                                    int64_t M, int64_t N) {
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  // -- Pass 1: per-row min/max + scale/zp (parallel over M) ---------------
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const float *row_src = src + m * N;
+
+    __m512 vmin0 = _mm512_set1_ps(std::numeric_limits<float>::max());
+    __m512 vmax0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
+    __m512 vmin1 = vmin0, vmax1 = vmax0;
+    __m512 vmin2 = vmin0, vmax2 = vmax0;
+    __m512 vmin3 = vmin0, vmax3 = vmax0;
+
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = _mm512_loadu_ps(row_src + j);
+      __m512 f1 = _mm512_loadu_ps(row_src + j + 16);
+      __m512 f2 = _mm512_loadu_ps(row_src + j + 32);
+      __m512 f3 = _mm512_loadu_ps(row_src + j + 48);
+      __mmask16 k0 = finite_mask(f0, abs_mask, vinf);
+      __mmask16 k1 = finite_mask(f1, abs_mask, vinf);
+      __mmask16 k2 = finite_mask(f2, abs_mask, vinf);
+      __mmask16 k3 = finite_mask(f3, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k0, vmin0, f0);
+      vmax0 = _mm512_mask_max_ps(vmax0, k0, vmax0, f0);
+      vmin1 = _mm512_mask_min_ps(vmin1, k1, vmin1, f1);
+      vmax1 = _mm512_mask_max_ps(vmax1, k1, vmax1, f1);
+      vmin2 = _mm512_mask_min_ps(vmin2, k2, vmin2, f2);
+      vmax2 = _mm512_mask_max_ps(vmax2, k2, vmax2, f2);
+      vmin3 = _mm512_mask_min_ps(vmin3, k3, vmin3, f3);
+      vmax3 = _mm512_mask_max_ps(vmax3, k3, vmax3, f3);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = _mm512_loadu_ps(row_src + j);
+      __mmask16 k = finite_mask(f, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k, vmin0, f);
+      vmax0 = _mm512_mask_max_ps(vmax0, k, vmax0, f);
+    }
+
+    vmin0 = _mm512_min_ps(_mm512_min_ps(vmin0, vmin1),
+                           _mm512_min_ps(vmin2, vmin3));
+    vmax0 = _mm512_max_ps(_mm512_max_ps(vmax0, vmax1),
+                           _mm512_max_ps(vmax2, vmax3));
+    float row_min = _mm512_reduce_min_ps(vmin0);
+    float row_max = _mm512_reduce_max_ps(vmax0);
+    for (; j < N; ++j) {
+      if (std::isfinite(row_src[j])) {
+        row_min = std::min(row_min, row_src[j]);
+        row_max = std::max(row_max, row_src[j]);
+      }
+    }
+
+    float scale;
+    int32_t zp;
+    compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
+    scales[m] = scale;
+    zps[m]    = zp;
+  }
+
+  // -- Pass 2: quantize (parallel over M*N contiguous elements) -----------
+  const int64_t total = M * N;
+  constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
+  zendnnl_parallel_for(0, total, grain_size,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+    while (begin < end) {
+      const int64_t m = begin / N;
+      const int64_t row_end = std::min((m + 1) * N, end);
+      const int64_t count = row_end - begin;
+      const float *csrc = src + begin;
+      uint8_t *cdst = dst + begin;
+      const __m512  vscale = _mm512_set1_ps(scales[m]);
+      const __m512i vzp = _mm512_set1_epi32(zps[m]);
+      const __m512i vlo = _mm512_set1_epi32(0);
+      const __m512i vhi = _mm512_set1_epi32(255);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(cdst) & 63) == 0;
+
+      int64_t k = 0;
+      for (; k + 63 < count; k += 64) {
+        __m512i r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k), vscale)), vzp)));
+        __m512i r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 16), vscale)), vzp)));
+        __m512i r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 32), vscale)), vzp)));
+        __m512i r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k + 48), vscale)), vzp)));
+        __m128i u0 = _mm512_cvtusepi32_epi8(r0);
+        __m128i u1 = _mm512_cvtusepi32_epi8(r1);
+        __m128i u2 = _mm512_cvtusepi32_epi8(r2);
+        __m128i u3 = _mm512_cvtusepi32_epi8(r3);
+        store_4x16_u8(cdst + k, u0, u1, u2, u3, cl_ok);
+      }
+      for (; k + 15 < count; k += 16) {
+        __m512i r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi,
+            _mm512_add_epi32(_mm512_cvtps_epi32(_mm512_div_ps(_mm512_loadu_ps(csrc + k), vscale)), vzp)));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(cdst + k),
+                         _mm512_cvtusepi32_epi8(r));
+      }
+      for (; k < count; ++k) {
+        int32_t q = static_cast<int32_t>(std::nearbyint(csrc[k] / scales[m])) + zps[m];
+        q = std::max(0, std::min(255, q));
+        cdst[k] = static_cast<uint8_t>(q);
+      }
+      begin = row_end;
+    }
+  });
+}
+
+//==============================================================================
+// SCALAR REFERENCE:  Fused Per-Token Dynamic Quantization
+//==============================================================================
+//
+// Scalar C++ implementations of the same fused per-row logic as the native
+// AVX-512 kernels.  Each row is processed in two back-to-back passes
+// (statistics + quantize) to keep row data in L1 cache, identical to the
+// native path but without SIMD intrinsics.
+//
+// Used when algo == reference for correctness testing or platforms without
+// AVX-512.
+//==============================================================================
+
+// --- BF16 -> S8 Symmetric (scalar fused) ---
+
+void dynamic_per_token_quant_bf16_s8_ref(const uint16_t *src, int8_t *dst,
+                                          float *scales,
+                                          int64_t M, int64_t N) {
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+    int8_t         *row_dst = dst + m * N;
+
+    float absmax = 0.0f;
+    for (int64_t j = 0; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v))
+        absmax = std::max(absmax, std::abs(v));
+    }
+
+    float scale;
+    compute_symmetric_scale_from_absmax(absmax, scale);
+    scales[m] = scale;
+
+    for (int64_t j = 0; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+      q = std::max(-128, std::min(127, q));
+      row_dst[j] = static_cast<int8_t>(q);
+    }
+  }
+}
+
+// --- F32 -> S8 Symmetric (scalar fused) ---
+
+void dynamic_per_token_quant_f32_s8_ref(const float *src, int8_t *dst,
+                                         float *scales,
+                                         int64_t M, int64_t N) {
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const float *row_src = src + m * N;
+    int8_t      *row_dst = dst + m * N;
+
+    float absmax = 0.0f;
+    for (int64_t j = 0; j < N; ++j) {
+      if (std::isfinite(row_src[j]))
+        absmax = std::max(absmax, std::abs(row_src[j]));
+    }
+
+    float scale;
+    compute_symmetric_scale_from_absmax(absmax, scale);
+    scales[m] = scale;
+
+    for (int64_t j = 0; j < N; ++j) {
+      int32_t q = static_cast<int32_t>(std::nearbyint(row_src[j] / scale));
+      q = std::max(-128, std::min(127, q));
+      row_dst[j] = static_cast<int8_t>(q);
+    }
+  }
+}
+
+// --- BF16 -> U8 Asymmetric (scalar fused) ---
+
+void dynamic_per_token_quant_bf16_u8_ref(const uint16_t *src, uint8_t *dst,
+                                          float *scales, int32_t *zps,
+                                          int64_t M, int64_t N) {
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+    uint8_t        *row_dst = dst + m * N;
+
+    float row_min = std::numeric_limits<float>::max();
+    float row_max = std::numeric_limits<float>::lowest();
+    for (int64_t j = 0; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v)) {
+        row_min = std::min(row_min, v);
+        row_max = std::max(row_max, v);
+      }
+    }
+
+    float scale;
+    int32_t zp;
+    compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
+    scales[m] = scale;
+    zps[m]    = zp;
+
+    for (int64_t j = 0; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
+      q = std::max(0, std::min(255, q));
+      row_dst[j] = static_cast<uint8_t>(q);
+    }
+  }
+}
+
+// --- F32 -> U8 Asymmetric (scalar fused) ---
+
+void dynamic_per_token_quant_f32_u8_ref(const float *src, uint8_t *dst,
+                                         float *scales, int32_t *zps,
+                                         int64_t M, int64_t N) {
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const float *row_src = src + m * N;
+    uint8_t     *row_dst = dst + m * N;
+
+    float row_min = std::numeric_limits<float>::max();
+    float row_max = std::numeric_limits<float>::lowest();
+    for (int64_t j = 0; j < N; ++j) {
+      if (std::isfinite(row_src[j])) {
+        row_min = std::min(row_min, row_src[j]);
+        row_max = std::max(row_max, row_src[j]);
+      }
+    }
+
+    float scale;
+    int32_t zp;
+    compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
+    scales[m] = scale;
+    zps[m]    = zp;
+
+    for (int64_t j = 0; j < N; ++j) {
+      int32_t q = static_cast<int32_t>(std::nearbyint(row_src[j] / scale)) + zp;
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
     }

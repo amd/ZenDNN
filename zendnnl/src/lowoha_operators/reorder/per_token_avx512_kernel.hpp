@@ -60,6 +60,70 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t N);
 
+//==============================================================================
+// Unfused 2-pass per-token dynamic quantization kernels (AVX-512F)
+//
+// Pass 1: compute per-row scale/zp (parallel over M rows, AVX-512).
+// Pass 2: quantize (parallel over M*N contiguous elements, AVX-512).
+// Better thread utilization than fused kernels when M < num_threads.
+//==============================================================================
+
+// --- BF16 -> S8 Symmetric ---
+
+void dynamic_per_token_quant_bf16_s8_unfused_native(const uint16_t *src,
+                                                     int8_t *dst, float *scales,
+                                                     int64_t M, int64_t N);
+
+// --- F32 -> S8 Symmetric ---
+
+void dynamic_per_token_quant_f32_s8_unfused_native(const float *src,
+                                                    int8_t *dst, float *scales,
+                                                    int64_t M, int64_t N);
+
+// --- BF16 -> U8 Asymmetric ---
+
+void dynamic_per_token_quant_bf16_u8_unfused_native(const uint16_t *src,
+                                                     uint8_t *dst, float *scales,
+                                                     int32_t *zps,
+                                                     int64_t M, int64_t N);
+
+// --- F32 -> U8 Asymmetric ---
+
+void dynamic_per_token_quant_f32_u8_unfused_native(const float *src,
+                                                    uint8_t *dst, float *scales,
+                                                    int32_t *zps,
+                                                    int64_t M, int64_t N);
+
+//==============================================================================
+// Scalar (reference) fused per-token dynamic quantization kernels
+//
+// Identical fused logic as the native AVX-512 kernels above (compute
+// per-row scale/zp and quantize in a single cache-friendly pass per row),
+// but using scalar C++ code only.  Used when algo == reference.
+//==============================================================================
+
+// --- BF16 -> S8 Symmetric ---
+
+void dynamic_per_token_quant_bf16_s8_ref(const uint16_t *src, int8_t *dst,
+                                          float *scales, int64_t M, int64_t N);
+
+// --- F32 -> S8 Symmetric ---
+
+void dynamic_per_token_quant_f32_s8_ref(const float *src, int8_t *dst,
+                                         float *scales, int64_t M, int64_t N);
+
+// --- BF16 -> U8 Asymmetric ---
+
+void dynamic_per_token_quant_bf16_u8_ref(const uint16_t *src, uint8_t *dst,
+                                          float *scales, int32_t *zps,
+                                          int64_t M, int64_t N);
+
+// --- F32 -> U8 Asymmetric ---
+
+void dynamic_per_token_quant_f32_u8_ref(const float *src, uint8_t *dst,
+                                         float *scales, int32_t *zps,
+                                         int64_t M, int64_t N);
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl

@@ -40,7 +40,8 @@ using zendnnl::memory::status_t;
 enum class granularity_type_t {
   invalid = -1,    ///< Invalid dims configuration
   per_tensor,      ///< All dims = 1 - single scale/zp for all elements
-  per_channel,     ///< Different value per column (N values)
+  per_channel,     ///< Different value per column (1,N) - N values
+  per_token,       ///< Different value per row (M,1) - M values
   per_group,       ///< G groups × N columns (G*N values)
   mixed            ///< Different granularity for scale vs zp
 };
@@ -440,7 +441,9 @@ static inline granularity_type_t get_single_granularity(const std::vector<int64_
                                                          const std::vector<int64_t> &shape) {
   if (is_per_tensor_dims(dims)) {
     return granularity_type_t::per_tensor;
-  } else if (is_per_channel_dims(dims, shape)) {
+  } else if (is_per_channel_row_dims(dims, shape)) {
+    return granularity_type_t::per_token;
+  } else if (is_per_channel_col_dims(dims, shape)) {
     return granularity_type_t::per_channel;
   } else if (is_per_group_dims(dims, shape)) {
     return granularity_type_t::per_group;
