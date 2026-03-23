@@ -103,7 +103,9 @@ struct norm_params {
   bool use_shift;                      // Whether to apply beta (ignored by RMSNorm)
   data_type_t src_dt;                  // Source data type
   data_type_t dst_dt;                  // Destination data type
-  norm_algo_t algorithm;               // Backend selection: defualt if reference
+  data_type_t gamma_dt;                // Gamma (scale) parameter data type
+  data_type_t beta_dt;                 // Beta (shift) parameter data type
+  norm_algo_t algorithm;               // Backend selection: default if reference
   uint64_t num_threads;                // Number of threads (0 = auto)
 };
 ```
@@ -122,12 +124,20 @@ enum class norm_type_t : int {
 
 ### Data Type Support
 
+**Input / Output (`src_dt`, `dst_dt`):**
+
 | Input Type | Output Type |
 |------------|-------------|
 | FP32 | FP32 |
 | BF16 | BF16 |
 | BF16 | FP32 |
 | FP32 | BF16 |
+
+**Gamma / Beta (`gamma_dt`, `beta_dt`):**
+
+| Supported Types | Default |
+|-----------------|---------|
+| FP32, BF16 | FP32 |
 
 ### Parameter Requirements by Norm Type
 
@@ -293,7 +303,45 @@ int layer_norm_example() {
 }
 ```
 
-### Example 5: BatchNorm Inference
+### Example 5: RMSNorm (BF16 Input with BF16 Gamma)
+
+```cpp
+int rms_norm_bf16_example() {
+  using namespace zendnnl::lowoha::normalization;
+
+  const uint64_t batch      = 2;
+  const uint64_t seq_len    = 512;
+  const uint64_t hidden_dim = 4096;
+  const uint64_t total_size = batch * seq_len * hidden_dim;
+
+  // BF16 buffers stored as int16_t
+  std::vector<int16_t> input(total_size);
+  std::vector<int16_t> gamma(hidden_dim);
+  std::vector<int16_t> output(total_size, 0);
+
+  // Fill input and gamma with BF16 data ...
+
+  norm_params params;
+  params.shape      = {batch, seq_len, hidden_dim};
+  params.norm_type  = norm_type_t::RMS_NORM;
+  params.norm_ndims = 1;
+  params.src_dt     = data_type_t::bf16;
+  params.dst_dt     = data_type_t::bf16;
+  params.gamma_dt   = data_type_t::bf16;  // gamma buffer is BF16
+  params.epsilon    = 1e-6f;
+  params.use_scale  = true;
+
+  status_t status = normalization_direct(
+      input.data(), output.data(),
+      gamma.data(), /*beta=*/nullptr,
+      /*running_mean=*/nullptr, /*running_var=*/nullptr,
+      /*residual=*/nullptr, params);
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 6: BatchNorm Inference
 
 ```cpp
 int batch_norm_inference_example() {
@@ -333,12 +381,11 @@ int batch_norm_inference_example() {
 | Norm Type | Kernel Type | Parallelization |
 |-----------|-------------|-----------------|
 | LayerNorm | Scalar (reference) | OpenMP (batch-level) |
-| RMSNorm | Scalar (reference) | OpenMP (batch-level) |
-| FusedAddRMSNorm | Scalar (reference) | OpenMP (batch-level) |
+| RMSNorm | Scalar (reference)/AVX512 | OpenMP (batch-level) |
+| FusedAddRMSNorm | Scalar (reference)/AVX512 | OpenMP (batch-level) |
 | BatchNorm | Scalar (reference) | OpenMP (batch x channel) |
 
 **Roadmap:**
-- Vector (AVX-512) implementations: TODO
 - Advanced parallelization: TODO
 
 ## Buffer Requirements
@@ -357,8 +404,10 @@ For all other norm types, pass `nullptr` for the residual parameter.
 
 ### Gamma and Beta
 
-- **Gamma (scale):** Shape `[norm_size]` for LayerNorm/RMSNorm/FusedAddRMSNorm, `[num_channels]` for BatchNorm. Always FP32. Pass `nullptr` if `use_scale == false`.
-- **Beta (shift):** Shape `[norm_size]` for LayerNorm, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Always FP32. Pass `nullptr` if `use_shift == false` or not applicable.
+- **Gamma (scale):** Shape `[norm_size]` for LayerNorm/RMSNorm/FusedAddRMSNorm, `[num_channels]` for BatchNorm. Supports FP32 (default) or BF16 — set `params.gamma_dt` to match the buffer's element type. Pass `nullptr` if `use_scale == false`.
+- **Beta (shift):** Shape `[norm_size]` for LayerNorm, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Supports FP32 (default) or BF16 — set `params.beta_dt` to match the buffer's element type. Pass `nullptr` if `use_shift == false` or not applicable.
+
+If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f32`. When providing BF16 gamma/beta buffers, you **must** set the corresponding `gamma_dt`/`beta_dt` to `data_type_t::bf16`; a mismatch between the field and the actual buffer type leads to undefined behavior.
 
 ## API Summary
 
@@ -387,7 +436,9 @@ The `normalization_direct` function returns `status_t`:
 Common failure causes:
 - Null input or output pointers
 - `norm_type` not specified (`NONE`)
-- Unsupported data type (not f32 or bf16)
+- Unsupported `src_dt` or `dst_dt` (not f32 or bf16)
+- Unsupported `gamma_dt` (not f32 or bf16) when `use_scale == true`
+- Unsupported `beta_dt` (not f32 or bf16) when `use_shift == true`
 - `use_scale == true` but gamma pointer is null
 - `use_shift == true` but beta pointer is null (LayerNorm/BatchNorm)
 - BatchNorm missing running_mean or running_var

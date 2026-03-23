@@ -40,16 +40,18 @@ namespace normalization {
 static void layer_norm_impl(
   const void  *input,
   void        *output,
-  const float *gamma,
-  const float *beta,
+  const void  *gamma,
+  const void  *beta,
   const norm_params &params,
   int num_threads
 ) {
-  const uint64_t batch     = params.batch;
-  const uint64_t norm_size = params.norm_size;
-  const float    eps       = params.epsilon;
-  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
-  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+  const uint64_t batch      = params.batch;
+  const uint64_t norm_size  = params.norm_size;
+  const float    eps        = params.epsilon;
+  const bool     src_bf16   = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16   = (params.dst_dt == data_type_t::bf16);
+  const bool     gamma_bf16 = (params.gamma_dt == data_type_t::bf16);
+  const bool     beta_bf16  = (params.beta_dt  == data_type_t::bf16);
 
   const float   *in_f32   = static_cast<const float *>(input);
   const int16_t *in_bf16  = static_cast<const int16_t *>(input);
@@ -83,10 +85,14 @@ static void layer_norm_impl(
                 : in_f32[off + i];
       float norm_val = (x - mean) * inv_std;
       if (params.use_scale) {
-        norm_val *= gamma[i];
+        norm_val *= gamma_bf16
+                    ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(gamma)[i])
+                    : static_cast<const float *>(gamma)[i];
       }
       if (params.use_shift) {
-        norm_val += beta[i];
+        norm_val += beta_bf16
+                    ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(beta)[i])
+                    : static_cast<const float *>(beta)[i];
       }
 
       if (dst_bf16) {
@@ -112,8 +118,8 @@ static void layer_norm_impl(
 static void batch_norm_impl(
   const void  *input,
   void        *output,
-  const float *gamma,
-  const float *beta,
+  const void  *gamma,
+  const void  *beta,
   const float *running_mean,
   const float *running_var,
   const norm_params &params,
@@ -125,6 +131,8 @@ static void batch_norm_impl(
   const float    eps          = params.epsilon;
   const bool     src_bf16     = (params.src_dt == data_type_t::bf16);
   const bool     dst_bf16     = (params.dst_dt == data_type_t::bf16);
+  const bool     gamma_bf16   = (params.gamma_dt == data_type_t::bf16);
+  const bool     beta_bf16    = (params.beta_dt  == data_type_t::bf16);
 
   const float   *in_f32   = static_cast<const float *>(input);
   const int16_t *in_bf16  = static_cast<const int16_t *>(input);
@@ -143,10 +151,14 @@ static void batch_norm_impl(
                   : in_f32[off + s];
         float norm_val = (x - m) * inv_std;
         if (params.use_scale) {
-          norm_val *= gamma[c];
+          norm_val *= gamma_bf16
+                      ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(gamma)[c])
+                      : static_cast<const float *>(gamma)[c];
         }
         if (params.use_shift) {
-          norm_val += beta[c];
+          norm_val += beta_bf16
+                      ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(beta)[c])
+                      : static_cast<const float *>(beta)[c];
         }
 
         if (dst_bf16) {
@@ -172,15 +184,16 @@ static void batch_norm_impl(
 static void rms_norm_impl(
   const void  *input,
   void        *output,
-  const float *gamma,
+  const void  *gamma,
   const norm_params &params,
   int num_threads
 ) {
-  const uint64_t batch     = params.batch;
-  const uint64_t norm_size = params.norm_size;
-  const float    eps       = params.epsilon;
-  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
-  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+  const uint64_t batch      = params.batch;
+  const uint64_t norm_size  = params.norm_size;
+  const float    eps        = params.epsilon;
+  const bool     src_bf16   = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16   = (params.dst_dt == data_type_t::bf16);
+  const bool     gamma_bf16 = (params.gamma_dt == data_type_t::bf16);
 
   const float   *in_f32   = static_cast<const float *>(input);
   const int16_t *in_bf16  = static_cast<const int16_t *>(input);
@@ -205,7 +218,9 @@ static void rms_norm_impl(
                 : in_f32[off + i];
       float norm_val = x * inv_rms;
       if (params.use_scale) {
-        norm_val *= gamma[i];
+        norm_val *= gamma_bf16
+                    ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(gamma)[i])
+                    : static_cast<const float *>(gamma)[i];
       }
 
       if (dst_bf16) {
@@ -230,15 +245,16 @@ static void fused_add_rms_norm_impl(
   const void  *input,
   void        *output,
   void        *residual,
-  const float *gamma,
+  const void  *gamma,
   const norm_params &params,
   int num_threads
 ) {
-  const uint64_t batch     = params.batch;
-  const uint64_t norm_size = params.norm_size;
-  const float    eps       = params.epsilon;
-  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
-  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+  const uint64_t batch      = params.batch;
+  const uint64_t norm_size  = params.norm_size;
+  const float    eps        = params.epsilon;
+  const bool     src_bf16   = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16   = (params.dst_dt == data_type_t::bf16);
+  const bool     gamma_bf16 = (params.gamma_dt == data_type_t::bf16);
 
   const float   *in_f32    = static_cast<const float *>(input);
   const int16_t *in_bf16   = static_cast<const int16_t *>(input);
@@ -277,7 +293,9 @@ static void fused_add_rms_norm_impl(
                 : res_f32[off + i];
       float norm_val = r * inv_rms;
       if (params.use_scale) {
-        norm_val *= gamma[i];
+        norm_val *= gamma_bf16
+                    ? bfloat16_t::bf16_to_f32_val(static_cast<const int16_t *>(gamma)[i])
+                    : static_cast<const float *>(gamma)[i];
       }
 
       if (dst_bf16) {
@@ -304,44 +322,30 @@ status_t normalization_reference_wrapper(
   norm_params &params
 ) {
 
-  if (params.src_dt != data_type_t::f32 && params.src_dt != data_type_t::bf16) {
-    log_error("Normalization Reference: Unsupported src data type (",
-              static_cast<int>(params.src_dt), "). Supported: f32, bf16");
-    return status_t::failure;
-  }
-  if (params.dst_dt != data_type_t::f32 && params.dst_dt != data_type_t::bf16) {
-    log_error("Normalization Reference: Unsupported dst data type (",
-              static_cast<int>(params.dst_dt), "). Supported: f32, bf16");
-    return status_t::failure;
-  }
-
   const int num_threads = params.num_threads > 0
                           ? static_cast<int>(params.num_threads)
                           : omp_get_max_threads();
 
-  const float *gamma_f32 = static_cast<const float *>(gamma);
-  const float *beta_f32  = static_cast<const float *>(beta);
-
   switch (params.norm_type) {
   case norm_type_t::LAYER_NORM:
-    layer_norm_impl(input, output, gamma_f32, beta_f32,
+    layer_norm_impl(input, output, gamma, beta,
                     params, num_threads);
     return status_t::success;
 
   case norm_type_t::BATCH_NORM:
-    batch_norm_impl(input, output, gamma_f32, beta_f32,
+    batch_norm_impl(input, output, gamma, beta,
                     static_cast<const float *>(running_mean),
                     static_cast<const float *>(running_var),
                     params, num_threads);
     return status_t::success;
 
   case norm_type_t::RMS_NORM:
-    rms_norm_impl(input, output, gamma_f32,
+    rms_norm_impl(input, output, gamma,
                   params, num_threads);
     return status_t::success;
 
   case norm_type_t::FUSED_ADD_RMS_NORM:
-    fused_add_rms_norm_impl(input, output, residual, gamma_f32,
+    fused_add_rms_norm_impl(input, output, residual, gamma,
                             params, num_threads);
     return status_t::success;
 

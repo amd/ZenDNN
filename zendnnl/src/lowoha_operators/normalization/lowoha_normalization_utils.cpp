@@ -75,6 +75,12 @@ status_t validate_normalization_inputs(
       log_error("Normalization: use_scale=true but gamma pointer is null");
       return status_t::failure;
     }
+    if (params.gamma_dt != data_type_t::f32 &&
+        params.gamma_dt != data_type_t::bf16) {
+      log_error("Normalization: Unsupported gamma data type (",
+                static_cast<int>(params.gamma_dt), "). Supported: f32, bf16");
+      return status_t::failure;
+    }
   }
 
   // Validate shift (beta) parameter
@@ -85,6 +91,11 @@ status_t validate_normalization_inputs(
     if (!beta) {
       log_error("Normalization: use_shift=true but beta pointer is null "
                 "(required for ", norm_type_to_str(params.norm_type), ")");
+      return status_t::failure;
+    }
+    if (params.beta_dt != data_type_t::f32 && params.beta_dt != data_type_t::bf16) {
+      log_error("Normalization: Unsupported beta data type (",
+                static_cast<int>(params.beta_dt), "). Supported: f32, bf16");
       return status_t::failure;
     }
   }
