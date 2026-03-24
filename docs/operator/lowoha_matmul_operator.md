@@ -30,7 +30,7 @@ Let:
 The computation can be expressed as:
 
 $$
-C = \text{PostOps}(\alpha \cdot (A \cdot B) + \text{Bias} + \beta \cdot C)
+C = \text{PostOps}(\alpha \cdot (A \cdot B) + \beta \cdot C + \text{Bias})
 $$
 
 

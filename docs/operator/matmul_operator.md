@@ -18,6 +18,8 @@ Let:
 - *B* ∈ ℝ<sup>kxn</sup> or ℝ<sup>bsxkxn</sup>: Weight Matrix or Batched Weight Matrix
 - *C* ∈ ℝ<sup>mxn</sup> or ℝ<sup>bsxmxn</sup>: Output Matrix or Batched Output Matrix
 - *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
+- *Alpha* (*α*): Scaling factor for the matrix product
+- *Beta* (*β*): Scaling factor for the existing output tensor (accumulation / in-place update)
 - *Scale* : Scaling factor for quantized data (INT8)
 - *ZeroPoint* : Zero-point offset for quantized data (INT8)
 - *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
@@ -31,30 +33,31 @@ Let:
 The computation can be expressed as:
 
 $$
-C = \text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D)
+C = \text{PostOps}(\alpha \cdot (A \cdot B) + \beta \cdot C + \text{Bias})
 $$
 
 The computation for quantized MatMul can be expressed as:
 
 $$
-C = \text{Scale} \cdot (\text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D) + \text{ZeroPoint})
+C = \text{Scale} \cdot \text{PostOps}(\alpha \cdot (A \cdot B) + \beta \cdot C + \text{Bias}) + \text{ZeroPoint}
 $$
 
 ## Steps to Perform MatMul Operation
 
-1. **Matrix Multiplication**:  
+1. **Fused GEMM (matrix multiply, α/β scaling, accumulation)**:  
    ```
-   Z = A × B
+   Z = α × (A × B) + β × C
    ```
+   (When *β* ≠ 0, *C* is the output tensor’s value before this update.)
 
 2. **Bias Addition (optional)**:  
    ```
    Z = Z + Bias
    ```
 
-3. **Scaling and Zero-Point Adjustment (INT8 only)**:  
+3. **Scaling and zero-point (INT8)**:
    ```
-   Z = Scale * (Z + ZeroPoint)
+   Z = Scale × Z + ZeroPoint
    ```
 
 4. **Activation Function (optional)**:  
@@ -72,14 +75,14 @@ $$
    C = Z
    ```
 
-- Above steps(#1 to 5) are repated for number of batches in batchedmatmul operation with proper offset.
+- Above steps are repeated for each batch in batched matmul with proper offsets.
 
 ## Example with ReLU and Add Post-Op
 
 If using ReLU as activation and element-wise addition with matrix \( D \):
 
 $$
-C = \text{ReLU}(A \times B + \text{Bias}) + D
+C = \text{ReLU}(\alpha \cdot (A \times B) + \beta \cdot C + \text{Bias}) + D
 $$
 
 # MatMul Operation Support Overview
