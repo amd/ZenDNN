@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
 #define _PROFILER_HPP_
 
 #include <chrono>
-#include <string>
 
 #include "error_status.hpp"
 
@@ -48,8 +47,16 @@ class profiler_t {
   /** @brief default constructor
   * Initializes a profiler_t object with the default
   * time resolution set to MILLISECONDS.
+  *
+  * Defined inline so the compiler can see the constructor body and apply
+  * dead store elimination at -O3 when profiling is disabled — reducing
+  * the constructor cost to zero cycles on the production path.
+  * TODO: Create single instance of profiler_t and use it throughout the application.
   */
-  profiler_t();
+  profiler_t()
+      : start_time{}, stop_time{}, elapsed_time{0.0},
+        res_str{"ms"}, resolution{time_res_t::milliseconds},
+        timer_started{false} {}
 
   /** @brief Set the time resolution
    * Configures the time unit in which elapsed time will be measured.
@@ -81,7 +88,7 @@ class profiler_t {
    *
    * @return Resolution string
   */
-  std::string get_res_str();
+  const char *get_res_str() const;
 
  private:
   /** @brief Calculate elapsed time based on the selected unit
@@ -90,12 +97,12 @@ class profiler_t {
   */
   void calculate_elapsed();
 
-  bool timer_started;                                        /*!< Set to true after tbp_start()*/
-  std::string res_str;                                       /*!< Set resolution string*/
-  time_res_t resolution;                                     /*!< Time resolution */
   std::chrono::high_resolution_clock::time_point start_time; /*!< Time point when tbp_start() was called */
   std::chrono::high_resolution_clock::time_point stop_time;  /*!< Time point when tbp_stop() was called */
   double elapsed_time;                                       /*!< Computed elapsed time */
+  const char *res_str;                                       /*!< Resolution string literal */
+  time_res_t resolution;                                     /*!< Time resolution */
+  bool timer_started;                                        /*!< Set to true after tbp_start()*/
 };
 
 } // profile

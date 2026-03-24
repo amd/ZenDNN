@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,10 @@
  */
 #ifndef NDEBUG
 #define LOG_DEBUG_INFO(...)                                                  \
-  do                                                                         \
-    debuglog_verbose("[",get_relative_path(__FILE__),"], [",                 \
-                     __PRETTY_FUNCTION__,"]: ", __VA_ARGS__);                \
-  while(0);
+   do                                                                         \
+     debuglog_verbose("[",get_relative_path(__FILE__),"], [",                 \
+                      __PRETTY_FUNCTION__,"]: ", __VA_ARGS__);                \
+   while(0);
 #else
 #define LOG_DEBUG_INFO(...)
 #endif
@@ -41,13 +41,13 @@
  * log levels.
  */
 #define LOGGER_MACRO(LOG_MODULE, LOG_LEVEL)                                  \
-  template<typename... Ts>                                                   \
-  static inline void LOG_MODULE##log##_##LOG_LEVEL(Ts...vargs) {             \
-  zendnnl::common::zendnnl_global_block()                                    \
-  .get_logger()                                                              \
-  .log_msg(zendnnl::error_handling::log_module_t::LOG_MODULE,                \
-           zendnnl::error_handling::log_level_t::LOG_LEVEL, vargs...);       \
-  }
+   template<typename... Ts>                                                   \
+   static inline void LOG_MODULE##log##_##LOG_LEVEL(Ts...vargs) {             \
+   zendnnl::common::zendnnl_global_block()                                    \
+   .get_logger()                                                              \
+   .log_msg(zendnnl::error_handling::log_module_t::LOG_MODULE,                \
+            zendnnl::error_handling::log_level_t::LOG_LEVEL, vargs...);       \
+   }
 
 /** @def LOGGER_MACRO(LOG_MODULE, LOG_LEVEL)
  *
@@ -56,24 +56,24 @@
  * to common log.
  */
 #define COMMON_LOGGER_MACRO(LOG_LEVEL)                                      \
-  template<typename... Ts>                                                  \
-  static inline void log##_##LOG_LEVEL(Ts...vargs) {                        \
-  zendnnl::common::zendnnl_global_block()                                   \
-    .get_logger()                                                           \
-    .log_msg(zendnnl::error_handling::log_module_t::common,                 \
-             zendnnl::error_handling::log_level_t::LOG_LEVEL, vargs...);    \
-  }
+   template<typename... Ts>                                                  \
+   static inline void log##_##LOG_LEVEL(Ts...vargs) {                        \
+   zendnnl::common::zendnnl_global_block()                                   \
+     .get_logger()                                                           \
+     .log_msg(zendnnl::error_handling::log_module_t::common,                 \
+              zendnnl::error_handling::log_level_t::LOG_LEVEL, vargs...);    \
+   }
 
 #define LOGGER_ENABLED_MACRO(LOG_MODULE, LOG_LEVEL)                        \
-  static inline bool LOG_MODULE##log##_##LOG_LEVEL##_enabled() {           \
-    if (zendnnl::common::zendnnl_global_block()                            \
-        .get_logger()                                                      \
-        .get_log_level(zendnnl::error_handling::log_module_t::LOG_MODULE)  \
-        >= zendnnl::error_handling::log_level_t::LOG_LEVEL)                \
-      return true;                                                         \
-                                                                           \
-    return false;                                                          \
-  }                                                                        \
+  inline bool LOG_MODULE##log##_##LOG_LEVEL##_enabled() {                  \
+    static const bool cached                                               \
+        = zendnnl::common::zendnnl_global_block()                          \
+              .get_logger()                                                \
+              .is_level_enabled(                                           \
+                  zendnnl::error_handling::log_module_t::LOG_MODULE,       \
+                  zendnnl::error_handling::log_level_t::LOG_LEVEL);        \
+    return cached;                                                         \
+  }
 
 namespace zendnnl {
 namespace common {
@@ -134,8 +134,10 @@ static inline const char *get_relative_path(const char *abs_path_) {
  * @brief Check if profiling is enabled.
  * @return A boolean indicating if profiling is enabled.
  */
-static inline bool is_profile_enabled() {
-  return zendnnl_global_block().get_config_manager().get_profiler_config().enable_profiler;
+inline bool is_profile_enabled() {
+  static const bool cached
+      = zendnnl_global_block().get_config_manager().get_profiler_config().enable_profiler;
+  return cached;
 }
 
 }//common

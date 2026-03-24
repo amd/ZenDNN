@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,21 +24,24 @@ namespace cn = std::chrono;
 logger_t::logger_t()
   :log_file{}, log_ofstream{}, log_start_time{cn::steady_clock::now()},
    log_cout_flag{true} {
-  log_level_map[log_module_t::common]  = log_level_t::warning;
-  log_level_map[log_module_t::api]     = log_level_t::warning;
-  log_level_map[log_module_t::test]    = log_level_t::warning;
-  log_level_map[log_module_t::profile] = log_level_t::warning;
-  log_level_map[log_module_t::debug]   = log_level_t::warning;
-  log_level_map[log_module_t::trace]   = log_level_t::disabled;
+  level_cache_[static_cast<size_t>(log_module_t::common)]  = log_level_t::warning;
+  level_cache_[static_cast<size_t>(log_module_t::api)]     = log_level_t::warning;
+  level_cache_[static_cast<size_t>(log_module_t::test)]    = log_level_t::warning;
+  level_cache_[static_cast<size_t>(log_module_t::profile)] = log_level_t::warning;
+  level_cache_[static_cast<size_t>(log_module_t::debug)]   = log_level_t::warning;
+  level_cache_[static_cast<size_t>(log_module_t::trace)]   =
+    log_level_t::disabled;
 }
 
 logger_t &logger_t::set_log_level(log_module_t module_, log_level_t level_) {
-  log_level_map[module_] = level_;
+  assert(static_cast<size_t>(module_) < num_modules);
+  level_cache_[static_cast<size_t>(module_)] = level_;
   return *this;
 }
 
 log_level_t logger_t::get_log_level(log_module_t module_) {
-  return log_level_map[module_];
+  assert(static_cast<size_t>(module_) < num_modules);
+  return level_cache_[static_cast<size_t>(module_)];
 }
 
 logger_t &logger_t::set_log_file(std::string log_file_) {
@@ -72,7 +75,8 @@ std::string logger_t::get_log_file() {
 logger_t &logger_t::set_config(const config_logger_t &config_logger_) {
 
   for (auto& [key, value] : config_logger_.log_level_map) {
-    log_level_map[key] = value;
+    assert(static_cast<size_t>(key) < num_modules);
+    level_cache_[static_cast<size_t>(key)] = value;
   }
 
   return *this;
@@ -112,7 +116,7 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
       std::string sub_message = message_.substr(nl_pos + 1);
 
       nl_pos = sub_message.find('\n');
-      while(nl_pos != std::string::npos) {
+      while (nl_pos != std::string::npos) {
         std::cout << empty_hdr << sub_message.substr(0, nl_pos) << "\n";
         sub_message = sub_message.substr(nl_pos + 1);
         nl_pos = sub_message.find('\n');

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,14 @@
 namespace zendnnl {
 namespace profile {
 
-profiler_t::profiler_t()
-  : timer_started(false),
-    res_str("ms"),
-    resolution(time_res_t::milliseconds),
-    elapsed_time(0.0) {}
-
 void profiler_t::tbp_set_default_res(time_res_t res) {
   resolution = res;
+  switch (res) {
+  case time_res_t::milliseconds: res_str = "ms";  break;
+  case time_res_t::microseconds: res_str = "us";  break;
+  case time_res_t::seconds:      res_str = "sec"; break;
+  default:                       res_str = "ms";  break;
+  }
 }
 
 status_t profiler_t::tbp_start() {
@@ -54,7 +54,7 @@ double profiler_t::tbp_elapsedtime() const {
   return elapsed_time;
 }
 
-std::string profiler_t::get_res_str() {
+const char *profiler_t::get_res_str() const {
   return res_str;
 }
 
@@ -64,15 +64,15 @@ void profiler_t::calculate_elapsed() {
   switch (resolution) {
   case time_res_t::milliseconds:
     elapsed_time = duration<double, std::milli>(time_duration).count();
-    res_str = "ms";
     break;
   case time_res_t::microseconds:
     elapsed_time = duration<double, std::micro>(time_duration).count();
-    res_str = "us";
     break;
   case time_res_t::seconds:
     elapsed_time = duration<double>(time_duration).count();
-    res_str = "sec";
+    break;
+  default:
+    elapsed_time = duration<double, std::milli>(time_duration).count();
     break;
   }
 }

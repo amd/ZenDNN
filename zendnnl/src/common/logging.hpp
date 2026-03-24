@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,9 +27,9 @@
 #include <cstdio>
 #include <iomanip>
 #include <mutex>
-#include <map>
 #include <vector>
 #include <algorithm>
+#include <cassert>
 
 #include "common/zendnnl_exceptions.hpp"
 #include "common/config_params.hpp"
@@ -61,8 +61,6 @@ namespace cn = std::chrono;
  */
 class logger_t {
  public:
-  using log_level_map_type = std::map<log_module_t, log_level_t>;
-
   /** @brief default constructor */
   logger_t();
 
@@ -71,7 +69,7 @@ class logger_t {
    * @param level_  : log level to setup.
    * @return A reference to self.
    */
-  logger_t& set_log_level(log_module_t module_, log_level_t level_);
+  logger_t &set_log_level(log_module_t module_, log_level_t level_);
 
   /** @brief Get log module level
    * @param module_ : log module
@@ -80,11 +78,21 @@ class logger_t {
    */
   log_level_t get_log_level(log_module_t module_);
 
+  /** @brief O(1) log level check via flat array (no std::map lookup).
+   * @param module_ : log module
+   * @param level_  : log level to check against.
+   * @return true if the module's configured level >= the requested level.
+   */
+  inline bool is_level_enabled(log_module_t module_, log_level_t level_) const {
+    assert(static_cast<size_t>(module_) < num_modules);
+    return level_cache_[static_cast<size_t>(module_)] >= level_;
+  }
+
   /** @brief Set log file
    * @param log_file_ : log file name.
    * @return A reference to self.
    */
-  logger_t& set_log_file(std::string log_file_);
+  logger_t &set_log_file(std::string log_file_);
 
   /** @brief Get log file
    * @return log file name
@@ -97,7 +105,7 @@ class logger_t {
    * @param config_logger_ : config received by config manager.
    * @return A reference to self.
    */
-  logger_t& set_config(const config_logger_t& config_logger_);
+  logger_t &set_config(const config_logger_t &config_logger_);
 
   /** @brief log a message
    * @param log_module_ : log module the message should go
@@ -121,17 +129,22 @@ class logger_t {
  private:
   std::string                   log_file;         /*!< Log file name */
   std::ofstream                 log_ofstream;     /*!< Log file stream */
-  cn::steady_clock::time_point  log_start_time;   /*!< Logger creation time stamp */
-  bool                          log_cout_flag;    /*!< Write to a log file or cout */
+  cn::steady_clock::time_point
+  log_start_time;   /*!< Logger creation time stamp */
+  bool
+  log_cout_flag;    /*!< Write to a log file or cout */
   std::mutex                    log_mutex;        /*!< Mutex for thread safety */
-  log_level_map_type            log_level_map;    /*!< Log level map */
+
+  static constexpr size_t num_modules
+    = static_cast<size_t>(log_module_t::log_module_count);
+  log_level_t level_cache_[num_modules] = {};     /*!< Flat array for O(1) log level lookups */
 };
 
 template<typename MSG_T, typename... MSG_TS>
 void logger_t::log_msg(log_module_t log_module_, log_level_t log_level_,
                        MSG_T msg_arg0_, MSG_TS... msg_args_) {
 
-  if (log_level_map.at(log_module_) >= log_level_) {
+  if (is_level_enabled(log_module_, log_level_)) {
     std::lock_guard<std::mutex> lk{log_mutex};
 
     std::stringstream stream;
