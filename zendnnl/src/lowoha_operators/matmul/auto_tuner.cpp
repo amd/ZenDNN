@@ -46,6 +46,25 @@ matmul_algo_t get_algo(int toggle_) {
   }
 }
 
+/**
+ * @brief Maps an M dimension value to its bin representative.
+ *
+ * Bins M into fixed-size ranges so that nearby M values share the same
+ * autotuner key. For bin_size B, M is mapped to ceil(M / B) * B.
+ * A bin_size of 1 disables binning (identity mapping).
+ *
+ * Bin size is controlled via ZENDNNL_AUTO_BIN_SIZE (default: 1).
+ */
+unsigned int get_binned_m(unsigned int M) {
+  static unsigned int bin_size = []() {
+    char *env = std::getenv("ZENDNNL_AUTO_BIN_SIZE");
+    unsigned int val = env ? std::stoi(env) : 16;
+    return val > 0 ? val : 1;
+  }();
+  if (bin_size == 1) return M;
+  return ((M + bin_size - 1) / bin_size) * bin_size;
+}
+
 unsigned int get_auto_tuner_iter(std::string val, bool is_skip) {
   char *skip_env_var = std::getenv(val.c_str());
   if (skip_env_var) {
@@ -62,11 +81,6 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                                      matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                                      const void *bias, bool is_weights_const) {
 
-  //It is used to know the size of bin.
-  // unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNNL_AUTO_BIN_SIZE", 1);
-  // if (autoBinSize == 0) {
-  //     autoBinSize = 1;
-  // }
   //Simplified Map having Key as struct and value as Algo.
   static std::unordered_map<Key_matmul, matmul_algo_t> matmul_kernel_map;
 
@@ -74,7 +88,9 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
   static std::unordered_map<Key_matmul,std::tuple<unsigned int, float, matmul_algo_t>>
       matmul_kernel_map1_helper;
 
-  Key_matmul key_obj_auto(transA, transB, M, K,
+  unsigned int binned_m = get_binned_m(M);
+
+  Key_matmul key_obj_auto(transA, transB, binned_m, K,
                           N, lda, ldb, B, (int32_t)matmul_algo_t::none);
 
   double cur_algo_time = 0.0;

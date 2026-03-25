@@ -703,17 +703,17 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
 }
 
 unsigned int get_auto_tuner_ver() {
-  char *skip_env_var = std::getenv("ZENDNNL_AUTO_TUNER_TYPE");
-  if (skip_env_var) {
-    unsigned int version = std::stoi(skip_env_var);
-    // Current support is 2 versions.
+  char *auto_tuner_version_env = std::getenv("ZENDNNL_AUTO_TUNER_TYPE");
+  if (auto_tuner_version_env) {
+    unsigned int version = std::stoi(auto_tuner_version_env);
+    // Current support is with two versions.
     if (version == 0 || version > 2) {
-      return 2;
+      return 1;
     }
     return version;
   }
-  // return version 2 as default
-  return 2;
+  // return version 1 as default
+  return 1;
 }
 
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
