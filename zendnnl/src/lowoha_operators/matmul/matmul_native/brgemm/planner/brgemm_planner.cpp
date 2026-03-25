@@ -226,6 +226,107 @@ BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
   return plan;
 }
 
+// ============================================================================
+// INT8 BRGEMM planner (NR=64, INT8 VNNI vpdpbusd microkernels)
+// ============================================================================
+
+BrgemmPlan plan_int8_brgemm(const GemmDescriptor &desc,
+                            const UarchParams &uarch) {
+  BrgemmPlan plan;
+  const int M = desc.M, N = desc.N, K = desc.K;
+  const int K_padded = (K + 3) & ~3;
+  const bool is_decode = (M <= 4);
+  plan.num_threads = desc.num_threads;
+  plan.NR = 64;
+
+  // ── MR: same adaptive logic as BF16 ──
+  if (is_decode) {
+    plan.MR = M;
+  } else if (M % 6 == 0 || M >= 18) {
+    plan.MR = 6;
+  } else if (M % 4 == 0) {
+    plan.MR = 4;
+  } else {
+    plan.MR = 6;
+  }
+
+  // ── BK: INT8 elements are 1 byte (vs 2 for BF16) ──
+  // A panel (MR×BK×1B) in L1, B panel (NR_PACK×BK×1B) in L2/2.
+  // INT8 gets 2× larger BK than BF16 for the same cache budget.
+  constexpr int NR_PACK = 64;
+  {
+    int kb_a = static_cast<int>(0.8 * uarch.l1d_bytes)
+               / std::max(plan.MR * 1, 1);
+    int kb_b = (uarch.l2_bytes / 2) / (NR_PACK * 1);
+    int bk_max = std::min(kb_a, kb_b);
+    bk_max = std::max(bk_max, 64);
+    bk_max = (bk_max + 3) & ~3;  // align to VNNI group of 4
+    if (K_padded <= bk_max) {
+      plan.BK = K_padded;
+    } else {
+      int n_blk = (K_padded + bk_max - 1) / bk_max;
+      plan.BK = ((K_padded + n_blk - 1) / n_blk + 3) & ~3;
+    }
+  }
+
+  // ── NB: L2-aware, aligned to NR=64 ──
+  // Accumulator is i32 (4 bytes), so effective footprint uses 4 bytes.
+  {
+    int l2_budget = uarch.l2_bytes / 2;
+    int nb_from_l2 = l2_budget / (plan.BK * 4);
+    int nb_from_l3 = nb_from_l2;
+    if (plan.num_threads > 1) {
+      int cores_per_ccd = std::min(uarch.num_cores, 8);
+      int threads_sharing_l3 = std::min(plan.num_threads, cores_per_ccd);
+      int l3_budget = static_cast<int>(0.5 * uarch.l3_bytes_per_ccd);
+      nb_from_l3 = l3_budget / (threads_sharing_l3 * plan.BK * 4);
+    }
+    int nb_max = std::min(nb_from_l2, nb_from_l3);
+    plan.NB = (std::max(nb_max, plan.NR) / plan.NR) * plan.NR;
+    plan.NB = std::min(plan.NB, N);
+  }
+
+  // ── MB: cache-aware ──
+  if (!is_decode) {
+    int mb_budget = (uarch.l1d_bytes + uarch.l2_bytes)
+                    / std::max(plan.NB * 4 + plan.BK * 1, 1);
+    mb_budget = (mb_budget / plan.MR) * plan.MR;
+    mb_budget = std::max(mb_budget, plan.MR);
+    plan.MB = std::min(mb_budget, M);
+
+    if (plan.num_threads > 1 && plan.MB < M) {
+      int m_panels = (M + plan.MR - 1) / plan.MR;
+      int jc_tiles = (N + plan.NB - 1) / plan.NB;
+      int ic_tiles = (M + plan.MB - 1) / plan.MB;
+      int last_ic = M - (ic_tiles - 1) * plan.MB;
+      bool imbalanced = (last_ic < plan.MB / 2)
+                        || (ic_tiles * jc_tiles < plan.num_threads);
+      if (imbalanced) {
+        int target = std::max(2 * plan.num_threads,
+                              plan.num_threads + jc_tiles);
+        int needed_ic = std::max((target + jc_tiles - 1) / jc_tiles, 2);
+        int ppb = std::max(m_panels / needed_ic, 1);
+        plan.MB = std::min(ppb * plan.MR, M);
+      }
+    }
+  } else {
+    plan.MB = M;
+  }
+
+  static bool s_log_int8 = apilog_info_enabled();
+  if (s_log_int8) {
+    int jt = (N + plan.NB - 1) / plan.NB;
+    int it = (M + plan.MB - 1) / plan.MB;
+    apilog_info("Native INT8 BRGEMM plan: M=", M, " N=", N, " K=", K,
+                " MB=", plan.MB, " NB=", plan.NB, " BK=", plan.BK,
+                " MR=", plan.MR, " NR=", plan.NR,
+                " ic=", it, " jc=", jt, " tiles=", it * jt,
+                " threads=", plan.num_threads);
+  }
+
+  return plan;
+}
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

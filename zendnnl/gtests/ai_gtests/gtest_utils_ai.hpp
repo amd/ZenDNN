@@ -218,7 +218,11 @@ enum class DataTypeCombination {
   S8_S8_S8,
   S4_S4_S4,
   U8_U8_U8,
-  S32_S32_S32
+  S32_S32_S32,
+  U8_S8_F32,     // INT8 GEMV: u8 src, s8 weight → f32 output
+  U8_S8_BF16,    // INT8 GEMV: u8 src, s8 weight → bf16 output
+  S8_S8_F32,     // INT8 GEMV: s8 src, s8 weight → f32 output
+  S8_S8_BF16,    // INT8 GEMV: s8 src, s8 weight → bf16 output
 };
 
 /** @brief Post-op configuration for comprehensive testing */

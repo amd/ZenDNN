@@ -276,7 +276,7 @@ void matmul_execute(const char layout,
 
   if (kernel == matmul_algo_t::native_gemm ||
       kernel == matmul_algo_t::native_brgemm) {
-    // Native kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
+    // Native kernels support FP32, BF16, and INT8 (u8/s8 × s8 → f32/bf16/s8/u8)
     const bool is_fp32 = (params.dtypes.src == data_type_t::f32 &&
                           params.dtypes.wei == data_type_t::f32 &&
                           params.dtypes.dst == data_type_t::f32);
@@ -284,7 +284,14 @@ void matmul_execute(const char layout,
                           params.dtypes.wei == data_type_t::bf16 &&
                           (params.dtypes.dst == data_type_t::bf16 ||
                            params.dtypes.dst == data_type_t::f32));
-    if (!is_fp32 && !is_bf16) {
+    const bool is_int8 = ((params.dtypes.src == data_type_t::u8 ||
+                           params.dtypes.src == data_type_t::s8) &&
+                          params.dtypes.wei == data_type_t::s8 &&
+                          (params.dtypes.dst == data_type_t::f32 ||
+                           params.dtypes.dst == data_type_t::bf16 ||
+                           params.dtypes.dst == data_type_t::s8 ||
+                           params.dtypes.dst == data_type_t::u8));
+    if (!is_fp32 && !is_bf16 && !is_int8) {
       log_info("Native kernel: unsupported data type, falling back to aocl_dlp");
       kernel = matmul_algo_t::aocl_dlp;
     } else if (transA) {
@@ -294,11 +301,14 @@ void matmul_execute(const char layout,
       apilog_info("Executing matmul LOWOHA kernel with ",
                   kernel_to_string(kernel),
                   ", algo: ", static_cast<int>(kernel));
-      native::native_matmul_execute(kernel, layout, transA, transB,
+      bool handled = native::native_matmul_execute(kernel, layout, transA, transB,
                               M, N, K, alpha, src, lda,
                               weight, ldb, bias, beta, dst, ldc,
                               is_weights_const, num_threads, params);
-      return;
+      if (handled) return;
+      // Native kernel declined (e.g. INT8 shape not supported by GEMV).
+      // Fall through to DLP.
+      kernel = matmul_algo_t::aocl_dlp;
     }
   }
 

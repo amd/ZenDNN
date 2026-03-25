@@ -26,6 +26,7 @@ set(matmul_native_common_headers
   postop.hpp
   kernel_cache.hpp
   avx512_math.hpp
+  native_utils.hpp
   bf16_packing.hpp
   fp32_packing.hpp)
 

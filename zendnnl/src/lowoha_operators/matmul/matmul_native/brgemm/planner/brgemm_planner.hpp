@@ -52,6 +52,11 @@ BrgemmPlan plan_fp32_brgemm(const GemmDescriptor &desc,
 BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
                             const UarchParams &uarch);
 
+/// Select INT8 BRGEMM blocking parameters (NR=64, INT8 VNNI layout).
+/// INT8 uses 1-byte elements and 4-byte VNNI groups (vpdpbusd).
+BrgemmPlan plan_int8_brgemm(const GemmDescriptor &desc,
+                            const UarchParams &uarch);
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

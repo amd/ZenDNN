@@ -18,6 +18,8 @@
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_brgemm_looper.hpp"
@@ -39,23 +41,18 @@ using namespace zendnnl::error_handling;
 // empirically fastest kernel.
 //
 // Decision tree (AMD EPYC 9B45, Zen 5, L1d=48KB, L2=1MB, L3=32MB/CCD),
-// validated against 172 BF16 GEMV shapes (K,N = 16..1024), 91.9% accuracy:
+// validated against 172 BF16 GEMV shapes (K,N = 16..1024) at 2.7 GHz fixed.
+// BKC-GEMV uses block-aware packing (256-col blocks) for any N where B ≤ L2.
 //
 //   Rules are evaluated in order (first match wins):
 //
 //   ┌──────────────────────────────────┬──────────┬────────────────────────┐
 //   │ Shape characteristic             │ Best     │ Reason                 │
 //   ├──────────────────────────────────┼──────────┼────────────────────────┤
-//   │ K≥256, N≤32                     │ DLP      │ Row-major streaming    │
-//   │ NR-pad waste≥25%, K high, N≤256 │ DLP      │ KC zero-pad bandwidth  │
-//   │ Non-64-aligned near-sq, B≥150KB │ DLP      │ Panel tail waste       │
-//   │ K>N, K≥384, N>256, B≥500KB     │ DLP      │ K-dominant streaming   │
-//   │ K<N, K≥256, N>256, B=400K-1.2M │ DLP      │ Wide-N L2 boundary     │
-//   │ N≤256, packed B≤L2              │ BRGEMM   │ KC GEMV path (1.4-2.5x)│
-//   │ K≤64, N>256                     │ BRGEMM   │ BRGEMM looper M=1 fast │
-//   │ K≥2*N, N≥64                     │ BRGEMM   │ K-dominant BRGEMM      │
-//   │ K≤128, N>256                    │ GEMM     │ Tiny-K wide-N, low OH  │
-//   │ Near-square, B=256KB-1.2MB      │ GEMM     │ Panel loop, L2 reuse   │
+//   │ N≤32, K≥384                     │ DLP      │ 50-75% NR-pad waste    │
+//   │ N∈(33,63), ≥25%pad, K≥12N,384 │ DLP      │ High zero-pad BW waste │
+//   │ N∈(65,127), ≥25%pad, K≥5N,384 │ DLP      │ Double dispatch + waste │
+//   │ Packed B ≤ L2                    │ BRGEMM   │ BKC GEMV: block packing│
 //   │ Everything else                  │ BRGEMM   │ General BRGEMM looper  │
 //   └──────────────────────────────────┴──────────┴────────────────────────┘
 // ════════════════════════════════════════════════════════════════════════
@@ -63,80 +60,50 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int N, int K, int num_threads) {
   if (num_threads != 1)
     return matmul_algo_t::native_brgemm;
 
-  const size_t b_bytes = static_cast<size_t>(K) * N * sizeof(uint16_t);
   const int packed_N = ((N + 63) / 64) * 64;
   const int pad_waste = packed_N - N;
   const size_t packed_K = static_cast<size_t>((K + 1) & ~1);
   const size_t b_packed_bytes = packed_K * packed_N * sizeof(uint16_t);
 
-  // ── DLP zone 1: high-K tiny-N ─────────────────────────────────
-  if (N <= 32 && K >= 256)
+  // ── DLP zone 1: tiny-N with large K ─────────────────────────────
+  // N≤32 pads to 64 → 50-75% of every ZMM load is zeros.
+  // DLP's row-major streaming avoids this entirely.
+  // Threshold K≥384: BKC-GEMV still wins at K=256 despite padding.
+  if (N <= 32 && K >= 384)
     return matmul_algo_t::aocl_dlp_blocked;
 
-  // ── DLP zone 2: high NR-padding waste with large K ────────────
-  // When packed_N has ≥25% zero columns (e.g. N=48→64, N=96→128),
-  // the KC kernel wastes that fraction of all loads. DLP reads B in
-  // row-major without padding.  Threshold depends on panel count:
-  //   1 panel  (N≤64):  K≥384 needed (low per-panel overhead)
-  //   2 panels (N>64):  K≥2*N sufficient (more overhead to amortize)
-  if (pad_waste * 4 >= packed_N && N > 32 && N <= 256) {
-    if (N <= 64 && K >= 384)
+  // ── DLP zone 2: NR-padding waste with K-dominant shapes ─────────
+  // When packed_N has ≥25% zero columns AND K is large relative to N,
+  // the BKC kernel wastes bandwidth on zero-padded loads.
+  //   N ∈ (32,64): DLP wins for very K-dominant (K ≥ 12*N, K ≥ 384).
+  //     Lower K thresholds cause false positives (N=48 K=512 BKC-GEMV wins 12%).
+  //   N ∈ (64,128) with tail: double dispatch overhead + padding.
+  //     DLP wins only for very K-dominant shapes (K ≥ 5*N, K ≥ 384).
+  if (pad_waste * 4 >= packed_N && N > 32) {
+    if (N < 64 && K >= 12 * N && K >= 384)
       return matmul_algo_t::aocl_dlp_blocked;
-    if (N > 64 && K >= 2 * N)
-      return matmul_algo_t::aocl_dlp_blocked;
-  }
-
-  // ── DLP zone 3: non-64-aligned near-square, large B ───────────
-  // When min(K,N) is not a multiple of 64, BRGEMM panels have
-  // a partially-filled tail strip. DLP's flat streaming avoids
-  // this overhead for near-square shapes with B ≥ 150KB.
-  {
-    const int mn = K < N ? K : N;
-    const int mx = K > N ? K : N;
-    if (mn % 64 != 0 && b_bytes >= 150 * 1024
-        && mn >= 128 && (mx - mn) <= mn)
+    if (N > 64 && N < 128 && K >= 5 * N && K >= 384)
       return matmul_algo_t::aocl_dlp_blocked;
   }
 
-  // ── DLP zone 4: K>N wide, large B ────────────────────────────
-  if (K > N && K >= 384 && N > 256
-      && b_bytes >= 500 * 1024)
+  // ── DLP zone 3: highly K-dominant shapes with large B ────────────
+  // When B > ~600KB and K ≥ 3×N with N in the wide-block range,
+  // DLP's row-major streaming outperforms BKC's block dispatch
+  // (e.g. K=1024 N=320: DLP 82% vs BKC 71%).
+  // K ≥ 2×N is too aggressive — K=896 N=384 BKC still wins by 13%.
+  if (b_packed_bytes > 600 * 1024 && K >= 3 * N && N > 256)
     return matmul_algo_t::aocl_dlp_blocked;
 
-  // ── DLP zone 5: K<N wide, B at L2 boundary ───────────────────
-  if (K < N && K >= 256 && N > 256
-      && b_bytes >= 400 * 1024 && b_bytes <= 1200 * 1024)
-    return matmul_algo_t::aocl_dlp_blocked;
-
-  // ── BRGEMM zone: N≤256 (KC path) ─────────────────────────────
+  // ── BKC-GEMV zone: packed B fits in L2 ──────────────────────────
+  // Block-aware packing eliminates stride gaps for any N.
+  // Wide blocks (384 cols, NP=5/6) used for N ∈ (256, 512].
   {
     static const size_t l2 = static_cast<size_t>(detect_uarch().l2_bytes);
-    if (N <= 256 && b_packed_bytes <= l2)
+    if (b_packed_bytes <= l2)
       return matmul_algo_t::native_brgemm;
   }
 
-  // ── BRGEMM zone: K≤64, wide N ────────────────────────────────
-  if (K <= 64 && N > 256)
-    return matmul_algo_t::native_brgemm;
-
-  // ── BRGEMM zone: K-dominant (K ≥ 2*N) ────────────────────────
-  if (K >= 2 * N && N >= 64)
-    return matmul_algo_t::native_brgemm;
-
-  // ── GEMM zone: tiny-K wide-N ─────────────────────────────────
-  if (K <= 128 && N > 256)
-    return matmul_algo_t::native_gemm;
-
-  // ── GEMM zone: near-square, B=256KB-1.2MB ────────────────────
-  {
-    const int mn = K < N ? K : N;
-    const int mx = K > N ? K : N;
-    if (b_bytes >= 256 * 1024 && b_bytes <= 1200 * 1024
-        && mn >= 256 && (mx - mn) <= mn / 2)
-      return matmul_algo_t::native_gemm;
-  }
-
-  // ── BRGEMM (default) ─────────────────────────────────────────
+  // ── BRGEMM (default for L3-resident shapes) ────────────────────
   return matmul_algo_t::native_brgemm;
 }
 
@@ -210,15 +177,27 @@ bool native_matmul_execute(
                                     num_threads, params);
     desc.bias = bias;
 
+    // INT8 paths: u8/s8 source × s8 weights → bf16/fp32.
+    // M=1 single-thread: try BKC GEMV fast path first (L2-resident B).
+    // All other shapes: general INT8 BRGEMM looper.
+    const bool is_int8 = ((params.dtypes.src == data_type_t::u8 ||
+                           params.dtypes.src == data_type_t::s8) &&
+                          params.dtypes.wei == data_type_t::s8);
+    if (is_int8) {
+      if (!uarch.avx512vnni) return false;
+      if (M == 1 && num_threads == 1) {
+        if (int8_gemv_direct(desc, uarch, src, weight, dst, bias, params))
+          return true;
+      }
+      int8_brgemm_execute(desc, uarch, src, weight, dst, bias, params);
+      return true;
+    }
+
     if (is_bf16 && uarch.avx512bf16) {
-      // BF16 GEMV fast path: K-contiguous kernel for M=1 single-thread.
-      // Eligible when N≤256 and B fits in L2. bf16_gemv_direct() has its
-      // own gate and returns false for ineligible shapes.
       if (M == 1 && num_threads == 1) {
         if (bf16_gemv_direct(desc, uarch, src, weight, dst, bias, params))
           return true;
       }
-      // General BF16 BRGEMM (Planner → Looper → Kernel)
       bf16_brgemm_execute(desc, uarch, src, weight, dst, bias, params);
     } else if (uarch.avx512f) {
       // FP32 BRGEMM

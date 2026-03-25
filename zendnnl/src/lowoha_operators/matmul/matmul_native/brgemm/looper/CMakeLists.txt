@@ -2,11 +2,15 @@
 set(sources
     bf16_brgemm_looper.cpp
   bf16_gemv_direct.cpp
+  int8_gemv_direct.cpp
+  int8_brgemm_looper.cpp
   fp32_brgemm_looper.cpp)
 
 set(headers
     bf16_brgemm_looper.hpp
   bf16_gemv_direct.hpp
+  int8_gemv_direct.hpp
+  int8_brgemm_looper.hpp
   fp32_brgemm_looper.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)

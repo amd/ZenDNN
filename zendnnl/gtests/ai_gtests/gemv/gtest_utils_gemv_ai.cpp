@@ -66,6 +66,14 @@ static const std::vector<DataTypeCombination> gemv_bf16_combos = {
   DataTypeCombination::BF16_BF16_F32,   // BF16 in, BF16 wt → F32 output
 };
 
+// INT8 GEMV data type combinations
+static const std::vector<DataTypeCombination> gemv_int8_combos = {
+  DataTypeCombination::U8_S8_F32,   // u8 src, s8 weight → f32 output
+  DataTypeCombination::U8_S8_BF16,  // u8 src, s8 weight → bf16 output
+  DataTypeCombination::S8_S8_F32,   // s8 src, s8 weight → f32 output
+  DataTypeCombination::S8_S8_BF16,  // s8 src, s8 weight → bf16 output
+};
+
 // Activation post-ops that the KC GEMV kernel can fuse
 static std::vector<PostOpConfig> get_gemv_postop_configs() {
   std::vector<PostOpConfig> configs;
@@ -108,6 +116,8 @@ MatmulParamsAI GemvParameterGenerator::create_gemv_param(
     switch (dt) {
     case data_type_t::f32:   return "f32";
     case data_type_t::bf16:  return "bf16";
+    case data_type_t::u8:    return "u8";
+    case data_type_t::s8:    return "s8";
     default:                 return "unk";
     }
   };
@@ -133,6 +143,7 @@ void GemvParameterGenerator::add_kc_path_params(
   static const uint64_t kc_k_vals[] = {32, 64, 128, 256, 512, 1024};
   auto postop_cfgs = get_gemv_postop_configs();
 
+  // BF16 KC tests
   for (auto combo : gemv_bf16_combos) {
     for (const auto &po : postop_cfgs) {
       for (auto n : kc_n_vals) {
@@ -140,6 +151,19 @@ void GemvParameterGenerator::add_kc_path_params(
           params.push_back(create_gemv_param(
             n, k, combo, TestCategory::ACCURACY, po,
             false, true, "gemv_kc"));
+        }
+      }
+    }
+  }
+
+  // INT8 KC tests (same shapes, all 4 dtype combos)
+  for (auto combo : gemv_int8_combos) {
+    for (const auto &po : postop_cfgs) {
+      for (auto n : kc_n_vals) {
+        for (auto k : kc_k_vals) {
+          params.push_back(create_gemv_param(
+            n, k, combo, TestCategory::ACCURACY, po,
+            false, true, "gemv_int8_kc"));
         }
       }
     }
@@ -155,6 +179,16 @@ void GemvParameterGenerator::add_kc_path_params(
         params.push_back(create_gemv_param(
           n, k, combo, TestCategory::ACCURACY, no_postop,
           true, true, "gemv_kc_transB"));
+      }
+    }
+  }
+  // INT8 transB
+  for (auto combo : gemv_int8_combos) {
+    for (auto n : tb_n_vals) {
+      for (auto k : tb_k_vals) {
+        params.push_back(create_gemv_param(
+          n, k, combo, TestCategory::ACCURACY, no_postop,
+          true, true, "gemv_int8_kc_transB"));
       }
     }
   }
@@ -178,6 +212,18 @@ void GemvParameterGenerator::add_looper_path_params(
       }
     }
   }
+  // INT8 looper path: exercises int8_brgemm_execute for large N
+  for (auto combo : gemv_int8_combos) {
+    for (const auto &po : postop_cfgs) {
+      for (auto n : lp_n_vals) {
+        for (auto k : lp_k_vals) {
+          params.push_back(create_gemv_param(
+            n, k, combo, TestCategory::ACCURACY, po,
+            false, true, "gemv_int8_looper"));
+        }
+      }
+    }
+  }
 }
 
 // Random stress: wide N/K range with all postops and transB.
@@ -192,21 +238,43 @@ void GemvParameterGenerator::add_random_stress_params(
     catch (...) {}
   }
 
-  for (auto combo : gemv_bf16_combos) {
-    auto in_dt  = AITestUtils::get_input_dtype(combo);
-    auto wt_dt  = AITestUtils::get_weight_dtype(combo);
-    auto out_dt = AITestUtils::get_output_dtype(combo);
-    for (const auto &po : all_postops) {
-      if (!AITestUtils::is_aocl_kernel_supported(in_dt, wt_dt, out_dt,
-                                                  po.post_ops))
-        continue;
+  auto add_stress = [&](const std::vector<DataTypeCombination> &combos,
+                        const std::string &prefix) {
+    for (auto combo : combos) {
+      auto in_dt  = AITestUtils::get_input_dtype(combo);
+      auto wt_dt  = AITestUtils::get_weight_dtype(combo);
+      auto out_dt = AITestUtils::get_output_dtype(combo);
+      for (const auto &po : all_postops) {
+        if (!AITestUtils::is_aocl_kernel_supported(in_dt, wt_dt, out_dt,
+                                                    po.post_ops))
+          continue;
+        for (int i = 0; i < max_per_combo; ++i) {
+          uint64_t n = gemv_random_dim(1, 2048);
+          uint64_t k = gemv_random_dim(1, 4096);
+          bool tb = (gemv_random_dim(0, 1) == 1);
+          params.push_back(create_gemv_param(
+            n, k, combo, TestCategory::ACCURACY, po,
+            tb, true, prefix));
+        }
+      }
+    }
+  };
+  add_stress(gemv_bf16_combos, "gemv_stress");
+
+  // INT8 stress: same N/K range as BF16. The KC kernel handles any N
+  // where packed B fits in L2 (INT8 is 1 byte/elem → 2x larger N than BF16).
+  // Shapes exceeding L2 gracefully fall back to DLP.
+  // Use only activation post-ops that the INT8 KC kernel can fuse.
+  auto int8_postops = get_gemv_postop_configs();
+  for (auto combo : gemv_int8_combos) {
+    for (const auto &po : int8_postops) {
       for (int i = 0; i < max_per_combo; ++i) {
         uint64_t n = gemv_random_dim(1, 2048);
         uint64_t k = gemv_random_dim(1, 4096);
         bool tb = (gemv_random_dim(0, 1) == 1);
         params.push_back(create_gemv_param(
           n, k, combo, TestCategory::ACCURACY, po,
-          tb, true, "gemv_stress"));
+          tb, true, "gemv_int8_stress"));
       }
     }
   }
@@ -229,6 +297,13 @@ void GemvParameterGenerator::add_boundary_params(
         false, true, "gemv_boundary"));
     }
   }
+  for (auto combo : gemv_int8_combos) {
+    for (const auto &[n, k] : boundary_nk) {
+      params.push_back(create_gemv_param(
+        n, k, combo, TestCategory::BOUNDARY, no_postop,
+        false, true, "gemv_int8_boundary"));
+    }
+  }
 }
 
 void GemvParameterGenerator::add_edge_case_params(
@@ -249,6 +324,15 @@ void GemvParameterGenerator::add_edge_case_params(
         params.push_back(create_gemv_param(
           n, k, combo, TestCategory::EDGE_CASE, po,
           false, true, "gemv_edge"));
+      }
+    }
+  }
+  for (auto combo : gemv_int8_combos) {
+    for (const auto &po : postop_cfgs) {
+      for (const auto &[n, k] : edge_nk) {
+        params.push_back(create_gemv_param(
+          n, k, combo, TestCategory::EDGE_CASE, po,
+          false, true, "gemv_int8_edge"));
       }
     }
   }

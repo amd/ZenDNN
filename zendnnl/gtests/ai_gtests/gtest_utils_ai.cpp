@@ -627,6 +627,12 @@ data_type_t AITestUtils::get_input_dtype(DataTypeCombination combo) {
   case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::BF16_F32_BF16:
     return data_type_t::bf16;
+  case DataTypeCombination::U8_S8_F32:
+  case DataTypeCombination::U8_S8_BF16:
+    return data_type_t::u8;
+  case DataTypeCombination::S8_S8_F32:
+  case DataTypeCombination::S8_S8_BF16:
+    return data_type_t::s8;
   default:
     return data_type_t::f32;
   }
@@ -653,6 +659,11 @@ data_type_t AITestUtils::get_weight_dtype(DataTypeCombination combo) {
   case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::F32_BF16_F32:
     return data_type_t::bf16;
+  case DataTypeCombination::U8_S8_F32:
+  case DataTypeCombination::U8_S8_BF16:
+  case DataTypeCombination::S8_S8_F32:
+  case DataTypeCombination::S8_S8_BF16:
+    return data_type_t::s8;
   default:
     return data_type_t::f32;
   }
@@ -675,9 +686,14 @@ data_type_t AITestUtils::get_output_dtype(DataTypeCombination combo) {
   case DataTypeCombination::F32_F32_F32:
   case DataTypeCombination::F32_BF16_F32:
   case DataTypeCombination::BF16_BF16_F32:
+  case DataTypeCombination::U8_S8_F32:
+  case DataTypeCombination::S8_S8_F32:
     return data_type_t::f32;
   case DataTypeCombination::BF16_BF16_BF16:
   case DataTypeCombination::BF16_F32_BF16:
+    return data_type_t::bf16;
+  case DataTypeCombination::U8_S8_BF16:
+  case DataTypeCombination::S8_S8_BF16:
     return data_type_t::bf16;
   default:
     return data_type_t::f32;
@@ -820,6 +836,11 @@ bool AITestUtils::is_aocl_kernel_supported(data_type_t input_dtype,
       (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
     return true;
   }
+  if ((input_dtype == data_type_t::u8 || input_dtype == data_type_t::s8) &&
+      weight_dtype == data_type_t::s8 &&
+      (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
+    return true;
+  }
   return false;
 }
 
@@ -846,7 +867,13 @@ bool AITestUtils::is_reference_implementation_supported(data_type_t input_dtype,
   }
   if (input_dtype == data_type_t::s8 &&
       weight_dtype == data_type_t::s8 &&
-      (output_dtype == data_type_t::s8 || output_dtype == data_type_t::f32)) {
+      (output_dtype == data_type_t::s8 || output_dtype == data_type_t::f32 ||
+       output_dtype == data_type_t::bf16)) {
+    dtype_supported = true;
+  }
+  if (input_dtype == data_type_t::u8 &&
+      weight_dtype == data_type_t::s8 &&
+      (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
     dtype_supported = true;
   }
   if (input_dtype == data_type_t::f32 &&
@@ -1731,7 +1758,11 @@ std::vector<DataTypeCombination> ParameterGenerator::supported_combinations = {
   DataTypeCombination::BF16_BF16_BF16,
   DataTypeCombination::BF16_BF16_F32,
   DataTypeCombination::BF16_F32_BF16,
-  DataTypeCombination::S8_S8_S8
+  DataTypeCombination::S8_S8_S8,
+  DataTypeCombination::U8_S8_F32,
+  DataTypeCombination::U8_S8_BF16,
+  DataTypeCombination::S8_S8_F32,
+  DataTypeCombination::S8_S8_BF16,
 };
 
 // -----------------------------------------------------------------------------

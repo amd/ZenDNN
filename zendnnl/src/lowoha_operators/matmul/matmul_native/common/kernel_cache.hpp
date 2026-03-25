@@ -189,10 +189,14 @@ private:
 };
 
 // ============================================================================
-// BF16 K-contiguous VNNI packed weight cache (for GEMV / K-contiguous kernel)
+// BF16 Blocked K-contiguous (BKC) VNNI packed weight cache (for BKC GEMV kernel)
 // ============================================================================
 
-/// BF16 K-contiguous VNNI packed weight buffer.
+/// BF16 Blocked K-contiguous (BKC) VNNI packed weight buffer.
+///
+/// Blocked K-contiguous (BKC) packing: B is partitioned into 256-column
+/// blocks, each packed with K-contiguous VNNI layout. Within each block,
+/// all k-pairs are contiguous with stride = blk_N_padded × VNNI_PAIR.
 ///
 /// Layout: for each k-pair, ALL N columns (padded to NR_PACK=64) are contiguous:
 ///   packed[kp * N_padded * 2 + n * 2 + 0] = B[2*kp  ][n]
@@ -203,7 +207,7 @@ private:
 ///
 /// This layout provides sequential memory access when iterating K-outer,
 /// N-inner — optimal for M=1 GEMV with L2-resident B.
-struct BF16KContiguousWeight {
+struct BF16BKCWeight {
   std::unique_ptr<uint16_t[], AlignedFreeU16Deleter> buf;
   const uint16_t *data;  ///< Points to buf.get()
   int K;           ///< Original K
@@ -216,25 +220,152 @@ struct BF16KContiguousWeight {
   int n_stride() const { return N_padded * VNNI_PAIR; }
 };
 
-/// Thread-safe singleton cache for BF16 K-contiguous packed weight matrices.
+/// Thread-safe singleton cache for BF16 BKC packed weight matrices.
 /// bf16_gemv_direct() checks get_weight_cache() internally and falls back
 /// to the thread-local repack path when caching is disabled.
-class BF16KContiguousWeightCache {
+class BF16BKCWeightCache {
 public:
-  static BF16KContiguousWeightCache &instance();
-  const BF16KContiguousWeight *get_or_pack(
+  static BF16BKCWeightCache &instance();
+  const BF16BKCWeight *get_or_pack(
     const PrepackedWeightKey &key, const uint16_t *weight);
   /// @copydoc PrepackedWeightCache::clear()
   void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
-  BF16KContiguousWeightCache(const BF16KContiguousWeightCache &) = delete;
-  BF16KContiguousWeightCache &operator=(const BF16KContiguousWeightCache &) = delete;
+  BF16BKCWeightCache(const BF16BKCWeightCache &) = delete;
+  BF16BKCWeightCache &operator=(const BF16BKCWeightCache &) = delete;
 private:
-  BF16KContiguousWeightCache() = default;
+  BF16BKCWeightCache() = default;
   std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<BF16KContiguousWeight>,
+             std::unique_ptr<BF16BKCWeight>,
              PrepackedWeightKeyHash> cache_;
   std::mutex mutex_;
 };
+
+// ── INT8 K-contiguous weight cache ──────────────────────────────────────
+
+/// Custom deleter for aligned_alloc'd INT8 memory.
+struct AlignedFreeS8Deleter {
+  void operator()(int8_t *p) const { std::free(p); }
+};
+struct AlignedFreeI32Deleter {
+  void operator()(int32_t *p) const { std::free(p); }
+};
+
+/// INT8 VNNI group size for vpdpbusd.
+inline constexpr int INT8_VNNI_GRP = 4;
+
+/// INT8 K-contiguous VNNI packed weight buffer with precomputed
+/// dequantization vectors for zero-point compensation.
+///
+/// Layout: for each k-quad, ALL N columns (padded to NR_PACK=64)
+/// are contiguous as 4-byte groups (matching vpdpbusd operand layout).
+struct INT8KContiguousWeight {
+  std::unique_ptr<int8_t[], AlignedFreeS8Deleter>  packed_buf;
+  std::unique_ptr<int32_t[], AlignedFreeI32Deleter> col_sum_buf;
+  std::unique_ptr<float[], AlignedFreeDeleter>      combined_scale_buf;
+  std::unique_ptr<float[], AlignedFreeDeleter>      effective_bias_buf;
+
+  const int8_t  *data;
+  const int32_t *col_sum;
+  const float   *combined_scale;
+  const float   *effective_bias;
+
+  int K, K_padded, N, N_padded;
+  size_t total;
+
+  float   cached_src_scale;
+  int32_t cached_src_zp;
+
+  int n_stride() const { return N_padded * INT8_VNNI_GRP; }
+};
+
+/// Thread-safe singleton cache for INT8 K-contiguous packed weights.
+/// Caches packed B + col_sum + combined_scale + effective_bias.
+/// Cache key is (weight_ptr, K, N, ldb, transB). Dequant vectors
+/// (combined_scale, effective_bias) are baked from src_scale, src_zp,
+/// bias, and wei_scale at pack time. On cache hit, src_scale/src_zp
+/// are validated; mismatch returns nullptr (caller falls back to
+/// thread-local path). bias and wei_scale are assumed constant when
+/// is_weights_const=true (same pointer → same values invariant).
+class INT8KContiguousWeightCache {
+public:
+  static INT8KContiguousWeightCache &instance();
+
+  /// Get or pack INT8 weights with precomputed dequant vectors.
+  /// Returns cached entry if key matches. Does NOT recompute dequant
+  /// if src_scale/src_zp changed — caller must ensure static quant
+  /// or use thread-local path for dynamic quant.
+  const INT8KContiguousWeight *get_or_pack(
+    const PrepackedWeightKey &key,
+    const int8_t *weight,
+    float src_scale, int32_t src_zp,
+    const float *bias,
+    const float *wei_scale, int wei_scale_count);
+
+  /// @copydoc PrepackedWeightCache::clear()
+  void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
+  INT8KContiguousWeightCache(const INT8KContiguousWeightCache &) = delete;
+  INT8KContiguousWeightCache &operator=(const INT8KContiguousWeightCache &) = delete;
+private:
+  INT8KContiguousWeightCache() = default;
+  std::unordered_map<PrepackedWeightKey,
+             std::unique_ptr<INT8KContiguousWeight>,
+             PrepackedWeightKeyHash> cache_;
+  std::mutex mutex_;
+};
+
+// ── INT8 VNNI panel-format prepacked weight cache (for BRGEMM looper) ──
+
+/// INT8 VNNI panel-format prepacked weight buffer + column sums.
+///
+/// Layout: NR_PACK-wide panels with 4-byte VNNI groups (same as BF16 panels
+/// but with int8 elements and 4-byte groups instead of 2-byte pairs).
+struct INT8PrepackedWeight {
+  std::unique_ptr<int8_t[], AlignedFreeS8Deleter>  packed_buf;
+  std::unique_ptr<int32_t[], AlignedFreeI32Deleter> col_sum_buf;
+
+  const int8_t  *data;
+  const int32_t *col_sum;
+  int K, K_padded, N, n_panels;
+
+  const int8_t *get_panel(int kq, int panel_idx) const {
+    const int vnni_stride = NR_PACK * INT8_VNNI_GRP;
+    const int k_quads = K_padded / 4;
+    return data
+        + static_cast<size_t>(panel_idx) * k_quads * vnni_stride
+        + static_cast<size_t>(kq) * vnni_stride;
+  }
+
+  static constexpr int stride() { return NR_PACK * INT8_VNNI_GRP; }
+};
+
+/// Thread-safe global singleton cache for INT8 panel-format packed weights.
+/// Used by INT8 BRGEMM looper for cross-thread reuse of packed B.
+class INT8PrepackedWeightCache {
+public:
+  static INT8PrepackedWeightCache &instance();
+  const INT8PrepackedWeight *get_or_prepack(
+    const PrepackedWeightKey &key, const int8_t *weight);
+  /// @copydoc PrepackedWeightCache::clear()
+  void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
+  INT8PrepackedWeightCache(const INT8PrepackedWeightCache &) = delete;
+  INT8PrepackedWeightCache &operator=(const INT8PrepackedWeightCache &) = delete;
+private:
+  INT8PrepackedWeightCache() = default;
+  std::unordered_map<PrepackedWeightKey,
+             std::unique_ptr<INT8PrepackedWeight>,
+             PrepackedWeightKeyHash> cache_;
+  std::mutex mutex_;
+};
+
+/// Clear all weight caches. Must only be called when no thread is using
+/// any previously returned pointer (e.g., between test cases or model swap).
+inline void clear_all_weight_caches() {
+  PrepackedWeightCache::instance().clear();
+  BF16PrepackedWeightCache::instance().clear();
+  BF16BKCWeightCache::instance().clear();
+  INT8KContiguousWeightCache::instance().clear();
+  INT8PrepackedWeightCache::instance().clear();
+}
 
 } // namespace native
 } // namespace matmul

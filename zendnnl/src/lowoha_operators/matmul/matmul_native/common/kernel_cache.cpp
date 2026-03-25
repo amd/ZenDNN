@@ -15,7 +15,8 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_kcontiguous.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -176,15 +177,15 @@ const BF16PrepackedWeight *BF16PrepackedWeightCache::get_or_prepack(
 }
 
 // ============================================================================
-// BF16 K-contiguous VNNI packed weight cache
+// BF16 Blocked K-contiguous (BKC) VNNI packed weight cache
 // ============================================================================
 
-BF16KContiguousWeightCache &BF16KContiguousWeightCache::instance() {
-  static BF16KContiguousWeightCache inst;
+BF16BKCWeightCache &BF16BKCWeightCache::instance() {
+  static BF16BKCWeightCache inst;
   return inst;
 }
 
-const BF16KContiguousWeight *BF16KContiguousWeightCache::get_or_pack(
+const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
   const PrepackedWeightKey &key, const uint16_t *weight) {
 
   // Fast path: check cache under lock.
@@ -207,9 +208,9 @@ const BF16KContiguousWeight *BF16KContiguousWeightCache::get_or_pack(
     std::aligned_alloc(64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
   if (!buf) return nullptr;
 
-  pack_b_kcontiguous_ext(weight, ldb, K, N, transB, buf);
+  pack_b_bkc_ext(weight, ldb, K, N, transB, buf);
 
-  auto pw = std::make_unique<BF16KContiguousWeight>();
+  auto pw = std::make_unique<BF16BKCWeight>();
   pw->buf.reset(buf);
   pw->data = buf;
   pw->K = K;
@@ -224,7 +225,178 @@ const BF16KContiguousWeight *BF16KContiguousWeightCache::get_or_pack(
   if (it != cache_.end())
     return it->second.get();  // race loser — discard our pack, use winner's
 
-  const BF16KContiguousWeight *raw = pw.get();
+  const BF16BKCWeight *raw = pw.get();
+  cache_[key] = std::move(pw);
+  return raw;
+}
+
+// ============================================================================
+// INT8 K-contiguous VNNI packed weight cache
+// ============================================================================
+
+INT8KContiguousWeightCache &INT8KContiguousWeightCache::instance() {
+  static INT8KContiguousWeightCache inst;
+  return inst;
+}
+
+const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
+  const PrepackedWeightKey &key,
+  const int8_t *weight,
+  float src_scale, int32_t src_zp,
+  const float *bias,
+  const float *wei_scale, int wei_scale_count) {
+
+  // Fast path: check cache under lock.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+      auto *entry = it->second.get();
+      if (entry->cached_src_scale == src_scale
+          && entry->cached_src_zp == src_zp)
+        return entry;
+      // Quant params changed — return nullptr to force thread-local path.
+      // Avoids in-place mutation that races with concurrent readers.
+      return nullptr;
+    }
+  }
+
+  // Cache miss: pack outside the lock.
+  const int K = key.K, N = key.N, ldb = key.ldb;
+  const bool transB = key.transB;
+  if (K <= 0 || N <= 0) return nullptr;
+  const int K_padded = (K + 3) & ~3;
+  const int N_padded = ((N + NR_PACK - 1) / NR_PACK) * NR_PACK;
+  const size_t packed_total = static_cast<size_t>(K_padded) * N_padded;
+
+  int8_t *pbuf = static_cast<int8_t *>(
+    std::aligned_alloc(64, ((packed_total + 63) & ~size_t(63))));
+  if (!pbuf) return nullptr;
+
+  int32_t *cs_buf = static_cast<int32_t *>(
+    std::aligned_alloc(64, ((N_padded * sizeof(int32_t) + 63) & ~size_t(63))));
+  if (!cs_buf) { std::free(pbuf); return nullptr; }
+
+  float *cscale_buf = static_cast<float *>(
+    std::aligned_alloc(64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
+  if (!cscale_buf) { std::free(pbuf); std::free(cs_buf); return nullptr; }
+
+  float *ebias_buf = static_cast<float *>(
+    std::aligned_alloc(64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
+  if (!ebias_buf) { std::free(pbuf); std::free(cs_buf); std::free(cscale_buf); return nullptr; }
+
+  pack_b_int8_bkc(weight, ldb, K, N, transB, pbuf, cs_buf);
+  precompute_int8_dequant(
+      cs_buf, bias, src_scale, src_zp,
+      wei_scale, wei_scale_count,
+      N, N_padded, cscale_buf, ebias_buf);
+
+  auto pw = std::make_unique<INT8KContiguousWeight>();
+  pw->packed_buf.reset(pbuf);
+  pw->col_sum_buf.reset(cs_buf);
+  pw->combined_scale_buf.reset(cscale_buf);
+  pw->effective_bias_buf.reset(ebias_buf);
+  pw->data = pbuf;
+  pw->col_sum = cs_buf;
+  pw->combined_scale = cscale_buf;
+  pw->effective_bias = ebias_buf;
+  pw->K = K;
+  pw->K_padded = K_padded;
+  pw->N = N;
+  pw->N_padded = N_padded;
+  pw->total = packed_total;
+  pw->cached_src_scale = src_scale;
+  pw->cached_src_zp = src_zp;
+
+  // Re-acquire lock and insert.
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = cache_.find(key);
+  if (it != cache_.end())
+    return it->second.get();
+
+  const INT8KContiguousWeight *raw = pw.get();
+  cache_[key] = std::move(pw);
+  return raw;
+}
+
+// ============================================================================
+// INT8 VNNI panel-format prepacked weight cache (for BRGEMM looper)
+// ============================================================================
+
+INT8PrepackedWeightCache &INT8PrepackedWeightCache::instance() {
+  static INT8PrepackedWeightCache inst;
+  return inst;
+}
+
+const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
+  const PrepackedWeightKey &key, const int8_t *weight) {
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_.find(key);
+    if (it != cache_.end())
+      return it->second.get();
+  }
+
+  const int K = key.K, N = key.N, ldb = key.ldb;
+  const bool transB = key.transB;
+  if (K <= 0 || N <= 0) return nullptr;
+  const int K_padded = (K + 3) & ~3;
+  const int k_quads  = K_padded / 4;
+  const int np = (N + NR_PACK - 1) / NR_PACK;
+  const int vnni_stride = NR_PACK * INT8_VNNI_GRP;
+  const size_t pack_total = static_cast<size_t>(np) * k_quads * vnni_stride;
+
+  int8_t *pbuf = static_cast<int8_t *>(
+    std::aligned_alloc(64, ((pack_total + 63) & ~size_t(63))));
+  if (!pbuf) return nullptr;
+
+  int32_t *cs_buf = static_cast<int32_t *>(
+    std::aligned_alloc(64, ((N * sizeof(int32_t) + 63) & ~size_t(63))));
+  if (!cs_buf) { std::free(pbuf); return nullptr; }
+
+  std::memset(cs_buf, 0, N * sizeof(int32_t));
+  for (int jp = 0; jp < np; ++jp) {
+    const int j0 = jp * NR_PACK;
+    const int nr_act = std::min(NR_PACK, N - j0);
+    int8_t *dst = pbuf + static_cast<size_t>(jp) * k_quads * vnni_stride;
+    for (int kq = 0; kq < k_quads; ++kq) {
+      int8_t *d = dst + kq * vnni_stride;
+      const int k_base = kq * 4;
+      for (int n = 0; n < nr_act; ++n) {
+        int32_t sum = 0;
+        for (int i = 0; i < 4; ++i) {
+          const int k = k_base + i;
+          int8_t val = 0;
+          if (k < K)
+            val = transB ? weight[(j0+n)*ldb+k] : weight[k*ldb+(j0+n)];
+          d[n*4+i] = val;
+          sum += val;
+        }
+        cs_buf[j0+n] += sum;
+      }
+      for (int n = nr_act; n < NR_PACK; ++n) {
+        d[n*4+0] = 0; d[n*4+1] = 0; d[n*4+2] = 0; d[n*4+3] = 0;
+      }
+    }
+  }
+
+  auto pw = std::make_unique<INT8PrepackedWeight>();
+  pw->packed_buf.reset(pbuf);
+  pw->col_sum_buf.reset(cs_buf);
+  pw->data = pbuf;
+  pw->col_sum = cs_buf;
+  pw->K = K;
+  pw->K_padded = K_padded;
+  pw->N = N;
+  pw->n_panels = np;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = cache_.find(key);
+  if (it != cache_.end())
+    return it->second.get();
+
+  const INT8PrepackedWeight *raw = pw.get();
   cache_[key] = std::move(pw);
   return raw;
 }
