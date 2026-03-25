@@ -23,6 +23,7 @@
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/auto_tuner.hpp"
 #include "matmul_native/native_matmul.hpp"
+#include "lowoha_operators/common/operator_instrumentation.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -317,17 +318,53 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
                        matmul_batch_params_t batch_params, matmul_params params) {
-  // Create profiler instance for timing
+  // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
+  //  - profiler_t constructor: eliminated by dead store elimination at -O3
+  //    when profiler is never used.
+  //  - is_profile_enabled(): negligible (cached static const bool, shared
+  //    across all translation units via inline linkage).
+  //  - if (is_profile) branch: negligible (always false, branch predictor
+  //    learns not-taken quickly).
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
   if (is_profile) {
     profiler.tbp_start();
   }
-  status_t status = validate_matmul_direct_inputs(src, weight, dst, M, N, K,
+
+  // F16 ISA check must always run — not gated behind diagnostics.
+  // Prevents undefined behavior on platforms without AVX512-FP16 support.
+  const bool is_f16 = (params.dtypes.src == data_type_t::f16 ||
+                       params.dtypes.wei == data_type_t::f16 ||
+                       params.dtypes.dst == data_type_t::f16);
+  if (is_f16 && !zendnnl_platform_info().get_f16_status()) {
+    log_error("F16 data type is not supported on this platform "
+              "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+    return status_t::isa_unsupported;
+  }
+
+  // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this
+  // resolves to a single predicted-not-taken branch, skipping the full
+  // validation path (null-pointer checks, dimension checks, and
+  // quantization-parameter validation).
+  status_t status = zendnnl::common::op_instrumentation::validate([&]() {
+    return validate_matmul_direct_inputs(src, weight, dst, M, N, K,
                     batch_params.Batch_A, batch_params.Batch_B,
                     params, is_weights_const);
+  });
   if (status != status_t::success) {
     return status;
+  }
+
+  // Set leading dimension for binary post-op buffers if not set.
+  // This is parameter initialization, not validation — must always execute
+  // regardless of the ZENDNNL_DIAGNOSTICS_ENABLE flag.
+  for (auto &po : params.postop_) {
+    if (po.po_type == post_op_type_t::binary_add ||
+        po.po_type == post_op_type_t::binary_mul) {
+      if (po.leading_dim == -1) {
+        po.leading_dim = N;
+      }
+    }
   }
 
   size_t src_type_size = size_of(params.dtypes.src);

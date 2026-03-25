@@ -340,21 +340,12 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   const bool is_u8_src   = (params.dtypes.src == data_type_t::u8);
   const bool is_s8_src   = (params.dtypes.src == data_type_t::s8);
   const bool is_f16_src  = (params.dtypes.src == data_type_t::f16);
-  const bool is_f16_wei  = (params.dtypes.wei == data_type_t::f16);
   const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
   const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
   const bool is_u8_out   = (params.dtypes.dst == data_type_t::u8);
   const bool is_s8_out   = (params.dtypes.dst == data_type_t::s8);
   const bool is_s32_out  = (params.dtypes.dst == data_type_t::s32);
   const bool is_f16_out  = (params.dtypes.dst == data_type_t::f16);
-
-  // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
-  if ((is_f16_src || is_f16_wei || is_f16_out) &&
-      !zendnnl_platform_info().get_f16_status()) {
-    log_error("F16 data type is not supported on this platform "
-              "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
-    return status_t::isa_unsupported;
-  }
 
   if ((!is_f32_src && !is_bf16_src && !is_u8_src && !is_s8_src && !is_f16_src)) {
     log_error("Unsupported source data type: ",
@@ -389,16 +380,6 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     log_error("Broadcasting is not compatible with given batch sizes: Batch_A=",
               Batch_A, ", Batch_B=", Batch_B);
     return status_t::failure;
-  }
-
-  // Set leading dimension for binary buffers if not set
-  for (auto &po : params.postop_) {
-    if (po.po_type == post_op_type_t::binary_add ||
-        po.po_type == post_op_type_t::binary_mul) {
-      if (po.leading_dim == -1) {
-        po.leading_dim = N;
-      }
-    }
   }
 
   return status_t::success;
