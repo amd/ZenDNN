@@ -473,11 +473,6 @@ status_t rms_norm_avx512(
   norm_params &params
 ) {
 
-  if (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM && !residual) {
-    log_error("AVX-512 kernel: fused_add_rms requires non-null residual");
-    return status_t::failure;
-  }
-
   const float inv_n = 1.0f / static_cast<float>(params.norm_size);
   const bool src_bf16   = (params.src_dt == data_type_t::bf16);
   const bool dst_bf16   = (params.dst_dt == data_type_t::bf16);

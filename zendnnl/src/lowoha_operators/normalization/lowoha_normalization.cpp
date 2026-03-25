@@ -17,6 +17,7 @@
 #include "lowoha_normalization.hpp"
 #include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
 #include "lowoha_operators/normalization/kernel/rmsnorm_avx512_kernel.hpp"
+#include "lowoha_operators/common/operator_instrumentation.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -73,15 +74,20 @@ status_t normalization_direct(
     profiler.tbp_start();
   }
 
-  // Derive batch, norm_size, num_channels from shape
-  if (setup_normalization_shape(params) != status_t::success) {
-    return status_t::failure;
+  // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this
+  // resolves to a single predicted-not-taken branch, skipping the full
+  // validation path (null-pointer checks, dimension checks, and
+  // quantization-parameter validation).
+  status_t status = zendnnl::common::op_instrumentation::validate([&]() {
+    return validate_normalization_inputs(input, output, gamma, beta,
+                                         running_mean, running_var, residual, params);
+  });
+  if (status != status_t::success) {
+    return status;
   }
 
-  // Validate inputs
-  if (validate_normalization_inputs(input, output, gamma, beta,
-                                    running_mean, running_var, residual, params)
-      != status_t::success) {
+  // Derive batch, norm_size, num_channels from shape
+  if (setup_normalization_shape(params) != status_t::success) {
     return status_t::failure;
   }
 
