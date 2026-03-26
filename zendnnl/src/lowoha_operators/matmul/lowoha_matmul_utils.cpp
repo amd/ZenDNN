@@ -854,6 +854,15 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     log_info("F16 detected, switching to onednn blocked kernel");
     kernel = matmul_algo_t::onednn_blocked;
   }
+
+  // TODO: Remove this workaround once OneDNN fixes the GEMV M=1 + beta!=0 case.
+  if (M == 1 && (kernel == matmul_algo_t::onednn ||
+                 kernel == matmul_algo_t::onednn_blocked) &&
+      params.dtypes.src == data_type_t::f32) {
+    log_info("M=1 and src is F32, switching to aocl_dlp_blocked kernel");
+    kernel = matmul_algo_t::aocl_dlp_blocked;
+  }
+
   // TODO: Update the conditon once prepack supports other formats
   // Current prepack supports only AOCL blocked kernel
   if (params.mem_format_b == 'r') {

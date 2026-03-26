@@ -298,7 +298,8 @@ status_t matmul_impl_t::validate() {
 
     if (weights->is_quantized() && is_per_group_src) {
       unsigned long N_dim = weights_size.at(weights_size.size()-1);
-      unsigned long wei_scale_nelems = compute_product(weights->get_quant_scale_size());
+      unsigned long wei_scale_nelems = compute_product(
+                                         weights->get_quant_scale_size());
       bool is_per_group_wei = (wei_scale_nelems > N_dim) &&
                               (wei_scale_nelems % N_dim == 0);
       if (is_per_group_wei) {
@@ -353,7 +354,7 @@ status_t matmul_impl_t::validate() {
 
   if (weights->get_data_type() != data_type_t::u4 &&
       (weights->get_layout() & uint16_t(tensor_layout_t::blocked) ||
-      weights->get_layout() & uint16_t(tensor_layout_t::blocked_aocl))) {
+       weights->get_layout() & uint16_t(tensor_layout_t::blocked_aocl))) {
     apilog_info("Weight tensor is prepacked, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
   }
@@ -409,6 +410,14 @@ status_t matmul_impl_t::validate() {
       forced_kernel = "onednn_blocked";
       log_info("F16 data type detected, forcing onednn_blocked kernel");
     }
+  }
+
+  // TODO: Remove this workaround once OneDNN fixes the GEMV M=1 + beta!=0 case.
+  if (input_size.at(0) == 1 && (forced_kernel == "onednn" ||
+                                forced_kernel == "onednn_blocked") &&
+      input->get_data_type() == data_type_t::f32) {
+    log_info("M=1 and src is F32, switching to aocl_dlp_blocked kernel");
+    forced_kernel = "aocl_dlp_blocked";
   }
 
   // validate post-ops
