@@ -181,9 +181,9 @@ static inline void store_4x16_u8(uint8_t *dst,
 //      with hardware saturation to [-128,127], no explicit clamp needed.
 //   7. Cache-line stores:  packs 4x __m128i into a single 64B aligned
 //      store for efficient cache-line writes.
-//   8. OMP threading:  the parallel-for uses the default OMP thread count,
-//      typically up to M threads (one row per thread) for NUMA-distributed
-//      writes.
+//   8. OMP threading:  rows are distributed round-robin across 16 CCXs
+//      using sched_setaffinity. Row m is pinned to CCX (m % 16) for
+//      cross-CCX memory bandwidth distribution.
 //   9. True division:  VDIVPS for exact match with reference scalar path
 //      (no reciprocal multiply rounding differences).
 //  10. Banker's rounding:  VCVTPS2DQ matches std::nearbyint() for
@@ -197,8 +197,7 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
-  #pragma omp parallel for schedule(static)
-  for (int64_t m = 0; m < M; ++m) {
+  auto row_loop = [&](int64_t m) __attribute__((target("avx512f"))) {
     const uint16_t *row_src = src + m * N;
     int8_t         *row_dst = dst + m * N;
 
@@ -289,6 +288,30 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
       q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
+  };
+
+  const bool use_parallel = (M > 1);
+
+  if (use_parallel) {
+    const int nthreads = omp_get_max_threads();
+    const int cores_per_ccx = 8;
+    const int num_ccxs = std::max(1, nthreads / cores_per_ccx);
+
+    #pragma omp parallel
+    {
+      const int tid      = omp_get_thread_num();
+      const int ccx_id   = tid / cores_per_ccx;
+      const int local_id = tid % cores_per_ccx;
+
+      const int64_t rows_per_ccx = (M + num_ccxs - 1) / num_ccxs;
+      const int64_t ccx_start    = ccx_id * rows_per_ccx;
+      const int64_t ccx_end      = std::min(ccx_start + rows_per_ccx, M);
+
+      for (int64_t m = ccx_start + local_id; m < ccx_end; m += cores_per_ccx)
+        row_loop(m);
+    }
+  } else {
+    for (int64_t m = 0; m < M; ++m) row_loop(m);
   }
 }
 
