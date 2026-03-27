@@ -21,6 +21,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/common/operator_instrumentation.hpp"
 
 #include <omp.h>
 #include <sstream>
@@ -32,6 +33,7 @@ namespace reorder {
 using namespace zendnnl::error_handling;
 using namespace zendnnl::profile;
 using zendnnl::lowoha::matmul::zendnnl_parallel_for;
+using zendnnl::common::op_instrumentation;
 
 /**
  * @brief Execute reorder kernel based on selected algorithm (per-tensor only)
@@ -961,32 +963,23 @@ static bool dispatch_unfused_per_token(const void *src, void *dst,
 }
 
 status_t reorder_direct(const void *src, void *dst,
-                         reorder_params_t params) {
-  // Compute nelems from shape - shape is mandatory
-  if (!params.is_shaped()) {
-    log_error("Shape must be provided. "
-              "For 1D arrays, use shape = {size}. "
-              "For 2D matrices, use shape = {M, N}. "
-              "For 3D batched, use shape = {batch, M, N}");
-    return status_t::failure;
-  }
-
+                         reorder_params_t &params) {
   // Compute nelems from shape
   const size_t nelems = static_cast<size_t>(params.nelems());
 
   //============================================================================
   // Dynamic Quantization Mode
   //============================================================================
+  params.num_threads = params.num_threads > 0 ? params.num_threads :
+                         omp_get_max_threads();
   if (params.dynamic_quant) {
-    // Validate dynamic quantization parameters
-    if (validate_dynamic_quant_params(src, params) != status_t::success) {
-      return status_t::failure;
-    }
-
-    // Validate shape
-    if (validate_reorder_shape(params) != status_t::success) {
-      return status_t::failure;
-    }
+    // Validate dynamic quantization parameters and shape
+    status_t dq_status = op_instrumentation::validate([&]() {
+      if (validate_dynamic_quant_params(src, params) != status_t::success)
+        return status_t::failure;
+      return validate_reorder_shape(params);
+    });
+    if (dq_status != status_t::success) return dq_status; // validation failed
 
     // Create profiler instance for timing
     profiler_t profiler;
@@ -1019,10 +1012,7 @@ status_t reorder_direct(const void *src, void *dst,
       profiler.tbp_start();
     }
 
-    params.num_threads = params.num_threads > 0 ? params.num_threads :
-                         omp_get_max_threads();
-
-    reorder_threadlimit thread_guard(params.num_threads);
+    reorder_threadlimit thread_guard(static_cast<int>(params.num_threads));
 
     //------------------------------------------------------------------
     // Fused per-token path: when granularity is per-channel-row (M,1)
@@ -1106,9 +1096,10 @@ status_t reorder_direct(const void *src, void *dst,
   //============================================================================
 
   // Validate inputs and parameters
-  if (validate_reorder_inputs(src, dst, nelems, params) != status_t::success) {
-    return status_t::failure;
-  }
+  status_t val_status = op_instrumentation::validate([&]() {
+    return validate_reorder_inputs(src, dst, nelems, params);
+  });
+  if (val_status != status_t::success) return val_status;
 
   // Select algorithm
   reorder_algo_t algo = select_reorder_algo(params, nelems);
@@ -1118,8 +1109,9 @@ status_t reorder_direct(const void *src, void *dst,
   bool is_profile = is_profile_enabled();
 
   // Build log string for API and profile logging
-  [[maybe_unused]] std::ostringstream ss;
+  [[maybe_unused]] std::string log_str;
   if (apilog_info_enabled() || is_profile) {
+    std::ostringstream ss;
     float scale_val = get_scale_value(params.quant_params.scale);
     int zp_val = get_zero_point_value(params.quant_params.zero_point);
     ss << "LOWOHA reorder_direct (Static_Quantize): M=" << params.M()
@@ -1144,8 +1136,9 @@ status_t reorder_direct(const void *src, void *dst,
       ss << "]";
     }
 
+    log_str = ss.str();
     if (apilog_info_enabled()) {
-      apilog_info(ss.str());
+      apilog_info(log_str);
     }
   }
 
@@ -1154,17 +1147,14 @@ status_t reorder_direct(const void *src, void *dst,
     profiler.tbp_start();
   }
 
-  params.num_threads = params.num_threads > 0 ? params.num_threads :
-                       omp_get_max_threads();
-
-  reorder_threadlimit thread_guard(params.num_threads);
+  reorder_threadlimit thread_guard(static_cast<int>(params.num_threads));
   // Execute reorder (handles all cases: contiguous, 1D/2D/3D strided)
   reorder_wrapper(src, dst, nelems, params, algo);
 
   // Stop profiling timer and log
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+    profilelog_verbose(log_str, ", time=", profiler.tbp_elapsedtime(),
                        profiler.get_res_str());
   }
 

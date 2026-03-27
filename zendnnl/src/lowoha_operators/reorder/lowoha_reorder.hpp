@@ -65,7 +65,7 @@ using zendnnl::memory::data_type_t;
  * @note Buffers must not overlap.
  */
 status_t reorder_direct(const void *src, void *dst,
-                         reorder_params_t params);
+                         reorder_params_t &params);
 
 
 /**

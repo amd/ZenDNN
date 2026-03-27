@@ -656,7 +656,7 @@ status_t validate_dynamic_quant_params(const void *src, const reorder_params_t &
  * @param params Reorder parameters (modified: scale/zp buffers filled)
  * @return status_t::success on success, status_t::failure on error
  */
-status_t compute_dynamic_quant_params(const void *src, reorder_params_t &params);
+status_t compute_dynamic_quant_params(const void *src, const reorder_params_t &params);
 
 /**
  * @brief Helper to get the number of quantization parameter elements

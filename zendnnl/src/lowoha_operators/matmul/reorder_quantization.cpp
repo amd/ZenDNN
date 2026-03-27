@@ -16,6 +16,7 @@
 
 #include "reorder_quantization.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "lowoha_operators/common/operator_instrumentation.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -23,6 +24,7 @@ namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::size_of;
+using zendnnl::common::op_instrumentation;
 using zendnnl::lowoha::reorder::reorder_algo_t;
 
 status_t reorder_quantization_wrapper(
@@ -46,30 +48,36 @@ status_t reorder_quantization_wrapper(
   const data_type_t orig_src_dtype = params.dtypes.src;
   const bool needs_zp = (quant_dtype == data_type_t::u8);
 
-  if (params.quant_params.src_scale.dims.empty() ||
-      params.quant_params.src_scale.dt == data_type_t::none) {
-    log_error("Reorder quantization requires quant_params.src_scale "
-              "dims and dt to be set");
-    return status_t::failure;
-  }
-  if (needs_zp &&
-      (params.quant_params.src_zp.dims.empty() ||
-       params.quant_params.src_zp.dt == data_type_t::none)) {
-    log_error("Asymmetric (u8) quantization requires quant_params.src_zp "
-              "dims and dt to be set");
-    return status_t::failure;
-  }
-  if (!is_dynamic) {
-    if (!params.quant_params.src_scale.buff) {
-      log_error("Static quantization requires quant_params.src_scale.buff "
-                "to be provided");
+  status_t val_status = op_instrumentation::validate([&]() {
+    if (params.quant_params.src_scale.dims.empty() ||
+        params.quant_params.src_scale.dt == data_type_t::none) {
+      log_error("Reorder quantization requires quant_params.src_scale "
+                "dims and dt to be set");
       return status_t::failure;
     }
-    if (needs_zp && !params.quant_params.src_zp.buff) {
-      log_error("Static quantization requires quant_params.src_zp.buff "
-                "to be provided for asymmetric (u8) quantization");
+    if (needs_zp &&
+        (params.quant_params.src_zp.dims.empty() ||
+         params.quant_params.src_zp.dt == data_type_t::none)) {
+      log_error("Asymmetric (u8) quantization requires quant_params.src_zp "
+                "dims and dt to be set");
       return status_t::failure;
     }
+    if (!is_dynamic) {
+      if (!params.quant_params.src_scale.buff) {
+        log_error("Static quantization requires quant_params.src_scale.buff "
+                  "to be provided");
+        return status_t::failure;
+      }
+      if (needs_zp && !params.quant_params.src_zp.buff) {
+        log_error("Static quantization requires quant_params.src_zp.buff "
+                  "to be provided for asymmetric (u8) quantization");
+        return status_t::failure;
+      }
+    }
+    return status_t::success;
+  });
+  if (val_status != status_t::success) {
+    return val_status;
   }
 
   apilog_info("Reorder quantization: using ",
@@ -159,7 +167,7 @@ status_t reorder_quantization_wrapper(
   }
 
   const status_t reorder_status = zendnnl::lowoha::reorder::reorder_direct(
-      src, buffers.src_buf, std::move(rp));
+      src, buffers.src_buf, rp);
 
   if (reorder_status == status_t::success) {
     src = buffers.src_buf;

@@ -516,7 +516,7 @@ status_t validate_dynamic_quant_params(const void *src, const reorder_params_t &
   return status_t::success;
 }
 
-status_t compute_dynamic_quant_params(const void *src, reorder_params_t &params) {
+status_t compute_dynamic_quant_params(const void *src, const reorder_params_t &params) {
   const auto &scale_dims = params.quant_params.scale.dims;
   const auto &shape = params.src_shape;
   
