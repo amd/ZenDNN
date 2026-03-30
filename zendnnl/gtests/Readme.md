@@ -224,9 +224,9 @@ cmake --build .
      - `true`: Use Low Overhead API
      - `false`: Use Regular API
    - **Default behavior varies by test suite**:
-     - **Reorder tests**:
-       - LOWOHA reorder tests always run (default)
-       - `--lowoha false`: Regular reorder tests additionally run alongside LOWOHA tests
+     - **Reorder tests**: Random 50/50 selection between LOWOHA and regular reorder tests per instance
+       - `--lowoha true`: Only LOWOHA reorder tests run (regular tests are skipped)
+       - `--lowoha false`: Only regular reorder tests run (LOWOHA tests are skipped)
      - **Matmul/BatchMatmul tests**: Tests are automatically partitioned into thirds:
        - First third: LOWOHA off
        - Second third: LOWOHA on
@@ -273,7 +273,7 @@ cmake --build .
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
  - If **`<lowoha>`** parameter is not provided:
-   - **Reorder tests**: LOWOHA reorder tests always run; use `--lowoha false` to additionally enable regular tests
+   - **Reorder tests**: Random 50/50 selection between LOWOHA and regular reorder tests per instance
    - **Matmul/BatchMatmul tests**: Tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios
    - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
  - If **`<num_threads>`** parameter is not provided, a random value is selected from available thread count.
@@ -328,50 +328,126 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 - **alpha, beta**: Scaling factors for matmul operations
 - **inplace_reorder**: Reorder mode flag (0 or 1)
 
-## **Examples**
-### Reorder Tests (Reorder + Matmul)
- - Reorder TestSuite has LOWOHA tests (always run) and Regular tests (run with `--lowoha false`)
- - LOWOHA testcases (always run): BF16_QUANT, FP32_QUANT, BF16_DEQUANT, FP32_DEQUANT, FP32_BF16_CONV, FP32_BF16_CONV_SCALED, QUANT_STRIDED, DEQUANT_STRIDED, FP32_BF16_CONV_STRIDED, FP32_DYN_QUANT, BF16_DYN_QUANT
- - Regular testcases (require `--lowoha false`): F32_F32, BF16_F32, BF16_BF16, F32, BF16, S8, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride
+## **LOWOHA Reorder Tests**
 
-1. Run all BF16 reorder tests followed by Matmul(BF16 Input, F32 Output):
+LOWOHA reorder tests validate quantization, dequantization, and type conversion kernels using a **round-trip methodology**. Each test performs a forward operation followed by its inverse, and then compares the result against the original input to verify correctness.
+
+### **Test Categories**
+
+| Category | Test Cases | Description |
+|----------|-----------|-------------|
+| **Static Quantization** | `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT` | Round-trip: Source → INT8 (S8/U8) → Source using user-provided scale/zp |
+| **Strided Static Quantization** | `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED` | Same as above but with strided (non-contiguous) source memory |
+| **Type Conversion** | `FP32_BF16_CVT` | Round-trip: FP32 ↔ BF16 without scale/zp |
+| **Scaled Type Conversion** | `FP32_BF16_CVT_SCALED` | Round-trip: FP32 ↔ BF16 with scale/zp |
+| **Strided Scaled Conversion** | `FP32_BF16_CVT_STRIDED` | Same as scaled conversion but with strided source memory |
+| **Dynamic Quantization** | `FP32_DYN_QUANT`, `BF16_DYN_QUANT` | Round-trip: Source → INT8 (S8/U8) → Source where scale/zp are computed by the kernel |
+
+### **Round-Trip Methodology**
+
+All LOWOHA reorder tests follow a three-step pattern:
+
+1. **Forward pass**: Apply the operation (quantize, dequantize, or convert) on the source tensor to produce an intermediate result.
+2. **Backward pass**: Apply the inverse operation on the intermediate result to reconstruct the original data type.
+3. **Compare**: Compare the reconstructed output against the original input using a tolerance-based comparison.
+
+### **Comparison Methods**
+
+- **Quantization tests** (`*QUANT_DEQUANT*`, `*DYN_QUANT*`, `*CVT_SCALED*`, `*CVT_STRIDED*`): Use `compare_lowoha_quant_output`, which computes a scale-aware tolerance:
+  ```
+  tolerance = max_scale / 2  +  epsilon
+  ```
+  Where `epsilon = 0.03` for BF16 sources and `0.001` for FP32 sources. The `max_scale / 2` term accounts for the maximum rounding error introduced by quantization.
+
+- **Type conversion tests** (`FP32_BF16_CVT`): Use `compare_lowoha_reorder_output` with fixed tolerances based on the output data type (BF16 tolerance for BF16, FP32 tolerance for FP32).
+
+### **Randomized Test Parameters**
+
+Each LOWOHA reorder test instance is parameterized with randomly generated values:
+
+| Parameter | Range / Distribution | Description |
+|-----------|---------------------|-------------|
+| **Dimensionality** | 1D (20%), 2D (50%), 3D (30%) | Tensor dimensionality |
+| **M** | [1, 3000] | Row dimension (fixed to 1 for 1D) |
+| **N** | [1, 3000] | Column dimension |
+| **Batch** | [2, 256] for 3D | Batch dimension |
+| **Symmetric/Asymmetric** | 50/50 random | S8 (symmetric, no zp) or U8 (asymmetric, with zp) |
+| **Granularity** | per-tensor (60-70%), per-channel (30%), per-group (10%) | Quantization granularity |
+| **Strided padding** | [0, 16] elements | Row padding for strided tests (50% chance of zero padding) |
+| **Threads** | [1, max_threads] | Number of OMP threads |
+
+### **Quantization Granularities**
+
+LOWOHA reorder tests support five quantization granularities:
+
+| Granularity | Scale/ZP Shape (2D) | Scale/ZP Shape (3D) | Description |
+|------------|--------------------|--------------------|-------------|
+| **Per-tensor** | `{1, 1}` | `{1, 1, 1}` | Single scale/zp for all elements |
+| **Per-channel-row** | `{M, 1}` | `{1, M, 1}` | One scale/zp per row (per-token) |
+| **Per-channel-col** | `{1, N}` | `{1, 1, N}` | One scale/zp per column |
+| **Per-group-row** | `{G, N}` | `{1, G, N}` | Groups along M dimension (M/G rows per group) |
+| **Per-group-col** | `{M, G}` | `{1, M, G}` | Groups along N dimension (N/G cols per group) |
+
+For 1D tensors, only per-tensor and per-channel granularities are supported.
+
+## **Examples**
+
+### Reorder Tests
+ - The Reorder TestSuite contains both LOWOHA reorder tests and Regular reorder tests (Reorder + Matmul).
+ - By default (no `--lowoha` flag), each test instance is randomly assigned as LOWOHA or regular (50/50).
+ - Use `--lowoha true` to run only LOWOHA reorder tests, or `--lowoha false` to run only regular reorder tests.
+ - **LOWOHA test cases**: `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `FP32_BF16_CVT`, `FP32_BF16_CVT_SCALED`, `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED`, `FP32_BF16_CVT_STRIDED`, `FP32_DYN_QUANT`, `BF16_DYN_QUANT`
+ - **Regular test cases**: `F32_F32`, `BF16_F32`, `BF16_BF16`, `F32`, `BF16`, `S8`, `F32_F32_Stride`, `BF16_F32_Stride`, `BF16_BF16_Stride`
+
+#### LOWOHA Reorder Tests
+
+1. Run all LOWOHA reorder tests:
 ```bash
-./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.BF16_F32/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.* --lowoha true
 ```
-2. Run all BF16 reorder tests followed by Matmul(BF16 Input, BF16 Output):
+2. Run LOWOHA static quantization round-trip tests (BF16 and FP32):
 ```bash
-./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.BF16_BF16/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_QUANT_DEQUANT/* --lowoha true
 ```
-3. Run all FP32 reorder tests followed by Matmul(F32 Input, F32 Output):
+3. Run LOWOHA strided quantization round-trip tests:
 ```bash
-./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.F32_F32/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT_STRIDED/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_QUANT_DEQUANT_STRIDED/* --lowoha true
 ```
-4. Run BF16 matmul tests with specific backend (AOCL DLP):
+4. Run LOWOHA type conversion tests (FP32 ↔ BF16):
 ```bash
-./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_dlp
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT_SCALED/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT_STRIDED/* --lowoha true
 ```
-5. Run all LOWOHA reorder tests (default):
+5. Run LOWOHA dynamic quantization tests:
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DYN_QUANT/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DYN_QUANT/* --lowoha true
 ```
-6. Run LOWOHA quantization tests:
+6. Run a specific LOWOHA test with fixed seed and thread count:
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT/*
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_QUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT/0 --seed 42 --num_threads 8 --lowoha true
 ```
-7. Run LOWOHA dequantization tests:
+
+#### Regular Reorder Tests (Reorder + Matmul)
+
+7. Run all regular reorder tests:
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DEQUANT/*
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DEQUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.* --lowoha false
 ```
-8. Run LOWOHA dynamic quantization tests:
+8. Run FP32 reorder + matmul tests:
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DYN_QUANT/*
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DYN_QUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/* --lowoha false
 ```
-9. Run LOWOHA type conversion tests:
+9. Run BF16 reorder + matmul tests (F32 output):
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CONV/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F32/* --lowoha false
+```
+10. Run BF16 reorder + matmul tests (BF16 output):
+```bash
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_BF16/* --lowoha false
 ```
 
 ### Matmul Tests

@@ -16,6 +16,7 @@
 
 #include "gtest_utils.hpp"
 #include "memory/memory_utils.hpp"
+#include <atomic>
 #include <cstring>
 #include <cmath>
 
@@ -254,41 +255,41 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
     // Randomly decide dimensionality: 1D (20%), 2D (50%), 3D (30%)
     int dim_choice = std::rand() % 10;
     if (dim_choice < 2) {
-      // 1D: [N] - 20% of tests
-      M = 1;  // For 1D, M is not used but set to 1
-      N = 64 + std::rand() % 1024;  // N: 64-1087
-      batch = 0;  // batch = 0 indicates 1D
+      M = 1;
+      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
+      batch = 0;
     }
     else if (dim_choice < 7) {
-      // 2D: [M, N] - 50% of tests
-      M = 16 + std::rand() % 256;   // M: 16-271
-      N = 16 + std::rand() % 256;   // N: 16-271
-      batch = 1;  // batch = 1 indicates 2D
+      M = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
+      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
+      batch = 1;
     }
     else {
-      // 3D: [batch, M, N] - 30% of tests
-      M = 16 + std::rand() % 128;   // M: 16-143
-      N = 16 + std::rand() % 128;   // N: 16-143
-      batch = 2 + std::rand() % 7;  // batch: 2-8
+      M = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
+      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
+      batch = 2 + std::rand() % (BATCH_END - 1);
     }
 
     // Default data types (will be overridden by individual TEST_P tests)
     src_dtype = data_type_t::f32;
     dst_dtype = data_type_t::s8;
     use_strided_src = false;
+    lowoha_algo = reorder_algo_t::native;
 
-    // Quantization granularity based on dimensionality
-    // 1D: per-tensor or per-channel only (no per-group)
-    // 2D/3D: per-tensor, per-channel, or per-group
+    // Thread count
+    if (cmd_num_threads) {
+      num_threads = cmd_num_threads;
+    }
+    else {
+      int max_threads = omp_get_max_threads();
+      num_threads = 1 + (std::rand() % max_threads);
+    }
+
+    // Quantization granularity: per-tensor (60%), per-channel (30%), per-group (10%)
     int granularity_choice = std::rand() % 10;
     if (batch == 0) {
-      // 1D: only per-tensor (70%) or per-channel (30%)
-      if (granularity_choice < 7) {
-        granularity = quant_granularity_t::tensor;
-      }
-      else {
-        granularity = quant_granularity_t::channel;
-      }
+      granularity = (granularity_choice < 7) ? quant_granularity_t::tensor
+                    : quant_granularity_t::channel;
       num_groups = 1;
     }
     else {
@@ -319,18 +320,6 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
           num_groups = valid_groups[std::rand() % valid_groups.size()];
         }
       }
-    }
-
-    // Algorithm: test will run native vs reference comparison
-    lowoha_algo = reorder_algo_t::native;
-
-    // Thread count
-    if (cmd_num_threads) {
-      num_threads = cmd_num_threads;
-    }
-    else {
-      int max_threads = omp_get_max_threads();
-      num_threads = 1 + (std::rand() % max_threads);
     }
   }
 }
@@ -2785,7 +2774,7 @@ size_t get_aligned_size(size_t alignment, size_t size_) {
   return ((size_ + alignment - 1) & ~(alignment - 1));
 }
 
-std::string granularityToStr(quant_granularity_t granularity) {
+std::string lowoha_granularity_to_str(quant_granularity_t granularity) {
   switch (granularity) {
   case quant_granularity_t::tensor:
     return "per-tensor";
@@ -3013,7 +3002,7 @@ void log_lowoha_test_info(const ReorderType &params, data_type_t src_dt,
   log_info("LOWOHA Reorder: batch=", params.batch,
            " M=", params.M, " N=", params.N,
            " src=", src_dt_str, " dst=", dst_dt_str,
-           " granularity=", granularityToStr(params.granularity),
+           " granularity=", lowoha_granularity_to_str(params.granularity),
            " groups=", params.num_groups, " strided=", strided,
            " scale_zp=", use_scale_zp, " threads=", params.num_threads);
 }
@@ -3054,36 +3043,13 @@ std::vector<size_t> get_lowoha_strided_shape(const ReorderType &params,
 }
 
 std::vector<size_t> get_lowoha_quant_shape(const ReorderType &params) {
-  uint64_t N = params.N;
-  uint64_t batch = params.batch;
-  uint64_t num_groups = params.num_groups;
-  quant_granularity_t granularity = params.granularity;
-
-  if (batch == 0) {
-    return (granularity == quant_granularity_t::tensor) ?
-           std::vector<size_t> {1} :
-           std::vector<size_t> {N};
-  }
-  else if (batch == 1) {
-    if (granularity == quant_granularity_t::tensor) return {1, 1};
-    else if (granularity == quant_granularity_t::channel) return {1, N};
-    else return {num_groups, N};
-  }
-  else {
-    if (granularity == quant_granularity_t::tensor) return {1, 1, 1};
-    else if (granularity == quant_granularity_t::channel) return {1, 1, N};
-    else return {1, num_groups, N};
-  }
-}
-
-std::vector<size_t> get_lowoha_dynamic_quant_shape(const ReorderType &params) {
   uint64_t M = params.M;
   uint64_t N = params.N;
   uint64_t batch = params.batch;
   uint64_t num_groups = params.num_groups;
   quant_granularity_t granularity = params.granularity;
 
-  // For dynamic quantization, this helper supports all 5 granularities:
+  // This helper supports all 5 granularities:
   //   1. per-tensor
   //   2. per-channel-row  (per-token)
   //   3. per-channel-col
@@ -3094,7 +3060,7 @@ std::vector<size_t> get_lowoha_dynamic_quant_shape(const ReorderType &params) {
   // Within that choice:
   //   - For "channel" granularity: randomly pick per-row or per-col (50/50).
   //   - For "group"   granularity: randomly pick per-row or per-col (50/50),
-  //     with fallback to per-row if N is not divisible by any valid group size.
+  //     with fallback to per-row if num_groups does not divide N.
 
   if (batch == 0) {
     // 1D: per-tensor {1} or per-channel {N}  (only 2 granularities for 1D)
@@ -3109,11 +3075,11 @@ std::vector<size_t> get_lowoha_dynamic_quant_shape(const ReorderType &params) {
   if (granularity == quant_granularity_t::tensor) {
     // Per-tensor: single scale/zp for all elements
     if (batch == 1) {
-      log_info("DynQuant granularity: per-tensor, dims={1,1}");
+      log_info("Granularity: per-tensor, dims={1,1}");
       return {1, 1};
     }
     else {
-      log_info("DynQuant granularity: per-tensor, dims={1,1,1}");
+      log_info("Granularity: per-tensor, dims={1,1,1}");
       return {1, 1, 1};
     }
   }
@@ -3121,80 +3087,69 @@ std::vector<size_t> get_lowoha_dynamic_quant_shape(const ReorderType &params) {
     if (use_col_variant) {
       // Per-channel-col: one scale/zp per column
       if (batch == 1) {
-        log_info("DynQuant granularity: per-channel-col, dims={1,", N, "}");
+        log_info("Granularity: per-channel-col, dims={1,", N, "}");
         return {1, N};
       }
       else {
-        log_info("DynQuant granularity: per-channel-col, dims={1,1,", N, "}");
+        log_info("Granularity: per-channel-col, dims={1,1,", N, "}");
         return {1, 1, N};
       }
     }
     else {
       // Per-channel-row: one scale/zp per row (per-token)
       if (batch == 1) {
-        log_info("DynQuant granularity: per-channel-row, dims={", M, ",1}");
+        log_info("Granularity: per-channel-row, dims={", M, ",1}");
         return {M, 1};
       }
       else {
-        log_info("DynQuant granularity: per-channel-row, dims={1,", M, ",1}");
+        log_info("Granularity: per-channel-row, dims={1,", M, ",1}");
         return {1, M, 1};
       }
     }
   }
   else {
     // Group granularity: randomly pick per-group-row or per-group-col
-    if (use_col_variant) {
+    if (use_col_variant && N % num_groups == 0) {
       // Per-group-col: dims = {M, G} (2D) or {1, M, G} (3D)
-      // Requires N % G == 0; find a valid group count that divides N
-      uint64_t col_groups = 0;
-      std::vector<uint64_t> valid_col_groups;
-      for (uint64_t g = 2; g <= N && g <= 16; ++g) {
-        if (N % g == 0) {
-          valid_col_groups.push_back(g);
-        }
+      // Reuse params.num_groups only if it also divides N
+      if (batch == 1) {
+        log_info("Granularity: per-group-col, dims={", M, ",",
+                 num_groups, "}, N=", N, ", N/G=", N / num_groups);
+        return {M, num_groups};
       }
-      if (!valid_col_groups.empty()) {
-        col_groups = valid_col_groups[std::rand() % valid_col_groups.size()];
+      else {
+        log_info("Granularity: per-group-col, dims={1,", M, ",",
+                 num_groups, "}, N=", N, ", N/G=", N / num_groups);
+        return {1, M, num_groups};
       }
-
-      if (col_groups > 0) {
-        if (batch == 1) {
-          log_info("DynQuant granularity: per-group-col, dims={", M, ",",
-                   col_groups, "}, N=", N, ", N/G=", N / col_groups);
-          return {M, col_groups};
-        }
-        else {
-          log_info("DynQuant granularity: per-group-col, dims={1,", M, ",",
-                   col_groups, "}, N=", N, ", N/G=", N / col_groups);
-          return {1, M, col_groups};
-        }
-      }
-      // Fallback to per-group-row if no valid col group found
-      log_info("DynQuant granularity: per-group-col fallback to per-group-row "
-               "(no valid G divides N=", N, ")");
-    }
-
-    // Per-group-row: dims = {G, N} (2D) or {1, G, N} (3D)
-    // num_groups already validated to divide M during ReorderType construction
-    if (batch == 1) {
-      log_info("DynQuant granularity: per-group-row, dims={", num_groups, ",",
-               N, "}, M=", M, ", M/G=", M / num_groups);
-      return {num_groups, N};
     }
     else {
-      log_info("DynQuant granularity: per-group-row, dims={1,", num_groups, ",",
-               N, "}, M=", M, ", M/G=", M / num_groups);
-      return {1, num_groups, N};
+      // Per-group-row: dims = {G, N} (2D) or {1, G, N} (3D)
+      // num_groups already validated to divide M during ReorderType construction
+      if (use_col_variant) {
+        log_info("Granularity: per-group-col fallback to per-group-row "
+                 "(num_groups=", num_groups, " does not divide N=", N, ")");
+      }
+      if (batch == 1) {
+        log_info("Granularity: per-group-row, dims={", num_groups, ",",
+                 N, "}, M=", M, ", M/G=", M / num_groups);
+        return {num_groups, N};
+      }
+      else {
+        log_info("Granularity: per-group-row, dims={1,", num_groups, ",",
+                 N, "}, M=", M, ", M/G=", M / num_groups);
+        return {1, num_groups, N};
+      }
     }
   }
 }
 
 
-void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
-                                     tensor_t &dequant_tensor,
-                                     tensor_t &scale_tensor,
-                                     const ReorderType &params,
-                                     bool &is_comparison_successful) {
+void compare_lowoha_quant_output(tensor_t &original_tensor,
+                                 tensor_t &dequant_tensor,
+                                 tensor_t &scale_tensor,
+                                 const ReorderType &params,
+                                 bool &is_comparison_successful) {
   const uint64_t batch = params.batch;
   const uint64_t M = params.M;
   const uint64_t N = params.N;
@@ -3222,8 +3177,10 @@ void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
     tol += 0.001f;  // Small epsilon for F32 numerical noise
   }
 
-  log_info("Dynamic quant round-trip tolerance: ", tol,
-           " (max_scale=", max_scale, ", scale/2=", max_scale / 2.0f, ")");
+  log_info("Round-trip tolerance: ", tol, " (max_scale=", max_scale,
+           ", scale/2=", max_scale / 2.0f, ")");
+
+  std::atomic<bool> success{true};
 
   // Compare based on dimensionality using tensor.at() which returns float
   // batch = 0: 1D [N], batch = 1: 2D [M, N], batch > 1: 3D [batch, M, N]
@@ -3231,16 +3188,16 @@ void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
     // 1D comparison
     #pragma omp parallel for
     for (uint64_t j = 0; j < N; ++j) {
-      if (is_comparison_successful) {
+      if (success.load(std::memory_order_relaxed)) {
         float orig_val = original_tensor.at({j});
         float deq_val = dequant_tensor.at({j});
         float abs_err = std::fabs(orig_val - deq_val);
 
         if (abs_err > tol) {
-          log_verbose("DynQuant mismatch at [", j, "]: orig=", orig_val,
+          log_verbose("Mismatch at [", j, "]: orig=", orig_val,
                       ", dequant=", deq_val, ", abs_err=", abs_err,
                       ", tol=", tol);
-          is_comparison_successful = false;
+          success.store(false, std::memory_order_relaxed);
         }
       }
     }
@@ -3250,16 +3207,16 @@ void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
     #pragma omp parallel for collapse(2)
     for (uint64_t i = 0; i < M; ++i) {
       for (uint64_t j = 0; j < N; ++j) {
-        if (is_comparison_successful) {
+        if (success.load(std::memory_order_relaxed)) {
           float orig_val = original_tensor.at({i, j});
           float deq_val = dequant_tensor.at({i, j});
           float abs_err = std::fabs(orig_val - deq_val);
 
           if (abs_err > tol) {
-            log_verbose("DynQuant mismatch at [", i, ",", j, "]: orig=",
+            log_verbose("Mismatch at [", i, ",", j, "]: orig=",
                         orig_val, ", dequant=", deq_val, ", abs_err=", abs_err,
                         ", tol=", tol);
-            is_comparison_successful = false;
+            success.store(false, std::memory_order_relaxed);
           }
         }
       }
@@ -3271,20 +3228,24 @@ void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
     for (uint64_t b = 0; b < batch; ++b) {
       for (uint64_t i = 0; i < M; ++i) {
         for (uint64_t j = 0; j < N; ++j) {
-          if (is_comparison_successful) {
+          if (success.load(std::memory_order_relaxed)) {
             float orig_val = original_tensor.at({b, i, j});
             float deq_val = dequant_tensor.at({b, i, j});
             float abs_err = std::fabs(orig_val - deq_val);
 
             if (abs_err > tol) {
-              log_verbose("DynQuant mismatch at [", b, ",", i, ",", j,
+              log_verbose("Mismatch at [", b, ",", i, ",", j,
                           "]: orig=", orig_val, ", dequant=", deq_val,
                           ", abs_err=", abs_err, ", tol=", tol);
-              is_comparison_successful = false;
+              success.store(false, std::memory_order_relaxed);
             }
           }
         }
       }
     }
+  }
+
+  if (!success.load()) {
+    is_comparison_successful = false;
   }
 }
