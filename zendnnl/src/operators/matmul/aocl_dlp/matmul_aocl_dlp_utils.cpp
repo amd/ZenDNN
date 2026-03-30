@@ -1012,6 +1012,19 @@ status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights,
       aocl_reorder_bf16s4f32of32 // reorder_func
     );
   }
+  else if (weight_data_type == data_type_t::f16) {
+    log_info("Reordering F16 weights");
+    reorder_weights_execute<uint16_t>(
+      weights_ptr, // weights
+      k, // k
+      n, // n
+      ldb, // ldb
+      'r', // order
+      trans_weights ? 't':'n', // trans
+      aocl_get_reorder_buf_size_f16f16f16of16, // size function
+      aocl_reorder_f16f16f16of16 // reorder_func
+    );
+  }
   else {
     log_error("Unsupported data type for aocl reorder.");
     return status_t::failure;

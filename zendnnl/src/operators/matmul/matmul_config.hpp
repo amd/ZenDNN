@@ -20,10 +20,13 @@
 #include <algorithm>
 #include <string>
 
+#include "common/data_types.hpp"
 #include "operators/common/operator_config.hpp"
 
 namespace zendnnl {
 namespace ops {
+
+using zendnnl::common::data_type_t;
 
 /** @enum matmul_algo_t
  *  @brief defines different algo levels.
@@ -74,6 +77,21 @@ class matmul_config_t final : public op_config_t {
   void set_default_config() override;
   status_t set_user_config(json config_json) override;
   void set_env_config() override;
+
+  /** @brief Sets the accumulation type for the reference kernel.
+  *
+  * This communicates which accumulation precision the reference kernel should
+  * use when validating the output of a given matmul kernel.
+  *
+  * @param type The accumulation data type (data_type_t::f32 or data_type_t::f16).
+  */
+  void set_accum_type(data_type_t type);
+
+  /** @brief Get the accumulation type for the reference kernel.
+   *
+   * @return The current accumulation data type.
+   */
+  data_type_t get_accum_type();
 
   /** @brief Sets matmul algo.
   *
@@ -224,6 +242,7 @@ class matmul_config_t final : public op_config_t {
 
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t bmm_algo;            /**< Batched Matmul algorithm. */
+  data_type_t matmul_accum_type; /**< Accumulation type for reference kernel. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
   int32_t matmul_otf_bpack;    /**< On-the-fly B packing for Native kernels. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */

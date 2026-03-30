@@ -28,6 +28,7 @@ void matmul_config_t::set_default_config() {
   set_weight_cache(1);
   set_otf_bpack(0);
   set_zp_comp_cache(true);  // Enable ZP compensation caching by default
+  set_accum_type(data_type_t::f32);  // Default to F32 accumulation
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {
@@ -132,6 +133,8 @@ status_t matmul_config_t::set_user_config(json config_json) {
   set_mm_partitioner_enabled(mm_partitioner_enabled);
   set_tile_m(tile_m);
   set_tile_n(tile_n);
+  // TODO: Add support for user flexibility to set accumulation type.
+  set_accum_type(data_type_t::f32);
 
   return status_t::success;
 }
@@ -219,7 +222,8 @@ void matmul_config_t::set_env_config() {
       if (val == 0 || val == 1) {
         matmul_otf_bpack = val;
       }
-    } catch (...) {
+    }
+    catch (...) {
     }
   }
   set_otf_bpack(matmul_otf_bpack);
@@ -289,6 +293,16 @@ void matmul_config_t::set_env_config() {
   }
   set_tile_n(tile_n);
 
+  // TODO: Add support for user flexibility to set accumulation type.
+  set_accum_type(data_type_t::f32);
+}
+
+void matmul_config_t::set_accum_type(data_type_t type) {
+  matmul_accum_type = type;
+}
+
+data_type_t matmul_config_t::get_accum_type() {
+  return matmul_accum_type;
 }
 
 void matmul_config_t::set_algo(int32_t algo) {

@@ -461,16 +461,23 @@ TEST_P(TestMatmul, BF16_BF16) {
 /** @fn TEST_P
  *  @param TestMatmul parameterized test class to initialize Matmul parameters
  *  @param F16_F16 user-defined name of test according to test
- *  @brief Test to validate matmul F16 input/weight/output support wrt OneDNN kernel
- *         F16 operations are routed to OneDNN backend as AOCL-DLP doesn't support F16.
+ *  @brief Test to validate matmul F16 input/weight/output
  */
 TEST_P(TestMatmul, F16_F16) {
+  bool disable_bias = false;
+  if (algo == matmul_algo_t::aocl_dlp ||
+      algo == matmul_algo_t::aocl_dlp_blocked) {
+    log_info("Post-ops/bias are not supported for F16_F16 with AOCL-DLP kernel; disabling post-ops and bias (po_type=none)");
+    po_type = post_op_type_t::none;
+    disable_bias = true;
+  }
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::f16, 2.0, transA);
-  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
-                            data_type_t::f32, 2.0);
+  auto bias_tensor        = disable_bias ? tensor_t() :
+                            tensor_factory.uniform_dist_tensor({1, n},
+                                data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
@@ -501,9 +508,13 @@ TEST_P(TestMatmul, F16_F16) {
 /** @fn TEST_P
  *  @param TestMatmul parameterized test class to initialize Matmul parameters
  *  @param F16_F32 user-defined name of test according to test
- *  @brief Test to validate matmul F16 input/weight with F32 output support wrt OneDNN kernel
+ *  @brief Test to validate matmul F16 input/weight with F32 output
  */
 TEST_P(TestMatmul, F16_F32) {
+  if (algo == matmul_algo_t::aocl_dlp ||
+      algo == matmul_algo_t::aocl_dlp_blocked) {
+    GTEST_SKIP() << "F16_F32 is not supported with AOCL-DLP kernel";
+  }
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
@@ -735,6 +746,10 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *
  */
 TEST_P(TestMatmul, F16_F16_Stride) {
+  if (algo == matmul_algo_t::aocl_dlp ||
+      algo == matmul_algo_t::aocl_dlp_blocked) {
+    GTEST_SKIP() << "F16_F16_Stride is not supported with AOCL-DLP kernel";
+  }
   size_t stride_in_inc           = rand() % 50;
   size_t stride_wt_inc           = rand() % 50;
   size_t stride_dst_inc          = rand() % 50;

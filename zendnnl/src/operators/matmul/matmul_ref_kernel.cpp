@@ -792,34 +792,96 @@ void matmul_ref_kernel_t::compute_matmul(int batch_size, int M, int N, int K,
     const void *bias, const void *output, float *accum_buff_f32,
     data_type_t input_dtype, data_type_t weight_dtype, data_type_t bias_dtype,
     data_type_t output_dtype) {
+
   LOG_DEBUG_INFO("Computing MatMul_ref");
+  // NOTE: When validating AOCL DLP's F16 GEMM, the reference must match DLP's
+  // hardware-level FP16 accumulation behavior (FMA with FP16 rounding per step
+  // and KC=2048 blocking). Without this, rounding differences can cause false
+  // mismatches. For all other algorithms, standard F32 accumulation is used.
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  data_type_t accum_type = matmul_config.get_accum_type();
+  const bool use_f16_accum = (accum_type == data_type_t::f16 &&
+                              input_dtype == data_type_t::f16 && weight_dtype == data_type_t::f16 &&
+                              output_dtype == data_type_t::f16);
 
   #pragma omp parallel for collapse(3)
   for (auto bs = 0; bs < batch_size; ++bs) {
     for (auto i = 0; i < M; ++i) {
       for (auto j = 0; j < N; ++j) {
-        float sum = 0.0;
-        size_t op_idx = bs * offset_out + i * ldc + j;
-        size_t ac_idx = bs * offset_out + i * N + j;
-        for (auto k = 0; k < K; ++k) {
-          size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
-                          (bs * offset_wei + k * ldb + j);
-          size_t ip_idx = is_transpose_src ? (bs * offset_src + k * lda + i) :
-                          (bs * offset_src + i * lda + k);
-          sum += read_and_cast<float>(input, input_dtype,
-                                      ip_idx) * read_and_cast<float>(weights, weight_dtype, wt_idx);
-        }
+        size_t op_idx = static_cast<size_t>(bs) * offset_out +
+                        static_cast<size_t>(i) * ldc + j;
+        size_t ac_idx = static_cast<size_t>(bs) * offset_out +
+                        static_cast<size_t>(i) * N + j;
 
-        if (alpha != 1.0f) {
-          sum *= alpha;
+        // F16 accumulation path for FP16 FMA
+        if (use_f16_accum) {
+          const int KC = 2048;
+          float alpha_f32 = static_cast<float>(float16_t(alpha));
+          for (int pc = 0; pc < K; pc+=KC) {
+            int kc0 = std::min(K - pc, KC);
+
+            // Beta is applied for first KC block
+            // beta 1 is applied for subsequent blocks
+            float16_t beta0 = (pc == 0) ? float16_t(beta) : float16_t(1.0f);
+
+            float16_t sum_f16 = float16_t(0.0f);
+            for (int kk = 0; kk < kc0; ++kk) {
+              int k_idx = pc + kk;
+              size_t wt_idx = is_transpose_weights ?
+                              (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(j) * ldb + k_idx) :
+                              (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(k_idx) * ldb + j);
+              size_t ip_idx = is_transpose_src ?
+                              (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(k_idx) * lda + i) :
+                              (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(i) * lda + k_idx);
+              float a_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
+              float b_f32 = read_and_cast<float>(weights, weight_dtype, wt_idx);
+              sum_f16 = float16_t(std::fmaf(a_f32, b_f32, static_cast<float>(sum_f16)));
+            }
+
+            float sum_f32   = static_cast<float>(sum_f16);
+            float beta_f32  = static_cast<float>(float16_t(beta0));
+
+            if (beta_f32) {
+              float c_f32 = (pc == 0) ? read_and_cast<float>(output, output_dtype,
+                            op_idx) : accum_buff_f32[ac_idx];
+              accum_buff_f32[ac_idx] = static_cast<float>(float16_t(c_f32 * beta_f32 + sum_f32
+                                       * alpha_f32));
+            }
+            else {
+              accum_buff_f32[ac_idx] = static_cast<float>(float16_t(sum_f32 * alpha_f32));
+            }
+          }
+          if (bias) {
+            float sum = accum_buff_f32[ac_idx];
+            accum_buff_f32[ac_idx] = static_cast<float>(float16_t(sum +
+                                     read_and_cast<float>(bias, bias_dtype, j)));
+          }
         }
-        if (beta) {
-          sum += read_and_cast<float>(output, output_dtype, op_idx) * beta;
+        else {
+          // Default F32 accumulation path for all other data types
+          float sum = 0.0;
+          for (auto k = 0; k < K; ++k) {
+            size_t wt_idx = is_transpose_weights ?
+                            (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(j) * ldb + k) :
+                            (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(k) * ldb + j);
+            size_t ip_idx = is_transpose_src ?
+                            (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(k) * lda + i) :
+                            (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(i) * lda + k);
+            sum += read_and_cast<float>(input, input_dtype,
+                                        ip_idx) * read_and_cast<float>(weights, weight_dtype, wt_idx);
+          }
+
+          if (alpha != 1.0f) {
+            sum *= alpha;
+          }
+          if (beta) {
+            sum += read_and_cast<float>(output, output_dtype, op_idx) * beta;
+          }
+          if (bias) {
+            sum += read_and_cast<float>(bias, bias_dtype, j);
+          }
+          accum_buff_f32[ac_idx] = sum;
         }
-        if (bias) {
-          sum += read_and_cast<float>(bias, bias_dtype, j);
-        }
-        accum_buff_f32[ac_idx] = sum;
       }
     }
   }
@@ -880,8 +942,10 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
   for (auto bs = 0; bs < batch_size; ++bs) {
     for (auto i = 0; i < M; ++i) {
       for (auto j = 0; j < N; ++j) {
-        size_t op_idx = bs * offset_out + i * ldc + j;
-        size_t ac_idx = bs * offset_out + i * N + j;
+        size_t op_idx = static_cast<size_t>(bs) * offset_out +
+                        static_cast<size_t>(i) * ldc + j;
+        size_t ac_idx = static_cast<size_t>(bs) * offset_out +
+                        static_cast<size_t>(i) * N + j;
         float sum = 0.0f;
 
         if (src_scale_per_group) {
@@ -890,10 +954,12 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
             int k_start = g * src_group_size;
             int k_end = k_start + src_group_size;
             for (int kk = k_start; kk < k_end; ++kk) {
-              size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + kk) :
-                              (bs * offset_wei + kk * ldb + j);
-              size_t ip_idx = is_transpose_src ? (bs * offset_src + kk * lda + i) :
-                              (bs * offset_src + i * lda + kk);
+              size_t wt_idx = is_transpose_weights ?
+                              (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(j) * ldb + kk) :
+                              (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(kk) * ldb + j);
+              size_t ip_idx = is_transpose_src ?
+                              (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(kk) * lda + i) :
+                              (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(i) * lda + kk);
               int32_t src_val;
               if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
                 float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
@@ -924,10 +990,12 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
         else {
           int32_t sum_s32 = 0;
           for (auto k = 0; k < K; ++k) {
-            size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
-                            (bs * offset_wei + k * ldb + j);
-            size_t ip_idx = is_transpose_src ? (bs * offset_src + k * lda + i) :
-                            (bs * offset_src + i * lda + k);
+            size_t wt_idx = is_transpose_weights ?
+                            (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(j) * ldb + k) :
+                            (static_cast<size_t>(bs) * offset_wei + static_cast<size_t>(k) * ldb + j);
+            size_t ip_idx = is_transpose_src ?
+                            (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(k) * lda + i) :
+                            (static_cast<size_t>(bs) * offset_src + static_cast<size_t>(i) * lda + k);
             if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
               float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
               size_t src_scl_idx = src_scale_per_token ? static_cast<size_t>(i) : 0;

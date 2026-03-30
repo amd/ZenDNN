@@ -17,6 +17,7 @@
 set(aocl_dlp_matmul_operator_sources
   matmul_fp32_avx512_kernel.cpp
   matmul_bf16_avx512_kernel.cpp
+  matmul_f16_avx512_kernel.cpp
   matmul_int8_avx512_kernel.cpp
   matmul_bf16s4_avx512_kernel.cpp)
 
@@ -33,6 +34,7 @@ endif()
 set(aocl_dlp_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
   matmul_bf16_avx512_kernel.hpp
+  matmul_f16_avx512_kernel.hpp
   matmul_int8_avx512_kernel.hpp
   matmul_bf16s4_avx512_kernel.hpp)
 

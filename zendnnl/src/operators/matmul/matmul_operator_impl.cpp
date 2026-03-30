@@ -395,6 +395,7 @@ status_t matmul_impl_t::validate() {
     }
 
   }
+  auto post_ops = context.get_post_op();
 
   if (input->get_data_type() == data_type_t::f16 ||
       weights->get_data_type() == data_type_t::f16 ||
@@ -405,10 +406,18 @@ status_t matmul_impl_t::validate() {
                    "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
       return status_t::isa_unsupported;
     }
-    if (forced_kernel != "reference" &&
-        forced_kernel != "onednn_blocked" && forced_kernel != "onednn") {
+
+    bool is_aocl_kernel = (forced_kernel == "aocl_dlp" ||
+                           forced_kernel == "aocl_dlp_blocked");
+    // AOCL supports F16 only when dst is also F16 (src=f16, wei=f16, dst=f16)
+    bool aocl_compatible = is_aocl_kernel &&
+                           input->get_data_type() == data_type_t::f16 &&
+                           weights->get_data_type() == data_type_t::f16 &&
+                           output->get_data_type() == data_type_t::f16 && !bias && post_ops.empty();
+
+    if (forced_kernel != "reference" && !is_onednn_kernel && !aocl_compatible) {
       forced_kernel = "onednn_blocked";
-      log_info("F16 data type detected, forcing onednn_blocked kernel");
+      log_info("Switching to onednn_blocked kernel for F16 GEMM");
     }
   }
 
@@ -420,8 +429,20 @@ status_t matmul_impl_t::validate() {
     forced_kernel = "aocl_dlp_blocked";
   }
 
+  // Update singleton accum_type so the reference kernel can later read which
+  // accumulation precision to use.
+  if (forced_kernel != "reference") {
+    matmul_config_t &matmul_config = matmul_config_t::instance();
+    bool is_aocl = (forced_kernel == "aocl_dlp" ||
+                    forced_kernel == "aocl_dlp_blocked");
+    bool is_f16_gemm = (input->get_data_type() == data_type_t::f16 &&
+                        weights->get_data_type() == data_type_t::f16);
+    matmul_config.set_accum_type(
+      (is_aocl && is_f16_gemm) ? data_type_t::f16
+      : data_type_t::f32);
+  }
+
   // validate post-ops
-  auto post_ops = context.get_post_op();
   return validate_buffer_post_op(output_size, post_ops, inputs);
 }
 
@@ -661,6 +682,12 @@ status_t matmul_impl_t::kernel_factory() {
               output_dtype == data_type_t::bf16)) {
       kernel = std::shared_ptr<matmul_bf16_avx512_kernel_t>
                (get_matmul_bf16_avx512_kernel());
+    }
+    else if ((weight_dtype == data_type_t::f16) &&
+             (input_dtype  == data_type_t::f16) &&
+             (output_dtype == data_type_t::f16)) {
+      kernel = std::shared_ptr<matmul_f16_avx512_kernel_t>
+               (get_matmul_f16_avx512_kernel());
     }
     else if ((weight_dtype == data_type_t::s8) &&
              (input_dtype  == data_type_t::s8 ||

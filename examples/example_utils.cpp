@@ -141,6 +141,12 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = bfloat16_t(val_);
       }
     }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = float16_t(val_);
+      }
+    }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
@@ -222,6 +228,12 @@ tensor_t tensor_factory_t::broadcast_uniform_tensor(const
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = bfloat16_t(val_);
+      }
+    }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = float16_t(val_);
       }
     }
     else if (dtype_ == data_type::s8) {
@@ -322,6 +334,10 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
     }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return float16_t(dist(gen));});
+    }
     else if (dtype_ == data_type::s8) {
       std::uniform_int_distribution<int> dist_s8(-1 * range_, range_);
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
@@ -398,6 +414,10 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     else if (dtype_ == data_type::bf16) {
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return float16_t(dist(gen));});
     }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);

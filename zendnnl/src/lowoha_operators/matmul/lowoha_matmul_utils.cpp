@@ -848,13 +848,6 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp;
   }
 
-  // Force OneDNN for F16 (only OneDNN supports F16 on CPU)
-  if (is_f16 && (kernel != matmul_algo_t::onednn &&
-                 kernel != matmul_algo_t::onednn_blocked)) {
-    log_info("F16 detected, switching to onednn blocked kernel");
-    kernel = matmul_algo_t::onednn_blocked;
-  }
-
   // TODO: Remove this workaround once OneDNN fixes the GEMV M=1 + beta!=0 case.
   if (M == 1 && (kernel == matmul_algo_t::onednn ||
                  kernel == matmul_algo_t::onednn_blocked) &&
@@ -869,7 +862,30 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 
+  // F16 kernel selection
+  // oneDNN supports: src=f16, wei=f16, dst=f16 or f32
+  // aocl supports: src=f16, wei=f16, dst=f16
+  if (is_f16) {
+    bool is_onednn_algo = (kernel == matmul_algo_t::onednn ||
+                           kernel == matmul_algo_t::onednn_blocked);
+    bool is_aocl_algo = (kernel == matmul_algo_t::aocl_dlp ||
+                         kernel == matmul_algo_t::aocl_dlp_blocked);
+    bool aocl_compatible = is_aocl_algo && params.dtypes.dst == data_type_t::f16 &&
+                           bias == nullptr && params.postop_.empty();
+    if (!is_onednn_algo && !aocl_compatible) {
+      log_info("Switching to onednn_blocked kernel for F16 GEMM");
+      kernel = matmul_algo_t::onednn_blocked;
+    }
+  }
+
   params.lowoha_algo = kernel;
+
+  bool is_aocl = (kernel == matmul_algo_t::aocl_dlp ||
+                  kernel == matmul_algo_t::aocl_dlp_blocked);
+  matmul_config.set_accum_type(
+    (is_aocl && is_f16) ? data_type_t::f16
+    : data_type_t::f32);
+
   return kernel;
 }
 

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
+#include <algorithm>
 #include <omp.h>
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
@@ -404,7 +406,8 @@ class matmul_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
    * @param output Pointer to the destination buffer where the output tensor will be stored.
    * @param output_dtype Data type of the output tensor.
    */
-  void store_output(int BS, int M, int N, int ldc, float *accum_buff_f32, void *output,
+  void store_output(int BS, int M, int N, int ldc, float *accum_buff_f32,
+                    void *output,
                     data_type_t output_dtype);
 };
 

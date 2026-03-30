@@ -1665,6 +1665,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                      aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                      weight_cache_type);
     }
+    else if (lowoha_param.dtypes.wei == data_type_t::f16) {
+      blocked_flag = reorderAndCacheWeights<uint16_t>(cache_key, B, reordered_mem, K,
+                     N, ldb, 'r', transB, mem_format_b,
+                     aocl_get_reorder_buf_size_f16f16f16of16, aocl_reorder_f16f16f16of16,
+                     weight_cache_type);
+    }
     else if (lowoha_param.dtypes.wei == data_type_t::s4 ||
              lowoha_param.dtypes.wei == data_type_t::u4) {
       blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B, reordered_mem, K,
@@ -1989,6 +1995,20 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
         log_error("Unsupported output data type for s8 source");
         break;
       }
+    }
+  }
+  else if (dtypes.src == data_type_t::f16 && dtypes.wei == data_type_t::f16) {
+    switch (dtypes.dst) {
+    case data_type_t::f16:
+      aocl_gemm_f16f16f16of16(layout, transA, transB, M, N, K, alpha,
+                              static_cast<const uint16_t *>(A), lda, mem_format_a,
+                              is_weight_blocked ? (uint16_t *)reordered_mem : static_cast<const uint16_t *>
+                              (B), ldb, mem_format_b, beta, static_cast<uint16_t *>(C), ldc,
+                              nullptr);  // post-ops are not supported for f16
+      break;
+    default:
+      log_error("Unsupported output data type for f16 source");
+      break;
     }
   }
   else {
