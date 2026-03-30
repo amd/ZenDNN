@@ -1,5 +1,5 @@
 # /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 
 set(reorder_sources
 reorder_benchdnn.cpp
-reorder_parser.cpp)
+reorder_utils.cpp
+reorder_tensor_factory.cpp
+reorder_lowoha.cpp)
 
 add_library(reorder_benchdnn STATIC ${reorder_sources})
 

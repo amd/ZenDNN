@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,34 +16,33 @@
 #ifndef _REORDER_BENCHDNN_HPP_
 #define _REORDER_BENCHDNN_HPP_
 
-#include "zendnnl.hpp"
 #include "example_utils.hpp"
 #include "benchdnn.hpp"
-#include "reorder_parser.hpp"
-#include <chrono>
+#include "reorder_utils.hpp"
+#include "reorder_tensor_factory.hpp"
+#include "reorder_lowoha.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace reorder {
 
-using namespace zendnnl::interface; ///< ZenDNN C++ interface
-using namespace zendnnl::examples;  ///< Example utilities
+using namespace zendnnl::interface;
+using namespace zendnnl::examples;
 
 /**
  * @brief Runs a single reorder operation and records timing statistics.
  *
  * @param input_tensor Input tensor to be reordered.
- * @param kernel_name Name of the kernel backend to use for reorder.
+ * @param cfg ReorderConfig with dimensions, data type, kernel, in-place flag.
  * @param stats Reference to TimingStats struct to store timing results.
- * @param isNotWarmup If true, this is a measured iteration; if false, a warmup iteration.
- * @return Status code (0 for success, non-zero for error).
+ * @param isNotWarmup If true, measures and accumulates detailed timings.
+ * @return int OK (0) on success, NOT_OK (1) on failure.
  */
-int run_reorder(tensor_t input_tensor, std::string kernel_name,
-                TimingStats &stats,
-                bool isNotWarmup = false);
+int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
+                TimingStats &stats, bool isNotWarmup = false);
 
 /**
- * @brief Runs the reorder benchmark for a set of configurations.
+ * @brief Runs the regular reorder benchmark for a set of configurations.
  *
  * Iterates through each provided configuration, performs warmup and measured iterations,
  * collects timing statistics, and stores the results in the provided vector.
@@ -51,55 +50,27 @@ int run_reorder(tensor_t input_tensor, std::string kernel_name,
  * @param configs Vector of ReorderConfig objects specifying each benchmark run.
  * @param reorder_results Vector to store pairs of configuration and timing statistics (std::pair<ReorderConfig, TimingStats>).
  *        Each entry corresponds to a unique configuration and its associated timing results.
- * @return Status code (0 for success, non-zero for error).
+ * @param cache_size Cache size for cold cache flushing (if enabled).
+ * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
-int reorder_benchdnn(std::vector<ReorderConfig> configs,
-                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results);
+int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
+                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
+                     size_t cache_size);
 
 /**
- * @brief Logs a detailed error message for a failed reorder benchmark configuration.
+ * @brief Entry point for the reorder benchmark.
  *
- * Prints configuration parameters to the error log for debugging failed runs.
- *
- * @param cfg ReorderConfig structure for which the benchmark failed.
- */
-void log_benchmark_failure(const ReorderConfig &cfg);
-
-
-/**
- * @brief Prints the reorder benchmark results in a formatted table to the given output stream.
- *
- * Dynamically calculates column widths for neat alignment and prints a table of results for each configuration.
- * Includes detailed timing breakdowns if enabled at compile time.
- *
- * @param reorder_results Vector of pairs (ReorderConfig, TimingStats) containing benchmark results.
- * @param outfile Output stream to print the table (e.g., std::cout or file stream).
- */
-void print_results(std::vector<std::pair<ReorderConfig, TimingStats>>
-                   &reorder_results, std::ostream &outfile);
-
-/**
- * @brief Logs the reorder benchmark results in CSV format to the given output stream.
- *
- * Writes a CSV header and a row for each configuration, including timing breakdowns if enabled.
- *
- * @param reorder_results Vector of pairs (ReorderConfig, TimingStats) containing benchmark results.
- * @param outfile Output stream to write the CSV data (e.g., file stream).
- */
-void log_results(std::vector<std::pair<ReorderConfig, TimingStats>>
-                 &reorder_results, std::ostream &outfile);
-
-/**
- * @brief Entry point for the reorder benchmark utility.
- *
- * Reads input configurations from a file, runs the benchmark, and writes results to output file.
+ * Reads input configurations, dispatches to regular or LOWOHA benchmark,
+ * and writes results to console and CSV file.
  *
  * @param in_filename Path to the input configuration file.
  * @param out_filename Path to the output CSV file for results.
- * @return Status code (0 for success, non-zero for error).
+ * @param isLOWOHA If true, runs LOWOHA benchmark; otherwise regular reorder.
+ * @param cache_size Cache size for cold cache flushing (if enabled).
+ * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          size_t cache_size);
+          const bool isLOWOHA, size_t cache_size);
 
 } // namespace reorder
 } // namespace benchdnn

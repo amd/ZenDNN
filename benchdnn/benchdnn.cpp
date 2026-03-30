@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
   }
   else if (op == "reorder") {
     return benchdnn::reorder::bench(in_filename, out_filename,
-                                    cache_size); ///< Run reorder benchmark
+                                    isLOWOHA, cache_size); ///< Run reorder benchmark
   }
   else if (op == "embag") {
     return benchdnn::embag::bench(in_filename, out_filename,
