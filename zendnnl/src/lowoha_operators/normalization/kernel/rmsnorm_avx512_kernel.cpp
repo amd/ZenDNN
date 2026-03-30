@@ -26,18 +26,10 @@ namespace zendnnl {
 namespace lowoha {
 namespace normalization {
 
-#pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl,fma")
+#pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl,avx512bf16,fma")
 
 // =============================================================================
 // BF16 ↔ FP32 conversion helpers
-//
-// BF16 is the upper 16 bits of IEEE-754 FP32. Conversion is a zero-extend +
-// left-shift (BF16→FP32) or round-to-nearest-even + right-shift (FP32→BF16).
-//
-// Register usage per call:
-//   bf16x16_to_fp32:      1 YMM (load) → 1 ZMM (result)
-//   store_fp32_as_bf16:   1 ZMM (input) → 1 YMM (store), plus 3 ZMM temporaries
-//                         for the rounding bias computation
 // =============================================================================
 
 static inline __m512 bf16x16_to_fp32(const int16_t *ptr) {
@@ -53,12 +45,12 @@ static inline __m512 bf16x16_to_fp32_mask(const int16_t *ptr, __mmask16 mask) {
 }
 
 static inline void store_fp32_as_bf16(int16_t *ptr, __m512 val) {
-  _mm256_storeu_si256((__m256i *)ptr, bfloat16_t::f32_to_bf16_avx512(val));
+  _mm256_storeu_si256((__m256i *)ptr, (__m256i)_mm512_cvtneps_pbh(val));
 }
 
 static inline void store_fp32_as_bf16_mask(int16_t *ptr, __m512 val,
     __mmask16 mask) {
-  _mm256_mask_storeu_epi16(ptr, mask, bfloat16_t::f32_to_bf16_avx512(val));
+  _mm256_mask_storeu_epi16(ptr, mask, (__m256i)_mm512_cvtneps_pbh(val));
 }
 
 // =============================================================================
@@ -126,14 +118,6 @@ static inline void dst_store16_mask(void *p, __m512 v, __mmask16 m, bool bf16) {
 
 static inline size_t elem_size(bool bf16) {
   return bf16 ? 2 : 4;
-}
-
-// byte-offset pointer advance
-static inline const void *advance(const void *p, uint64_t elems, bool bf16) {
-  return static_cast<const char *>(p) + elems * elem_size(bf16);
-}
-static inline void *advance(void *p, uint64_t elems, bool bf16) {
-  return static_cast<char *>(p) + elems * elem_size(bf16);
 }
 
 // =============================================================================
@@ -462,7 +446,7 @@ static inline void fused_add_rms_row_avx512(
 }
 
 // =====================================================================
-// Dispatches RMS_NORM and FUSED_ADD_RMS_NORM.
+// Dispatches RMS_NORM and FUSED_ADD_RMS_NORM
 // =====================================================================
 
 status_t rms_norm_avx512(
@@ -472,7 +456,6 @@ status_t rms_norm_avx512(
   const void *gamma,
   norm_params &params
 ) {
-
   const float inv_n = 1.0f / static_cast<float>(params.norm_size);
   const bool src_bf16   = (params.src_dt == data_type_t::bf16);
   const bool dst_bf16   = (params.dst_dt == data_type_t::bf16);
@@ -480,20 +463,19 @@ status_t rms_norm_avx512(
   const size_t src_sz = src_bf16 ? 2 : 4;
   const size_t dst_sz = dst_bf16 ? 2 : 4;
   const uint64_t N = params.norm_size;
+  const int64_t batch = static_cast<int64_t>(params.batch);
+  const bool is_fused = (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM &&
+                         residual);
 
-  if (params.norm_type == norm_type_t::RMS_NORM || !residual) {
-    #pragma omp parallel for
-    for (uint64_t b = 0; b < params.batch; ++b) {
+  auto row_loop = [&](int64_t b) {
+    if (!is_fused) {
       rms_norm_row_avx512(
         static_cast<const char *>(input)  + b * N * src_sz,
         static_cast<char *>(output)       + b * N * dst_sz,
         gamma, N, inv_n, params.epsilon,
         params.use_scale, src_bf16, dst_bf16, gamma_bf16);
     }
-  }
-  else {
-    #pragma omp parallel for
-    for (uint64_t b = 0; b < params.batch; ++b) {
+    else {
       fused_add_rms_row_avx512(
         static_cast<const char *>(input)    + b * N * src_sz,
         static_cast<char *>(output)         + b * N * dst_sz,
@@ -501,12 +483,22 @@ status_t rms_norm_avx512(
         gamma, N, inv_n, params.epsilon,
         params.use_scale, src_bf16, dst_bf16, gamma_bf16);
     }
-  }
+  };
 
+  if (batch <= 1) {
+    for (int64_t b = 0; b < batch; ++b) {
+      row_loop(b);
+    }
+  }
+  else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t b = 0; b < batch; ++b) {
+      row_loop(b);
+    }
+  }
   return status_t::success;
 }
 
 } // namespace normalization
 } // namespace lowoha
 } // namespace zendnnl
-
