@@ -35,7 +35,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
     uint64_t group_size = 0;
     uint64_t num_groups = 1;
 
-    if (dt == data_type_t::s4) {
+    if (dt == data_type_t::s4 || dt == data_type_t::u4) {
       // If no even divisors found, fall back to K only if K is even
       // Otherwise, fall back to per-channel for per-group cases
       cfg.group_size = cfg.group_size ? cfg.group_size : cfg.k;
@@ -142,12 +142,15 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                          1.0, "weights_" + std::to_string(i), cfg.isTransB);
       }
       else {
-        auto wei_scale = (dt == data_type_t::s8 || dt == data_type_t::s4) ?
+        auto wei_scale = (dt == data_type_t::s8 || dt == data_type_t::s4 ||
+                          dt == data_type_t::u4) ?
                          tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 0.2) :
                          tensor_t();
+        auto wei_zp = dt == data_type_t::u4 ? tensor_factory.uniform_dist_tensor(scale_size, data_type_t::bf16,
+                      0.2) : tensor_t();
         weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
-                         dt,
-                         1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale);
+                          dt,
+                          1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale, wei_zp);
       }
     }
     weights.push_back(weights_tensor);

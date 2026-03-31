@@ -727,7 +727,8 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
         auto zp_nelems = compute_product(zp_size);
         ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point = const_cast<void *>(zp_ptr);
         ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_len = zp_nelems;
-        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_type = DLP_TYPE::DLP_S8;
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_type = get_aocl_store_type(
+              weight_tensor.get_quant_zero_data_type());
       }
       else {
         (aocl_dlp_po_ptr->pre_ops)->b_zp = NULL;

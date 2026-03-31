@@ -18,7 +18,7 @@
 #include "utils/perf_counters.hpp"
 
 #ifdef _OPENMP
-#include <omp.h>
+  #include <omp.h>
 #endif
 
 namespace zendnnl {
@@ -164,7 +164,8 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
 
   // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
   bool is_woq = (input_tensor.get_data_type() == data_type_t::bf16 &&
-                 weight_tensor.get_data_type() == data_type_t::s4);
+                 (weight_tensor.get_data_type() == data_type_t::s4 ||
+                  weight_tensor.get_data_type() == data_type_t::u4));
   if (is_woq) {
     set_woq_params(params, weight_tensor);
   }
@@ -258,7 +259,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       TimingStats time_stats;
 
       PerfProfile perf_profile = parse_perf_profile(
-          options.perf_profile_str.c_str());
+                                   options.perf_profile_str.c_str());
       PerfCounterGroup perf_ctrs(perf_profile);
       const bool use_perf = options.perf_counters && perf_ctrs.is_available();
       if (use_perf) {
@@ -388,13 +389,16 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
 
       if (use_perf && perf_ctrs.is_available()) {
         double elapsed_sec = 0;
-        for (auto &ts : time_stats_layer)
+        for (auto &ts : time_stats_layer) {
           elapsed_sec += ts.total_time_ms / 1000.0;
+        }
         int nt = 1;
 #ifdef _OPENMP
         nt = omp_get_max_threads();
 #endif
-        if (nt < 1) nt = 1;
+        if (nt < 1) {
+          nt = 1;
+        }
         auto derived = perf_ctrs.derive(elapsed_sec, nt);
         printf("  [PERF]");
         perf_ctrs.print_values(derived, false);

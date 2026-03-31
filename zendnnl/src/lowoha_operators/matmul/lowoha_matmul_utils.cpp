@@ -820,11 +820,6 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     log_info("WOQ detected, switching to DLP kernel");
   }
 
-  // Use simulated WOQ for U4 weights when zero-point is bf16
-  if (params.dtypes.wei == data_type_t::u4 &&
-      params.quant_params.wei_zp.dt == data_type_t::bf16) {
-    kernel = matmul_algo_t::aocl_dlp;
-  }
   size_t src_scale_nelems = 1;
   for (auto d : params.quant_params.src_scale.dims) {
     src_scale_nelems *= static_cast<size_t>(d);

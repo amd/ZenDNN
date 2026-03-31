@@ -365,6 +365,17 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
         buf_ptr[i] = low_nibble | (high_nibble << 4);
       }
     }
+    else if (dtype_ == data_type::u4) {
+      // U4 is packed like S4: 2 x 4-bit values per byte, range [0, 15]
+      std::uniform_int_distribution<int> dist_u4(0, 15);
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        int8_t low_nibble = static_cast<int8_t>(dist_u4(gen)) & 0x0F;
+        int8_t high_nibble = static_cast<int8_t>(dist_u4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
     }

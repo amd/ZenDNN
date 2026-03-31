@@ -250,7 +250,8 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       id++;
       cfg.beta = fields[id].empty() ? 0.0f : std::stof(fields[id]);
       id++;
-      if (cfg.dt[1] == data_type_t::s4 || cfg.dt[1] == data_type_t::s8) {
+      if (cfg.dt[1] == data_type_t::s4 || cfg.dt[1] == data_type_t::s8 ||
+          cfg.dt[1] == data_type_t::u4) {
         if (!fields[id].empty()) {
           std::string scale_gran = fields[id];
           std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),

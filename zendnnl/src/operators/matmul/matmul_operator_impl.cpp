@@ -339,17 +339,11 @@ status_t matmul_impl_t::validate() {
     }
   }
 
-  if (weights && weights->get_data_type() == data_type_t::s4 &&
+  if (weights && (weights->get_data_type() == data_type_t::s4 ||
+      weights->get_data_type() == data_type_t::u4) &&
       forced_kernel != "reference") {
-    apilog_info("Weight tensor is S4, forcing aocl_dlp_blocked kernel");
+    apilog_info("Weight tensor is S4/U4, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
-  }
-
-  // U4 does not have full support in AOCL-DLP, force reference kernel
-  if (weights && weights->get_data_type() == data_type_t::u4 &&
-      forced_kernel != "reference") {
-    apilog_info("Weight tensor is U4, forcing reference kernel");
-    forced_kernel = "reference";
   }
 
   if (weights->get_data_type() != data_type_t::u4 &&
@@ -699,7 +693,8 @@ status_t matmul_impl_t::kernel_factory() {
               output_dtype == data_type_t::s32)) {
       kernel = get_matmul_int8_avx512_kernel();
     }
-    else if ((weight_dtype == data_type_t::s4) &&
+    else if ((weight_dtype == data_type_t::s4 ||
+              weight_dtype == data_type_t::u4) &&
              (input_dtype  == data_type_t::bf16) &&
              (output_dtype == data_type_t::f32 ||
               output_dtype == data_type_t::bf16)) {

@@ -243,7 +243,6 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
  *         and U4 weights wrt Reference kernel
  */
 TEST_P(TestMatmul, WOQ_BF16_U4) {
-  use_LOWOHA = true;
   // Test WOQ with different scale/zp granularity combinations:
   // Combination 0: scale=per-tensor,  zp=per-tensor  -> {1,1}, {1,1}
   // Combination 1: scale=per-channel, zp=per-tensor  -> {1,n}, {1,1}

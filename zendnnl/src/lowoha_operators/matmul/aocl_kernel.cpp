@@ -317,7 +317,8 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
       size_t zp_elements = get_num_elements(wei_zp.dims);
       dlp_metadata->pre_ops->b_zp->zero_point_len = zp_elements;
       dlp_metadata->pre_ops->b_zp->zero_point = const_cast<void *>(wei_zp.buff);
-      dlp_metadata->pre_ops->b_zp->zero_point_type = DLP_S8;
+      dlp_metadata->pre_ops->b_zp->zero_point_type = wei_zp.dt == data_type_t::s8 ?
+          DLP_S8 : DLP_BF16;
     }
   }
   else {
