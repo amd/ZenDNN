@@ -32,6 +32,9 @@
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
+#include "lowoha_operators/normalization/lowoha_normalization.hpp"
+#include "lowoha_operators/normalization/lowoha_normalization_utils.hpp"
+#include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 3000
@@ -48,6 +51,7 @@ using namespace zendnnl::ops;
 using namespace zendnnl::lowoha::matmul;
 using namespace zendnnl::lowoha::reorder;
 using namespace zendnnl::lowoha::embag;
+using namespace zendnnl::lowoha::normalization;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
@@ -146,6 +150,20 @@ struct EmbeddingType {
   EmbeddingType();
 };
 
+/** @brief Normalization Op Parameters Structure */
+struct NormalizationType {
+  norm_type_t norm_type;
+  std::vector<uint64_t> shape;
+  int norm_ndims;
+  float epsilon;
+  bool use_scale;
+  bool use_shift;
+  data_type_t gamma_dt;
+  data_type_t beta_dt;
+  uint32_t num_threads;
+  NormalizationType();
+};
+
 
 extern int gtest_argc;
 extern char **gtest_argv;
@@ -165,6 +183,8 @@ extern const float EMBAG_INT4_TOL;
 extern const float LOWOHA_REORDER_INT8_TOL;
 extern const float LOWOHA_REORDER_BF16_TOL;
 extern const float LOWOHA_REORDER_F32_TOL;
+extern const float NORM_F32_TOL;
+extern const float NORM_BF16_TOL;
 extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;
@@ -176,6 +196,7 @@ extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
 extern std::vector<EmbagType> embag_test;
 extern std::vector<EmbeddingType> embedding_test;
+extern std::vector<NormalizationType> normalization_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -287,6 +308,8 @@ void PrintTo(const ReorderType &value, ::std::ostream *os);
 void PrintTo(const EmbagType &value, ::std::ostream *os);
 /** @brief Print EmbeddingType for GTest parameterized test failure messages. */
 void PrintTo(const EmbeddingType &value, ::std::ostream *os);
+/** @brief Print NormalizationType for GTest parameterized test failure messages. */
+void PrintTo(const NormalizationType &value, ::std::ostream *os);
 
 /** @fn strToAlgo
  *  @brief Convert string representation to matmul algorithm type
@@ -678,5 +701,58 @@ status_t quant_params_compute(
   tensor_t &scale_out,
   tensor_t &zp_out,
   tensor_t *dst_out = nullptr);
+/** @fn normalization_kernel_test
+ *  @brief Test function for normalization kernel (native path)
+ *
+ *  Calls normalization_direct() which dispatches to the best available kernel:
+ *  AVX-512 for RMSNorm/FusedAddRMSNorm, reference for LayerNorm/BatchNorm.
+ *
+ *  @return status_t Success or failure status
+ */
+ status_t normalization_kernel_test(
+  tensor_t &input_tensor,
+  tensor_t &output_tensor,
+  tensor_t &gamma_tensor,
+  tensor_t &beta_tensor,
+  tensor_t &running_mean_tensor,
+  tensor_t &running_var_tensor,
+  tensor_t &residual_tensor,
+  norm_params &params);
+
+/** @fn normalization_forced_ref_kernel_test
+ *  @brief Test function for normalization reference kernel (forced)
+ *
+ *  Calls setup_normalization_shape() then normalization_reference_wrapper()
+ *  directly, bypassing the AVX-512 dispatch to always use the scalar reference.
+ *
+ *  @return status_t Success or failure status
+ */
+status_t normalization_forced_ref_kernel_test(
+  tensor_t &input_tensor,
+  tensor_t &output_tensor,
+  tensor_t &gamma_tensor,
+  tensor_t &beta_tensor,
+  tensor_t &running_mean_tensor,
+  tensor_t &running_var_tensor,
+  tensor_t &residual_tensor,
+  norm_params &params);
+
+/** @fn compare_norm_tensors
+ *  @brief Compare two tensors element-by-element for any dimensionality
+ *
+ *  Iterates over all elements using flat-to-multidim index conversion,
+ *  so it works correctly for 1D, 2D, 3D, 4D, 5D tensors.
+ *
+ *  @param output Actual output tensor
+ *  @param output_ref Reference output tensor
+ *  @param shape Tensor shape vector
+ *  @param total_elements Total number of elements in the tensor
+ *  @param tol Base tolerance value
+ *  @param is_comparison_successful Output flag indicating comparison result
+ */
+void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
+                          const std::vector<uint64_t> &shape,
+                          uint64_t total_elements,
+                          float tol, bool &is_comparison_successful);
 
 #endif

@@ -50,6 +50,10 @@ const float LOWOHA_REORDER_INT8_TOL = 0.01;   // For int8/uint8 output
 const float LOWOHA_REORDER_BF16_TOL = 0.01;  // For bf16 output
 const float LOWOHA_REORDER_F32_TOL  = 0.001; // For f32 output
 
+// Normalization tolerance constants
+const float NORM_F32_TOL  = 0.001;
+const float NORM_BF16_TOL = 0.01;
+
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
@@ -76,6 +80,9 @@ std::vector<EmbagType> embag_test{};
 
 /** @brief embedding_test Data Structure(vector of structures) to hold random Embedding Parameters */
 std::vector<EmbeddingType> embedding_test{};
+
+/** @brief normalization_test Data Structure(vector of structures) to hold random Normalization Parameters */
+std::vector<NormalizationType> normalization_test{};
 
 
 int main(int argc, char **argv) {
@@ -141,6 +148,9 @@ int main(int argc, char **argv) {
     embag_test.resize(test_num);
     // Creating Random parameters for Embedding
     embedding_test.resize(test_num);
+
+    // Creating Random parameters for Normalization
+    normalization_test.resize(test_num);
 
     ::testing :: InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -29,6 +29,8 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `MATMUL_F32_TOL`: Tolerance for floating-point precision in tests (default: `0.001`).
 - `MATMUL_BF16_TOL`: Tolerance for BF16 precision in tests (default: `0.01`).
 - F16 tests use the same tolerance as BF16 (`MATMUL_BF16_TOL`).
+- `NORM_F32_TOL`: Tolerance for normalization F32 tests (default: `0.001`).
+- `NORM_BF16_TOL`: Tolerance for normalization BF16 tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `100`).
 
 ## **Matrix Dimension Ranges**
@@ -164,6 +166,7 @@ gtests/
 ├── test_reorder.cpp         # Reorder testsuite (regular + LOWOHA quantization/dequantization).
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
+├── test_normalization.cpp   # Normalization testsuite with different test cases.
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
 ```
 
@@ -232,6 +235,7 @@ cmake --build .
        - Second third: LOWOHA on
        - Last third: LOWOHA on with LIBXSMM backend
      - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
+     - **Normalization tests**: Always use LOWOHA API (normalization is a LOWOHA-only operator)
    - **Note**: For LIBXSMM backends, LOWOHA is always enabled by default
 
 7. **`--input_file <InputFile>`** (Optional):
@@ -568,6 +572,37 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 10. Run all U4 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_BF16/*
+```
+
+### Normalization Tests
+ - Normalization TestSuite has four testcases (F32_F32, BF16_BF16, BF16_F32, F32_BF16)
+ - Supports four normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, BatchNorm
+ - Test parameters (shape, norm_ndims, use_scale, use_shift, gamma/beta data types) are randomly generated
+ - Validates native kernel output against the reference (scalar) kernel output
+
+1. Run all F32 Input, F32 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F32_F32/*
+```
+2. Run all BF16 Input, BF16 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.BF16_BF16/*
+```
+3. Run all BF16 Input, F32 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.BF16_F32/*
+```
+4. Run all F32 Input, BF16 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F32_BF16/*
+```
+5. Run all normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/*
+```
+6. Run normalization tests with 8 threads:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/* --num_threads 8
 ```
 
 ### Example with more Arguments Support

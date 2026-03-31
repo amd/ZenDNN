@@ -200,6 +200,7 @@ EmbagType::EmbagType() {
     num_threads = thread_dist(gen);
   }
 }
+
 // EmbeddingType constructor
 EmbeddingType::EmbeddingType() {
   num_embeddings = 128 + std::rand() % 2048;
@@ -223,6 +224,87 @@ EmbeddingType::EmbeddingType() {
   else {
     int max_threads = omp_get_max_threads();
     static std::mt19937 gen(rand());
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
+}
+
+// NormalizationType constructor
+NormalizationType::NormalizationType() {
+  int type_choice = std::rand() % 4;
+  switch (type_choice) {
+  case 0:
+    norm_type = norm_type_t::LAYER_NORM;
+    break;
+  case 1:
+    norm_type = norm_type_t::RMS_NORM;
+    break;
+  case 2:
+    norm_type = norm_type_t::FUSED_ADD_RMS_NORM;
+    break;
+  case 3:
+    norm_type = norm_type_t::BATCH_NORM;
+    break;
+  }
+
+  if (norm_type == norm_type_t::BATCH_NORM) {
+    // BatchNorm requires >= 2D, supports up to 5D (NORM_MAX_NDIMS)
+    int ndims = 2 + std::rand() % 4; // 2-5 dims (NC, NCH, NCHW, NCDHW)
+    shape.resize(ndims);
+    shape[0] = 1 + std::rand() % 8;   // N: 1-8
+    shape[1] = 1 + std::rand() % 32;  // C: 1-32
+    for (int i = 2; i < ndims; ++i) {
+      shape[i] = 1 + std::rand() % 16; // spatial: 1-16
+    }
+    norm_ndims = 0;
+  }
+  else {
+    // LayerNorm/RMSNorm/FusedAddRMSNorm: supports 1D to 5D (NORM_MAX_NDIMS)
+    int ndims = 1 + std::rand() % 5; // 1-5 dims
+    shape.resize(ndims);
+    for (int i = 0; i < ndims - 1; ++i) {
+      shape[i] = 1 + std::rand() % 8; // batch dims: 1-8
+    }
+    shape[ndims - 1] = 1 + std::rand() % 512; // norm dim: 1-512
+
+    // norm_ndims: 1 to ndims
+    // 70% → 1, 15% → 2..ndims-1, 15% → ndims (full tensor normalization)
+    int choice = std::rand() % 20;
+    if (ndims == 1) {
+      norm_ndims = 1;
+    }
+    else if (choice < 14) {
+      norm_ndims = 1;
+    }
+    else if (choice < 17) {
+      norm_ndims = 1 + std::rand() % (ndims - 1); // 1 to ndims-1
+    }
+    else {
+      norm_ndims = ndims; // normalize entire tensor (batch=1)
+    }
+  }
+
+  epsilon = (norm_type == norm_type_t::RMS_NORM ||
+             norm_type == norm_type_t::FUSED_ADD_RMS_NORM) ? 1e-6f : 1e-5f;
+
+  use_scale = (std::rand() % 4 != 0); // 75% true
+  if (norm_type == norm_type_t::LAYER_NORM ||
+      norm_type == norm_type_t::BATCH_NORM) {
+    use_shift = (std::rand() % 4 != 0); // 75% true
+  }
+  else {
+    use_shift = false;
+  }
+
+  gamma_dt = (std::rand() % 4 == 0) ? data_type_t::bf16 : data_type_t::f32;
+  beta_dt  = (std::rand() % 4 == 0) ? data_type_t::bf16 : data_type_t::f32;
+
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    static std::mt19937 gen(std::rand());
     std::uniform_int_distribution<int> thread_dist(1, max_threads);
     num_threads = thread_dist(gen);
   }
@@ -1095,6 +1177,25 @@ void PrintTo(const EmbeddingType &value, ::std::ostream *os) {
       << ", fp16_scale_bias=" << value.fp16_scale_bias
       << ", strided=" << value.strided
       << ", use_LOWOHA=" << value.use_LOWOHA << ", num_threads=" << value.num_threads
+      << ", seed=" << seed;
+}
+
+void PrintTo(const NormalizationType &value, ::std::ostream *os) {
+  *os << "norm_type=" << norm_type_to_str(value.norm_type)
+      << ", shape=[";
+  for (size_t i = 0; i < value.shape.size(); ++i) {
+    if (i > 0) {
+      *os << ",";
+    }
+    *os << value.shape[i];
+  }
+  *os << "], norm_ndims=" << value.norm_ndims
+      << ", epsilon=" << value.epsilon
+      << ", use_scale=" << value.use_scale
+      << ", use_shift=" << value.use_shift
+      << ", gamma_dt=" << dtype_info(value.gamma_dt)
+      << ", beta_dt=" << dtype_info(value.beta_dt)
+      << ", num_threads=" << value.num_threads
       << ", seed=" << seed;
 }
 
@@ -3153,12 +3254,12 @@ std::vector<size_t> get_lowoha_quant_shape(const ReorderType &params) {
   }
 }
 
-
 void compare_lowoha_quant_output(tensor_t &original_tensor,
                                  tensor_t &dequant_tensor,
                                  tensor_t &scale_tensor,
                                  const ReorderType &params,
                                  bool &is_comparison_successful) {
+
   const uint64_t batch = params.batch;
   const uint64_t M = params.M;
   const uint64_t N = params.N;
@@ -3359,5 +3460,128 @@ status_t quant_params_compute(
   }
 
   return reorder_direct(src_ref.get_raw_handle_unsafe(), dst_ptr, rp);
+}
+
+static void *safe_raw_ptr(tensor_t &t) {
+  return (t.get_nelem() > 0) ? t.get_raw_handle_unsafe() : nullptr;
+}
+
+status_t normalization_kernel_test(
+  tensor_t &input_tensor,
+  tensor_t &output_tensor,
+  tensor_t &gamma_tensor,
+  tensor_t &beta_tensor,
+  tensor_t &running_mean_tensor,
+  tensor_t &running_var_tensor,
+  tensor_t &residual_tensor,
+  norm_params &params) {
+  try {
+    void *input_ptr    = safe_raw_ptr(input_tensor);
+    void *output_ptr   = safe_raw_ptr(output_tensor);
+    void *gamma_ptr    = safe_raw_ptr(gamma_tensor);
+    void *beta_ptr     = safe_raw_ptr(beta_tensor);
+    void *mean_ptr     = safe_raw_ptr(running_mean_tensor);
+    void *var_ptr      = safe_raw_ptr(running_var_tensor);
+    void *residual_ptr = safe_raw_ptr(residual_tensor);
+
+    status_t status = normalization_direct(
+                        input_ptr, output_ptr, gamma_ptr, beta_ptr,
+                        mean_ptr, var_ptr, residual_ptr, params);
+
+    if (status != status_t::success) {
+      log_error("normalization_direct execution failed");
+    }
+    return status;
+  }
+  catch (const exception_t &ex) {
+    log_error("normalization_kernel_test exception: ", ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("normalization_kernel_test std::exception: ", e.what());
+    return status_t::failure;
+  }
+}
+
+status_t normalization_forced_ref_kernel_test(
+  tensor_t &input_tensor,
+  tensor_t &output_tensor,
+  tensor_t &gamma_tensor,
+  tensor_t &beta_tensor,
+  tensor_t &running_mean_tensor,
+  tensor_t &running_var_tensor,
+  tensor_t &residual_tensor,
+  norm_params &params) {
+  try {
+    status_t setup_status = setup_normalization_shape(params);
+    if (setup_status != status_t::success) {
+      log_error("setup_normalization_shape failed in forced ref test");
+      return status_t::failure;
+    }
+
+    void *input_ptr    = safe_raw_ptr(input_tensor);
+    void *output_ptr   = safe_raw_ptr(output_tensor);
+    void *gamma_ptr    = safe_raw_ptr(gamma_tensor);
+    void *beta_ptr     = safe_raw_ptr(beta_tensor);
+    void *mean_ptr     = safe_raw_ptr(running_mean_tensor);
+    void *var_ptr      = safe_raw_ptr(running_var_tensor);
+    void *residual_ptr = safe_raw_ptr(residual_tensor);
+
+    status_t status = normalization_reference_wrapper(
+                        input_ptr, output_ptr, gamma_ptr, beta_ptr,
+                        mean_ptr, var_ptr, residual_ptr, params);
+
+    if (status != status_t::success) {
+      log_error("normalization_reference_wrapper execution failed");
+    }
+    return status;
+  }
+  catch (const exception_t &ex) {
+    log_error("normalization_forced_ref_kernel_test exception: ", ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("normalization_forced_ref_kernel_test std::exception: ", e.what());
+    return status_t::failure;
+  }
+}
+
+void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
+                          const std::vector<uint64_t> &shape,
+                          uint64_t total_elements,
+                          float tol, bool &is_comparison_successful) {
+  const float atol = tol;
+  const float rtol = tol * 10;
+  std::atomic<bool> success{true};
+
+  #pragma omp parallel
+  {
+    std::vector<uint64_t> idx(shape.size());
+    #pragma omp for
+    for (uint64_t flat = 0; flat < total_elements; ++flat) {
+      if (success.load(std::memory_order_relaxed)) {
+        uint64_t remaining = flat;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+          idx[d] = remaining % shape[d];
+          remaining /= shape[d];
+        }
+        float actual_val = output.at(idx);
+        float ref_val    = output_ref.at(idx);
+        float abs_err    = std::fabs(ref_val - actual_val);
+
+        if (abs_err > (atol + rtol * std::fabs(ref_val))) {
+          log_verbose("Mismatch at flat=", flat,
+                      ": actual=", actual_val,
+                      ", ref=", ref_val,
+                      ", abs_err=", abs_err);
+          success.store(false, std::memory_order_relaxed);
+        }
+      }
+    }
+  }
+
+  if (!success.load()) {
+    is_comparison_successful = false;
+  }
 }
 
