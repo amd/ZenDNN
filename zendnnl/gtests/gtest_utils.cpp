@@ -331,12 +331,21 @@ bool is_binary_postop(post_op_type_t post_op) {
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
                                        data_type dtype_, tensor_t scale, tensor_t zp,
-                                       bool strided) {
+                                       bool strided, bool trans) {
 
   auto ztensor = tensor_t()
                  .set_name("zero tensor")
                  .set_size(size_)
                  .set_data_type(dtype_);
+  auto tensor_dim = ztensor.get_dim();
+  if (trans && tensor_dim >= 2) {
+    std::string tag;
+    for (size_t i = 0; i < tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    ztensor.set_order(tag);
+  }
   if (strided) {
     uint64_t x = size_[1] + rand() % 50;
     ztensor.set_stride({x, 1});
@@ -2629,7 +2638,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               bool &is_comparison_successful,
                               bool enable_f32_relaxation,
                               float alpha,
-                              bool is_woq) {
+                              bool is_quant) {
   constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
   constexpr int P = 15; // Post-op accumulation margin
@@ -2643,7 +2652,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
   // abs_bound = alpha * (C*k+P)*epsilon
   const bool is_low_precision = (output_tensor.get_data_type() ==
                                  data_type_t::bf16) ||
-                                (output_tensor.get_data_type() == data_type_t::f16) || is_woq;
+                                (output_tensor.get_data_type() == data_type_t::f16) || is_quant;
   const float abs_bound = is_low_precision
                           ? (alpha * k * epsilon)
                           : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
@@ -3249,3 +3258,106 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
     is_comparison_successful = false;
   }
 }
+status_t quant_params_compute(
+  tensor_factory_t &factory,
+  const tensor_t &src_ref,
+  data_type_t src_dtype,
+  data_type_t dst_dtype,
+  const std::vector<int64_t> &scale_dims,
+  data_type_t scale_dt,
+  tensor_t &scale_out,
+  tensor_t &zp_out,
+  tensor_t *dst_out) {
+  if (src_dtype != data_type_t::bf16 && src_dtype != data_type_t::f32) {
+    log_error("quant_params_compute: src_dtype must be bf16 or f32");
+    return status_t::failure;
+  }
+  if (dst_dtype != data_type_t::s8 && dst_dtype != data_type_t::u8) {
+    log_error("quant_params_compute: dst_dtype must be s8 or u8");
+    return status_t::failure;
+  }
+  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16) {
+    log_error("quant_params_compute: scale_dt must be f32 or bf16");
+    return status_t::failure;
+  }
+  if (scale_dims.empty()) {
+    log_error("quant_params_compute: scale_dims must be non-empty");
+    return status_t::failure;
+  }
+  const std::vector<uint64_t> src_shape_u64 = src_ref.get_size();
+  if (src_shape_u64.empty()) {
+    log_error("quant_params_compute: src_ref shape must be non-empty");
+    return status_t::failure;
+  }
+  std::vector<int64_t> src_shape(src_shape_u64.begin(), src_shape_u64.end());
+  for (size_t i = 0; i < src_shape.size(); ++i) {
+    if (src_shape[i] <= 0) {
+      log_error("quant_params_compute: src_ref shape[", i, "]=", src_shape[i],
+                " must be > 0");
+      return status_t::failure;
+    }
+  }
+  for (size_t i = 0; i < scale_dims.size(); ++i) {
+    if (scale_dims[i] <= 0) {
+      log_error("quant_params_compute: scale_dims[", i, "]=", scale_dims[i],
+                " must be > 0");
+      return status_t::failure;
+    }
+  }
+
+  std::vector<uint64_t> scale_size(scale_dims.begin(), scale_dims.end());
+
+  scale_out = factory.zero_tensor(scale_size, scale_dt);
+
+  bool is_asymmetric = (dst_dtype == data_type_t::u8);
+  if (is_asymmetric) {
+    zp_out = factory.zero_tensor(scale_size, data_type_t::s32);
+  }
+  else {
+    zp_out = tensor_t();
+  }
+
+  const bool src_is_transposed = src_ref.is_transposed();
+
+  // Compute physical shape: reorder_direct operates on the physical memory
+  // layout, so when the source is transposed we swap the last two dims
+  std::vector<int64_t> phys_shape = src_shape;
+  if (src_is_transposed && phys_shape.size() >= 2) {
+    std::swap(phys_shape[phys_shape.size() - 2],
+              phys_shape[phys_shape.size() - 1]);
+  }
+
+  void *dst_ptr = nullptr;
+  if (dst_out) {
+    std::vector<uint64_t> tensor_size(src_shape_u64.begin(), src_shape_u64.end());
+    *dst_out = factory.zero_tensor(tensor_size, dst_dtype, scale_out, zp_out,
+                                   false, src_is_transposed);
+    dst_ptr = dst_out->get_raw_handle_unsafe();
+  }
+
+  reorder_params_t rp;
+  rp.src_dtype     = src_dtype;
+  rp.dst_dtype     = dst_dtype;
+  rp.dynamic_quant = true;
+  rp.src_shape     = phys_shape;
+  rp.dst_shape     = phys_shape;
+
+  // Scale/zp dims must match the physical layout; swap when transposed.
+  std::vector<int64_t> phys_scale_dims = scale_dims;
+  if (src_is_transposed && phys_scale_dims.size() >= 2) {
+    std::swap(phys_scale_dims[phys_scale_dims.size() - 2],
+              phys_scale_dims[phys_scale_dims.size() - 1]);
+  }
+
+  rp.quant_params.scale.buff = scale_out.get_raw_handle_unsafe();
+  rp.quant_params.scale.dt   = scale_dt;
+  rp.quant_params.scale.dims = phys_scale_dims;
+  if (is_asymmetric) {
+    rp.quant_params.zero_point.buff = zp_out.get_raw_handle_unsafe();
+    rp.quant_params.zero_point.dt   = data_type_t::s32;
+    rp.quant_params.zero_point.dims = phys_scale_dims;
+  }
+
+  return reorder_direct(src_ref.get_raw_handle_unsafe(), dst_ptr, rp);
+}
+

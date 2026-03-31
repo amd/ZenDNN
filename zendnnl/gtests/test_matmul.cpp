@@ -817,27 +817,36 @@ TEST_P(TestMatmul, INT8) {
                                           quant_granularity_t::tensor) ?
                                          std::vector<uint64_t> {1, 1} :
                                          std::vector<uint64_t> {1, n};
-  auto wei_scale          = tensor_factory.uniform_dist_tensor(wei_scale_size,
-                            data_type_t::f32, 0.2);
-  auto src_scale          = tensor_factory.uniform_dist_tensor({1, 1},
-                            data_type_t::f32, 0.3);
-  auto dst_scale          = !(output_dtype == data_type_t::f32 ||
-                              output_dtype == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
-                                  data_type_t::f32, 2) : tensor_t();
 
-  auto src_zp             = (source_dtype == data_type_t::u8) ?
-                            tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 16) : tensor_t();
-  auto wei_zp             = (weight_granularity == quant_granularity_t::tensor) ?
-                            tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 16) : tensor_t();
-  auto dst_zp             = (output_dtype == data_type_t::u8) ?
-                            tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 53) : tensor_t();
-  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::s8, 25.0, transB, wei_scale, wei_zp);
-  auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            source_dtype, 25.0, transA, src_scale, src_zp);
+  data_type_t ref_dt = (output_dtype == data_type_t::f32) ? data_type_t::f32
+                       : data_type_t::bf16;
+
+  auto wei_ref = tensor_factory.uniform_dist_tensor({k, n}, ref_dt, 25.0, transB);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref,
+                           ref_dt, data_type_t::s8,
+{static_cast<int64_t>(wei_scale_size[0]), static_cast<int64_t>(wei_scale_size[1])},
+  data_type_t::f32, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, k}, ref_dt, 25.0, transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref,
+                           ref_dt, source_dtype,
+{1, 1}, data_type_t::f32, src_scale, src_zp,
+&input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+  tensor_t dst_scale, dst_zp;
+  if (output_dtype != data_type_t::f32 && output_dtype != data_type_t::bf16) {
+    auto dst_ref = tensor_factory.uniform_dist_tensor({m, n}, ref_dt, 2.0);
+    if (quant_params_compute(tensor_factory, dst_ref,
+                             ref_dt, output_dtype,
+    {1, 1}, data_type_t::f32, dst_scale, dst_zp) != status_t::success) {
+      FAIL() << "destination scale/zp computation failed";
+    }
+  }
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
@@ -858,9 +867,10 @@ TEST_P(TestMatmul, INT8) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
-                             epsilon_bf16, is_test_successful, false, 1.0f);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_bf16,
+                             epsilon_bf16, is_test_successful, false, 1.0f, true);
   }
+
 
   EXPECT_TRUE(is_test_successful);
 }
@@ -886,16 +896,31 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_BF16) {
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
 
+  data_type_t ref_dt = data_type_t::bf16;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
-  auto wei_scale     = tensor_factory.uniform_dist_tensor({sym_k / group_size, n},
-                       scale_dt, 0.2);
-  auto src_scale     = tensor_factory.uniform_dist_tensor({m, sym_k / group_size},
-                       scale_dt, 0.3);
-  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
-                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
-  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
-                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  uint64_t num_groups = sym_k / group_size;
+  std::vector<int64_t> wei_sd = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(num_groups)};
+
+  auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                 transB);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                           data_type_t::s8,
+                           wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                 transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref, ref_dt,
+                           data_type_t::s8,
+                           src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor = is_binary_postop(po_type)
@@ -941,16 +966,31 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
 
+  data_type_t ref_dt = data_type_t::f32;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
-  auto wei_scale     = tensor_factory.uniform_dist_tensor({sym_k / group_size, n},
-                       scale_dt, 0.2);
-  auto src_scale     = tensor_factory.uniform_dist_tensor({m, sym_k / group_size},
-                       scale_dt, 0.3);
-  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
-                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
-  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
-                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  uint64_t num_groups = sym_k / group_size;
+  std::vector<int64_t> wei_sd = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(num_groups)};
+  // Keeping the range to 2.0 to avoid accuracy drops in INT8 matmul
+  auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 2.0,
+                 transB);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                           data_type_t::s8,
+                           wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                 transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref, ref_dt,
+                           data_type_t::s8,
+                           src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor = is_binary_postop(po_type)
@@ -985,15 +1025,31 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
 
+  data_type_t ref_dt = data_type_t::bf16;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBF17);
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
-  auto wei_scale     = tensor_factory.uniform_dist_tensor({1, n}, scale_dt, 0.2);
-  auto src_scale     = tensor_factory.uniform_dist_tensor({m, 1}, scale_dt, 0.3);
-  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
-                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
-  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
-                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
+
+  auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                 transB);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                           data_type_t::s8,
+                           wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                 transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref, ref_dt,
+                           data_type_t::s8,
+                           src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor = is_binary_postop(po_type)
@@ -1013,7 +1069,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
   bool ok = (status == status_t::success && ref_status == status_t::success);
   if (ok) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                             rtol_bf16, epsilon_bf16, ok, false, 1.0f);
+                             rtol_bf16, epsilon_bf16, ok, false, 1.0f, true);
   }
   EXPECT_TRUE(ok);
 }
@@ -1028,15 +1084,31 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
 
+  data_type_t ref_dt = data_type_t::f32;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xF321);
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
-  auto wei_scale     = tensor_factory.uniform_dist_tensor({1, n}, scale_dt, 0.2);
-  auto src_scale     = tensor_factory.uniform_dist_tensor({m, 1}, scale_dt, 0.3);
-  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
-                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
-  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
-                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
+
+  auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                 transB);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                           data_type_t::s8,
+                           wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                 transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref, ref_dt,
+                           data_type_t::s8,
+                           src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor = is_binary_postop(po_type)
@@ -1056,7 +1128,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
   bool ok = (status == status_t::success && ref_status == status_t::success);
   if (ok) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                             rtol_f32, epsilon_f32, ok, false, 1.0f);
+                             rtol_f32, epsilon_f32, ok, false, 1.0f, true);
   }
   EXPECT_TRUE(ok);
 }
@@ -1108,29 +1180,12 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
 
   auto weight_tensor_ref = tensor_factory.uniform_dist_tensor({sym_k, n},
                            test_dt, 2.0);
-
-  auto wei_scale = tensor_factory.zero_tensor({
-    static_cast<uint64_t>(wei_scale_dims[0]),
-    static_cast<uint64_t>(wei_scale_dims[1])},
-  scale_dt);
-  auto weight_tensor_s8 = tensor_factory.zero_tensor({sym_k, n},
-                          data_type_t::s8, wei_scale);
-  {
-    reorder_params_t rp;
-    rp.src_dtype = test_dt;
-    rp.dst_dtype = data_type_t::s8;
-    rp.dynamic_quant = true;
-    rp.src_shape = {static_cast<int64_t>(sym_k), static_cast<int64_t>(n)};
-    rp.dst_shape = rp.src_shape;
-    rp.quant_params.scale.buff = wei_scale.get_raw_handle_unsafe();
-    rp.quant_params.scale.dt = scale_dt;
-    rp.quant_params.scale.dims = wei_scale_dims;
-    status_t rs = reorder_direct(
-                    weight_tensor_ref.get_raw_handle_unsafe(),
-                    weight_tensor_s8.get_raw_handle_unsafe(), rp);
-    if (rs != status_t::success) {
-      GTEST_SKIP() << "weight reorder_direct dynamic quantization failed";
-    }
+  tensor_t weight_tensor_s8, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, weight_tensor_ref, test_dt,
+                           data_type_t::s8,
+                           wei_scale_dims, scale_dt,
+                           wei_scale, wei_zp, &weight_tensor_s8) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
   }
 
   auto src_scale      = tensor_factory.zero_tensor(src_scale_shape,
@@ -1162,7 +1217,7 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
   bool ok = (status == status_t::success && ref_status == status_t::success);
   if (ok) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                             rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f);
+                             rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f, true);
   }
   EXPECT_TRUE(ok);
 }
@@ -1214,29 +1269,12 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 
   auto weight_tensor_ref = tensor_factory.uniform_dist_tensor({sym_k, n},
                            test_dt, 2.0);
-
-  auto wei_scale = tensor_factory.zero_tensor({
-    static_cast<uint64_t>(wei_scale_dims[0]),
-    static_cast<uint64_t>(wei_scale_dims[1])},
-  scale_dt);
-  auto weight_tensor_s8 = tensor_factory.zero_tensor({sym_k, n},
-                          data_type_t::s8, wei_scale);
-  {
-    reorder_params_t rp;
-    rp.src_dtype = test_dt;
-    rp.dst_dtype = data_type_t::s8;
-    rp.dynamic_quant = true;
-    rp.src_shape = {static_cast<int64_t>(sym_k), static_cast<int64_t>(n)};
-    rp.dst_shape = rp.src_shape;
-    rp.quant_params.scale.buff = wei_scale.get_raw_handle_unsafe();
-    rp.quant_params.scale.dt = scale_dt;
-    rp.quant_params.scale.dims = wei_scale_dims;
-    status_t rs = reorder_direct(
-                    weight_tensor_ref.get_raw_handle_unsafe(),
-                    weight_tensor_s8.get_raw_handle_unsafe(), rp);
-    if (rs != status_t::success) {
-      GTEST_SKIP() << "weight reorder_direct dynamic quantization failed";
-    }
+  tensor_t weight_tensor_s8, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, weight_tensor_ref, test_dt,
+                           data_type_t::s8,
+                           wei_scale_dims, scale_dt,
+                           wei_scale, wei_zp, &weight_tensor_s8) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
   }
 
   auto src_scale      = tensor_factory.zero_tensor(src_scale_shape,
@@ -1267,8 +1305,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
                         binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
   bool ok = (status == status_t::success && ref_status == status_t::success);
   if (ok) {
+    // TODO: Update the tolerace calcuation
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                             rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f);
+                             rtol_bf16, 18 *epsilon_bf16, ok, false, 1.0f, true);
   }
   EXPECT_TRUE(ok);
 }

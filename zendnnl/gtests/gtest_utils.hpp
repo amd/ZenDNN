@@ -180,7 +180,7 @@ class tensor_factory_t {
   /** @brief zero tensor */
   tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
                        tensor_t scale = tensor_t(), tensor_t zp = tensor_t(),
-                       bool strided = false);
+                       bool strided = false, bool trans = false);
 
   /** @brief uniformly distributed tensor */
 
@@ -506,7 +506,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               const float epsilon, bool &flag,
                               bool enable_f32_relaxation = false,
                               float alpha = 1.0f,
-                              bool is_woq = false);
+                              bool is_quant = false);
 
 /** @fn compare_tensor_3D_matrix
  *  @brief Function to compare two matrix result after batch-matrix matmul
@@ -638,5 +638,37 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
                                  tensor_t &scale_tensor,
                                  const ReorderType &params,
                                  bool &is_comparison_successful);
+
+/** @fn quant_params_compute
+ *  @brief Compute quantization parameters from float data, and optionally quantize.
+ *
+ *  Uses reorder_direct with dynamic_quant=true to compute quantization
+ *  parameters (scale, zero-point) from the source data via compute_scale_zp.
+ *
+ *  When dst_out is nullptr (default), only scale/zp are computed (compute-only
+ *  mode). When dst_out is provided, the source data is also quantized and the
+ *  quantized tensor is written to *dst_out.
+ *
+ *  @param factory     Tensor factory for buffer allocation
+ *  @param src_ref     Float reference tensor (bf16 or f32)
+ *  @param src_dtype   Data type of src_ref (bf16 or f32)
+ *  @param dst_dtype   Quantized type (s8 or u8, determines symmetric vs asymmetric)
+ *  @param scale_dims  Quantization granularity dims for reorder_direct
+ *  @param scale_dt    Scale output data type (f32 or bf16)
+ *  @param scale_out   [out] Computed scale tensor
+ *  @param zp_out      [out] Computed zero-point tensor (empty for symmetric/s8)
+ *  @param dst_out     [out] Optional: if non-null, also quantizes and writes result
+ *  @return status_t::success or status_t::failure
+ */
+status_t quant_params_compute(
+  tensor_factory_t &factory,
+  const tensor_t &src_ref,
+  data_type_t src_dtype,
+  data_type_t dst_dtype,
+  const std::vector<int64_t> &scale_dims,
+  data_type_t scale_dt,
+  tensor_t &scale_out,
+  tensor_t &zp_out,
+  tensor_t *dst_out = nullptr);
 
 #endif
