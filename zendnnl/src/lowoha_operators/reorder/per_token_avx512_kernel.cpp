@@ -290,11 +290,15 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
     }
   };
 
-  const bool use_parallel = (M > 1);
+  if (M == 1) {
+    row_loop(0);
+    return;
+  }
 
-  if (use_parallel) {
-    const int nthreads = omp_get_max_threads();
-    const int cores_per_ccx = 8;
+  const int nthreads = omp_get_max_threads();
+  const int cores_per_ccx = 8;
+
+  if (nthreads >= cores_per_ccx && M < nthreads) {
     const int num_ccxs = std::max(1, nthreads / cores_per_ccx);
 
     #pragma omp parallel
@@ -311,7 +315,9 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
         row_loop(m);
     }
   } else {
-    for (int64_t m = 0; m < M; ++m) row_loop(m);
+    #pragma omp parallel for schedule(static)
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
   }
 }
 
