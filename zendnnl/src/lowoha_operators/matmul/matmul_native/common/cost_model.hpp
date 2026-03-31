@@ -35,11 +35,14 @@ struct UarchParams {
   bool avx512f;
   bool avx512bf16;
   bool avx512vnni;
+  /// Logical cores per CCX for M=1 GEMV OpenMP slice scheduling (AMD Zen ≈ 8).
+  /// When 1, column slices follow linear tid order.
+  int ccx_cores;
 
   UarchParams()
     : l1d_bytes(32768), l2_bytes(1048576), l3_bytes_per_ccd(33554432),
       num_cores(1), fma_ports(2), vec_width_bits(512),
-      avx512f(false), avx512bf16(false), avx512vnni(false) {}
+      avx512f(false), avx512bf16(false), avx512vnni(false), ccx_cores(1) {}
 };
 
 /// Detect micro-architecture parameters via CPUID (cached after first call).

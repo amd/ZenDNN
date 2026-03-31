@@ -242,6 +242,8 @@ struct MatmulParamsAI {
   PostOpConfig post_op_config;
   bool trans_a, trans_b;
   bool expect_success;
+  float alpha, beta;
+  int ldb_pad;
   std::string test_name;
 
   MatmulParamsAI() : m(1), n(1), k(1),
@@ -249,6 +251,7 @@ struct MatmulParamsAI {
     category(TestCategory::ACCURACY),
     trans_a(false), trans_b(false),
     expect_success(true),
+    alpha(1.0f), beta(0.0f), ldb_pad(0),
     test_name("") {}
 };
 

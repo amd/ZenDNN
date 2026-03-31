@@ -201,7 +201,7 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
   const bool transB = key.transB;
   if (K <= 0 || N <= 0) return nullptr;
   const int K_padded = (K + 1) & ~1;
-  const int N_padded = ((N + NR_PACK - 1) / NR_PACK) * NR_PACK;
+  const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
   const size_t total = static_cast<size_t>(K_padded) * N_padded;
 
   uint16_t *buf = static_cast<uint16_t *>(
@@ -266,11 +266,17 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
   const bool transB = key.transB;
   if (K <= 0 || N <= 0) return nullptr;
   const int K_padded = (K + 3) & ~3;
-  const int N_padded = ((N + NR_PACK - 1) / NR_PACK) * NR_PACK;
+  const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
   const size_t packed_total = static_cast<size_t>(K_padded) * N_padded;
+  // int8_gemv_bkc_nr64_core<1> loads a full 64-column panel for sub-64
+  // tails. When the last block's nb_padded < 64, those unmasked loads
+  // extend past packed_total. The guard ensures valid (zero) memory so
+  // the accumulator picks up zeros; the epilogue masks prevent output
+  // corruption. No effect on performance — allocation-time only.
+  constexpr size_t bkc_guard = NR_PACK * INT8_VNNI_GRP;
 
   int8_t *pbuf = static_cast<int8_t *>(
-    std::aligned_alloc(64, ((packed_total + 63) & ~size_t(63))));
+    std::aligned_alloc(64, ((packed_total + bkc_guard + 63) & ~size_t(63))));
   if (!pbuf) return nullptr;
 
   int32_t *cs_buf = static_cast<int32_t *>(
@@ -286,6 +292,7 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
   if (!ebias_buf) { std::free(pbuf); std::free(cs_buf); std::free(cscale_buf); return nullptr; }
 
   pack_b_int8_bkc(weight, ldb, K, N, transB, pbuf, cs_buf);
+  std::memset(pbuf + packed_total, 0, bkc_guard);
   precompute_int8_dequant(
       cs_buf, bias, src_scale, src_zp,
       wei_scale, wei_scale_count,
@@ -399,6 +406,20 @@ const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
   const INT8PrepackedWeight *raw = pw.get();
   cache_[key] = std::move(pw);
   return raw;
+}
+
+std::atomic<uint64_t> &weight_cache_generation() {
+  static std::atomic<uint64_t> gen{0};
+  return gen;
+}
+
+void clear_all_weight_caches() {
+  PrepackedWeightCache::instance().clear();
+  BF16PrepackedWeightCache::instance().clear();
+  BF16BKCWeightCache::instance().clear();
+  INT8KContiguousWeightCache::instance().clear();
+  INT8PrepackedWeightCache::instance().clear();
+  weight_cache_generation().fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace native

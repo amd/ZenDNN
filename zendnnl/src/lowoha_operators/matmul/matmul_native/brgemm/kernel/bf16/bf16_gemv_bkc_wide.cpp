@@ -44,7 +44,7 @@ static void bf16_gemv_bkc_wide_core(
     float *__restrict__ C_fp32,
     const float *__restrict__ bias_f,
     fused_postop_t fused_op,
-    float beta,
+    float alpha, float beta,
     bool dst_is_bf16,
     int k_pairs, int n_stride, int K, int N, int jc) {
 
@@ -52,35 +52,8 @@ static void bf16_gemv_bkc_wide_core(
     constexpr int NR = 64;
     __m512 acc[NP * NV];
 
-    if (beta != 0.0f && dst_is_bf16 && C_bf16) {
-        __m512 bv = _mm512_set1_ps(beta);
-        for (int i = 0; i < NP * NV; ++i) {
-            const int n_off = jc + i * 16;
-            if (n_off >= N) { acc[i] = _mm512_setzero_ps(); continue; }
-            const int elems = std::min(16, N - n_off);
-            __m256i raw = (elems == 16)
-                ? _mm256_loadu_si256(reinterpret_cast<const __m256i *>(C_bf16 + n_off))
-                : _mm256_maskz_loadu_epi16(
-                    static_cast<__mmask16>((1u << elems) - 1), C_bf16 + n_off);
-            __m512 fp = _mm512_castsi512_ps(_mm512_slli_epi32(
-                _mm512_cvtepu16_epi32(raw), 16));
-            acc[i] = _mm512_mul_ps(bv, fp);
-        }
-    } else if (beta != 0.0f && C_fp32) {
-        __m512 bv = _mm512_set1_ps(beta);
-        for (int i = 0; i < NP * NV; ++i) {
-            const int n_off = jc + i * 16;
-            if (n_off >= N) { acc[i] = _mm512_setzero_ps(); continue; }
-            const int elems = std::min(16, N - n_off);
-            acc[i] = (elems == 16)
-                ? _mm512_mul_ps(bv, _mm512_loadu_ps(C_fp32 + n_off))
-                : _mm512_mul_ps(bv, _mm512_maskz_loadu_ps(
-                    static_cast<__mmask16>((1u << elems) - 1), C_fp32 + n_off));
-        }
-    } else {
-        for (int i = 0; i < NP * NV; ++i)
-            acc[i] = _mm512_setzero_ps();
-    }
+    for (int i = 0; i < NP * NV; ++i)
+        acc[i] = _mm512_setzero_ps();
 
     const int k_pairs_even = K / 2;
 
@@ -118,15 +91,35 @@ static void bf16_gemv_bkc_wide_core(
         const int n_off = jc + i * 16;
         if (n_off >= N) break;
         const int elems = std::min(16, N - n_off);
-        __m512 val = acc[i];
+        const __mmask16 mask = (elems == 16) ? __mmask16(0xFFFF)
+            : static_cast<__mmask16>((1u << elems) - 1);
 
-        if (bias_f) {
-            if (elems == 16)
-                val = _mm512_add_ps(val, _mm512_loadu_ps(bias_f + n_off));
-            else
-                val = _mm512_add_ps(val, _mm512_maskz_loadu_ps(
-                    static_cast<__mmask16>((1u << elems) - 1), bias_f + n_off));
+        __m512 val = (alpha != 1.0f)
+            ? _mm512_mul_ps(acc[i], _mm512_set1_ps(alpha)) : acc[i];
+
+        if (beta != 0.0f) {
+            __m512 c_old;
+            if (dst_is_bf16 && C_bf16) {
+                __m256i raw = (elems == 16)
+                    ? _mm256_loadu_si256(reinterpret_cast<const __m256i *>(C_bf16 + n_off))
+                    : _mm256_maskz_loadu_epi16(mask, C_bf16 + n_off);
+                c_old = _mm512_castsi512_ps(_mm512_slli_epi32(
+                    _mm512_cvtepu16_epi32(raw), 16));
+            } else if (C_fp32) {
+                c_old = (elems == 16)
+                    ? _mm512_loadu_ps(C_fp32 + n_off)
+                    : _mm512_maskz_loadu_ps(mask, C_fp32 + n_off);
+            } else {
+                c_old = _mm512_setzero_ps();
+            }
+            val = _mm512_fmadd_ps(_mm512_set1_ps(beta), c_old, val);
         }
+
+        if (bias_f)
+            val = _mm512_add_ps(val, (elems == 16)
+                ? _mm512_loadu_ps(bias_f + n_off)
+                : _mm512_maskz_loadu_ps(mask, bias_f + n_off));
+
         if (fused_op != fused_postop_t::none)
             val = apply_fused_postop(val, fused_op);
 
@@ -136,14 +129,12 @@ static void bf16_gemv_bkc_wide_core(
                 _mm256_storeu_si256(
                     reinterpret_cast<__m256i *>(C_bf16 + n_off), (__m256i)bf);
             else
-                _mm256_mask_storeu_epi16(C_bf16 + n_off,
-                    static_cast<__mmask16>((1u << elems) - 1), (__m256i)bf);
+                _mm256_mask_storeu_epi16(C_bf16 + n_off, mask, (__m256i)bf);
         } else {
             if (elems == 16)
                 _mm512_storeu_ps(C_fp32 + n_off, val);
             else
-                _mm512_mask_storeu_ps(C_fp32 + n_off,
-                    static_cast<__mmask16>((1u << elems) - 1), val);
+                _mm512_mask_storeu_ps(C_fp32 + n_off, mask, val);
         }
     }
 }
@@ -155,7 +146,7 @@ void bf16_gemv_bkc_wide_dispatch(
     float *__restrict__ C_fp32,
     const float *__restrict__ bias_f,
     fused_postop_t fused_op,
-    float beta,
+    float alpha, float beta,
     bool dst_is_bf16,
     int k_pairs, int n_stride, int K, int N,
     int jc, int nb) {
@@ -167,12 +158,12 @@ void bf16_gemv_bkc_wide_dispatch(
     case 6:
         bf16_gemv_bkc_wide_core<6>(
             A, B_bkc, C_bf16, C_fp32, bias_f, fused_op,
-            beta, dst_is_bf16, k_pairs, n_stride, K, N, jc);
+            alpha, beta, dst_is_bf16, k_pairs, n_stride, K, N, jc);
         break;
     case 5:
         bf16_gemv_bkc_wide_core<5>(
             A, B_bkc, C_bf16, C_fp32, bias_f, fused_op,
-            beta, dst_is_bf16, k_pairs, n_stride, K, N, jc);
+            alpha, beta, dst_is_bf16, k_pairs, n_stride, K, N, jc);
         break;
     default:
         break;

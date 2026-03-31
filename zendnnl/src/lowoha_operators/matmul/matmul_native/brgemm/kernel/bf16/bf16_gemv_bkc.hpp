@@ -48,15 +48,17 @@ void bf16_gemv_bkc(
     float *__restrict__ C_fp32,
     const float *__restrict__ bias_f,
     fused_postop_t fused_op,
-    float beta,
+    float alpha, float beta,
     bool dst_is_bf16,
     int K, int N);
 
 /// Pack B into Blocked K-contiguous (BKC) VNNI block layout.
 /// Total size: K_padded × N_padded × sizeof(uint16_t) bytes (same as before).
+/// \p col0  Starting column in B (0 = pack columns [0, N); else [col0, col0+N)).
 void pack_b_bkc_ext(
     const uint16_t *B, int ldb, int K, int N, bool transB,
-    uint16_t *packed);
+    uint16_t *packed,
+    int col0 = 0);
 
 /// Wide-block dispatch for NP=5,6 (separate CU to avoid i-cache pollution).
 /// Called from bf16_gemv_bkc when block width is 384.
@@ -67,7 +69,7 @@ void bf16_gemv_bkc_wide_dispatch(
     float *__restrict__ C_fp32,
     const float *__restrict__ bias_f,
     fused_postop_t fused_op,
-    float beta,
+    float alpha, float beta,
     bool dst_is_bf16,
     int k_pairs, int n_stride, int K, int N,
     int jc, int nb);

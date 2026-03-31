@@ -17,6 +17,7 @@
 #ifndef MATMUL_NATIVE_KERNEL_CACHE_HPP
 #define MATMUL_NATIVE_KERNEL_CACHE_HPP
 
+#include <atomic>
 #include <mutex>
 #include <memory>
 #include <unordered_map>
@@ -36,6 +37,13 @@ namespace native {
 /// A kernel with NR=48 loads 3 of 4 ZMMs per k-row; the unused 16 floats
 /// are zero-padded and ignored.
 inline constexpr int NR_PACK = 64;
+
+/// Packing granularity for BKC (Blocked K-Contiguous) GEMV format.
+/// BKC pads each block's column count to the next multiple of BKC_NR_PAD
+/// instead of NR_PACK, reducing zero-padding waste for non-64-aligned N.
+/// The GEMV kernel's 16-wide tail handles any remainder via masking.
+/// Must be a power of 2 and divide NR_PACK (so full-panel dispatch is safe).
+inline constexpr int BKC_NR_PAD = 16;
 
 /// Custom deleter for aligned_alloc'd memory.
 struct AlignedFreeDeleter {
@@ -76,14 +84,15 @@ struct PrepackedWeight {
   static constexpr int stride() { return NR_PACK; }
 };
 
-/// Cache key — no NR dependency.
+/// Cache key for packed weights — independent of microkernel NR.
 ///
-/// IMPORTANT: The key uses the raw weight pointer for identity. Callers
-/// must ensure pointer stability for the lifetime of cached entries: the
-/// same address must always refer to the same weight data. Frameworks
-/// that recycle memory via caching allocators (e.g., PyTorch) must
-/// guarantee this invariant when is_weights_const is true, or disable
-/// weight caching entirely.
+/// Uniqueness: equality and hashing use \c weight_ptr, \c K, \c N, \c ldb,
+/// and \c transB. Distinct tensors or layouts produce distinct keys; there is
+/// no separate "format id" — if any of these differ, the entry is different.
+///
+/// IMPORTANT: \c weight_ptr is identity for the tensor. Callers must keep the
+/// address stable for the lifetime of cached entries when weights are const;
+/// otherwise disable weight caching or clear caches on buffer reuse.
 struct PrepackedWeightKey {
   const void *weight_ptr;
   int K, N, ldb;
@@ -99,13 +108,13 @@ struct PrepackedWeightKey {
 struct PrepackedWeightKeyHash {
   size_t operator()(const PrepackedWeightKey &k) const {
     size_t h = std::hash<const void *>()(k.weight_ptr);
-    auto combine = [](size_t &seed, size_t val) {
+    auto mix = [](size_t &seed, size_t val) {
       seed ^= val + 0x9e3779b9 + (seed << 6) + (seed >> 2);
     };
-    combine(h, std::hash<int>()(k.K));
-    combine(h, std::hash<int>()(k.N));
-    combine(h, std::hash<int>()(k.ldb));
-    combine(h, std::hash<bool>()(k.transB));
+    mix(h, static_cast<size_t>(static_cast<uint32_t>(k.K)));
+    mix(h, static_cast<size_t>(static_cast<uint32_t>(k.N)));
+    mix(h, static_cast<size_t>(static_cast<uint32_t>(k.ldb)));
+    mix(h, k.transB ? size_t(1) : size_t(0));
     return h;
   }
 };
@@ -198,11 +207,11 @@ private:
 /// blocks, each packed with K-contiguous VNNI layout. Within each block,
 /// all k-pairs are contiguous with stride = blk_N_padded × VNNI_PAIR.
 ///
-/// Layout: for each k-pair, ALL N columns (padded to NR_PACK=64) are contiguous:
+/// Layout: for each k-pair, ALL N columns (padded to BKC_NR_PAD=16) are contiguous:
 ///   packed[kp * N_padded * 2 + n * 2 + 0] = B[2*kp  ][n]
 ///   packed[kp * N_padded * 2 + n * 2 + 1] = B[2*kp+1][n]
 ///
-/// N is padded to NR_PACK (64) boundary with zeros.
+/// N is padded to BKC_NR_PAD (16) boundary with zeros.
 /// K is padded to even for VNNI alignment.
 ///
 /// This layout provides sequential memory access when iterating K-outer,
@@ -213,7 +222,7 @@ struct BF16BKCWeight {
   int K;           ///< Original K
   int K_padded;    ///< K rounded up to even
   int N;           ///< Original N
-  int N_padded;    ///< N rounded up to NR_PACK (64)
+  int N_padded;    ///< N rounded up to BKC_NR_PAD (16)
   size_t total;    ///< Total buffer size in uint16_t elements
 
   /// N-stride in uint16_t units for one k-pair row.
@@ -256,7 +265,7 @@ inline constexpr int INT8_VNNI_GRP = 4;
 /// INT8 K-contiguous VNNI packed weight buffer with precomputed
 /// dequantization vectors for zero-point compensation.
 ///
-/// Layout: for each k-quad, ALL N columns (padded to NR_PACK=64)
+/// Layout: for each k-quad, ALL N columns (padded to BKC_NR_PAD=16)
 /// are contiguous as 4-byte groups (matching vpdpbusd operand layout).
 struct INT8KContiguousWeight {
   std::unique_ptr<int8_t[], AlignedFreeS8Deleter>  packed_buf;
@@ -357,15 +366,15 @@ private:
   std::mutex mutex_;
 };
 
+/// Generation counter incremented on every cache clear. Thread-local
+/// fast paths compare against this to detect stale pointers.
+/// Defined in kernel_cache.cpp to ensure a single instance across TUs.
+std::atomic<uint64_t> &weight_cache_generation();
+
 /// Clear all weight caches. Must only be called when no thread is using
 /// any previously returned pointer (e.g., between test cases or model swap).
-inline void clear_all_weight_caches() {
-  PrepackedWeightCache::instance().clear();
-  BF16PrepackedWeightCache::instance().clear();
-  BF16BKCWeightCache::instance().clear();
-  INT8KContiguousWeightCache::instance().clear();
-  INT8PrepackedWeightCache::instance().clear();
-}
+/// Defined in kernel_cache.cpp.
+void clear_all_weight_caches();
 
 } // namespace native
 } // namespace matmul

@@ -27,9 +27,11 @@ namespace matmul {
 namespace native {
 
 /// Direct BF16 GEMV (M=1) fast path.
-/// Bypasses Planner + Looper for minimal overhead single-thread GEMV.
-/// Uses cached prepacked weights when available, else falls back to
-/// the standard bf16_brgemm_execute / bf16_gemm_execute path.
+/// Bypasses Planner + Looper for eligible shapes: single-thread uses a global
+/// or thread-local packed B when it fits L2; multi-thread uses per-thread
+/// column slices (OpenMP team size capped by \c m1_gemv_cap_threads) with
+/// optional CCX-aware slice permutation on AMD Zen when \c nt % ccx_cores == 0.
+/// Falls back to bf16_brgemm_execute when gates fail.
 ///
 /// Returns true if the fast path handled the operation, false to fall back.
 bool bf16_gemv_direct(

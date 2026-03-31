@@ -18,6 +18,7 @@
 #include "common/zendnnl_global.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "matmul_native/common/cost_model.hpp"
+#include "matmul_native/common/kernel_cache.hpp"
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -789,7 +790,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
           // For large B near L2 capacity (>500KB) with N>256, DLP wins
           // due to two-block dispatch overhead. Route those to DLP.
           const int kp = (K + 3) & ~3;
-          const int np = ((N + 63) / 64) * 64;
+          const int np = ((N + native::BKC_NR_PAD - 1) / native::BKC_NR_PAD) * native::BKC_NR_PAD;
           const size_t b_packed = static_cast<size_t>(kp) * np;
           static const size_t l2 =
               static_cast<size_t>(native::detect_uarch().l2_bytes);

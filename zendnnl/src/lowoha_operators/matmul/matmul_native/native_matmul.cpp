@@ -17,6 +17,8 @@
 #include "lowoha_operators/matmul/matmul_native/native_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
@@ -60,7 +62,7 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int N, int K, int num_threads) {
   if (num_threads != 1)
     return matmul_algo_t::native_brgemm;
 
-  const int packed_N = ((N + 63) / 64) * 64;
+  const int packed_N = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
   const int pad_waste = packed_N - N;
   const size_t packed_K = static_cast<size_t>((K + 1) & ~1);
   const size_t b_packed_bytes = packed_K * packed_N * sizeof(uint16_t);
@@ -172,9 +174,12 @@ bool native_matmul_execute(
   // ════════════════════════════════════════════════════════════════════
   if (kernel == matmul_algo_t::native_brgemm) {
     const UarchParams &uarch = detect_uarch();
+    int nt_exec = num_threads;
+    if (M == 1 && is_bf16 && num_threads > 1)
+      nt_exec = m1_gemv_cap_threads(N, num_threads);
     GemmDescriptor desc = make_desc(transA, transB, M, N, K, alpha, beta,
                                     lda, ldb, ldc, is_weights_const,
-                                    num_threads, params);
+                                    nt_exec, params);
     desc.bias = bias;
 
     // INT8 paths: u8/s8 source × s8 weights → bf16/fp32.
@@ -185,6 +190,8 @@ bool native_matmul_execute(
                           params.dtypes.wei == data_type_t::s8);
     if (is_int8) {
       if (!uarch.avx512vnni) return false;
+      // INT8 BKC GEMV is single-thread only today; BF16 M=1 can use bf16_gemv_direct
+      // with nt>1. Parallel INT8 M=1 goes straight to BRGEMM.
       if (M == 1 && num_threads == 1) {
         if (int8_gemv_direct(desc, uarch, src, weight, dst, bias, params))
           return true;
@@ -194,7 +201,10 @@ bool native_matmul_execute(
     }
 
     if (is_bf16 && uarch.avx512bf16) {
-      if (M == 1 && num_threads == 1) {
+      // M=1: try BKC GEMV first (single-thread: global/thread-local pack;
+      // multi-thread: per-thread N-slices, each packs its columns). On false,
+      // fall through to BRGEMM looper.
+      if (M == 1) {
         if (bf16_gemv_direct(desc, uarch, src, weight, dst, bias, params))
           return true;
       }

@@ -21,10 +21,12 @@
 #include "operators/matmul/matmul_config.hpp"
 #include "common/zendnnl_global.hpp"
 
-#include <cstdint>
-#include <cstring>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -32,6 +34,216 @@ namespace matmul {
 namespace native {
 
 using namespace zendnnl::error_handling;
+using zendnnl::ops::matmul_config_t;
+
+namespace {
+
+/// Worst per-thread packed column-slice size (bytes) for team size \p nt
+/// (\p chunk = ceil(N/nt), padded to BKC_NR_PAD).
+inline size_t bf16_bkc_mt_worst_slice_packed_bytes(int K_padded, int N, int nt) {
+    if (nt < 1) nt = 1;
+    const int chunk = (N + nt - 1) / nt;
+    const int n_pad = ((chunk + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
+    return static_cast<size_t>(K_padded) * n_pad * sizeof(uint16_t);
+}
+
+/// Max fraction of L2 used for each thread's packed B slice in the MT path.
+/// Leaves headroom for A, outputs, bias, and prefetch (single-thread BKC still
+/// gates on full \p l2_cap for the whole packed matrix).
+inline constexpr unsigned kBf16BkcMtL2SliceBudgetPct = 85;
+
+/// Map OpenMP \p tid → column slice index (same \p chunk = ceil(N/nt) layout as
+/// linear scheduling, but permuted so consecutive \p tid values map to the same
+/// CCX). When \p nt % ccx_cores == 0 and \p nt >= ccx_cores, indices \p s are a
+/// permutation of 0..nt-1 (every slice assigned once). Otherwise returns \p tid
+/// (linear). \p nt == ccx_cores gives the identity map.
+inline int bf16_gemv_mt_slice_index(int tid, int nt, int ccx_cores) {
+    if (ccx_cores < 2 || nt < ccx_cores || (nt % ccx_cores) != 0)
+        return tid;
+    const int num_ccxs = nt / ccx_cores;
+    const int ccx_id = tid / ccx_cores;
+    const int local_id = tid % ccx_cores;
+    return ccx_id + local_id * num_ccxs;
+}
+
+/// Column range for slice \p s with fixed \p chunk (same as linear scheduling).
+inline void bf16_gemv_mt_slice_column_range(int s, int N, int chunk,
+                                            int *n0_out, int *n1_out) {
+    const int n0 = s * chunk;
+    *n0_out = n0;
+    *n1_out = std::min(N, n0 + chunk);
+}
+
+inline void bf16_bias_to_f32_span(const uint16_t *bb, int count, float *out) {
+    for (int n = 0; n < count; ++n) {
+        uint32_t bits = static_cast<uint32_t>(bb[n]) << 16;
+        std::memcpy(&out[n], &bits, sizeof(float));
+    }
+}
+
+/// BF16 bias → FP32 scratch (thread_local). Full row length N.
+bool bkc_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
+                        bool has_bias, const float **bias_f_out) {
+    *bias_f_out = nullptr;
+    if (!has_bias) return true;
+    const bool bias_is_bf16 = (desc.bias_dt == data_type_t::bf16);
+    if (desc.bias_dt == data_type_t::f32) {
+        *bias_f_out = static_cast<const float *>(bias);
+        return true;
+    }
+    if (!bias_is_bf16) return false;
+
+    static thread_local float *s_bias_fp32 = nullptr;
+    static thread_local size_t s_bias_cap = 0;
+    static thread_local const void *s_bias_ptr = nullptr;
+    static thread_local int s_bias_N = 0;
+    static thread_local uint64_t s_bias_gen = 0;
+
+    const uint64_t cur_gen = weight_cache_generation().load(
+        std::memory_order_relaxed);
+    if (s_bias_fp32 && s_bias_ptr == bias && s_bias_N == N
+        && s_bias_gen == cur_gen) {
+        *bias_f_out = s_bias_fp32;
+        return true;
+    }
+    if (s_bias_cap < static_cast<size_t>(N)) {
+        std::free(s_bias_fp32);
+        s_bias_fp32 = static_cast<float *>(std::aligned_alloc(
+            64, ((static_cast<size_t>(N) * sizeof(float) + 63) & ~size_t(63))));
+        s_bias_cap = s_bias_fp32 ? static_cast<size_t>(N) : 0;
+        if (!s_bias_fp32) return false;
+    }
+    bf16_bias_to_f32_span(static_cast<const uint16_t *>(bias), N, s_bias_fp32);
+    s_bias_ptr = bias;
+    s_bias_N = N;
+    s_bias_gen = cur_gen;
+    *bias_f_out = s_bias_fp32;
+    return true;
+}
+
+/// Single-thread packed B: global weight cache when const+enabled, else
+/// thread-local buffer. Keyed by \c PrepackedWeightKey (pointer, K, N, ldb, transB).
+bool bkc_resolve_packed_B_st(
+    const GemmDescriptor &desc,
+    int K, int N, int K_padded, int N_padded,
+    const void *weight, const uint16_t *B_raw,
+    const uint16_t **B_bkc_out, const char **pack_source_out) {
+    *B_bkc_out = nullptr;
+    *pack_source_out = "none";
+    const int ldb = desc.ldb;
+    const size_t need = static_cast<size_t>(K_padded) * N_padded;
+
+    const int32_t wcache = matmul_config_t::instance().get_weight_cache();
+    if (desc.is_weights_const && wcache != 0) {
+        static thread_local const void *tl_g_wt = nullptr;
+        static thread_local int tl_g_K = 0, tl_g_N = 0;
+        static thread_local const uint16_t *tl_g_data = nullptr;
+        static thread_local uint64_t tl_g_gen = 0;
+
+        const uint64_t cur_gen = weight_cache_generation().load(
+            std::memory_order_relaxed);
+        if (tl_g_wt == weight && tl_g_K == K && tl_g_N == N
+            && tl_g_data && tl_g_gen == cur_gen) {
+            *B_bkc_out = tl_g_data;
+            *pack_source_out = "tl_hit_global_ptr";
+            return true;
+        }
+        const PrepackedWeightKey key{weight, K, N, ldb, desc.transB};
+        const BF16BKCWeight *cached =
+            BF16BKCWeightCache::instance().get_or_pack(key, B_raw);
+        if (!cached) return false;
+        *B_bkc_out = cached->data;
+        tl_g_wt = weight;
+        tl_g_K = K;
+        tl_g_N = N;
+        tl_g_data = cached->data;
+        tl_g_gen = cur_gen;
+        *pack_source_out = "global_cache";
+        return true;
+    }
+
+    static thread_local uint16_t *tl_buf = nullptr;
+    static thread_local size_t tl_cap = 0;
+    static thread_local const void *tl_wt = nullptr;
+    static thread_local int tl_K = 0, tl_N = 0, tl_ldb = 0;
+    static thread_local bool tl_tr = false;
+    static thread_local uint64_t tl_gen = 0;
+
+    const uint64_t cur_gen = weight_cache_generation().load(
+        std::memory_order_relaxed);
+    const bool hit = (tl_buf && tl_cap >= need && desc.is_weights_const
+                      && tl_wt == weight && tl_K == K && tl_N == N
+                      && tl_ldb == ldb && tl_tr == desc.transB
+                      && tl_gen == cur_gen);
+    if (!hit) {
+        if (tl_cap < need) {
+            std::free(tl_buf);
+            tl_buf = static_cast<uint16_t *>(std::aligned_alloc(
+                64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
+            tl_cap = tl_buf ? need : 0;
+        }
+        if (!tl_buf) return false;
+        pack_b_bkc_ext(B_raw, ldb, K, N, desc.transB, tl_buf);
+        tl_wt = weight;
+        tl_K = K;
+        tl_N = N;
+        tl_ldb = ldb;
+        tl_tr = desc.transB;
+        tl_gen = cur_gen;
+    }
+    *B_bkc_out = tl_buf;
+    *pack_source_out = "thread_local";
+    return true;
+}
+
+/// Per-thread N-column slice pack (multi-thread GEMV). No global cache.
+bool bkc_pack_column_slice(
+    const GemmDescriptor &desc, int K, int K_padded,
+    int n0, int n_cols,
+    const void *weight, const uint16_t *B_raw,
+    const uint16_t **packed_out) {
+    const int ldb = desc.ldb;
+    const int n_pad = ((n_cols + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
+    const size_t need = static_cast<size_t>(K_padded) * n_pad;
+
+    static thread_local uint16_t *buf = nullptr;
+    static thread_local size_t cap = 0;
+    static thread_local const void *w = nullptr;
+    static thread_local int k_stored = 0, ldb_stored = 0;
+    static thread_local int n0_stored = 0, nloc_stored = 0;
+    static thread_local bool tr_stored = false;
+    static thread_local uint64_t gen_stored = 0;
+
+    const uint64_t cur_gen = weight_cache_generation().load(
+        std::memory_order_relaxed);
+    const bool can_reuse = desc.is_weights_const
+        && buf && cap >= need
+        && w == weight && k_stored == K && ldb_stored == ldb
+        && n0_stored == n0 && nloc_stored == n_cols
+        && tr_stored == desc.transB && gen_stored == cur_gen;
+
+    if (!can_reuse) {
+        if (cap < need) {
+            std::free(buf);
+            buf = static_cast<uint16_t *>(std::aligned_alloc(
+                64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
+            cap = buf ? need : 0;
+        }
+        if (!buf) return false;
+        pack_b_bkc_ext(B_raw, ldb, K, n_cols, desc.transB, buf, n0);
+        w = weight;
+        k_stored = K;
+        ldb_stored = ldb;
+        n0_stored = n0;
+        nloc_stored = n_cols;
+        tr_stored = desc.transB;
+        gen_stored = cur_gen;
+    }
+    *packed_out = buf;
+    return true;
+}
+
+} // namespace
 
 __attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
 bool bf16_gemv_direct(
@@ -41,156 +253,100 @@ bool bf16_gemv_direct(
     const void *bias, matmul_params &params) {
 
     const int M = desc.M, N = desc.N, K = desc.K;
-    const int ldb = desc.ldb;
     const float alpha = desc.alpha, beta = desc.beta;
 
     if (M != 1) return false;
     if (!uarch.avx512bf16) return false;
-    if (alpha != 1.0f) return false;
     if (desc.transA) return false;
-
-    // ── Eligibility gates ──
-    const int K_padded = (K + 1) & ~1;
-    const int N_padded = ((N + NR_PACK - 1) / NR_PACK) * NR_PACK;
-    const size_t b_packed_bytes =
-        static_cast<size_t>(K_padded) * N_padded * sizeof(uint16_t);
-    const size_t l2_cap = static_cast<size_t>(uarch.l2_bytes);
-
     if (N <= 0) return false;
-    if (desc.num_threads > 1) return false;
-    if (b_packed_bytes > l2_cap) return false;
-    if (desc.ldc != N) return false;
+
+    const int K_padded = (K + 1) & ~1;
+    const size_t l2_cap = static_cast<size_t>(uarch.l2_bytes);
+    const int num_threads = desc.num_threads;
 
     fused_postop_t kc_fused_op = fused_postop_t::none;
-    bool has_unfuseable_postops = false;
-    for (int i = 0; i < static_cast<int>(params.postop_.size()); ++i) {
-        auto pt = params.postop_[i].po_type;
-        if (pt == post_op_type_t::none) continue;
-        if (kc_fused_op == fused_postop_t::none) {
-            if (pt == post_op_type_t::relu && params.postop_[i].alpha == 0.0f)
-                { kc_fused_op = fused_postop_t::relu; continue; }
-            if (pt == post_op_type_t::gelu_tanh)
-                { kc_fused_op = fused_postop_t::gelu_tanh; continue; }
-            if (pt == post_op_type_t::gelu_erf)
-                { kc_fused_op = fused_postop_t::gelu_erf; continue; }
-            if (pt == post_op_type_t::sigmoid)
-                { kc_fused_op = fused_postop_t::sigmoid; continue; }
-            if (pt == post_op_type_t::tanh)
-                { kc_fused_op = fused_postop_t::tanh_op; continue; }
-            if (pt == post_op_type_t::swish)
-                { kc_fused_op = fused_postop_t::swish; continue; }
-        }
-        has_unfuseable_postops = true;
-    }
-    if (has_unfuseable_postops) return false;
+    bool has_unfuseable = false;
+    if (!scan_gemv_postops(params, &kc_fused_op, &has_unfuseable))
+        return false;
 
-    // ── Pack B + compute ──
     const bool has_bias = (desc.bias != nullptr);
     const bool dst_is_bf16 = (desc.dst_dt == data_type_t::bf16);
     const bool bias_is_bf16 = (desc.bias_dt == data_type_t::bf16);
     const uint16_t *A = static_cast<const uint16_t *>(src);
-
-    static thread_local float *s_bias_g = nullptr;
-    static thread_local size_t s_bias_g_cap = 0;
-    static thread_local const void *s_bias_ptr = nullptr;
-    static thread_local int s_bias_N = 0;
-    const float *bias_f = nullptr;
-    if (has_bias) {
-        if (bias_is_bf16) {
-            if (s_bias_g_cap < static_cast<size_t>(N)) {
-                std::free(s_bias_g);
-                s_bias_g = static_cast<float *>(std::aligned_alloc(
-                    64, ((N * sizeof(float) + 63) & ~size_t(63))));
-                s_bias_g_cap = s_bias_g ? N : 0;
-                if (!s_bias_g) return false;
-                s_bias_ptr = nullptr;
-            }
-            if (s_bias_ptr != bias || s_bias_N != N) {
-                const uint16_t *bb = static_cast<const uint16_t *>(bias);
-                for (int n = 0; n < N; ++n) {
-                    uint32_t bits = static_cast<uint32_t>(bb[n]) << 16;
-                    std::memcpy(&s_bias_g[n], &bits, sizeof(float));
-                }
-                s_bias_ptr = bias;
-                s_bias_N = N;
-            }
-            bias_f = s_bias_g;
-        } else {
-            bias_f = static_cast<const float *>(bias);
-        }
-    }
-
     const uint16_t *B_raw = static_cast<const uint16_t *>(weight);
-    const uint16_t *B_bkc = nullptr;
-    [[maybe_unused]] const char *pack_source = "none";
 
-    using zendnnl::ops::matmul_config_t;
-    static int32_t s_weight_cache =
-        matmul_config_t::instance().get_weight_cache();
+    if (has_bias && !bias_is_bf16 && desc.bias_dt != data_type_t::f32)
+        return false;
 
-    if (desc.is_weights_const && s_weight_cache != 0) {
-        static thread_local const void *s_gc_wt = nullptr;
-        static thread_local int s_gc_K = 0, s_gc_N = 0;
-        static thread_local const uint16_t *s_gc_data = nullptr;
+    if (num_threads > 1) {
+        if (desc.ldc != N) return false;
+        // nt = max team size allowed for this N (min cols/thread + caller cap).
+        // Worst packed slice shrinks as nt grows (chunk = ceil(N/nt)); if even
+        // that thinnest slice exceeds an L2 budget, no smaller nt helps — BRGEMM.
+        const int nt = m1_gemv_cap_threads(N, num_threads);
+        const size_t l2_slice_budget =
+            (l2_cap * kBf16BkcMtL2SliceBudgetPct) / 100;
+        if (bf16_bkc_mt_worst_slice_packed_bytes(K_padded, N, nt) > l2_slice_budget)
+            return false;
 
-        if (s_gc_wt == weight && s_gc_K == K && s_gc_N == N && s_gc_data) {
-            B_bkc = s_gc_data;
-            pack_source = "tl_cache";
-        } else {
-            PrepackedWeightKey key{weight, K, N, ldb, desc.transB};
-            const BF16BKCWeight *cached =
-                BF16BKCWeightCache::instance().get_or_pack(key, B_raw);
-            if (!cached) return false;
-            B_bkc = cached->data;
-            s_gc_wt = weight;
-            s_gc_K = K;
-            s_gc_N = N;
-            s_gc_data = cached->data;
-            pack_source = "global_cache";
-        }
-    } else {
-        static thread_local uint16_t *s_bkc = nullptr;
-        static thread_local size_t s_bkc_cap = 0;
-        static thread_local const void *s_bkc_ptr = nullptr;
-        static thread_local int s_bkc_K = 0, s_bkc_N = 0;
-        static thread_local int s_bkc_ldb = 0;
-        static thread_local bool s_bkc_transB = false;
+        const int chunk = (N + nt - 1) / nt;
 
-        size_t need = static_cast<size_t>(K_padded) * N_padded;
-        bool hit = (s_bkc && s_bkc_cap >= need
-                    && desc.is_weights_const
-                    && s_bkc_ptr == weight
-                    && s_bkc_K == K && s_bkc_N == N
-                    && s_bkc_ldb == ldb
-                    && s_bkc_transB == desc.transB);
-        if (!hit) {
-            if (s_bkc_cap < need) {
-                std::free(s_bkc);
-                s_bkc = static_cast<uint16_t *>(std::aligned_alloc(
-                    64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
-                s_bkc_cap = s_bkc ? need : 0;
+        const float *bias_f_row = nullptr;
+        if (!bkc_resolve_bias_f(desc, N, bias, has_bias, &bias_f_row))
+            return false;
+
+        uint16_t *C_bf16 = dst_is_bf16 ? static_cast<uint16_t *>(dst) : nullptr;
+        float *C_fp32 = !dst_is_bf16 ? static_cast<float *>(dst) : nullptr;
+
+        std::atomic<int> pack_fail{0};
+        const int ccx_w = uarch.ccx_cores;
+        #pragma omp parallel num_threads(nt)
+        {
+            const int tid = omp_get_thread_num();
+            const int s = bf16_gemv_mt_slice_index(tid, nt, ccx_w);
+            int n0 = 0, n1 = 0;
+            bf16_gemv_mt_slice_column_range(s, N, chunk, &n0, &n1);
+            if (n0 < N) {
+                const int n_loc = n1 - n0;
+                const uint16_t *B_slice = nullptr;
+                if (!bkc_pack_column_slice(desc, K, K_padded, n0, n_loc,
+                                           weight, B_raw, &B_slice))
+                    pack_fail.store(1, std::memory_order_relaxed);
+                else
+                    bf16_gemv_bkc(
+                        A, B_slice,
+                        C_bf16 ? C_bf16 + n0 : nullptr,
+                        C_fp32 ? C_fp32 + n0 : nullptr,
+                        bias_f_row ? bias_f_row + n0 : nullptr,
+                        kc_fused_op, alpha, beta, dst_is_bf16, K, n_loc);
             }
-            if (!s_bkc) return false;
-            pack_b_bkc_ext(B_raw, ldb, K, N, desc.transB, s_bkc);
-            s_bkc_ptr = weight;
-            s_bkc_K = K;
-            s_bkc_N = N;
-            s_bkc_ldb = ldb;
-            s_bkc_transB = desc.transB;
         }
-        B_bkc = s_bkc;
-        pack_source = "thread_local";
+        return pack_fail.load(std::memory_order_relaxed) == 0;
     }
+
+    // Single-thread: packed B must fit entirely in L2.
+    const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
+    const size_t b_packed_bytes =
+        static_cast<size_t>(K_padded) * N_padded * sizeof(uint16_t);
+    if (b_packed_bytes > l2_cap) return false;
+    if (desc.ldc != N) return false;
+
+    const float *bias_f = nullptr;
+    if (!bkc_resolve_bias_f(desc, N, bias, has_bias, &bias_f))
+        return false;
+
+    const uint16_t *B_bkc = nullptr;
+    const char *pack_source = nullptr;
+    if (!bkc_resolve_packed_B_st(desc, K, N, K_padded, N_padded,
+                                 weight, B_raw, &B_bkc, &pack_source))
+        return false;
 
     bf16_gemv_bkc(
         A, B_bkc,
         dst_is_bf16 ? static_cast<uint16_t *>(dst) : nullptr,
         !dst_is_bf16 ? static_cast<float *>(dst) : nullptr,
         (has_bias && bias_f) ? bias_f : nullptr,
-        kc_fused_op,
-        beta,
-        dst_is_bf16,
-        K, N);
+        kc_fused_op, alpha, beta, dst_is_bf16, K, N);
 
     static bool s_log = apilog_info_enabled();
     if (s_log) {

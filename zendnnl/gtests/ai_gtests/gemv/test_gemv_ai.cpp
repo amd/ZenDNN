@@ -22,6 +22,9 @@
 #include <iostream>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
+#include <algorithm>
+#include <omp.h>
 
 using namespace ai_gtests;
 using namespace zendnnl::lowoha::matmul;
@@ -45,13 +48,13 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
     t.input   = AITensorFactory::create_uniform_tensor(
                   {params.m, params.k}, input_dtype, "gemv_input");
 
-    // transB: weights are {N, K} instead of {K, N}
-    if (params.trans_b)
-      t.weights = AITensorFactory::create_uniform_tensor(
-                    {params.n, params.k}, weight_dtype, "gemv_weights");
-    else
-      t.weights = AITensorFactory::create_uniform_tensor(
-                    {params.k, params.n}, weight_dtype, "gemv_weights");
+    // transB: weights are {N, K} instead of {K, N}.
+    // ldb_pad > 0: allocate wider rows for stride testing (ldb = N + pad).
+    const uint64_t ldb_cols = params.trans_b
+        ? params.k + params.ldb_pad : params.n + params.ldb_pad;
+    const uint64_t ldb_rows = params.trans_b ? params.n : params.k;
+    t.weights = AITensorFactory::create_uniform_tensor(
+                  {ldb_rows, ldb_cols}, weight_dtype, "gemv_weights");
     t.bias    = AITensorFactory::create_uniform_tensor(
                   {1, params.n}, output_dtype, "gemv_bias");
     t.output  = AITensorFactory::create_zero_tensor(
@@ -181,11 +184,10 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
         const int N = static_cast<int>(params.n);
         const int K = static_cast<int>(params.k);
         const int lda = K;
-        const int ldb = params.trans_b ? K : N;
+        const int ldb = (params.trans_b ? K : N) + params.ldb_pad;
         const int ldc = N;
 
         // Enable weight caching so the global cache path is exercised.
-        // Must be set before the first kernel call (static captured once).
         matmul_config_t::instance().set_weight_cache(1);
 
         matmul_data_types dtypes;
@@ -203,10 +205,27 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
 
         matmul_params mp;
         mp.dtypes = dtypes;
-        mp.num_threads = 1;
-        // Set algo from config, matching regular gtest (params.lowoha_algo = algo)
-        mp.lowoha_algo = static_cast<matmul_algo_t>(
-          matmul_config_t::instance().get_algo());
+        // Default 1 for stable CI. Set GEMV_NUM_THREADS>1 to stress the
+        // multi-thread BKC-GEMV path in bf16_gemv_direct; use GEMV_NUM_THREADS=0
+        // to follow omp_get_max_threads() (respect OMP_NUM_THREADS).
+        {
+          int gemv_nt = 1;
+          if (const char *nts = std::getenv("GEMV_NUM_THREADS")) {
+            if (nts[0] != '\0') {
+              int v = std::atoi(nts);
+              if (v <= 0)
+                gemv_nt = omp_get_max_threads();
+              else
+                gemv_nt = std::min(v, 256);
+            }
+          }
+          mp.num_threads = std::max(1, gemv_nt);
+        }
+        // Force algo 11 (native_brgemm) to ensure the BKC-GEMV kernel
+        // is tested consistently across all 3 packing paths. Algo 0
+        // may route different paths to different kernels (DLP vs BKC)
+        // based on is_weights_const, causing false cross-check failures.
+        mp.lowoha_algo = matmul_algo_t::native_brgemm;
 
         for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
           matmul_post_op po_item;
@@ -261,48 +280,71 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
           // subtracts 128*col_sum — compensating the +128 offset exactly.
         }
 
-        // ── Run all three packing paths for every test case ──
         using namespace zendnnl::lowoha::matmul::native;
         auto out_dt = output.get_data_type();
 
+        const float test_alpha = params.alpha;
+        const float test_beta  = params.beta;
         auto call_kernel = [&](bool wt_const, void *dst_buf) {
             return matmul_direct(
                 'r', false, params.trans_b,
                 M, N, K,
-                1.0f, input.get_raw_handle_unsafe(), lda,
+                test_alpha, input.get_raw_handle_unsafe(), lda,
                 weights.get_raw_handle_unsafe(), ldb,
                 bias.get_raw_handle_unsafe(),
-                0.0f, dst_buf, ldc,
+                test_beta, dst_buf, ldc,
                 wt_const, bp, mp);
+        };
+
+        // When beta != 0, each output must start with identical random C_old
+        // so that beta * C_old has an observable effect. Without this, all
+        // paths start from zero and beta is silently untested.
+        const bool need_c_init = (test_beta != 0.0f);
+        tensor_t c_init;
+        if (need_c_init)
+          c_init = AITensorFactory::create_uniform_tensor(
+              {params.m, params.n}, out_dt, "gemv_c_init");
+        const size_t out_bytes = params.m * params.n
+            * (out_dt == data_type_t::bf16 ? 2 : 4);
+        auto seed_output = [&](tensor_t &dst) {
+          if (need_c_init)
+            std::memcpy(dst.get_raw_handle_unsafe(),
+                        c_init.get_raw_handle_const(), out_bytes);
         };
 
         // Path 1: thread_local repack (is_wt_const=false)
         auto tl_out = AITensorFactory::create_zero_tensor(
             {params.m, params.n}, out_dt, "gemv_tl");
+        seed_output(tl_out);
         auto st = call_kernel(false, tl_out.get_raw_handle_unsafe());
         if (st != status_t::success) return st;
 
-        // Clear all caches so Path 2 is a guaranteed cold miss.
+        // Clear caches so Path 2 is a guaranteed cold miss.
         clear_all_weight_caches();
 
         // Path 2: global_cache cold miss (is_wt_const=true, first call)
         auto gc_cold_out = AITensorFactory::create_zero_tensor(
             {params.m, params.n}, out_dt, "gemv_gc_cold");
+        seed_output(gc_cold_out);
         st = call_kernel(true, gc_cold_out.get_raw_handle_unsafe());
         if (st != status_t::success) return st;
 
         // Path 3: global_cache warm hit (is_wt_const=true, reuses cached)
+        seed_output(output);
         st = call_kernel(true, output.get_raw_handle_unsafe());
         if (st != status_t::success) return st;
 
         // Cross-check: all three paths must produce consistent results.
-        // output holds Path 3 (warm hit) and is later compared to reference.
         EXPECT_TRUE(compare_gemv_output(tl_out, output, params.k, out_dt, is_int8))
             << "thread_local vs global_cache_warm mismatch: "
             << params.test_name;
         EXPECT_TRUE(compare_gemv_output(gc_cold_out, output, params.k, out_dt, is_int8))
             << "global_cache_cold vs global_cache_warm mismatch: "
             << params.test_name;
+
+        // Evict this test's cache entry so the next test with a reused
+        // weight pointer won't find stale packed data.
+        clear_all_weight_caches();
 
         return st;
       } else {
@@ -375,10 +417,11 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
       return;
     }
 
-    // Reference comparison: the reference kernel assumes K×N weight layout
-    // (no transB). For transB tests, transpose weights back to K×N.
+    // Reference comparison: the reference kernel assumes K×N weight layout,
+    // alpha=1, beta=0, ldb=N. Skip reference for non-standard configurations.
     bool ref_supported = AITestUtils::is_reference_implementation_supported(
-      in_dt, wt_dt, out_dt, params.post_op_config.post_ops);
+      in_dt, wt_dt, out_dt, params.post_op_config.post_ops)
+      && params.alpha == 1.0f && params.beta == 0.0f && params.ldb_pad == 0;
     if (ref_supported && st == status_t::success) {
       tensor_t ref_weights = params.trans_b
         ? transpose_weights(tensors.weights, params.n, params.k, wt_dt)
@@ -440,9 +483,6 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
 };
 
 TEST_P(TestGemvAI, BF16GemvTest) {
-  // TODO: Enable GEMV tests for BF16
-  GTEST_SKIP() << "GEMV tests are skipped for now";
-  return;
   MatmulParamsAI params = GetParam();
   if (!AITestUtils::is_valid_data_type_combination(params.data_types)) {
     GTEST_SKIP() << "Data type combination not supported";

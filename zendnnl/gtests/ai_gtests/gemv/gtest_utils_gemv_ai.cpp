@@ -192,6 +192,79 @@ void GemvParameterGenerator::add_kc_path_params(
       }
     }
   }
+
+  // ── Alpha/Beta variants ──
+  static const float alpha_vals[] = {2.0f, 0.5f, 0.0f};
+  static const float beta_vals[]  = {0.0f, 1.0f, 0.5f};
+  static const uint64_t ab_n_vals[] = {64, 128, 256};
+  static const uint64_t ab_k_vals[] = {128, 512};
+  for (auto combo : gemv_bf16_combos) {
+    for (auto a : alpha_vals) {
+      for (auto b : beta_vals) {
+        for (auto n : ab_n_vals) {
+          for (auto k : ab_k_vals) {
+            auto p = create_gemv_param(
+                n, k, combo, TestCategory::ACCURACY, no_postop,
+                false, true, "gemv_kc_ab");
+            p.alpha = a;
+            p.beta = b;
+            params.push_back(p);
+          }
+        }
+      }
+    }
+  }
+
+  // ── LDB stride tests (BF16) ──
+  static const int ldb_pads[] = {1, 7, 16, 64};
+  static const uint64_t ldb_n_vals[] = {32, 64, 128};
+  static const uint64_t ldb_k_vals[] = {64, 256};
+  for (auto combo : gemv_bf16_combos) {
+    for (auto pad : ldb_pads) {
+      for (auto n : ldb_n_vals) {
+        for (auto k : ldb_k_vals) {
+          auto p = create_gemv_param(
+              n, k, combo, TestCategory::ACCURACY, no_postop,
+              false, true, "gemv_kc_ldb");
+          p.ldb_pad = pad;
+          params.push_back(p);
+        }
+      }
+    }
+  }
+
+  // ── INT8 Alpha/Beta variants ──
+  for (auto combo : gemv_int8_combos) {
+    for (auto a : alpha_vals) {
+      for (auto b : beta_vals) {
+        for (auto n : ab_n_vals) {
+          for (auto k : ab_k_vals) {
+            auto p = create_gemv_param(
+                n, k, combo, TestCategory::ACCURACY, no_postop,
+                false, true, "gemv_int8_kc_ab");
+            p.alpha = a;
+            p.beta = b;
+            params.push_back(p);
+          }
+        }
+      }
+    }
+  }
+
+  // ── INT8 LDB stride tests ──
+  for (auto combo : gemv_int8_combos) {
+    for (auto pad : ldb_pads) {
+      for (auto n : ldb_n_vals) {
+        for (auto k : ldb_k_vals) {
+          auto p = create_gemv_param(
+              n, k, combo, TestCategory::ACCURACY, no_postop,
+              false, true, "gemv_int8_kc_ldb");
+          p.ldb_pad = pad;
+          params.push_back(p);
+        }
+      }
+    }
+  }
 }
 
 // Looper BRGEMM M=1 path: N>256. These go through bf16_brgemm_execute.
@@ -226,11 +299,28 @@ void GemvParameterGenerator::add_looper_path_params(
   }
 }
 
-// Random stress: wide N/K range with all postops and transB.
+// Randomized alpha/beta/ldb_pad pools.
+// Weighted: common-path values (alpha=1, beta=0, ldb_pad=0) appear more often
+// so we still exercise the hot path heavily while covering edge cases.
+static float random_alpha() {
+  static const float pool[] = {1.0f, 1.0f, 1.0f, 1.0f,
+                                0.5f, 2.0f, 0.0f, -1.0f};
+  return pool[gemv_random_dim(0, 7)];
+}
+static float random_beta() {
+  static const float pool[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                1.0f, 0.5f, -0.5f};
+  return pool[gemv_random_dim(0, 7)];
+}
+static int random_ldb_pad() {
+  static const int pool[] = {0, 0, 0, 0, 0, 1, 7, 16, 64};
+  return pool[gemv_random_dim(0, 8)];
+}
+
+// Random stress: wide N/K range with all postops, transB, alpha, beta, ldb_pad.
 void GemvParameterGenerator::add_random_stress_params(
     std::vector<MatmulParamsAI> &params) {
   auto all_postops = get_gemv_all_postop_configs();
-  // GEMV_STRESS_COUNT env var overrides the compiled-in default at any time
   int max_per_combo = GemvMaxTestCases::RANDOM_STRESS;
   const char *env = std::getenv("GEMV_STRESS_COUNT");
   if (env) {
@@ -252,19 +342,19 @@ void GemvParameterGenerator::add_random_stress_params(
           uint64_t n = gemv_random_dim(1, 2048);
           uint64_t k = gemv_random_dim(1, 4096);
           bool tb = (gemv_random_dim(0, 1) == 1);
-          params.push_back(create_gemv_param(
+          auto p = create_gemv_param(
             n, k, combo, TestCategory::ACCURACY, po,
-            tb, true, prefix));
+            tb, true, prefix);
+          p.alpha   = random_alpha();
+          p.beta    = random_beta();
+          p.ldb_pad = random_ldb_pad();
+          params.push_back(std::move(p));
         }
       }
     }
   };
   add_stress(gemv_bf16_combos, "gemv_stress");
 
-  // INT8 stress: same N/K range as BF16. The KC kernel handles any N
-  // where packed B fits in L2 (INT8 is 1 byte/elem → 2x larger N than BF16).
-  // Shapes exceeding L2 gracefully fall back to DLP.
-  // Use only activation post-ops that the INT8 KC kernel can fuse.
   auto int8_postops = get_gemv_postop_configs();
   for (auto combo : gemv_int8_combos) {
     for (const auto &po : int8_postops) {
@@ -272,9 +362,13 @@ void GemvParameterGenerator::add_random_stress_params(
         uint64_t n = gemv_random_dim(1, 2048);
         uint64_t k = gemv_random_dim(1, 4096);
         bool tb = (gemv_random_dim(0, 1) == 1);
-        params.push_back(create_gemv_param(
+        auto p = create_gemv_param(
           n, k, combo, TestCategory::ACCURACY, po,
-          tb, true, "gemv_int8_stress"));
+          tb, true, "gemv_int8_stress");
+        p.alpha   = random_alpha();
+        p.beta    = random_beta();
+        p.ldb_pad = random_ldb_pad();
+        params.push_back(std::move(p));
       }
     }
   }
@@ -284,9 +378,17 @@ void GemvParameterGenerator::add_boundary_params(
     std::vector<MatmulParamsAI> &params) {
   static const std::vector<std::pair<uint64_t, uint64_t>> boundary_nk = {
     {1, 1}, {1, 32}, {32, 1},
-    {63, 64}, {64, 63}, {65, 64},    // NR_PACK boundary
+    // BKC_NR_PAD=16 boundaries: each triggers different tail NVT
+    {15, 128}, {16, 128}, {17, 128},     // tail<1> → tail<1> → tail<2>
+    {31, 128}, {32, 128}, {33, 128},     // tail<2> → tail<2> → tail<3>
+    {47, 128}, {48, 128}, {49, 128},     // tail<3> → tail<3> → tail<4>
+    {63, 64}, {64, 63}, {65, 64},        // tail<4> → nr64<1> → nr64<1>+tail<1>
+    // NP+tail combos
+    {80, 256},                           // nr64<1> + tail<1>
+    {96, 256},                           // nr64<1> + tail<2>
+    {100, 256},                          // nr64<1> + tail<3> (non-16-aligned)
     {127, 128}, {128, 127}, {129, 128},
-    {255, 256}, {256, 255}, {257, 256},  // KC path N boundary
+    {255, 256}, {256, 255}, {257, 256},
     {256, 1024}, {1, 4096}, {2048, 1},
   };
   PostOpConfig no_postop;
@@ -314,6 +416,10 @@ void GemvParameterGenerator::add_edge_case_params(
     {4096, 1},     // very wide N, tiny K
     {3, 7},        // odd non-power-of-2
     {17, 33},      // prime-ish
+    {24, 512},     // N=24 pads to 32: 25% waste with BKC_NR_PAD=16
+    {48, 512},     // N=48 pads to 48: zero waste with BKC_NR_PAD=16
+    {100, 256},    // N=100 pads to 112: np=1 + tail<3>
+    {200, 256},    // N=200 pads to 208: np=3 + tail<1>
     {256, 256},    // KC boundary exact
     {255, 1023},   // just below boundaries
   };

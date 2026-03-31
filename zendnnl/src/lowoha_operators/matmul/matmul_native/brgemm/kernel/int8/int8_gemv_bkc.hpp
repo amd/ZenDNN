@@ -46,11 +46,12 @@ void int8_gemv_bkc(
     uint16_t *__restrict__ C_bf16,
     float    *__restrict__ C_fp32,
     fused_postop_t fused_op,
+    float alpha, float beta,
     bool dst_is_bf16,
     int K, int N);
 
 /// Pack s8 weight matrix B into blocked K-contiguous (BKC) INT8 VNNI layout.
-/// N is partitioned into blocks via choose_blk_n(), padded to NR_PACK (64).
+/// N is partitioned into blocks via choose_blk_n(), padded to BKC_NR_PAD (16).
 /// col_sum[n] = sum_k(B[k][n]) for n in [0, N_padded); caller must allocate
 /// col_sum with length >= N_padded. Padding entries are zero-initialized.
 void pack_b_int8_bkc(
@@ -66,6 +67,7 @@ void int8_gemv_bkc_wide_dispatch(
     uint16_t *__restrict__ C_bf16,
     float    *__restrict__ C_fp32,
     fused_postop_t fused_op,
+    float alpha, float beta,
     bool dst_is_bf16,
     int k_quads, int n_stride, int K, int N,
     int jc, int nb);
