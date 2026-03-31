@@ -191,7 +191,7 @@ static void bf16_gemv_bkc_nr64_core(
         if (fused_op != fused_postop_t::none)
             val = apply_fused_postop(val, fused_op);
 
-        if (dst_is_bf16) {
+        if (dst_is_bf16 && C_bf16) {
             __m256bh bf = _mm512_cvtneps_pbh(val);
             if (elems == 16)
                 _mm256_storeu_si256(
@@ -286,7 +286,7 @@ static void bf16_gemv_bkc_tail(
 
         if (fused_op != fused_postop_t::none)
             val = apply_fused_postop(val, fused_op);
-        if (dst_is_bf16) {
+        if (dst_is_bf16 && C_bf16) {
             __m256bh bf = _mm512_cvtneps_pbh(val);
             if (elems == 16)
                 _mm256_storeu_si256(

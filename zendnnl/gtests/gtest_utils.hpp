@@ -80,24 +80,32 @@ struct BatchMatmulType {
 };
 
 struct ReorderType {
-  bool inplace_reorder;
+  bool inplace_reorder = false;
   MatmulType mat{};
 
   // LOWOHA-specific parameters (used when is_lowoha_test = true)
-  bool is_lowoha_test;                  ///< Flag to distinguish LOWOHA reorder tests
-  uint64_t M;                           ///< Rows dimension (LOWOHA)
-  uint64_t N;                           ///< Columns dimension (LOWOHA)
-  uint64_t batch;                       ///< Batch dimension (0=1D, 1=2D, >1=3D) (LOWOHA)
-  data_type_t
-  src_dtype;                ///< Source data type (LOWOHA, set by TEST_P)
-  data_type_t
-  dst_dtype;                ///< Destination data type (LOWOHA, set by TEST_P)
-  quant_granularity_t granularity;      ///< Quantization granularity (LOWOHA)
-  uint64_t num_groups;                  ///< Number of groups for per-group quant (LOWOHA)
-  bool use_strided_src;                 ///< Use strided source memory (LOWOHA, set by TEST_P)
-  reorder_algo_t
-  lowoha_algo;           ///< LOWOHA algorithm selection (LOWOHA, set by TEST_P)
-  uint32_t num_threads;                 ///< Number of threads (LOWOHA)
+  // Flag to distinguish LOWOHA reorder tests
+  bool is_lowoha_test = false;
+  // Rows dimension (LOWOHA)
+  uint64_t M = 0;
+  //  Columns dimension (LOWOHA)
+  uint64_t N = 0;
+  //  Batch dimension (0=1D, 1=2D, >1=3D) (LOWOHA)
+  uint64_t batch = 0;
+  //  Source data type (LOWOHA, set by TEST_P)
+  data_type_t src_dtype = data_type_t::f32;
+  //  Destination data type (LOWOHA, set by TEST_P)
+  data_type_t dst_dtype = data_type_t::s8;
+  //  Quantization granularity (LOWOHA)
+  quant_granularity_t granularity = quant_granularity_t::tensor;
+  //  Number of groups for per-group quant (LOWOHA)
+  uint64_t num_groups = 0;
+  //  Use strided source memory (LOWOHA, set by TEST_P)
+  bool use_strided_src = false;
+  //  LOWOHA algorithm selection (LOWOHA, set by TEST_P)
+  reorder_algo_t lowoha_algo = reorder_algo_t::native;
+  //  Number of threads (LOWOHA)
+  uint32_t num_threads = 1;
 
   /// @param test_index Index of current test (for partitioning)
   /// @param total_tests Total number of tests

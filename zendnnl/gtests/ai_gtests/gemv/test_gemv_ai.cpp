@@ -486,7 +486,6 @@ TEST_P(TestGemvAI, BF16GemvTest) {
   MatmulParamsAI params = GetParam();
   if (!AITestUtils::is_valid_data_type_combination(params.data_types)) {
     GTEST_SKIP() << "Data type combination not supported";
-    return;
   }
   switch (params.category) {
   case TestCategory::ACCURACY:
