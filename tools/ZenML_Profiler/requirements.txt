@@ -1,0 +1,6 @@
+pytimedinput==2.0.1
+prettytable==3.11.0
+pandas
+numpy
+openpyxl==3.1.5
+pytz

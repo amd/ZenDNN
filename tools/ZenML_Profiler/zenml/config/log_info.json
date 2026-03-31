@@ -1,0 +1,192 @@
+{
+    "ZenDNN_5.1": {
+        "format": "positional",
+        "execute" : {
+            "tpy1": {
+                "start": "zendnn_primitive_execute,cpu,",
+                "sep": ",",
+                "op": 3,
+                "dim": 9,
+                "ker": 4,
+                "format":6,
+                "post": 7,
+                "time": 10,
+                "num_args": 12,
+                "dim_sep": [":", "x"],
+                "plugin_op": 2
+            }
+        },
+        "create" : {
+            "tpy1": {
+                "start": "zendnn_primitive_create,",
+                "sep": ",",
+                "op": 4,
+                "dim": 10,
+                "ker": 5,
+                "format":7,
+                "post": 8,
+                "time": 11,
+                "num_args": 13,
+                "dim_sep": [":", "x"]
+            }
+        },
+        "prof" : {
+            "tpy1": {
+                "start": "zendnn_primitive_execute,cpu,",
+                "sep": ",",
+                "op": 3,
+                "dim": 9,
+                "ker": 4,
+                "format":6,
+                "post": 7,
+                "time": 11,
+                "num_args": 12,
+                "dim_sep": [":", "x"]
+            }
+        },
+        "algo" : {
+            "tpy1": {
+                "start": "zendnn_*_matmul",
+                "sep": " ",
+                "algotype": 16,
+                "M" : 3,
+                "N" : 4,
+                "K" : 5,
+                "num_args": 19
+            }
+        }
+    },
+    "ZenDNN_4.2": {
+        "format": "positional",
+        "execute" : {
+            "tpy1": {
+                "start": "zendnn_primitive_execute,cpu,",
+                "sep": ",",
+                "op": 2,
+                "dim": 8,
+                "ker": 3,
+                "format":5,
+                "post": 6,
+                "time": 9,
+                "num_args": 11,
+                "dim_sep": [":", "x"]
+            }
+        },
+        "create" : {
+            "tpy1": {
+                "start": "zendnn_primitive_create,",
+                "sep": ",",
+                "op": 3,
+                "dim": 9,
+                "ker": 4,
+                "format":6,
+                "post": 7,
+                "time": 10,
+                "num_args": 12,
+                "dim_sep": [":", "x"]
+            }
+        }
+    },
+    "ZenDNN_5.2": {
+        "format": "kv",
+        "execute": {
+            "matmul_direct": {
+                "start": "LOWOHA ",
+                "op_identifier": "matmul_direct",
+                "mapped_op": "matmul",
+                "time_suffix": "ms",
+                "dim_fields": ["M", "N", "K"],
+                "dim_type": "matmul",
+                "batch_fields": ["Batch_A", "Batch_B"],
+                "ker": "kernel",
+                "post": "post_op",
+                "time": "time",
+                "format_fields": ["input_dtype", "weight_dtype", "output_dtype", "bias_dtype"],
+                "format_prefixes": ["src", "wei", "dst", "bias"],
+                "plugin_op": "plugin_op"
+            },
+            "softmax_direct": {
+                "start": "LOWOHA ",
+                "op_identifier": "softmax_direct",
+                "mapped_op": "softmax",
+                "time_suffix": "ms",
+                "dim_fields": ["batch", "axis_dim"],
+                "dim_type": "softmax",
+                "ker": null,
+                "post": null,
+                "time": "time",
+                "format_fields": ["src_dt", "dst_dt"],
+                "format_prefixes": ["src", "dst"]
+            },
+            "conv_direct": {
+                "start": "LOWOHA ",
+                "op_identifier": "conv_direct",
+                "mapped_op": "convolution",
+                "time_suffix": "ms",
+                "dim_fields": ["batch", "in_c", "out_c", "in_h", "in_w", "filter_h", "filter_w"],
+                "dim_type": "convolution",
+                "ker": null,
+                "post": null,
+                "time": "time",
+                "format_fields": [],
+                "format_prefixes": []
+            },
+            "reorder_direct_dq": {
+                "start": "LOWOHA ",
+                "op_identifier": "reorder_direct (Dynamic_Quantize)",
+                "mapped_op": "reorder",
+                "time_suffix": "ms",
+                "dim_fields": ["M", "K"],
+                "dim_type": "generic",
+                "ker": "kernel",
+                "post": null,
+                "time": "time",
+                "format_fields": ["src_dtype", "dst_dtype"],
+                "format_prefixes": ["src", "dst"]
+            }
+        }
+    },
+    "OneDNN": {
+        "format": "positional",
+        "execute" : {
+            "tpy1": {
+                "start": "onednn_verbose,exec,cpu,",
+                "sep": ",",
+                "op": 3,
+                "dim": 9,
+                "format":6,
+                "ker": 4,
+                "post": 7,
+                "time": 10,
+                "num_args": 11,
+                "dim_sep": [":", "x", "mb", "ic", "oc"]
+            },
+            "tpy2": {
+                "start": "onednn_verbose,primitive,exec,cpu,",
+                "sep": ",",
+                "op": 4,
+                "dim": 10,
+                "ker": 5,
+                "format":7,
+                "post": 8,
+                "time": 11,
+                "num_args": 12,
+                "dim_sep": [":", "x", "mb", "ic", "oc"]
+            }
+        },
+        "create" : {
+            "tpy1": {
+                "start": "onednn_verbose,create:",
+                "sep": ",",
+                "op": 3,
+                "dim": 9,
+                "format":6,
+                "ker": 4,
+                "post": 7,
+                "time": 10,
+                "num_args": 11,
+                "dim_sep": [":", "x", "mb", "ic", "oc"]
+            }
+        }
+    }
+}

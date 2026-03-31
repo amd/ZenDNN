@@ -1,0 +1,42 @@
+{
+  "ZenML": {
+    "_helper": "Edit the values according to the keys. For multiple log files, refer the README_ZAT file and add necessary arguments to this json.",
+    "-in1": "",
+    "-in2": "",
+    "-lc": "",
+    "-ln1": "",
+    "-ln2": "",
+    "--roofline_path": "",
+    "-mc": "",
+    "-th": "",
+    "-fr": "",
+    "-it": "",
+    "-ln": "",
+    "-n": "",
+    "-t": "",
+    "-v": "",
+    "-is": "",
+    "-e": "",
+    "-f": "",
+    "-bk1": "ZenDNN_5.2",
+    "-bk2": "",
+    "--csv": "",
+    "--threshold": 1,
+    "--info": "True",
+    "-ppj": "",
+    "--benchdnn": "False",
+    "--result_file" : ""
+
+  },
+    "benchDNN": {
+      "ip_only" : "",
+      "data_type" : "bf16bf16bf16",
+      "gemm_algo_type" : "4",
+      "input_threads" : "96",
+      "iterations" : "100",
+      "benchdnn_file" : "/ZenDNN_tools/benchmark/benchdnn_bench/ZenDNN/zendnn_matmul_driver.sh",
+      "output_file" : "BenchDNN_Analysis.txt",
+      "result" : "BenchDNN_Comparison.txt",
+      "backend" : "ZenDNN_5.1"
+  }
+}
