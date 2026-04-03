@@ -17,10 +17,10 @@
 #include "reference_kernel.hpp"
 #include "common/logging.hpp"
 #include "common/bfloat16.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
-#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -176,8 +176,8 @@ status_t pooling_reference_wrapper(
     void *output,
     pool_params &params
 ) {
-    const int num_threads = params.num_threads > 0 ? params.num_threads :
-                            omp_get_max_threads();
+    const int32_t num_threads = resolve_num_threads(params.num_threads,
+                                                    thread_guard::max_threads());
 
     if (params.dtypes.src == data_type_t::f32) {
         if (params.is_max_pooling) {

@@ -17,7 +17,6 @@
 #ifndef _LOWOHA_MATMUL_HPP
 #define _LOWOHA_MATMUL_HPP
 
-#include <omp.h>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -31,65 +30,6 @@
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
-
-/**
- * @brief RAII helper to temporarily set OpenMP thread count.
- *        Automatically restores original thread count on scope exit.
- *
- * @example
- *   {
- *       matmul_threadlimit guard(4);   // Set to 4 threads
- *       // ... parallel work ...
- *   }  // Restored to original
- */
-struct matmul_threadlimit {
-  int old_num_threads;
-  bool is_modified;
-
-  matmul_threadlimit(int num_threads) : old_num_threads(0), is_modified(false) {
-    if (num_threads != omp_get_max_threads()) {
-      old_num_threads = omp_get_max_threads();
-      omp_set_num_threads(num_threads);
-      is_modified = true;
-    }
-  }
-
-  ~matmul_threadlimit() {
-    if (is_modified) {
-      omp_set_num_threads(old_num_threads);
-    }
-  }
-};
-
-/**
- * @brief RAII helper to temporarily set OpenMP max active nesting levels.
- *        Automatically restores original level on scope exit.
- *
- * @example
- *   {
- *       matmul_active_levels guard(2);   // Set to 2 nesting levels
- *       // ... nested parallel work ...
- *   }  // Restored to original
- */
-struct matmul_active_levels {
-  int old_max_active_levels;
-  bool is_modified;
-
-  matmul_active_levels(int max_active_levels)
-    : old_max_active_levels(1), is_modified(false) {
-    if (max_active_levels != omp_get_max_active_levels()) {
-      old_max_active_levels = omp_get_max_active_levels();
-      omp_set_max_active_levels(max_active_levels);
-      is_modified = true;
-    }
-  }
-
-  ~matmul_active_levels() {
-    if (is_modified) {
-      omp_set_max_active_levels(old_max_active_levels);
-    }
-  }
-};
 
 /**
  * @brief Entry function for different backends supported by ZenDNNL

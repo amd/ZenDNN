@@ -21,6 +21,7 @@
 #include "operators/common/post_op.hpp"
 #include "lowoha_operators/matmul/zendnnl_key.hpp"
 #include "lowoha_operators/matmul/lru_cache.hpp"
+#include <cstdint>
 
 namespace zendnnl {
 namespace lowoha {
@@ -133,7 +134,8 @@ struct matmul_params {
   char mem_format_a;                           ///< Memory format for matrix A
   char mem_format_b;                           ///< Memory format for matrix B
   matmul_algo_t lowoha_algo;                   ///< Selected algorithm
-  uint64_t num_threads;                        ///< Number of threads
+  //num_threads is int32_t to match the type used by OpenMP APIs
+  int32_t num_threads;                        ///< Number of threads
   std::string plugin_op;                       ///< Plugin op name
   bool dynamic_quant;                          ///< Enable dynamic quantization of source
   /**

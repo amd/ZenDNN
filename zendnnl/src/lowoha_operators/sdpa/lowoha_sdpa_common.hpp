@@ -75,8 +75,8 @@ struct sdpa_params {
   data_type_t out_dt;         ///< Output data type
   data_type_t mask_dt;        ///< Attention mask data type
 
-  // Threading
-  uint64_t num_threads;       ///< Number of threads
+  //num_threads is int32_t to match the type used by OpenMP APIs
+  int32_t num_threads;        ///< Number of threads (0 = auto)
 
   /**
    * @brief Default constructor

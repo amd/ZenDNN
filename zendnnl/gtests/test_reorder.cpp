@@ -67,7 +67,7 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
   data_type_t source_dtype;
   bool use_LOWOHA;
   matmul_algo_t algo;
-  uint32_t num_threads;
+  int32_t num_threads;
   tensor_factory_t tensor_factory{};
 
   ReorderType lowoha_params;

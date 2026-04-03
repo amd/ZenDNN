@@ -150,7 +150,8 @@ struct reorder_params_t {
   data_type_t dst_dtype;                  ///< Destination data type
   reorder_quant_params_t quant_params;    ///< Quantization parameters
   reorder_algo_t algo;                    ///< Selected algorithm
-  uint64_t num_threads;                   ///< Number of threads (0 = auto)
+  //num_threads is int32_t to match the type used by OpenMP APIs
+  int32_t num_threads;                    ///< Number of threads (0 = auto)
   std::vector<int64_t> src_shape;         ///< Source shape: [nelems] or [M, N] or [batch, M, N]
   std::vector<int64_t> dst_shape;         ///< Destination shape: must match src_shape
   std::vector<int64_t> src_strides;       ///< Source strides for non-contiguous memory access

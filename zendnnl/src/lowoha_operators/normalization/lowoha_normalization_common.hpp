@@ -109,8 +109,8 @@ struct norm_params {
   // --- Backend selection ---
   norm_algo_t algorithm;          ///< Selected algorithm / backend
 
-  // --- Threading ---
-  uint64_t num_threads;           ///< Number of threads (0 = auto)
+  //num_threads is int32_t to match the type used by OpenMP APIs
+  int32_t num_threads;            ///< Number of threads (0 = auto)
 
   /**
    * @brief Default constructor

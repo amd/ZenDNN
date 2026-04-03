@@ -24,6 +24,7 @@
 #include "lowoha_operators/matmul/auto_tuner.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -381,8 +382,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   size_t out_type_size = size_of(params.dtypes.dst);
 
   const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
-  const int num_threads = params.num_threads > 0 ? params.num_threads :
-                          omp_get_max_threads();
+  const int32_t omp_mt = thread_guard::max_threads();
+  const int32_t num_threads = resolve_num_threads(params.num_threads, omp_mt);
 
   // Dynamic quantization converts the source matrix from its original dtype
   // (f32/bf16) to a lower-precision integer type (s8/u8) in a contiguous buffer.
@@ -409,7 +410,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   // if (params.mem_format_b) {}
 
   // Dispatch to BMM or Matmul based on batch_count
-  matmul_threadlimit thread_guard(num_threads);
+  thread_guard tg(num_threads, omp_mt);
   if (batch_count > 1) {
     // Batch Matrix Multiplication (BMM)
     bmm_execute(layout, transA, transB,
@@ -513,9 +514,9 @@ status_t group_gemm_direct(const std::vector<char> &layout,
   const char *gemm_mode;
   static unsigned int auto_version = get_auto_tuner_ver();
 
-  const int num_threads = params[0].num_threads > 0 ? params[0].num_threads :
-                          omp_get_max_threads();
-  matmul_threadlimit thread_guard(num_threads);
+  const int32_t omp_mt = thread_guard::max_threads();
+  const int32_t num_threads = resolve_num_threads(params[0].num_threads, omp_mt);
+  thread_guard tg(num_threads, omp_mt);
 
   if (src.size() == 1) {
     // Sequential GEMM: chained operations where output[i-1] feeds as input[i]
@@ -574,7 +575,7 @@ status_t group_gemm_direct(const std::vector<char> &layout,
     }
 
     // Execute with automatic strategy selection
-    matmul_active_levels active_levels_guard(1);
+    scoped_active_levels active_levels_guard(1);
 
     #pragma omp parallel for num_threads(num_threads)
     for (size_t i = 0; i < num_ops; ++i) {

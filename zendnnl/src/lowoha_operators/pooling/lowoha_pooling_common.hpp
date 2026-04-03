@@ -117,8 +117,8 @@ struct pool_params {
 
     // Data format (currently NHWC only)
     char data_format[8];           ///< Data format string ("NHWC")
-
-    uint64_t num_threads;            ///< Number of threads (0 = auto)
+    //num_threads is int32_t to match the type used by OpenMP APIs
+    int32_t num_threads;             ///< Number of threads (0 = auto)
 
     /**
      * @brief Default constructor

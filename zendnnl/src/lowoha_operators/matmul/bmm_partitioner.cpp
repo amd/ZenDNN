@@ -19,7 +19,7 @@
 #include "lowoha_matmul.hpp"
 #include "libxsmm_utils.hpp"
 #include <algorithm>
-#include <omp.h>
+#include "lowoha_operators/common/omp_thread_control.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -198,7 +198,7 @@ void execute_bmm_partition(
                            static_cast<int>(config.kernel));
 
   // Execute with automatic strategy selection
-  matmul::matmul_active_levels active_levels_guard(1);
+  scoped_active_levels active_levels_guard(1);
 
   if (should_use_zendnnl_parallel(config.M, config.N, config.K)) {
     execute_parallel_zendnnl(src, weight, dst, config, batch_params,

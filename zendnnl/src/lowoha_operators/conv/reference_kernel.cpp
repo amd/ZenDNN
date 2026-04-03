@@ -17,10 +17,10 @@
 #include "reference_kernel.hpp"
 #include "common/logging.hpp"
 #include "common/bfloat16.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
-#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -230,8 +230,7 @@ status_t conv_reference_wrapper(
     const bool is_weights_const,
     conv_params &params
 ) {
-    // Get number of threads
-    const int num_threads = omp_get_max_threads();
+    const int32_t num_threads = thread_guard::max_threads();
     
     log_info("Conv2D Reference: Starting reference kernel execution");
     

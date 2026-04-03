@@ -17,11 +17,11 @@
 #include "reference_kernel.hpp"
 #include "common/logging.hpp"
 #include "common/bfloat16.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
 #include <limits>
-#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -133,8 +133,8 @@ status_t softmax_reference_wrapper(
     log_info("Softmax Reference: ", params.ndims, "D tensor, flattened to batch=",
              params.batch, ", axis_dim=", params.axis_dim);
 
-    const int num_threads = params.num_threads > 0 ? params.num_threads :
-                            omp_get_max_threads();
+    const int32_t num_threads = resolve_num_threads(params.num_threads,
+                                                    thread_guard::max_threads());
 
     if (params.src_dt == data_type_t::f32) {
         // FP32: Direct computation

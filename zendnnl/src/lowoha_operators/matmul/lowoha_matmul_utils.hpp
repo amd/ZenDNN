@@ -19,6 +19,7 @@
 
 #include <utility>
 #include <mutex>
+#include <omp.h>
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 

@@ -70,7 +70,7 @@ struct embag_params_t {
   embag_algo_t algo;             // Reduction algorithm (sum/mean/max/none)
   uint64_t num_embeddings;       // Number of rows in the embedding table
   uint64_t embedding_dim;        // Dimension of each embedding vector
-  uint64_t num_threads;          // Number of threads
+  int32_t num_threads;           // Number of threads (0 = auto)
   uint64_t num_indices;          // Total number of indices
   uint64_t num_bags;             // Number of bags (output rows)
   bool is_weights;               // Whether weights are present

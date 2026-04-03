@@ -63,7 +63,7 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
   float alpha, beta;
   bool use_LOWOHA;
   matmul_algo_t algo;
-  uint32_t num_threads;
+  int32_t num_threads;
 };
 
 /** @fn TEST_P

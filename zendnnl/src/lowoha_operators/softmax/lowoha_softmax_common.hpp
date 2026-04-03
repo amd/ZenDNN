@@ -56,7 +56,8 @@ struct softmax_params {
     data_type_t src_dt;             ///< Source/input data type
     data_type_t dst_dt;             ///< Destination/output data type
     softmax_algo_t algorithm;       ///< Selected algorithm
-    uint64_t num_threads;           ///< Number of threads
+    //num_threads is int32_t to match the type used by OpenMP APIs
+    int32_t num_threads;            ///< Number of threads (0 = auto)
 
     // Original tensor shape information (for OneDNN backend)
     uint64_t shape[SOFTMAX_MAX_NDIMS];  ///< Original tensor dimensions

@@ -17,7 +17,9 @@
 #include "lowoha_embedding_bag.hpp"
 #include "dispatch_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 
+#include <cstdint>
 #include <sstream>
 #include <vector>
 
@@ -51,11 +53,9 @@ status_t embedding_bag_direct(
     return status_t::failure;
   }
 
-  const int num_threads = (params.num_threads > 0)
-                          ? static_cast<int>(params.num_threads)
-                          : omp_get_max_threads();
-
-  embag_threadlimit thread_guard(num_threads);
+  const int32_t omp_mt = thread_guard::max_threads();
+  const int32_t num_threads = resolve_num_threads(params.num_threads, omp_mt);
+  thread_guard tg(num_threads, omp_mt);
 
   // Dispatch to the appropriate kernel
   dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
@@ -129,8 +129,9 @@ status_t group_embedding_bag_direct(
   embag_config_t &embag_config = embag_config_t::instance();
   embag_config.set_env_config();
 
-  unsigned int eb_thread_qty = params[0].num_threads > 0 ? params[0].num_threads :
-                               omp_get_max_threads();
+  const int32_t omp_mt = thread_guard::max_threads();
+  const int32_t eb_thread_qty = resolve_num_threads(params[0].num_threads, omp_mt);
+  thread_guard tg(eb_thread_qty, omp_mt);
   eb_thread_algo_t thread_algo = thread_algo_select();
   const char *thread_type = thread_algo_to_string(thread_algo);
 
@@ -140,54 +141,55 @@ status_t group_embedding_bag_direct(
   // Thread algorithm dispatch
   if (thread_algo == eb_thread_algo_t::ccd_threaded) {
     // CCD-aware threading with nested parallelism
-    omp_set_max_active_levels(2);
+    scoped_active_levels active_levels_guard(2);
     int ccd_num_threads = CCD_NUM_THREADS;
-    unsigned int outer_threads = (eb_thread_qty % ccd_num_threads) == 0 ?
+    int32_t outer_threads = (eb_thread_qty % ccd_num_threads) == 0 ?
                                  eb_thread_qty / ccd_num_threads :
                                  ((eb_thread_qty / ccd_num_threads) + 1);
-    unsigned int rem = (eb_thread_qty % ccd_num_threads) == 0 ?
+    int32_t rem = (eb_thread_qty % ccd_num_threads) == 0 ?
                        ccd_num_threads :
                        eb_thread_qty % ccd_num_threads;
-    unsigned int loopCount = (num_tables % outer_threads) == 0 ?
+    int32_t loopCount = (num_tables % outer_threads) == 0 ?
                              num_tables / outer_threads :
                              ((num_tables / outer_threads) + 1);
 
     #pragma omp parallel num_threads(outer_threads)
     {
-      unsigned int inner_threads = ccd_num_threads;
-      unsigned int thid = omp_get_thread_num();
+      int32_t inner_threads = ccd_num_threads;
+      int32_t thid = omp_get_thread_num();
       if (thid == outer_threads - 1) {
         inner_threads = rem;
       }
 
-      for (unsigned int i = 0; i < loopCount; i++) {
+      const int32_t task_max = omp_get_max_threads();
+      for (int32_t i = 0; i < loopCount; i++) {
         int threadOffset = thid + (i * outer_threads);
         if (threadOffset >= num_tables) {
           break;
         }
 
-        embag_threadlimit thread_guard(inner_threads);
+        thread_guard inner_guard(inner_threads, task_max);
         dispatch_avx512_kernel(
           tables[threadOffset], indices[threadOffset], offsets[threadOffset],
           weights[threadOffset], dsts[threadOffset], mutable_params[threadOffset]);
       }
     }
   }
-  else if (num_tables < static_cast<int>(eb_thread_qty) &&
+  else if (num_tables < eb_thread_qty &&
            thread_algo == eb_thread_algo_t::hybrid_threaded) {
     // Hybrid threading when tables < threads
-    unsigned int outer_threads = num_tables;
-    unsigned int rem = eb_thread_qty % num_tables;
+    int32_t outer_threads = num_tables;
+    int32_t rem = eb_thread_qty % num_tables;
 
     #pragma omp parallel num_threads(outer_threads)
     {
-      unsigned int inner_threads = eb_thread_qty / num_tables;
-      unsigned int threadOffset = omp_get_thread_num();
+      int32_t inner_threads = eb_thread_qty / num_tables;
+      int32_t threadOffset = omp_get_thread_num();
       if (threadOffset < rem) {
         inner_threads++;
       }
 
-      embag_threadlimit thread_guard(inner_threads);
+      thread_guard inner_guard(inner_threads);
       dispatch_avx512_kernel(
         tables[threadOffset], indices[threadOffset], offsets[threadOffset],
         weights[threadOffset], dsts[threadOffset], mutable_params[threadOffset]);
@@ -195,14 +197,14 @@ status_t group_embedding_bag_direct(
   }
   else if (thread_algo == eb_thread_algo_t::table_threaded) {
     // Thread-per-table parallelism
-    unsigned int loopCount = (num_tables % eb_thread_qty) == 0 ?
+    int32_t loopCount = (num_tables % eb_thread_qty) == 0 ?
                              num_tables / eb_thread_qty :
                              ((num_tables / eb_thread_qty) + 1);
 
     #pragma omp parallel num_threads(eb_thread_qty)
     {
-      for (unsigned int i = 0; i < loopCount; i++) {
-        int threadOffset = omp_get_thread_num() + (i * eb_thread_qty);
+      for (int32_t i = 0; i < loopCount; i++) {
+        int32_t threadOffset = omp_get_thread_num() + (i * eb_thread_qty);
         if (threadOffset >= num_tables) {
           break;
         }
@@ -216,8 +218,7 @@ status_t group_embedding_bag_direct(
 
   else {
     // Default: batch_threaded - Sequential tables with batch-level threading
-    embag_threadlimit thread_guard(eb_thread_qty);
-    for (int i = 0; i < num_tables; i++) {
+    for (int32_t i = 0; i < num_tables; i++) {
       dispatch_avx512_kernel(
         tables[i], indices[i], offsets[i],
         weights[i], dsts[i], mutable_params[i]);

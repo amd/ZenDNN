@@ -17,42 +17,12 @@
 #ifndef _LOWOHA_EMBEDDING_BAG_HPP
 #define _LOWOHA_EMBEDDING_BAG_HPP
 
-#include <omp.h>
 #include <vector>
 #include "lowoha_embag_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
-
-/**
- * @brief RAII helper to temporarily set OpenMP thread count.
- *        Automatically restores original thread count on scope exit.
- *
- * @example
- *   {
- *       embag_threadlimit guard(4);   // Set to 4 threads
- *       // ... parallel work ...
- *   }  // Restored to original
- */
-struct embag_threadlimit {
-  int old_num_threads;
-  bool is_modified;
-
-  embag_threadlimit(int num_threads) : old_num_threads(0), is_modified(false) {
-    if (num_threads != omp_get_max_threads()) {
-      old_num_threads = omp_get_max_threads();
-      omp_set_num_threads(num_threads);
-      is_modified = true;
-    }
-  }
-
-  ~embag_threadlimit() {
-    if (is_modified) {
-      omp_set_num_threads(old_num_threads);
-    }
-  }
-};
 
 /**
  * @brief Direct API for embedding bag operation

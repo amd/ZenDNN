@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 set(lowoha_common_public_headers
+  omp_thread_control.hpp
   operator_instrumentation.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)

@@ -71,7 +71,7 @@ struct MatmulType {
   data_type_t source_dtype;
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
-  uint32_t num_threads;
+  int32_t num_threads;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1,
              bool is_bmm = false);
 };
@@ -109,7 +109,7 @@ struct ReorderType {
   //  LOWOHA algorithm selection (LOWOHA, set by TEST_P)
   reorder_algo_t lowoha_algo = reorder_algo_t::native;
   //  Number of threads (LOWOHA)
-  uint32_t num_threads = 1;
+  int32_t num_threads = 1;
 
   /// @param test_index Index of current test (for partitioning)
   /// @param total_tests Total number of tests
@@ -131,7 +131,7 @@ struct EmbagType {
   bool fp16_scale_bias;
   bool strided;
   bool use_LOWOHA;
-  uint32_t num_threads;
+  int32_t num_threads;
   EmbagType();
 };
 
@@ -146,7 +146,7 @@ struct EmbeddingType {
   bool fp16_scale_bias;
   bool strided;
   bool use_LOWOHA;
-  uint32_t num_threads;
+  int32_t num_threads;
   EmbeddingType();
 };
 

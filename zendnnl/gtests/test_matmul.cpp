@@ -63,7 +63,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   data_type_t source_dtype, output_dtype;
   quant_granularity_t weight_granularity;
   matmul_algo_t algo;
-  uint32_t num_threads;
+  int32_t num_threads;
 };
 
 /** @fn TEST_P
@@ -1452,7 +1452,7 @@ class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
   tensor_factory_t tensor_factory{};
   float alpha, beta;
   matmul_algo_t algo;
-  uint32_t num_threads;
+  int32_t num_threads;
   size_t num_ops;
 };
 

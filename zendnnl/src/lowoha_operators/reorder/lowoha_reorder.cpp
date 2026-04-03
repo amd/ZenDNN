@@ -19,11 +19,11 @@
 #include "lowoha_operators/reorder/reorder_kernels.hpp"
 #include "lowoha_operators/reorder/per_token_avx512_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 
-#include <omp.h>
 #include <sstream>
 
 namespace zendnnl {
@@ -967,11 +967,13 @@ status_t reorder_direct(const void *src, void *dst,
   // Compute nelems from shape
   const size_t nelems = static_cast<size_t>(params.nelems());
 
+  const int32_t omp_mt = thread_guard::max_threads();
+  params.num_threads = resolve_num_threads(params.num_threads, omp_mt);
+  thread_guard tg(params.num_threads, omp_mt);
+
   //============================================================================
   // Dynamic Quantization Mode
   //============================================================================
-  params.num_threads = params.num_threads > 0 ? params.num_threads :
-                         omp_get_max_threads();
   if (params.dynamic_quant) {
     // Validate dynamic quantization parameters and shape
     status_t dq_status = op_instrumentation::validate([&]() {
@@ -1011,8 +1013,6 @@ status_t reorder_direct(const void *src, void *dst,
     if (is_profile) {
       profiler.tbp_start();
     }
-
-    reorder_threadlimit thread_guard(static_cast<int>(params.num_threads));
 
     //------------------------------------------------------------------
     // Fused per-token path: when granularity is per-channel-row (M,1)
@@ -1147,7 +1147,6 @@ status_t reorder_direct(const void *src, void *dst,
     profiler.tbp_start();
   }
 
-  reorder_threadlimit thread_guard(static_cast<int>(params.num_threads));
   // Execute reorder (handles all cases: contiguous, 1D/2D/3D strided)
   reorder_wrapper(src, dst, nelems, params, algo);
 

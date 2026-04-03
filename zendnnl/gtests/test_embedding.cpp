@@ -56,7 +56,7 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
   bool is_weights, fp16_scale_bias;
   data_type_t indices_dtype;
   bool use_LOWOHA, strided;
-  uint32_t num_threads;
+  int32_t num_threads;
   tensor_factory_t tensor_factory{};
 };
 

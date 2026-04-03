@@ -17,10 +17,10 @@
 #include "lowoha_sdpa.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include <vector>
 #include <limits>
 #include <cstdlib>
-#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -65,8 +65,8 @@ status_t sdpa_direct(
   const uint64_t seq_len = params.seq_len;
   const uint64_t head_dim = params.head_dim;
   const uint64_t batch_heads = batch * num_heads;
-  const int num_threads = params.num_threads > 0 ? params.num_threads :
-                          omp_get_max_threads();
+  const int32_t num_threads = resolve_num_threads(params.num_threads,
+                                                  thread_guard::max_threads());
 
   // Determine element size based on data type
   size_t elem_size = (params.q_dt == data_type_t::bf16) ? sizeof(
