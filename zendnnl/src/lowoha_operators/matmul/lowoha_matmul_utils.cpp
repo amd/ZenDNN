@@ -777,8 +777,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
       }
       else {
         if (params.dtypes.wei == data_type_t::bf16) {
-          if (M == 1 && num_threads == 1) {
-            kernel = native::bf16_gemv_best_algo(N, K, num_threads);
+          if (M <= 8) {
+            // M=1: BKC GEMV with flat kernel + CCX scheduling.
+            // M=2-8: BRGEMM with MR=M (decode) or MR=8, with
+            // b_exceeds_l2 exemption. Both dominate DLP at high
+            // thread counts (up to +50% at 128t on MoE shapes).
+            kernel = native::bf16_gemv_best_algo(M, N, K, num_threads);
           }
           else {
             kernel = select_algo_by_heuristics_bf16_mm(M, N, K);

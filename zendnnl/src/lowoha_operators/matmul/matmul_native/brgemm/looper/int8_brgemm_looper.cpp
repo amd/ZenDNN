@@ -207,6 +207,9 @@ void int8_brgemm_execute(
     const int K_padded = (K + 3) & ~3;
 
     // ── Extract quantization parameters ──
+    // Only per-tensor src scale/zp and per-tensor/per-channel wei scale
+    // are supported. Per-token, per-group, etc. are rejected at the
+    // native_brgemm entry gate and should not reach here.
     auto qp = extract_int8_quant(params);
     const float src_scale = qp.src_scale;
     int32_t src_zp = qp.src_zp;

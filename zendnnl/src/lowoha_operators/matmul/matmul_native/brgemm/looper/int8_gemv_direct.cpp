@@ -125,6 +125,8 @@ bool int8_gemv_direct(
         return false;
 
     // ── Extract quantization parameters ──
+    // Only per-tensor src scale/zp and per-tensor/per-channel wei scale
+    // are supported. Per-token, per-group, etc. fall back to BRGEMM/DLP.
     auto qp = extract_int8_quant(params);
     float src_scale = qp.src_scale;
     int32_t src_zp = qp.src_zp;
@@ -132,6 +134,12 @@ bool int8_gemv_direct(
     const float *wei_scale_ptr = qp.wei_scale ? qp.wei_scale : &wei_scale_default;
     int wei_scale_count = qp.wei_scale_count;
     if (wei_scale_count != 0 && wei_scale_count != 1 && wei_scale_count != N)
+        return false;
+    const auto &src_sc_dims = params.quant_params.src_scale.dims;
+    if (!src_sc_dims.empty() && src_sc_dims.back() > 1)
+        return false;
+    const auto &src_zp_dims = params.quant_params.src_zp.dims;
+    if (!src_zp_dims.empty() && src_zp_dims.back() > 1)
         return false;
 
     // ── Prepare A as u8 ──

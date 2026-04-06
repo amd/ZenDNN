@@ -16,7 +16,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <cstdlib>
 #include <algorithm>
 
 #include <immintrin.h>
@@ -347,6 +346,158 @@ static inline void dispatch_block(
     }
 }
 
+// ── Flat GEMV epilogue: alpha/beta/bias/postop/store from FP32 accumulators
+__attribute__((always_inline, target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
+static inline void bf16_gemv_flat_epilogue(
+    const float *__restrict__ acc, int nvt,
+    uint16_t *__restrict__ C_bf16,
+    float *__restrict__ C_fp32,
+    const float *__restrict__ bias_f,
+    fused_postop_t fused_op,
+    float alpha, float beta,
+    bool dst_is_bf16, int N) {
+
+    for (int v = 0; v < nvt; ++v) {
+        const int n_off = v * 16;
+        if (n_off >= N) break;
+        const int elems = std::min(16, N - n_off);
+        const __mmask16 mask = (elems == 16) ? __mmask16(0xFFFF)
+            : static_cast<__mmask16>((1u << elems) - 1);
+
+        __m512 val = _mm512_load_ps(acc + v * 16);
+
+        if (alpha != 1.0f)
+            val = _mm512_mul_ps(val, _mm512_set1_ps(alpha));
+
+        if (beta != 0.0f) {
+            __m512 c_old;
+            if (dst_is_bf16 && C_bf16) {
+                __m256i raw = (elems == 16)
+                    ? _mm256_loadu_si256(
+                          reinterpret_cast<const __m256i *>(C_bf16 + n_off))
+                    : _mm256_maskz_loadu_epi16(mask, C_bf16 + n_off);
+                c_old = _mm512_castsi512_ps(
+                    _mm512_slli_epi32(_mm512_cvtepu16_epi32(raw), 16));
+            } else if (C_fp32) {
+                c_old = (elems == 16) ? _mm512_loadu_ps(C_fp32 + n_off)
+                                      : _mm512_maskz_loadu_ps(mask, C_fp32 + n_off);
+            } else {
+                c_old = _mm512_setzero_ps();
+            }
+            val = _mm512_fmadd_ps(_mm512_set1_ps(beta), c_old, val);
+        }
+
+        if (bias_f)
+            val = _mm512_add_ps(val, (elems == 16)
+                ? _mm512_loadu_ps(bias_f + n_off)
+                : _mm512_maskz_loadu_ps(mask, bias_f + n_off));
+
+        if (fused_op != fused_postop_t::none)
+            val = apply_fused_postop(val, fused_op);
+
+        if (dst_is_bf16 && C_bf16) {
+            __m256bh bf = _mm512_cvtneps_pbh(val);
+            if (elems == 16)
+                _mm256_storeu_si256(
+                    reinterpret_cast<__m256i *>(C_bf16 + n_off), (__m256i)bf);
+            else
+                _mm256_mask_storeu_epi16(C_bf16 + n_off, mask, (__m256i)bf);
+        } else {
+            if (elems == 16)
+                _mm512_storeu_ps(C_fp32 + n_off, val);
+            else
+                _mm512_mask_storeu_ps(C_fp32 + n_off, mask, val);
+        }
+    }
+}
+
+// ── Intrinsics flat K-loop: compile-time unrolled, single K-loop ──────
+// NVT accumulators live in ZMM registers for the entire K dimension.
+template<int NVT>
+__attribute__((noinline, target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
+static void bf16_gemv_flat_kloop_intrinsic(
+    const uint16_t *__restrict__ A,
+    const uint16_t *__restrict__ B_bkc,
+    float *__restrict__ acc,
+    int K, int n_stride) {
+
+    __m512 a[NVT];
+    for (int v = 0; v < NVT; ++v)
+        a[v] = _mm512_setzero_ps();
+
+    const int k_pairs_even = K / 2;
+    for (int kp = 0; kp < k_pairs_even; ++kp) {
+        int32_t ap;
+        std::memcpy(&ap, &A[2 * kp], sizeof(ap));
+        __m512bh av = (__m512bh)_mm512_set1_epi32(ap);
+        const uint16_t *bp = B_bkc + kp * n_stride;
+        for (int v = 0; v < NVT; ++v)
+            a[v] = _mm512_dpbf16_ps(a[v], av,
+                (__m512bh)_mm512_loadu_si512(bp + v * 16 * VNNI_PAIR));
+    }
+    if (K & 1) {
+        __m512bh av = (__m512bh)_mm512_set1_epi32(
+            static_cast<int32_t>(static_cast<uint32_t>(A[K - 1])));
+        const uint16_t *bp = B_bkc + k_pairs_even * n_stride;
+        for (int v = 0; v < NVT; ++v)
+            a[v] = _mm512_dpbf16_ps(a[v], av,
+                (__m512bh)_mm512_loadu_si512(bp + v * 16 * VNNI_PAIR));
+    }
+
+    for (int v = 0; v < NVT; ++v)
+        _mm512_store_ps(acc + v * 16, a[v]);
+}
+
+// Dispatch intrinsics K-loop by NVT (1..16).
+__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
+static bool bf16_gemv_flat_intrinsic_dispatch(
+    const uint16_t *A, const uint16_t *B_bkc,
+    float *acc, int K, int n_stride, int nvt) {
+
+    #define CASE_NVT(N) case N: bf16_gemv_flat_kloop_intrinsic<N>( \
+        A, B_bkc, acc, K, n_stride); return true
+
+    switch (nvt) {
+    CASE_NVT(1);  CASE_NVT(2);  CASE_NVT(3);  CASE_NVT(4);
+    CASE_NVT(5);  CASE_NVT(6);  CASE_NVT(7);  CASE_NVT(8);
+    CASE_NVT(9);  CASE_NVT(10); CASE_NVT(11); CASE_NVT(12);
+    CASE_NVT(13); CASE_NVT(14); CASE_NVT(15); CASE_NVT(16);
+    default: return false;
+    }
+    #undef CASE_NVT
+}
+
+// ── Flat GEMV entry: single K-loop + epilogue ─────────────────────────
+// Replaces the block dispatch chain when N fits in one BKC block (≤256)
+// and the block dispatch would produce a main panel + tail (N%64 != 0).
+// Merges both into a single K-loop with NVT accumulators in ZMM registers.
+__attribute__((noinline, target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
+static bool bf16_gemv_flat(
+    const uint16_t *__restrict__ A,
+    const uint16_t *__restrict__ B_bkc,
+    uint16_t *__restrict__ C_bf16,
+    float *__restrict__ C_fp32,
+    const float *__restrict__ bias_f,
+    fused_postop_t fused_op,
+    float alpha, float beta,
+    bool dst_is_bf16,
+    int K, int N) {
+
+    const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
+    const int nvt = N_padded / 16;
+    if (nvt < 1 || nvt > 16) return false;
+
+    const int n_stride = N_padded * VNNI_PAIR;
+    float acc[256] __attribute__((aligned(64)));
+
+    if (!bf16_gemv_flat_intrinsic_dispatch(A, B_bkc, acc, K, n_stride, nvt))
+        return false;
+
+    bf16_gemv_flat_epilogue(acc, nvt, C_bf16, C_fp32, bias_f,
+                            fused_op, alpha, beta, dst_is_bf16, N);
+    return true;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────
 
 __attribute__((noinline))
@@ -409,6 +560,16 @@ void bf16_gemv_bkc(
     float alpha, float beta,
     bool dst_is_bf16,
     int K, int N) {
+
+    // Flat path: merges nr64_core + tail into one K-loop.  Only beneficial
+    // when the block dispatch would produce both a main panel AND a tail
+    // (N > 64 and N not 64-aligned).  When N % 64 == 0 the block dispatch
+    // already runs a single K-loop with no tail.
+    if (N > 64 && (N & 63) != 0 && N <= choose_blk_n(N)) {
+        if (bf16_gemv_flat(A, B_bkc, C_bf16, C_fp32, bias_f, fused_op,
+                           alpha, beta, dst_is_bf16, K, N))
+            return;
+    }
 
     bf16_gemv_bkc_jc_range(
         A, B_bkc, C_bf16, C_fp32, bias_f, fused_op,

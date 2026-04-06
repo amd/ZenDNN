@@ -559,11 +559,12 @@ void bf16_brgemm_execute(
         bool small_n = (N < NR_PACK);
         // Tiny-K wide-N decode (M>1): BRGEMM's per-panel overhead exceeds
         // the compute per panel. GEMM's simpler loop is faster.
-        // M=1 is excluded: the BRGEMM M=1 fast path has minimal overhead
-        // and fuses postops with better accuracy than the GEMM fallback.
+        // Small M (≤8) is excluded from b_exceeds_l2: the BRGEMM kernel
+        // streams through K with BK-blocking. For M≤8 (MR=M), all rows
+        // are processed in one panel — no M-reuse needed across BK blocks.
         bool tiny_k_wide = (is_decode && M > 1 && K < 32 && N > K);
 
-        if (b_exceeds_l2 || small_n || tiny_k_wide) {
+        if ((b_exceeds_l2 && M > 8) || small_n || tiny_k_wide) {
             bf16_gemm_execute(desc, uarch, src, weight, dst, bias, params);
             return;
         }

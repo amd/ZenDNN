@@ -136,6 +136,8 @@ BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
   // ── MR: adaptive for decode vs throughput ──
   if (is_decode) {
     plan.MR = M;
+  } else if (M == 8) {
+    plan.MR = 8;
   } else if (M % 6 == 0 || M >= 18) {
     plan.MR = 6;
   } else if (M % 4 == 0) {

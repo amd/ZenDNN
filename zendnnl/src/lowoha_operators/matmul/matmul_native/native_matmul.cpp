@@ -38,28 +38,36 @@ using zendnnl::common::size_of;
 using namespace zendnnl::error_handling;
 
 // ════════════════════════════════════════════════════════════════════════
-// Unified best-of-3 selector for BF16 GEMV (M=1, single-thread).
-// Called by ALGO 0 (dynamic_dispatch) to route each shape to the
-// empirically fastest kernel.
+// Best-algo selector for BF16 M≤8 (GEMV/decode) shapes.
+// Called by ALGO 0 (dynamic_dispatch) to route M≤8 shapes to
+// native_brgemm or aocl_dlp_blocked.
 //
+// M=2-8 or multi-thread: always native_brgemm (BRGEMM dominates DLP
+// at all thread counts for decode shapes — up to +54% at 128t).
+//
+// M=1 single-thread: shape-based DLP gates for small-N high-K where
+// BKC dispatch overhead exceeds DLP's thin-dispatcher advantage.
 // Decision tree (AMD EPYC 9B45, Zen 5, L1d=48KB, L2=1MB, L3=32MB/CCD),
-// validated against 172 BF16 GEMV shapes (K,N = 16..1024) at 2.7 GHz fixed.
-// BKC-GEMV uses block-aware packing (256-col blocks) for any N where B ≤ L2.
+// validated against 188 BF16 GEMV shapes + 22 MoE shapes.
 //
 //   Rules are evaluated in order (first match wins):
 //
 //   ┌──────────────────────────────────┬──────────┬────────────────────────┐
 //   │ Shape characteristic             │ Best     │ Reason                 │
 //   ├──────────────────────────────────┼──────────┼────────────────────────┤
-//   │ N≤32, K≥384                     │ DLP      │ 50-75% NR-pad waste    │
-//   │ N∈(33,63), ≥25%pad, K≥12N,384 │ DLP      │ High zero-pad BW waste │
+//   │ N≤32, K≥256                     │ DLP      │ 50-75% NR-pad waste    │
+//   │ N=33-48, K≥384                 │ DLP      │ BKC dispatch overhead  │
+//   │ N∈(49,63), ≥25%pad, K≥8N,384  │ DLP      │ High zero-pad BW waste │
 //   │ N∈(65,127), ≥25%pad, K≥5N,384 │ DLP      │ Double dispatch + waste │
-//   │ Packed B ≤ L2                    │ BRGEMM   │ BKC GEMV: block packing│
+//   │ Packed B ≤ L2                    │ BRGEMM   │ BKC+flat GEMV kernel   │
 //   │ Everything else                  │ BRGEMM   │ General BRGEMM looper  │
 //   └──────────────────────────────────┴──────────┴────────────────────────┘
 // ════════════════════════════════════════════════════════════════════════
-static matmul_algo_t bf16_gemv_best_algo_impl(int N, int K, int num_threads) {
-  if (num_threads != 1)
+static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K, int num_threads) {
+  // M=2-8: BRGEMM always wins (MR=M decode kernel, b_exceeds_l2 exemption).
+  // DLP zones below are M=1-specific — BKC dispatch overhead matters only
+  // when there's a single row to process.
+  if (M > 1 || num_threads != 1)
     return matmul_algo_t::native_brgemm;
 
   const int packed_N = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
@@ -67,34 +75,30 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int N, int K, int num_threads) {
   const size_t packed_K = static_cast<size_t>((K + 1) & ~1);
   const size_t b_packed_bytes = packed_K * packed_N * sizeof(uint16_t);
 
-  // ── DLP zone 1: tiny-N with large K ─────────────────────────────
-  // N≤32 pads to 64 → 50-75% of every ZMM load is zeros.
-  // DLP's row-major streaming avoids this entirely.
-  // Threshold K≥384: BKC-GEMV still wins at K=256 despite padding.
-  if (N <= 32 && K >= 384)
+  // ── DLP zone 1: small-N with large K ────────────────────────────
+  // N≤48: BKC dispatch overhead (pack + block iteration + tail-only
+  // kernel) dominates for K-dominant shapes. DLP's thin dispatcher
+  // and row-major streaming avoid this entirely.
+  //   N≤32, K≥256: 50-75% NR-pad waste on every ZMM load.
+  //   N=33-48, K≥384: no pad waste but BKC dispatch cost is high
+  //     relative to the small per-row compute.
+  if (N <= 32 && K >= 256)
+    return matmul_algo_t::aocl_dlp_blocked;
+  if (N > 32 && N <= 48 && K >= 384)
     return matmul_algo_t::aocl_dlp_blocked;
 
   // ── DLP zone 2: NR-padding waste with K-dominant shapes ─────────
   // When packed_N has ≥25% zero columns AND K is large relative to N,
   // the BKC kernel wastes bandwidth on zero-padded loads.
-  //   N ∈ (32,64): DLP wins for very K-dominant (K ≥ 12*N, K ≥ 384).
-  //     Lower K thresholds cause false positives (N=48 K=512 BKC-GEMV wins 12%).
+  //   N ∈ (48,64) with padding: DLP wins for K-dominant (K ≥ 8*N).
   //   N ∈ (64,128) with tail: double dispatch overhead + padding.
   //     DLP wins only for very K-dominant shapes (K ≥ 5*N, K ≥ 384).
-  if (pad_waste * 4 >= packed_N && N > 32) {
-    if (N < 64 && K >= 12 * N && K >= 384)
+  if (pad_waste * 4 >= packed_N && N > 48) {
+    if (N < 64 && K >= 8 * N && K >= 384)
       return matmul_algo_t::aocl_dlp_blocked;
     if (N > 64 && N < 128 && K >= 5 * N && K >= 384)
       return matmul_algo_t::aocl_dlp_blocked;
   }
-
-  // ── DLP zone 3: highly K-dominant shapes with large B ────────────
-  // When B > ~600KB and K ≥ 3×N with N in the wide-block range,
-  // DLP's row-major streaming outperforms BKC's block dispatch
-  // (e.g. K=1024 N=320: DLP 82% vs BKC 71%).
-  // K ≥ 2×N is too aggressive — K=896 N=384 BKC still wins by 13%.
-  if (b_packed_bytes > 600 * 1024 && K >= 3 * N && N > 256)
-    return matmul_algo_t::aocl_dlp_blocked;
 
   // ── BKC-GEMV zone: packed B fits in L2 ──────────────────────────
   // Block-aware packing eliminates stride gaps for any N.
@@ -110,14 +114,13 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int N, int K, int num_threads) {
 }
 
 // Wrapper that logs the dispatch decision.
-matmul_algo_t bf16_gemv_best_algo(int N, int K, int num_threads) {
-  matmul_algo_t result = bf16_gemv_best_algo_impl(N, K, num_threads);
+matmul_algo_t bf16_gemv_best_algo(int M, int N, int K, int num_threads) {
+  matmul_algo_t result = bf16_gemv_best_algo_impl(M, N, K, num_threads);
   static bool s_log = apilog_info_enabled();
   if (s_log) {
     const char *name = (result == matmul_algo_t::native_brgemm) ? "BRGEMM" :
-                       (result == matmul_algo_t::native_gemm) ? "GEMM" :
                        (result == matmul_algo_t::aocl_dlp_blocked) ? "DLP" : "???";
-    apilog_info("ALGO0 GEMV dispatch: M=1 K=", K, " N=", N,
+    apilog_info("ALGO0 decode dispatch: M=", M, " K=", K, " N=", N,
                 " threads=", num_threads,
                 " B=", static_cast<size_t>(K)*N*2/1024, "KB"
                 " → ", name);
@@ -190,6 +193,25 @@ bool native_matmul_execute(
                           params.dtypes.wei == data_type_t::s8);
     if (is_int8) {
       if (!uarch.avx512vnni) return false;
+
+      // Native INT8 supports:
+      //   src: per-tensor scale + per-tensor zero point only
+      //   wei: per-tensor (wei_scale_count==1) or per-channel (==N)
+      // Per-group, per-token, and other granularities (e.g. src_scale with
+      // dims > 1, or wei_scale_count not in {0,1,N}) fall back to DLP.
+      {
+        auto qp = extract_int8_quant(params);
+        if (qp.wei_scale_count != 0 && qp.wei_scale_count != 1
+            && qp.wei_scale_count != N)
+          return false;
+        const auto &src_dims = params.quant_params.src_scale.dims;
+        if (!src_dims.empty() && src_dims.back() > 1)
+          return false;
+        const auto &zp_dims = params.quant_params.src_zp.dims;
+        if (!zp_dims.empty() && zp_dims.back() > 1)
+          return false;
+      }
+
       // INT8 BKC GEMV is single-thread only today; BF16 M=1 can use bf16_gemv_direct
       // with nt>1. Parallel INT8 M=1 goes straight to BRGEMM.
       if (M == 1 && num_threads == 1) {

@@ -280,16 +280,13 @@ bool bf16_gemv_direct(
 
     if (num_threads > 1) {
         if (desc.ldc != N) return false;
-        // nt = max team size allowed for this N (min cols/thread + caller cap).
-        // Worst packed slice shrinks as nt grows (chunk = ceil(N/nt)); if even
-        // that thinnest slice exceeds an L2 budget, no smaller nt helps — BRGEMM.
+
         const int nt = m1_gemv_cap_threads(N, num_threads);
+        const int chunk = (N + nt - 1) / nt;
         const size_t l2_slice_budget =
             (l2_cap * kBf16BkcMtL2SliceBudgetPct) / 100;
         if (bf16_bkc_mt_worst_slice_packed_bytes(K_padded, N, nt) > l2_slice_budget)
             return false;
-
-        const int chunk = (N + nt - 1) / nt;
 
         const float *bias_f_row = nullptr;
         if (!bkc_resolve_bias_f(desc, N, bias, has_bias, &bias_f_row))
@@ -324,12 +321,17 @@ bool bf16_gemv_direct(
         return pack_fail.load(std::memory_order_relaxed) == 0;
     }
 
-    // Single-thread: packed B must fit entirely in L2.
+    // Single-thread
+    if (desc.ldc != N) return false;
     const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
     const size_t b_packed_bytes =
         static_cast<size_t>(K_padded) * N_padded * sizeof(uint16_t);
-    if (b_packed_bytes > l2_cap) return false;
-    if (desc.ldc != N) return false;
+
+    // >L2 shapes stream through the cached BKC data directly — the kernel's
+    // sequential k-pair access lets the HW prefetcher handle L3/DRAM traffic
+    // with accumulators in ZMM registers. Requires const weights for caching.
+    if (b_packed_bytes > l2_cap && !desc.is_weights_const)
+        return false;
 
     const float *bias_f = nullptr;
     if (!bkc_resolve_bias_f(desc, N, bias, has_bias, &bias_f))

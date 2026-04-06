@@ -141,8 +141,8 @@ void bf16_brgemm_ukernel(
         const uint16_t*, int, const uint16_t*, int, float*, int, \
         int, int, float, const float*, fused_postop_t, uint16_t*, int);
 
-// NR=64 (NV=4): MR=1-6
-INST(1,4) INST(2,4) INST(3,4) INST(4,4) INST(6,4)
+// NR=64 (NV=4): MR=1-8
+INST(1,4) INST(2,4) INST(3,4) INST(4,4) INST(6,4) INST(8,4)
 // NR=32 (NV=2): MR=1-6
 INST(1,2) INST(2,2) INST(3,2) INST(4,2) INST(6,2)
 // NR=16 (NV=1): MR=1-6
@@ -163,6 +163,7 @@ bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
         case 3: return bf16_brgemm_ukernel<3, 4>;
         case 4: return bf16_brgemm_ukernel<4, 4>;
         case 6: return bf16_brgemm_ukernel<6, 4>;
+        case 8: return bf16_brgemm_ukernel<8, 4>;
         }
         break;
     case 32:
