@@ -36,8 +36,10 @@ namespace normalization {
  * flags, and iteration counts.
  *
  * @var norm_type Normalization variant: "layer_norm", "batch_norm", "rms_norm", or "fused_add_rms_norm".
- * @var shape Tensor dimensions (e.g., {batch, hidden_dim} or {N, C, H, W}).
- * @var norm_ndims Number of trailing dimensions to normalize (LayerNorm/RMSNorm/FusedAddRMSNorm).
+ * @var batch Product of all outer (non-normalized) dimensions.
+ * @var norm_size Product of all normalized (trailing) dimensions.
+ * @var num_channels Channel count (BatchNorm only).
+ * @var total_elements Total number of elements (batch * norm_size, or batch * num_channels * norm_size for BatchNorm).
  * @var src_dt Source (input) data type (f32 or bf16).
  * @var dst_dt Destination (output) data type (f32 or bf16).
  * @var gamma_dt Gamma (scale) parameter data type (default: f32).
@@ -54,8 +56,10 @@ namespace normalization {
  */
 struct NormalizationConfig {
   std::string norm_type;
-  std::vector<uint64_t> shape;
-  int norm_ndims;
+  uint64_t batch;
+  uint64_t norm_size;
+  uint64_t num_channels;
+  uint64_t total_elements;
   zendnnl::common::data_type_t src_dt;
   zendnnl::common::data_type_t dst_dt;
   zendnnl::common::data_type_t gamma_dt;
@@ -82,30 +86,6 @@ struct NormalizationConfig {
 std::string strToNormType(const std::string &str);
 
 /**
- * @brief Parses a shape string (e.g., "2x4096" or "32x64x56x56") into a vector of dimensions.
- *
- * @param shape_str Shape string with dimensions separated by 'x'.
- * @return std::vector<uint64_t> Parsed dimensions.
- */
-std::vector<uint64_t> parseShape(const std::string &shape_str);
-
-/**
- * @brief Computes the product of the last norm_ndims dimensions of the shape.
- *
- * @param cfg NormalizationConfig containing shape and norm_ndims.
- * @return uint64_t The normalization size.
- */
-uint64_t compute_norm_size(const NormalizationConfig &cfg);
-
-/**
- * @brief Extracts the number of channels (second dimension) from the shape.
- *
- * @param cfg NormalizationConfig containing the tensor shape.
- * @return uint64_t The number of channels, or 0 if shape has fewer than 2 dimensions.
- */
-uint64_t compute_num_channels(const NormalizationConfig &cfg);
-
-/**
  * @brief Converts a normalization type string to the LOWOHA norm_type_t enum.
  *
  * @param norm_type Canonical normalization type string (e.g., "layer_norm").
@@ -125,8 +105,8 @@ norm_algo_t strToLowohaAlgo(const std::string &algo);
  * @brief Parses the input file and populates a vector of NormalizationConfig structures.
  *
  * Each line in the input file specifies a benchmark configuration in CSV format:
- *   norm_type, shape, norm_ndims, src_dt:dst_dt, epsilon, use_scale, use_shift, iters
- *   [, warmup_iters, gamma_dt, beta_dt, algorithm, num_threads, isInplace]
+ *   norm_type, batch, norm_size, src_dt:dst_dt, epsilon, use_scale, use_shift, iters
+ *   [, warmup_iters, gamma_dt, beta_dt, algorithm, num_threads, isInplace, num_channels]
  *
  * @param infile Reference to an open std::ifstream containing the input configurations.
  * @param configs Reference to a vector of NormalizationConfig to be populated.

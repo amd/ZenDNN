@@ -47,9 +47,9 @@ int run_lowoha_layer_norm_fp32_example() {
 
     // Setup normalization parameters
     norm_params params;
-    params.shape      = {batch, hidden_dim};
+    params.batch      = batch;
+    params.norm_size  = hidden_dim;
     params.norm_type  = norm_type_t::LAYER_NORM;
-    params.norm_ndims = 1;
     params.src_dt     = data_type_t::f32;
     params.dst_dt     = data_type_t::f32;
     params.epsilon    = 1e-5f;
@@ -102,9 +102,9 @@ int run_lowoha_layer_norm_3d_fp32_example() {
 
     // Setup: normalize over last 1 dim (hidden_dim)
     norm_params params;
-    params.shape      = {batch, seq_len, hidden_dim};
+    params.batch      = batch * seq_len;
+    params.norm_size  = hidden_dim;
     params.norm_type  = norm_type_t::LAYER_NORM;
-    params.norm_ndims = 1;
     params.src_dt     = data_type_t::f32;
     params.dst_dt     = data_type_t::f32;
     params.epsilon    = 1e-5f;
@@ -160,13 +160,15 @@ int run_lowoha_batch_norm_fp32_example() {
 
     // Setup
     norm_params params;
-    params.shape      = {N, C, H, W};
-    params.norm_type  = norm_type_t::BATCH_NORM;
-    params.src_dt     = data_type_t::f32;
-    params.dst_dt     = data_type_t::f32;
-    params.epsilon    = 1e-5f;
-    params.use_scale  = true;
-    params.use_shift  = true;
+    params.batch        = N;
+    params.num_channels = C;
+    params.norm_size    = H * W;
+    params.norm_type    = norm_type_t::BATCH_NORM;
+    params.src_dt       = data_type_t::f32;
+    params.dst_dt       = data_type_t::f32;
+    params.epsilon      = 1e-5f;
+    params.use_scale    = true;
+    params.use_shift    = true;
 
     status_t status = normalization_direct(
                         input.data(), output.data(),
@@ -210,13 +212,13 @@ int run_lowoha_rms_norm_fp32_example() {
 
     // Setup
     norm_params params;
-    params.shape      = {batch, hidden_dim};
+    params.batch      = batch;
+    params.norm_size  = hidden_dim;
     params.norm_type  = norm_type_t::RMS_NORM;
-    params.norm_ndims = 1;
     params.src_dt     = data_type_t::f32;
     params.dst_dt     = data_type_t::f32;
-    params.epsilon    = 1e-6f;  // LLaMA uses 1e-6
-    params.use_scale  = true;   // RMSNorm uses scale (gamma) only
+    params.epsilon    = 1e-6f;
+    params.use_scale  = true;
 
     status_t status = normalization_direct(
                         input.data(), output.data(),
@@ -263,13 +265,13 @@ int run_lowoha_fused_add_rms_norm_fp32_example() {
     std::vector<float> output(total_size, 0.0f);
 
     norm_params params;
-    params.shape      = {batch, hidden_dim};
+    params.batch      = batch;
+    params.norm_size  = hidden_dim;
     params.norm_type  = norm_type_t::FUSED_ADD_RMS_NORM;
-    params.norm_ndims = 1;
     params.src_dt     = data_type_t::f32;
     params.dst_dt     = data_type_t::f32;
     params.epsilon    = 1e-6f;
-    params.use_scale  = true; // true if gamma is provided
+    params.use_scale  = true;
 
     status_t status = normalization_direct(
                         input.data(), output.data(),

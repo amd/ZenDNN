@@ -38,43 +38,14 @@ std::string strToNormType(const std::string &str) {
   return "";
 }
 
-std::vector<uint64_t> parseShape(const std::string &shape_str) {
-  std::vector<uint64_t> dims;
-  std::stringstream ss(shape_str);
-  std::string token;
-  while (std::getline(ss, token, 'x')) {
-    if (!token.empty()) {
-      dims.push_back(std::stoull(token));
-    }
-  }
-  return dims;
-}
-
-static std::string shapeToStr(const std::vector<uint64_t> &shape) {
+static std::string dimsToStr(uint64_t batch, uint64_t norm_size,
+                             uint64_t num_channels) {
   std::ostringstream ss;
-  for (size_t i = 0; i < shape.size(); ++i) {
-    if (i > 0) {
-      ss << "x";
-    }
-    ss << shape[i];
+  ss << batch << "x" << norm_size;
+  if (num_channels > 0) {
+    ss << " (C=" << num_channels << ")";
   }
   return ss.str();
-}
-
-uint64_t compute_norm_size(const NormalizationConfig &cfg) {
-  uint64_t norm_size = 1;
-  int ndims = static_cast<int>(cfg.shape.size());
-  for (int i = ndims - cfg.norm_ndims; i < ndims; ++i) {
-    norm_size *= cfg.shape[i];
-  }
-  return norm_size;
-}
-
-uint64_t compute_num_channels(const NormalizationConfig &cfg) {
-  if (cfg.shape.size() >= 2) {
-    return cfg.shape[1];
-  }
-  return 0;
 }
 
 norm_type_t strToLowohaType(const std::string &norm_type) {
@@ -116,9 +87,8 @@ void inputParser(std::ifstream &infile,
     if (fields.size() < NORM_REQUIRED_FIELD_COUNT) {
       commonlog_error(
         "Invalid line (expected at least ", NORM_REQUIRED_FIELD_COUNT, " fields): "
-        "[norm_type, shape, norm_ndims, src_dt:dst_dt, epsilon, use_scale, "
-        "use_shift, iters, warmup_iters (opt), gamma_dt (opt), beta_dt (opt), "
-        "algorithm (opt), num_threads (opt), isInplace (opt)]");
+        "[norm_type, batch, norm_size, src_dt:dst_dt, epsilon, use_scale, "
+        "use_shift, iters, ...]");
       continue;
     }
 
@@ -134,45 +104,17 @@ void inputParser(std::ifstream &infile,
       }
       id++;
 
-      cfg.shape = parseShape(fields[id]);
-      if (cfg.shape.empty()) {
-        commonlog_error("Invalid shape: ", fields[id],
-                        ". Expected format: dim0xdim1x... (e.g., 2x4096)");
+      cfg.batch = std::stoull(fields[id++]);
+      cfg.norm_size = std::stoull(fields[id++]);
+
+      if (cfg.batch == 0 || cfg.norm_size == 0) {
+        commonlog_error("batch and norm_size must be > 0, got batch=",
+                        cfg.batch, " norm_size=", cfg.norm_size);
         continue;
       }
 
-      int ndims = static_cast<int>(cfg.shape.size());
-      constexpr int NORM_MAX_NDIMS = 5;
-
-      if (ndims > NORM_MAX_NDIMS) {
-        commonlog_error("Shape has ", ndims, " dimensions, but normalization supports "
-                        "at most ", NORM_MAX_NDIMS, "D tensors. Got shape: ", fields[id]);
-        continue;
-      }
-
-      if (cfg.norm_type == "batch_norm" && ndims < 2) {
-        commonlog_error("batch_norm requires shape with >= 2 dimensions (N, C, ...), got ",
-                        ndims, "D shape: ", fields[id]);
-        continue;
-      }
-      id++;
-
-      cfg.norm_ndims = std::stoi(fields[id++]);
-
-      if (cfg.norm_type == "batch_norm") {
-        if (cfg.norm_ndims != 0) {
-          commonlog_warning("batch_norm uses norm_ndims=0 (channel-wise normalization). "
-                            "Overriding provided norm_ndims=", cfg.norm_ndims, " to 0.");
-          cfg.norm_ndims = 0;
-        }
-      }
-      else {
-        if (cfg.norm_ndims < 1 || cfg.norm_ndims > ndims) {
-          commonlog_error("norm_ndims must be in range [1, ", ndims,
-                          "] for ", cfg.norm_type, ", got ", cfg.norm_ndims);
-          continue;
-        }
-      }
+      cfg.num_channels = 0;
+      cfg.total_elements = cfg.batch * cfg.norm_size;
 
       auto dt = split(fields[id++], ':');
       if (dt.size() >= 2) {
@@ -253,6 +195,15 @@ void inputParser(std::ifstream &infile,
         cfg.isInplace = false;
       }
 
+      cfg.num_channels = (fields.size() > static_cast<size_t>(id) &&
+                          !fields[id].empty()) ?
+                         std::stoull(fields[id]) : 0;
+      id++;
+
+      if (cfg.norm_type == "batch_norm") {
+        cfg.total_elements = cfg.batch * cfg.num_channels * cfg.norm_size;
+      }
+
       configs.push_back(cfg);
     }
     catch (const std::exception &e) {
@@ -264,7 +215,7 @@ void inputParser(std::ifstream &infile,
 
 void log_benchmark_failure(const NormalizationConfig &cfg) {
   testlog_error("Benchmark failed for ", cfg.norm_type, ", ",
-                shapeToStr(cfg.shape), ", ", cfg.norm_ndims, ", ",
+                dimsToStr(cfg.batch, cfg.norm_size, cfg.num_channels), ", ",
                 datatypeToStr(cfg.src_dt), ":", datatypeToStr(cfg.dst_dt), ", ",
                 cfg.epsilon, ", ", cfg.use_scale, ", ", cfg.use_shift, ", ",
                 cfg.iters, ", ", cfg.warmup_iters, ", ",
@@ -277,7 +228,7 @@ void log_benchmark_failure(const NormalizationConfig &cfg) {
 void print_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
                    &normalization_results, std::ostream &outfile) {
   std::vector<std::string> headers = {
-    "Norm_Type", "Shape", "Norm_Ndims", "Data_Type", "Epsilon",
+    "Norm_Type", "Batch", "Norm_Size", "Data_Type", "Epsilon",
     "Use_Scale", "Use_Shift", "Iterations", "Warmup_Iters",
     "Gamma_DT", "Beta_DT", "Algorithm", "Num_Threads", "Inplace",
     "Total_time(ms) (all iters)", "Avg_time(ms)"
@@ -294,10 +245,10 @@ void print_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
     col_widths[col] = std::max(col_widths[col], config.norm_type.size() + 2);
     col++;
     col_widths[col] = std::max(col_widths[col],
-                               shapeToStr(config.shape).size() + 2);
+                               std::to_string(config.batch).size() + 2);
     col++;
     col_widths[col] = std::max(col_widths[col],
-                               std::to_string(config.norm_ndims).size() + 2);
+                               std::to_string(config.norm_size).size() + 2);
     col++;
     std::string dt_str = datatypeToStr(config.src_dt) + ":" +
                          datatypeToStr(config.dst_dt);
@@ -362,8 +313,8 @@ void print_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
     const auto &stat = result.second;
     std::vector<std::string> row;
     row.push_back(config.norm_type);
-    row.push_back(shapeToStr(config.shape));
-    row.push_back(std::to_string(config.norm_ndims));
+    row.push_back(std::to_string(config.batch));
+    row.push_back(std::to_string(config.norm_size));
     row.push_back(datatypeToStr(config.src_dt) + ":" +
                   datatypeToStr(config.dst_dt));
     std::ostringstream eps_ss;
@@ -394,7 +345,7 @@ void print_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
 void log_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
                  &normalization_results, std::ostream &outfile) {
   outfile <<
-          "Norm_Type, Shape, Norm_Ndims, Data_Type, Epsilon, "
+          "Norm_Type, Batch, Norm_Size, Data_Type, Epsilon, "
           "Use_Scale, Use_Shift, Iterations, Warmup_Iters, "
           "Gamma_DT, Beta_DT, Algorithm, Num_Threads, Inplace, "
           "Total_time(ms) (all iters), Avg_time(ms)" << std::endl;
@@ -404,8 +355,8 @@ void log_results(std::vector<std::pair<NormalizationConfig, TimingStats>>
     const auto &stat = result.second;
     outfile <<
             config.norm_type << ", " <<
-            shapeToStr(config.shape) << ", " <<
-            config.norm_ndims << ", " <<
+            config.batch << ", " <<
+            config.norm_size << ", " <<
             datatypeToStr(config.src_dt) << ":" << datatypeToStr(config.dst_dt) << ", " <<
             config.epsilon << ", " <<
             (config.use_scale ? "true" : "false") << ", " <<

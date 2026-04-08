@@ -22,16 +22,24 @@ namespace zendnnl {
 namespace benchdnn {
 namespace normalization {
 
+static std::vector<uint64_t> flat_shape(const NormalizationConfig &cfg) {
+  if (cfg.norm_type == "batch_norm" && cfg.num_channels > 0) {
+    return {cfg.batch, cfg.num_channels, cfg.norm_size};
+  }
+  return {cfg.batch, cfg.norm_size};
+}
+
 int create_input_tensor(tensor_factory_t &tensor_factory,
                         const NormalizationConfig &cfg, tensor_t &input) {
-  input = tensor_factory.uniform_dist_tensor(cfg.shape, cfg.src_dt,
+  input = tensor_factory.uniform_dist_tensor(flat_shape(cfg), cfg.src_dt,
           2.0f, "input_tensor");
   return OK;
 }
 
 int create_output_tensor(tensor_factory_t &tensor_factory,
                          const NormalizationConfig &cfg, tensor_t &output) {
-  output = tensor_factory.zero_tensor(cfg.shape, cfg.dst_dt, "output_tensor");
+  output = tensor_factory.zero_tensor(flat_shape(cfg), cfg.dst_dt,
+                                      "output_tensor");
   return OK;
 }
 
@@ -42,14 +50,8 @@ int create_gamma_tensor(tensor_factory_t &tensor_factory,
     return OK;
   }
 
-  uint64_t param_size;
-  if (cfg.norm_type == "batch_norm") {
-    param_size = compute_num_channels(cfg);
-  }
-  else {
-    param_size = compute_norm_size(cfg);
-  }
-
+  uint64_t param_size = (cfg.norm_type == "batch_norm") ?
+                        cfg.num_channels : cfg.norm_size;
   gamma = tensor_factory.uniform_dist_tensor({param_size}, cfg.gamma_dt,
           1.0f, "gamma_tensor");
   return OK;
@@ -64,14 +66,8 @@ int create_beta_tensor(tensor_factory_t &tensor_factory,
     return OK;
   }
 
-  uint64_t param_size;
-  if (cfg.norm_type == "batch_norm") {
-    param_size = compute_num_channels(cfg);
-  }
-  else {
-    param_size = compute_norm_size(cfg);
-  }
-
+  uint64_t param_size = (cfg.norm_type == "batch_norm") ?
+                        cfg.num_channels : cfg.norm_size;
   beta = tensor_factory.uniform_dist_tensor({param_size}, cfg.beta_dt,
          1.0f, "beta_tensor");
   return OK;
@@ -85,8 +81,7 @@ int create_running_mean_tensor(tensor_factory_t &tensor_factory,
     return OK;
   }
 
-  uint64_t num_channels = compute_num_channels(cfg);
-  running_mean = tensor_factory.uniform_dist_tensor({num_channels},
+  running_mean = tensor_factory.uniform_dist_tensor({cfg.num_channels},
                  data_type_t::f32, 2.0f, "running_mean_tensor");
   return OK;
 }
@@ -99,19 +94,16 @@ int create_running_var_tensor(tensor_factory_t &tensor_factory,
     return OK;
   }
 
-  uint64_t num_channels = compute_num_channels(cfg);
-  running_var = tensor_factory.uniform_dist_tensor({num_channels},
+  running_var = tensor_factory.uniform_dist_tensor({cfg.num_channels},
                 data_type_t::f32, 1.0f, "running_var_tensor");
 
-  // Variance must be non-negative; ensure all values are positive to avoid
-  // NaN in the 1/sqrt(var + epsilon) computation.
   float *var_ptr = static_cast<float *>(
                      running_var.get_raw_handle_unsafe());
   if (!var_ptr) {
     commonlog_error("Failed to get raw handle for running_var tensor");
     return NOT_OK;
   }
-  for (uint64_t i = 0; i < num_channels; ++i) {
+  for (uint64_t i = 0; i < cfg.num_channels; ++i) {
     var_ptr[i] = std::fabs(var_ptr[i]) + 0.1f;
   }
 
@@ -126,7 +118,7 @@ int create_residual_tensor(tensor_factory_t &tensor_factory,
     return OK;
   }
 
-  residual = tensor_factory.uniform_dist_tensor(cfg.shape, cfg.src_dt,
+  residual = tensor_factory.uniform_dist_tensor(flat_shape(cfg), cfg.src_dt,
              2.0f, "residual_tensor");
   return OK;
 }

@@ -25,8 +25,10 @@ class TestNormalization : public ::testing::TestWithParam<NormalizationType> {
   virtual void SetUp() {
     NormalizationType params = GetParam();
     norm_type     = params.norm_type;
+    batch         = params.batch;
+    norm_size     = params.norm_size;
+    num_channels  = params.num_channels;
     shape         = params.shape;
-    norm_ndims    = params.norm_ndims;
     epsilon       = params.epsilon;
     use_scale     = params.use_scale;
     use_shift     = params.use_shift;
@@ -40,23 +42,13 @@ class TestNormalization : public ::testing::TestWithParam<NormalizationType> {
       total_elements *= d;
     }
 
-    if (norm_type == norm_type_t::BATCH_NORM) {
-      num_channels = shape[1];
-      gamma_size   = num_channels;
-    }
-    else {
-      int ndims = static_cast<int>(shape.size());
-      gamma_size = 1;
-      for (int i = ndims - norm_ndims; i < ndims; ++i) {
-        gamma_size *= shape[i];
-      }
-      num_channels = 0;
-    }
+    gamma_size = (norm_type == norm_type_t::BATCH_NORM) ?
+                 num_channels : norm_size;
 
     log_info("norm_type: ", norm_type_to_str(norm_type),
-             " ndims: ", shape.size(),
+             " batch: ", batch,
+             " norm_size: ", norm_size,
              " total_elements: ", total_elements,
-             " norm_ndims: ", norm_ndims,
              " epsilon: ", epsilon,
              " use_scale: ", use_scale, " use_shift: ", use_shift,
              " gamma_dt: ", dtype_info(gamma_dt),
@@ -71,17 +63,18 @@ class TestNormalization : public ::testing::TestWithParam<NormalizationType> {
    */
   norm_params build_params(data_type_t src_dt, data_type_t dst_dt) {
     norm_params np;
-    np.norm_type   = norm_type;
-    np.shape       = shape;
-    np.norm_ndims  = norm_ndims;
-    np.epsilon     = epsilon;
-    np.use_scale   = use_scale;
-    np.use_shift   = use_shift;
-    np.src_dt      = src_dt;
-    np.dst_dt      = dst_dt;
-    np.gamma_dt    = gamma_dt;
-    np.beta_dt     = beta_dt;
-    np.num_threads = num_threads;
+    np.norm_type    = norm_type;
+    np.batch        = batch;
+    np.norm_size    = norm_size;
+    np.num_channels = num_channels;
+    np.epsilon      = epsilon;
+    np.use_scale    = use_scale;
+    np.use_shift    = use_shift;
+    np.src_dt       = src_dt;
+    np.dst_dt       = dst_dt;
+    np.gamma_dt     = gamma_dt;
+    np.beta_dt      = beta_dt;
+    np.num_threads  = num_threads;
     return np;
   }
 
@@ -132,15 +125,16 @@ class TestNormalization : public ::testing::TestWithParam<NormalizationType> {
   }
 
   norm_type_t norm_type;
+  uint64_t batch;
+  uint64_t norm_size;
+  uint64_t num_channels;
   std::vector<uint64_t> shape;
-  int norm_ndims;
   float epsilon;
   bool use_scale, use_shift;
   data_type_t gamma_dt, beta_dt;
   uint32_t num_threads;
 
   uint64_t total_elements;
-  uint64_t num_channels;
   uint64_t gamma_size;
 
   tensor_t gamma_tensor, beta_tensor;

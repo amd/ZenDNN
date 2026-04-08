@@ -18,7 +18,6 @@
 #define _LOWOHA_NORMALIZATION_COMMON_HPP
 
 #include <cstdint>
-#include <vector>
 #include "memory/memory_utils.hpp"
 
 namespace zendnnl {
@@ -65,38 +64,34 @@ enum class norm_algo_t : int {
 };
 
 /**
- * @brief Maximum supported tensor dimensions for normalization
- */
-constexpr int NORM_MAX_NDIMS = 5;
-
-/**
  * @brief Parameter structure for LOWOHA normalization operations
  *
- * This structure contains all parameters needed to configure and execute
- * LayerNorm, RMSNorm, or BatchNorm operations.
+ * The caller must set batch and norm_size directly before calling
+ * normalization_direct().  The kernel treats the input as a 2-D
+ * [batch, norm_size] matrix and normalizes each row independently.
  *
- * Tensor layout assumptions:
- *   - LayerNorm / RMSNorm: Input shape [batch_dims..., normalized_dims...]
- *     Mean/variance (or RMS) computed on-the-fly from the input.
- *   - BatchNorm: Input shape [N, C, spatial_dims...]
- *     Uses pre-computed running_mean and running_var (from training).
+ *   batch     — product of all outer (non-normalized) dimensions.
+ *               For a 2-D [B, D] tensor normalized over D: batch = B.
+ *               For a 3-D [B, S, D] tensor normalized over D: batch = B * S.
+ *
+ *   norm_size — product of all normalized (trailing) dimensions.
+ *               For the examples above: norm_size = D.
+ *
+ *   num_channels — (BatchNorm only) channel count C from shape [N, C, ...].
+ *
+ * The total number of elements must equal batch * norm_size.
  */
 struct norm_params {
   // --- Normalization variant ---
   norm_type_t norm_type;          ///< Which normalization to apply
 
-  // --- Tensor shape ---
-  std::vector<uint64_t>
-  shape;    ///< Tensor dimensions (e.g. {batch, hidden_dim})
-
-  // --- Derived / flattened dimensions (populated by setup) ---
-  uint64_t batch;                 ///< Outer (batch) size: product of non-normalized dims
-  uint64_t norm_size;             ///< Inner (normalized) size: product of normalized dims
-  uint64_t num_channels;          ///< Number of channels (used by BatchNorm, dim[1])
+  // --- Flattened dimensions (set by caller) ---
+  uint64_t batch;                 ///< Product of all outer (non-normalized) dims
+  uint64_t norm_size;             ///< Product of all normalized (trailing) dims
+  uint64_t num_channels;          ///< Channel count (BatchNorm only)
 
   // --- Normalization parameters ---
   float epsilon;                  ///< Small constant for numerical stability (default 1e-5)
-  int norm_ndims;                 ///< Number of trailing dims to normalize (LayerNorm/RMSNorm)
   bool use_scale;                 ///< Whether to apply learned scale (gamma)
   bool use_shift;                 ///< Whether to apply learned shift (beta); ignored by RMSNorm
 
@@ -109,19 +104,14 @@ struct norm_params {
   // --- Backend selection ---
   norm_algo_t algorithm;          ///< Selected algorithm / backend
 
-  //num_threads is int32_t to match the type used by OpenMP APIs
   int32_t num_threads;            ///< Number of threads (0 = auto)
 
-  /**
-   * @brief Default constructor
-   */
   norm_params()
     : norm_type(norm_type_t::NONE),
-      batch(1),
+      batch(0),
       norm_size(0),
       num_channels(0),
       epsilon(1e-5f),
-      norm_ndims(1),
       use_scale(false),
       use_shift(false),
       src_dt(data_type_t::none),

@@ -65,14 +65,6 @@ status_t validate_normalization_inputs(
 );
 
 /**
- * @brief Setup normalization shape
- *
- * @param params  Normalization parameters
- * @return status_t::success if successful, status_t::failure otherwise
- */
-status_t setup_normalization_shape(norm_params &params);
-
-/**
  * @brief Convert norm_type_t to a string
  *
  * @param type  The normalization type enum value

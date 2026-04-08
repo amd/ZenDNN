@@ -153,8 +153,10 @@ struct EmbeddingType {
 /** @brief Normalization Op Parameters Structure */
 struct NormalizationType {
   norm_type_t norm_type;
+  uint64_t batch;
+  uint64_t norm_size;
+  uint64_t num_channels;
   std::vector<uint64_t> shape;
-  int norm_ndims;
   float epsilon;
   bool use_scale;
   bool use_shift;
@@ -709,7 +711,7 @@ status_t quant_params_compute(
  *
  *  @return status_t Success or failure status
  */
- status_t normalization_kernel_test(
+status_t normalization_kernel_test(
   tensor_t &input_tensor,
   tensor_t &output_tensor,
   tensor_t &gamma_tensor,
@@ -722,8 +724,9 @@ status_t quant_params_compute(
 /** @fn normalization_forced_ref_kernel_test
  *  @brief Test function for normalization reference kernel (forced)
  *
- *  Calls setup_normalization_shape() then normalization_reference_wrapper()
- *  directly, bypassing the AVX-512 dispatch to always use the scalar reference.
+ *  Calls normalization_reference_wrapper() directly, bypassing the AVX-512
+ *  dispatch to always use the scalar reference. Caller must set batch and
+ *  norm_size in params before calling.
  *
  *  @return status_t Success or failure status
  */

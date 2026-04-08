@@ -106,9 +106,10 @@ int normalization_lowoha_benchdnn(
 
       // Setup LOWOHA normalization parameters
       norm_params params;
-      params.norm_type = strToLowohaType(cfg.norm_type);
-      params.shape = cfg.shape;
-      params.norm_ndims = cfg.norm_ndims;
+      params.norm_type    = strToLowohaType(cfg.norm_type);
+      params.batch        = cfg.batch;
+      params.norm_size    = cfg.norm_size;
+      params.num_channels = cfg.num_channels;
       params.src_dt = cfg.src_dt;
       params.dst_dt = cfg.dst_dt;
       params.gamma_dt = cfg.gamma_dt;

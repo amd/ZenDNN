@@ -248,40 +248,52 @@ NormalizationType::NormalizationType() {
   }
 
   if (norm_type == norm_type_t::BATCH_NORM) {
-    // BatchNorm requires >= 2D, supports up to 5D (NORM_MAX_NDIMS)
-    int ndims = 2 + std::rand() % 4; // 2-5 dims (NC, NCH, NCHW, NCDHW)
+    int ndims = 2 + std::rand() % 4;
     shape.resize(ndims);
-    shape[0] = 1 + std::rand() % 8;   // N: 1-8
-    shape[1] = 1 + std::rand() % 32;  // C: 1-32
+    shape[0] = 1 + std::rand() % 8;
+    shape[1] = 1 + std::rand() % 32;
     for (int i = 2; i < ndims; ++i) {
-      shape[i] = 1 + std::rand() % 16; // spatial: 1-16
+      shape[i] = 1 + std::rand() % 16;
     }
-    norm_ndims = 0;
+    batch = shape[0];
+    num_channels = shape[1];
+    norm_size = 1;
+    for (int i = 2; i < ndims; ++i) {
+      norm_size *= shape[i];
+    }
   }
   else {
-    // LayerNorm/RMSNorm/FusedAddRMSNorm: supports 1D to 5D (NORM_MAX_NDIMS)
-    int ndims = 1 + std::rand() % 5; // 1-5 dims
+    int ndims = 1 + std::rand() % 5;
     shape.resize(ndims);
     for (int i = 0; i < ndims - 1; ++i) {
-      shape[i] = 1 + std::rand() % 8; // batch dims: 1-8
+      shape[i] = 1 + std::rand() % 8;
     }
-    shape[ndims - 1] = 1 + std::rand() % 512; // norm dim: 1-512
+    shape[ndims - 1] = 1 + std::rand() % 512;
 
-    // norm_ndims: 1 to ndims
-    // 70% → 1, 15% → 2..ndims-1, 15% → ndims (full tensor normalization)
+    int norm_ndims_local;
     int choice = std::rand() % 20;
     if (ndims == 1) {
-      norm_ndims = 1;
+      norm_ndims_local = 1;
     }
     else if (choice < 14) {
-      norm_ndims = 1;
+      norm_ndims_local = 1;
     }
     else if (choice < 17) {
-      norm_ndims = 1 + std::rand() % (ndims - 1); // 1 to ndims-1
+      norm_ndims_local = 1 + std::rand() % (ndims - 1);
     }
     else {
-      norm_ndims = ndims; // normalize entire tensor (batch=1)
+      norm_ndims_local = ndims;
     }
+
+    batch = 1;
+    for (int i = 0; i < ndims - norm_ndims_local; ++i) {
+      batch *= shape[i];
+    }
+    norm_size = 1;
+    for (int i = ndims - norm_ndims_local; i < ndims; ++i) {
+      norm_size *= shape[i];
+    }
+    num_channels = 0;
   }
 
   epsilon = (norm_type == norm_type_t::RMS_NORM ||
@@ -1182,14 +1194,9 @@ void PrintTo(const EmbeddingType &value, ::std::ostream *os) {
 
 void PrintTo(const NormalizationType &value, ::std::ostream *os) {
   *os << "norm_type=" << norm_type_to_str(value.norm_type)
-      << ", shape=[";
-  for (size_t i = 0; i < value.shape.size(); ++i) {
-    if (i > 0) {
-      *os << ",";
-    }
-    *os << value.shape[i];
-  }
-  *os << "], norm_ndims=" << value.norm_ndims
+      << ", batch=" << value.batch
+      << ", norm_size=" << value.norm_size
+      << ", num_channels=" << value.num_channels
       << ", epsilon=" << value.epsilon
       << ", use_scale=" << value.use_scale
       << ", use_shift=" << value.use_shift
@@ -1816,7 +1823,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
               auto src_scale_size = input_tensor.get_quant_scale_size();
               params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
-                  src_scale_size.end());
+                                                src_scale_size.end());
               log_info("LOWOHA INT8: Source scale extracted");
             }
             // Extract source zero point (for asymmetric quantization)
@@ -1840,7 +1847,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
               auto wei_scale_size = weight_tensor.get_quant_scale_size();
               params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
-                  wei_scale_size.end());
+                                                wei_scale_size.end());
               log_info("LOWOHA INT8: Weight scale extracted");
             }
             // Extract weight zero point (for asymmetric quantization)
@@ -1864,7 +1871,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
               auto dst_scale_size = output_tensor.get_quant_scale_size();
               params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
-                  dst_scale_size.end());
+                                                dst_scale_size.end());
               log_info("LOWOHA INT8: Destination scale extracted");
             }
             // Extract destination zero point (for asymmetric quantization)
@@ -2000,7 +2007,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
       }
       matmul_operator.set_input("matmul_input", input_tensor)
-      .set_output("matmul_output", output_tensor);
+                     .set_output("matmul_output", output_tensor);
       if (algo != matmul_algo_t::none) {
         matmul_operator.set_forced_kernel(algoToStr(algo));
       }
@@ -2386,9 +2393,9 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
       //define embedding bag operator
       embag_operator_t embedding_bag_operator = embag_operator_t()
-          .set_name("embedding_bag")
-          .set_context(embedding_bag_context)
-          .create();
+        .set_name("embedding_bag")
+        .set_context(embedding_bag_context)
+        .create();
 
       if (embedding_bag_operator.is_bad_object()) {
         testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -2458,9 +2465,9 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
-        .set_name("ref_embedding_bag")
-        .set_context(embedding_bag_context)
-        .create();
+      .set_name("ref_embedding_bag")
+      .set_context(embedding_bag_context)
+      .create();
 
     if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -2973,7 +2980,7 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
       reorder_params.quant_params.scale.dt = scale_tensor.get_data_type();
       auto scale_size = scale_tensor.get_size();
       reorder_params.quant_params.scale.dims.assign(scale_size.begin(),
-          scale_size.end());
+                                            scale_size.end());
     }
 
     if (zp_tensor.get_nelem() > 0) {
@@ -3513,12 +3520,6 @@ status_t normalization_forced_ref_kernel_test(
   tensor_t &residual_tensor,
   norm_params &params) {
   try {
-    status_t setup_status = setup_normalization_shape(params);
-    if (setup_status != status_t::success) {
-      log_error("setup_normalization_shape failed in forced ref test");
-      return status_t::failure;
-    }
-
     void *input_ptr    = safe_raw_ptr(input_tensor);
     void *output_ptr   = safe_raw_ptr(output_tensor);
     void *gamma_ptr    = safe_raw_ptr(gamma_tensor);

@@ -56,10 +56,13 @@ status_t validate_normalization_inputs(
     return status_t::failure;
   }
 
-  // Validate dimensions
-  if (params.shape.empty() || params.shape.size() > NORM_MAX_NDIMS) {
-    log_error("Normalization: Invalid shape size: ", params.shape.size(),
-              " (must be 1-", NORM_MAX_NDIMS, ")");
+  // Validate batch and norm_size
+  if (params.batch == 0) {
+    log_error("Normalization: batch must be > 0");
+    return status_t::failure;
+  }
+  if (params.norm_size == 0) {
+    log_error("Normalization: norm_size must be > 0");
     return status_t::failure;
   }
 
@@ -105,13 +108,6 @@ status_t validate_normalization_inputs(
 
   // BatchNorm-specific validations
   if (params.norm_type == norm_type_t::BATCH_NORM) {
-    if (params.shape.size() < 2) {
-      log_error("Normalization: BatchNorm requires at least 2 dimensions "
-                "(N, C, ...), got ndims=", params.shape.size());
-      return status_t::failure;
-    }
-
-    // Inference mode: running_mean and running_var are required
     if (!running_mean) {
       log_error("Normalization: BatchNorm inference requires running_mean "
                 "(pre-computed from training)");
@@ -124,81 +120,9 @@ status_t validate_normalization_inputs(
     }
   }
 
-  // LayerNorm / RMSNorm / FusedAddRMSNorm validations
-  if (params.norm_type == norm_type_t::LAYER_NORM ||
-      params.norm_type == norm_type_t::RMS_NORM ||
-      params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
-    if (params.norm_ndims <= 0 ||
-        params.norm_ndims > static_cast<int>(params.shape.size())) {
-      log_error("Normalization: Invalid norm_ndims: ", params.norm_ndims,
-                " (must be 1-", params.shape.size(), ")");
-      return status_t::failure;
-    }
-  }
-
-  // Check if each shape[i] is > 0
-  const int ndims = static_cast<int>(params.shape.size());
-  for (int i = 0; i < ndims; ++i) {
-    if (params.shape[i] <= 0) {
-      log_error("Normalization: shape[", i, "] is <= 0. All dimensions must be > 0.");
-      return status_t::failure;
-    }
-  }
-
   // Epsilon validation
   if (params.epsilon <= 0.0f) {
     log_error("Normalization: epsilon must be > 0, got ", params.epsilon);
-    return status_t::failure;
-  }
-
-  return status_t::success;
-}
-
-status_t setup_normalization_shape(norm_params &params) {
-
-  const int ndims = static_cast<int>(params.shape.size());
-  switch (params.norm_type) {
-  case norm_type_t::LAYER_NORM:
-  case norm_type_t::RMS_NORM:
-  case norm_type_t::FUSED_ADD_RMS_NORM: {
-
-    // batch = product of leading dims [0 .. ndims-norm_ndims)
-    params.batch = 1;
-    for (int i = 0; i < ndims - params.norm_ndims; ++i) {
-      params.batch *= params.shape[i];
-    }
-
-    // norm_size = product of trailing dims [ndims-norm_ndims .. ndims)
-    params.norm_size = 1;
-    for (int i = ndims - params.norm_ndims; i < ndims; ++i) {
-      params.norm_size *= params.shape[i];
-    }
-
-    log_info("Normalization setup: ", norm_type_to_str(params.norm_type),
-             " ", ndims, "D tensor, batch=", params.batch,
-             ", norm_size=", params.norm_size);
-    break;
-  }
-
-  case norm_type_t::BATCH_NORM: {
-
-    // N = shape[0], C = shape[1], spatial = product of shape[2..]
-    params.batch        = params.shape[0];
-    params.num_channels = params.shape[1];
-
-    params.norm_size = 1;
-    for (int i = 2; i < ndims; ++i) {
-      params.norm_size *= params.shape[i];
-    }
-
-    log_info("Normalization setup: BatchNorm ", ndims, "D tensor, "
-             "N=", params.batch, ", C=", params.num_channels,
-             ", spatial=", params.norm_size);
-    break;
-  }
-
-  default:
-    log_error("Normalization setup: Unknown norm_type");
     return status_t::failure;
   }
 
