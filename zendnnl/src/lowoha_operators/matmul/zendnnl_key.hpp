@@ -70,6 +70,26 @@ struct Key_matmul {
   }
 };
 
+struct Key_unpack {
+  const void *weight_data = nullptr;
+  unsigned int N = 0;
+  unsigned int K = 0;
+  size_t extra_input_hash = 0;
+
+  Key_unpack() = default;
+
+  Key_unpack(const void *weight, unsigned int n, unsigned int k,
+             size_t extra_input_hash = 0)
+    : weight_data(weight), N(n), K(k), extra_input_hash(extra_input_hash) {}
+
+  bool operator==(const Key_unpack &other) const {
+    return (weight_data == other.weight_data
+            && N == other.N
+            && K == other.K
+            && extra_input_hash == other.extra_input_hash);
+  }
+};
+
 namespace std {
 
 template <>
@@ -86,6 +106,18 @@ struct hash<Key_matmul> {
     seed = zendnnl::common::hash_combine(seed, (k.weights));
     seed = zendnnl::common::hash_combine(seed, (k.algo));
     seed = zendnnl::common::hash_combine(seed, (k.extra_input_hash));
+    return seed;
+  }
+};
+
+template <>
+struct hash<Key_unpack> {
+  std::size_t operator()(const Key_unpack &k) const {
+    std::size_t seed = 0;
+    seed = zendnnl::common::hash_combine(seed, k.weight_data);
+    seed = zendnnl::common::hash_combine(seed, k.N);
+    seed = zendnnl::common::hash_combine(seed, k.K);
+    seed = zendnnl::common::hash_combine(seed, k.extra_input_hash);
     return seed;
   }
 };

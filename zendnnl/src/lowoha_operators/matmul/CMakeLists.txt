@@ -21,6 +21,7 @@ set(lowoha_matmul_sources
   lowoha_matmul.cpp
   group_matmul_direct.cpp
   lowoha_matmul_utils.cpp
+  ggml_weight_unpack.cpp
   bmm_partitioner.cpp
   matmul_partitioner.cpp
   aocl_kernel.cpp
@@ -46,7 +47,8 @@ set(lowoha_matmul_private_headers
   auto_tuner.hpp
   brgemm_matmul.hpp
   matmul_kernel_bf16_avx512.hpp
-  reorder_quantization.hpp)
+  reorder_quantization.hpp
+  ggml_weight_unpack.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

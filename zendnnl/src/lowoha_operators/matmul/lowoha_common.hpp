@@ -125,6 +125,19 @@ struct matmul_batch_params_t {
 };
 
 /**
+ * @brief Structure describing the packing format of weight matrix B.
+ *
+ * pack_format_b = 0 (default): weights are in standard unpacked layout.
+ * pack_format_b = 1: weights are in GGML Q8_0 packed format (int8 weights
+ *                     with interleaved fp16 scales) and must be unpacked.
+ */
+struct pack_format {
+  int pack_format_b;  ///< 0 = unpacked (default), 1 = GGML Q8_0 packed weights
+
+  pack_format() : pack_format_b(0) {}
+};
+
+/**
  * @brief Main parameter structure for LOWOHA matrix multiplication
  */
 struct matmul_params {
@@ -138,12 +151,13 @@ struct matmul_params {
   int32_t num_threads;                        ///< Number of threads
   std::string plugin_op;                       ///< Plugin op name
   bool dynamic_quant;                          ///< Enable dynamic quantization of source
+  pack_format packing;                         ///< Weight packing format for matrix B
   /**
    * @brief Default constructor for matmul_params
    */
   matmul_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
     mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0),
-    plugin_op(""), dynamic_quant(false) {}
+    plugin_op(""), dynamic_quant(false), packing() {}
 };
 
 } // namespace matmul

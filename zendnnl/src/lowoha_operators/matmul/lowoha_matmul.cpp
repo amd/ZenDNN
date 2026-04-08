@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include "ggml_weight_unpack.hpp"
 #include "reorder_quantization.hpp"
 #include "bmm_partitioner.hpp"
 #include "matmul_partitioner.hpp"
@@ -375,6 +376,13 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
       if (po.leading_dim == -1) {
         po.leading_dim = N;
       }
+    }
+  }
+
+  if (params.packing.pack_format_b == 1) {
+    status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, params);
+    if (unpack_status != status_t::success) {
+      return unpack_status;
     }
   }
 
