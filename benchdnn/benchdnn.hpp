@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -63,9 +63,10 @@ struct TimingStats {
 } // namespace benchdnn
 } // namespace zendnnl
 
-// Include the main matmul and reorder benchmarking interfaces
+// Include the main benchmarking interfaces
 #include "matmul/matmul_benchdnn.hpp"
 #include "reorder/reorder_benchdnn.hpp"
 #include "embag/embag_benchdnn.hpp"
+#include "normalization/normalization_benchdnn.hpp"
 
 #endif // _BENCHDNN_HPP_

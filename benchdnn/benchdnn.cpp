@@ -105,7 +105,8 @@ int main(int argc, char **argv) {
 
   // Validate required arguments
   if (op.empty()) {
-    commonlog_error("Usage: ", argv[0], " --op=<matmul|reorder|embag> ...");
+    commonlog_error("Usage: ", argv[0],
+                    " --op=<matmul|reorder|embag|normalization> ...");
     return NOT_OK;
   }
 
@@ -154,9 +155,13 @@ int main(int argc, char **argv) {
     return benchdnn::embag::bench(in_filename, out_filename,
                                   isLOWOHA, cache_size); ///< Run embag benchmark
   }
+  else if (op == "normalization") {
+    return benchdnn::normalization::bench(in_filename, out_filename,
+                                          isLOWOHA, cache_size); ///< Run normalization benchmark
+  }
   else {
     commonlog_error("Unsupported operator: ", op);
-    commonlog_error("Supported operators: matmul, reorder, embag");
+    commonlog_error("Supported operators: matmul, reorder, embag, normalization");
     return NOT_OK;
   }
 }

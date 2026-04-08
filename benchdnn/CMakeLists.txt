@@ -56,6 +56,7 @@ include_directories(${ZENDNNL_SOURCE_DIR}/benchdnn)
 add_subdirectory(matmul)
 add_subdirectory(reorder)
 add_subdirectory(embag)
+add_subdirectory(normalization)
 add_subdirectory(utils)
 
 add_executable(benchdnn ${benchdnn_sources})
@@ -66,6 +67,7 @@ target_link_libraries(benchdnn
   matmul_benchdnn
   reorder_benchdnn
   embag_benchdnn
+  normalization_benchdnn
   benchdnn_utils)
 
 # Link to whichever zendnnl library variant was built
