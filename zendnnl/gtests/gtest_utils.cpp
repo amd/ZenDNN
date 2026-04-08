@@ -21,7 +21,11 @@
 #include <cmath>
 
 MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
-  matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  bool test_gemv_m1 = false;
+  if (!cmd_test_gemv_m1.empty()) {
+    test_gemv_m1 = (cmd_test_gemv_m1 == "1") || (cmd_test_gemv_m1 == "true");
+  }
+  matmul_m   = test_gemv_m1 ? 1 : MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   transA     = rand() % 2;
@@ -1039,7 +1043,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
                         uint32_t &tests, std::string &po, std::string &backend,
                         std::string &ai_test_mode, std::string &lowoha,
                         uint32_t &num_threads, std::string &input_file, std::string &op,
-                        uint32_t &ndims) {
+                        uint32_t &ndims, std::string &test_gemv_m1) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -1057,6 +1061,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("input_file", input_file);
   read_from_umap("op", op);
   read_from_umap("ndims", ndims);
+  read_from_umap("test_gemv_m1", test_gemv_m1);
   return;
 }
 

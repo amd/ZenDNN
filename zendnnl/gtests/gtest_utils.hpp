@@ -175,6 +175,7 @@ extern int64_t seed;
 extern std::string cmd_post_op;
 extern std::string cmd_backend;
 extern std::string cmd_lowoha;
+extern std::string cmd_test_gemv_m1;
 extern uint32_t cmd_num_threads;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
@@ -280,7 +281,7 @@ class Parser {
                   int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
                   std::string &ai_test_mode,
                   std::string &lowoha, uint32_t &num_threads, std::string &input_file,
-                  std::string &op, uint32_t &ndims);
+                  std::string &op, uint32_t &ndims, std::string &test_gemv_m1);
 };
 
 bool is_binary_postop(post_op_type_t post_op);
