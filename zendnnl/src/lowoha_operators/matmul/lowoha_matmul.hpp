@@ -114,7 +114,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        matmul_batch_params_t batch_params, matmul_params params);
 
 /**
- * @brief Execute group GEMM operations where each operation calls matmul_direct
+ * @brief Execute group matmul operations (e.g. MoE experts)
  *
  * This function performs multiple independent matrix multiplications in sequence.
  * Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i] + fused post-ops
@@ -140,7 +140,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */
-status_t group_gemm_direct(const std::vector<char> &layout,
+status_t group_matmul_direct(const std::vector<char> &layout,
                            const std::vector<bool> &transA,
                            const std::vector<bool> &transB,
                            const std::vector<int> &M,

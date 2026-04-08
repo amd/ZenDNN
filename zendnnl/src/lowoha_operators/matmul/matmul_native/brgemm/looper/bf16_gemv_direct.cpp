@@ -47,9 +47,10 @@ inline size_t bf16_bkc_mt_worst_slice_packed_bytes(int K_padded, int N, int nt) 
     return static_cast<size_t>(K_padded) * n_pad * sizeof(uint16_t);
 }
 
-/// Max fraction of L2 used for each thread's packed B slice in the MT path.
-/// Leaves headroom for A, outputs, bias, and prefetch (single-thread BKC still
-/// gates on full \p l2_cap for the whole packed matrix).
+/// Max fraction of L2 used for each thread's packed B slice in the MT path
+/// (non-const weights only). Leaves headroom for A, outputs, bias, and
+/// prefetch. Const-weight shapes bypass this gate — per-thread BKC packing
+/// is cached thread-local, and first-touch gives NUMA-local L3 residency.
 inline constexpr unsigned kBf16BkcMtL2SliceBudgetPct = 85;
 
 /// Map OpenMP \p tid → column slice index (same \p chunk = ceil(N/nt) layout as
@@ -279,13 +280,20 @@ bool bf16_gemv_direct(
         return false;
 
     if (num_threads > 1) {
-        if (desc.ldc != N) return false;
+        if (desc.ldc < N) return false;
 
         const int nt = m1_gemv_cap_threads(N, num_threads);
         const int chunk = (N + nt - 1) / nt;
+        const size_t slice_bytes =
+            bf16_bkc_mt_worst_slice_packed_bytes(K_padded, N, nt);
         const size_t l2_slice_budget =
             (l2_cap * kBf16BkcMtL2SliceBudgetPct) / 100;
-        if (bf16_bkc_mt_worst_slice_packed_bytes(K_padded, N, nt) > l2_slice_budget)
+        // Const weights: allow >L2 slices. Per-thread BKC packing is cached
+        // thread-local (one-time cost), and each thread's first-touch places
+        // pages in its local CCD's DRAM → L3-resident with NUMA locality.
+        // The kernel's sequential k-pair access lets HW prefetcher stream from
+        // L3/DRAM. Non-const weights repack every call → gate on L2.
+        if (slice_bytes > l2_slice_budget && !desc.is_weights_const)
             return false;
 
         const float *bias_f_row = nullptr;
@@ -322,7 +330,7 @@ bool bf16_gemv_direct(
     }
 
     // Single-thread
-    if (desc.ldc != N) return false;
+    if (desc.ldc < N) return false;
     const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
     const size_t b_packed_bytes =
         static_cast<size_t>(K_padded) * N_padded * sizeof(uint16_t);

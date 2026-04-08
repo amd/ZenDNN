@@ -542,8 +542,8 @@ int run_lowoha_matmul_int8_caching_test() {
   return OK;
 }
 
-int group_gemm_f32_kernel_example() {
-  testlog_info("**group_gemm f32 kernel example with multiple operations.");
+int group_matmul_f32_kernel_example() {
+  testlog_info("**group_matmul f32 kernel example with multiple operations.");
 
   try {
 
@@ -568,7 +568,7 @@ int group_gemm_f32_kernel_example() {
       dst_buffers[i].resize(Ms[i] * Ns[i], 0.0f);
     }
 
-    // Prepare vectors for group_gemm API
+    // Prepare vectors for group_matmul API
     std::vector<char> layouts(NUM_OPS, 'r');  // Row-major layout
     std::vector<bool> transA(NUM_OPS, false);
     std::vector<bool> transB(NUM_OPS, false);
@@ -604,8 +604,8 @@ int group_gemm_f32_kernel_example() {
       params[i].mem_format_b = 'n';
     }
 
-    // Execute group_gemm
-    status_t status = group_gemm_direct(
+    // Execute group_matmul
+    status_t status = group_matmul_direct(
                         layouts, transA, transB,
                         Ms, Ns, Ks, alphas,
                         src_ptrs, ldas,
@@ -616,7 +616,7 @@ int group_gemm_f32_kernel_example() {
                         params);
 
     if (status == status_t::success) {
-      testlog_info("group_gemm execution successful for ", NUM_OPS, " operations.");
+      testlog_info("group_matmul execution successful for ", NUM_OPS, " operations.");
 
       // Verify results: C = A * B where A is all 1s and B is all 1s
       // Each element of C should be K (sum of K ones)
@@ -634,14 +634,14 @@ int group_gemm_f32_kernel_example() {
       }
 
       if (results_valid) {
-        testlog_info("group_gemm results verified successfully.");
+        testlog_info("group_matmul results verified successfully.");
       }
       else {
         return NOT_OK;
       }
     }
     else {
-      testlog_error("group_gemm execution failed.");
+      testlog_error("group_matmul execution failed.");
       return NOT_OK;
     }
 
@@ -654,7 +654,7 @@ int group_gemm_f32_kernel_example() {
   return OK;
 }
 
-// This example demonstrates the sequential (linear) GEMM mode of group_gemm_direct.
+// This example demonstrates the sequential (linear) GEMM mode of group_matmul_direct.
 // When src.size() == 1, operations are chained: dst[i-1] feeds as input to op[i].
 // This simulates a multi-layer perceptron: Input -> Linear1 -> Linear2 -> Linear3
 //
@@ -731,8 +731,8 @@ int sequential_gemm_f32_kernel_example() {
       params[i].mem_format_b = 'n';
     }
 
-    // Execute sequential MLP via group_gemm_direct
-    status_t status = group_gemm_direct(
+    // Execute sequential MLP via group_matmul_direct
+    status_t status = group_matmul_direct(
                         layouts, transA, transB,
                         Ms, Ns, Ks, alphas,
                         src_ptrs, ldas,

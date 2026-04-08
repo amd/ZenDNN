@@ -19,6 +19,7 @@ add_subdirectory(matmul_native)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
+  group_matmul_direct.cpp
   lowoha_matmul_utils.cpp
   bmm_partitioner.cpp
   matmul_partitioner.cpp

@@ -157,11 +157,15 @@ int main(int argc, char **argv) {
   }
   else if (op == "normalization") {
     return benchdnn::normalization::bench(in_filename, out_filename,
-                                          isLOWOHA, cache_size); ///< Run normalization benchmark
+                                          isLOWOHA, cache_size);
+  }
+  else if (op == "grp_matmul") {
+    return benchdnn::grp_matmul::bench(in_filename, out_filename,
+                                       cache_size);
   }
   else {
     commonlog_error("Unsupported operator: ", op);
-    commonlog_error("Supported operators: matmul, reorder, embag, normalization");
+    commonlog_error("Supported operators: matmul, reorder, embag, normalization, grp_matmul");
     return NOT_OK;
   }
 }

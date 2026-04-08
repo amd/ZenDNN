@@ -1,5 +1,5 @@
 # /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -57,6 +57,7 @@ add_subdirectory(matmul)
 add_subdirectory(reorder)
 add_subdirectory(embag)
 add_subdirectory(normalization)
+add_subdirectory(grp_matmul)
 add_subdirectory(utils)
 
 add_executable(benchdnn ${benchdnn_sources})
@@ -68,6 +69,7 @@ target_link_libraries(benchdnn
   reorder_benchdnn
   embag_benchdnn
   normalization_benchdnn
+  grp_matmul_benchdnn
   benchdnn_utils)
 
 # Link to whichever zendnnl library variant was built

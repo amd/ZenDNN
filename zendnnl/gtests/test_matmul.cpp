@@ -1421,7 +1421,7 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 INSTANTIATE_TEST_SUITE_P(Matmul, TestMatmul,
                          ::testing::ValuesIn(matmul_test));
 
-/** @brief TestGroupGemm is a test class for group_gemm_direct API */
+/** @brief TestGroupGemm is a test class for group_matmul_direct API */
 class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
  protected:
   virtual void SetUp() {
@@ -1459,10 +1459,10 @@ class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
 /** @fn TEST_P
  *  @param TestGroupGemm parameterized test class
  *  @param F32_F32 user-defined name of test
- *  @brief Test to validate group_gemm_direct F32 kernel support
+ *  @brief Test to validate group_matmul_direct F32 kernel support
  */
 TEST_P(TestGroupGemm, F32_F32) {
-  // Create vectors for group_gemm_direct parameters
+  // Create vectors for group_matmul_direct parameters
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1520,8 +1520,8 @@ TEST_P(TestGroupGemm, F32_F32) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_gemm_direct
-  status_t status = group_gemm_direct(
+  // Execute group_matmul_direct
+  status_t status = group_matmul_direct(
                       layouts, transAs, transBs,
                       Ms, Ns, Ks, alphas,
                       srcs, ldas,
@@ -1560,10 +1560,10 @@ TEST_P(TestGroupGemm, F32_F32) {
 /** @fn TEST_P
  *  @param TestGroupGemm parameterized test class
  *  @param BF16_F32 user-defined name of test
- *  @brief Test to validate group_gemm_direct BF16 input F32 output kernel support
+ *  @brief Test to validate group_matmul_direct BF16 input F32 output kernel support
  */
 TEST_P(TestGroupGemm, BF16_F32) {
-  // Create vectors for group_gemm_direct parameters
+  // Create vectors for group_matmul_direct parameters
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1621,8 +1621,8 @@ TEST_P(TestGroupGemm, BF16_F32) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_gemm_direct
-  status_t status = group_gemm_direct(
+  // Execute group_matmul_direct
+  status_t status = group_matmul_direct(
                       layouts, transAs, transBs,
                       Ms, Ns, Ks, alphas,
                       srcs, ldas,
@@ -1661,10 +1661,10 @@ TEST_P(TestGroupGemm, BF16_F32) {
 /** @fn TEST_P
  *  @param TestGroupGemm parameterized test class
  *  @param BF16_BF16 user-defined name of test
- *  @brief Test to validate group_gemm_direct BF16 input BF16 output kernel support
+ *  @brief Test to validate group_matmul_direct BF16 input BF16 output kernel support
  */
 TEST_P(TestGroupGemm, BF16_BF16) {
-  // Create vectors for group_gemm_direct parameters
+  // Create vectors for group_matmul_direct parameters
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1728,8 +1728,8 @@ TEST_P(TestGroupGemm, BF16_BF16) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_gemm_direct
-  status_t status = group_gemm_direct(
+  // Execute group_matmul_direct
+  status_t status = group_matmul_direct(
                       layouts, transAs, transBs,
                       Ms, Ns, Ks, alphas,
                       srcs, ldas,

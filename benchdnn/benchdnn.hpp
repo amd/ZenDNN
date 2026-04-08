@@ -68,5 +68,6 @@ struct TimingStats {
 #include "reorder/reorder_benchdnn.hpp"
 #include "embag/embag_benchdnn.hpp"
 #include "normalization/normalization_benchdnn.hpp"
+#include "grp_matmul/grp_matmul_benchdnn.hpp"
 
 #endif // _BENCHDNN_HPP_

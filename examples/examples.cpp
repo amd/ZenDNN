@@ -75,10 +75,10 @@ int main() {
     /** Group GEMM operator functionality examples.
      *  Demonstrates group GEMM API for multiple independent matmul operations.
      */
-    group_gemm_f32_kernel_example();
+    group_matmul_f32_kernel_example();
 
     /** Sequential GEMM operator functionality examples.
-     *  Demonstrates sequential (linear) GEMM using group_gemm_direct API.
+     *  Demonstrates sequential (linear) GEMM using group_matmul_direct API.
      */
     sequential_gemm_f32_kernel_example();
 
