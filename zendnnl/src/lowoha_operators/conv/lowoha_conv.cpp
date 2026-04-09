@@ -109,6 +109,35 @@ status_t conv_direct(
            << ", pad_t=" << params.pad_top << ", pad_l=" << params.pad_left
            << ", pad_b=" << params.pad_bottom << ", pad_r=" << params.pad_right
            << ", dilation_h=" << params.dilation_h << ", dilation_w=" << params.dilation_w;
+        // Print post-ops list
+        ss << ", post_ops=[";
+        for (size_t i = 0; i < params.postop_.size(); ++i) {
+            if (i > 0) ss << ",";
+            switch (params.postop_[i].po_type) {
+                case zendnnl::ops::post_op_type_t::none: ss << "none"; break;
+                case zendnnl::ops::post_op_type_t::elu: ss << "elu"; break;
+                case zendnnl::ops::post_op_type_t::relu: ss << "relu"; break;
+                case zendnnl::ops::post_op_type_t::leaky_relu: ss << "leaky_relu"; break;
+                case zendnnl::ops::post_op_type_t::gelu_tanh: ss << "gelu_tanh"; break;
+                case zendnnl::ops::post_op_type_t::gelu_erf: ss << "gelu_erf"; break;
+                case zendnnl::ops::post_op_type_t::sigmoid: ss << "sigmoid"; break;
+                case zendnnl::ops::post_op_type_t::swish: ss << "swish"; break;
+                case zendnnl::ops::post_op_type_t::tanh: ss << "tanh"; break;
+                case zendnnl::ops::post_op_type_t::softmax: ss << "softmax"; break;
+                case zendnnl::ops::post_op_type_t::pooling: ss << "pooling"; break;
+                case zendnnl::ops::post_op_type_t::square: ss << "square"; break;
+                case zendnnl::ops::post_op_type_t::abs: ss << "abs"; break;
+                case zendnnl::ops::post_op_type_t::sqrt: ss << "sqrt"; break;
+                case zendnnl::ops::post_op_type_t::exp: ss << "exp"; break;
+                case zendnnl::ops::post_op_type_t::log: ss << "log"; break;
+                case zendnnl::ops::post_op_type_t::clip: ss << "clip"; break;
+                case zendnnl::ops::post_op_type_t::binary_add: ss << "binary_add"; break;
+                case zendnnl::ops::post_op_type_t::binary_mul: ss << "binary_mul"; break;
+                default: ss << "unknown"; break;
+            }
+        }
+        ss << "]";
+
         if (params.depthwise.is_depthwise) {
             ss << ", groups=" << params.depthwise.groups
                << ", depth_multiplier=" << params.depthwise.depth_multiplier;

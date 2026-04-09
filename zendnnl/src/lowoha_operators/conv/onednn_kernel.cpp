@@ -17,6 +17,7 @@
 #include "lowoha_operators/conv/onednn_kernel.hpp"
 #include "lowoha_operators/conv/conv_cache_key.hpp"
 #include "../matmul/lru_cache.hpp"
+#include <cstdlib>
 
 namespace zendnnl {
 namespace lowoha {
@@ -24,12 +25,42 @@ namespace conv {
 
 #if ZENDNNL_DEPENDS_ONEDNN
 
+/**
+ * @brief Get conv weight cache type from environment variable
+ *
+ * Reads ZENDNNL_CONV_WEIGHT_CACHE environment variable:
+ * - 0 = disabled (no caching)
+ * - 1 = enabled (default)
+ *
+ * @return weight cache type (0 or 1)
+ */
+static int32_t get_conv_weight_cache_type() {
+    static int32_t weight_cache_type = -1;  // -1 = not initialized
+    
+    if (weight_cache_type == -1) {
+        // Read environment variable once
+        char *weight_cache_env = std::getenv("ZENDNNL_CONV_WEIGHT_CACHE");
+        if (weight_cache_env) {
+            int32_t cache_type = std::stoi(weight_cache_env);
+            if (cache_type == 0 || cache_type == 1) {
+                weight_cache_type = cache_type;
+            } else {
+                weight_cache_type = 1;  // Default to enabled
+            }
+        } else {
+            weight_cache_type = 1;  // Default to enabled
+        }
+    }
+    
+    return weight_cache_type;
+}
 
 /**
  * @brief Reorder and cache convolution weights
  *
  * Similar to matmul's reorderAndCacheWeights pattern.
- * Handles both cached and non-cached reordering based on is_weights_const flag.
+ * Handles both cached and non-cached reordering based on is_weights_const flag
+ * and ZENDNNL_CONV_WEIGHT_CACHE environment variable.
  *
  * @param key               Cache key for weight identification
  * @param src_weights_mem   Source weights in HWIO format
@@ -50,7 +81,11 @@ bool reorderAndCacheWeights(
     static lru_cache_t<Key_conv, dnnl::memory> conv_weight_cache(std::numeric_limits<uint32_t>::max());
     static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
 
-    if (is_weights_const == 0) {
+    // Get weight cache configuration from environment variable
+    int32_t weight_cache_type = get_conv_weight_cache_type();
+
+    // If cache is disabled via env variable or weights are not constant, reorder directly
+    if (weight_cache_type == 0 || is_weights_const == 0) {
         apilog_info("onednn conv reorder weights (WEIGHT_CACHE_DISABLE)");
         dnnl::stream eng_stream(eng);
         dnnl::reorder(src_weights_mem, dst_weights_mem).execute(eng_stream, src_weights_mem, dst_weights_mem);
