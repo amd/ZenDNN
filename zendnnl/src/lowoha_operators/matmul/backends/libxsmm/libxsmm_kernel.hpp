@@ -18,7 +18,7 @@
 #define _LIBXSMM_KERNEL_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/libxsmm_utils.hpp"
+#include "lowoha_operators/matmul/backends/libxsmm/libxsmm_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {

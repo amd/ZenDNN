@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/matmul/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include <mutex>
 
 namespace zendnnl {

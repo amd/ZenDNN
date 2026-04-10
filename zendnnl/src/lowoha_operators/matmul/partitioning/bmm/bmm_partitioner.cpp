@@ -15,9 +15,9 @@
 # *******************************************************************************/
 
 #include "bmm_partitioner.hpp"
-#include "lowoha_matmul_utils.hpp"
-#include "lowoha_matmul.hpp"
-#include "libxsmm_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/backends/libxsmm/libxsmm_utils.hpp"
 #include <algorithm>
 #include "lowoha_operators/common/omp_thread_control.hpp"
 
@@ -212,4 +212,3 @@ void execute_bmm_partition(
 
 } // namespace lowoha
 } // namespace zendnnl
-

@@ -19,8 +19,8 @@
 
 #include "memory/memory_utils.hpp"
 #include "operators/common/post_op.hpp"
-#include "lowoha_operators/matmul/zendnnl_key.hpp"
-#include "lowoha_operators/matmul/lru_cache.hpp"
+#include "lowoha_operators/matmul/cache/zendnnl_key.hpp"
+#include "lowoha_operators/matmul/cache/lru_cache.hpp"
 #include <cstdint>
 
 namespace zendnnl {

@@ -17,7 +17,7 @@
 #ifndef REORDER_QUANTIZATION_HPP
 #define REORDER_QUANTIZATION_HPP
 
-#include "lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include <cstdlib>
 
 namespace zendnnl {

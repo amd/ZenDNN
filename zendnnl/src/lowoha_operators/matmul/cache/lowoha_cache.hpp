@@ -17,10 +17,10 @@
 #ifndef _LOWOHA_CACHE_HPP
 #define _LOWOHA_CACHE_HPP
 
-#include "lowoha_common.hpp"
-#include "lru_cache.hpp"
-#include "zendnnl_key.hpp"
-#include "lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/cache/lru_cache.hpp"
+#include "lowoha_operators/matmul/cache/zendnnl_key.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "operators/matmul/matmul_config.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -216,4 +216,3 @@ inline int32_t* cache_or_compute_zp_compensation(
 } // namespace zendnnl
 
 #endif // _LOWOHA_CACHE_HPP
-

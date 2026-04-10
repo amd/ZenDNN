@@ -190,4 +190,3 @@ void execute_bmm_partition(
 } // namespace zendnnl
 
 #endif // LOWOHA_PARTITIONER_HPP
-

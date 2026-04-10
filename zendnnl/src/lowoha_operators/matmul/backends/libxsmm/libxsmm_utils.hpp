@@ -17,7 +17,7 @@
 #ifndef _LIBXSMM_UTILS_HPP
 #define _LIBXSMM_UTILS_HPP
 
-#include "lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 #if ZENDNNL_DEPENDS_LIBXSMM
   #include "libxsmm.h"

@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_operators/matmul/auto_tuner.hpp"
+#include "lowoha_operators/matmul/tuning/auto_tuner.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {

@@ -19,7 +19,6 @@
 #define MATMUL_PARTITIONER_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 #include <functional>
 #include <utility>

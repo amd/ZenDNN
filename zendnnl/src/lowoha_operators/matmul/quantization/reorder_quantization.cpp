@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "reorder_quantization.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 

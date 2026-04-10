@@ -22,32 +22,33 @@ set(lowoha_matmul_sources
   group_matmul_direct.cpp
   lowoha_matmul_utils.cpp
   ggml_weight_unpack.cpp
-  bmm_partitioner.cpp
-  matmul_partitioner.cpp
-  aocl_kernel.cpp
-  auto_tuner.cpp
-  onednn_kernel.cpp
-  reorder_quantization.cpp)
+  partitioning/bmm/bmm_partitioner.cpp
+  partitioning/matmul/matmul_partitioner.cpp
+  backends/aocl/aocl_kernel.cpp
+  tuning/auto_tuner.cpp
+  backends/onednn/onednn_kernel.cpp
+  quantization/reorder_quantization.cpp)
 
 set(lowoha_matmul_public_headers
   lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
-  bmm_partitioner.hpp
-  matmul_partitioner.hpp
 
-  lru_cache.hpp
-  zendnnl_key.hpp)
+  cache/lru_cache.hpp
+  cache/zendnnl_key.hpp)
 
 set(lowoha_matmul_private_headers
-  libxsmm_utils.hpp
-  libxsmm_kernel.hpp
-  aocl_kernel.hpp
-  onednn_kernel.hpp
-  auto_tuner.hpp
+  backends/libxsmm/libxsmm_utils.hpp
+  backends/libxsmm/libxsmm_kernel.hpp
+  backends/aocl/aocl_kernel.hpp
+  cache/lowoha_cache.hpp
+  backends/onednn/onednn_kernel.hpp
+  tuning/auto_tuner.hpp
+  partitioning/bmm/bmm_partitioner.hpp
+  partitioning/matmul/matmul_partitioner.hpp
   brgemm_matmul.hpp
   matmul_kernel_bf16_avx512.hpp
-  reorder_quantization.hpp
+  quantization/reorder_quantization.hpp
   ggml_weight_unpack.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)

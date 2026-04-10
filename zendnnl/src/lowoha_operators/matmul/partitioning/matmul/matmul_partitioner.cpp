@@ -20,11 +20,11 @@
 #include <cstdlib>
 #include <omp.h>
 
-#include "lowoha_matmul.hpp"
-#include "lowoha_matmul_utils.hpp"
-#include "libxsmm_utils.hpp"
-#include "lowoha_operators/matmul/onednn_kernel.hpp"
-#include "libxsmm_kernel.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/backends/libxsmm/libxsmm_utils.hpp"
+#include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
@@ -219,7 +219,7 @@ static brgemm_kernel_invoker_t create_brgemm_callback(
   matmul_batch_params_t &batch_params,
   float beta
 ) {
-  return [ &, layout, trans_input, trans_weight, beta](
+  return [&](
            int m_start, int m_len,
            int n_start, int n_len,
            const void **A_batch_main,
@@ -299,7 +299,9 @@ void execute_partitioned_matmul_libxsmm_brgemm(
   const matmul_partition_config_t &config,
   const brgemm_kernel_invoker_t &brgemm_callback
 ) {
-  auto [M_block, N_block] = calculate_optimal_tile_sizes(config);
+  std::pair<int, int> block_sizes = calculate_optimal_tile_sizes(config);
+  int M_block = block_sizes.first;
+  int N_block = block_sizes.second;
 
   const int K_main = (config.K / KC_BLOCK) * KC_BLOCK;
   const int K_tail = config.K - K_main;
@@ -378,7 +380,9 @@ void execute_partitioned_matmul_standard(
   const matmul_partition_config_t &config,
   const tile_kernel_invoker_t &tile_callback
 ) {
-  auto [M_block, N_block] = calculate_optimal_tile_sizes(config);
+  std::pair<int, int> block_sizes = calculate_optimal_tile_sizes(config);
+  int M_block = block_sizes.first;
+  int N_block = block_sizes.second;
 
   const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
   const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
