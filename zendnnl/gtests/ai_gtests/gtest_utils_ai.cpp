@@ -399,6 +399,11 @@ void AITensorFactory::fill_boundary_data(void *ptr, size_t nelem,
     fill_pattern(static_cast<bfloat16_t *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }
+  else if (dtype == data_type_t::u8) {
+    static const uint8_t pattern[] = {255, 0, 128, 1};
+    fill_pattern(static_cast<uint8_t *>(ptr), pattern,
+                 sizeof(pattern)/sizeof(pattern[0]));
+  }
   else if (dtype == data_type_t::s8) {
     static const int8_t pattern[] = {127, -127, 1, -1};
     fill_pattern(static_cast<int8_t *>(ptr), pattern,

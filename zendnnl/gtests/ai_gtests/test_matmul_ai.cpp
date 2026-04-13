@@ -1354,6 +1354,22 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       }
     }
 
+    // INT8 boundary inputs produce legitimately large products
+    // (e.g. s8: 127*127 = 16129 per K element), so the magnitude and
+    // range thresholds must scale with the input value range.
+    bool is_int8_input = (input_dtype == data_type_t::s8 ||
+                          input_dtype == data_type_t::u8);
+    float max_src = (input_dtype == data_type_t::u8) ? 255.0f :
+                    (input_dtype == data_type_t::s8) ? 127.0f : 1.0f;
+    float max_wei = (weight_dtype == data_type_t::u8) ? 255.0f :
+                    (weight_dtype == data_type_t::s8) ? 127.0f : 1.0f;
+    float int8_headroom = is_int8_input
+                          ? max_src * max_wei * static_cast<float>(params.k)
+                          : 0.0f;
+    // 10% margin covers bias contribution and post-op rounding.
+    float magnitude_threshold = std::max(1000.0f, int8_headroom * 1.1f);
+    float range_threshold = std::max(1000.0f, 2.0f * int8_headroom * 1.1f);
+
     // 2. For vector outputs (m==1 or n==1), check that the output RMS magnitude is not too large or too small
     if (params.m == 1 || params.n == 1) {
       float output_magnitude = 0.0f;
@@ -1389,7 +1405,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
         }
       }
       output_magnitude = std::sqrt(output_magnitude / sample_indices.size());
-      if (output_magnitude > 1000.0f) {
+      if (output_magnitude > magnitude_threshold) {
         std::cout <<
                   "[AI_BOUNDARY_ERROR] Vector operation produced excessive magnitude: "
                   << output_magnitude << std::endl;
@@ -1443,7 +1459,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
         }
       }
       float output_range = max_output - min_output;
-      if (output_range > 1000.0f) {
+      if (output_range > range_threshold) {
         std::cout << "[AI_BOUNDARY_ERROR] Large output range detected: " << output_range
                   << std::endl;
         return false;
