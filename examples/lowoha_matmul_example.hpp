@@ -99,13 +99,10 @@ int run_lowoha_matmul_woq_bf16u4_test();
 int run_lowoha_matmul_int8_caching_test();
 
 /** @fn group_matmul_f32_kernel_example
- *  @brief Demonstrates group GEMM API for multiple independent matmul operations.
+ *  @brief Demonstrates @c group_matmul_direct for multiple independent matmuls (parallel mode).
  *
- *  group_matmul executes multiple independent matrix multiplications in sequence.
- *  Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i]
- *
- *  This example demonstrates how to use the group_matmul API with multiple
- *  f32 matmul operations of varying dimensions.
+ *  Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i].
+ *  Pass @c nullptr for the optional @c moe_postop argument when MoE post-op is not used.
  */
 int group_matmul_f32_kernel_example();
 

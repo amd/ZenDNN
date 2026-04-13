@@ -17,14 +17,19 @@
 /// Group MatMul (MoE) benchdnn driver.
 ///
 /// Input file format (CSV, one line per config):
-///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup
+///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk]
 ///
 /// M can be a single int (all experts same) or colon-separated per-expert:
-///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50       <- uniform M=4
-///   8, 126:323:80:68:256:37:15:119, 4096, 14336, 200, ...  <- per-expert M
+///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50         <- no MoE
+///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2      <- MoE topk=2
+///   8, 126:323:80:68:256:37:15:119, 4096, 14336, 200, ...    <- per-expert M
+///
+/// moe_topk (optional, default 0): 0 = no MoE post-op, >0 = fused weighted-reduce
+/// with that topk value.  Requires total_M divisible by topk.
 ///
 /// Env vars:
-///   ZENDNNL_GRP_MATMUL_ALGO=1|2   - select parallel strategy
+///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4 - select parallel strategy
+///     0=auto, 1=sequential, 2=per_expert, 3=multilevel, 4=flat_ccd_m_slice
 ///   ZENDNNL_MATMUL_ALGO=N         - select kernel (default: aocl_dlp_blocked)
 
 #include "grp_matmul_benchdnn.hpp"
@@ -100,11 +105,57 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         params[i].dtypes.bias = data_type_t::none;
     }
 
+    // Build MoE post-op when moe_topk > 0.
+    const bool moe_enabled = (cfg.moe_topk > 0);
+    const int topk = cfg.moe_topk;
+    int total_M = 0;
+    for (int i = 0; i < n; ++i) total_M += cfg.M_per_op[i];
+    const int num_tokens = moe_enabled ? (total_M / topk) : 0;
+    const int num_slots = num_tokens * topk;
+
+    std::vector<float> moe_weights;
+    std::vector<const void *> moe_row_ptrs_vec;
+    AlignedBuffer moe_output_buf;
+    group_matmul_moe_postop_params moe;
+    group_matmul_moe_postop_params *moe_ptr = nullptr;
+
+    if (moe_enabled) {
+        if (total_M % topk != 0) {
+            std::cerr << "ERROR: total_M=" << total_M
+                      << " not divisible by moe_topk=" << topk << std::endl;
+            return false;
+        }
+
+        moe_weights.assign(static_cast<size_t>(num_slots),
+                           1.f / static_cast<float>(topk));
+        moe_output_buf.alloc(static_cast<size_t>(num_tokens) * cfg.N * dst_elem);
+
+        moe_row_ptrs_vec.resize(static_cast<size_t>(num_slots));
+        int slot = 0;
+        for (int e = 0; e < n; ++e) {
+            auto *base = static_cast<const char *>(C[e].ptr);
+            for (int j = 0; j < cfg.M_per_op[e]; ++j) {
+                moe_row_ptrs_vec[static_cast<size_t>(slot)] =
+                    base + static_cast<size_t>(j) * cfg.N * dst_elem;
+                ++slot;
+            }
+        }
+
+        moe.num_tokens = num_tokens;
+        moe.topk = topk;
+        moe.output = moe_output_buf.ptr;
+        moe.ldc_output = cfg.N;
+        moe.topk_weights = moe_weights.data();
+        moe.skip_weighted = false;
+        moe.row_ptrs = moe_row_ptrs_vec.data();
+        moe_ptr = &moe;
+    }
+
     // Warmup
     for (int w = 0; w < cfg.warmup; ++w) {
         auto st = group_matmul_direct(layout, transA, transB, Mv, Nv, Kv, alpha,
                                       src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
-                                      dst_ptrs, ldc, wconst, params);
+                                      dst_ptrs, ldc, wconst, params, moe_ptr);
         if (st != status_t::success) {
             std::cerr << "ERROR: group_matmul_direct failed during warmup"
                       << std::endl;
@@ -122,7 +173,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         auto ti0 = std::chrono::high_resolution_clock::now();
         group_matmul_direct(layout, transA, transB, Mv, Nv, Kv, alpha,
                             src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
-                            dst_ptrs, ldc, wconst, params);
+                            dst_ptrs, ldc, wconst, params, moe_ptr);
         auto ti1 = std::chrono::high_resolution_clock::now();
         double iter_ms = std::chrono::duration<double, std::milli>(ti1 - ti0).count();
         if (iter_ms < min_ms) min_ms = iter_ms;
@@ -135,6 +186,8 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     double total_flops = 0;
     for (int i = 0; i < n; ++i)
         total_flops += 2.0 * cfg.M_per_op[i] * cfg.K * cfg.N;
+    if (moe_enabled)
+        total_flops += 2.0 * num_tokens * cfg.N * topk;
     double gflops_avg = (total_flops / avg_ms) * 1e-6;
     double gflops_peak = (total_flops / min_ms) * 1e-6;
 
@@ -142,13 +195,17 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
                          + ":" + datatypeToStr(cfg.dst_dt);
     std::string m_str = format_M(cfg);
 
+    std::string moe_str = moe_enabled ? "topk=" + std::to_string(topk) : "off";
+
     // Console
     std::cout << std::setw(4) << n << "  "
               << std::setw(12) << m_str << "  "
               << std::setw(6) << cfg.K << "  "
               << std::setw(6) << cfg.N << "  "
               << std::setw(5) << cfg.iters << "  "
+              << std::setw(6) << cfg.warmup << "  "
               << std::setw(14) << dtypes << "  "
+              << std::setw(6) << moe_str << "  "
               << std::fixed << std::setprecision(3)
               << std::setw(10) << avg_ms << "  "
               << std::setw(10) << min_ms << "  "
@@ -159,8 +216,9 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
 
     // CSV
     csv << n << "," << m_str << "," << cfg.K << "," << cfg.N << ","
-        << cfg.iters << "," << dtypes << ","
+        << cfg.iters << "," << cfg.warmup << "," << dtypes << ","
         << (cfg.is_weights_const ? "true" : "false") << ","
+        << cfg.moe_topk << ","
         << std::fixed << std::setprecision(6)
         << total_ms << "," << avg_ms << "," << min_ms << ","
         << std::setprecision(2) << gflops_avg << "," << gflops_peak << "\n";
@@ -197,7 +255,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     const char *omp_env = std::getenv("OMP_NUM_THREADS");
 
     std::ofstream csv(out_filename);
-    csv << "num_ops,M,K,N,iters,dtypes,is_weights_const,"
+    csv << "num_ops,M,K,N,iters,warmup,dtypes,is_weights_const,moe_topk,"
            "total_ms,avg_ms,min_ms,GFLOPS_avg,GFLOPS_peak\n";
 
     std::cout << "================================================================"
@@ -209,8 +267,8 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     std::cout << "  Threads    : " << (omp_env ? omp_env : "default") << std::endl;
     std::cout << "================================================================"
               << std::endl;
-    std::cout << " ops             M       K       N  iters          dtypes"
-                 "      avg_ms      min_ms  GFLOPS_a  GFLOPS_p" << std::endl;
+    std::cout << " ops             M       K       N  iters warmup          dtypes"
+                 "     moe      avg_ms      min_ms  GFLOPS_a  GFLOPS_p" << std::endl;
 
     for (const auto &cfg : configs) {
         if (!run_config(cfg, csv, cache_size))

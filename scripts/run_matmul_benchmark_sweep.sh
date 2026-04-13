@@ -16,8 +16,11 @@ set -euo pipefail
 #                                   10 = Native GEMM
 #                                   11 = Native BRGEMM
 #   -v, --ver <N>[,N,...]         Group matmul strategy version(s) (for grp_matmul)
-#                                   1  = Per-expert (baseline)
-#                                   2  = Multilevel (M-proportional threads)
+#                                   0  = Auto (selects V2 or V3 based on shape)
+#                                   1  = Sequential (experts serial, all threads per GEMM)
+#                                   2  = Per-expert (1 thread per expert, parallel-for)
+#                                   3  = Multilevel CCD-aware (nested OMP, best standalone perf)
+#                                   4  = Flat CCD M-slice (no nested OMP, framework-safe)
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
@@ -37,8 +40,8 @@ set -euo pipefail
 #
 # Examples:
 #   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 128
-#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2 -i uniform -t 128
-#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2 -a 11 -i imbalanced
+#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i uniform -t 128
+#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -a 11 -i imbalanced
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -214,7 +214,7 @@ The Low Overhead API path exposes direct, Low Overhead APIs for specific operati
 
 | Operation | Description | Documentation |
 |-----------|-------------|---------------|
-| **Group GEMM** | Multiple GEMMs in a single call; sequential or parallel execution for MLP layers, multi-head attention, MoE. | [lowoha_group_gemm_operator.md](operator/lowoha_group_gemm_operator.md) |
+| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op. | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
 | **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
 | **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
 | **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |
@@ -282,7 +282,7 @@ Input Tensor (from Frontend)
 ### Low Overhead API (LowOHA) path
 For the Low Overhead API path, execution is more direct to minimize per-call overhead:
 
-1. **Input** is passed from the frontend to a **direct Low Overhead API** (e.g. `matmul_direct`, `group_gemm_direct`).
+1. **Input** is passed from the frontend to a **direct Low Overhead API** (e.g. `matmul_direct`, `group_matmul_direct`).
 2. **Backend selection** (e.g. via Auto Tuner or Decision Tree) chooses the best backend and native kernel for the problem size.
 3. **Native kernel** or **Third Party Libraries** (AOCL, LibXSMM, OneDNN, FBGEMM) perform the computation.
 4. Computation is executed on the **CPU**.

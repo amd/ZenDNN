@@ -46,8 +46,10 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
     if (line.empty() || line[0] == '#') return false;
     std::istringstream ss(line);
     std::string tok;
+    bool has_more = true;
     auto next = [&]() -> std::string {
-        std::getline(ss, tok, ',');
+        if (!has_more) return "";
+        if (!std::getline(ss, tok, ',')) { has_more = false; return ""; }
         size_t s = tok.find_first_not_of(" \t");
         size_t e = tok.find_last_not_of(" \t");
         return (s == std::string::npos) ? "" : tok.substr(s, e - s + 1);
@@ -68,6 +70,8 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
         cfg.is_weights_const = (wc != "false" && wc != "0");
         std::string wp = next();
         if (!wp.empty()) cfg.warmup = std::stoi(wp);
+        std::string moe_str = next();
+        if (!moe_str.empty()) cfg.moe_topk = std::stoi(moe_str);
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) {
         return false;

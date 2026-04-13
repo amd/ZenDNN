@@ -14,34 +14,19 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Group MatMul direct API implementation.
+/// Group MatMul direct — public entry point and input validation.
 ///
-/// Sequential mode (`src.size() == 1`): chained matmuls where output[i-1]
-/// feeds as input[i]. Uses full thread team via matmul_execute.
-///
-/// Parallel mode (`src.size() > 1`): independent matmuls (e.g. MoE experts).
-/// Two strategies selectable via env ZENDNNL_GRP_MATMUL_ALGO:
-///
-///   1 (per-expert): omp parallel for over num_ops. Each expert runs
-///       single-threaded matmul_execute. Simple baseline.
-///
-///   2 (multilevel): All experts run concurrently in a single nested
-///       parallel region. Each expert gets M-proportional inner threads
-///       so heavy experts (large M) get more compute. Thread budget is
-///       num_ops outer + sum(inner[i]) = num_threads exactly.
-///
-/// Default: 1.
-/// Kernel: ZENDNNL_MATMUL_ALGO from env; defaults to aocl_dlp_blocked.
+/// Implementation details:
+///   - group_matmul/group_matmul_parallel.cpp — parallel expert dispatch (OMP).
+///   - group_matmul/group_matmul_moe_postop.cpp — optional MoE weighted-reduce post-op.
 
-#include <algorithm>
-#include <cstdlib>
 #include <sstream>
 #include <vector>
-#include <omp.h>
 
+#include "group_matmul/group_matmul_direct.hpp"
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
-#include "operators/matmul/matmul_config.hpp"
+#include "lowoha_operators/common/operator_instrumentation.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -49,155 +34,166 @@ namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::size_of;
+using zendnnl::common::op_instrumentation;
 
 namespace {
 
-inline int get_grp_matmul_algo() {
-    static const int ver = []() {
-        const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
-        return (env && env[0] >= '1' && env[0] <= '2') ? (env[0] - '0') : 0;
-    }();
-    return ver;
-}
-
-/// Resolve kernel algo from ZENDNNL_MATMUL_ALGO env. Default: aocl_dlp_blocked.
-inline matmul_algo_t resolve_kernel() {
-    static const matmul_algo_t algo = []() {
-        int32_t a = matmul_config_t::instance().get_algo();
-        if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count))
-            return matmul_algo_t::aocl_dlp_blocked;
-        return static_cast<matmul_algo_t>(a);
-    }();
-    return algo;
-}
-
-/// Execute a single expert's matmul via matmul_execute.
-inline void execute_expert(
-    char layout, bool transA, bool transB,
-    int M, int N, int K, float alpha,
-    const void *src, int lda,
-    const void *weight, int ldb,
-    const void *bias, float beta,
-    void *dst, int ldc,
-    bool is_weights_const, int num_thr,
-    matmul_params &params,
-    matmul_algo_t algo) {
-
-    matmul_batch_params_t bp;
-    bp.Batch_A = 1;
-    bp.Batch_B = 1;
-    matmul_algo_t kernel = algo;
-    matmul_execute(layout, transA, transB,
-        M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, size_of(params.dtypes.src), size_of(params.dtypes.dst),
-        num_thr, kernel, params, bp, 0);
-}
-
-// ── ALGO 1: Per-expert ──────────────────────────────────────────────────
-// One OMP iteration per expert. Each expert runs single-threaded.
-void parallel_per_expert(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
+status_t validate_group_matmul_nonempty_vectors(
+    const std::vector<int> &M,
+    const std::vector<int> &N,
+    const std::vector<int> &K,
+    const std::vector<matmul_params> &params,
+    const std::vector<const void *> &src,
+    const std::vector<const void *> &weight,
+    const std::vector<void *> &dst,
+    const std::vector<const void *> &bias,
     const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads) {
+    const std::vector<int> &lda,
+    const std::vector<int> &ldb,
+    const std::vector<int> &ldc) {
 
-    const size_t num_ops = M.size();
-    matmul_algo_t algo = resolve_kernel();
-    scoped_active_levels guard(1);
-
-    #pragma omp parallel for num_threads(num_threads)
-    for (size_t i = 0; i < num_ops; ++i) {
-        execute_expert(layout[i], transA[i], transB[i],
-            M[i], N[i], K[i], alpha[i],
-            src[i], lda[i], weight[i], ldb[i],
-            bias[i], beta[i], dst[i], ldc[i],
-            is_weights_const[i], 1, params[i], algo);
-    }
+  if (M.empty() || N.empty() || K.empty() || params.empty() || src.empty() ||
+      weight.empty() || dst.empty() || bias.empty() || is_weights_const.empty() ||
+      lda.empty() || ldb.empty() || ldc.empty()) {
+    log_error("group_matmul_direct: empty input vectors");
+    return status_t::failure;
+  }
+  return status_t::success;
 }
 
-// ── ALGO 2: Multilevel (outer experts x inner threads) ──────────────────
-// Each expert gets M-proportional inner threads so heavy experts (large M)
-// get more compute resources than light ones.
-//
-// Adapts to the inner-thread-per-expert ratio:
-//   max(thr_per_op) == 1: all experts are single-threaded → flat parallel
-//     for (same as ALGO 1 but respects the M-proportional intent). No
-//     nested OMP overhead.
-//   max(thr_per_op) > 1: nested OMP with active_levels=2. Outer region
-//     has num_ops threads, each spawns thr_per_op[i] inner threads.
-//     Thread budget: num_ops outer + sum(thr_per_op[i]) = num_threads.
-void parallel_multilevel(
+status_t validate_parallel_gemm_inputs(
     const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
+    const std::vector<bool> &transA,
+    const std::vector<bool> &transB,
+    const std::vector<int> &M,
+    const std::vector<int> &N,
+    const std::vector<int> &K,
+    const std::vector<float> &alpha,
+    const std::vector<const void *> &src,
+    const std::vector<int> &lda,
+    const std::vector<const void *> &weight,
+    const std::vector<int> &ldb,
+    const std::vector<const void *> &bias,
+    const std::vector<float> &beta,
+    const std::vector<void *> &dst,
+    const std::vector<int> &ldc,
     const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads) {
+    const std::vector<matmul_params> &params) {
 
-    const int num_ops = static_cast<int>(M.size());
-    matmul_algo_t algo = resolve_kernel();
+  const size_t num_ops = M.size();
 
-    // Inner pool = total threads minus one outer thread per expert.
-    const int inner_pool = std::max(1, num_threads - num_ops);
-    int total_M = 0;
-    for (int i = 0; i < num_ops; ++i) total_M += M[i];
-    if (total_M <= 0) total_M = num_ops;
+  if (num_ops == 0) {
+    log_error("group_matmul parallel: num_ops is 0");
+    return status_t::failure;
+  }
 
-    // M-proportional allocation with round-robin leftover.
-    std::vector<int> thr_per_op(num_ops);
-    int assigned = 0;
-    for (int i = 0; i < num_ops; ++i) {
-        thr_per_op[i] = std::max(1, inner_pool * M[i] / total_M);
-        assigned += thr_per_op[i];
+  if (layout.size() != num_ops || transA.size() != num_ops ||
+      transB.size() != num_ops || N.size() != num_ops ||
+      K.size() != num_ops || alpha.size() != num_ops ||
+      src.size() != num_ops || lda.size() != num_ops ||
+      weight.size() != num_ops || ldb.size() != num_ops ||
+      bias.size() != num_ops || beta.size() != num_ops ||
+      dst.size() != num_ops || ldc.size() != num_ops ||
+      is_weights_const.size() != num_ops || params.size() != num_ops) {
+    log_error("group_matmul parallel: vector size mismatch, num_ops=", num_ops);
+    return status_t::failure;
+  }
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (!src[i] || !weight[i] || !dst[i]) {
+      log_error("group_matmul parallel: null pointer at operation ", i);
+      return status_t::failure;
     }
-    for (int i = 0, left = inner_pool - assigned; left > 0; ++i, --left)
-        thr_per_op[i % num_ops]++;
-
-    if (inner_pool < 2 * num_ops) {
-        // Not enough inner threads per expert on average to justify
-        // nesting overhead. Use flat parallel for (same as ALGO 1).
-        scoped_active_levels guard(1);
-        #pragma omp parallel for num_threads(num_threads)
-        for (size_t i = 0; i < static_cast<size_t>(num_ops); ++i) {
-            execute_expert(layout[i], transA[i], transB[i],
-                M[i], N[i], K[i], alpha[i],
-                src[i], lda[i], weight[i], ldb[i],
-                bias[i], beta[i], dst[i], ldc[i],
-                is_weights_const[i], 1, params[i], algo);
-        }
-    } else {
-        // Multi-threaded experts: nested OMP.
-        scoped_active_levels guard(2);
-        #pragma omp parallel num_threads(num_ops)
-        {
-            const int i = omp_get_thread_num();
-            if (i < num_ops) {
-                execute_expert(layout[i], transA[i], transB[i],
-                    M[i], N[i], K[i], alpha[i],
-                    src[i], lda[i], weight[i], ldb[i],
-                    bias[i], beta[i], dst[i], ldc[i],
-                    is_weights_const[i], thr_per_op[i],
-                    params[i], algo);
-            }
-        }
+    if (M[i] <= 0 || N[i] <= 0 || K[i] <= 0) {
+      log_error("group_matmul parallel: invalid dimensions at operation ", i,
+                ": M=", M[i], ", N=", N[i], ", K=", K[i]);
+      return status_t::failure;
     }
+  }
+
+  return status_t::success;
+}
+
+status_t validate_sequential_gemm_inputs(
+    const std::vector<char> &layout,
+    const std::vector<bool> &transA,
+    const std::vector<bool> &transB,
+    const std::vector<int> &M,
+    const std::vector<int> &N,
+    const std::vector<int> &K,
+    const std::vector<float> &alpha,
+    const std::vector<const void *> &src,
+    const std::vector<int> &lda,
+    const std::vector<const void *> &weight,
+    const std::vector<int> &ldb,
+    const std::vector<const void *> &bias,
+    const std::vector<float> &beta,
+    const std::vector<void *> &dst,
+    const std::vector<int> &ldc,
+    const std::vector<bool> &is_weights_const,
+    const std::vector<matmul_params> &params) {
+
+  const size_t num_ops = M.size();
+
+  if (num_ops == 0) {
+    log_error("group_matmul sequential: num_ops is 0");
+    return status_t::failure;
+  }
+
+  if (src.size() != 1) {
+    log_error("group_matmul sequential: src.size() must be 1, got ", src.size());
+    return status_t::failure;
+  }
+
+  if (layout.size() != num_ops || transA.size() != num_ops ||
+      transB.size() != num_ops || N.size() != num_ops ||
+      K.size() != num_ops || alpha.size() != num_ops ||
+      lda.size() != num_ops || weight.size() != num_ops ||
+      ldb.size() != num_ops || bias.size() != num_ops ||
+      beta.size() != num_ops || dst.size() != num_ops ||
+      ldc.size() != num_ops || is_weights_const.size() != num_ops ||
+      params.size() != num_ops) {
+    log_error("group_matmul sequential: vector size mismatch, num_ops=", num_ops);
+    return status_t::failure;
+  }
+
+  if (!src[0]) {
+    log_error("group_matmul sequential: null src pointer");
+    return status_t::failure;
+  }
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (!weight[i] || !dst[i]) {
+      log_error("group_matmul sequential: null pointer at operation ", i);
+      return status_t::failure;
+    }
+    if (M[i] <= 0 || N[i] <= 0 || K[i] <= 0) {
+      log_error("group_matmul sequential: invalid dimensions at operation ", i,
+                ": M=", M[i], ", N=", N[i], ", K=", K[i]);
+      return status_t::failure;
+    }
+  }
+
+  for (size_t i = 1; i < num_ops; ++i) {
+    if (M[i] != M[0]) {
+      log_error("group_matmul sequential: M must be constant across layers, "
+                "M[0]=", M[0], ", M[", i, "]=", M[i]);
+      return status_t::failure;
+    }
+  }
+
+  for (size_t i = 1; i < num_ops; ++i) {
+    if (K[i] != N[i - 1]) {
+      log_error("group_matmul sequential: dimension mismatch at layer ", i,
+                ": K[", i, "]=", K[i], " != N[", i - 1, "]=", N[i - 1]);
+      return status_t::failure;
+    }
+  }
+
+  return status_t::success;
 }
 
 } // namespace
-
-// ── Public API ──────────────────────────────────────────────────────────
 
 status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<bool> &transA,
@@ -215,37 +211,85 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<void *> &dst,
                              const std::vector<int> &ldc,
                              const std::vector<bool> &is_weights_const,
-                             std::vector<matmul_params> &params) {
+                             std::vector<matmul_params> &params,
+                             const group_matmul_moe_postop_params *moe_postop) {
 
-  if (M.empty() || N.empty() || K.empty() || params.empty() || src.empty() ||
-      weight.empty() || dst.empty() || bias.empty() || is_weights_const.empty() ||
-      lda.empty() || ldb.empty() || ldc.empty()) {
-    log_error("group_matmul_direct: empty input vectors");
+  // Always-on guard: check all vectors before any indexing.
+  // Enforces size consistency without per-element loops — single branch.
+  if (M.empty() || params.empty() || src.empty())
+    return status_t::failure;
+
+  const size_t num_ops = M.size();
+
+  if (N.size() != num_ops || K.size() != num_ops || weight.size() != num_ops ||
+      dst.size() != num_ops || lda.size() != num_ops || ldb.size() != num_ops ||
+      ldc.size() != num_ops || layout.size() != num_ops ||
+      transA.size() != num_ops || transB.size() != num_ops ||
+      alpha.size() != num_ops || beta.size() != num_ops ||
+      bias.size() != num_ops || is_weights_const.size() != num_ops ||
+      params.size() != num_ops) {
+    log_error("group_matmul_direct: vector size mismatch");
     return status_t::failure;
   }
+  if (src.size() != 1 && src.size() != num_ops) {
+    log_error("group_matmul_direct: src.size() must be 1 or num_ops");
+    return status_t::failure;
+  }
+
+  // MoE post-op is parallel mode only.
+  if (moe_postop != nullptr && src.size() == 1) {
+    log_error("group_matmul_direct: moe_postop is only supported in parallel mode");
+    return status_t::failure;
+  }
+
+  // Validate remaining inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1.
+  status_t val = op_instrumentation::validate([&]() {
+    if (validate_group_matmul_nonempty_vectors(M, N, K, params, src, weight, dst,
+            bias, is_weights_const, lda, ldb, ldc) != status_t::success)
+      return status_t::failure;
+    // When MoE is enabled, all experts must have identical N (hidden dim)
+    // and dst dtype — the weighted-reduce reads all expert rows uniformly.
+    if (moe_postop != nullptr) {
+      for (size_t i = 1; i < num_ops; ++i) {
+        if (N[i] != N[0]) {
+          log_error("group_matmul_direct: moe_postop requires identical N across experts");
+          return status_t::failure;
+        }
+        if (params[i].dtypes.dst != params[0].dtypes.dst) {
+          log_error("group_matmul_direct: moe_postop requires identical dst dtype across experts");
+          return status_t::failure;
+        }
+      }
+    }
+    if (validate_group_matmul_moe_postop(moe_postop, N[0],
+                                          params[0].dtypes.dst) != status_t::success)
+      return status_t::failure;
+    return status_t::success;
+  });
+  if (val != status_t::success)
+    return val;
 
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
   if (is_profile)
     profiler.tbp_start();
 
-  const size_t num_ops = M.size();
   const char *gemm_mode = nullptr;
-  static unsigned int auto_version = get_auto_tuner_ver();
 
   const int32_t omp_mt = thread_guard::max_threads();
   const int32_t num_threads = resolve_num_threads(params[0].num_threads, omp_mt);
   thread_guard tg(num_threads, omp_mt);
 
   if (src.size() == 1) {
-    // Sequential: chained matmuls (output[i-1] feeds input[i]).
-    gemm_mode = "sequential";
+    val = op_instrumentation::validate([&]() {
+      return validate_sequential_gemm_inputs(layout, transA, transB, M, N, K,
+                 alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                 is_weights_const, params);
+    });
+    if (val != status_t::success)
+      return val;
 
-    if (validate_sequential_gemm_inputs(layout, transA, transB, M, N, K,
-            alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-            is_weights_const, params) != status_t::success)
-      return status_t::failure;
-
+    static unsigned int auto_version = get_auto_tuner_ver();
     for (size_t i = 0; i < num_ops; ++i) {
       matmul_batch_params_t bp;
       bp.Batch_A = 1;
@@ -267,29 +311,29 @@ status_t group_matmul_direct(const std::vector<char> &layout,
           size_of(params[i].dtypes.src), size_of(params[i].dtypes.dst),
           num_threads, kernel, params[i], bp, auto_version);
     }
+    gemm_mode = "sequential";
   } else {
-    // Parallel: independent matmuls. Select strategy.
-    if (validate_parallel_gemm_inputs(layout, transA, transB, M, N, K,
-            alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-            is_weights_const, params) != status_t::success)
-      return status_t::failure;
+    val = op_instrumentation::validate([&]() {
+      return validate_parallel_gemm_inputs(layout, transA, transB, M, N, K,
+                 alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                 is_weights_const, params);
+    });
+    if (val != status_t::success)
+      return val;
 
-    const int algo = get_grp_matmul_algo();
-    int use_algo = (algo >= 1 && algo <= 2) ? algo : 1;
+    group_matmul_run_parallel_dispatch(layout, transA, transB, M, N, K, alpha,
+        src, lda, weight, ldb, bias, beta, dst, ldc,
+        is_weights_const, params, num_threads, &gemm_mode);
 
-    switch (use_algo) {
-    case 2:
-        gemm_mode = "multilevel";
-        parallel_multilevel(layout, transA, transB, M, N, K, alpha,
-            src, lda, weight, ldb, bias, beta, dst, ldc,
-            is_weights_const, params, num_threads);
-        break;
-    default:
-        gemm_mode = "per_expert";
-        parallel_per_expert(layout, transA, transB, M, N, K, alpha,
-            src, lda, weight, ldb, bias, beta, dst, ldc,
-            is_weights_const, params, num_threads);
-        break;
+    if (moe_postop != nullptr) {
+      status_t moe_val = validate_group_matmul_moe_postop(
+          moe_postop, N[0], params[0].dtypes.dst);
+      if (moe_val != status_t::success)
+        return moe_val;
+      status_t moe_st = group_matmul_moe_postop_execute(moe_postop, N[0],
+          num_threads, params[0].dtypes.dst);
+      if (moe_st != status_t::success)
+        return moe_st;
     }
   }
 
@@ -297,10 +341,10 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     profiler.tbp_stop();
 
   if (apilog_info_enabled() || is_profile) {
-    [[maybe_unused]] std::ostringstream ss;
+    std::ostringstream ss;
     ss << "LOWOHA group_matmul_direct: "
        << "num_ops=" << num_ops
-       << ", mode=" << gemm_mode
+       << ", mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
        << ", num_threads=" << num_threads;
     apilog_info(ss.str());
     if (is_profile)

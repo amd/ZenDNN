@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include "gtest_utils.hpp"
+#include "common/bfloat16.hpp"
 
 
 /** @brief TestMatmul is a test class to handle parameters */
@@ -1421,8 +1422,8 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 INSTANTIATE_TEST_SUITE_P(Matmul, TestMatmul,
                          ::testing::ValuesIn(matmul_test));
 
-/** @brief TestGroupGemm is a test class for group_matmul_direct API */
-class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
+/** @brief TestGroupMatmul is a test class for group_matmul_direct API */
+class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
  protected:
   virtual void SetUp() {
     MatmulType params = GetParam();
@@ -1437,9 +1438,10 @@ class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
     algo         = params.algo;
     num_threads  = params.num_threads;
     omp_set_num_threads(num_threads);
-    // Generate random number of operations (2-5)
+    // Deterministic: srand(seed) above seeds rand(), so num_ops is
+    // reproducible for a given seed across CI runs.
     num_ops = 2 + (rand() % 4);
-    log_info("GroupGemm Test: m=", m, " k=", k, " n=", n,
+    log_info("GroupMatmul test: m=", m, " k=", k, " n=", n,
              " transA=", transA, " transB=", transB,
              " alpha=", alpha, " beta=", beta,
              " num_ops=", num_ops, " num_threads=", num_threads);
@@ -1457,12 +1459,24 @@ class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
 };
 
 /** @fn TEST_P
- *  @param TestGroupGemm parameterized test class
+ *  @param TestGroupMatmul parameterized test class
  *  @param F32_F32 user-defined name of test
- *  @brief Test to validate group_matmul_direct F32 kernel support
+ *  @brief Test to validate group_matmul_direct F32 kernel support.
+ *         Deterministically enables MoE post-op for ~half the parameter
+ *         combinations (topk=2, uniform weights), exercising both the plain
+ *         parallel path and the fused weighted-reduce path.
+ *
+ *         Determinism: m, n, k are from the parameterized test data and
+ *         num_ops is derived from srand(seed) in SetUp(), so the formula
+ *         produces the same enable_moe decision for every CI run.
  */
-TEST_P(TestGroupGemm, F32_F32) {
-  // Create vectors for group_matmul_direct parameters
+TEST_P(TestGroupMatmul, F32_F32) {
+  const int D = static_cast<int>(n);
+  const int num_tokens = static_cast<int>(m);
+  const int topk = 2;
+  const bool enable_moe = ((m + n + k + num_ops) % 2 == 1)
+                           && (num_ops >= static_cast<size_t>(topk));
+
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1476,7 +1490,6 @@ TEST_P(TestGroupGemm, F32_F32) {
   std::vector<int> ldcs(num_ops);
   std::vector<bool> is_weights_consts(num_ops, false);
 
-  // Create tensors for each operation
   std::vector<tensor_t> input_tensors(num_ops);
   std::vector<tensor_t> weight_tensors(num_ops);
   std::vector<tensor_t> bias_tensors(num_ops);
@@ -1484,7 +1497,7 @@ TEST_P(TestGroupGemm, F32_F32) {
   std::vector<tensor_t> output_tensors_ref(num_ops);
 
   std::vector<const void *> srcs(num_ops);
-  std::vector<const void *> weights(num_ops);
+  std::vector<const void *> weights_vec(num_ops);
   std::vector<const void *> biases(num_ops);
   std::vector<void *> dsts(num_ops);
   std::vector<matmul_params> params(num_ops);
@@ -1501,18 +1514,15 @@ TEST_P(TestGroupGemm, F32_F32) {
     output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
 
-    // Set leading dimensions
     ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
     ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
     ldcs[i] = static_cast<int>(n);
 
-    // Set pointers
     srcs[i] = input_tensors[i].get_raw_handle_unsafe();
-    weights[i] = weight_tensors[i].get_raw_handle_unsafe();
+    weights_vec[i] = weight_tensors[i].get_raw_handle_unsafe();
     biases[i] = bias_tensors[i].get_raw_handle_unsafe();
     dsts[i] = output_tensors[i].get_raw_handle_unsafe();
 
-    // Set matmul params
     params[i].dtypes.src = data_type_t::f32;
     params[i].dtypes.wei = data_type_t::f32;
     params[i].dtypes.dst = data_type_t::f32;
@@ -1520,18 +1530,53 @@ TEST_P(TestGroupGemm, F32_F32) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_matmul_direct
+  const int num_slots = num_tokens * topk;
+  std::vector<float> moe_weights(static_cast<size_t>(num_slots),
+                                  1.f / static_cast<float>(topk));
+  std::vector<float> moe_output(static_cast<size_t>(num_tokens * D), 0.f);
+  std::vector<const void *> moe_row_ptrs_storage(static_cast<size_t>(num_slots));
+
+  group_matmul_moe_postop_params moe;
+  group_matmul_moe_postop_params *moe_ptr = nullptr;
+
+  if (enable_moe) {
+    moe.num_tokens = num_tokens;
+    moe.topk = topk;
+    moe.output = moe_output.data();
+    moe.ldc_output = D;
+    const bool use_skip_weighted = ((m + k + num_ops) % 3 == 0);
+    moe.topk_weights = use_skip_weighted ? nullptr : moe_weights.data();
+    moe.skip_weighted = use_skip_weighted;
+
+    // Expert assignment: token t's k-th slot uses expert = (t+kk) % num_ops.
+    // This distributes slots across ALL experts, not just 0..topk-1.
+    for (int t = 0; t < num_tokens; ++t) {
+      for (int kk = 0; kk < topk; ++kk) {
+        const int slot = t * topk + kk;
+        const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+        const auto *base = static_cast<const float *>(dsts[expert]);
+        moe_row_ptrs_storage[static_cast<size_t>(slot)] =
+            base + static_cast<size_t>(t) * static_cast<size_t>(ldcs[expert]);
+      }
+    }
+    moe.row_ptrs = moe_row_ptrs_storage.data();
+    moe_ptr = &moe;
+    log_info("  MoE post-op enabled: num_tokens=", num_tokens,
+             " topk=", topk, " num_slots=", num_slots);
+  }
+
   status_t status = group_matmul_direct(
                       layouts, transAs, transBs,
                       Ms, Ns, Ks, alphas,
                       srcs, ldas,
-                      weights, ldbs,
+                      weights_vec, ldbs,
                       biases, betas,
                       dsts, ldcs,
                       is_weights_consts,
-                      params);
+                      params,
+                      moe_ptr);
 
-  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  // Reference: run individual matmuls
   post_op_type_t po_type = post_op_type_t::none;
   bool use_LOWOHA = false;
   status_t ref_status = status_t::success;
@@ -1545,8 +1590,7 @@ TEST_P(TestGroupGemm, F32_F32) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
-  // Compare outputs
-  if (is_test_successful) {
+  if (is_test_successful && !enable_moe) {
     for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
       compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
                                m, n, k, rtol_f32, epsilon_f32,
@@ -1554,16 +1598,47 @@ TEST_P(TestGroupGemm, F32_F32) {
     }
   }
 
+  if (is_test_successful && enable_moe) {
+    const bool sw = moe.skip_weighted;
+    for (int t = 0; t < num_tokens; ++t) {
+      for (int d = 0; d < D; ++d) {
+        float acc = 0.f;
+        for (int kk = 0; kk < topk; ++kk) {
+          const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+          const auto *ref_base = static_cast<const float *>(
+              output_tensors_ref[expert].get_raw_handle_unsafe());
+          const float val = ref_base[static_cast<size_t>(t) * static_cast<size_t>(n) + d];
+          const float w = sw ? 1.f : moe_weights[static_cast<size_t>(t * topk + kk)];
+          acc += w * val;
+        }
+        const float got = moe_output[static_cast<size_t>(t) * static_cast<size_t>(D) + d];
+        if (std::abs(acc - got) > 2 * epsilon_f32 + 2 * rtol_f32 * std::abs(acc)) {
+          log_error("MoE output mismatch at token=", t, " d=", d,
+                    ": expected=", acc, " got=", got);
+          is_test_successful = false;
+          break;
+        }
+      }
+      if (!is_test_successful) break;
+    }
+  }
+
   EXPECT_TRUE(is_test_successful);
 }
 
 /** @fn TEST_P
- *  @param TestGroupGemm parameterized test class
+ *  @param TestGroupMatmul parameterized test class
  *  @param BF16_F32 user-defined name of test
- *  @brief Test to validate group_matmul_direct BF16 input F32 output kernel support
+ *  @brief Test to validate group_matmul_direct BF16 input F32 output kernel support.
+ *         Randomly enables MoE post-op (FP32 weighted-reduce path).
  */
-TEST_P(TestGroupGemm, BF16_F32) {
-  // Create vectors for group_matmul_direct parameters
+TEST_P(TestGroupMatmul, BF16_F32) {
+  const int D = static_cast<int>(n);
+  const int num_tokens = static_cast<int>(m);
+  const int topk = 2;
+  const bool enable_moe = ((m + n + k + num_ops) % 2 == 1)
+                           && (num_ops >= static_cast<size_t>(topk));
+
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1572,21 +1647,13 @@ TEST_P(TestGroupGemm, BF16_F32) {
   std::vector<int> Ks(num_ops, static_cast<int>(k));
   std::vector<float> alphas(num_ops, alpha);
   std::vector<float> betas(num_ops, beta);
-  std::vector<int> ldas(num_ops);
-  std::vector<int> ldbs(num_ops);
-  std::vector<int> ldcs(num_ops);
+  std::vector<int> ldas(num_ops), ldbs(num_ops), ldcs(num_ops);
   std::vector<bool> is_weights_consts(num_ops, false);
 
-  // Create tensors for each operation
-  std::vector<tensor_t> input_tensors(num_ops);
-  std::vector<tensor_t> weight_tensors(num_ops);
-  std::vector<tensor_t> bias_tensors(num_ops);
-  std::vector<tensor_t> output_tensors(num_ops);
-  std::vector<tensor_t> output_tensors_ref(num_ops);
+  std::vector<tensor_t> input_tensors(num_ops), weight_tensors(num_ops),
+      bias_tensors(num_ops), output_tensors(num_ops), output_tensors_ref(num_ops);
 
-  std::vector<const void *> srcs(num_ops);
-  std::vector<const void *> weights_vec(num_ops);
-  std::vector<const void *> biases(num_ops);
+  std::vector<const void *> srcs(num_ops), weights_vec(num_ops), biases(num_ops);
   std::vector<void *> dsts(num_ops);
   std::vector<matmul_params> params(num_ops);
 
@@ -1602,18 +1669,15 @@ TEST_P(TestGroupGemm, BF16_F32) {
     output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
 
-    // Set leading dimensions
     ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
     ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
     ldcs[i] = static_cast<int>(n);
 
-    // Set pointers
     srcs[i] = input_tensors[i].get_raw_handle_unsafe();
     weights_vec[i] = weight_tensors[i].get_raw_handle_unsafe();
     biases[i] = bias_tensors[i].get_raw_handle_unsafe();
     dsts[i] = output_tensors[i].get_raw_handle_unsafe();
 
-    // Set matmul params
     params[i].dtypes.src = data_type_t::bf16;
     params[i].dtypes.wei = data_type_t::bf16;
     params[i].dtypes.dst = data_type_t::f32;
@@ -1621,18 +1685,40 @@ TEST_P(TestGroupGemm, BF16_F32) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_matmul_direct
-  status_t status = group_matmul_direct(
-                      layouts, transAs, transBs,
-                      Ms, Ns, Ks, alphas,
-                      srcs, ldas,
-                      weights_vec, ldbs,
-                      biases, betas,
-                      dsts, ldcs,
-                      is_weights_consts,
-                      params);
+  const int num_slots = num_tokens * topk;
+  std::vector<float> moe_weights(static_cast<size_t>(num_slots),
+                                  1.f / static_cast<float>(topk));
+  std::vector<float> moe_output(static_cast<size_t>(num_tokens * D), 0.f);
+  std::vector<const void *> moe_row_ptrs_storage(static_cast<size_t>(num_slots));
 
-  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  group_matmul_moe_postop_params moe;
+  group_matmul_moe_postop_params *moe_ptr = nullptr;
+
+  if (enable_moe) {
+    moe.num_tokens = num_tokens;
+    moe.topk = topk;
+    moe.output = moe_output.data();
+    moe.ldc_output = D;
+    moe.topk_weights = moe_weights.data();
+    moe.skip_weighted = false;
+    for (int t = 0; t < num_tokens; ++t) {
+      for (int kk = 0; kk < topk; ++kk) {
+        const int slot = t * topk + kk;
+        const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+        const auto *base = static_cast<const float *>(dsts[expert]);
+        moe_row_ptrs_storage[static_cast<size_t>(slot)] =
+            base + static_cast<size_t>(t) * static_cast<size_t>(ldcs[expert]);
+      }
+    }
+    moe.row_ptrs = moe_row_ptrs_storage.data();
+    moe_ptr = &moe;
+  }
+
+  status_t status = group_matmul_direct(
+      layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+      srcs, ldas, weights_vec, ldbs, biases, betas, dsts, ldcs,
+      is_weights_consts, params, moe_ptr);
+
   post_op_type_t po_type = post_op_type_t::none;
   bool use_LOWOHA = false;
   status_t ref_status = status_t::success;
@@ -1646,8 +1732,7 @@ TEST_P(TestGroupGemm, BF16_F32) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
-  // Compare outputs
-  if (is_test_successful) {
+  if (is_test_successful && !enable_moe) {
     for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
       compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
                                m, n, k, rtol_f32, epsilon_f32,
@@ -1655,16 +1740,44 @@ TEST_P(TestGroupGemm, BF16_F32) {
     }
   }
 
+  if (is_test_successful && enable_moe) {
+    for (int t = 0; t < num_tokens && is_test_successful; ++t) {
+      for (int d = 0; d < D && is_test_successful; ++d) {
+        float acc = 0.f;
+        for (int kk = 0; kk < topk; ++kk) {
+          const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+          const auto *ref_base = static_cast<const float *>(
+              output_tensors_ref[expert].get_raw_handle_unsafe());
+          acc += moe_weights[static_cast<size_t>(t * topk + kk)] *
+                 ref_base[static_cast<size_t>(t) * n + d];
+        }
+        const float got = moe_output[static_cast<size_t>(t) * D + d];
+        if (std::abs(acc - got) > 2 * epsilon_f32 + 2 * rtol_f32 * std::abs(acc)) {
+          log_error("MoE BF16_F32 mismatch at t=", t, " d=", d,
+                    ": expected=", acc, " got=", got);
+          is_test_successful = false;
+        }
+      }
+    }
+  }
+
   EXPECT_TRUE(is_test_successful);
 }
 
 /** @fn TEST_P
- *  @param TestGroupGemm parameterized test class
+ *  @param TestGroupMatmul parameterized test class
  *  @param BF16_BF16 user-defined name of test
- *  @brief Test to validate group_matmul_direct BF16 input BF16 output kernel support
+ *  @brief Test to validate group_matmul_direct BF16 input BF16 output kernel support.
+ *         Deterministically enables MoE post-op (BF16 weighted-reduce path)
+ *         for ~half the parameter combinations — see F32_F32 comment for details.
  */
-TEST_P(TestGroupGemm, BF16_BF16) {
-  // Create vectors for group_matmul_direct parameters
+TEST_P(TestGroupMatmul, BF16_BF16) {
+  const int D = static_cast<int>(n);
+  const int num_tokens = static_cast<int>(m);
+  const int topk = 2;
+  const bool enable_moe = ((m + n + k + num_ops) % 2 == 1)
+                           && (num_ops >= static_cast<size_t>(topk));
+
   std::vector<char> layouts(num_ops, 'r');
   std::vector<bool> transAs(num_ops, transA);
   std::vector<bool> transBs(num_ops, transB);
@@ -1673,21 +1786,13 @@ TEST_P(TestGroupGemm, BF16_BF16) {
   std::vector<int> Ks(num_ops, static_cast<int>(k));
   std::vector<float> alphas(num_ops, alpha);
   std::vector<float> betas(num_ops, beta);
-  std::vector<int> ldas(num_ops);
-  std::vector<int> ldbs(num_ops);
-  std::vector<int> ldcs(num_ops);
+  std::vector<int> ldas(num_ops), ldbs(num_ops), ldcs(num_ops);
   std::vector<bool> is_weights_consts(num_ops, false);
 
-  // Create tensors for each operation
-  std::vector<tensor_t> input_tensors(num_ops);
-  std::vector<tensor_t> weight_tensors(num_ops);
-  std::vector<tensor_t> bias_tensors(num_ops);
-  std::vector<tensor_t> output_tensors(num_ops);
-  std::vector<tensor_t> output_tensors_ref(num_ops);
+  std::vector<tensor_t> input_tensors(num_ops), weight_tensors(num_ops),
+      bias_tensors(num_ops), output_tensors(num_ops), output_tensors_ref(num_ops);
 
-  std::vector<const void *> srcs(num_ops);
-  std::vector<const void *> weights_vec(num_ops);
-  std::vector<const void *> biases(num_ops);
+  std::vector<const void *> srcs(num_ops), weights_vec(num_ops), biases(num_ops);
   std::vector<void *> dsts(num_ops);
   std::vector<matmul_params> params(num_ops);
 
@@ -1703,24 +1808,20 @@ TEST_P(TestGroupGemm, BF16_BF16) {
     output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::bf16, 2.0);
 
-    // Set leading dimensions
     ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
     ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
     ldcs[i] = static_cast<int>(n);
 
-    // Set pointers
     srcs[i] = input_tensors[i].get_raw_handle_unsafe();
     weights_vec[i] = weight_tensors[i].get_raw_handle_unsafe();
     if (algo == matmul_algo_t::libxsmm ||
         algo == matmul_algo_t::libxsmm_blocked) {
       biases[i] = nullptr;
-    }
-    else {
+    } else {
       biases[i] = bias_tensors[i].get_raw_handle_unsafe();
     }
     dsts[i] = output_tensors[i].get_raw_handle_unsafe();
 
-    // Set matmul params
     params[i].dtypes.src = data_type_t::bf16;
     params[i].dtypes.wei = data_type_t::bf16;
     params[i].dtypes.dst = data_type_t::bf16;
@@ -1728,18 +1829,40 @@ TEST_P(TestGroupGemm, BF16_BF16) {
     params[i].num_threads = num_threads;
   }
 
-  // Execute group_matmul_direct
-  status_t status = group_matmul_direct(
-                      layouts, transAs, transBs,
-                      Ms, Ns, Ks, alphas,
-                      srcs, ldas,
-                      weights_vec, ldbs,
-                      biases, betas,
-                      dsts, ldcs,
-                      is_weights_consts,
-                      params);
+  const int num_slots = num_tokens * topk;
+  std::vector<float> moe_weights(static_cast<size_t>(num_slots),
+                                  1.f / static_cast<float>(topk));
+  std::vector<uint16_t> moe_output(static_cast<size_t>(num_tokens * D), 0);
+  std::vector<const void *> moe_row_ptrs_storage(static_cast<size_t>(num_slots));
 
-  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  group_matmul_moe_postop_params moe;
+  group_matmul_moe_postop_params *moe_ptr = nullptr;
+
+  if (enable_moe) {
+    moe.num_tokens = num_tokens;
+    moe.topk = topk;
+    moe.output = moe_output.data();
+    moe.ldc_output = D;
+    moe.topk_weights = moe_weights.data();
+    moe.skip_weighted = false;
+    for (int t = 0; t < num_tokens; ++t) {
+      for (int kk = 0; kk < topk; ++kk) {
+        const int slot = t * topk + kk;
+        const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+        const auto *base = static_cast<const uint16_t *>(dsts[expert]);
+        moe_row_ptrs_storage[static_cast<size_t>(slot)] =
+            base + static_cast<size_t>(t) * static_cast<size_t>(ldcs[expert]);
+      }
+    }
+    moe.row_ptrs = moe_row_ptrs_storage.data();
+    moe_ptr = &moe;
+  }
+
+  status_t status = group_matmul_direct(
+      layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+      srcs, ldas, weights_vec, ldbs, biases, betas, dsts, ldcs,
+      is_weights_consts, params, moe_ptr);
+
   post_op_type_t po_type = post_op_type_t::none;
   bool use_LOWOHA = false;
   status_t ref_status = status_t::success;
@@ -1753,8 +1876,7 @@ TEST_P(TestGroupGemm, BF16_BF16) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
-  // Compare outputs
-  if (is_test_successful) {
+  if (is_test_successful && !enable_moe) {
     for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
       compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
                                m, n, k, rtol_bf16, epsilon_bf16,
@@ -1762,11 +1884,46 @@ TEST_P(TestGroupGemm, BF16_BF16) {
     }
   }
 
+  if (is_test_successful && enable_moe) {
+    for (int t = 0; t < num_tokens && is_test_successful; ++t) {
+      for (int d = 0; d < D && is_test_successful; ++d) {
+        float acc = 0.f;
+        for (int kk = 0; kk < topk; ++kk) {
+          const size_t expert = static_cast<size_t>((t + kk) % num_ops);
+          const auto *ref_base = static_cast<const uint16_t *>(
+              output_tensors_ref[expert].get_raw_handle_unsafe());
+          const uint16_t raw = ref_base[static_cast<size_t>(t) * n + d];
+          acc += moe_weights[static_cast<size_t>(t * topk + kk)] *
+                 zendnnl::common::bfloat16_t::bf16_to_f32_val(
+                     static_cast<int16_t>(raw));
+        }
+        const uint16_t got_raw = moe_output[static_cast<size_t>(t) * D + d];
+        const float got = zendnnl::common::bfloat16_t::bf16_to_f32_val(
+                              static_cast<int16_t>(got_raw));
+        if (std::abs(acc - got) > 2 * epsilon_bf16 + 2 * rtol_bf16 * std::abs(acc)) {
+          log_error("MoE BF16_BF16 mismatch at t=", t, " d=", d,
+                    ": expected=", acc, " got=", got);
+          is_test_successful = false;
+        }
+      }
+    }
+  }
+
   EXPECT_TRUE(is_test_successful);
 }
 
+// TODO: INT8, WOQ, and dynamic-quant group matmul tests require a dedicated
+// test fixture with constrained parameters (no transpose, alpha=1, beta=0,
+// aligned K, compatible algos). The shared matmul_test params are not valid
+// for quantized group matmul. Add in a follow-up PR with INT8-specific params.
+
+// TODO: Add per-ALGO coverage tests that set ZENDNNL_GRP_MATMUL_ALGO=1..4
+// via setenv/putenv before calling group_matmul_direct, to ensure all
+// dispatch paths (sequential, per_expert, multilevel, flat_ccd_m_slice)
+// are exercised and don't regress. Add in a follow-up PR.
+
 /** @fn INSTANTIATE_TEST_SUITE_P
- *  @brief Triggers GroupGemm parameterized test suite
+ *  @brief Triggers group_matmul_direct parameterized test suite
  */
-INSTANTIATE_TEST_SUITE_P(GroupGemm, TestGroupGemm,
+INSTANTIATE_TEST_SUITE_P(GroupMatmul, TestGroupMatmul,
                          ::testing::ValuesIn(matmul_test));

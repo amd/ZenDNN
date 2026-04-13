@@ -27,7 +27,7 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 
 | Feature              | Supported Values                        |
 |----------------------|----------------------------------------|
-| Operators            | matmul, reorder, embag, normalization   |
+| Operators            | matmul, reorder, embag, normalization, grp_matmul |
 | Multi-layer Matmul   | Supported                               |
 | Data Types           | f32, bf16                               |
 | Timing Modes         | end-to-end, detailed timing breakdowns  |
@@ -119,6 +119,7 @@ To run a benchmark, specify the operator and input method as command-line argume
   - [reorder](doc/reorder.md)
   - [embag](doc/embag.md)
   - [normalization](doc/normalization.md)
+  - [grp_matmul](doc/grp_matmul.md)
 - `--input_file=<file>`: Path to a configuration file with one or more test cases.
 - `--input_model_file=<model_file>`: (Optional) Path to a model file for model-based benchmarking.
 - `[command-line options]`: Command-line arguments to specify all required parameters directly. These can be used in combination with model files.

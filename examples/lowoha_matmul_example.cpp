@@ -613,7 +613,8 @@ int group_matmul_f32_kernel_example() {
                         bias_ptrs, betas,
                         dst_ptrs, ldcs,
                         is_weights_const,
-                        params);
+                        params,
+                        nullptr);
 
     if (status == status_t::success) {
       testlog_info("group_matmul execution successful for ", NUM_OPS, " operations.");
@@ -740,7 +741,8 @@ int sequential_gemm_f32_kernel_example() {
                         bias_ptrs, betas,
                         dst_ptrs, ldcs,
                         is_weights_const,
-                        params);
+                        params,
+                        nullptr);
 
     if (status == status_t::success) {
       testlog_info("Sequential GEMM execution successful for ", NUM_OPS, " layers.");

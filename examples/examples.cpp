@@ -72,7 +72,7 @@ int main() {
     run_lowoha_matmul_woq_bf16u4_test();
     run_lowoha_matmul_int8_caching_test();
 
-    /** Group GEMM operator functionality examples.
+    /** Group matmul (`group_matmul_direct`) operator examples.
      *  Demonstrates group GEMM API for multiple independent matmul operations.
      */
     group_matmul_f32_kernel_example();

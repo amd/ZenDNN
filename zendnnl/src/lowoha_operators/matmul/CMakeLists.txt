@@ -16,10 +16,12 @@
 
 #add_subdirectory(native_kernels)
 add_subdirectory(matmul_native)
+add_subdirectory(group_matmul)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
   group_matmul_direct.cpp
+  ${lowoha_group_matmul_sources}
   lowoha_matmul_utils.cpp
   ggml_weight_unpack.cpp
   partitioning/bmm/bmm_partitioner.cpp
@@ -33,6 +35,7 @@ set(lowoha_matmul_public_headers
   lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
+  ${lowoha_group_matmul_public_headers}
 
   cache/lru_cache.hpp
   cache/zendnnl_key.hpp)

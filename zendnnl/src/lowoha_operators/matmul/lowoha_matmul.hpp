@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "operators/matmul/matmul_context.hpp"
 
 #define M_FLOPS 6.0
@@ -107,6 +108,7 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
+
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
@@ -135,28 +137,31 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  * @param dst              Vector of pointers to matrix C data
  * @param ldc              Vector of leading dimensions for C
  * @param is_weights_const Vector of flags indicating if weights are constant (enables caching)
- * @param batch_params     Vector of batch parameters including batch sizes and strides
  * @param params           Vector of additional parameters including post-ops and data types
+ * @param moe_postop       Optional MoE weighted-reduce over pre-gathered expert rows;
+ *                         nullptr disables (default). Parallel mode only; see
+ *                         group_matmul_moe_postop_params.
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */
 status_t group_matmul_direct(const std::vector<char> &layout,
-                           const std::vector<bool> &transA,
-                           const std::vector<bool> &transB,
-                           const std::vector<int> &M,
-                           const std::vector<int> &N,
-                           const std::vector<int> &K,
-                           const std::vector<float> &alpha,
-                           const std::vector<const void *> &src,
-                           const std::vector<int> &lda,
-                           const std::vector<const void *> &weight,
-                           const std::vector<int> &ldb,
-                           const std::vector<const void *> &bias,
-                           const std::vector<float> &beta,
-                           const std::vector<void *> &dst,
-                           const std::vector<int> &ldc,
-                           const std::vector<bool> &is_weights_const,
-                           std::vector<matmul_params> &params);
+                             const std::vector<bool> &transA,
+                             const std::vector<bool> &transB,
+                             const std::vector<int> &M,
+                             const std::vector<int> &N,
+                             const std::vector<int> &K,
+                             const std::vector<float> &alpha,
+                             const std::vector<const void *> &src,
+                             const std::vector<int> &lda,
+                             const std::vector<const void *> &weight,
+                             const std::vector<int> &ldb,
+                             const std::vector<const void *> &bias,
+                             const std::vector<float> &beta,
+                             const std::vector<void *> &dst,
+                             const std::vector<int> &ldc,
+                             const std::vector<bool> &is_weights_const,
+                             std::vector<matmul_params> &params,
+                             const group_matmul_moe_postop_params *moe_postop = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

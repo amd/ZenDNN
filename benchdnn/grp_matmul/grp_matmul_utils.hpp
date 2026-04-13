@@ -65,6 +65,7 @@ struct GrpMatmulConfig {
     data_type_t dst_dt = data_type_t::bf16;
     bool is_weights_const = true;
     int warmup = 50;
+    int moe_topk = 0;  ///< 0 = no MoE post-op, >0 = enable with this topk
 
     int max_M() const { return *std::max_element(M_per_op.begin(), M_per_op.end()); }
     int total_M() const { return std::accumulate(M_per_op.begin(), M_per_op.end(), 0); }
