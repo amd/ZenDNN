@@ -20,8 +20,8 @@ Let:
 - *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
 - *Alpha* (*α*): Scaling factor for the matrix product
 - *Beta* (*β*): Scaling factor for the existing output tensor (accumulation / in-place update)
-- *Scale* : Scaling factor for quantized data (INT8)
-- *ZeroPoint* : Zero-point offset for quantized data (INT8)
+- *Scale* : Scaling factor for quantized data (INT8; **WOQ**: mandatory weight scales for S4/U4 weights)
+- *ZeroPoint* : Zero-point offset for quantized data (INT8; **WOQ U4**: asymmetric weight zero-point, S8 or BF16 domain)
 - *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
 - *BinaryOp(x, y)* : Optional binary post-operation (Example: element-wise add/mul with another matrix)
 - *D* ∈ ℝᴹˣᴺ : Optional second operand for binary operations
@@ -232,17 +232,17 @@ S4 weights use **signed 4-bit integers** with a range of [-8, 7]. U4 weights use
 - **Low nibble** (bits 0-3): First value
 - **High nibble** (bits 4-7): Second value
 
-S4 uses symmetric quantization (no zero-point in the DLP kernel). U4 uses asymmetric quantization with an S8 zero-point.
+S4 uses symmetric quantization (no zero-point in the DLP WOQ path). U4 uses **asymmetric** quantization: the weight zero-point may be **S8** (integer-domain) or **BF16** (float-domain), which selects the dequantization path in the LowOHA/DLP stack (see **LowOHA MatMul** operator documentation for routing notes).
 
 ### WOQ Quantization Granularity
 
-WOQ supports flexible quantization granularity for weight scales and zero-points:
+WOQ supports flexible quantization granularity for weight **scales**. For **U4**, **zero-point tensors use the same shape** as the scale tensor (per-tensor, per-channel, or per-group).
 
-| Granularity | Scale Dimensions | Description |
-|-------------|------------------|-------------|
-| Per-tensor | `{1, 1}` | Single scale for entire weight matrix |
-| Per-channel | `{1, N}` | One scale per output channel |
-| Per-group | `{G, N}` | G groups along K dimension (G = K / group_size) |
+| Granularity | Scale dimensions (S4 / U4) | U4 zero-point dimensions | Description |
+|-------------|----------------------------|--------------------------|-------------|
+| Per-tensor | `{1, 1}` | `{1, 1}` | Single scale (and ZP for U4) for entire weight matrix |
+| Per-channel | `{1, N}` | `{1, N}` | One scale (and ZP for U4) per output channel |
+| Per-group | `{G, N}` | `{G, N}` | G groups along K (G = K / group_size) |
 
 **Per-group quantization** is commonly used in LLM inference with typical group sizes of 32 or 128.
 
@@ -251,25 +251,29 @@ WOQ supports flexible quantization granularity for weight scales and zero-points
 The dequantization process to recover floating-point values from quantized weights:
 
 **S4 (symmetric):**
+
 $$
 W_{dequant} = \text{Scale} \cdot W_{s4}
 $$
 
 **U4 (asymmetric, integer-domain zero-point):**
+
 $$
 W_{dequant} = (W_{u4} - \text{ZeroPoint}_{int8}) \cdot \text{Scale}
 $$
+
 **U4 (asymmetric, float-domain zero-point):**
+
 $$
 W_{dequant} = (W_{u4} - 8) \cdot \text{Scale} + \text{ZeroPoint}_{float}
 $$
 
 Where:
-- \( W_{s4} \): Quantized S4 weight value (signed, range [-8, 7])
-- \( W_{u4} \): Quantized U4 weight value (unsigned, range [0, 15])
-- \( \text{Scale} \): Per-tensor, per-channel, or per-group scale factor
-- \( \text{ZeroPoint}_{int8} \): Integer (S8) zero-point offset used for integer-domain U4 dequantization
-- \( \text{ZeroPoint}_{float} \): Floating-point (e.g., BF16) zero-point offset used for float-domain U4 dequantization
+- $W_{s4}$: Quantized S4 weight value (signed, range [-8, 7])
+- $W_{u4}$: Quantized U4 weight value (unsigned, range [0, 15])
+- $\text{Scale}$: Per-tensor, per-channel, or per-group scale factor
+- $\text{ZeroPoint}_{int8}$: Integer (S8) zero-point offset used for integer-domain U4 dequantization
+- $\text{ZeroPoint}_{float}$: Floating-point (e.g., BF16) zero-point offset used for float-domain U4 dequantization
 
 ### WOQ Tensor Creation Example
 
@@ -863,7 +867,7 @@ This example demonstrates Weight-Only Quantization (WOQ) with BF16 input and S4 
 
 - **S4 Quantized Weights**
   - Weights are stored as 4-bit signed integers (S4), packed 2 values per byte
-  - Per-channel scale tensor is used for dequantization
+  - Per-channel scale tensor is used for dequantization (per-group scales use `{G, N}` dimensions)
 
 - **Post-Operation**
   - Applies GELU (erf variant) activation on the result.
@@ -958,9 +962,9 @@ int matmul_woq_bf16_kernel_example() {
 
 **Key Points for WOQ:**
 - **S4 Weight Tensor**: Created with `data_type_t::s4` and an associated scale tensor. S4 uses symmetric quantization (no zero-point).
-- **U4 Weight Tensor**: Created with `data_type_t::u4` with both scale and zero-point tensors. U4 uses asymmetric quantization with an S8 zero-point.
-- **Per-channel Scale**: Scale tensor with dimensions `{1, N}` provides one scale value per output channel.
-- **Dequantization**: S4: `W_dequant = scale * W_s4`. U4: `W_dequant = (W_u4 - 8) * scale + zp_float`.
+- **U4 Weight Tensor**: Created with `data_type_t::u4` with **scale** and **zero-point** tensors. The zero-point data type may be **S8** or **BF16** (see dequantization formulas above; BF16 zp uses the float-domain formula with midpoint shift).
+- **Scales**: Per-channel example uses `{1, N}`; per-group uses `{G, N}` with G = K / group_size.
+- **Dequantization**: S4: `W_dequant = scale * W_s4`. U4 (integer ZP): `(W_u4 - ZeroPoint_int8) * scale`. U4 (float ZP): `(W_u4 - 8) * scale + ZeroPoint_float`.
 - **BF16 Input**: Source activations remain in BFloat16 for accuracy.
 - **Post-ops Support**: WOQ MatMul supports the same post-operations as regular MatMul (ReLU, GELU, SiLU, binary ops, etc.).
 
