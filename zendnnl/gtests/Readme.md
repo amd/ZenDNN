@@ -167,6 +167,7 @@ gtests/
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
 ├── test_normalization.cpp   # Normalization testsuite with different test cases.
+├── test_omp_api.cpp         # OpenMP thread-control utility testsuite (omp_thread_control.hpp).
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
 ```
 
@@ -603,6 +604,57 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 6. Run normalization tests with 8 threads:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Normalization/* --num_threads 8
+```
+
+### OMP API Tests
+ - OMP API TestSuite validates the OpenMP thread-control utilities in `omp_thread_control.hpp`
+ - Uses fixed `TEST_F` tests (not parameterized) since each test targets a specific code path or contract
+ - Self-contained: does not depend on `gtest_utils.hpp` or randomized data from `gtest_main.cpp`
+ - The `OmpApiTest` fixture manages OpenMP state (disables `omp_set_dynamic`, restores ICVs between tests)
+
+#### Test Categories
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| **resolve_num_threads** | 6 tests | Pure logic tests for the thread-count resolution function (auto, explicit, single-thread, boundary, single-core, negative) |
+| **thread_guard::max_threads** | 3 tests | Singleton caching: stability across repeated calls, cache immunity to external ICV mutation, thread-safe static init |
+| **thread_guard RAII** | 8 tests | Set/restore correctness: no-op elision, two-arg top-level, single-arg capture, per-task ICV inside parallel regions, loop pattern, nested guards, sequential guards, over-request restore |
+| **Combined / Production** | 2 tests | Full operator entry-point pattern (`resolve_num_threads` + `thread_guard`), combined `thread_guard` + `scoped_active_levels` (group_gemm pattern) |
+| **scoped_active_levels** | 2 tests | RAII correctness: no-op elision when desired equals current, set/restore of max-active-levels ICV |
+
+#### Environment Setup
+
+Set these environment variables before running OMP API tests to ensure deterministic behavior:
+```bash
+export OMP_NUM_THREADS=8
+export OMP_MAX_ACTIVE_LEVELS=2
+```
+
+#### Running OMP API Tests
+
+1. Run all OMP API tests:
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.*'
+```
+2. Run only resolve_num_threads tests:
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.ResolveNumThreads*'
+```
+3. Run only thread_guard RAII tests:
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.*ThreadGuard*'
+```
+4. Run only scoped_active_levels tests:
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.ScopedActiveLevels*'
+```
+5. Run only the production pattern and combined tests:
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.ProductionPattern*:OmpApiTest.Combined*'
+```
+6. Run only the parallel-region tests (per-task ICV, loop pattern, concurrent max_threads):
+```bash
+./install/gtests/gtests --gtest_filter='OmpApiTest.*ParallelRegion*:OmpApiTest.*PerTaskIcv*:OmpApiTest.*ParallelThreads*'
 ```
 
 ### Example with more Arguments Support

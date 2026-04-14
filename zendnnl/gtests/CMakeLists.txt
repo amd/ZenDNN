@@ -34,7 +34,8 @@ if(ZENDNNL_BUILD_GTEST)
     test_batchmatmul.cpp
     test_embag.cpp
     test_embedding.cpp
-    test_normalization.cpp)
+    test_normalization.cpp
+    test_omp_api.cpp)
 
   set(gtests_headers
     gtest_utils.hpp)
@@ -61,6 +62,9 @@ if(ZENDNNL_BUILD_GTEST)
   endif()
 
   add_executable(gtests ${gtests_sources})
+
+  target_include_directories(gtests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
   # Link to OpenMP and GTest
   target_link_libraries(gtests
