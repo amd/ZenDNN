@@ -183,7 +183,7 @@ struct matmul_quantization_params_t {
    */
   struct matmul_quant_t {
     const void *buff;              // Pointer to scale/zero-point data
-    data_type_t dt;                // Data type (f32/bf16 for scale, s8/u8/s32 for zero-point)
+    data_type_t dt;                // Scale: f32/bf16. INT8 zero-point: s8/u8/s32. WOQ U4 weight ZP: s8 or bf16
     std::vector<int64_t> dims;     // Dimensions of the quantization tensor
   };
   
@@ -253,7 +253,7 @@ struct matmul_quantization_params_t {
 | WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
 
 > **Notes:**
-> - **WOQ Routing:** When `dtypes.src = BF16` and `dtypes.wei = S4/U4`, the kernel selector forces a DLP backend. When `wei_zp.dt = s8`, the `aocl_dlp_blocked` kernel is used (native DLP path). When `wei_zp.dt = bf16`, the kernel selector forces a simulated DLP backend.
+> - **WOQ Routing:** WOQ is supported by DLP backend only.
 > - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
 > - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
 
@@ -468,8 +468,6 @@ int lowoha_woq_bf16s4_matmul_example() {
 |-----------------|---------|-------------|
 | `s8` (integer domain) | `dequant = (u4_weight - zp) * scale` | Standard affine dequantization with integer zero-point |
 | `bf16` (float domain) | `dequant = (u4_weight - 8) * scale + zp` | Asymmetric dequantization with midpoint shift (8 = midpoint of [0, 15]) and float zero-point added post-scaling |
-
-- **Kernel Selection**: When `wei_zp.dt = s8`, the `aocl_dlp_blocked` kernel is used (native DLP path). When `wei_zp.dt = bf16`, the simulated `aocl_dlp` kernel is used.
 
 **Key Differences from S4 WOQ:**
 - **Weight type**: `data_type_t::u4` (unsigned, range [0, 15]) vs `data_type_t::s4` (signed, range [-8, 7])
