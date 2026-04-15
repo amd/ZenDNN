@@ -28,8 +28,8 @@
 /// with that topk value.  Requires total_M divisible by topk.
 ///
 /// Env vars:
-///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4 - select parallel strategy
-///     0=auto, 1=sequential, 2=per_expert, 3=multilevel, 4=flat_ccd_m_slice
+///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
+///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert
 ///   ZENDNNL_MATMUL_ALGO=N         - select kernel (default: aocl_dlp_blocked)
 
 #include "grp_matmul_benchdnn.hpp"

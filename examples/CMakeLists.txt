@@ -59,6 +59,7 @@ endif()
    sample_example.cpp
    matmul_example.cpp
    lowoha_matmul_example.cpp
+   lowoha_group_matmul_example.cpp
    lowoha_conv2d_example.cpp
    lowoha_reorder_example.cpp
    lowoha_softmax_example.cpp
@@ -76,6 +77,7 @@ endif()
    sample_example.hpp
    matmul_example.hpp
    lowoha_matmul_example.hpp
+   lowoha_group_matmul_example.hpp
    lowoha_conv2d_example.hpp
    lowoha_reorder_example.hpp
    lowoha_softmax_example.hpp

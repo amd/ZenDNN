@@ -22,6 +22,7 @@
 #include "compare_op_example.hpp"
 #include "embedding_bag_example.hpp"
 #include "lowoha_matmul_example.hpp"
+#include "lowoha_group_matmul_example.hpp"
 #include "lowoha_conv2d_example.hpp"
 #include "lowoha_reorder_example.hpp"
 #include "lowoha_softmax_example.hpp"
@@ -81,6 +82,14 @@ int main() {
      *  Demonstrates sequential (linear) GEMM using group_matmul_direct API.
      */
     sequential_gemm_f32_kernel_example();
+
+    /** Group matmul FP32, BF16, and MoE post-op examples.
+     *  Demonstrates parallel group GEMM with BF16, and the MoE
+     *  weighted-reduce post-op that fuses expert outputs.
+     */
+    group_matmul_fp32_example();
+    group_matmul_bf16_example();
+    group_matmul_moe_postop_example();
 
     /** LOWOHA Conv2D operator functionality examples.
      *  Demonstrates 2D convolution with low-overhead API including:

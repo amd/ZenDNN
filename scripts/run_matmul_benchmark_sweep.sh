@@ -16,11 +16,12 @@ set -euo pipefail
 #                                   10 = Native GEMM
 #                                   11 = Native BRGEMM
 #   -v, --ver <N>[,N,...]         Group matmul strategy version(s) (for grp_matmul)
-#                                   0  = Auto (selects V2 or V3 based on shape)
+#                                   0  = Auto (selects V1, V2, or V3 based on shape)
 #                                   1  = Sequential (experts serial, all threads per GEMM)
-#                                   2  = Per-expert (1 thread per expert, parallel-for)
-#                                   3  = Multilevel CCD-aware (nested OMP, best standalone perf)
-#                                   4  = Flat CCD M-slice (no nested OMP, framework-safe)
+#                                   2  = Flat CCD adaptive tile (hybrid M/N, framework-safe)
+#                                   3  = Flat CCD N-tile (no nested OMP, framework-safe)
+#                                   4  = Multilevel CCD-aware (nested OMP)
+#                                   5  = Per-expert (1 thread per expert, parallel-for)
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
@@ -36,12 +37,13 @@ set -euo pipefail
 #
 # Input shortcuts (grp_matmul):
 #   uniform          -> input/grp_matmul/moe_uniform.txt
-#   imbalanced       -> input/grp_matmul/moe_imbalanced.txt
+#   prompt           -> input/grp_matmul/grp_matmul_prompt.txt
+#   decode           -> input/grp_matmul/grp_matmul_decode.txt
 #
 # Examples:
 #   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 128
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i uniform -t 128
-#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -a 11 -i imbalanced
+#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i prompt -t 128
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,7 +104,8 @@ done
 if [[ "$OP" == "grp_matmul" ]]; then
     case "$INPUT_ARG" in
         uniform)     INPUT_FILE="$GRP_DIR/moe_uniform.txt"; TAG="uniform" ;;
-        imbalanced)  INPUT_FILE="$GRP_DIR/moe_imbalanced.txt"; TAG="imbalanced" ;;
+        prompt)      INPUT_FILE="$GRP_DIR/grp_matmul_prompt.txt"; TAG="prompt" ;;
+        decode)      INPUT_FILE="$GRP_DIR/grp_matmul_decode.txt"; TAG="decode" ;;
         bf16)        INPUT_FILE="$GRP_DIR/moe_uniform.txt"; TAG="uniform" ;;
         *)           INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
     esac

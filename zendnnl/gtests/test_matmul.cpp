@@ -1917,10 +1917,11 @@ TEST_P(TestGroupMatmul, BF16_BF16) {
 // aligned K, compatible algos). The shared matmul_test params are not valid
 // for quantized group matmul. Add in a follow-up PR with INT8-specific params.
 
-// TODO: Add per-ALGO coverage tests that set ZENDNNL_GRP_MATMUL_ALGO=1..4
-// via setenv/putenv before calling group_matmul_direct, to ensure all
-// dispatch paths (sequential, per_expert, multilevel, flat_ccd_m_slice)
-// are exercised and don't regress. Add in a follow-up PR.
+// TODO: Add per-ALGO coverage tests for ZENDNNL_GRP_MATMUL_ALGO=1..5.
+// get_grp_matmul_algo() reads the env var on every call (no caching),
+// so setenv/putenv can switch algos within a single test process.
+// Exercise all dispatch paths (1=sequential, 2=flat_ccd_m_tile,
+// 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert). Add in a follow-up PR.
 
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers group_matmul_direct parameterized test suite

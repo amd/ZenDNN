@@ -22,6 +22,7 @@ Include `lowoha_operators/matmul/lowoha_matmul.hpp` (namespace `zendnnl::lowoha:
 - Non-contiguous buffers: each operation has its own src, weight, bias, and dst pointers
 - Sequential chaining **or** parallel execution in one API
 - CCD-aware adaptive parallelization (auto-selects best strategy)
+- N-tiling for large-N experts: up to 3.9× faster than sequential for Mixtral gate_proj
 - Optional MoE weighted-reduce post-op (last argument, `nullptr` to disable)
 - Unified status: `status_t::success` only when everything succeeds
 
@@ -55,7 +56,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `layout` | `vector<char>` | `'r'` row-major or `'c'` column-major per op |
+| `layout` | `vector<char>` | `'r'`/`'R'` row-major or `'c'` column-major per op; tiled algos (2/3) require row-major |
 | `transA` | `vector<bool>` | Transpose A per op |
 | `transB` | `vector<bool>` | Transpose B (weights) per op |
 | `M` | `vector<int>` | Rows of A / C per op |
@@ -74,35 +75,6 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, etc. |
 | `moe_postop` | `const group_matmul_moe_postop_params*` | Optional MoE post-op; **`nullptr`** disables (default) |
 
-### `matmul_params`
-
-```cpp
-struct matmul_params {
-  matmul_data_types dtypes;
-  std::vector<matmul_post_op> postop_;
-  matmul_quantization_params_t quant_params;
-  char mem_format_a;
-  char mem_format_b;
-  matmul_algo_t lowoha_algo;
-  int32_t num_threads;   // 0 = auto
-  std::string plugin_op;
-  bool dynamic_quant;
-  pack_format packing;
-};
-```
-
-### `matmul_data_types`
-
-```cpp
-struct matmul_data_types {
-  data_type_t src;
-  data_type_t wei;
-  data_type_t dst;
-  data_type_t bias;
-  data_type_t compute;
-};
-```
-
 ### Return value
 
 - `status_t::success` — all operations (and optional MoE post-op) completed
@@ -115,51 +87,39 @@ struct matmul_data_types {
 | `src.size() == 1` | Sequential | Chain: `dst[i-1]` feeds op `i` |
 | `src.size() > 1` | Parallel | Independent GEMMs + optional MoE post-op |
 
-### Sequential (linear)
+## Parallel strategy selection (`ZENDNNL_GRP_MATMUL_ALGO`)
+
+| ALGO | Name | Strategy | OMP nesting |
+|------|------|----------|-------------|
+| **0** | Auto | Selects 1, 2, or 3 based on expert count, M, and N | — |
+| **1** | Sequential | Experts serial, each GEMM uses all threads. Default for ≤4 experts and large K×N. | None |
+| **2** | Adaptive tile | Per-expert M-tile or N-tile decision. No nested OMP — framework-safe. | Flat |
+| **3** | N-tile | Pure N-tiling with decode-optimized sequential regime. Up to 3.9× for Mixtral. | Flat |
+| **4** | Multilevel | CCD-aware nested OMP. Multi-CCD for large M, round-based for small M. | Nested |
+| **5** | Per-expert | Parallel-for over experts, 1 thread each. Best when experts ≥ threads. | Flat |
+
+### Auto-select decision tree (ALGO=0)
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│           group_matmul_direct (sequential)               │
-├──────────────────────────────────────────────────────────┤
-│  src[0] ──► ┌──────────┐                                 │
-│             │  Op 0    │ (all T threads)                 │
-│             └────┬─────┘                                 │
-│                  │ dst[0]                                │
-│                  ▼                                       │
-│             ┌──────────┐                                 │
-│             │  Op 1    │                                 │
-│             └────┬─────┘                                 │
-│                  ▼  …                                    │
-│              (output)                                    │
-└──────────────────────────────────────────────────────────┘
+num_ops ≤ 4                            → ALGO 1 (sequential)
+num_ops ≥ 32, max_M ≥ 8               → ALGO 3 (N-tile)
+num_ops ≥ 32, max_M < 8, max_N ≤ 2048 → ALGO 3 (N-tile, small B fits L3)
+num_ops ≥ 32, max_M < 8, max_N > 2048 → ALGO 2 (adaptive tile)
+num_ops ≥ 8, max_M ≥ 8                → ALGO 3 (N-tile)
+num_ops ≥ 16, max_M < 8               → ALGO 2 (adaptive tile)
+num_ops ≥ 8, max_M ≤ 1                → ALGO 2 (adaptive tile)
+fallback                               → ALGO 1 (sequential)
 ```
 
-- `K[i+1]` must equal `N[i]` (chaining).
-- `moe_postop` must be `nullptr`.
+Tiled algos (2/3) require row-major layout, uniform dtypes, no quantization, no post-ops, and standard unpacked A and B (`mem_format_a=='n'`, `mem_format_b=='n'`, `pack_format_b==0`). If these conditions are not met, auto-select falls back to ALGO 1.
 
-### Parallel
-
-```
-┌────────────────────────────────────────────────────────────┐
-│            group_matmul_direct (parallel)                  │
-├────────────────────────────────────────────────────────────┤
-│  OMP parallel for over ops                                 │
-│  ┌─────────┐ ┌─────────┐       ┌─────────┐               │
-│  │  Op 0   │ │  Op 1   │  ...  │ Op N-1  │               │
-│  │ expert 0│ │ expert 1│       │expert E-1│               │
-│  └────┬────┘ └────┬────┘       └────┬────┘               │
-│       │           │                 │                      │
-│       └───────────┴────── ▼ ────────┘                      │
-│            (optional MoE post-op)                          │
-│              weighted-reduce → output                      │
-└────────────────────────────────────────────────────────────┘
-```
+Set the strategy via environment variable: `ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5`.
 
 ## MoE post-op (parallel mode only)
 
-When `moe_postop != nullptr`, a weighted-reduce runs after the parallel expert GEMMs:
+When `moe_postop != nullptr`, a weighted-reduce runs after the parallel expert GEMMs.
 
-### Weighted-reduce
+### What it does
 
 For each token `t` and hidden dim `d`:
 
@@ -169,183 +129,106 @@ output[t, d] = Σ_{k=0}^{topk-1}  topk_weights[t, k] × row_ptrs[t·topk + k][d]
 
 When `skip_weighted == true`, every weight is implicitly 1.0 (plain gather-sum).
 
-The caller provides pre-gathered row pointers (`row_ptrs`) built during the token-to-expert scatter step on the frontend side. This keeps the library focused on compute and enables future GEMM fusion.
+The library performs **only** the weighted-reduce — not the gather. The caller must pre-build the `row_ptrs` array during the token-to-expert scatter step.
 
 ### `group_matmul_moe_postop_params`
 
 ```cpp
 struct group_matmul_moe_postop_params {
-  int num_tokens;
-  int topk;
-  void *output;
-  int ldc_output;
-  const float *topk_weights;
-  bool skip_weighted;
-  const void **row_ptrs;
+  int num_tokens = 0;           // rows in the output buffer
+  int topk = 0;                 // experts per token
+  void *output = nullptr;       // [num_tokens, ldc_output] FP32 or BF16
+  int ldc_output = 0;           // leading dim of output (>= D)
+  const float *topk_weights = nullptr;  // [num_tokens, topk] routing weights
+  bool skip_weighted = false;   // true → all weights = 1.0
+  const void **row_ptrs = nullptr;      // [num_tokens * topk] pre-gathered row pointers
 };
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `num_tokens` | `int` | Number of input tokens (rows in output). Must be > 0. |
-| `topk` | `int` | Experts selected per token. Must be > 0. |
-| `output` | `void*` | Row-major `[num_tokens, ldc_output]` output buffer. First `D` columns written (FP32 or BF16 matching expert `dst` dtype). |
-| `ldc_output` | `int` | Leading dimension of `output` (>= `D`, where `D = N[0]`). |
-| `topk_weights` | `const float*` | Tightly-packed `[num_tokens, topk]` routing weights (row-major). Entry `[t * topk + k]` scales token `t`'s `k`-th expert. Required unless `skip_weighted == true`. |
-| `skip_weighted` | `bool` | When `true`, all routing weights are implicitly 1.0; `topk_weights` may be `nullptr`. |
-| `row_ptrs` | `const void**` | Pre-gathered row pointers: flat array of size `num_tokens * topk`. Entry `row_ptrs[t * topk + k]` points to the start of a D-wide row (FP32 or BF16) in an expert `dst` buffer. Must be non-null. |
+| Field | Requirement |
+|-------|-------------|
+| `num_tokens` | > 0 |
+| `topk` | > 0 |
+| `output` | Non-null. dtype must match expert `dst` dtype (FP32 or BF16). |
+| `ldc_output` | ≥ D (where D = N[0]) |
+| `topk_weights` | Required unless `skip_weighted == true` |
+| `row_ptrs` | Non-null. Each entry points to a D-wide row in an expert dst buffer. |
 
 ### How the caller builds `row_ptrs`
 
-During the token-to-expert scatter (grouping tokens into expert batches), build `row_ptrs` alongside the scatter:
+During token-to-expert scatter (grouping tokens into expert batches), build `row_ptrs` alongside the scatter. This fuses the gather pointer construction with the scatter in a single pass:
 
-```python
+```text
+# Python/Zentorch-side pseudocode
 row_ptrs = [None] * (num_tokens * topk)
+current_count = [0] * num_experts
+
 for t in range(num_tokens):
     for k in range(topk):
         expert_id = topk_indices[t, k]
         row_j = current_count[expert_id]
-        expert_src[expert_id][row_j] = hidden_states[t]         # scatter
-        row_ptrs[t * topk + k] = dst[expert_id] + row_j * ldc   # gather (fused!)
+
+        # Scatter: copy token's hidden state into expert's input batch
+        expert_src[expert_id][row_j] = hidden_states[t]
+
+        # Gather pointer: where this token's result will be in expert output
+        row_ptrs[t * topk + k] = &expert_dst[expert_id][row_j * ldc]
+
         current_count[expert_id] += 1
 ```
 
-### Validation rules
-
-- Parallel mode only (`src.size() > 1`).
-- `row_ptrs` and `output` must be non-null.
-- All `N[i]` equal (hidden dim `D`); `ldc_output >= D`.
-- Every expert's `dst` dtype must be uniform **FP32 or BF16**.
-
-## Thread configuration
-
-| Mode | Typical thread use |
-|------|---------------------|
-| Sequential | Each op uses the resolved thread count |
-| Parallel (auto, ALGO=0) | Auto-selects: V2 (per-expert) when experts >= threads, V3 (multilevel) otherwise |
-| Sequential (ALGO=1) | Experts run serially, each GEMM uses all threads |
-| Per-expert (ALGO=2) | Parallel-for over experts, 1 thread per expert |
-| Multilevel (ALGO=3) | CCD-aware nested OMP: multi-CCD for large M, round-based for small M. Best standalone perf. |
-| Flat CCD M-slice (ALGO=4) | Single-level OMP, CCD-aware M-slicing. Proportional CCD allocation for few experts, round-based for many. No nested OMP — framework-safe. |
-
-Set via `OMP_NUM_THREADS` or `params[i].num_threads` (0 = library default).
-
-## Usage examples
-
-### Parallel group matmul (no MoE)
+### C++ MoE post-op example (BF16, 4 experts, topk=2)
 
 ```cpp
-int lowoha_group_matmul_example() {
-  using namespace zendnnl::lowoha::matmul;
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+using namespace zendnnl::lowoha::matmul;
 
-  constexpr int NUM_OPS = 4;
-  std::vector<int> Ms = {64, 128, 32, 256};
-  std::vector<int> Ns = {128, 64, 256, 64};
-  std::vector<int> Ks = {256, 256, 128, 128};
+// After setting up expert GEMMs (src, weight, dst, params, etc.)...
 
-  std::vector<std::vector<float>> src_buf(NUM_OPS), wei_buf(NUM_OPS),
-                                   bias_buf(NUM_OPS), dst_buf(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    src_buf[i].resize(Ms[i] * Ks[i], 1.0f);
-    wei_buf[i].resize(Ks[i] * Ns[i], 1.0f);
-    bias_buf[i].resize(Ns[i], 0.0f);
-    dst_buf[i].resize(Ms[i] * Ns[i], 0.0f);
-  }
+const int NUM_TOKENS = 8, TOPK = 2, N = 64, NUM_EXPERTS = 4;
 
-  std::vector<const void *> src(NUM_OPS), wei(NUM_OPS), bias(NUM_OPS);
-  std::vector<void *> dst(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    src[i]  = src_buf[i].data();
-    wei[i]  = wei_buf[i].data();
-    bias[i] = bias_buf[i].data();
-    dst[i]  = dst_buf[i].data();
-  }
+// Build row_ptrs: token t → experts (t%4) and ((t+1)%4)
+std::vector<const void *> row_ptrs(NUM_TOKENS * TOPK);
+std::vector<float> weights(NUM_TOKENS * TOPK, 0.5f);  // equal routing
 
-  std::vector<char> layout(NUM_OPS, 'r');
-  std::vector<bool> tA(NUM_OPS, false), tB(NUM_OPS, false);
-  std::vector<float> alpha(NUM_OPS, 1.f), beta(NUM_OPS, 0.f);
-  std::vector<bool> wconst(NUM_OPS, true);
-  std::vector<int> lda(NUM_OPS), ldb(NUM_OPS), ldc(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    lda[i] = Ks[i]; ldb[i] = Ns[i]; ldc[i] = Ns[i];
-  }
-
-  std::vector<matmul_params> params(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    params[i].dtypes = {data_type_t::f32, data_type_t::f32,
-                        data_type_t::f32, data_type_t::f32,
-                        data_type_t::f32};
-    params[i].mem_format_a = 'n';
-    params[i].mem_format_b = 'n';
-  }
-
-  status_t st = group_matmul_direct(
-      layout, tA, tB, Ms, Ns, Ks, alpha,
-      src, lda, wei, ldb, bias, beta, dst, ldc,
-      wconst, params,
-      nullptr);   // no MoE post-op
-
-  return (st == status_t::success) ? 0 : -1;
+for (int t = 0; t < NUM_TOKENS; ++t) {
+  int e0 = t % NUM_EXPERTS, e1 = (t + 1) % NUM_EXPERTS;
+  row_ptrs[t * TOPK + 0] =
+      static_cast<const uint16_t *>(dst_ptrs[e0]) + t * N;
+  row_ptrs[t * TOPK + 1] =
+      static_cast<const uint16_t *>(dst_ptrs[e1]) + t * N;
 }
+
+// MoE output buffer
+std::vector<uint16_t> moe_output(NUM_TOKENS * N, 0);
+
+// Fill the post-op struct
+group_matmul_moe_postop_params moe;
+moe.num_tokens = NUM_TOKENS;
+moe.topk = TOPK;
+moe.output = moe_output.data();
+moe.ldc_output = N;
+moe.topk_weights = weights.data();
+moe.skip_weighted = false;
+moe.row_ptrs = row_ptrs.data();
+
+// Execute: expert GEMMs + fused weighted-reduce
+status_t st = group_matmul_direct(
+    layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+    src_ptrs, ldas, weight_ptrs, ldbs, bias_ptrs, betas,
+    dst_ptrs, ldcs, is_weights_const, params, &moe);
+// moe_output now contains the reduced [NUM_TOKENS, N] tensor
 ```
 
-### Sequential (chained) matmul
-
-```cpp
-int lowoha_sequential_matmul_example() {
-  using namespace zendnnl::lowoha::matmul;
-
-  const int NUM_OPS = 3, M = 64;
-  std::vector<int> Ms = {M, M, M};
-  std::vector<int> Ks = {128, 256, 128};
-  std::vector<int> Ns = {256, 128, 64};
-
-  std::vector<float> input(M * Ks[0], 1.0f);
-  std::vector<std::vector<float>> wei_buf(NUM_OPS), dst_buf(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    wei_buf[i].resize(Ks[i] * Ns[i], 0.5f);
-    dst_buf[i].resize(Ms[i] * Ns[i], 0.0f);
-  }
-
-  std::vector<const void *> src = {input.data()};
-  std::vector<const void *> wei(NUM_OPS), bias(NUM_OPS, nullptr);
-  std::vector<void *> dst(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    wei[i] = wei_buf[i].data();
-    dst[i] = dst_buf[i].data();
-  }
-
-  std::vector<char> layout(NUM_OPS, 'r');
-  std::vector<bool> tA(NUM_OPS, false), tB(NUM_OPS, false);
-  std::vector<float> alpha(NUM_OPS, 1.f), beta(NUM_OPS, 0.f);
-  std::vector<int> lda = Ks, ldb = Ns, ldc = Ns;
-  std::vector<bool> wconst(NUM_OPS, false);
-
-  std::vector<matmul_params> params(NUM_OPS);
-  for (int i = 0; i < NUM_OPS; ++i) {
-    params[i].dtypes = {data_type_t::f32, data_type_t::f32,
-                        data_type_t::f32, data_type_t::f32,
-                        data_type_t::f32};
-    params[i].mem_format_a = 'n';
-    params[i].mem_format_b = 'n';
-  }
-
-  status_t st = group_matmul_direct(
-      layout, tA, tB, Ms, Ns, Ks, alpha,
-      src, lda, wei, ldb, bias, beta, dst, ldc,
-      wconst, params,
-      nullptr);   // MoE not supported in sequential mode
-
-  return (st == status_t::success) ? 0 : -1;
-}
-```
+See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16, and MoE post-op examples with verification.
 
 ## Notes and best practices
 
 1. **Vector lengths**: All per-op vectors must have length `num_ops`; `src` length selects the mode.
 2. **Chaining**: In sequential mode `K[i+1] == N[i]`.
 3. **Parallel independence**: Each op uses its own `src[i]`, `weight[i]`, `dst[i]`.
-4. **MoE**: Pass `nullptr` when not needed. When wired, provide `row_ptrs` (built during scatter) and `topk_weights`.
-5. **Weight caching**: `is_weights_const[i] == true` enables caching on repeated calls.
-6. **Alignment**: Align buffers for best kernel performance.
+4. **MoE**: Pass `nullptr` when not needed. When enabled, provide `row_ptrs` (built during scatter) and `topk_weights`.
+5. **Weight caching**: `is_weights_const[i] == true` enables caching. N-tiling creates per-slice cache entries (O(experts × tiles) — manageable for MoE).
+6. **Tiled algos (2/3)**: Require row-major layout, uniform dtypes across experts, no quantization, no post-ops, and standard unpacked B. Falls back to ALGO 1 automatically when these conditions are not met.
 7. **Errors**: On failure, check logs for dimension / dtype / MoE validation messages.
+8. **Strategy override**: Set `ZENDNNL_GRP_MATMUL_ALGO=N` (1-5) to force a specific strategy. `0` (default) auto-selects.

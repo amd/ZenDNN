@@ -113,8 +113,8 @@ status_t group_matmul_moe_postop_execute(
  * @brief Run independent expert GEMMs (parallel group matmul path).
  *
  * @param gemm_mode_out  If non-null, receives a static string literal for logging
- *                       ("sequential_experts", "per_expert", "multilevel",
- *                       or "flat_ccd_m_slice").
+ *                       ("sequential_experts", "flat_ccd_m_tile", "flat_ccd_n_tile",
+ *                       "multilevel", or "per_expert").
  */
 void group_matmul_run_parallel_dispatch(
     const std::vector<char> &layout,

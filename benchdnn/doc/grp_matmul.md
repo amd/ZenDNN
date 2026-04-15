@@ -24,7 +24,7 @@ with independent memory layouts.
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto), `1` (sequential), `2` (per-expert), `3` (multilevel), `4` (flat CCD M-slice) | Parallel strategy. Default `0` auto-selects. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto), `1` (sequential), `2` (flat CCD M-tile), `3` (flat CCD N-tile), `4` (multilevel), `5` (per-expert) | Parallel strategy. Default `0` auto-selects. |
 | `ZENDNNL_MATMUL_ALGO` | `1`, `3`, `10`, `11`, ... | Backend GEMM kernel. Default from config. |
 | `OMP_NUM_THREADS` | integer | Number of OpenMP threads. |
 
@@ -107,8 +107,8 @@ Results are printed to the console and written to a timestamped CSV file.
 Use `scripts/run_matmul_benchmark_sweep.sh` for automated benchmarking:
 
 ```sh
-# Run all parallel strategies on imbalanced shapes, 128 threads
-./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2 -i imbalanced -t 128
+# Run versions 0-3 on prompt shapes, 128 threads
+./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i prompt -t 128
 
 # Run on uniform shapes with specific kernel
 ./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 2 -a 1 -i uniform -t 128
@@ -119,14 +119,16 @@ Use `scripts/run_matmul_benchmark_sweep.sh` for automated benchmarking:
 | Shortcut | File |
 |----------|------|
 | `uniform` | `benchdnn/input/grp_matmul/moe_uniform.txt` |
-| `imbalanced` | `benchdnn/input/grp_matmul/moe_imbalanced.txt` |
+| `prompt` | `benchdnn/input/grp_matmul/grp_matmul_prompt.txt` |
+| `decode` | `benchdnn/input/grp_matmul/grp_matmul_decode.txt` |
 
 ### Version flags (`-v`)
 
 | Version | Strategy | Best for |
 |---------|----------|----------|
-| `0` | Auto-select | Default — picks V2 or V3 based on shape |
-| `1` | Sequential | Experts serial, all threads per GEMM |
-| `2` | Per-expert | Many experts (>= threads), 1 thread each |
-| `3` | Multilevel CCD-aware | Few experts (< threads), standalone benchmarks |
-| `4` | Flat CCD M-slice | Framework-safe: no nested OMP, proportional CCD + M-slicing |
+| `0` | Auto-select | Default — picks V1, V2, or V3 based on shape |
+| `1` | Sequential | Experts serial, all threads per GEMM (default) |
+| `2` | Flat CCD adaptive tile | Framework-safe: no nested OMP, hybrid M/N-tiling per expert |
+| `3` | Flat CCD N-tile | Framework-safe: no nested OMP, proportional CCD + N-tiling |
+| `4` | Multilevel CCD-aware | Nested OMP, inter-expert concurrency |
+| `5` | Per-expert | Many experts (>= threads), 1 thread each |
