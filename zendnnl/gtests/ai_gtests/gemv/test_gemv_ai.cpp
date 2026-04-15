@@ -487,6 +487,9 @@ TEST_P(TestGemvAI, BF16GemvTest) {
   if (!AITestUtils::is_valid_data_type_combination(params.data_types)) {
     GTEST_SKIP() << "Data type combination not supported";
   }
+  if (params.ldb_pad != 0 && !is_lowoha_mode_enabled()) {
+    GTEST_SKIP() << "LDB stride tests require LOWOHA mode";
+  }
   switch (params.category) {
   case TestCategory::ACCURACY:
     run_accuracy_test(params);

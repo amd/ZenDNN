@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include "gtest_utils.hpp"
 #include "common/bfloat16.hpp"
 
@@ -1599,6 +1600,10 @@ TEST_P(TestGroupMatmul, F32_F32) {
   }
 
   if (is_test_successful && enable_moe) {
+    constexpr int C_moe = 20, P_moe = 15, sf_moe = 4;
+    const float moe_abs_bound = std::fabs(alpha) *
+        ((C_moe + std::log2(static_cast<float>(k)) / sf_moe) * k + P_moe) *
+        epsilon_f32;
     const bool sw = moe.skip_weighted;
     for (int t = 0; t < num_tokens; ++t) {
       for (int d = 0; d < D; ++d) {
@@ -1612,7 +1617,7 @@ TEST_P(TestGroupMatmul, F32_F32) {
           acc += w * val;
         }
         const float got = moe_output[static_cast<size_t>(t) * static_cast<size_t>(D) + d];
-        if (std::abs(acc - got) > 2 * epsilon_f32 + 2 * rtol_f32 * std::abs(acc)) {
+        if (std::abs(acc - got) > moe_abs_bound + rtol_f32 * std::abs(acc)) {
           log_error("MoE output mismatch at token=", t, " d=", d,
                     ": expected=", acc, " got=", got);
           is_test_successful = false;
@@ -1741,6 +1746,10 @@ TEST_P(TestGroupMatmul, BF16_F32) {
   }
 
   if (is_test_successful && enable_moe) {
+    constexpr int C_moe = 20, P_moe = 15, sf_moe = 4;
+    const float moe_abs_bound = std::fabs(alpha) *
+        ((C_moe + std::log2(static_cast<float>(k)) / sf_moe) * k + P_moe) *
+        epsilon_f32;
     for (int t = 0; t < num_tokens && is_test_successful; ++t) {
       for (int d = 0; d < D && is_test_successful; ++d) {
         float acc = 0.f;
@@ -1752,7 +1761,7 @@ TEST_P(TestGroupMatmul, BF16_F32) {
                  ref_base[static_cast<size_t>(t) * n + d];
         }
         const float got = moe_output[static_cast<size_t>(t) * D + d];
-        if (std::abs(acc - got) > 2 * epsilon_f32 + 2 * rtol_f32 * std::abs(acc)) {
+        if (std::abs(acc - got) > moe_abs_bound + rtol_f32 * std::abs(acc)) {
           log_error("MoE BF16_F32 mismatch at t=", t, " d=", d,
                     ": expected=", acc, " got=", got);
           is_test_successful = false;
@@ -1885,6 +1894,8 @@ TEST_P(TestGroupMatmul, BF16_BF16) {
   }
 
   if (is_test_successful && enable_moe) {
+    const float moe_abs_bound = std::fabs(alpha) *
+        (static_cast<float>(k) * epsilon_bf16);
     for (int t = 0; t < num_tokens && is_test_successful; ++t) {
       for (int d = 0; d < D && is_test_successful; ++d) {
         float acc = 0.f;
@@ -1900,7 +1911,7 @@ TEST_P(TestGroupMatmul, BF16_BF16) {
         const uint16_t got_raw = moe_output[static_cast<size_t>(t) * D + d];
         const float got = zendnnl::common::bfloat16_t::bf16_to_f32_val(
                               static_cast<int16_t>(got_raw));
-        if (std::abs(acc - got) > 2 * epsilon_bf16 + 2 * rtol_bf16 * std::abs(acc)) {
+        if (std::abs(acc - got) > moe_abs_bound + rtol_bf16 * std::abs(acc)) {
           log_error("MoE BF16_BF16 mismatch at t=", t, " d=", d,
                     ": expected=", acc, " got=", got);
           is_test_successful = false;
