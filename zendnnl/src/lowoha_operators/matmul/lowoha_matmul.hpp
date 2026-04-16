@@ -25,7 +25,6 @@
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "operators/matmul/matmul_context.hpp"
 
-#define M_FLOPS 6.0
 #define ENABLE_LIBXSMM_BRGEMM_KERNEL 0
 
 namespace zendnnl {
@@ -48,21 +47,6 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                            const void *bias, bool is_weights_const);
 
-/**
- * @brief Execute Batch Matrix Multiplication (BMM) for batch_count > 1
- *
- * This function handles all batched matrix multiplication scenarios including:
- * - Batch GEMM using batched_sgemm kernel
- * - OneDNN batched execution
- * - Parallel partitioning across batches and M dimension
- */
-void bmm_execute(const char layout, const bool transA, const bool transB,
-                 const int M, const int N, const int K, const float alpha,
-                 const void *src, const int lda, const void *weight, const int ldb,
-                 const void *bias, const float beta, void *dst, const int ldc,
-                 const bool is_weights_const, matmul_batch_params_t &batch_params,
-                 const size_t src_type_size, const size_t out_type_size, const int num_threads,
-                 matmul_algo_t &kernel, matmul_params &params);
 
 /**
  * @brief Execute single Matrix Multiplication (Matmul) for batch_count == 1

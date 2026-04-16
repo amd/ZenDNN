@@ -2,17 +2,20 @@
 set -euo pipefail
 
 # ===========================================================================
-# Matmul / Group Matmul Benchmark Runner
+# Matmul / BMM / Group Matmul Benchmark Runner
 #
 # Usage:
 #   ./run_matmul_benchmark_sweep.sh [options]
 #
 # Options:
-#   --op <matmul|grp_matmul>      Operator (default: matmul)
-#   -a, --algo <N>[,N,...]        Algo number(s) to benchmark (required for matmul)
+#   --op <matmul|bmm|grp_matmul>  Operator (default: matmul)
+#   -a, --algo <N>[,N,...]        Algo number(s) to benchmark (required for matmul/bmm)
 #                                 Comma-separated or repeated: -a 1,11 or -a 1 -a 11
 #                                   1  = AOCL DLP Blocked
 #                                   3  = OneDNN BRGEMM
+#                                   4  = AOCL DLP
+#                                   5  = OneDNN
+#                                   6  = LibxSMM
 #                                   10 = Native GEMM
 #                                   11 = Native BRGEMM
 #   -v, --ver <N>[,N,...]         Group matmul strategy version(s) (for grp_matmul)
@@ -25,8 +28,8 @@ set -euo pipefail
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
-#   -p, --perf [profile]          External perf stat (matmul only)
-#   -P, --perf-internal [profile] Internal perf counters (matmul only)
+#   -p, --perf [profile]          External perf stat (matmul/bmm only)
+#   -P, --perf-internal [profile] Internal perf counters (matmul/bmm only)
 #   -h, --help                    Show this help
 #
 # Input shortcuts (matmul):
@@ -34,6 +37,10 @@ set -euo pipefail
 #   fp32             -> benchmark_sweep/fp32_generative_models_eval.txt
 #   bf16_pytorch     -> benchmark_sweep/bf16_pytorch_models_eval.txt
 #   fp32_pytorch     -> benchmark_sweep/fp32_pytorch_models_eval.txt
+#
+# Input shortcuts (bmm):
+#   sdpa             -> input/bmm/sdpa_bmm_inputs.txt
+#   pytorch          -> input/bmm/pytorch_bmm_inputs.txt
 #
 # Input shortcuts (grp_matmul):
 #   uniform          -> input/grp_matmul/moe_uniform.txt
@@ -44,11 +51,13 @@ set -euo pipefail
 #   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 128
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i uniform -t 128
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i prompt -t 128
+#   ./run_matmul_benchmark_sweep.sh --op bmm -a 4,5,6 -i sdpa -t 128
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SWEEP_DIR="$REPO_ROOT/benchdnn/input/matmul/benchmark_sweep"
+BMM_DIR="$REPO_ROOT/benchdnn/input/bmm"
 GRP_DIR="$REPO_ROOT/benchdnn/input/grp_matmul"
 
 OP="matmul"
@@ -109,6 +118,13 @@ if [[ "$OP" == "grp_matmul" ]]; then
         bf16)        INPUT_FILE="$GRP_DIR/moe_uniform.txt"; TAG="uniform" ;;
         *)           INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
     esac
+elif [[ "$OP" == "bmm" ]]; then
+    case "$INPUT_ARG" in
+        sdpa|SDPA)       INPUT_FILE="$BMM_DIR/sdpa_bmm_inputs.txt";    TAG="sdpa" ;;
+        pytorch|PYTORCH) INPUT_FILE="$BMM_DIR/pytorch_bmm_inputs.txt";  TAG="pytorch" ;;
+        bf16)            INPUT_FILE="$BMM_DIR/sdpa_bmm_inputs.txt";     TAG="sdpa" ;;
+        *)               INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
+    esac
 else
     case "$INPUT_ARG" in
         bf16|BF16)                     INPUT_FILE="$SWEEP_DIR/bf16_generative_models_eval.txt"; TAG="bf16" ;;
@@ -130,6 +146,10 @@ export OMP_NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 if [[ "$OP" == "grp_matmul" ]]; then
     if [ ${#VERS[@]} -eq 0 ]; then VERS=(1); fi
     if [ ${#ALGOS[@]} -eq 0 ]; then ALGOS=(11); fi
+elif [[ "$OP" == "bmm" ]]; then
+    if [ ${#ALGOS[@]} -eq 0 ]; then
+        echo "ERROR: -a/--algo is required for bmm (e.g. -a 6 for libxsmm, -a 5,6)"; show_help
+    fi
 else
     if [ ${#ALGOS[@]} -eq 0 ]; then
         echo "ERROR: -a/--algo is required (e.g. -a 1 or -a 1,11)"; show_help
@@ -177,6 +197,9 @@ echo "  Algo    : ${ALGOS[*]}"
 else
 echo "  Algos   : ${ALGOS[*]}"
 fi
+if [[ "$OP" == "bmm" ]]; then
+echo "  ndims   : 3 (batched)"
+fi
 echo "  Threads : $OMP_NUM_THREADS"
 echo "  CPU bind: $CPU_BIND"
 if [[ $PERF_MODE -eq 1 ]]; then echo "  HW Perf : External perf stat ($PERF_PROFILE)"
@@ -202,6 +225,55 @@ if [[ "$OP" == "grp_matmul" ]]; then
             echo "--- V${ver} ALGO=${algo} done → $OUTFILE ---"
             echo ""
         done
+    done
+
+# ── bmm mode: loop over algos with --ndims=3 ─────────────────────────────
+elif [[ "$OP" == "bmm" ]]; then
+    for algo in "${ALGOS[@]}"; do
+        OUTFILE="$OUTDIR/bmm_${TAG}_algo${algo}_${OMP_NUM_THREADS}c.txt"
+
+        if [[ $PERF_MODE -eq 1 ]]; then
+            PERF_RAW="$OUTDIR/bmm_${TAG}_algo${algo}_${OMP_NUM_THREADS}c_perf_raw.txt"
+            echo "--- BMM ALGO=$algo (per-shape perf stat) ---"
+            > "$PERF_RAW"
+            total=$(grep -c '[^[:space:]]' "$INPUT_FILE" || echo 0)
+            idx=0
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                [[ -z "${line// /}" ]] && continue
+                idx=$((idx + 1))
+                echo "$line" > /tmp/_benchdnn_single.txt
+                echo "=== SHAPE $idx/$total ===" >> "$PERF_RAW"
+                echo "INPUT: $line" >> "$PERF_RAW"
+                perf stat -e "$PERF_EVENTS" -- \
+                    env OMP_NUM_THREADS="$OMP_NUM_THREADS" ZENDNNL_BMM_ALGO="$algo" \
+                    numactl --physcpubind="$CPU_BIND" \
+                    "$BENCHDNN_BIN" --op=matmul --ndims=3 \
+                    --input_file=/tmp/_benchdnn_single.txt \
+                    >> "$PERF_RAW" 2>&1
+                echo "" >> "$PERF_RAW"
+                if (( idx % 10 == 0 )) || (( idx == 1 )); then
+                    echo "  [$idx/$total] done"
+                fi
+            done < "$INPUT_FILE"
+            echo "--- BMM ALGO=$algo perf → $PERF_RAW ---"
+        elif [[ $PERF_MODE -eq 2 ]]; then
+            echo "--- BMM ALGO=$algo (internal perf) ---"
+            ZENDNNL_BMM_ALGO=$algo \
+            numactl --physcpubind="$CPU_BIND" \
+                "$BENCHDNN_BIN" --op=matmul --ndims=3 \
+                "--perf-counters=$PERF_PROFILE" \
+                --input_file="$INPUT_FILE" \
+                2>&1 | tee "$OUTFILE"
+            echo "--- BMM ALGO=$algo done → $OUTFILE ---"
+        else
+            echo "--- BMM ALGO=$algo ---"
+            ZENDNNL_BMM_ALGO=$algo \
+            numactl --physcpubind="$CPU_BIND" \
+                "$BENCHDNN_BIN" --op=matmul --ndims=3 --input_file="$INPUT_FILE" \
+                2>&1 | tee "$OUTFILE"
+            echo "--- BMM ALGO=$algo done → $OUTFILE ---"
+        fi
+        echo ""
     done
 
 # ── matmul mode: loop over algos (existing behavior) ────────────────────
