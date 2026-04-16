@@ -18,8 +18,8 @@
 #define _LOWOHA_CACHE_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#include "lowoha_operators/matmul/cache/lru_cache.hpp"
-#include "lowoha_operators/matmul/cache/zendnnl_key.hpp"
+#include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
+#include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "operators/matmul/matmul_config.hpp"
 #include <cstdlib>

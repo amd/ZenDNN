@@ -17,41 +17,27 @@
 #add_subdirectory(native_kernels)
 add_subdirectory(matmul_native)
 add_subdirectory(group_matmul)
+add_subdirectory(backends)
+add_subdirectory(partitioning)
+add_subdirectory(auto_tuner)
+add_subdirectory(quantization)
+add_subdirectory(lru_cache)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
   group_matmul_direct.cpp
   ${lowoha_group_matmul_sources}
   lowoha_matmul_utils.cpp
-  ggml_weight_unpack.cpp
-  partitioning/bmm/bmm_partitioner.cpp
-  partitioning/matmul/matmul_partitioner.cpp
-  backends/aocl/aocl_kernel.cpp
-  tuning/auto_tuner.cpp
-  backends/onednn/onednn_kernel.cpp
-  quantization/reorder_quantization.cpp)
+  ggml_weight_unpack.cpp)
 
 set(lowoha_matmul_public_headers
   lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
-  ${lowoha_group_matmul_public_headers}
-
-  cache/lru_cache.hpp
-  cache/zendnnl_key.hpp)
+  ${lowoha_group_matmul_public_headers})
 
 set(lowoha_matmul_private_headers
-  backends/libxsmm/libxsmm_utils.hpp
-  backends/libxsmm/libxsmm_kernel.hpp
-  backends/aocl/aocl_kernel.hpp
-  cache/lowoha_cache.hpp
-  backends/onednn/onednn_kernel.hpp
-  tuning/auto_tuner.hpp
-  partitioning/bmm/bmm_partitioner.hpp
-  partitioning/matmul/matmul_partitioner.hpp
   brgemm_matmul.hpp
-  matmul_kernel_bf16_avx512.hpp
-  quantization/reorder_quantization.hpp
   ggml_weight_unpack.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)

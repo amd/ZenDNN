@@ -15,7 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
-#include "lowoha_operators/matmul/cache/lowoha_cache.hpp"
+#include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <mutex>

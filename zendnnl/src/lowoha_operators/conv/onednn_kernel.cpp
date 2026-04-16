@@ -17,7 +17,7 @@
 #include "lowoha_operators/conv/onednn_kernel.hpp"
 #include "lowoha_operators/conv/conv_cache_key.hpp"
 #include <cstdlib>
-#include "lowoha_operators/matmul/cache/lru_cache.hpp"
+#include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
 
 namespace zendnnl {
 namespace lowoha {

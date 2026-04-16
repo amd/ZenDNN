@@ -22,7 +22,7 @@
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
-#include "lowoha_operators/matmul/tuning/auto_tuner.hpp"
+#include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
@@ -69,17 +69,6 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
           lda, ldb, ldc, mem_format_a, mem_format_b,
           A, B, C, dtypes, lowoha_param, bias, kernel, is_weights_const);
   return;
-
-  //   TODO: To implement native AVX512 BF16 kernel
-  //   else if (0) {
-  //     if (dtypes.src == data_type_t::bf16 &&
-  //         dtypes.dst == data_type_t::bf16) {
-  //       matmul_bf16_dispatch(static_cast<const int16_t *>(A),
-  //                            static_cast<const int16_t *>(B),
-  //                            static_cast<int16_t *>(C), nullptr /*bias.data()*/,
-  //                            alpha, beta, M, N, K, lda, ldb, ldc, false);
-  //     }
-  //   }
 }
 
 void bmm_execute(const char layout, const bool transA, const bool transB,
