@@ -9,16 +9,16 @@ The **LOWOHA Normalization Operator** is a high-performance, low-overhead normal
 
 LOWOHA Normalization provides a **function-based interface** optimized for:
 - Minimal execution overhead
-- Support for multi-dimensional tensors (1D to 5D)
-- FP32 and BF16 data types
+- FP32 and BF16 data types (input, output, gamma, beta)
 - Multiple normalization variants via a single API
+- AVX-512 vectorized kernels for RMSNorm and FusedAddRMSNorm
 - Direct control over execution parameters
 
 ## Supported Normalization Types
 
 ### LayerNorm
 
-Normalizes each sample across the last `norm_ndims` dimensions. Mean and variance are computed on-the-fly from the input.
+Normalizes each sample across the normalized dimensions. Mean and variance are computed on-the-fly from the input.
 
 $$
 y_i = \gamma_i \cdot \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta_i
@@ -33,7 +33,7 @@ Where:
 
 ### RMSNorm
 
-Root Mean Square normalization across the last `norm_ndims` dimensions. A simplified variant of LayerNorm that omits mean subtraction and the shift parameter.
+Root Mean Square normalization. A simplified variant of LayerNorm that omits mean subtraction and the shift parameter.
 
 $$
 y_i = \gamma_i \cdot \frac{x_i}{\sqrt{\frac{1}{N}\sum_j x_j^2 + \epsilon}}
@@ -83,32 +83,54 @@ status_t normalization_direct(
   norm_params &params        // Normalization parameters
 );
 ```
+Current dispatch logic:
+- `RMS_NORM` / `FUSED_ADD_RMS_NORM` → AVX-512 kernel (`rms_norm_avx512`)
+- `LAYER_NORM` / `BATCH_NORM` → Reference (scalar) kernel (`normalization_reference_wrapper`)
 
 ## Parameters Structure
 
 ### `norm_params`
 
-The main configuration structure:
+The main configuration structure. The caller must set `batch`, `norm_size`, and (for BatchNorm) `num_channels` directly. The kernel treats the input as a logically 2-D `[batch, norm_size]` matrix and normalizes each row independently.
 
 ```cpp
 struct norm_params {
-  norm_type_t norm_type;               // Normalization variant to apply
-  std::vector<uint64_t> shape;         // Tensor dimensions (e.g. {batch, hidden_dim})
-  uint64_t batch;                      // Flattened batch size (not to be set by the user)
-  uint64_t norm_size;                  // Flattened norm size (not to be set by the user)
-  uint64_t num_channels;               // Number of channels (BatchNorm only)
-  float epsilon;                       // Numerical stability constant (default 1e-5)
-  int norm_ndims;                      // Trailing dims to normalize (LayerNorm/RMSNorm)
-  bool use_scale;                      // Whether to apply gamma
-  bool use_shift;                      // Whether to apply beta (ignored by RMSNorm)
-  data_type_t src_dt;                  // Source data type
-  data_type_t dst_dt;                  // Destination data type
-  data_type_t gamma_dt;                // Gamma (scale) parameter data type
-  data_type_t beta_dt;                 // Beta (shift) parameter data type
-  norm_algo_t algorithm;               // Backend selection: default if reference
-  uint64_t num_threads;                // Number of threads (0 = auto)
+  // --- Normalization variant ---
+  norm_type_t norm_type;          // Which normalization to apply (default: NONE)
+
+  // --- Flattened dimensions (set by caller) ---
+  uint64_t batch;                 // Product of all outer (non-normalized) dims (default: 0)
+  uint64_t norm_size;             // Product of all normalized (trailing) dims (default: 0)
+  uint64_t num_channels;          // Channel count C (BatchNorm only, default: 0)
+
+  // --- Normalization parameters ---
+  float epsilon;                  // Numerical stability constant (default: 1e-5)
+  bool use_scale;                 // Whether to apply gamma (default: false)
+  bool use_shift;                 // Whether to apply beta; ignored by RMSNorm (default: false)
+
+  // --- Data types ---
+  data_type_t src_dt;             // Source data type (default: none)
+  data_type_t dst_dt;             // Destination data type (default: none)
+  data_type_t gamma_dt;           // Gamma (scale) parameter data type (default: f32)
+  data_type_t beta_dt;            // Beta (shift) parameter data type (default: f32)
+
+  // --- Backend selection ---
+  norm_algo_t algorithm;          // Selected algorithm / backend (default: none)
+
+  int32_t num_threads;            // Number of threads, 0 = auto (default: 0)
 };
 ```
+
+**Dimension flattening rules:**
+
+The caller is responsible for flattening tensor dimensions before calling `normalization_direct`. The total element count must equal `batch * norm_size` (or `batch * num_channels * norm_size` for BatchNorm).
+
+| Tensor Shape | Norm Dims | `batch` | `norm_size` | `num_channels` |
+|---|---|---|---|---|
+| `[B, D]` | last 1 | `B` | `D` | — |
+| `[B, S, D]` | last 1 | `B * S` | `D` | — |
+| `[B, S, H, D]` | last 2 | `B * S` | `H * D` | — |
+| `[N, C, H, W]` (BatchNorm) | per-channel | `N` | `H * W` | `C` |
 
 ### Normalization Types
 
@@ -139,17 +161,20 @@ enum class norm_type_t : int {
 |-----------------|---------|
 | FP32, BF16 | FP32 |
 
+**BatchNorm running mean / variance:** FP32 only (cast to `const float *` internally).
+
 ### Parameter Requirements by Norm Type
 
 | Parameter | LayerNorm | RMSNorm | FusedAddRMSNorm | BatchNorm |
 |-----------|-----------|---------|-----------------|-----------|
 | `norm_type` | `LAYER_NORM` | `RMS_NORM` | `FUSED_ADD_RMS_NORM` | `BATCH_NORM` |
-| `shape` | required | required | required | required |
-| `norm_ndims` | required | required | required | not used |
+| `batch` | required | required | required | required (`N`) |
+| `norm_size` | required | required | required | required (`H*W`) |
+| `num_channels` | not used | not used | not used | required (`C`) |
 | `gamma` | optional | optional | optional | optional |
 | `beta` | optional | nullptr | nullptr | optional |
-| `running_mean` | nullptr | nullptr | nullptr | required |
-| `running_var` | nullptr | nullptr | nullptr | required |
+| `running_mean` | nullptr | nullptr | nullptr | required (FP32) |
+| `running_var` | nullptr | nullptr | nullptr | required (FP32) |
 | `residual` | nullptr | nullptr | required | nullptr |
 | `use_scale` | true/false | true/false | true/false | true/false |
 | `use_shift` | true/false | not used | not used | true/false |
@@ -173,9 +198,9 @@ int rms_norm_example() {
   // Fill input with data ...
 
   norm_params params;
-  params.shape      = {batch, hidden_dim};
+  params.batch      = batch;
+  params.norm_size  = hidden_dim;
   params.norm_type  = norm_type_t::RMS_NORM;
-  params.norm_ndims = 1;
   params.src_dt     = data_type_t::f32;
   params.dst_dt     = data_type_t::f32;
   params.epsilon    = 1e-6f;
@@ -193,6 +218,8 @@ int rms_norm_example() {
 
 ### Example 2: RMSNorm on 3D Tensor (Transformer)
 
+For a 3D tensor `[batch, seq_len, hidden_dim]` normalized over the last dimension, flatten the outer dimensions into `params.batch`:
+
 ```cpp
 int rms_norm_3d_example() {
   using namespace zendnnl::lowoha::normalization;
@@ -207,9 +234,9 @@ int rms_norm_3d_example() {
   std::vector<float> output(total_size, 0.0f);
 
   norm_params params;
-  params.shape      = {batch, seq_len, hidden_dim};
+  params.batch      = batch * seq_len;   // flatten outer dims
+  params.norm_size  = hidden_dim;        // normalize over hidden_dim
   params.norm_type  = norm_type_t::RMS_NORM;
-  params.norm_ndims = 1;   // normalize over hidden_dim only
   params.src_dt     = data_type_t::f32;
   params.dst_dt     = data_type_t::f32;
   params.epsilon    = 1e-6f;
@@ -246,9 +273,9 @@ int fused_add_rms_norm_example() {
   // Fill sublayer_output and residual with data ...
 
   norm_params params;
-  params.shape      = {batch, seq_len, hidden_dim};
+  params.batch      = batch * seq_len;
+  params.norm_size  = hidden_dim;
   params.norm_type  = norm_type_t::FUSED_ADD_RMS_NORM;
-  params.norm_ndims = 1;
   params.src_dt     = data_type_t::f32;
   params.dst_dt     = data_type_t::f32;
   params.epsilon    = 1e-6f;
@@ -284,9 +311,9 @@ int layer_norm_example() {
   std::vector<float> output(total_size, 0.0f);
 
   norm_params params;
-  params.shape      = {batch, hidden_dim};
+  params.batch      = batch;
+  params.norm_size  = hidden_dim;
   params.norm_type  = norm_type_t::LAYER_NORM;
-  params.norm_ndims = 1;
   params.src_dt     = data_type_t::f32;
   params.dst_dt     = data_type_t::f32;
   params.epsilon    = 1e-5f;
@@ -322,9 +349,9 @@ int rms_norm_bf16_example() {
   // Fill input and gamma with BF16 data ...
 
   norm_params params;
-  params.shape      = {batch, seq_len, hidden_dim};
+  params.batch      = batch * seq_len;
+  params.norm_size  = hidden_dim;
   params.norm_type  = norm_type_t::RMS_NORM;
-  params.norm_ndims = 1;
   params.src_dt     = data_type_t::bf16;
   params.dst_dt     = data_type_t::bf16;
   params.gamma_dt   = data_type_t::bf16;  // gamma buffer is BF16
@@ -358,13 +385,15 @@ int batch_norm_inference_example() {
   std::vector<float> output(total_size, 0.0f);
 
   norm_params params;
-  params.shape      = {N, C, H, W};
-  params.norm_type  = norm_type_t::BATCH_NORM;
-  params.src_dt     = data_type_t::f32;
-  params.dst_dt     = data_type_t::f32;
-  params.epsilon    = 1e-5f;
-  params.use_scale  = true;
-  params.use_shift  = true;
+  params.batch        = N;
+  params.num_channels = C;
+  params.norm_size    = H * W;
+  params.norm_type    = norm_type_t::BATCH_NORM;
+  params.src_dt       = data_type_t::f32;
+  params.dst_dt       = data_type_t::f32;
+  params.epsilon      = 1e-5f;
+  params.use_scale    = true;
+  params.use_shift    = true;
 
   status_t status = normalization_direct(
       input.data(), output.data(),
@@ -376,18 +405,6 @@ int batch_norm_inference_example() {
 }
 ```
 
-## Kernel Implementation Status
-
-| Norm Type | Kernel Type | Parallelization |
-|-----------|-------------|-----------------|
-| LayerNorm | Scalar (reference) | OpenMP (batch-level) |
-| RMSNorm | Scalar (reference)/AVX512 | OpenMP (batch-level) |
-| FusedAddRMSNorm | Scalar (reference)/AVX512 | OpenMP (batch-level) |
-| BatchNorm | Scalar (reference) | OpenMP (batch x channel) |
-
-**Roadmap:**
-- Advanced parallelization: TODO
-
 ## Buffer Requirements
 
 ### Residual Buffer (FusedAddRMSNorm)
@@ -395,7 +412,6 @@ int batch_norm_inference_example() {
 The `residual` parameter is unique to `FUSED_ADD_RMS_NORM`:
 
 - **Required:** Must be non-null when `norm_type == FUSED_ADD_RMS_NORM`
-- **Shape:** Same shape as the input tensor
 - **Element type:** Same as `params.src_dt` (f32 or bf16)
 - **Access:** Read-write (modified in-place)
 - **After the call:** `residual[i] = old_residual[i] + input[i]`
@@ -421,10 +437,15 @@ If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f
 | `output` | `void*` | Output tensor pointer |
 | `gamma` | `const void*` | Scale parameter pointer (read-only) |
 | `beta` | `const void*` | Shift parameter pointer (read-only) |
-| `running_mean` | `const void*` | Pre-computed mean (BatchNorm only) |
-| `running_var` | `const void*` | Pre-computed variance (BatchNorm only) |
+| `running_mean` | `const void*` | Pre-computed mean (BatchNorm only, FP32) |
+| `running_var` | `const void*` | Pre-computed variance (BatchNorm only, FP32) |
 | `residual` | `void*` | Residual buffer (FusedAddRMSNorm only, in-place) |
 | `params` | `norm_params&` | Configuration parameters |
+
+## Diagnostics and Profiling
+
+- **Input validation** runs only when the environment variable `ZENDNNL_DIAGNOSTICS_ENABLE=1` is set. In production builds, validation resolves to a single predicted-not-taken branch.
+- **Profiling** is controlled by the environment variable `ZENDNNL_ENABLE_PROFILER=1` and `ZENDNNL_PROFILE_LOG_LEVEL=4`. When active, `normalization_direct` reports execution time and operator parameters.
 
 ## Error Handling
 
@@ -433,17 +454,15 @@ The `normalization_direct` function returns `status_t`:
 - `status_t::success`: Operation completed successfully
 - `status_t::failure`: Operation failed (check logs for details)
 
-Common failure causes:
+Common failure causes (checked when `ZENDNNL_DIAGNOSTICS_ENABLE=1`):
 - Null input or output pointers
 - `norm_type` not specified (`NONE`)
 - Unsupported `src_dt` or `dst_dt` (not f32 or bf16)
+- `batch == 0` or `norm_size == 0`
 - Unsupported `gamma_dt` (not f32 or bf16) when `use_scale == true`
 - Unsupported `beta_dt` (not f32 or bf16) when `use_shift == true`
 - `use_scale == true` but gamma pointer is null
-- `use_shift == true` but beta pointer is null (LayerNorm/BatchNorm)
-- BatchNorm missing running_mean or running_var
+- `use_shift == true` but beta pointer is null (LayerNorm/BatchNorm only; RMSNorm and FusedAddRMSNorm skip this check)
+- BatchNorm missing `running_mean` or `running_var`
 - FusedAddRMSNorm missing residual buffer
-- FusedAddRMSNorm with zero batch or norm_size
-- Invalid `norm_ndims` (must be 1 to ndims)
 - `epsilon <= 0`
-- Shape empty or exceeds 5 dimensions
