@@ -17,8 +17,15 @@
 set(lowoha_reorder_sources
   lowoha_reorder.cpp
   lowoha_reorder_utils.cpp
-  reorder_kernels.cpp
-  per_token_avx512_kernel.cpp)
+  reorder_data_type/reorder_dtype_dispatch.cpp
+  reorder_data_type/scalar_impl/scalar_ref_kernels.cpp
+  reorder_data_type/scalar_impl/scalar_granular_impl.cpp
+  reorder_data_type/scalar_impl/scalar_dynamic_dispatch.cpp
+  reorder_data_type/scalar_impl/dynamic_per_token_ref_kernel.cpp
+  reorder_data_type/static_quant_dequant_impl/quant_dequant_per_tensor_avx512_kernel.cpp
+  reorder_data_type/static_quant_dequant_impl/bf16_f32_per_tensor_avx512_kernel.cpp
+  reorder_data_type/dynamic_quant_impl/dynamic_dispatch.cpp
+  reorder_data_type/dynamic_quant_impl/per_token_avx512_kernel.cpp)
 
 set(lowoha_reorder_public_headers
   lowoha_reorder_common.hpp
@@ -26,8 +33,10 @@ set(lowoha_reorder_public_headers
   lowoha_reorder_utils.hpp)
 
 set(lowoha_reorder_private_headers
-  reorder_kernels.hpp
-  per_token_avx512_kernel.hpp)
+  reorder_data_type/reorder_dtype_dispatch.hpp
+  reorder_data_type/scalar_impl/scalar_kernels.hpp
+  reorder_data_type/static_quant_dequant_impl/static_kernels.hpp
+  reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
@@ -57,4 +66,3 @@ list(APPEND lowoha_reorder_public_headers_list
 create_header_file(${zendnnl_inc_file}
   ${inc_subdir}
   "${lowoha_reorder_public_headers_list}")
-
