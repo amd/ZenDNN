@@ -82,7 +82,7 @@ Framework integration build assumes that ZenDNN is part of an embedding inferenc
 
 ## 2. Required Toolchains
 
-- **Build System** : CMake >= 3.25
+- **Build System** : CMake >= 3.26
 - **Compilers**    : GNU g++ >= 11.2.0
 
 ## 3. Build Options

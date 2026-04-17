@@ -132,7 +132,7 @@ For detailed usage instructions and configuration options, refer to the [zendnn 
 Please refer to the [build system documentation](docs/zendnnl_build.md) to find details of how ZenDNN can be integrated with a inference or serving framework.
 
 # 5. License
-Refer to the "[LICENSE](LICENCE)" file for the full license text and copyright notice.
+Refer to the "[LICENSE](LICENSE)" file for the full license text and copyright notice.
 
 This distribution includes third party software governed by separate license terms.
 
