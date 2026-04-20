@@ -21,7 +21,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig AOCL-DLP...")
 
-  if (NOT ZENDNNL_AMDBLIS_INJECTED)
+  if (NOT ZENDNNL_AOCLDLP_INJECTED)
     list(APPEND AD_CMAKE_ARGS "-DDLP_THREADING_MODEL=openmp")
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
@@ -44,8 +44,24 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
     if (ZENDNNL_LOCAL_AOCLDLP)
-
+      message(WARNING "${ZENDNNL_MSG_PREFIX}AOCL-DLP will be built from local source at ${AOCLDLP_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-DLP from ${AOCLDLP_ROOT_DIR}")
+
+      set(AOCLDLP_DEPS_LINK "${ZENDNNL_DEPS_DIR}/aocldlp")
+      if(NOT "${AOCLDLP_ROOT_DIR}" STREQUAL "${AOCLDLP_DEPS_LINK}")
+        if(EXISTS "${AOCLDLP_DEPS_LINK}")
+          if(IS_SYMLINK "${AOCLDLP_DEPS_LINK}")
+            file(REMOVE "${AOCLDLP_DEPS_LINK}")
+          else()
+            message(WARNING "${ZENDNNL_MSG_PREFIX}${AOCLDLP_DEPS_LINK} exists and is not a symlink. Skipping symlink creation. Remove it manually if needed.")
+          endif()
+        endif()
+        if(NOT EXISTS "${AOCLDLP_DEPS_LINK}")
+          execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${AOCLDLP_ROOT_DIR}" "${AOCLDLP_DEPS_LINK}")
+          message(STATUS "${ZENDNNL_MSG_PREFIX}Created symlink ${AOCLDLP_DEPS_LINK} -> ${AOCLDLP_ROOT_DIR}")
+        endif()
+      endif()
 
       ExternalProject_ADD(zendnnl-deps-aocldlp
         SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
@@ -76,9 +92,10 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
       PROPERTIES
       ADDITIONAL_CLEAN_FILES "${AOCLDLP_CLEAN_FILES}")
   else()
+    message(WARNING "${ZENDNNL_MSG_PREFIX}AOCL-DLP will be injected from ${ZENDNNL_AOCLDLP_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     #add a custom target that create a soft link
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/aocldlp")
-    set(SYMLNK_SRC "${ZENDNNL_AOCLDLP_FWK_DIR}")
+    set(SYMLNK_SRC "${ZENDNNL_AOCLDLP_INJECT_DIR}")
 
     # blocked for consistency with onednn
     # if (EXISTS ${SYMLNK_DST})

@@ -34,7 +34,25 @@ if (ZENDNNL_DEPENDS_PARLOOPER)
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
 
     if (ZENDNNL_LOCAL_PARLOOPER)
+      message(WARNING "${ZENDNNL_MSG_PREFIX}PARLOOPER will be built from local source at ${PARLOOPER_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "Using local ParLooper from ${PARLOOPER_ROOT_DIR}")
+
+      set(PARLOOPER_DEPS_LINK "${ZENDNNL_DEPS_DIR}/parlooper")
+      if(NOT "${PARLOOPER_ROOT_DIR}" STREQUAL "${PARLOOPER_DEPS_LINK}")
+        if(EXISTS "${PARLOOPER_DEPS_LINK}")
+          if(IS_SYMLINK "${PARLOOPER_DEPS_LINK}")
+            file(REMOVE "${PARLOOPER_DEPS_LINK}")
+          else()
+            message(WARNING "${ZENDNNL_MSG_PREFIX}${PARLOOPER_DEPS_LINK} exists and is not a symlink. Skipping symlink creation. Remove it manually if needed.")
+          endif()
+        endif()
+        if(NOT EXISTS "${PARLOOPER_DEPS_LINK}")
+          execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${PARLOOPER_ROOT_DIR}" "${PARLOOPER_DEPS_LINK}")
+          message(STATUS "${ZENDNNL_MSG_PREFIX}Created symlink ${PARLOOPER_DEPS_LINK} -> ${PARLOOPER_ROOT_DIR}")
+        endif()
+      endif()
+
       ExternalProject_Add(zendnnl-deps-parlooper
         SOURCE_DIR    "${PARLOOPER_ROOT_DIR}"
         BINARY_DIR    "${CMAKE_CURRENT_BINARY_DIR}/parlooper"
@@ -104,8 +122,9 @@ if (ZENDNNL_DEPENDS_PARLOOPER)
     endif()
 
   else()
+    message(WARNING "${ZENDNNL_MSG_PREFIX}PARLOOPER will be injected from ${ZENDNNL_PARLOOPER_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/parlooper")
-    set(SYMLNK_SRC "${ZENDNNL_PARLOOPER_FWK_DIR}")
+    set(SYMLNK_SRC "${ZENDNNL_PARLOOPER_INJECT_DIR}")
 
     # blocked for consistency with onednn
     # if (EXISTS ${SYMLNK_DST})

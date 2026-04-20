@@ -72,9 +72,10 @@ In order to assist development and also integration with an inference framework 
 
 #### 1.3.1. Standalone Build
 
-Standalone build is primarily used for library development, and independent test and benchmarking purposes. In this build, the  build system discovers all its dependencies before building the library. The dependencies are discovered as follows
-  - As a part of the build, they are downloaded and built before the library, or
-  - The developer provides a local build of a dependency. This feature is useful if a developer need to experiment with unreleased/beta version of the dependency.
+Standalone build is primarily used for library development, and independent test and benchmarking purposes. In this build, the build system discovers all its dependencies before building the library. The dependencies are discovered in one of three ways:
+  - **Default**: Downloaded from public repositories and built automatically.
+  - **Local**: The developer provides a local source directory of a dependency. ZenDNN builds it from that source instead of cloning. Useful for testing unreleased/beta dependency versions.
+  - **Injection**: The developer provides a pre-built install directory of a dependency. ZenDNN uses it as-is without any compilation. Useful when the dependency is already built and installed separately.
 
 #### 1.3.2 Framework Integration Build
 
@@ -111,17 +112,23 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_LIB_BUILD_ARCHIVE | Build ZenDNN archive (static) library | BOOL |ON |
 | ZENDNNL_LIB_BUILD_SHARED | Build ZenDNN shared library. Build should be configure to build at least one of the archive or shared library.| BOOL |OFF |
 
-### 3.3 Framework Integration Options
+### 3.3 Dependency Injection Options
+
+Dependency injection allows ZenDNN to use a pre-built installation of a dependency instead of downloading and building it from source. This works in both standalone and framework builds.
+
+When an `INJECT_DIR` path is provided, ZenDNN creates a symlink to the specified install directory and uses it directly. The install directory is expected to have `lib/` and `include/` subdirectories.
+
+In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` so the resulting `libzendnnl_archive.a` is self-contained. In **framework** builds (`ZENDNNL_FWK_BUILD=ON`), injected dependencies use `COMPILE_ONLY` linking — the framework is responsible for linking the dependencies at the final binary stage.
 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
-| ZENDNNL_FWK_BUILD | Build ZenDNN as a part of framework build. This option need to be ON if the library is being built as a part of a framework. If this option is OFF the library will be built as a standalone package. | BOOL | OFF |
-| ZENDNNL_AMDBLIS_FWK_DIR | If the framework is building a ZenDNN dependency (for example AMDBLIS in this case), it can inform the library where this dependency is installed, by populating this variable. If populated, ZenDNN assumes that the dependency is already built before library build starts, the binaries of the dependency are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/lib, and the include files are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/include. The framework build will have to ascertain by creating proper CMake dependency tree that this dependency is built before the library starts building. ZenDNN provides a CMake include file (fwk/ZenDnnlFwkIntegrate.cmake) to enable it. If this variable is not populated, then ZenDNN assumes that the dependency is not being provided by the framework, and builds it the way it does for standalone build. | PATH | NO DEFAULT |
-| ZENDNNL_AOCLDLP_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for AOCLDLP dependency | PATH | NO DEFAULT |
-| ZENDNNL_ONEDNN_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for ONEDNN dependency | PATH | NO DEFAULT |
-| ZENDNNL_LIBXSMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for LIBXSMM dependency | PATH | NO DEFAULT |
-| ZENDNNL_PARLOOPER_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for PARLOOPER dependency | PATH | NO DEFAULT |
-| ZENDNNL_FBGEMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for FBGEMM dependency | PATH | NO DEFAULT |
+| ZENDNNL_FWK_BUILD | Build ZenDNN as a part of framework build. If ON, dependencies use COMPILE_ONLY linking (framework handles final link). If OFF (default), dependencies are linked with WHOLE_ARCHIVE for a self-contained archive. | BOOL | OFF |
+| ZENDNNL_AMDBLIS_INJECT_DIR | Path to a pre-built AMD-BLIS install directory. If provided, ZenDNN skips building AMD-BLIS and uses this installation. The directory must contain `lib/` and `include/` subdirectories. | PATH | (empty) |
+| ZENDNNL_AOCLDLP_INJECT_DIR | Same as ZENDNNL_AMDBLIS_INJECT_DIR but for AOCL-DLP. | PATH | (empty) |
+| ZENDNNL_ONEDNN_INJECT_DIR | Same as ZENDNNL_AMDBLIS_INJECT_DIR but for oneDNN. | PATH | (empty) |
+| ZENDNNL_LIBXSMM_INJECT_DIR | Same as ZENDNNL_AMDBLIS_INJECT_DIR but for LIBXSMM. | PATH | (empty) |
+| ZENDNNL_PARLOOPER_INJECT_DIR | Same as ZENDNNL_AMDBLIS_INJECT_DIR but for PARLOOPER. | PATH | (empty) |
+| ZENDNNL_FBGEMM_INJECT_DIR | Same as ZENDNNL_AMDBLIS_INJECT_DIR but for FBGEMM. | PATH | (empty) |
 
 ### 3.4 Dependencies Options
 
@@ -132,14 +139,14 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
 | ZENDNNL_DEPENDS_FBGEMM | FBGEMM is a backend for embedding_bag in ZenDNN | BOOL | ON |
-| ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publicly available, or a version still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
-| ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
-| ZENDNNL_LOCAL_AOCLUTILS | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLUTILS | BOOL | OFF |
-| ZENDNNL_LOCAL_JSON | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for JSON (nlohmann-json) | BOOL | OFF |
-| ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
-| ZENDNNL_LOCAL_LIBXSMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for LIBXSMM | BOOL | OFF |
-| ZENDNNL_LOCAL_PARLOOPER | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for PARLOOPER | BOOL | OFF |
-| ZENDNNL_LOCAL_FBGEMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for FBGEMM | BOOL | OFF |
+| ZENDNNL_LOCAL_AMDBLIS | Use a locally available source of amd-blis instead of downloading from a public repository. By default, the source is expected at `${ZENDNNL_SOURCE_DIR}/dependencies/amdblis`. Alternatively, pass `-DAMDBLIS_ROOT_DIR=<path>` to specify a custom source directory (a symlink is created automatically). | BOOL | OFF |
+| ZENDNNL_LOCAL_AOCLDLP | Same as ZENDNNL_LOCAL_AMDBLIS but for AOCL-DLP. Custom path: `-DAOCLDLP_ROOT_DIR=<path>`. | BOOL | OFF |
+| ZENDNNL_LOCAL_AOCLUTILS | Same as ZENDNNL_LOCAL_AMDBLIS but for AOCL-UTILS. | BOOL | OFF |
+| ZENDNNL_LOCAL_JSON | Same as ZENDNNL_LOCAL_AMDBLIS but for JSON (nlohmann-json). | BOOL | OFF |
+| ZENDNNL_LOCAL_ONEDNN | Same as ZENDNNL_LOCAL_AMDBLIS but for oneDNN. Custom path: `-DONEDNN_ROOT_DIR=<path>`. | BOOL | OFF |
+| ZENDNNL_LOCAL_LIBXSMM | Same as ZENDNNL_LOCAL_AMDBLIS but for LIBXSMM. Custom path: `-DLIBXSMM_ROOT_DIR=<path>`. | BOOL | OFF |
+| ZENDNNL_LOCAL_PARLOOPER | Same as ZENDNNL_LOCAL_AMDBLIS but for PARLOOPER. Custom path: `-DPARLOOPER_ROOT_DIR=<path>`. | BOOL | OFF |
+| ZENDNNL_LOCAL_FBGEMM | Same as ZENDNNL_LOCAL_AMDBLIS but for FBGEMM. Custom path: `-DFBGEMM_ROOT_DIR=<path>`. | BOOL | OFF |
 
 ## 4. The Build Process
 
@@ -182,12 +189,52 @@ This mode is used primarily for library development, test and benchmarking its o
 
 #### 4.2.1 Providing Local Dependencies
 
-In the general build process of ZenDNN, it downloads all dependencies source code from their public repositories, and source builds them. However there may be occasions, when the library need to be built with unreleased dependency source code. In such a case the following is needed to be done
+In the general build process of ZenDNN, it downloads all dependencies source code from their public repositories, and source builds them. However there may be occasions when the library needs to be built with unreleased dependency source code or a pre-built dependency. ZenDNN provides two mechanisms for this:
 
-- Enable build option ZENDNNL_LOCAL_[DEPENDENCY] (for example ZENDNNL_LOCAL_AMDBLIS).
-- Copy (or create soft link of) the local dependency directory to ${ZENDNNL_SOURCE_DIR}/dependencies.
+##### Local Build (from source)
 
-If a local dependency is provided, the build will not try to download dependency source code, and work with local source code.
+Builds the dependency from a local source directory instead of downloading:
+
+**Option A: Place source in the dependencies directory**
+- Enable `ZENDNNL_LOCAL_<DEPENDENCY>` (e.g., `ZENDNNL_LOCAL_AOCLDLP=ON`).
+- Copy or symlink the source to `${ZENDNNL_SOURCE_DIR}/dependencies/<name>`.
+
+**Option B: Point to a source directory anywhere**
+- Enable `ZENDNNL_LOCAL_<DEPENDENCY>=ON` and pass `-D<DEPENDENCY>_ROOT_DIR=<path>`.
+- A symlink is created automatically in `${ZENDNNL_SOURCE_DIR}/dependencies/`.
+
+```bash
+# Option A: symlink in dependencies/
+ln -s /path/to/aocl-dlp dependencies/aocldlp
+cmake .. -DZENDNNL_LOCAL_AOCLDLP=ON
+
+# Option B: custom path (no manual symlink needed)
+cmake .. -DZENDNNL_LOCAL_AOCLDLP=ON -DAOCLDLP_ROOT_DIR=/path/to/aocl-dlp
+```
+
+##### Dependency Injection (pre-built install)
+
+Uses a pre-built installation of a dependency without any compilation. Provide the install prefix path (containing `lib/` and `include/` subdirectories):
+
+```bash
+cmake .. -DZENDNNL_AOCLDLP_INJECT_DIR=<path-to-aocldlp-install>
+
+# Multiple dependencies can be injected simultaneously
+cmake .. \
+  -DZENDNNL_AOCLDLP_INJECT_DIR=<path-to-aocldlp-install> \
+  -DZENDNNL_ONEDNN_INJECT_DIR=<path-to-onednn-install> \
+  -DZENDNNL_LIBXSMM_INJECT_DIR=<path-to-libxsmm-install> \
+  -DZENDNNL_FBGEMM_INJECT_DIR=<path-to-fbgemm-install>
+```
+
+##### Comparison
+
+| | Default | Local | Injection |
+|---|---|---|---|
+| Input | None (auto-download) | Source directory | Install directory (pre-built) |
+| Git clone | Yes | No | No |
+| Compilation | Yes | Yes | No |
+| Flag | (none) | `-DZENDNNL_LOCAL_<DEP>=ON` | `-DZENDNNL_<DEP>_INJECT_DIR=<path>` |
 
 #### 4.2.2 Command Line Build
 
@@ -278,19 +325,22 @@ To assist the build process a bash script **ZenDNN/scripts/zendnnl_build.sh** is
 | `--clean-all` | Clean dependencies and build folders |
 | **Dependency Options** | |
 | `--no-deps` | Don't rebuild (or clean) dependencies |
-| `--enable-parlooper` | Enable parlooper |
-| `--enable-amdblis` | Enable amdblis (disables aocldlp which is default) |
-| **Local Dependency Options** | Requires source in `dependencies/<name>/` |
-| `--local-amdblis` | Use local amdblis |
-| `--local-aocldlp` | Use local aocldlp |
-| `--local-aoclutils` | Use local aoclutils |
-| `--local-json` | Use local json |
-| `--local-onednn` | Use local onednn |
-| `--local-libxsmm` | Use local libxsmm |
-| `--local-parlooper` | Use local parlooper |
-| `--local-fbgemm` | Use local fbgemm |
+| `--enable-<dep>` | Enable a dependency (e.g., `--enable-parlooper`, `--enable-amdblis`) |
+| **Local Dependency Options** | Build from source in `dependencies/<name>/` |
+| `--local-<dep>` | Use local source from `dependencies/<dep>/` (e.g., `--local-aocldlp`, `--local-onednn`) |
+| **Local Dependency with Custom Path** | Build from source at specified directory |
+| `--local-<dep>-dir <path>` | Use source from `<path>` (e.g., `--local-aocldlp-dir <path>`) |
+| **Dependency Injection** | Use pre-built install (no compilation) |
+| `--inject-<dep> <path>` | Inject pre-built dependency from `<path>` (e.g., `--inject-aocldlp <path>`) |
 | **Build Options** | |
 | `--nproc <N>` | Number of processes for parallel build (default: 1) |
+| `--debug` | Build in debug mode (default: release) |
+| `--shared` | Build shared library (.so) in addition to static |
+| `--asan` | Enable AddressSanitizer |
+| `--coverage` | Enable code coverage |
+| `--install-prefix <path>` | Set custom install prefix |
+| `--cc <path>` | Set C compiler |
+| `--cxx <path>` | Set C++ compiler |
 
 ##### Build Script Examples
 
@@ -313,8 +363,20 @@ source zendnnl_build.sh --zendnnl --zendnnl-gtest --examples
 # Rebuild without re-downloading dependencies
 source zendnnl_build.sh --no-deps --all
 
-# Use local onednn source
+# Use local onednn source from default dependencies/ directory
 source zendnnl_build.sh --zendnnl --local-onednn
+
+# Use local aocl-dlp source from a custom path
+source zendnnl_build.sh --zendnnl --local-aocldlp-dir <path-to-aocldlp-source>
+
+# Inject pre-built dependencies (no compilation)
+source zendnnl_build.sh --zendnnl \
+  --inject-aocldlp <path-to-aocldlp-install> \
+  --inject-libxsmm <path-to-libxsmm-install> \
+  --nproc 16
+
+# Debug build with ASAN
+source zendnnl_build.sh --all --debug --asan --nproc 8
 ```
 
 ### 4.3 Framework Integration Build
@@ -334,7 +396,9 @@ dependency_install_directory
 |
 ```
 - If the dependency provides cmake configuration files in lib/cmake, it uses config mode of CMake find_package tool to discover the dependency. If lib/cmake is not present, it has a Find\<dependency\>.cmake to find the dependency using module mode of CMake find_package tool.
-- The cmake variable ZENDNNL_\<DEPENDENCY\>_FWK_DIR (eg. ZENDNNL_AMDBLIS_FWK_DIR) need to be pointed to the dependency_install_directory as shown above, and making ZenDNN build dependent on the dependency target.
+- The cmake variable ZENDNNL_\<DEPENDENCY\>_INJECT_DIR (eg. ZENDNNL_AMDBLIS_INJECT_DIR) need to be pointed to the dependency_install_directory as shown above, and making ZenDNN build dependent on the dependency target.
+
+> **Note**: In framework builds (`ZENDNNL_FWK_BUILD=ON`), injected dependencies use `COMPILE_ONLY` linking. This means ZenDNN's archive library does not embed the dependency symbols — the framework is responsible for linking them at the final binary stage. This avoids duplicate symbols when multiple framework components share the same dependency.
 
 #### 4.3.2 Integrating ZenDNN Build to Framework Build
 
@@ -353,12 +417,12 @@ ZenDNN build can be integrated to the framework build using these files as follo
   | ZENDNNL_SOURCE_DIR | ZenDNN source code. |
   | ZENDNNL_BINARY_DIR | Where ZenDNN will be built in the build tree. if unsure set ${CMAKE_CURRENT_BINARY_DIR}/zendnnl. |
   | ZENDNNL_INSTALL_PREFIX | Where ZenDNN will be installed. If unsure set ${CMAKE_INSTALL_PREFIX}/zendnnl. |
-  | ZENDNNL_AMDBLIS_FWK_DIR | Install path of amd-blis if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_AOCLDLP_FWK_DIR | Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_ONEDNN_FWK_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_LIBXSMM_FWK_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_PARLOOPER_FWK_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_FBGEMM_FWK_DIR | Install path of fbgemm if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_AMDBLIS_INJECT_DIR | Install path of amd-blis if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_AOCLDLP_INJECT_DIR | Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_ONEDNN_INJECT_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_LIBXSMM_INJECT_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_PARLOOPER_INJECT_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_FBGEMM_INJECT_DIR | Install path of fbgemm if framework is building it and wants to inject it to ZenDNN build. |
 
 - Make *fwk_zendnnl* target dependent on injected dependencies by editing its "add_dependencies(fwk_zendnnl...)" command.
 - Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN is to be built.

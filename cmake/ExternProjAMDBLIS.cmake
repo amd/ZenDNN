@@ -37,7 +37,24 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
     if(ZENDNNL_LOCAL_AMDBLIS)
 
+      message(WARNING "${ZENDNNL_MSG_PREFIX}AMD-BLIS will be built from local source at ${AMDBLIS_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AMD-BLIS from ${AMDBLIS_ROOT_DIR}")
+
+      set(AMDBLIS_DEPS_LINK "${ZENDNNL_DEPS_DIR}/amdblis")
+      if(NOT "${AMDBLIS_ROOT_DIR}" STREQUAL "${AMDBLIS_DEPS_LINK}")
+        if(EXISTS "${AMDBLIS_DEPS_LINK}")
+          if(IS_SYMLINK "${AMDBLIS_DEPS_LINK}")
+            file(REMOVE "${AMDBLIS_DEPS_LINK}")
+          else()
+            message(WARNING "${ZENDNNL_MSG_PREFIX}${AMDBLIS_DEPS_LINK} exists and is not a symlink. Skipping symlink creation. Remove it manually if needed.")
+          endif()
+        endif()
+        if(NOT EXISTS "${AMDBLIS_DEPS_LINK}")
+          execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${AMDBLIS_ROOT_DIR}" "${AMDBLIS_DEPS_LINK}")
+          message(STATUS "${ZENDNNL_MSG_PREFIX}Created symlink ${AMDBLIS_DEPS_LINK} -> ${AMDBLIS_ROOT_DIR}")
+        endif()
+      endif()
 
       ExternalProject_ADD(zendnnl-deps-amdblis
         SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
@@ -70,9 +87,10 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
       PROPERTIES
       ADDITIONAL_CLEAN_FILES "${AMDBLIS_CLEAN_FILES}")
   else()
+    message(WARNING "${ZENDNNL_MSG_PREFIX}AMD-BLIS will be injected from ${ZENDNNL_AMDBLIS_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     #add a custom target that create a soft link
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/amdblis")
-    set(SYMLNK_SRC "${ZENDNNL_AMDBLIS_FWK_DIR}")
+    set(SYMLNK_SRC "${ZENDNNL_AMDBLIS_INJECT_DIR}")
 
     # blocked for consistency with onednn
     # if (EXISTS ${SYMLNK_DST})

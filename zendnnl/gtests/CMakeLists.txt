@@ -85,15 +85,28 @@ if(ZENDNNL_BUILD_GTEST)
     message(FATAL_ERROR "No zendnnl library target found for gtests!")
   endif()
 
-  # Link correct AOCL backend and add matching compile defs
-  if(ZENDNNL_DEPENDS_AOCLDLP AND ZENDNNL_AOCLDLP_INJECTED)
-      target_link_libraries(gtests
-        PRIVATE aocldlp::aocl_dlp_static)
-  endif()
-
-  if(ZENDNNL_DEPENDS_AMDBLIS AND ZENDNNL_AMDBLIS_INJECTED)
-      target_link_libraries(gtests
-        PRIVATE amdblis::amdblis_archive)
+  # In framework builds, the archive uses COMPILE_ONLY so consumers must
+  # link dependencies explicitly. In standalone builds the archive is
+  # self-contained via WHOLE_ARCHIVE — no extra link needed.
+  if(ZENDNNL_FWK_BUILD)
+    if(ZENDNNL_DEPENDS_AOCLDLP AND TARGET aocldlp::aocl_dlp_static)
+      target_link_libraries(gtests PRIVATE aocldlp::aocl_dlp_static)
+    endif()
+    if(ZENDNNL_DEPENDS_AMDBLIS AND TARGET amdblis::amdblis_archive)
+      target_link_libraries(gtests PRIVATE amdblis::amdblis_archive)
+    endif()
+    if(ZENDNNL_DEPENDS_ONEDNN AND TARGET DNNL::dnnl)
+      target_link_libraries(gtests PRIVATE DNNL::dnnl)
+    endif()
+    if(ZENDNNL_DEPENDS_LIBXSMM AND TARGET libxsmm::libxsmm_archive)
+      target_link_libraries(gtests PRIVATE libxsmm::libxsmm_archive)
+    endif()
+    if(ZENDNNL_DEPENDS_PARLOOPER AND TARGET parlooper::parlooper_archive)
+      target_link_libraries(gtests PRIVATE parlooper::parlooper_archive)
+    endif()
+    if(ZENDNNL_DEPENDS_FBGEMM AND TARGET fbgemm::fbgemm_archive)
+      target_link_libraries(gtests PRIVATE fbgemm::fbgemm_archive)
+    endif()
   endif()
 
   # if (ZENDNNL_DEPENDS_AOCLDLP)

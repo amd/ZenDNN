@@ -77,9 +77,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
-    if(ZENDNNL_AOCLDLP_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AOCLDLP_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
+        PUBLIC "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
@@ -90,9 +90,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   if(ZENDNNL_DEPENDS_AMDBLIS)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
-    if(ZENDNNL_AMDBLIS_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AMDBLIS_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:amdblis::amdblis_archive>")
+        PUBLIC "$<COMPILE_ONLY:amdblis::amdblis_archive>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
@@ -105,9 +105,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
   # CPU detection symbols take priority.
   if(ZENDNNL_DEPENDS_ONEDNN)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-    if(ZENDNNL_ONEDNN_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_ONEDNN_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:DNNL::dnnl>")
+        PUBLIC "$<COMPILE_ONLY:DNNL::dnnl>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
@@ -118,9 +118,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   if(ZENDNNL_DEPENDS_LIBXSMM)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_LIBXSMM=1)
-    if(ZENDNNL_LIBXSMM_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_LIBXSMM_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:libxsmm::libxsmm_archive>")
+        PUBLIC "$<COMPILE_ONLY:libxsmm::libxsmm_archive>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
@@ -131,9 +131,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_PARLOOPER=1)
-    if(ZENDNNL_PARLOOPER_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_PARLOOPER_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:parlooper::parlooper_archive>")
+        PUBLIC "$<COMPILE_ONLY:parlooper::parlooper_archive>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
@@ -144,9 +144,9 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
 
   if(ZENDNNL_DEPENDS_FBGEMM)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
-    if(ZENDNNL_FBGEMM_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_FBGEMM_INJECTED)
       target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
+        PUBLIC "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
     else()
       target_link_libraries(zendnnl_archive
         PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
@@ -213,7 +213,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
-    if(ZENDNNL_AOCLDLP_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AOCLDLP_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC aocldlp::aocl_dlp_static)
     else()
@@ -226,7 +226,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
   if(ZENDNNL_DEPENDS_AMDBLIS)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
-    if(ZENDNNL_AMDBLIS_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AMDBLIS_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC amdblis::amdblis_archive)
     else()
@@ -241,7 +241,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
   # CPU detection symbols take priority. See archive target comment above.
   if(ZENDNNL_DEPENDS_ONEDNN)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-    if(ZENDNNL_ONEDNN_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_ONEDNN_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC DNNL::dnnl)
     else()
@@ -254,7 +254,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
   if(ZENDNNL_DEPENDS_LIBXSMM)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_LIBXSMM=1)
-    if(ZENDNNL_LIBXSMM_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_LIBXSMM_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC libxsmm::libxsmm_archive)
     else()
@@ -267,7 +267,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=1)
-    if(ZENDNNL_PARLOOPER_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_PARLOOPER_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC parlooper::parlooper_archive)
     else()
@@ -280,7 +280,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
   if(ZENDNNL_DEPENDS_FBGEMM)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
-    if(ZENDNNL_FBGEMM_INJECTED)
+    if(ZENDNNL_FWK_BUILD AND ZENDNNL_FBGEMM_INJECTED)
       target_link_libraries(zendnnl
         PUBLIC fbgemm::fbgemm_archive)
     else()

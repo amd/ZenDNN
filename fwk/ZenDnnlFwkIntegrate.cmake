@@ -155,50 +155,50 @@ zendnnl_add_option(NAME ZENDNNL_DEPENDS_FBGEMM
 
 # set path of amdblis if amdblis is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_AMDBLIS_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_AMDBLIS_INJECT_DIR
   VALUE <amd blis install path>
   TYPE PATH
-  CACHE_STRING "zendnnl amdblis framework path"
+  CACHE_STRING "zendnnl amdblis injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of aocldlp if aocldlp is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_AOCLDLP_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_AOCLDLP_INJECT_DIR
   VALUE <aocldlp install path>
   TYPE PATH
-  CACHE_STRING "zendnnl aocldlp framework path"
+  CACHE_STRING "zendnnl aocldlp injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of onednn if onednn is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_ONEDNN_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_ONEDNN_INJECT_DIR
   VALUE <onednn install path>
   TYPE PATH
-  CACHE_STRING "zendnnl onednnn framework path"
+  CACHE_STRING "zendnnl onednn injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of libxsmm if libxsmm is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_LIBXSMM_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_LIBXSMM_INJECT_DIR
   VALUE <libxsmm install path>
   TYPE PATH
-  CACHE_STRING "zendnnl libxsmm framework path"
+  CACHE_STRING "zendnnl libxsmm injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of parlooper if parlooper is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_PARLOOPER_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_PARLOOPER_INJECT_DIR
   VALUE <parlooper install path>
   TYPE PATH
-  CACHE_STRING "zendnnl parlooper framework path"
+  CACHE_STRING "zendnnl parlooper injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of fbgemm if fbgemm is injected. if the framework
 # does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_FBGEMM_FWK_DIR
+zendnnl_add_option(NAME ZENDNNL_FBGEMM_INJECT_DIR
   VALUE <fbgemm install path>
   TYPE PATH
-  CACHE_STRING "zendnnl fbgemm framework path"
+  CACHE_STRING "zendnnl fbgemm injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # try to find pre-built package

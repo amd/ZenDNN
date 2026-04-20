@@ -39,7 +39,24 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
     if (ZENDNNL_LOCAL_ONEDNN)
 
+      message(WARNING "${ZENDNNL_MSG_PREFIX}ONEDNN will be built from local source at ${ONEDNN_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local ONEDNN from ${ONEDNN_ROOT_DIR}")
+
+      set(ONEDNN_DEPS_LINK "${ZENDNNL_DEPS_DIR}/onednn")
+      if(NOT "${ONEDNN_ROOT_DIR}" STREQUAL "${ONEDNN_DEPS_LINK}")
+        if(EXISTS "${ONEDNN_DEPS_LINK}")
+          if(IS_SYMLINK "${ONEDNN_DEPS_LINK}")
+            file(REMOVE "${ONEDNN_DEPS_LINK}")
+          else()
+            message(WARNING "${ZENDNNL_MSG_PREFIX}${ONEDNN_DEPS_LINK} exists and is not a symlink. Skipping symlink creation. Remove it manually if needed.")
+          endif()
+        endif()
+        if(NOT EXISTS "${ONEDNN_DEPS_LINK}")
+          execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${ONEDNN_ROOT_DIR}" "${ONEDNN_DEPS_LINK}")
+          message(STATUS "${ZENDNNL_MSG_PREFIX}Created symlink ${ONEDNN_DEPS_LINK} -> ${ONEDNN_ROOT_DIR}")
+        endif()
+      endif()
 
       ExternalProject_ADD(zendnnl-deps-onednn
         SOURCE_DIR "${ONEDNN_ROOT_DIR}"
@@ -72,9 +89,10 @@ if (ZENDNNL_DEPENDS_ONEDNN)
       PROPERTIES
       ADDITIONAL_CLEAN_FILES "${ONEDNN_CLEAN_FILES}")
   else()
+    message(WARNING "${ZENDNNL_MSG_PREFIX}ONEDNN will be injected from ${ZENDNNL_ONEDNN_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     #add a custom target that create a soft link
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/onednn")
-    set(SYMLNK_SRC "${ZENDNNL_ONEDNN_FWK_DIR}")
+    set(SYMLNK_SRC "${ZENDNNL_ONEDNN_INJECT_DIR}")
 
     # blocked to test pytorch integration
     # if(EXISTS ${SYMLNK_DST})

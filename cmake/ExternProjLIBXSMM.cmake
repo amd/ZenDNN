@@ -31,7 +31,25 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
 
     if (ZENDNNL_LOCAL_LIBXSMM)
+      message(WARNING "${ZENDNNL_MSG_PREFIX}LIBXSMM will be built from local source at ${LIBXSMM_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local LIBXSMM from ${LIBXSMM_ROOT_DIR}")
+
+      set(LIBXSMM_DEPS_LINK "${ZENDNNL_DEPS_DIR}/libxsmm")
+      if(NOT "${LIBXSMM_ROOT_DIR}" STREQUAL "${LIBXSMM_DEPS_LINK}")
+        if(EXISTS "${LIBXSMM_DEPS_LINK}")
+          if(IS_SYMLINK "${LIBXSMM_DEPS_LINK}")
+            file(REMOVE "${LIBXSMM_DEPS_LINK}")
+          else()
+            message(WARNING "${ZENDNNL_MSG_PREFIX}${LIBXSMM_DEPS_LINK} exists and is not a symlink. Skipping symlink creation. Remove it manually if needed.")
+          endif()
+        endif()
+        if(NOT EXISTS "${LIBXSMM_DEPS_LINK}")
+          execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            "${LIBXSMM_ROOT_DIR}" "${LIBXSMM_DEPS_LINK}")
+          message(STATUS "${ZENDNNL_MSG_PREFIX}Created symlink ${LIBXSMM_DEPS_LINK} -> ${LIBXSMM_ROOT_DIR}")
+        endif()
+      endif()
+
       ExternalProject_Add(zendnnl-deps-libxsmm
         SOURCE_DIR   "${LIBXSMM_ROOT_DIR}"
         BINARY_DIR   "${CMAKE_CURRENT_BINARY_DIR}/libxsmm"
@@ -62,8 +80,9 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
     )
 
   else()
+    message(WARNING "${ZENDNNL_MSG_PREFIX}LIBXSMM will be injected from ${ZENDNNL_LIBXSMM_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/libxsmm")
-    set(SYMLNK_SRC "${ZENDNNL_LIBXSMM_FWK_DIR}")
+    set(SYMLNK_SRC "${ZENDNNL_LIBXSMM_INJECT_DIR}")
 
     # blocked for consistency with onednn
     # if (EXISTS ${SYMLNK_DST})
