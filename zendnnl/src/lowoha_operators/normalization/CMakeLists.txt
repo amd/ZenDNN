@@ -18,7 +18,8 @@ set(lowoha_normalization_sources
   lowoha_normalization.cpp
   lowoha_normalization_utils.cpp
   kernel/reference_kernel.cpp
-  kernel/rmsnorm_avx512_kernel.cpp)
+  kernel/rmsnorm_avx512_kernel.cpp
+  kernel/layernorm_avx512_kernel.cpp)
 
 set(lowoha_normalization_public_headers
   lowoha_normalization.hpp
@@ -26,8 +27,10 @@ set(lowoha_normalization_public_headers
   lowoha_normalization_common.hpp)
 
 set(lowoha_normalization_private_headers
+  kernel/avx512_utils.hpp
   kernel/reference_kernel.hpp
-  kernel/rmsnorm_avx512_kernel.hpp)
+  kernel/rmsnorm_avx512_kernel.hpp
+  kernel/layernorm_avx512_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

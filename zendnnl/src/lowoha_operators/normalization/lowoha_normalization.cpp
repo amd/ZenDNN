@@ -17,11 +17,14 @@
 #include "lowoha_normalization.hpp"
 #include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
 #include "lowoha_operators/normalization/kernel/rmsnorm_avx512_kernel.hpp"
+#include "lowoha_operators/normalization/kernel/layernorm_avx512_kernel.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace normalization {
+
+using namespace zendnnl::common;
 
 status_t normalization_kernel_wrapper(
   const void *input,
@@ -34,11 +37,23 @@ status_t normalization_kernel_wrapper(
   norm_params &params
 ) {
 
-  if (params.norm_type == norm_type_t::RMS_NORM ||
-      params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
+  const bool has_avx512f = zendnnl_platform_info().get_avx512f_status();
+
+  if (has_avx512f && (params.norm_type == norm_type_t::RMS_NORM ||
+                      params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM)) {
     log_info("Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
 
     status_t status = rms_norm_avx512(input, output, residual, gamma, params);
+    if (status != status_t::success) {
+      log_error(norm_type_to_str(params.norm_type), " kernel failed");
+    }
+    return status;
+  }
+
+  if (has_avx512f && params.norm_type == norm_type_t::LAYER_NORM) {
+    log_info("Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
+
+    status_t status = layer_norm_avx512(input, output, gamma, beta, params);
     if (status != status_t::success) {
       log_error(norm_type_to_str(params.norm_type), " kernel failed");
     }
