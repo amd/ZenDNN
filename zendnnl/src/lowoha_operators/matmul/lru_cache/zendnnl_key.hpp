@@ -46,6 +46,12 @@ struct Key_matmul {
       ldb(ldb), weights(B_Array), algo(algo), extra_input_hash(extra_input_hash) {
   }
 
+  // Constructor for weight-unpack caching (keyed on weights pointer and dimensions only)
+  Key_matmul(const void *B_Array, unsigned int N, unsigned int K,
+             size_t extra_input_hash = 0)
+    : k(K), n(N), weights(B_Array), extra_input_hash(extra_input_hash) {
+  }
+
   // Constructor to initialize all member variables
   Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,
              unsigned int N,
@@ -70,26 +76,6 @@ struct Key_matmul {
   }
 };
 
-struct Key_unpack {
-  const void *weight_data = nullptr;
-  unsigned int N = 0;
-  unsigned int K = 0;
-  size_t extra_input_hash = 0;
-
-  Key_unpack() = default;
-
-  Key_unpack(const void *weight, unsigned int n, unsigned int k,
-             size_t extra_input_hash = 0)
-    : weight_data(weight), N(n), K(k), extra_input_hash(extra_input_hash) {}
-
-  bool operator==(const Key_unpack &other) const {
-    return (weight_data == other.weight_data
-            && N == other.N
-            && K == other.K
-            && extra_input_hash == other.extra_input_hash);
-  }
-};
-
 namespace std {
 
 template <>
@@ -110,17 +96,6 @@ struct hash<Key_matmul> {
   }
 };
 
-template <>
-struct hash<Key_unpack> {
-  std::size_t operator()(const Key_unpack &k) const {
-    std::size_t seed = 0;
-    seed = zendnnl::common::hash_combine(seed, k.weight_data);
-    seed = zendnnl::common::hash_combine(seed, k.N);
-    seed = zendnnl::common::hash_combine(seed, k.K);
-    seed = zendnnl::common::hash_combine(seed, k.extra_input_hash);
-    return seed;
-  }
-};
 }
 
 #endif // _ZENDNNL_KEY_HPP

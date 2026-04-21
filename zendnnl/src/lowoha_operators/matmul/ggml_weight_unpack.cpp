@@ -19,6 +19,8 @@
  * @brief GGML weight unpacking for ZenDNN kernels
  */
 
+#include <memory>
+
 #include "ggml_weight_unpack.hpp"
 #include "lowoha_matmul_utils.hpp"
 
@@ -91,46 +93,96 @@ int64_t ggml_unpack_weight_buffer_size(int ggml_type, bool use_bf16_scales,
 int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
                               bool is_superblock, bool use_bf16_scales,
                               bool use_unsigned_q4, int64_t M, int64_t K,
-                              void *buf, int8_t **wei_ptr, void **scl_ptr) {
-    if (!weight_data || !buf || !wei_ptr || !scl_ptr) return -1;
-    if (M <= 0 || K <= 0 || K % 32 != 0) return -1;
+                              int8_t **wei_ptr, void **scl_ptr) {
+    if (!weight_data || !wei_ptr || !scl_ptr) return -1;
+    if (M <= 0 || K <= 0 || K % 32 != 0)      return -1;
 
-    int64_t ng = K / 32;
+    // Inplace unpack: the caller's packed-weights allocation is reused as the
+    // unpacked destination. Temporary heap buffers hold the unpacked data
+    // until every source block has been read, so in-flight reads are never
+    // clobbered by writes that land on the same bytes.
+    void *buf = const_cast<void *>(weight_data);
 
-    int64_t weight_bytes = (ggml_type == 8) ? M * K : M * (K / 2);
+    const int64_t ng       = K / 32;
+    const int64_t n_blocks = M * ng;
+
+    const int64_t weight_bytes = (ggml_type == 8) ? M * K : M * (K / 2);
     *wei_ptr = static_cast<int8_t *>(buf);
-    *scl_ptr = static_cast<void *>(static_cast<int8_t *>(buf) + weight_bytes);
-
-    int8_t *weight_buffer = *wei_ptr;
-    void   *scale_buffer  = *scl_ptr;
+    *scl_ptr = static_cast<void  *>(static_cast<int8_t *>(buf) + weight_bytes);
 
     // Q8_0: copy int8 weights directly, one scale per group.
     if (ggml_type == 8) {
-        auto blocks = static_cast<const block_q8_0 *>(weight_data);
-        for (int64_t row = 0; row < M; row++) {
+        auto *blocks = static_cast<const block_q8_0 *>(weight_data);
+
+        std::unique_ptr<int8_t[]>  tmp_weights(new int8_t[M * K]);
+        const size_t scale_bytes =
+            n_blocks * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
+        std::unique_ptr<uint8_t[]> tmp_scales(new uint8_t[scale_bytes]);
+
+        const int64_t rows4 = (M / 4) * 4;
+
+        #pragma omp parallel for schedule(static)
+        for (int64_t row = 0; row < rows4; row += 4) {
             for (int64_t g = 0; g < ng; g++) {
-                block_q8_0 local;
-                std::memcpy(&local, &blocks[row * ng + g], sizeof(local));
-                write_scale(scale_buffer, use_bf16_scales,
-                            g * M + row, fp16_to_fp32(local.d));
-                std::memcpy(&weight_buffer[row * K + g * 32], local.qs, 32);
+                const block_q8_0 &b0 = blocks[(row + 0) * ng + g];
+                const block_q8_0 &b1 = blocks[(row + 1) * ng + g];
+                const block_q8_0 &b2 = blocks[(row + 2) * ng + g];
+                const block_q8_0 &b3 = blocks[(row + 3) * ng + g];
+
+                write_scale(tmp_scales.get(), use_bf16_scales,
+                            g * M + row + 0, fp16_to_fp32(b0.d));
+                write_scale(tmp_scales.get(), use_bf16_scales,
+                            g * M + row + 1, fp16_to_fp32(b1.d));
+                write_scale(tmp_scales.get(), use_bf16_scales,
+                            g * M + row + 2, fp16_to_fp32(b2.d));
+                write_scale(tmp_scales.get(), use_bf16_scales,
+                            g * M + row + 3, fp16_to_fp32(b3.d));
+
+                std::memcpy(&tmp_weights[(row + 0) * K + g * 32], b0.qs, 32);
+                std::memcpy(&tmp_weights[(row + 1) * K + g * 32], b1.qs, 32);
+                std::memcpy(&tmp_weights[(row + 2) * K + g * 32], b2.qs, 32);
+                std::memcpy(&tmp_weights[(row + 3) * K + g * 32], b3.qs, 32);
             }
         }
+
+        for (int64_t row = rows4; row < M; row++) {
+            for (int64_t g = 0; g < ng; g++) {
+                const block_q8_0 &b = blocks[row * ng + g];
+                write_scale(tmp_scales.get(), use_bf16_scales,
+                            g * M + row, fp16_to_fp32(b.d));
+                std::memcpy(&tmp_weights[row * K + g * 32], b.qs, 32);
+            }
+        }
+
+        uint8_t *raw_buf = static_cast<uint8_t *>(buf);
+        std::memcpy(raw_buf,         tmp_weights.get(), M * K);
+        std::memcpy(raw_buf + M * K, tmp_scales.get(),  scale_bytes);
         return 0;
     }
 
     // Q4_0 superblock: 8 rows interleaved, nibbles pre-signed via XOR 0x88.
     if (ggml_type == 2 && is_superblock) {
         if (M % 8 != 0) return -1;
-        auto blocks = static_cast<const block_q4_0x8 *>(weight_data);
+
+        const int64_t weight_q4_bytes = M * (K / 2);
+        const size_t  scale_bytes     =
+            n_blocks * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
+
+        std::unique_ptr<int8_t[]>  weight_tmp(new int8_t[weight_q4_bytes]);
+        std::unique_ptr<uint8_t[]> scale_tmp(new uint8_t[scale_bytes]);
+
+        auto *blocks = static_cast<const block_q4_0x8 *>(weight_data);
+
+        #pragma omp parallel for schedule(static)
         for (int64_t r8 = 0; r8 < M / 8; r8++) {
             for (int64_t g = 0; g < ng; g++) {
                 block_q4_0x8 local;
                 std::memcpy(&local, &blocks[r8 * ng + g], sizeof(local));
 
                 for (int ri = 0; ri < 8; ri++) {
-                    int64_t row = r8 * 8 + ri;
-                    write_scale(scale_buffer, use_bf16_scales,
+                    const int64_t row = r8 * 8 + ri;
+
+                    write_scale(scale_tmp.get(), use_bf16_scales,
                                 g * M + row, fp16_to_fp32(local.d[ri]));
 
                     uint8_t src[16];
@@ -139,7 +191,7 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
                         src[i + 8] = local.qs[64 + ri * 8 + i];
                     }
 
-                    int8_t *dst = &weight_buffer[(row * K + g * 32) / 2];
+                    int8_t *dst = &weight_tmp[(row * K + g * 32) / 2];
                     for (int i = 0; i < 8; i++) {
                         uint8_t lo0 = src[2*i]     & 0x0F;
                         uint8_t lo1 = src[2*i + 1] & 0x0F;
@@ -156,20 +208,34 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
                 }
             }
         }
+
+        uint8_t *raw_buf = static_cast<uint8_t *>(buf);
+        std::memcpy(raw_buf,                   weight_tmp.get(), weight_q4_bytes);
+        std::memcpy(raw_buf + weight_q4_bytes, scale_tmp.get(),  scale_bytes);
         return 0;
     }
 
     // Q4_0 regular: unsigned nibbles 0-15, subtract 8 to convert to signed S4.
     if (ggml_type == 2) {
-        auto blocks = static_cast<const block_q4_0 *>(weight_data);
+        const int64_t weight_q4_bytes = M * (K / 2);
+        const size_t  scale_bytes     =
+            n_blocks * (use_bf16_scales ? sizeof(uint16_t) : sizeof(float));
+
+        std::unique_ptr<int8_t[]>  weight_tmp(new int8_t[weight_q4_bytes]);
+        std::unique_ptr<uint8_t[]> scale_tmp(new uint8_t[scale_bytes]);
+
+        auto *blocks = static_cast<const block_q4_0 *>(weight_data);
+
+        #pragma omp parallel for schedule(static)
         for (int64_t row = 0; row < M; row++) {
             for (int64_t g = 0; g < ng; g++) {
                 block_q4_0 local;
                 std::memcpy(&local, &blocks[row * ng + g], sizeof(local));
-                write_scale(scale_buffer, use_bf16_scales,
+
+                write_scale(scale_tmp.get(), use_bf16_scales,
                             g * M + row, fp16_to_fp32(local.d));
 
-                int8_t *dst = &weight_buffer[(row * K + g * 32) / 2];
+                int8_t *dst = &weight_tmp[(row * K + g * 32) / 2];
                 for (int i = 0; i < 8; i++) {
                     uint8_t lo0 = local.qs[2*i]     & 0x0F;
                     uint8_t lo1 = local.qs[2*i + 1] & 0x0F;
@@ -188,6 +254,10 @@ int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
                 }
             }
         }
+
+        uint8_t *raw_buf = static_cast<uint8_t *>(buf);
+        std::memcpy(raw_buf,                   weight_tmp.get(), weight_q4_bytes);
+        std::memcpy(raw_buf + weight_q4_bytes, scale_tmp.get(),  scale_bytes);
         return 0;
     }
 
@@ -202,57 +272,49 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
   apilog_info("GGML Q8_0 unpack: N=", N, ", K=", K,
               ", weight_address=", static_cast<const void *>(weight));
 
-  Key_unpack cache_key(weight,
+  Key_matmul unpack_cache_key(weight,
                        static_cast<unsigned int>(N),
                        static_cast<unsigned int>(K));
 
-  static lru_cache_t<Key_unpack, void *> unpack_cache;
+  // Tracks whether the bytes at this weight pointer have already been
+  // transformed inplace from packed GGML blocks to the unpacked
+  // (weights + bf16 scales) layout. A non-pointer value is used on purpose
+  // so that LRU eviction does not std::free the caller-owned buffer.
+  static lru_cache_t<Key_matmul, bool> unpack_cache;
 
-  void *unpack_buf = nullptr;
-  if (unpack_cache.find_key(cache_key)) {
-    unpack_buf = unpack_cache.get(cache_key);
-    apilog_info("GGML unpack cache hit: reading cached weights, N=", N,
-                ", K=", K);
+  const int64_t weight_bytes = unpack_M * unpack_K;
+
+  if (unpack_cache.find_key(unpack_cache_key)) {
+    apilog_info("GGML unpack cache hit: reusing inplace-unpacked weights, N=",
+                N, ", K=", K);
   } else {
-    apilog_info("GGML unpack cache miss: unpacking and caching weights, N=", N,
+    apilog_info("GGML unpack cache miss: unpacking weights inplace, N=", N,
                 ", K=", K);
-
-    int64_t buf_size = ggml_unpack_weight_buffer_size(
-        8, true, unpack_M, unpack_K);
-    if (buf_size <= 0) {
-      log_error("Invalid parameters for GGML weight unpacking");
-      return status_t::failure;
-    }
-
-    unpack_buf = std::malloc(static_cast<size_t>(buf_size));
-    if (!unpack_buf) {
-      log_error("Failed to allocate buffer for GGML weight unpacking");
-      return status_t::failure;
-    }
 
     int8_t *wei_tmp = nullptr;
-    void *scl_tmp = nullptr;
+    void   *scl_tmp = nullptr;
     int ret = ggml_unpack_weight_buffer(
         weight, 8, false, true, false,
-        unpack_M, unpack_K, unpack_buf, &wei_tmp, &scl_tmp);
+        unpack_M, unpack_K, &wei_tmp, &scl_tmp);
     if (ret != 0) {
-      std::free(unpack_buf);
       log_error("GGML weight unpacking failed");
       return status_t::failure;
     }
 
-    unpack_cache.add(cache_key, unpack_buf);
+    unpack_cache.add(unpack_cache_key, true);
+
+    const int64_t buf_size = ggml_unpack_weight_buffer_size(
+        8, true, unpack_M, unpack_K);
     apilog_info("GGML unpack complete: wrote ", buf_size,
                 " bytes (weights + bf16 scales)");
   }
 
-  int64_t weight_bytes = unpack_M * unpack_K;
-  weight = static_cast<const void *>(unpack_buf);
-
+  // Inplace unpack leaves weights at the original address; scales follow
+  // immediately after the weight region in the same buffer.
   params.quant_params.wei_scale.buff = static_cast<const void *>(
-      static_cast<int8_t *>(unpack_buf) + weight_bytes);
+      static_cast<const int8_t *>(weight) + weight_bytes);
   params.quant_params.wei_scale.dt = data_type_t::bf16;
-  int64_t ng = unpack_K / 32;
+  const int64_t ng = unpack_K / 32;
   params.quant_params.wei_scale.dims = {ng, unpack_M};
 
   apilog_info("GGML unpack output: weight_bytes=", weight_bytes,

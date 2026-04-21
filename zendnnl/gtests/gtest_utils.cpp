@@ -20,6 +20,62 @@
 #include <cstring>
 #include <cmath>
 
+namespace {
+
+struct block_q8_0 { uint16_t d; int8_t qs[32]; };
+
+inline uint32_t gtest_fp32_to_bits(float f) {
+  uint32_t bits;
+  std::memcpy(&bits, &f, sizeof(f));
+  return bits;
+}
+
+inline float gtest_fp32_from_bits(uint32_t bits) {
+  float f;
+  std::memcpy(&f, &bits, sizeof(bits));
+  return f;
+}
+
+uint16_t gtest_fp32_to_fp16(float f) {
+  const float scale_to_inf  = gtest_fp32_from_bits(UINT32_C(0x77800000));
+  const float scale_to_zero = gtest_fp32_from_bits(UINT32_C(0x08800000));
+  float base = (std::fabs(f) * scale_to_inf) * scale_to_zero;
+
+  const uint32_t w      = gtest_fp32_to_bits(f);
+  const uint32_t shl1_w = w + w;
+  const uint32_t sign   = w & UINT32_C(0x80000000);
+  uint32_t bias = shl1_w & UINT32_C(0xFF000000);
+  if (bias < UINT32_C(0x71000000)) {
+    bias = UINT32_C(0x71000000);
+  }
+
+  base = gtest_fp32_from_bits((bias >> 1) + UINT32_C(0x07800000)) + base;
+  const uint32_t bits          = gtest_fp32_to_bits(base);
+  const uint32_t exp_bits      = (bits >> 13) & UINT32_C(0x00007C00);
+  const uint32_t mantissa_bits = bits & UINT32_C(0x00000FFF);
+  const uint32_t nonsign       = exp_bits + mantissa_bits;
+  return static_cast<uint16_t>(
+      (sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign));
+}
+
+} // anonymous namespace
+
+void repack_weights_q8_0(const int8_t *weight_buffer,
+                         const float *scale_buffer,
+                         int64_t M, int64_t K,
+                         void *out_blocks) {
+  const int64_t ng = K / 32;
+  auto *out = static_cast<block_q8_0 *>(out_blocks);
+
+  for (int64_t row = 0; row < M; row++) {
+    for (int64_t g = 0; g < ng; g++) {
+      block_q8_0 *b = &out[row * ng + g];
+      b->d = gtest_fp32_to_fp16(scale_buffer[g * M + row]);
+      std::memcpy(b->qs, weight_buffer + row * K + g * 32, 32);
+    }
+  }
+}
+
 MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   bool test_gemv_m1 = false;
   if (!cmd_test_gemv_m1.empty()) {
@@ -1633,7 +1689,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             post_op_type_t po_type, tensor_t &binary_tensor, bool use_LOWOHA,
                             matmul_algo_t algo,
                             float alpha,
-                            float beta) {
+                            float beta,
+                            int pack_format_b) {
   try {
 
     if (use_LOWOHA) {
@@ -1789,6 +1846,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
         params.num_threads = 0; // Use default (omp_get_max_threads)
+        params.packing.pack_format_b = pack_format_b;
 
         // For WOQ: Extract quantization parameters from weight tensor
         if (is_woq) {

@@ -423,7 +423,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor, post_op_type_t po_type,
                             tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
                             float alpha = 1.0f,
-                            float beta = 0.0f);
+                            float beta = 0.0f,
+                            int pack_format_b = 0);
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -512,6 +513,23 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     int64_t padding_index,
     bool is_weights,
     bool fp16_scale_bias);
+
+/**
+ * @brief Repack separate int8 weights and fp32 scales into GGML Q8_0 blocked format.
+ *
+ * The output is a contiguous array of block_q8_0 blocks where each block
+ * contains one fp16 scale followed by 32 int8 weights (34 bytes total).
+ *
+ * @param weight_buffer  Flat int8 weights, row-major [M x K]
+ * @param scale_buffer   Flat fp32 scales, column-major [ng x M] where ng = K/32
+ * @param M              Number of rows (output channels)
+ * @param K              Number of columns (must be divisible by 32)
+ * @param out_blocks     Output buffer, must be at least M * (K/32) * 34 bytes
+ */
+void repack_weights_q8_0(const int8_t *weight_buffer,
+                         const float *scale_buffer,
+                         int64_t M, int64_t K,
+                         void *out_blocks);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

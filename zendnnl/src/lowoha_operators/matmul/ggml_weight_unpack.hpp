@@ -25,13 +25,13 @@ namespace lowoha {
 namespace matmul {
 
 /**
- * @brief Returns the minimum buffer size in bytes needed for
- *        ggml_unpack_weight_buffer.
+ * @brief Returns the minimum buffer size in bytes needed for the unpacked
+ *        GGML weights + scales layout.
  *
  * With use_bf16_scales=true the packed and unpacked totals are equal, so the
- * caller can pass the same allocation it already holds for the packed weights.
- * With use_bf16_scales=false (fp32 scales) the unpacked layout is larger and
- * a fresh allocation is required.
+ * inplace unpack in ggml_unpack_weight_buffer is safe to run directly on the
+ * caller's packed-weights allocation. With use_bf16_scales=false (fp32 scales)
+ * the unpacked layout is larger and a fresh allocation is required.
  *
  * @param ggml_type       GGML quantization type (8 = Q8_0, 2 = Q4_0)
  * @param use_bf16_scales true to use bf16 scales, false for fp32
@@ -43,30 +43,43 @@ int64_t ggml_unpack_weight_buffer_size(int ggml_type, bool use_bf16_scales,
                                        int64_t M, int64_t K);
 
 /**
- * @brief Unpack GGML quantised weights into a flat weight region + a flat
- *        scale region, both carved from a single caller-supplied buffer.
+ * @brief Unpack GGML quantised weights inplace into a flat weight region + a
+ *        flat scale region that share the original packed-weights allocation.
+ *
+ * The caller's @p weight_data buffer is reinterpreted as both the source of
+ * packed blocks and the destination of the unpacked layout; temporary heap
+ * buffers are used internally so that in-flight reads are not clobbered by
+ * inplace writes. When use_bf16_scales=true, the packed and unpacked byte
+ * counts match for Q8_0 / Q4_0, so the input buffer is always large enough.
  *
  * On success:
- *   *wei_ptr  -> start of buf  (weight bytes)
- *   *scl_ptr  -> buf + weight region size  (scale bytes, fp32 or bf16)
+ *   *wei_ptr  -> start of the buffer (int8 weight bytes)
+ *   *scl_ptr  -> weight region + weight_bytes (fp32 or bf16 scale bytes)
  *
  * @return 0 on success, -1 on error.
  */
 int ggml_unpack_weight_buffer(const void *weight_data, int ggml_type,
                               bool is_superblock, bool use_bf16_scales,
                               bool use_unsigned_q4, int64_t M, int64_t K,
-                              void *buf, int8_t **wei_ptr, void **scl_ptr);
+                              int8_t **wei_ptr, void **scl_ptr);
 
 /**
- * @brief Unpack GGML Q8_0 packed weights into separate weight and scale arrays.
+ * @brief Unpack GGML Q8_0 packed weights inplace into a flat int8 weight
+ *        region followed by a bf16 scale region, reusing the caller's buffer.
  *
- * Uses an LRU cache keyed on (weight pointer, N, K) so that repeated calls
- * with the same packed buffer reuse the previously unpacked result.
+ * Uses an LRU cache keyed on (weight pointer, N, K) to avoid re-running the
+ * transform if the same packed buffer is presented again. The cache value is
+ * a sentinel bool (not a pointer) so LRU eviction never frees the caller's
+ * weight memory.
  *
- * On success, @p weight is redirected to the flat int8 weight array and
- * params.quant_params.wei_scale is populated with the bf16 scale array.
+ * On success, the bytes at @p weight are transformed from packed GGML blocks
+ * to [int8 weights | bf16 scales] (the pointer itself is unchanged because
+ * the layout fits inplace for bf16 scales), and
+ * params.quant_params.wei_scale is populated with the bf16 scale array that
+ * lives immediately after the weight region.
  *
- * @param weight  [in/out] Pointer to packed weight data; updated to unpacked weights
+ * @param weight  [in/out] Pointer to packed weight data; contents are
+ *                transformed inplace to the unpacked layout.
  * @param N       Number of output channels (rows in the GGML weight matrix)
  * @param K       Number of input features (columns, must be divisible by 32)
  * @param params  [in/out] matmul_params whose wei_scale is populated on success

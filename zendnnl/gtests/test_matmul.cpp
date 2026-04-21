@@ -1017,6 +1017,111 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
   EXPECT_TRUE(ok);
 }
 
+/** @brief Test INT8 sym_quant with GGML Q8_0 packed weights.
+ *  Combines INT8_SYM_QUANT_PER_GROUP_BF16 and F32 variants:
+ *    - Randomly picks bf16 or f32 for both input/output
+ *    - K is always a multiple of 32 (GGML Q8_0 group size)
+ *    - Weights are repacked into GGML Q8_0 blocked format and passed
+ *      with pack_format_b = 1 so the API unpacks them internally
+ */
+TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
+  uint64_t sym_k = (k / 32) * 32;
+  if (sym_k == 0) sym_k = 32;
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBB01);
+  bool use_bf16 = (local_rng() % 2 == 0);
+  data_type_t ref_dt = use_bf16 ? data_type_t::bf16 : data_type_t::f32;
+  data_type_t out_dt = ref_dt;
+
+  source_dtype = data_type_t::s8;
+  use_LOWOHA = true;
+
+  uint64_t num_groups = sym_k / 32;
+  data_type_t scale_dt = data_type_t::bf16;
+
+  std::vector<int64_t> wei_sd = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(num_groups)};
+
+  auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 2.0,
+                 false);
+  tensor_t weight_tensor, wei_scale, wei_zp;
+  if (quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                           data_type_t::s8, wei_sd, scale_dt,
+                           wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+    FAIL() << "weight dynamic quantization failed";
+  }
+
+  auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                 transA);
+  tensor_t input_tensor, src_scale, src_zp;
+  if (quant_params_compute(tensor_factory, src_ref, ref_dt,
+                           data_type_t::s8, src_sd, scale_dt,
+                           src_scale, src_zp, &input_tensor) != status_t::success) {
+    FAIL() << "source dynamic quantization failed";
+  }
+
+  const int8_t *raw_wt = static_cast<const int8_t *>(
+      weight_tensor.get_raw_handle_unsafe());
+
+  int64_t M_pack = static_cast<int64_t>(n);
+  int64_t K_pack = static_cast<int64_t>(sym_k);
+  int64_t ng = K_pack / 32;
+  size_t num_scales = static_cast<size_t>(num_groups * n);
+
+  const auto *raw_scl_bf16 = static_cast<const uint16_t *>(
+      wei_scale.get_raw_handle_unsafe());
+  std::vector<float> scl_f32(num_scales);
+  for (size_t i = 0; i < num_scales; i++) {
+    uint32_t bits = static_cast<uint32_t>(raw_scl_bf16[i]) << 16;
+    std::memcpy(&scl_f32[i], &bits, sizeof(float));
+  }
+
+  std::vector<int8_t> wt_nk(sym_k * n);
+  for (uint64_t ki = 0; ki < sym_k; ki++) {
+    for (uint64_t ni = 0; ni < n; ni++) {
+      wt_nk[ni * sym_k + ki] = raw_wt[ki * n + ni];
+    }
+  }
+
+  size_t packed_size = static_cast<size_t>(M_pack * ng * 34);
+  std::vector<uint8_t> packed_buf(packed_size);
+  repack_weights_q8_0(wt_nk.data(), scl_f32.data(), M_pack, K_pack,
+                      packed_buf.data());
+
+  auto packed_weight_tensor = tensor_factory.copy_tensor(
+      {sym_k, n}, data_type_t::s8,
+      std::make_pair(packed_size, static_cast<void *>(packed_buf.data())),
+      true, false);
+
+  auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
+                     rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor = is_binary_postop(po_type)
+                       ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                       : tensor_t();
+
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+
+  log_info("INT8_SYM_QUANT_GGML_PACKED: dtype=",
+           use_bf16 ? "bf16" : "f32",
+           " K=", sym_k, " groups=", num_groups);
+
+  status_t status     = matmul_kernel_test(input_tensor, packed_weight_tensor,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0, 1);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
+                        weight_tensor, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_bf16, epsilon_bf16, ok, false, 1.0f,
+                             true);
+  }
+  EXPECT_TRUE(ok);
+}
+
 /** @brief Test INT8 sym_quant: per-token source scale, bf16 output */
 TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
   uint64_t sym_k = (k / 4) * 4;
