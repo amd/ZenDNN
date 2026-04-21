@@ -72,6 +72,8 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
         if (!wp.empty()) cfg.warmup = std::stoi(wp);
         std::string moe_str = next();
         if (!moe_str.empty()) cfg.moe_topk = std::stoi(moe_str);
+        std::string act_str = next();
+        if (!act_str.empty()) cfg.gated_act = std::stoi(act_str);
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) {
         return false;

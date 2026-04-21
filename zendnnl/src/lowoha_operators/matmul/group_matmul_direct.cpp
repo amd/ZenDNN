@@ -212,7 +212,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<int> &ldc,
                              const std::vector<bool> &is_weights_const,
                              std::vector<matmul_params> &params,
-                             const group_matmul_moe_postop_params *moe_postop) {
+                             const group_matmul_moe_postop_params *moe_postop,
+                             const grp_matmul_gated_act_params *gated_act) {
 
   // Always-on guard: check all vectors before any indexing.
   // Enforces size consistency without per-element loops — single branch.
@@ -236,9 +237,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     return status_t::failure;
   }
 
-  // MoE post-op is parallel mode only.
+  // MoE post-op and gated activation are parallel mode only.
   if (moe_postop != nullptr && src.size() == 1) {
     log_error("group_matmul_direct: moe_postop is only supported in parallel mode");
+    return status_t::failure;
+  }
+  if (gated_act != nullptr
+      && gated_act->act != grp_matmul_gated_act_t::none
+      && src.size() == 1) {
+    log_error("group_matmul_direct: gated_act is only supported in parallel mode");
     return status_t::failure;
   }
 
@@ -321,9 +328,45 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     if (val != status_t::success)
       return val;
 
-    group_matmul_run_parallel_dispatch(layout, transA, transB, M, N, K, alpha,
+    // Validate gated_act prerequisites before launching GEMMs (fast-fail).
+    data_type_t act_dtype = data_type_t::none;
+    const bool run_gated_act = (gated_act != nullptr
+        && gated_act->act != grp_matmul_gated_act_t::none);
+    if (run_gated_act) {
+      act_dtype = params[0].dtypes.dst;
+      if (act_dtype != data_type_t::f32 && act_dtype != data_type_t::bf16) {
+        log_error("group_matmul_direct: gated_act requires f32 or bf16 dst");
+        return status_t::failure;
+      }
+      for (size_t i = 1; i < num_ops; ++i) {
+        if (params[i].dtypes.dst != act_dtype) {
+          log_error("group_matmul_direct: gated_act requires uniform dst dtype");
+          return status_t::failure;
+        }
+      }
+      for (size_t i = 0; i < num_ops; ++i) {
+        if (N[i] % 2 != 0) {
+          log_error("group_matmul_direct: gated_act requires even N, N[",
+                    i, "]=", N[i]);
+          return status_t::failure;
+        }
+      }
+    }
+
+    const bool act_fused = group_matmul_run_parallel_dispatch(
+        layout, transA, transB, M, N, K, alpha,
         src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads, &gemm_mode);
+        is_weights_const, params, num_threads, &gemm_mode,
+        run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
+        act_dtype);
+
+    // Separate activation pass for ALGOs that can't fuse (ALGO 3 N-tile).
+    if (run_gated_act && !act_fused) {
+      status_t act_st = group_matmul_moe_act_execute(
+          gated_act, dst, M, N, ldc, act_dtype, num_threads);
+      if (act_st != status_t::success)
+        return act_st;
+    }
 
     if (moe_postop != nullptr) {
       status_t moe_val = validate_group_matmul_moe_postop(

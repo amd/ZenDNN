@@ -214,7 +214,7 @@ The Low Overhead API path exposes direct, Low Overhead APIs for specific operati
 
 | Operation | Description | Documentation |
 |-----------|-------------|---------------|
-| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op. | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
+| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op; optional gated activation post-op (silu_and_mul, gelu_and_mul, swiglu_oai_mul) for fused gate+up projections. | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
 | **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
 | **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
 | **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |

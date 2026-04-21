@@ -102,7 +102,8 @@ int run_lowoha_matmul_int8_caching_test();
  *  @brief Demonstrates @c group_matmul_direct for multiple independent matmuls (parallel mode).
  *
  *  Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i].
- *  Pass @c nullptr for the optional @c moe_postop argument when MoE post-op is not used.
+ *  Pass @c nullptr for the optional @c moe_postop and @c gated_act arguments
+ *  when MoE post-op and gated activation are not used.
  */
 int group_matmul_f32_kernel_example();
 

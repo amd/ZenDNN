@@ -14,6 +14,8 @@ It supports two execution modes:
 
 An optional **MoE post-op** can be attached to the parallel path to fuse expert outputs into a single token-major result via weighted-reduce, avoiding a separate kernel launch.
 
+An optional **gated activation post-op** can be attached to fuse gate+up projections: after the GEMM (which uses fused `[gate_W | up_W]` weights producing `N = 2*dim` output columns), the activation computes in-place `dst[:, 0:dim] = act(gate) * up`.  Supported activations: `silu_and_mul` (Mixtral, Llama, Qwen), `gelu_and_mul`, `swiglu_oai_mul` (interleaved layout).  Applied after GEMM and before the MoE weighted-reduce (if both are set).
+
 Include `lowoha_operators/matmul/lowoha_matmul.hpp` (namespace `zendnnl::lowoha::matmul`).
 
 ### Key benefits
@@ -23,7 +25,8 @@ Include `lowoha_operators/matmul/lowoha_matmul.hpp` (namespace `zendnnl::lowoha:
 - Sequential chaining **or** parallel execution in one API
 - CCD-aware adaptive parallelization (auto-selects best strategy)
 - N-tiling for large-N experts: up to 3.9× faster than sequential for Mixtral gate_proj
-- Optional MoE weighted-reduce post-op (last argument, `nullptr` to disable)
+- Optional MoE weighted-reduce post-op (`moe_postop`, `nullptr` to disable)
+- Optional gated activation post-op (`gated_act`) for fused gate+up projections (silu_and_mul, gelu_and_mul, swiglu_oai_mul)
 - Unified status: `status_t::success` only when everything succeeds
 
 ## API signature
@@ -47,7 +50,8 @@ status_t group_matmul_direct(
   const std::vector<int> &ldc,
   const std::vector<bool> &is_weights_const,
   std::vector<matmul_params> &params,
-  const group_matmul_moe_postop_params *moe_postop = nullptr);
+  const group_matmul_moe_postop_params *moe_postop = nullptr,
+  const grp_matmul_gated_act_params *gated_act = nullptr);
 ```
 
 ### Parameters
@@ -74,6 +78,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | `is_weights_const` | `vector<bool>` | Weight-caching hint per op |
 | `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, etc. |
 | `moe_postop` | `const group_matmul_moe_postop_params*` | Optional MoE post-op; **`nullptr`** disables (default) |
+| `gated_act` | `const grp_matmul_gated_act_params*` | Optional gated activation; **`nullptr`** disables (default). Requires N even, dst dtype f32/bf16. Applied after GEMM, before `moe_postop`. |
 
 ### Return value
 
@@ -220,7 +225,66 @@ status_t st = group_matmul_direct(
 // moe_output now contains the reduced [NUM_TOKENS, N] tensor
 ```
 
-See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16, and MoE post-op examples with verification.
+See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16, MoE post-op, and gated activation examples with verification.
+
+## Gated activation post-op (parallel mode only)
+
+When `gated_act != nullptr`, an in-place gated activation runs after the expert GEMMs and before the MoE weighted-reduce (if both are set).
+
+### What it does
+
+For each expert `e`, row `m`, and output column `d` (where `dim = N/2`):
+
+```
+dst[e][m, d] = act(gate[d]) * up[d]
+```
+
+The GEMM uses fused `[gate_W | up_W]` weights producing `N = 2*dim` output columns.  The first `dim` columns are the gate projection, the second `dim` columns are the up projection.  After activation, only `dst[:, 0:dim]` is meaningful.
+
+For `swiglu_oai_mul`, the layout is interleaved: `[g0, u0, g1, u1, ...]`.
+
+### `grp_matmul_gated_act_params`
+
+```cpp
+enum class grp_matmul_gated_act_t : int {
+  none = 0,           // No activation (default).
+  silu_and_mul = 1,   // SiLU(gate) * up — Mixtral, Llama, Qwen.
+  gelu_and_mul = 2,   // GELU(gate) * up — some GPT variants.
+  swiglu_oai_mul = 3  // SwigluOAI — interleaved gate/up layout.
+};
+
+struct grp_matmul_gated_act_params {
+  grp_matmul_gated_act_t act = grp_matmul_gated_act_t::none;
+};
+```
+
+### Constraints
+
+| Constraint | Requirement |
+|------------|-------------|
+| `N` | Must be even (`N = 2 * dim`) for all experts |
+| `dst dtype` | Must be FP32 or BF16 (uniform across experts) |
+| Mode | Parallel only (`src.size() > 1`) |
+
+### C++ gated activation example
+
+```cpp
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+using namespace zendnnl::lowoha::matmul;
+
+// After setting up expert GEMMs with N = 2*dim...
+
+grp_matmul_gated_act_params act;
+act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+status_t st = group_matmul_direct(
+    layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+    src_ptrs, ldas, weight_ptrs, ldbs, bias_ptrs, betas,
+    dst_ptrs, ldcs, is_weights_const, params,
+    nullptr,   // no MoE weighted-reduce
+    &act);     // gated activation: silu(gate) * up
+// dst[:, 0:dim] now contains the activated output
+```
 
 ## Notes and best practices
 
@@ -228,7 +292,8 @@ See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16,
 2. **Chaining**: In sequential mode `K[i+1] == N[i]`.
 3. **Parallel independence**: Each op uses its own `src[i]`, `weight[i]`, `dst[i]`.
 4. **MoE**: Pass `nullptr` when not needed. When enabled, provide `row_ptrs` (built during scatter) and `topk_weights`.
-5. **Weight caching**: `is_weights_const[i] == true` enables caching. N-tiling creates per-slice cache entries (O(experts × tiles) — manageable for MoE).
-6. **Tiled algos (2/3)**: Require row-major layout, uniform dtypes across experts, no quantization, no post-ops, and standard unpacked B. Falls back to ALGO 1 automatically when these conditions are not met.
-7. **Errors**: On failure, check logs for dimension / dtype / MoE validation messages.
-8. **Strategy override**: Set `ZENDNNL_GRP_MATMUL_ALGO=N` (1-5) to force a specific strategy. `0` (default) auto-selects.
+5. **Gated activation**: Pass `nullptr` when not needed. When enabled, N must be even and dst dtype must be FP32 or BF16.  Applied after GEMM, before MoE weighted-reduce.
+6. **Weight caching**: `is_weights_const[i] == true` enables caching. N-tiling creates per-slice cache entries (O(experts × tiles) — manageable for MoE).
+7. **Tiled algos (2/3)**: Both require row-major layout, uniform dtypes, and standard unpacked A/B. ALGO 2 (M-tile, `m_tile_safe`) additionally supports quantization and most post-ops (except softmax/pooling), but blocks dynamic_quant and packed B. ALGO 3 (N-tile, `n_tile_safe`) is stricter: only buffer-free element-wise post-ops (relu, gelu, swish, etc.) are safe under column slicing. Falls back to ALGO 1 automatically when the required safety check fails.
+8. **Errors**: On failure, check logs for dimension / dtype / MoE / gated-act validation messages.
+9. **Strategy override**: Set `ZENDNNL_GRP_MATMUL_ALGO=N` (1-5) to force a specific strategy. `0` (default) auto-selects.

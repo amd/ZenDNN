@@ -107,16 +107,95 @@ status_t group_matmul_moe_postop_execute(
     int num_threads,
     data_type_t dst_elem);
 
+// --- MoE gated activation: fused act(gate) * up after GEMM ---
+
+/**
+ * @brief Gated activation type for MoE fused gate+up GEMM.
+ *
+ * Applied after the GEMM that uses fused [gate_W | up_W] weights.
+ * The GEMM output dst[M, 2*dim] is split into gate[:, 0:dim] and
+ * up[:, dim:2*dim].  The activation computes in-place:
+ *   dst[:, 0:dim] = act(gate) * up
+ * The second half (up columns) becomes garbage after activation.
+ * The caller passes ldc=2*dim to the subsequent down_proj GEMM as lda.
+ */
+enum class grp_matmul_gated_act_t : int {
+  none = 0,           ///< No gated activation (down_proj or unfused).
+  silu_and_mul = 1,   ///< SiLU(gate) * up — Mixtral, Llama, Qwen.
+  gelu_and_mul = 2,   ///< GELU(gate) * up — some GPT variants.
+  swiglu_oai_mul = 3  ///< SwigluOAI — interleaved gate/up layout (GPT-OSS).
+};
+
+/**
+ * @brief Parameters for MoE gated activation post-op.
+ *
+ * Single struct (not per-expert) — all experts in a group_matmul call
+ * use the same activation type.  The activation operates on each expert's
+ * dst buffer in-place.
+ */
+struct grp_matmul_gated_act_params {
+  grp_matmul_gated_act_t act;  ///< Activation type (or none).
+
+  grp_matmul_gated_act_params() : act(grp_matmul_gated_act_t::none) {}
+};
+
+/**
+ * @brief Apply gated activation to all experts' dst buffers.
+ *
+ * For each expert e: dst[e][:, 0:dim] = act(dst[e][:, 0:dim]) * dst[e][:, dim:2*dim]
+ * where dim = N[e] / 2.
+ *
+ * @param act_params  Activation type (nullptr or act==none → no-op).
+ * @param dst         Per-expert output buffers from GEMM [M_e, N_e].
+ * @param M           Per-expert row counts.
+ * @param N           Per-expert column counts (must be even: N = 2*dim).
+ * @param ldc         Per-expert leading dimensions of dst.
+ * @param dst_dtype   Data type of dst buffers (FP32 or BF16).
+ * @param num_threads OMP thread count for parallel execution.
+ */
+status_t group_matmul_moe_act_execute(
+    const grp_matmul_gated_act_params *act_params,
+    const std::vector<void *> &dst,
+    const std::vector<int> &M,
+    const std::vector<int> &N,
+    const std::vector<int> &ldc,
+    data_type_t dst_dtype,
+    int num_threads);
+
+/**
+ * @brief Apply gated activation in-place on a row range of a single expert.
+ *
+ * Single-threaded — designed to be called from within OMP parallel regions
+ * (ALGO 2 M-tile, ALGO 1/4/5 per-expert) for fused activation.
+ *
+ * @param act       Activation type (none is a no-op).
+ * @param dst       Expert output buffer [M, ldc].
+ * @param row_start First row to process (inclusive).
+ * @param row_end   Last row to process (exclusive).
+ * @param N         Total columns (must be even: N = 2*dim).
+ * @param ldc       Leading dimension of dst.
+ * @param dst_dtype Data type of dst (f32 or bf16).
+ */
+void apply_gated_act_inplace(
+    grp_matmul_gated_act_t act,
+    void *dst, int row_start, int row_end,
+    int N, int ldc, data_type_t dst_dtype);
+
 // --- Parallel expert dispatch ---
 
 /**
  * @brief Run independent expert GEMMs (parallel group matmul path).
  *
  * @param gemm_mode_out  If non-null, receives a static string literal for logging
- *                       ("sequential_experts", "flat_ccd_m_tile", "flat_ccd_n_tile",
+ *                       ("sequential_experts", "flat_m_tile", "flat_n_tile",
  *                       "multilevel", or "per_expert").
  */
-void group_matmul_run_parallel_dispatch(
+/**
+ * @return true if gated activation was fused into the ALGO (caller should
+ *         skip the separate activation pass).  false if caller must apply
+ *         activation separately (ALGO 3 N-tile cannot fuse split-layout acts).
+ */
+bool group_matmul_run_parallel_dispatch(
     const std::vector<char> &layout,
     const std::vector<bool> &transA,
     const std::vector<bool> &transB,
@@ -135,7 +214,9 @@ void group_matmul_run_parallel_dispatch(
     const std::vector<bool> &is_weights_const,
     std::vector<matmul_params> &params,
     int num_threads,
-    const char **gemm_mode_out);
+    const char **gemm_mode_out,
+    grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
+    data_type_t act_dtype = data_type_t::none);
 
 } // namespace matmul
 } // namespace lowoha

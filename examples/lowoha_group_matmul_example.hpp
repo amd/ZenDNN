@@ -56,6 +56,18 @@ int group_matmul_bf16_example();
  */
 int group_matmul_moe_postop_example();
 
+/**
+ * @brief FP32 group GEMM with gated activation (silu_and_mul).
+ *
+ * Demonstrates the gated_act parameter for fused gate+up projections:
+ *   - 4 experts, each computing GEMM with N = 2*dim (fused gate+up weights).
+ *   - After GEMM, in-place activation: dst[:, 0:dim] = silu(gate) * up.
+ *   - Supported activations: silu_and_mul, gelu_and_mul, swiglu_oai_mul.
+ *   - Constraints: N must be even, dst dtype must be FP32 or BF16.
+ *   - Applied after GEMM and before moe_postop (if both are set).
+ */
+int group_matmul_gated_act_example();
+
 } // namespace examples
 } // namespace zendnnl
 

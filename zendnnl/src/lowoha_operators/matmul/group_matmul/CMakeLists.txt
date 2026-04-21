@@ -20,6 +20,7 @@
 set(lowoha_group_matmul_sources
   group_matmul/group_matmul_parallel.cpp
   group_matmul/group_matmul_moe_postop.cpp
+  group_matmul/group_matmul_moe_act.cpp
   PARENT_SCOPE)
 
 set(lowoha_group_matmul_public_headers

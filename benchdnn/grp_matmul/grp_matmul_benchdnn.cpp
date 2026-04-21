@@ -17,7 +17,7 @@
 /// Group MatMul (MoE) benchdnn driver.
 ///
 /// Input file format (CSV, one line per config):
-///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk]
+///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk[, gated_act]]
 ///
 /// M can be a single int (all experts same) or colon-separated per-expert:
 ///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50         <- no MoE
@@ -26,6 +26,8 @@
 ///
 /// moe_topk (optional, default 0): 0 = no MoE post-op, >0 = fused weighted-reduce
 /// with that topk value.  Requires total_M divisible by topk.
+/// gated_act (optional, default 0): 0 = no activation, 1 = silu_and_mul
+/// (fused gate+up projection).  Requires N even.
 ///
 /// Env vars:
 ///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
@@ -151,11 +153,18 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         moe_ptr = &moe;
     }
 
+    // Gated activation: controlled by the gated_act field in the CSV.
+    // 0=off, 1=silu_and_mul, 2=gelu_and_mul, 3=swiglu_oai_mul.
+    grp_matmul_gated_act_params act;
+    act.act = static_cast<grp_matmul_gated_act_t>(cfg.gated_act);
+    grp_matmul_gated_act_params *act_ptr =
+        (cfg.gated_act > 0) ? &act : nullptr;
+
     // Warmup
     for (int w = 0; w < cfg.warmup; ++w) {
         auto st = group_matmul_direct(layout, transA, transB, Mv, Nv, Kv, alpha,
                                       src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
-                                      dst_ptrs, ldc, wconst, params, moe_ptr);
+                                      dst_ptrs, ldc, wconst, params, moe_ptr, act_ptr);
         if (st != status_t::success) {
             std::cerr << "ERROR: group_matmul_direct failed during warmup"
                       << std::endl;
@@ -173,7 +182,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         auto ti0 = std::chrono::high_resolution_clock::now();
         group_matmul_direct(layout, transA, transB, Mv, Nv, Kv, alpha,
                             src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta,
-                            dst_ptrs, ldc, wconst, params, moe_ptr);
+                            dst_ptrs, ldc, wconst, params, moe_ptr, act_ptr);
         auto ti1 = std::chrono::high_resolution_clock::now();
         double iter_ms = std::chrono::duration<double, std::milli>(ti1 - ti0).count();
         if (iter_ms < min_ms) min_ms = iter_ms;

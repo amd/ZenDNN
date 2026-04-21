@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstring>
 #include "gtest_utils.hpp"
 #include "common/bfloat16.hpp"
 
@@ -1939,3 +1940,253 @@ TEST_P(TestGroupMatmul, BF16_BF16) {
  */
 INSTANTIATE_TEST_SUITE_P(GroupMatmul, TestGroupMatmul,
                          ::testing::ValuesIn(matmul_test));
+
+// ═══════════════════════════════════════════════════════════════════════
+// Parameterized gated activation test suite (200+ corner-case configs)
+//
+// Covers all gated activation post-ops in-place on dst:
+//   act  ∈ {none, silu_and_mul, gelu_and_mul, swiglu_oai_mul}
+//   dtype ∈ {F32, BF16}
+//   dim  ∈ {1, 7, 15, 16, 17, 31, 32, 33, 64, 128, 255, 256, 512}
+//   M    ∈ {1, 4, 16, 64}
+//   num_ops ∈ {2, 4, 8}  (≥2: parallel expert path required)
+// Each test runs GEMM→reference, then GEMM+activation, then verifies.
+// ═══════════════════════════════════════════════════════════════════════
+
+struct GatedActTestParam {
+  int dim;        // Half of N (N = 2*dim)
+  int M;
+  int num_ops;
+  int act_int;    // 0=none, 1=silu, 2=gelu, 3=swiglu_oai
+  bool is_bf16;
+};
+
+static std::string GatedActParamName(
+    const ::testing::TestParamInfo<GatedActTestParam> &info) {
+  const auto &p = info.param;
+  static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
+  return std::string(act_names[p.act_int])
+      + (p.is_bf16 ? "_bf16" : "_f32")
+      + "_d" + std::to_string(p.dim)
+      + "_M" + std::to_string(p.M)
+      + "_E" + std::to_string(p.num_ops);
+}
+
+class TestGatedAct : public ::testing::TestWithParam<GatedActTestParam> {};
+
+TEST_P(TestGatedAct, Correctness) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::bfloat16_t;
+
+  const auto &p = GetParam();
+  const int dim = p.dim;
+  const int N_val = 2 * dim;
+  const int M_val = p.M;
+  const int K_val = 32;
+  const int num_ops = p.num_ops;
+  const bool is_bf16 = p.is_bf16;
+  const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+
+  const data_type_t dt = is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+
+  const size_t src_elems = static_cast<size_t>(M_val) * K_val;
+  const size_t wei_elems = static_cast<size_t>(K_val) * N_val;
+  const size_t dst_elems = static_cast<size_t>(M_val) * N_val;
+
+  // Typed storage avoids UB from reinterpret_cast on raw byte buffers.
+  std::vector<std::vector<float>> src_f32(num_ops), wei_f32(num_ops);
+  std::vector<std::vector<float>> dst_f32(num_ops), ref_f32(num_ops);
+  std::vector<std::vector<bfloat16_t>> src_bf16(num_ops), wei_bf16(num_ops);
+  std::vector<std::vector<bfloat16_t>> dst_bf16(num_ops), ref_bf16(num_ops);
+
+  std::vector<const void *> srcs(num_ops), weights(num_ops);
+  std::vector<const void *> biases(num_ops, nullptr);
+  std::vector<void *> dsts(num_ops), dsts_ref_ptrs(num_ops);
+
+  for (int e = 0; e < num_ops; ++e) {
+    if (is_bf16) {
+      src_bf16[e].resize(src_elems);
+      wei_bf16[e].resize(wei_elems);
+      dst_bf16[e].resize(dst_elems, bfloat16_t(0.0f));
+      ref_bf16[e].resize(dst_elems, bfloat16_t(0.0f));
+      for (size_t i = 0; i < src_elems; ++i)
+        src_bf16[e][i] = bfloat16_t(0.05f * (((i + e * 7) % 11) - 5));
+      for (size_t i = 0; i < wei_elems; ++i)
+        wei_bf16[e][i] = bfloat16_t(0.01f * (((i + e * 3) % 7) - 3));
+      srcs[e] = src_bf16[e].data();
+      weights[e] = wei_bf16[e].data();
+      dsts[e] = dst_bf16[e].data();
+      dsts_ref_ptrs[e] = ref_bf16[e].data();
+    } else {
+      src_f32[e].resize(src_elems);
+      wei_f32[e].resize(wei_elems);
+      dst_f32[e].resize(dst_elems, 0.0f);
+      ref_f32[e].resize(dst_elems, 0.0f);
+      for (size_t i = 0; i < src_elems; ++i)
+        src_f32[e][i] = 0.05f * (((i + e * 7) % 11) - 5);
+      for (size_t i = 0; i < wei_elems; ++i)
+        wei_f32[e][i] = 0.01f * (((i + e * 3) % 7) - 3);
+      srcs[e] = src_f32[e].data();
+      weights[e] = wei_f32[e].data();
+      dsts[e] = dst_f32[e].data();
+      dsts_ref_ptrs[e] = ref_f32[e].data();
+    }
+  }
+
+  std::vector<char> layouts(num_ops, 'r');
+  std::vector<bool> transAs(num_ops, false), transBs(num_ops, false);
+  std::vector<int> Ms(num_ops, M_val), Ns(num_ops, N_val), Ks(num_ops, K_val);
+  std::vector<float> alphas(num_ops, 1.0f), betas(num_ops, 0.0f);
+  std::vector<int> ldas(num_ops, K_val), ldbs(num_ops, N_val), ldcs(num_ops, N_val);
+  std::vector<bool> is_wc(num_ops, true);
+  std::vector<matmul_params> params(num_ops);
+
+  for (int e = 0; e < num_ops; ++e) {
+    params[e].dtypes.src = dt;
+    params[e].dtypes.wei = dt;
+    params[e].dtypes.dst = dt;
+    params[e].dtypes.bias = data_type_t::none;
+  }
+
+  // group_matmul_direct takes params by non-const reference and may mutate
+  // internal state (algo selection, packing). Deep-copy before each call so
+  // the second GEMM starts from the same initial params.
+  auto params_ref = params;
+  status_t st = group_matmul_direct(layouts, transAs, transBs,
+      Ms, Ns, Ks, alphas, srcs, ldas, weights, ldbs, biases, betas,
+      dsts_ref_ptrs, ldcs, is_wc, params_ref, nullptr, nullptr);
+  ASSERT_EQ(st, status_t::success);
+
+  // act=none: verify identical to reference
+  if (act_type == grp_matmul_gated_act_t::none) {
+    grp_matmul_gated_act_params act;
+    act.act = grp_matmul_gated_act_t::none;
+    auto params_none = params;
+    st = group_matmul_direct(layouts, transAs, transBs,
+        Ms, Ns, Ks, alphas, srcs, ldas, weights, ldbs, biases, betas,
+        dsts, ldcs, is_wc, params_none, nullptr, &act);
+    ASSERT_EQ(st, status_t::success);
+    for (int e = 0; e < num_ops; ++e) {
+      const size_t sz = is_bf16
+          ? dst_bf16[e].size() * sizeof(bfloat16_t)
+          : dst_f32[e].size() * sizeof(float);
+      const void *got = is_bf16
+          ? static_cast<const void *>(dst_bf16[e].data())
+          : static_cast<const void *>(dst_f32[e].data());
+      const void *ref = is_bf16
+          ? static_cast<const void *>(ref_bf16[e].data())
+          : static_cast<const void *>(ref_f32[e].data());
+      ASSERT_EQ(std::memcmp(got, ref, sz), 0)
+          << "act=none must be identical, expert=" << e;
+    }
+    return;
+  }
+
+  // Run with activation
+  grp_matmul_gated_act_params act;
+  act.act = act_type;
+  auto params_act = params;
+  st = group_matmul_direct(layouts, transAs, transBs,
+      Ms, Ns, Ks, alphas, srcs, ldas, weights, ldbs, biases, betas,
+      dsts, ldcs, is_wc, params_act, nullptr, &act);
+  ASSERT_EQ(st, status_t::success);
+
+  // Tolerance: BF16 loses ~7 bits mantissa, fast_exp adds ~1e-4 relative
+  const float rel_tol = is_bf16 ? 0.15f : 2e-4f;
+  const float abs_tol = is_bf16 ? 0.02f : 1e-5f;
+  const float alpha_sw = 1.702f;
+
+  for (int e = 0; e < num_ops; ++e) {
+    for (int m = 0; m < M_val; ++m) {
+      for (int n = 0; n < dim; ++n) {
+        float expected = 0.0f, actual = 0.0f;
+
+        if (is_bf16) {
+          const bfloat16_t *ref_row = ref_bf16[e].data() + m * N_val;
+          const bfloat16_t *act_row = dst_bf16[e].data() + m * N_val;
+          actual = static_cast<float>(act_row[n]);
+
+          if (act_type == grp_matmul_gated_act_t::silu_and_mul) {
+            float g = static_cast<float>(ref_row[n]);
+            float u = static_cast<float>(ref_row[dim + n]);
+            expected = g * (1.0f / (1.0f + std::exp(-g))) * u;
+          } else if (act_type == grp_matmul_gated_act_t::gelu_and_mul) {
+            float g = static_cast<float>(ref_row[n]);
+            float u = static_cast<float>(ref_row[dim + n]);
+            expected = g * 0.5f * (1.0f + std::erf(
+                g * 0.7071067811865476f)) * u;
+          } else {
+            float g = std::max(-7.0f, std::min(
+                static_cast<float>(ref_row[2 * n]), 7.0f));
+            float u = std::max(-7.0f, std::min(
+                static_cast<float>(ref_row[2 * n + 1]), 7.0f));
+            float sig = 1.0f / (1.0f + std::exp(-g * alpha_sw));
+            expected = (1.0f + u) * g * sig;
+          }
+        } else {
+          const float *ref_row = ref_f32[e].data() + m * N_val;
+          const float *act_row = dst_f32[e].data() + m * N_val;
+          actual = act_row[n];
+
+          if (act_type == grp_matmul_gated_act_t::silu_and_mul) {
+            float g = ref_row[n], u = ref_row[dim + n];
+            expected = g * (1.0f / (1.0f + std::exp(-g))) * u;
+          } else if (act_type == grp_matmul_gated_act_t::gelu_and_mul) {
+            float g = ref_row[n], u = ref_row[dim + n];
+            expected = g * 0.5f * (1.0f + std::erf(
+                g * 0.7071067811865476f)) * u;
+          } else {
+            float g = std::max(-7.0f, std::min(ref_row[2 * n], 7.0f));
+            float u = std::max(-7.0f, std::min(ref_row[2 * n + 1], 7.0f));
+            float sig = 1.0f / (1.0f + std::exp(-g * alpha_sw));
+            expected = (1.0f + u) * g * sig;
+          }
+        }
+
+        ASSERT_NEAR(actual, expected,
+            std::abs(expected) * rel_tol + abs_tol)
+            << "act=" << p.act_int
+            << (is_bf16 ? " bf16" : " f32")
+            << " dim=" << dim << " M=" << M_val
+            << " e=" << e << " m=" << m << " n=" << n;
+      }
+    }
+  }
+}
+
+static std::vector<GatedActTestParam> make_gated_act_params() {
+  std::vector<GatedActTestParam> out;
+
+  // dim values: boundary-rich for AVX-512 (16-wide) vector/scalar paths
+  const int dims[] = {1, 7, 15, 16, 17, 31, 32, 33, 64, 128, 255, 256, 512};
+  const int ms[] = {1, 4, 16, 64};
+  const int experts[] = {1, 2, 4, 8};
+  const int acts[] = {0, 1, 2, 3};  // none, silu, gelu, swiglu_oai
+
+  // Full cross-product of (act × dtype × dim) for M=4, num_ops=2:
+  // 4 acts × 2 dtypes × 13 dims = 104 tests (core corner-case coverage)
+  for (int a : acts)
+    for (bool bf : {false, true})
+      for (int d : dims)
+        out.push_back({d, 4, 2, a, bf});
+
+  // Vary M and num_ops for silu (act=1) and swiglu (act=3) at key dims.
+  // num_ops >= 2: with 1 expert, group_matmul_direct enters the sequential
+  // (chained layers) path which does not apply gated activation.
+  const int key_dims[] = {1, 16, 33};
+  for (int a : {1, 3})
+    for (bool bf : {false, true})
+      for (int d : key_dims)
+        for (int m : ms)
+          for (int e : experts) {
+            if (e < 2) continue;                // skip E1 (sequential path)
+            if (m == 4 && e == 2) continue;     // already in core set
+            out.push_back({d, m, e, a, bf});
+          }
+
+  return out;
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulGatedAct, TestGatedAct,
+    ::testing::ValuesIn(make_gated_act_params()),
+    GatedActParamName);

@@ -7,8 +7,10 @@
 Benchmarks multiple independent matrix multiplications executed via
 `group_matmul_direct`.  Each operation can have its own dimensions and
 non-contiguous buffers.  Supports parallel execution with CCD-aware
-scheduling and an optional MoE (Mixture of Experts) weighted-reduce
-post-op that fuses expert outputs into token-major rows.
+scheduling, an optional MoE (Mixture of Experts) weighted-reduce
+post-op that fuses expert outputs into token-major rows, and an
+optional gated activation post-op (silu_and_mul, gelu_and_mul,
+swiglu_oai_mul) for fused gate+up projections.
 
 Use cases include MoE expert layers, multi-head attention projections,
 parallel Q/K/V computation, and any workload requiring grouped GEMMs
@@ -33,7 +35,7 @@ with independent memory layouts.
 CSV, one configuration per line.  Lines starting with `#` are comments.
 
 ```
-num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk]
+num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk[, gated_act]]
 ```
 
 ### Fields
@@ -49,17 +51,18 @@ num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_to
 | `is_weights_const` | bool | Weight caching hint (`true` / `false`). |
 | `warmup` | int | Warmup iterations before timing. |
 | `moe_topk` | int (optional) | MoE post-op topk.  `0` or omitted = disabled.  `>0` = enable fused weighted-reduce with that topk.  Requires `total_M % topk == 0`. |
+| `gated_act` | int (optional) | Gated activation.  `0` or omitted = disabled.  `1` = `silu_and_mul` (Mixtral/Llama/Qwen), `2` = `gelu_and_mul`, `3` = `swiglu_oai_mul` (GPT-OSS interleaved).  Requires `N` even. |
 
 ### Examples
 
 ```
-# 8 Mixtral experts, uniform M=4, no MoE post-op
+# 8 Mixtral experts, uniform M=4, no MoE post-op, no activation
 8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50
 
-# 8 experts, uniform M=4, with MoE topk=2
-8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2
+# 8 experts, uniform M=4, with MoE topk=2, silu activation (fused gate+up)
+8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1
 
-# 8 experts, imbalanced M, with MoE topk=2
+# 8 experts, imbalanced M, with MoE topk=2, no activation (down_proj)
 8, 126:323:80:68:256:37:15:119, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2
 ```
 

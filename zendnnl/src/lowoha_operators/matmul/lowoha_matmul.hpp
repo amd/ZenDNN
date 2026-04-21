@@ -125,6 +125,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  * @param moe_postop       Optional MoE weighted-reduce over pre-gathered expert rows;
  *                         nullptr disables (default). Parallel mode only; see
  *                         group_matmul_moe_postop_params.
+ * @param gated_act        Optional gated activation applied in-place after GEMM
+ *                         and before moe_postop: dst[:, 0:dim] = act(gate) * up
+ *                         where dim = N/2. Requires N even and dst dtype f32 or
+ *                         bf16. nullptr disables (default). Parallel mode only;
+ *                         see grp_matmul_gated_act_params.
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */
@@ -145,7 +150,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<int> &ldc,
                              const std::vector<bool> &is_weights_const,
                              std::vector<matmul_params> &params,
-                             const group_matmul_moe_postop_params *moe_postop = nullptr);
+                             const group_matmul_moe_postop_params *moe_postop = nullptr,
+                             const grp_matmul_gated_act_params *gated_act = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

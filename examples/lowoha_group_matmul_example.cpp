@@ -14,18 +14,23 @@
  * limitations under the License.
  ******************************************************************************/
 
-/// Group MatMul examples — FP32, BF16, and MoE weighted-reduce post-op.
+/// Group MatMul examples — FP32, BF16, MoE post-op, and gated activation.
 ///
 /// Demonstrates the group_matmul_direct API for:
 ///   1. FP32 parallel group GEMM (multiple independent matmuls).
 ///   2. BF16 parallel group GEMM.
 ///   3. BF16 group GEMM with MoE post-op (weighted-reduce over expert outputs).
+///   4. FP32 group GEMM with gated activation (silu_and_mul for fused gate+up).
 ///
 /// The MoE post-op example simulates a Mixture-of-Experts layer:
 ///   - 4 experts, topk=2, 8 tokens
 ///   - Each token is routed to 2 experts with routing weights
 ///   - After expert GEMMs, the post-op reduces:
 ///       output[t, d] = Σ_k  weight[t,k] * expert_output[row_ptrs[t*topk+k]][d]
+///
+/// The gated activation example demonstrates fused gate+up projection:
+///   - N = 2*dim, GEMM output is [gate | up]
+///   - Activation computes: dst[:, 0:dim] = silu(gate) * up
 
 #include "lowoha_group_matmul_example.hpp"
 
@@ -335,6 +340,101 @@ int group_matmul_moe_postop_example() {
     if (ok) {
       testlog_info("MoE post-op verified OK. Tokens reduced from ",
                    NUM_EXPERTS, " experts with topk=", TOPK);
+    } else {
+      return NOT_OK;
+    }
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+// ---------------------------------------------------------------------------
+// Example 4: FP32 group GEMM with gated activation (silu_and_mul)
+// ---------------------------------------------------------------------------
+
+int group_matmul_gated_act_example() {
+  testlog_info("** group_matmul gated activation example: "
+               "4 experts, silu_and_mul, dim=32");
+
+  try {
+    const int NUM_EXPERTS = 4;
+    const int M_PER_EXPERT = 8;
+    const int K = 64;
+    const int DIM = 32;
+    const int N = 2 * DIM;  // fused gate+up projection
+
+    std::vector<int> Ms(NUM_EXPERTS, M_PER_EXPERT);
+    std::vector<int> Ns(NUM_EXPERTS, N);
+    std::vector<int> Ks(NUM_EXPERTS, K);
+
+    std::vector<std::vector<float>> src(NUM_EXPERTS), wei(NUM_EXPERTS),
+        dst_buf(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      src[i].resize(M_PER_EXPERT * K);
+      wei[i].resize(K * N);
+      dst_buf[i].resize(M_PER_EXPERT * N, 0.f);
+      fill_f32(src[i], 0.1f);
+      fill_f32(wei[i], 0.01f);
+    }
+
+    std::vector<char> layouts(NUM_EXPERTS, 'r');
+    std::vector<bool> transAs(NUM_EXPERTS, false), transBs(NUM_EXPERTS, false);
+    std::vector<float> alphas(NUM_EXPERTS, 1.f), betas(NUM_EXPERTS, 0.f);
+    std::vector<bool> wconst(NUM_EXPERTS, false);
+    std::vector<int> ldas = Ks, ldbs = Ns, ldcs = Ns;
+
+    std::vector<const void *> sp(NUM_EXPERTS), wp(NUM_EXPERTS);
+    std::vector<const void *> bp(NUM_EXPERTS, nullptr);
+    std::vector<void *> dp(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      sp[i] = src[i].data();
+      wp[i] = wei[i].data();
+      dp[i] = dst_buf[i].data();
+    }
+
+    std::vector<matmul_params> params(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      params[i].dtypes.src = data_type_t::f32;
+      params[i].dtypes.wei = data_type_t::f32;
+      params[i].dtypes.dst = data_type_t::f32;
+    }
+
+    // Set up gated activation: silu_and_mul.
+    // After GEMM, dst[:, 0:DIM] = silu(gate) * up
+    // where gate = dst[:, 0:DIM] and up = dst[:, DIM:2*DIM].
+    grp_matmul_gated_act_params act;
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    status_t st = group_matmul_direct(
+        layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+        sp, ldas, wp, ldbs, bp, betas, dp, ldcs, wconst, params,
+        nullptr, &act);
+
+    if (st != status_t::success) {
+      testlog_error("Gated activation group_matmul failed");
+      return NOT_OK;
+    }
+
+    // Verify: activated values should be finite (no NaN/Inf).
+    bool ok = true;
+    for (int i = 0; i < NUM_EXPERTS && ok; ++i) {
+      for (int m = 0; m < M_PER_EXPERT && ok; ++m) {
+        for (int d = 0; d < DIM && ok; ++d) {
+          float val = dst_buf[i][m * N + d];
+          if (std::isnan(val) || std::isinf(val)) {
+            testlog_error("Gated act verify failed: NaN/Inf at expert=", i,
+                          " m=", m, " d=", d);
+            ok = false;
+          }
+        }
+      }
+    }
+
+    if (ok) {
+      testlog_info("Gated activation (silu_and_mul) verified OK. ",
+                   NUM_EXPERTS, " experts, dim=", DIM);
     } else {
       return NOT_OK;
     }
