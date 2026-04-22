@@ -98,6 +98,12 @@ void initialize_test_mode(const std::string &mode_str) {
     ai_gtest_mode = TestMode::BOUNDARY;
     std::cout << "[AI_GTEST] Test mode set to BOUNDARY" << std::endl;
   }
+  else if (normalized == "coverage") {
+    ai_gtest_mode = TestMode::COVERAGE;
+    std::cout <<
+              "[AI_GTEST] Test mode set to COVERAGE (strategic minimal tests for maximum code coverage)"
+              << std::endl;
+  }
   else {
     // Unknown or empty mode - use DEFAULT
     ai_gtest_mode = TestMode::DEFAULT;
@@ -264,7 +270,9 @@ void AITensorFactory::fill_uniform_data(void *ptr, size_t nelem,
     break;
   }
   default:
-    std::memset(ptr, 0, nelem * sizeof(float));
+    // For unknown types, zero the buffer based on nelem (assume 1 byte per element minimum)
+    // This is a fallback - unknown types should be handled explicitly above
+    std::memset(ptr, 0, nelem);
     break;
   }
 }
@@ -399,11 +407,6 @@ void AITensorFactory::fill_boundary_data(void *ptr, size_t nelem,
     fill_pattern(static_cast<bfloat16_t *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }
-  else if (dtype == data_type_t::u8) {
-    static const uint8_t pattern[] = {255, 0, 128, 1};
-    fill_pattern(static_cast<uint8_t *>(ptr), pattern,
-                 sizeof(pattern)/sizeof(pattern[0]));
-  }
   else if (dtype == data_type_t::s8) {
     static const int8_t pattern[] = {127, -127, 1, -1};
     fill_pattern(static_cast<int8_t *>(ptr), pattern,
@@ -412,6 +415,11 @@ void AITensorFactory::fill_boundary_data(void *ptr, size_t nelem,
   else if (dtype == data_type_t::s4) {
     static const int8_t pattern[] = {7, -8, 1, -1};
     fill_pattern(static_cast<int8_t *>(ptr), pattern,
+                 sizeof(pattern)/sizeof(pattern[0]));
+  }
+  else if (dtype == data_type_t::u8) {
+    static const uint8_t pattern[] = {255, 0, 128, 1};
+    fill_pattern(static_cast<uint8_t *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }
 }
@@ -605,6 +613,119 @@ tensor_t AITensorFactory::create_quantized_embedding_tensor(
   return qtensor;
 }
 
+// -----------------------------------------------------------------------------
+// create_woq_weight_tensor
+//
+// Creates a WoQ (Weight-Only Quantization) weight tensor bundle for S4 quantized
+// weights with proper scale and zero-point tensors. Uses per-channel scale and
+// per-tensor zero-point (the most common WoQ configuration).
+//
+// Parameters:
+//   dims       - Weight dimensions {K, N}
+//   scale_dtype - Data type for scale tensor (f32 or bf16)
+//   name       - Optional tensor name prefix
+// Returns:
+//   WoQTensors struct containing weights, scale, and zp tensors
+// -----------------------------------------------------------------------------
+WoQTensors AITensorFactory::create_woq_weight_tensor(
+  const std::vector<uint64_t> &dims,
+  data_type_t scale_dtype,
+  const std::string &name) {
+
+  if (dims.size() != 2) {
+    throw std::invalid_argument("WoQ weight tensor must be 2D {K, N}");
+  }
+
+  WoQTensors result;
+  std::string tensor_name = name.empty() ?
+                            "ai_woq_" + std::to_string(tensor_counter.fetch_add(1)) : name;
+
+  const uint64_t k = dims[0];
+  const uint64_t n = dims[1];
+
+  // Create per-channel scale tensor {1, N} - scale per output channel
+  std::vector<tensor_t::index_type> scale_dims = {1, static_cast<tensor_t::index_type>(n)};
+  result.scale = tensor_t()
+                 .set_name(tensor_name + "_scale")
+                 .set_size(scale_dims)
+                 .set_data_type(scale_dtype)
+                 .set_storage()
+                 .create();
+
+  if (!result.scale.check()) {
+    throw std::runtime_error("Failed to create WoQ scale tensor");
+  }
+
+  // Fill scale tensor with random values in range [0.1, 2.0]
+  std::uniform_real_distribution<float> scale_dist(0.1f, 2.0f);
+  if (scale_dtype == data_type_t::f32) {
+    float *scale_data = static_cast<float *>(result.scale.get_raw_handle_unsafe());
+    for (uint64_t i = 0; i < n; ++i) {
+      scale_data[i] = scale_dist(rng);
+    }
+  }
+  else if (scale_dtype == data_type_t::bf16) {
+    bfloat16_t *scale_data = static_cast<bfloat16_t *>
+                             (result.scale.get_raw_handle_unsafe());
+    for (uint64_t i = 0; i < n; ++i) {
+      scale_data[i] = bfloat16_t(scale_dist(rng));
+    }
+  }
+
+  // Create per-tensor zero-point tensor {1, 1}
+  std::vector<tensor_t::index_type> zp_dims = {1, 1};
+  result.zp = tensor_t()
+              .set_name(tensor_name + "_zp")
+              .set_size(zp_dims)
+              .set_data_type(data_type_t::s8)
+              .set_storage()
+              .create();
+
+  if (!result.zp.check()) {
+    throw std::runtime_error("Failed to create WoQ zero-point tensor");
+  }
+
+  // Fill zero-point tensor with small random value
+  std::uniform_int_distribution<int> zp_dist(-4, 4);
+  int8_t *zp_data = static_cast<int8_t *>(result.zp.get_raw_handle_unsafe());
+  zp_data[0] = static_cast<int8_t>(zp_dist(rng));
+
+  // Create S4 weight tensor with scale and zero-point attached
+  std::vector<tensor_t::index_type> weight_size = {
+    static_cast<tensor_t::index_type>(k),
+    static_cast<tensor_t::index_type>(n)
+  };
+
+  result.weights = tensor_t()
+                   .set_name(tensor_name + "_weights")
+                   .set_size(weight_size)
+                   .set_data_type(data_type_t::s4)
+                   .set_quant_scale(result.scale)
+                   .set_quant_zero_point(result.zp)
+                   .set_storage()
+                   .create();
+
+  if (!result.weights.check()) {
+    throw std::runtime_error("Failed to create WoQ weight tensor");
+  }
+
+  // Fill weight tensor with random S4 values [-8, 7]
+  // S4 is packed: 2 x 4-bit values per byte
+  size_t nelem = result.weights.get_nelem();
+  size_t num_bytes = (nelem + 1) / 2;  // S4 storage: 2 values packed per byte
+  int8_t *weight_data = static_cast<int8_t *>
+                        (result.weights.get_raw_handle_unsafe());
+  std::uniform_int_distribution<int> weight_dist(-8, 7);
+  for (size_t i = 0; i < num_bytes; ++i) {
+    // Pack 2 S4 values (each 4-bit) into 1 byte
+    int8_t low_nibble = static_cast<int8_t>(weight_dist(rng)) & 0x0F;
+    int8_t high_nibble = static_cast<int8_t>(weight_dist(rng)) & 0x0F;
+    weight_data[i] = low_nibble | (high_nibble << 4);
+  }
+
+  return result;
+}
+
 
 // AITestUtils static member definitions
 std::mt19937 AITestUtils::rng(
@@ -631,13 +752,22 @@ data_type_t AITestUtils::get_input_dtype(DataTypeCombination combo) {
   case DataTypeCombination::BF16_BF16_BF16:
   case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::BF16_F32_BF16:
+  case DataTypeCombination::BF16_S4_BF16:
+  case DataTypeCombination::BF16_S4_F32:
     return data_type_t::bf16;
   case DataTypeCombination::U8_S8_F32:
   case DataTypeCombination::U8_S8_BF16:
+  case DataTypeCombination::U8_U8_U8:
     return data_type_t::u8;
   case DataTypeCombination::S8_S8_F32:
   case DataTypeCombination::S8_S8_BF16:
+  case DataTypeCombination::S8_S8_S8:
+  case DataTypeCombination::S8_S8_S32:
     return data_type_t::s8;
+  case DataTypeCombination::S4_S4_S4:
+    return data_type_t::s4;
+  case DataTypeCombination::S32_S32_S32:
+    return data_type_t::s32;
   default:
     return data_type_t::f32;
   }
@@ -668,7 +798,17 @@ data_type_t AITestUtils::get_weight_dtype(DataTypeCombination combo) {
   case DataTypeCombination::U8_S8_BF16:
   case DataTypeCombination::S8_S8_F32:
   case DataTypeCombination::S8_S8_BF16:
+  case DataTypeCombination::S8_S8_S8:
+  case DataTypeCombination::S8_S8_S32:
     return data_type_t::s8;
+  case DataTypeCombination::BF16_S4_BF16:
+  case DataTypeCombination::BF16_S4_F32:
+  case DataTypeCombination::S4_S4_S4:
+    return data_type_t::s4;
+  case DataTypeCombination::U8_U8_U8:
+    return data_type_t::u8;
+  case DataTypeCombination::S32_S32_S32:
+    return data_type_t::s32;
   default:
     return data_type_t::f32;
   }
@@ -693,13 +833,23 @@ data_type_t AITestUtils::get_output_dtype(DataTypeCombination combo) {
   case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::U8_S8_F32:
   case DataTypeCombination::S8_S8_F32:
+  case DataTypeCombination::BF16_S4_F32:
     return data_type_t::f32;
   case DataTypeCombination::BF16_BF16_BF16:
   case DataTypeCombination::BF16_F32_BF16:
-    return data_type_t::bf16;
   case DataTypeCombination::U8_S8_BF16:
   case DataTypeCombination::S8_S8_BF16:
+  case DataTypeCombination::BF16_S4_BF16:
     return data_type_t::bf16;
+  case DataTypeCombination::S8_S8_S8:
+    return data_type_t::s8;
+  case DataTypeCombination::S8_S8_S32:
+  case DataTypeCombination::S32_S32_S32:
+    return data_type_t::s32;
+  case DataTypeCombination::S4_S4_S4:
+    return data_type_t::s4;
+  case DataTypeCombination::U8_U8_U8:
+    return data_type_t::u8;
   default:
     return data_type_t::f32;
   }
@@ -843,6 +993,12 @@ bool AITestUtils::is_aocl_kernel_supported(data_type_t input_dtype,
   }
   if ((input_dtype == data_type_t::u8 || input_dtype == data_type_t::s8) &&
       weight_dtype == data_type_t::s8 &&
+      (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
+    return true;
+  }
+  // WoQ support: BF16 input + S4 quantized weights → BF16 or F32 output
+  if (input_dtype == data_type_t::bf16 &&
+      weight_dtype == data_type_t::s4 &&
       (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
     return true;
   }
@@ -992,6 +1148,12 @@ bool AITestUtils::compare_sampled_tensors(const tensor_t &test_tensor,
   }
 
   size_t total_elements = test_tensor.get_nelem();
+
+  // Empty tensors are considered equal (nothing to compare)
+  if (total_elements == 0) {
+    return true;
+  }
+
   auto sample_indices = get_sample_indices(total_elements,
                         AI_MAX_VALIDATION_ELEMENTS);
 
@@ -1091,6 +1253,12 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
   }
 
   size_t total_elements = test_tensor.get_nelem();
+
+  // Empty tensors are considered equal (nothing to compare)
+  if (total_elements == 0) {
+    return true;
+  }
+
   auto sample_indices = get_sample_indices(total_elements,
                         AI_MAX_VALIDATION_ELEMENTS);
 
@@ -1768,7 +1936,213 @@ std::vector<DataTypeCombination> ParameterGenerator::supported_combinations = {
   DataTypeCombination::U8_S8_BF16,
   DataTypeCombination::S8_S8_F32,
   DataTypeCombination::S8_S8_BF16,
+  DataTypeCombination::BF16_S4_BF16,  // BF16 with S4 quantized weights
+  DataTypeCombination::BF16_S4_F32,   // BF16 with S4 quantized weights, F32 output
+  DataTypeCombination::S8_S8_S32      // INT8 with S32 accumulator
 };
+
+// -----------------------------------------------------------------------------
+// generate_coverage_test_suite
+//
+// Generates a strategic minimal set of matmul test parameters designed to
+// maximize code coverage while minimizing test count. This includes:
+//   - One test per data type combination
+//   - One test per post-op type
+//   - Key boundary and edge case tests
+//   - Invalid tests for error handling coverage
+//
+// Returns:
+//   Vector of MatmulParamsAI objects for coverage testing (~100 tests)
+// Usage:
+//   Used by coverage builds to maximize code coverage with minimal runtime.
+// -----------------------------------------------------------------------------
+std::vector<MatmulParamsAI>
+ParameterGenerator::generate_coverage_test_suite() {
+  std::vector<MatmulParamsAI> coverage_params;
+  add_coverage_accuracy_params(coverage_params);
+  add_coverage_boundary_params(coverage_params);
+  add_coverage_edge_case_params(coverage_params);
+  add_coverage_invalid_params(coverage_params);
+  std::cout << "[AI_GTEST] Coverage test suite generated with "
+            << coverage_params.size() << " strategic tests" << std::endl;
+  return coverage_params;
+}
+
+// -----------------------------------------------------------------------------
+// add_coverage_accuracy_params
+//
+// Adds strategic accuracy tests for maximum code coverage:
+//   - One test per data type combination with a representative shape
+//   - One test per post-op type to cover all post-op code paths
+//   - Key transpose variations
+// -----------------------------------------------------------------------------
+void ParameterGenerator::add_coverage_accuracy_params(
+  std::vector<MatmulParamsAI> &params) {
+  auto post_op_configs = AITestUtils::get_all_post_op_configs();
+  PostOpConfig no_postop;  // Empty post-op config
+
+  // 1. One test per data type combination (representative medium shape)
+  const uint64_t cov_m = 64, cov_n = 64, cov_k = 64;
+  for (auto data_combo : supported_combinations) {
+    if (AITestUtils::is_aocl_kernel_supported(
+          AITestUtils::get_input_dtype(data_combo),
+          AITestUtils::get_weight_dtype(data_combo),
+          AITestUtils::get_output_dtype(data_combo), {})) {
+      params.push_back(create_param(cov_m, cov_n, cov_k, data_combo,
+                                    TestCategory::ACCURACY, no_postop, true, "coverage_dtype"));
+    }
+  }
+
+  // 2. One test per post-op type (use F32_F32_F32 for simplicity)
+  for (const auto &post_op_config : post_op_configs) {
+    if (AITestUtils::is_aocl_kernel_supported(
+          data_type_t::f32, data_type_t::f32, data_type_t::f32,
+          post_op_config.post_ops)) {
+      params.push_back(create_param(32, 32, 32, DataTypeCombination::F32_F32_F32,
+                                    TestCategory::ACCURACY, post_op_config, true, "coverage_postop"));
+    }
+  }
+
+  // 3. Key shape variations (tiny, small, medium, large, skinny)
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> cov_shapes
+  = {
+    {4, 4, 4, "tiny"},
+    {32, 32, 32, "small"},
+    {64, 64, 64, "medium"},
+    {128, 128, 128, "large"},
+    {512, 4, 4, "skinny_tall"},
+    {4, 512, 4, "skinny_wide"},
+    {4, 4, 512, "skinny_deep"},
+    {42, 42, 42, "non_pow2"}
+  };
+  for (const auto& [m, n, k, desc] : cov_shapes) {
+    params.push_back(create_param(m, n, k, DataTypeCombination::F32_F32_F32,
+                                  TestCategory::ACCURACY, no_postop, true, "coverage_shape_" + desc));
+  }
+
+  // 4. Transpose variations
+  MatmulParamsAI transA_param = create_param(32, 32, 32,
+                                DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY, no_postop,
+                                true, "coverage_transA");
+  transA_param.trans_a = true;
+  params.push_back(transA_param);
+
+  MatmulParamsAI transB_param = create_param(32, 32, 32,
+                                DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY, no_postop,
+                                true, "coverage_transB");
+  transB_param.trans_b = true;
+  params.push_back(transB_param);
+
+  MatmulParamsAI transAB_param = create_param(32, 32, 32,
+                                 DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY, no_postop,
+                                 true, "coverage_transAB");
+  transAB_param.trans_a = true;
+  transAB_param.trans_b = true;
+  params.push_back(transAB_param);
+}
+
+// -----------------------------------------------------------------------------
+// add_coverage_boundary_params
+//
+// Adds strategic boundary tests for coverage:
+//   - Minimal dimensions (1x1x1)
+//   - SIMD/AVX boundary sizes
+//   - Single row/column variations
+// -----------------------------------------------------------------------------
+void ParameterGenerator::add_coverage_boundary_params(
+  std::vector<MatmulParamsAI> &params) {
+  PostOpConfig no_postop;
+
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> boundary_dims
+  = {
+    {1, 1, 1, "minimal"},
+    {1, 32, 32, "single_row"},
+    {32, 1, 32, "single_col"},
+    {32, 32, 1, "single_k"},
+    {8, 8, 8, "simd8"},
+    {16, 16, 16, "avx16"},
+    {32, 32, 32, "avx512_32"}
+  };
+
+  for (const auto& [m, n, k, desc] : boundary_dims) {
+    params.push_back(create_param(m, n, k, DataTypeCombination::F32_F32_F32,
+                                  TestCategory::BOUNDARY, no_postop, true, "coverage_boundary_" + desc));
+  }
+}
+
+// -----------------------------------------------------------------------------
+// add_coverage_edge_case_params
+//
+// Adds strategic edge case tests for coverage:
+//   - Very tall, wide, deep matrices
+//   - Large K with small M,N
+// -----------------------------------------------------------------------------
+void ParameterGenerator::add_coverage_edge_case_params(
+  std::vector<MatmulParamsAI> &params) {
+  PostOpConfig no_postop;
+
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> edge_dims = {
+    {1024, 1, 128, "very_tall"},
+    {1, 1024, 128, "very_wide"},
+    {128, 128, 1, "flat_k"},
+    {1, 128, 128, "single_m"},
+    {128, 1, 128, "single_n"}
+  };
+
+  for (const auto& [m, n, k, desc] : edge_dims) {
+    params.push_back(create_param(m, n, k, DataTypeCombination::F32_F32_F32,
+                                  TestCategory::EDGE_CASE, no_postop, true, "coverage_edge_" + desc));
+  }
+}
+
+// -----------------------------------------------------------------------------
+// add_coverage_invalid_params
+//
+// Adds strategic invalid tests for error handling coverage:
+//   - Zero dimensions
+//   - Overflow dimensions
+//   - Missing binary tensor
+//   - Unsupported dtype combos
+// -----------------------------------------------------------------------------
+void ParameterGenerator::add_coverage_invalid_params(
+  std::vector<MatmulParamsAI> &params) {
+  PostOpConfig no_postop;
+  auto post_op_configs = AITestUtils::get_all_post_op_configs();
+
+  // Zero dimension tests
+  params.push_back(create_param(0, 32, 32, DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_zero_m"));
+  params.push_back(create_param(32, 0, 32, DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_zero_n"));
+  params.push_back(create_param(32, 32, 0, DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_zero_k"));
+  params.push_back(create_param(0, 0, 0, DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_all_zero"));
+
+  // Overflow dimension
+  params.push_back(create_param(AI_MAX_DIM + 1, 32, 32,
+                                DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_overflow"));
+
+  // Missing binary tensor for binary post-op
+  MatmulParamsAI missing_binary = create_param(8, 8, 8,
+                                  DataTypeCombination::F32_F32_F32, TestCategory::INVALID,
+                                  AITestUtils::create_binary_add_config(), false,
+                                  "coverage_invalid_missing_binary");
+  missing_binary.test_name = "coverage_invalid_missing_binary_tensor";
+  params.push_back(missing_binary);
+
+  // Unsupported data type combination
+  params.push_back(create_param(8, 8, 8, DataTypeCombination::S4_S4_S4,
+                                TestCategory::INVALID, no_postop, false, "coverage_invalid_unsupported_dtype"));
+
+  // Unknown post-op type
+  PostOpConfig bad_postop;
+  bad_postop.config_name = "bad_postop";
+  bad_postop.post_ops = {static_cast<post_op_type_t>(999)};
+  params.push_back(create_param(8, 8, 8, DataTypeCombination::F32_F32_F32,
+                                TestCategory::INVALID, bad_postop, false, "coverage_invalid_bad_postop"));
+}
 
 // -----------------------------------------------------------------------------
 // generate_comprehensive_test_suite

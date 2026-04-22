@@ -442,6 +442,110 @@ BatchMatmulParameterGenerator::generate_random_params_for_accuracy_subcategory(
                       expect_success, "accuracy");
 }
 
+// -----------------------------------------------------------------------------
+// generate_coverage_test_suite
+//
+// Generates a strategic minimal set of batch matmul test parameters designed to
+// maximize code coverage while minimizing test count. This includes:
+//   - One test per data type combination
+//   - Key batch size variations
+//   - Broadcasting scenarios (2D weight, 2D input)
+//   - Boundary and edge case tests
+//   - Invalid tests for error handling coverage
+//
+// Returns:
+//   Vector of BatchMatmulParamsAI objects for coverage testing (~25 tests)
+// Usage:
+//   Used by coverage builds to maximize code coverage with minimal runtime.
+// -----------------------------------------------------------------------------
+std::vector<BatchMatmulParamsAI>
+BatchMatmulParameterGenerator::generate_coverage_test_suite() {
+  std::vector<BatchMatmulParamsAI> coverage_params;
+  PostOpConfig no_postop;
+
+  // 1. One test per data type combination (representative shape)
+  const uint64_t cov_batch = 4, cov_m = 32, cov_n = 32, cov_k = 32;
+  for (auto data_combo : ParameterGenerator::supported_combinations) {
+    if (AITestUtils::is_aocl_kernel_supported(
+          AITestUtils::get_input_dtype(data_combo),
+          AITestUtils::get_weight_dtype(data_combo),
+          AITestUtils::get_output_dtype(data_combo), {})) {
+      coverage_params.push_back(create_param(cov_batch, cov_m, cov_n, cov_k,
+                                             data_combo, TestCategory::ACCURACY, no_postop,
+                                             false, false, true, "coverage_bmm_dtype"));
+    }
+  }
+
+  // 2. Batch size variations
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  batch_sizes = {
+    {1, 32, 32, 32, "single_batch"},
+    {2, 32, 32, 32, "small_batch"},
+    {8, 32, 32, 32, "medium_batch"},
+    {16, 32, 32, 32, "large_batch"}
+  };
+  for (const auto& [batch, m, n, k, desc] : batch_sizes) {
+    coverage_params.push_back(create_param(batch, m, n, k,
+                                           DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY,
+                                           no_postop, false, false, true, "coverage_bmm_batch_" + desc));
+  }
+
+  // 3. Broadcasting scenarios
+  // 2D weight (weight shared across batch)
+  coverage_params.push_back(create_param(4, 32, 32, 32,
+                                         DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY,
+                                         no_postop, true, false, true, "coverage_bmm_broadcast_weight"));
+  // 2D input (input shared across batch)
+  coverage_params.push_back(create_param(4, 32, 32, 32,
+                                         DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY,
+                                         no_postop, false, true, true, "coverage_bmm_broadcast_input"));
+
+  // 4. Boundary tests
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  boundary_dims = {
+    {1, 1, 1, 1, "minimal"},
+    {1, 32, 32, 1, "single_k"},
+    {8, 8, 8, 8, "simd8"},
+    {4, 16, 16, 16, "avx16"}
+  };
+  for (const auto& [batch, m, n, k, desc] : boundary_dims) {
+    coverage_params.push_back(create_param(batch, m, n, k,
+                                           DataTypeCombination::F32_F32_F32, TestCategory::BOUNDARY,
+                                           no_postop, false, false, true, "coverage_bmm_boundary_" + desc));
+  }
+
+  // 5. Edge case tests
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  edge_dims = {
+    {2, 1, 128, 128, "tall"},
+    {2, 128, 1, 128, "wide"},
+    {2, 128, 128, 1, "flat_k"}
+  };
+  for (const auto& [batch, m, n, k, desc] : edge_dims) {
+    coverage_params.push_back(create_param(batch, m, n, k,
+                                           DataTypeCombination::F32_F32_F32, TestCategory::EDGE_CASE,
+                                           no_postop, false, false, true, "coverage_bmm_edge_" + desc));
+  }
+
+  // 6. Invalid tests
+  // Zero batch size
+  coverage_params.push_back(create_param(0, 32, 32, 32,
+                                         DataTypeCombination::F32_F32_F32, TestCategory::INVALID,
+                                         no_postop, false, false, false, "coverage_bmm_invalid_zero_batch"));
+  // Zero dimension
+  coverage_params.push_back(create_param(4, 0, 32, 32,
+                                         DataTypeCombination::F32_F32_F32, TestCategory::INVALID,
+                                         no_postop, false, false, false, "coverage_bmm_invalid_zero_m"));
+  // Unsupported dtype
+  coverage_params.push_back(create_param(4, 32, 32, 32,
+                                         DataTypeCombination::S4_S4_S4, TestCategory::INVALID,
+                                         no_postop, false, false, false, "coverage_bmm_invalid_dtype"));
+
+  std::cout << "[AI_GTEST] BatchMatMul coverage test suite generated with "
+            << coverage_params.size() << " strategic tests" << std::endl;
+  return coverage_params;
+}
+
 std::vector<BatchMatmulParamsAI>
 BatchMatmulParameterGenerator::generate_comprehensive_test_suite() {
   std::vector<BatchMatmulParamsAI> all_params;

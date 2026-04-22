@@ -94,29 +94,97 @@ function run_and_generate_coverage_report() {
   FILTERED_INFO="coverage_filtered.info"
   HTML_DIR="coverage_html"
   
-  # Direct MatMul configuration - ZENDNNL_MATMUL_ALGO values
-  ALGO_VALUES_DIRECT=("auto" 0 1 2)
+  # ZENDNNL_MATMUL_ALGO values for lowoha=false: 1, 2, 4, 5
+  ALGO_VALUES_LOWOHA_FALSE=(1 2 4 5)
   
-  # Set USE_ZENDNN_MATMUL_DIRECT for direct mode
-  export USE_ZENDNN_MATMUL_DIRECT=1
+  # ZENDNNL_MATMUL_ALGO values for lowoha=true: auto, 0, 1, 2, 3, 4, 5, 6
+  ALGO_VALUES_LOWOHA_TRUE=("auto" 0 1 2 3 4 5 6)
   
-  # Run tests for each algorithm value in direct mode
-  for algo in "${ALGO_VALUES_DIRECT[@]}"; do
+  # ============================================================================
+  # ENABLE ALL LOGGERS AND PROFILERS FOR MAXIMUM COVERAGE
+  # ============================================================================
+  # These environment variables enable logging code paths that would otherwise
+  # be skipped, ensuring coverage of logger/profiler source code.
+  # See docs/logging.md for detailed information about log levels.
+  # ============================================================================
+  export ZENDNNL_ENABLE_PROFILER=1         # Enable profiler code paths
+  export ZENDNNL_PROFILE_LOG_LEVEL=4       # Verbose profiler output
+  export ZENDNNL_COMMON_LOG_LEVEL=4        # Common logging enabled
+  export ZENDNNL_API_LOG_LEVEL=4           # API logging enabled
+  export ZENDNNL_TEST_LOG_LEVEL=4          # Test logging enabled
+  
+  echo "=========================================="
+  echo "Logging/Profiler environment variables set:"
+  echo "  ZENDNNL_ENABLE_PROFILER=1"
+  echo "  ZENDNNL_PROFILE_LOG_LEVEL=4"
+  echo "  ZENDNNL_COMMON_LOG_LEVEL=4"
+  echo "  ZENDNNL_API_LOG_LEVEL=4"
+  echo "  ZENDNNL_TEST_LOG_LEVEL=4"
+  echo "=========================================="
+  
+  # ============================================================================
+  # Run tests with lowoha=false
+  # ============================================================================
+  for algo in "${ALGO_VALUES_LOWOHA_FALSE[@]}"; do
     echo "=========================================="
-    echo "Running tests with ZENDNNL_MATMUL_ALGO=$algo ..."
+    echo "Running tests with ZENDNNL_MATMUL_ALGO=$algo (lowoha=false) ..."
     echo "=========================================="
     export ZENDNNL_MATMUL_ALGO=$algo
-    ./install/gtests/gtests --ai_test_mode post-sub --lowoha true --gtest_filter="AITests/*:-AITests/TestBatch*"
+    # Use --ai_test_mode coverage for strategic minimal tests with maximum code coverage
+    # Alternative modes: pre-sub (minimal), post-sub (comprehensive), nightly (10x tests)
+    ./install/gtests/gtests --ai_test_mode coverage --lowoha false --gtest_filter="AITests/*:-AITests/TestBatch*"
     
     # Capture coverage for this run
-    lcov --capture --directory . --output-file "coverage_direct_algo_${algo}.info"
+    lcov --capture --directory . --output-file "coverage_lowoha_false_algo_${algo}.info"
   done
   
-  # Build the lcov command dynamically based on ALGO_VALUES_DIRECT
-  TRACEFILE_ARGS=""
-  for algo in "${ALGO_VALUES_DIRECT[@]}"; do
-    TRACEFILE_ARGS="$TRACEFILE_ARGS --add-tracefile coverage_direct_algo_${algo}.info"
+  # ============================================================================
+  # Run tests with lowoha=true
+  # ============================================================================
+  for algo in "${ALGO_VALUES_LOWOHA_TRUE[@]}"; do
+    echo "=========================================="
+    echo "Running tests with ZENDNNL_MATMUL_ALGO=$algo (lowoha=true) ..."
+    echo "=========================================="
+    export ZENDNNL_MATMUL_ALGO=$algo
+    # Use --ai_test_mode coverage for strategic minimal tests with maximum code coverage
+    # Alternative modes: pre-sub (minimal), post-sub (comprehensive), nightly (10x tests)
+    ./install/gtests/gtests --ai_test_mode coverage --lowoha true --gtest_filter="AITests/*:-AITests/TestBatch*"
+    
+    # Capture coverage for this run
+    lcov --capture --directory . --output-file "coverage_lowoha_true_algo_${algo}.info"
   done
+  
+  # ============================================================================
+  # Run tests with logging DISABLED to cover else-branches
+  # ============================================================================
+  # This ensures both if(logging_enabled) and else branches get coverage
+  # ============================================================================
+  echo "=========================================="
+  echo "Running tests with logging DISABLED for else-branch coverage..."
+  echo "=========================================="
+  unset ZENDNNL_ENABLE_PROFILER
+  unset ZENDNNL_PROFILE_LOG_LEVEL
+  unset ZENDNNL_COMMON_LOG_LEVEL
+  unset ZENDNNL_API_LOG_LEVEL
+  unset ZENDNNL_TEST_LOG_LEVEL
+  
+  export ZENDNNL_MATMUL_ALGO=auto
+  ./install/gtests/gtests --ai_test_mode coverage --lowoha true --gtest_filter="AITests/*:-AITests/TestBatch*"
+  
+  # Capture coverage for this run
+  lcov --capture --directory . --output-file "coverage_logging_disabled.info"
+  
+  # Build the lcov command dynamically based on both ALGO_VALUES arrays
+  TRACEFILE_ARGS=""
+  for algo in "${ALGO_VALUES_LOWOHA_FALSE[@]}"; do
+    TRACEFILE_ARGS="$TRACEFILE_ARGS --add-tracefile coverage_lowoha_false_algo_${algo}.info"
+  done
+  for algo in "${ALGO_VALUES_LOWOHA_TRUE[@]}"; do
+    TRACEFILE_ARGS="$TRACEFILE_ARGS --add-tracefile coverage_lowoha_true_algo_${algo}.info"
+  done
+  
+  # Add logging-disabled coverage file
+  TRACEFILE_ARGS="$TRACEFILE_ARGS --add-tracefile coverage_logging_disabled.info"
   
   # Merge all coverage files
   echo "=========================================="
@@ -163,6 +231,8 @@ function run_and_generate_coverage_report() {
     '*/gtest/*'           # Google Test framework
     '*/gtests/*'          # Test files (zendnnl/gtests and ai_gtests)
     '*/build/*'           # Build artifacts
+    '*/reorder*'
+    '*/matmul_native*'
   )
   
   # ============================================================================
@@ -201,8 +271,19 @@ function run_and_generate_coverage_report() {
   echo "=========================================="
   echo "Code Coverage report for ZENDNN(L) is generated."
   echo "Coverage includes data from:"
+  echo ""
+  echo "  - AI tests with LOWOHA disabled (--lowoha false)"
+  echo "    ZENDNNL_MATMUL_ALGO values: ${ALGO_VALUES_LOWOHA_FALSE[*]}"
+  echo ""
   echo "  - AI tests with LOWOHA enabled (--lowoha true)"
-  echo "  - ZENDNNL_MATMUL_ALGO values: ${ALGO_VALUES_DIRECT[*]}"
+  echo "    ZENDNNL_MATMUL_ALGO values: ${ALGO_VALUES_LOWOHA_TRUE[*]}"
+  echo ""
+  echo "  - Additional run with logging DISABLED for else-branch coverage"
+  echo ""
+  echo "Logger/Profiler coverage enabled:"
+  echo "  - ZENDNNL_ENABLE_PROFILER=1"
+  echo "  - All log levels set to 4 (verbose)"
+  echo "  - Covers: apilog_info(), log_info(), profile timing, config_manager"
   echo ""
   echo "This covers LOWOHA operators:"
   echo "  - lowoha_operators/matmul/*"

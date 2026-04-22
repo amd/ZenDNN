@@ -105,6 +105,7 @@ class BatchMatmulParameterGenerator {
  public:
   static std::vector<BatchMatmulParamsAI> generate_comprehensive_test_suite();
   static std::vector<BatchMatmulParamsAI> generate_minimal_test_suite();
+  static std::vector<BatchMatmulParamsAI> generate_coverage_test_suite();
   static std::vector<BatchMatmulParamsAI> generate_category_specific_params(
     TestCategory category);
 

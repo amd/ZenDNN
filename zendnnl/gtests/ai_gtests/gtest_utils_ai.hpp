@@ -68,6 +68,7 @@ enum class TestMode {
   ACCURACY,   // Accuracy-focused tests only
   INVALID,    // Invalid input tests only
   BOUNDARY,   // Boundary condition tests only
+  COVERAGE,   // Strategic minimal tests for maximum code coverage
   DEFAULT     // Default comprehensive testing
 };
 
@@ -127,6 +128,9 @@ std::vector<ParamsType> get_test_suite_for_mode() {
   }
   else if (ai_gtest_mode == TestMode::BOUNDARY) {
     return GeneratorType::generate_category_specific_params(TestCategory::BOUNDARY);
+  }
+  else if (ai_gtest_mode == TestMode::COVERAGE) {
+    return GeneratorType::generate_coverage_test_suite();
   }
   else if (ai_gtest_mode == TestMode::DEFAULT) {
     return GeneratorType::generate_comprehensive_test_suite();
@@ -208,6 +212,21 @@ enum class MatrixDimensions : uint64_t {
   SKINNY_MAX_LARGE = 512
 };
 
+/** @brief Max possible values for data types used in numerical stability validation
+ *
+ * These values represent the maximum magnitude that can appear in tensors
+ * based on the fill patterns used in tensor creation (fill_uniform_data, fill_boundary_data).
+ * Used in validate_numerical_stability to calculate expected output bounds.
+ */
+enum class DataTypeMaxValue : int {
+  F32 = 3,      // Based on fill_uniform_data range [-3, 3]
+  BF16 = 3,     // Based on fill_uniform_data range [-3, 3]
+  U8 = 255,     // Unsigned 8-bit max (boundary pattern: {255, 0, 128, 1})
+  S8 = 127,     // Signed 8-bit max (boundary pattern: {127, -127, 1, -1})
+  S4 = 8,       // 4-bit signed range [-8, 7]
+  DEFAULT = 255 // Safe fallback for unknown types
+};
+
 /** @brief Data type combinations for testing */
 enum class DataTypeCombination {
   F32_F32_F32,   // Input, Weight, Output
@@ -215,7 +234,10 @@ enum class DataTypeCombination {
   BF16_BF16_F32,  // BF16 input/weight → F32 output (GEMV / inference)
   BF16_F32_BF16,
   F32_BF16_F32,
+  BF16_S4_BF16,  // BF16 input with S4 quantized weights
+  BF16_S4_F32,   // BF16 input with S4 quantized weights, F32 output
   S8_S8_S8,
+  S8_S8_S32,     // INT8 matmul with S32 accumulator
   S4_S4_S4,
   U8_U8_U8,
   S32_S32_S32,
@@ -317,14 +339,6 @@ class AITestUtils {
 
   // Validation utilities
   static bool validate_dimensions(uint64_t m, uint64_t n, uint64_t k);
-  static bool validate_tensor_compatibility(const tensor_t &tensor,
-      const std::vector<uint64_t> &expected_dims,
-      data_type_t expected_dtype);
-
-  // Error testing utilities
-  static status_t test_invalid_context_creation(const MatmulParamsAI &params);
-  static status_t test_invalid_operator_creation(const MatmulParamsAI &params);
-  static status_t test_missing_tensors(const MatmulParamsAI &params);
 
   // Reference implementation utilities
   static status_t run_reference_matmul(tensor_t &input,
@@ -340,12 +354,34 @@ class AITestUtils {
   // Debug print utility
   static void debug_print(const std::string &msg);
 
-  // Memory management utilities
-  static void cleanup_tensors(std::vector<tensor_t> &tensors);
-  static size_t get_tensor_memory_usage(const tensor_t &tensor);
-
   // Unique name generation
   static std::string generate_unique_name(const std::string &prefix);
+
+  // Data type max value utility for numerical stability validation
+  // Returns the max possible value for a given data type based on fill patterns
+  static float get_dtype_max_value(data_type_t dtype) {
+    switch (dtype) {
+    case data_type_t::f32:
+      return static_cast<float>(DataTypeMaxValue::F32);
+    case data_type_t::bf16:
+      return static_cast<float>(DataTypeMaxValue::BF16);
+    case data_type_t::u8:
+      return static_cast<float>(DataTypeMaxValue::U8);
+    case data_type_t::s8:
+      return static_cast<float>(DataTypeMaxValue::S8);
+    case data_type_t::s4:
+      return static_cast<float>(DataTypeMaxValue::S4);
+    default:
+      return static_cast<float>(DataTypeMaxValue::DEFAULT);
+    }
+  }
+};
+
+/** @brief WoQ (Weight-Only Quantization) tensor bundle for S4 quantized weights */
+struct WoQTensors {
+  tensor_t weights;  // S4 quantized weight tensor
+  tensor_t scale;    // Per-channel scale tensor (F32 or BF16)
+  tensor_t zp;       // Zero-point tensor (S8)
 };
 
 /** @brief AI-specific tensor factory for comprehensive testing */
@@ -378,6 +414,21 @@ class AITensorFactory {
     data_type_t dtype,
     const std::string &name = "",
     bool fp16_scale_bias = true);
+
+  /** @brief Create WoQ (Weight-Only Quantization) weight tensor with scale and zero-point
+   *
+   * Creates an S4 quantized weight tensor with proper scale and zero-point tensors
+   * for Weight-Only Quantization (WoQ) matmul operations.
+   *
+   * @param dims Weight dimensions {K, N}
+   * @param scale_dtype Data type for scale tensor (f32 or bf16)
+   * @param name Optional tensor name prefix
+   * @return WoQTensors struct containing weights, scale, and zp tensors
+   */
+  static WoQTensors create_woq_weight_tensor(
+    const std::vector<uint64_t> &dims,
+    data_type_t scale_dtype = data_type_t::f32,
+    const std::string &name = "");
 };
 
 /** @brief Comprehensive test parameter generator */
@@ -386,9 +437,14 @@ class ParameterGenerator {
   static std::vector<DataTypeCombination> supported_combinations;
   static std::vector<MatmulParamsAI> generate_comprehensive_test_suite();
   static std::vector<MatmulParamsAI> generate_minimal_test_suite();
+  static std::vector<MatmulParamsAI> generate_coverage_test_suite();
   static std::vector<MatmulParamsAI> generate_category_specific_params(
     TestCategory category);
  private:
+  static void add_coverage_accuracy_params(std::vector<MatmulParamsAI> &params);
+  static void add_coverage_boundary_params(std::vector<MatmulParamsAI> &params);
+  static void add_coverage_edge_case_params(std::vector<MatmulParamsAI> &params);
+  static void add_coverage_invalid_params(std::vector<MatmulParamsAI> &params);
   static MatmulParamsAI generate_random_params_for_accuracy_subcategory(
     const std::string &category,
     DataTypeCombination data_combo,

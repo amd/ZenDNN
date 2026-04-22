@@ -93,6 +93,12 @@ enum class EmbagDataTypeCombination {
   S4_BF16,      // Table: S4 (quantized), Output: BF16
 };
 
+/** @brief Indices/Offsets data type combinations for embedding bag */
+enum class EmbagIndicesType {
+  S64,          // Indices/Offsets: int64_t (s64)
+  S32,          // Indices/Offsets: int32_t (s32)
+};
+
 /** @brief AI-specific embedding bag parameter structure */
 struct EmbagParamsAI {
   uint64_t num_embeddings;  // Number of embeddings in table
@@ -101,6 +107,7 @@ struct EmbagParamsAI {
   uint64_t num_bags;        // Number of bags (for embedding bag mode)
 
   EmbagDataTypeCombination data_types;
+  EmbagIndicesType indices_type;  // Indices/Offsets data type (s64 or s32)
   embag_algo_t algo;        // sum, mean, max, or none (for embedding lookup)
   TestCategory category;
 
@@ -113,9 +120,13 @@ struct EmbagParamsAI {
   bool expect_success;
   std::string test_name;
 
+  bool is_group_embag;    // If true, test group_embedding_bag_direct API
+  uint64_t group_size;    // Number of tables in the group (default: 2)
+
   EmbagParamsAI() : num_embeddings(100), embedding_dim(64),
     num_indices(16), num_bags(4),
     data_types(EmbagDataTypeCombination::F32_F32),
+    indices_type(EmbagIndicesType::S64),
     algo(embag_algo_t::sum),
     category(TestCategory::ACCURACY),
     use_offsets(true),
@@ -124,7 +135,9 @@ struct EmbagParamsAI {
     fp16_scale_bias(false),
     include_last_offset(false),
     expect_success(true),
-    test_name("") {}
+    test_name(""),
+    is_group_embag(false),
+    group_size(2) {}
 };
 
 /** @brief Embedding bag-specific utility functions */
@@ -139,6 +152,7 @@ class EmbagTestUtils {
   // Data type utilities
   static data_type_t get_table_dtype(EmbagDataTypeCombination combo);
   static data_type_t get_output_dtype(EmbagDataTypeCombination combo);
+  static data_type_t get_indices_dtype(EmbagIndicesType indices_type);
   static bool is_valid_embag_data_type_combination(EmbagDataTypeCombination
       combo);
 
@@ -197,6 +211,7 @@ class EmbagParameterGenerator {
 
   static std::vector<EmbagParamsAI> generate_comprehensive_test_suite();
   static std::vector<EmbagParamsAI> generate_minimal_test_suite();
+  static std::vector<EmbagParamsAI> generate_coverage_test_suite();
   static std::vector<EmbagParamsAI> generate_category_specific_params(
     TestCategory category);
 
@@ -224,7 +239,8 @@ class EmbagParameterGenerator {
     TestCategory category,
     bool use_offsets = true,
     bool expect_success = true,
-    const std::string &suite_name = "");
+    const std::string &suite_name = "",
+    EmbagIndicesType indices_type = EmbagIndicesType::S64);
 };
 
 } // namespace ai_gtests

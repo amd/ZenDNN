@@ -23,6 +23,7 @@ using namespace zendnnl::lowoha::matmul;
 #include <iostream>
 #include <memory>
 #include <cstdlib>
+#include <cstring>
 
 /** @brief AI Test class for comprehensive ZenDNNL batch matmul testing */
 class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
@@ -90,7 +91,23 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
     auto bias_dims = BatchMatmulTestUtils::get_bias_dims(params.n);
 
     tensors.input = tensor_creator(input_dims, input_dtype, input_name);
-    tensors.weights = tensor_creator(weight_dims, weight_dtype, weights_name);
+
+    // Handle WoQ (Weight-Only Quantization) for S4 weights
+    // S4 quantized weights require scale and zero-point tensors
+    // NOTE: WoQ S4 weights in batch matmul must always be 2D (broadcasted)
+    // because the quantization scale/zp are per-channel (2D) and don't support
+    // 3D batched weights. The same S4 weights are shared across all batches.
+    if (weight_dtype == data_type_t::s4) {
+      // Always use 2D broadcasted weights for S4 quantized weights
+      // This is required because WoQ scale/zp are 2D and don't support batched dims
+      WoQTensors woq_tensors = AITensorFactory::create_woq_weight_tensor(
+      {params.k, params.n}, output_dtype, weights_name);
+      tensors.weights = woq_tensors.weights;
+    }
+    else {
+      tensors.weights = tensor_creator(weight_dims, weight_dtype, weights_name);
+    }
+
     tensors.bias = tensor_creator(bias_dims, output_dtype, bias_name);
     tensors.output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                      output_name);
@@ -644,6 +661,11 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
           matmul_params_obj.postop_.push_back(postop_item);
         }
 
+        // Determine if weights are constant (required for WoQ S4 weights)
+        // S4 quantized weights require weight reordering which is performed
+        // when is_weights_const is true
+        bool is_weights_const = (matmul_dtypes.wei == data_type_t::s4);
+
         // Call LOWOHA matmul_direct
         status_t status = matmul_direct(
                             'r',  // layout: row-major
@@ -653,7 +675,7 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
                             B_data, ldb,
                             bias_data,
                             0.0f, C_data, ldc,
-                            false,  // is_weights_const
+                            is_weights_const,  // true for S4 quantized weights
                             batch_params,
                             matmul_params_obj);
 

@@ -107,12 +107,14 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                      params.use_padding_idx ? params.padding_idx : -1);
     }
 
+    data_type_t indices_dtype = EmbagTestUtils::get_indices_dtype(
+                                  params.indices_type);
     std::vector<tensor_t::index_type> indices_size_vec(indices_dims.begin(),
         indices_dims.end());
     tensors.indices = tensor_t()
                       .set_name(indices_name)
                       .set_size(indices_size_vec)
-                      .set_data_type(data_type_t::s64)
+                      .set_data_type(indices_dtype)
                       .set_storage()
                       .create();
 
@@ -123,8 +125,21 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     if (!indices_ptr) {
       throw std::runtime_error("Null pointer for indices tensor");
     }
-    std::memcpy(indices_ptr, indices_data.data(),
-                indices_data.size() * sizeof(int64_t));
+
+    // Copy indices data based on indices data type
+    if (indices_dtype == data_type_t::s32) {
+      // Convert int64_t to int32_t
+      std::vector<int32_t> indices_data_s32(indices_data.size());
+      for (size_t i = 0; i < indices_data.size(); ++i) {
+        indices_data_s32[i] = static_cast<int32_t>(indices_data[i]);
+      }
+      std::memcpy(indices_ptr, indices_data_s32.data(),
+                  indices_data_s32.size() * sizeof(int32_t));
+    }
+    else {
+      std::memcpy(indices_ptr, indices_data.data(),
+                  indices_data.size() * sizeof(int64_t));
+    }
 
     // Create offsets tensor if needed
     if (params.use_offsets) {
@@ -138,7 +153,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
       tensors.offsets = tensor_t()
                         .set_name(offsets_name)
                         .set_size(offsets_size_vec)
-                        .set_data_type(data_type_t::s64)
+                        .set_data_type(indices_dtype)
                         .set_storage()
                         .create();
 
@@ -149,8 +164,21 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
       if (!offsets_ptr) {
         throw std::runtime_error("Null pointer for offsets tensor");
       }
-      std::memcpy(offsets_ptr, offsets_data.data(),
-                  offsets_data.size() * sizeof(int64_t));
+
+      // Copy offsets data based on indices data type
+      if (indices_dtype == data_type_t::s32) {
+        // Convert int64_t to int32_t
+        std::vector<int32_t> offsets_data_s32(offsets_data.size());
+        for (size_t i = 0; i < offsets_data.size(); ++i) {
+          offsets_data_s32[i] = static_cast<int32_t>(offsets_data[i]);
+        }
+        std::memcpy(offsets_ptr, offsets_data_s32.data(),
+                    offsets_data_s32.size() * sizeof(int32_t));
+      }
+      else {
+        std::memcpy(offsets_ptr, offsets_data.data(),
+                    offsets_data.size() * sizeof(int64_t));
+      }
     }
 
     // Create output tensors
@@ -406,6 +434,108 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     // Invalid tests should fail
     EXPECT_NE(test_status, status_t::success)
         << "Invalid test should fail but succeeded: " << params.test_name;
+  }
+
+  // -----------------------------------------------------------------------------
+  // run_group_embag_test
+  //
+  // Runs group embedding bag test using group_embedding_bag_direct API.
+  // Creates multiple sets of tensors and runs batched embedding bag operation.
+  // Used for testing the grouped/batched embedding bag direct API.
+  //
+  // Parameters:
+  //   params - Embedding bag test parameters (with is_group_embag=true)
+  // -----------------------------------------------------------------------------
+  void run_group_embag_test(const EmbagParamsAI &params) {
+    ASSERT_TRUE(params.is_group_embag)
+        << "run_group_embag_test called with non-group params";
+    ASSERT_GT(params.group_size, 0)
+        << "Group size must be greater than 0";
+
+    auto table_dtype = EmbagTestUtils::get_table_dtype(params.data_types);
+    auto output_dtype = EmbagTestUtils::get_output_dtype(params.data_types);
+
+    // Vectors to hold tensor groups and raw pointers
+    std::vector<CreatedTensors> tensor_groups;
+    std::vector<const void *> tables;
+    std::vector<const void *> indices;
+    std::vector<const void *> offsets;
+    std::vector<const float *> weights;
+    std::vector<void *> dsts;
+    std::vector<embag_params_t> embag_params_vec;
+
+    // Create tensors for each table in the group
+    for (uint64_t i = 0; i < params.group_size; ++i) {
+      std::string suffix = "_group" + std::to_string(i);
+      auto tensors = create_test_tensors(params, table_dtype, output_dtype,
+                                         false, false, suffix);
+      tensor_groups.push_back(tensors);
+
+      // Build raw pointers
+      tables.push_back(tensors.table.get_raw_handle_const());
+      indices.push_back(tensors.indices.get_raw_handle_const());
+      if (params.use_offsets) {
+        offsets.push_back(tensors.offsets.get_raw_handle_const());
+      }
+      else {
+        offsets.push_back(nullptr);
+      }
+      weights.push_back(nullptr);  // AI tests don't use per-sample weights
+      dsts.push_back(tensors.output.get_raw_handle_unsafe());
+
+      // Build embag_params_t for this table
+      data_type_t indices_dtype = EmbagTestUtils::get_indices_dtype(
+                                    params.indices_type);
+      embag_params_t embag_params_obj;
+      embag_params_obj.dtypes.table = table_dtype;
+      embag_params_obj.dtypes.output = output_dtype;
+      embag_params_obj.dtypes.indices = indices_dtype;
+      if (params.use_offsets) {
+        embag_params_obj.dtypes.offsets = indices_dtype;
+      }
+
+      embag_params_obj.algo = params.algo;
+      embag_params_obj.num_embeddings = params.num_embeddings;
+      embag_params_obj.embedding_dim = params.embedding_dim;
+      embag_params_obj.num_indices = params.num_indices;
+
+      if (params.use_offsets) {
+        embag_params_obj.num_bags = params.num_bags;
+        embag_params_obj.include_last_offset = params.include_last_offset;
+      }
+
+      embag_params_obj.is_weights = false;
+      embag_params_obj.padding_idx = params.use_padding_idx ? params.padding_idx : -1;
+      embag_params_obj.num_threads = 0;
+      embag_params_obj.fp16_scale_bias = params.fp16_scale_bias;
+      embag_params_obj.dst_stride = tensors.output.get_stride()[0];
+
+      embag_params_vec.push_back(embag_params_obj);
+    }
+
+    // Call group_embedding_bag_direct
+    AITestUtils::debug_print("[AI_EMBAG_DEBUG] Running group_embedding_bag_direct with "
+                             + std::to_string(params.group_size) + " tables...");
+
+    status_t status = group_embedding_bag_direct(
+                        tables, indices, offsets, weights, dsts, embag_params_vec);
+
+    AITestUtils::debug_print("[AI_EMBAG_DEBUG] group_embedding_bag_direct finished.");
+
+    if (params.expect_success) {
+      EXPECT_EQ(status, status_t::success)
+          << "Group embedding bag test failed when success was expected for "
+          << params.test_name;
+    }
+    else {
+      EXPECT_NE(status, status_t::success)
+          << "Group embedding bag test succeeded when failure was expected for "
+          << params.test_name;
+    }
+
+    std::cout << "[AI_EMBAG_GROUP] " << params.test_name
+              << " with " << params.group_size << " tables completed with status: "
+              << static_cast<int>(status) << std::endl;
   }
 
  private:
@@ -764,7 +894,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
 /**
  * @brief Main test method for ZenDNNL embedding bag AI tests.
  *        Routes to the appropriate test type based on category (accuracy, boundary, edge case,
- *        invalid, reference kernel). Used by all test instantiations to run the correct test flow.
+ *        invalid, reference kernel, group embedding bag). Used by all test instantiations to run the correct test flow.
  */
 TEST_P(TestEmbagAI, ComprehensiveEmbagTest) {
   EmbagParamsAI params = GetParam();
@@ -773,6 +903,12 @@ TEST_P(TestEmbagAI, ComprehensiveEmbagTest) {
   if (!EmbagTestUtils::is_valid_embag_data_type_combination(params.data_types)) {
     GTEST_SKIP() << "Data type combination not yet supported: "
                  << static_cast<int>(params.data_types);
+    return;
+  }
+
+  // Check for group embedding bag test first (special handling)
+  if (params.is_group_embag) {
+    run_group_embag_test(params);
     return;
   }
 

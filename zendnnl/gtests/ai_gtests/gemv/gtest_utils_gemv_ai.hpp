@@ -32,6 +32,7 @@ class GemvParameterGenerator {
  public:
   static std::vector<MatmulParamsAI> generate_comprehensive_test_suite();
   static std::vector<MatmulParamsAI> generate_minimal_test_suite();
+  static std::vector<MatmulParamsAI> generate_coverage_test_suite();
   static std::vector<MatmulParamsAI> generate_category_specific_params(
     TestCategory category);
 

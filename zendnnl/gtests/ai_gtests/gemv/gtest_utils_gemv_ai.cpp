@@ -35,8 +35,11 @@ void initialize_gemv_nightly_config() {
   if (env) {
     try {
       int val = std::stoi(env);
-      if (val > 0) GemvMaxTestCases::RANDOM_STRESS = val;
-    } catch (...) {}
+      if (val > 0) {
+        GemvMaxTestCases::RANDOM_STRESS = val;
+      }
+    }
+    catch (...) {}
   }
   std::cout << "[AI_GEMV] Nightly mode: RANDOM_STRESS="
             << GemvMaxTestCases::RANDOM_STRESS << std::endl;
@@ -45,8 +48,9 @@ void initialize_gemv_nightly_config() {
 namespace {
 struct GemvNightlyInitializer {
   GemvNightlyInitializer() {
-    if (ai_gtest_mode == TestMode::NIGHTLY)
+    if (ai_gtest_mode == TestMode::NIGHTLY) {
       initialize_gemv_nightly_config();
+    }
   }
 };
 static GemvNightlyInitializer s_gemv_nightly_init;
@@ -114,11 +118,16 @@ MatmulParamsAI GemvParameterGenerator::create_gemv_param(
   static std::atomic<uint64_t> counter{0};
   auto dtype_str = [](data_type_t dt) {
     switch (dt) {
-    case data_type_t::f32:   return "f32";
-    case data_type_t::bf16:  return "bf16";
-    case data_type_t::u8:    return "u8";
-    case data_type_t::s8:    return "s8";
-    default:                 return "unk";
+    case data_type_t::f32:
+      return "f32";
+    case data_type_t::bf16:
+      return "bf16";
+    case data_type_t::u8:
+      return "u8";
+    case data_type_t::s8:
+      return "s8";
+    default:
+      return "unk";
     }
   };
   std::string in_s  = dtype_str(AITestUtils::get_input_dtype(data_types));
@@ -128,17 +137,17 @@ MatmulParamsAI GemvParameterGenerator::create_gemv_param(
 
   std::string prefix = suite_name.empty() ? "gemv" : suite_name;
   param.test_name = prefix
-    + "_n" + std::to_string(n) + "_k" + std::to_string(k)
-    + "_" + in_s + "_" + wt_s + "_" + out_s
-    + "_" + tb_s
-    + "_" + post_op_config.config_name
-    + "_" + std::to_string(counter.fetch_add(1));
+                    + "_n" + std::to_string(n) + "_k" + std::to_string(k)
+                    + "_" + in_s + "_" + wt_s + "_" + out_s
+                    + "_" + tb_s
+                    + "_" + post_op_config.config_name
+                    + "_" + std::to_string(counter.fetch_add(1));
   return param;
 }
 
 // KC path: N<=256, packed B fits in L2. These shapes hit bf16_gemv_direct.
 void GemvParameterGenerator::add_kc_path_params(
-    std::vector<MatmulParamsAI> &params) {
+  std::vector<MatmulParamsAI> &params) {
   static const uint64_t kc_n_vals[] = {1, 2, 4, 8, 16, 32, 64, 128, 192, 256};
   static const uint64_t kc_k_vals[] = {32, 64, 128, 256, 512, 1024};
   auto postop_cfgs = get_gemv_postop_configs();
@@ -149,8 +158,8 @@ void GemvParameterGenerator::add_kc_path_params(
       for (auto n : kc_n_vals) {
         for (auto k : kc_k_vals) {
           params.push_back(create_gemv_param(
-            n, k, combo, TestCategory::ACCURACY, po,
-            false, true, "gemv_kc"));
+                             n, k, combo, TestCategory::ACCURACY, po,
+                             false, true, "gemv_kc"));
         }
       }
     }
@@ -162,8 +171,8 @@ void GemvParameterGenerator::add_kc_path_params(
       for (auto n : kc_n_vals) {
         for (auto k : kc_k_vals) {
           params.push_back(create_gemv_param(
-            n, k, combo, TestCategory::ACCURACY, po,
-            false, true, "gemv_int8_kc"));
+                             n, k, combo, TestCategory::ACCURACY, po,
+                             false, true, "gemv_int8_kc"));
         }
       }
     }
@@ -177,8 +186,8 @@ void GemvParameterGenerator::add_kc_path_params(
     for (auto n : tb_n_vals) {
       for (auto k : tb_k_vals) {
         params.push_back(create_gemv_param(
-          n, k, combo, TestCategory::ACCURACY, no_postop,
-          true, true, "gemv_kc_transB"));
+                           n, k, combo, TestCategory::ACCURACY, no_postop,
+                           true, true, "gemv_kc_transB"));
       }
     }
   }
@@ -187,8 +196,8 @@ void GemvParameterGenerator::add_kc_path_params(
     for (auto n : tb_n_vals) {
       for (auto k : tb_k_vals) {
         params.push_back(create_gemv_param(
-          n, k, combo, TestCategory::ACCURACY, no_postop,
-          true, true, "gemv_int8_kc_transB"));
+                           n, k, combo, TestCategory::ACCURACY, no_postop,
+                           true, true, "gemv_int8_kc_transB"));
       }
     }
   }
@@ -204,8 +213,8 @@ void GemvParameterGenerator::add_kc_path_params(
         for (auto n : ab_n_vals) {
           for (auto k : ab_k_vals) {
             auto p = create_gemv_param(
-                n, k, combo, TestCategory::ACCURACY, no_postop,
-                false, true, "gemv_kc_ab");
+                       n, k, combo, TestCategory::ACCURACY, no_postop,
+                       false, true, "gemv_kc_ab");
             p.alpha = a;
             p.beta = b;
             params.push_back(p);
@@ -224,8 +233,8 @@ void GemvParameterGenerator::add_kc_path_params(
       for (auto n : ldb_n_vals) {
         for (auto k : ldb_k_vals) {
           auto p = create_gemv_param(
-              n, k, combo, TestCategory::ACCURACY, no_postop,
-              false, true, "gemv_kc_ldb");
+                     n, k, combo, TestCategory::ACCURACY, no_postop,
+                     false, true, "gemv_kc_ldb");
           p.ldb_pad = pad;
           params.push_back(p);
         }
@@ -240,8 +249,8 @@ void GemvParameterGenerator::add_kc_path_params(
         for (auto n : ab_n_vals) {
           for (auto k : ab_k_vals) {
             auto p = create_gemv_param(
-                n, k, combo, TestCategory::ACCURACY, no_postop,
-                false, true, "gemv_int8_kc_ab");
+                       n, k, combo, TestCategory::ACCURACY, no_postop,
+                       false, true, "gemv_int8_kc_ab");
             p.alpha = a;
             p.beta = b;
             params.push_back(p);
@@ -257,8 +266,8 @@ void GemvParameterGenerator::add_kc_path_params(
       for (auto n : ldb_n_vals) {
         for (auto k : ldb_k_vals) {
           auto p = create_gemv_param(
-              n, k, combo, TestCategory::ACCURACY, no_postop,
-              false, true, "gemv_int8_kc_ldb");
+                     n, k, combo, TestCategory::ACCURACY, no_postop,
+                     false, true, "gemv_int8_kc_ldb");
           p.ldb_pad = pad;
           params.push_back(p);
         }
@@ -269,7 +278,7 @@ void GemvParameterGenerator::add_kc_path_params(
 
 // Looper BRGEMM M=1 path: N>256. These go through bf16_brgemm_execute.
 void GemvParameterGenerator::add_looper_path_params(
-    std::vector<MatmulParamsAI> &params) {
+  std::vector<MatmulParamsAI> &params) {
   static const uint64_t lp_n_vals[] = {257, 384, 512, 768, 1024};
   static const uint64_t lp_k_vals[] = {32, 64, 128, 256, 512, 1024};
   auto postop_cfgs = get_gemv_postop_configs();
@@ -279,8 +288,8 @@ void GemvParameterGenerator::add_looper_path_params(
       for (auto n : lp_n_vals) {
         for (auto k : lp_k_vals) {
           params.push_back(create_gemv_param(
-            n, k, combo, TestCategory::ACCURACY, po,
-            false, true, "gemv_looper"));
+                             n, k, combo, TestCategory::ACCURACY, po,
+                             false, true, "gemv_looper"));
         }
       }
     }
@@ -291,8 +300,8 @@ void GemvParameterGenerator::add_looper_path_params(
       for (auto n : lp_n_vals) {
         for (auto k : lp_k_vals) {
           params.push_back(create_gemv_param(
-            n, k, combo, TestCategory::ACCURACY, po,
-            false, true, "gemv_int8_looper"));
+                             n, k, combo, TestCategory::ACCURACY, po,
+                             false, true, "gemv_int8_looper"));
         }
       }
     }
@@ -304,12 +313,14 @@ void GemvParameterGenerator::add_looper_path_params(
 // so we still exercise the hot path heavily while covering edge cases.
 static float random_alpha() {
   static const float pool[] = {1.0f, 1.0f, 1.0f, 1.0f,
-                                0.5f, 2.0f, 0.0f, -1.0f};
+                               0.5f, 2.0f, 0.0f, -1.0f
+                              };
   return pool[gemv_random_dim(0, 7)];
 }
 static float random_beta() {
   static const float pool[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                                1.0f, 0.5f, -0.5f};
+                               1.0f, 0.5f, -0.5f
+                              };
   return pool[gemv_random_dim(0, 7)];
 }
 static int random_ldb_pad() {
@@ -319,32 +330,38 @@ static int random_ldb_pad() {
 
 // Random stress: wide N/K range with all postops, transB, alpha, beta, ldb_pad.
 void GemvParameterGenerator::add_random_stress_params(
-    std::vector<MatmulParamsAI> &params) {
+  std::vector<MatmulParamsAI> &params) {
   auto all_postops = get_gemv_all_postop_configs();
   int max_per_combo = GemvMaxTestCases::RANDOM_STRESS;
   const char *env = std::getenv("GEMV_STRESS_COUNT");
   if (env) {
-    try { int v = std::stoi(env); if (v > 0) max_per_combo = v; }
+    try {
+      int v = std::stoi(env);
+      if (v > 0) {
+        max_per_combo = v;
+      }
+    }
     catch (...) {}
   }
 
   auto add_stress = [&](const std::vector<DataTypeCombination> &combos,
-                        const std::string &prefix) {
+  const std::string &prefix) {
     for (auto combo : combos) {
       auto in_dt  = AITestUtils::get_input_dtype(combo);
       auto wt_dt  = AITestUtils::get_weight_dtype(combo);
       auto out_dt = AITestUtils::get_output_dtype(combo);
       for (const auto &po : all_postops) {
         if (!AITestUtils::is_aocl_kernel_supported(in_dt, wt_dt, out_dt,
-                                                    po.post_ops))
+            po.post_ops)) {
           continue;
+        }
         for (int i = 0; i < max_per_combo; ++i) {
           uint64_t n = gemv_random_dim(1, 2048);
           uint64_t k = gemv_random_dim(1, 4096);
           bool tb = (gemv_random_dim(0, 1) == 1);
           auto p = create_gemv_param(
-            n, k, combo, TestCategory::ACCURACY, po,
-            tb, true, prefix);
+                     n, k, combo, TestCategory::ACCURACY, po,
+                     tb, true, prefix);
           p.alpha   = random_alpha();
           p.beta    = random_beta();
           p.ldb_pad = random_ldb_pad();
@@ -363,8 +380,8 @@ void GemvParameterGenerator::add_random_stress_params(
         uint64_t k = gemv_random_dim(1, 4096);
         bool tb = (gemv_random_dim(0, 1) == 1);
         auto p = create_gemv_param(
-          n, k, combo, TestCategory::ACCURACY, po,
-          tb, true, "gemv_int8_stress");
+                   n, k, combo, TestCategory::ACCURACY, po,
+                   tb, true, "gemv_int8_stress");
         p.alpha   = random_alpha();
         p.beta    = random_beta();
         p.ldb_pad = random_ldb_pad();
@@ -375,7 +392,7 @@ void GemvParameterGenerator::add_random_stress_params(
 }
 
 void GemvParameterGenerator::add_boundary_params(
-    std::vector<MatmulParamsAI> &params) {
+  std::vector<MatmulParamsAI> &params) {
   static const std::vector<std::pair<uint64_t, uint64_t>> boundary_nk = {
     {1, 1}, {1, 32}, {32, 1},
     // BKC_NR_PAD=16 boundaries: each triggers different tail NVT
@@ -395,21 +412,21 @@ void GemvParameterGenerator::add_boundary_params(
   for (auto combo : gemv_bf16_combos) {
     for (const auto &[n, k] : boundary_nk) {
       params.push_back(create_gemv_param(
-        n, k, combo, TestCategory::BOUNDARY, no_postop,
-        false, true, "gemv_boundary"));
+                         n, k, combo, TestCategory::BOUNDARY, no_postop,
+                         false, true, "gemv_boundary"));
     }
   }
   for (auto combo : gemv_int8_combos) {
     for (const auto &[n, k] : boundary_nk) {
       params.push_back(create_gemv_param(
-        n, k, combo, TestCategory::BOUNDARY, no_postop,
-        false, true, "gemv_int8_boundary"));
+                         n, k, combo, TestCategory::BOUNDARY, no_postop,
+                         false, true, "gemv_int8_boundary"));
     }
   }
 }
 
 void GemvParameterGenerator::add_edge_case_params(
-    std::vector<MatmulParamsAI> &params) {
+  std::vector<MatmulParamsAI> &params) {
   static const std::vector<std::pair<uint64_t, uint64_t>> edge_nk = {
     {1, 1},
     {1, 8192},     // very deep K
@@ -428,8 +445,8 @@ void GemvParameterGenerator::add_edge_case_params(
     for (const auto &po : postop_cfgs) {
       for (const auto &[n, k] : edge_nk) {
         params.push_back(create_gemv_param(
-          n, k, combo, TestCategory::EDGE_CASE, po,
-          false, true, "gemv_edge"));
+                           n, k, combo, TestCategory::EDGE_CASE, po,
+                           false, true, "gemv_edge"));
       }
     }
   }
@@ -437,8 +454,8 @@ void GemvParameterGenerator::add_edge_case_params(
     for (const auto &po : postop_cfgs) {
       for (const auto &[n, k] : edge_nk) {
         params.push_back(create_gemv_param(
-          n, k, combo, TestCategory::EDGE_CASE, po,
-          false, true, "gemv_int8_edge"));
+                           n, k, combo, TestCategory::EDGE_CASE, po,
+                           false, true, "gemv_int8_edge"));
       }
     }
   }
@@ -465,17 +482,25 @@ GemvParameterGenerator::generate_minimal_test_suite() {
 
   for (auto combo : gemv_bf16_combos) {
     // KC path: a few representative shapes
-    minimal.push_back(create_gemv_param(64,  128, combo, TestCategory::ACCURACY, no_postop,  false, true, "gemv_min"));
-    minimal.push_back(create_gemv_param(128, 256, combo, TestCategory::ACCURACY, relu_po,    false, true, "gemv_min"));
-    minimal.push_back(create_gemv_param(256, 512, combo, TestCategory::ACCURACY, no_postop,  false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(64,  128, combo, TestCategory::ACCURACY,
+                                        no_postop,  false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(128, 256, combo, TestCategory::ACCURACY,
+                                        relu_po,    false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(256, 512, combo, TestCategory::ACCURACY,
+                                        no_postop,  false, true, "gemv_min"));
     // Looper path
-    minimal.push_back(create_gemv_param(512, 256, combo, TestCategory::ACCURACY, no_postop,  false, true, "gemv_min"));
-    minimal.push_back(create_gemv_param(1024, 64, combo, TestCategory::ACCURACY, relu_po,    false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(512, 256, combo, TestCategory::ACCURACY,
+                                        no_postop,  false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(1024, 64, combo, TestCategory::ACCURACY,
+                                        relu_po,    false, true, "gemv_min"));
     // transB
-    minimal.push_back(create_gemv_param(128, 256, combo, TestCategory::ACCURACY, no_postop,  true,  true, "gemv_min"));
+    minimal.push_back(create_gemv_param(128, 256, combo, TestCategory::ACCURACY,
+                                        no_postop,  true,  true, "gemv_min"));
     // Boundary
-    minimal.push_back(create_gemv_param(1, 1,     combo, TestCategory::BOUNDARY, no_postop,  false, true, "gemv_min"));
-    minimal.push_back(create_gemv_param(256, 256, combo, TestCategory::BOUNDARY, no_postop,  false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(1, 1,     combo, TestCategory::BOUNDARY,
+                                        no_postop,  false, true, "gemv_min"));
+    minimal.push_back(create_gemv_param(256, 256, combo, TestCategory::BOUNDARY,
+                                        no_postop,  false, true, "gemv_min"));
   }
   std::cout << "[AI_GEMV] Generated " << minimal.size()
             << " minimal GEMV test cases" << std::endl;
@@ -484,7 +509,7 @@ GemvParameterGenerator::generate_minimal_test_suite() {
 
 std::vector<MatmulParamsAI>
 GemvParameterGenerator::generate_category_specific_params(
-    TestCategory category) {
+  TestCategory category) {
   std::vector<MatmulParamsAI> params;
   switch (category) {
   case TestCategory::ACCURACY:
@@ -502,6 +527,26 @@ GemvParameterGenerator::generate_category_specific_params(
     break;
   }
   return params;
+}
+
+// // -----------------------------------------------------------------------------
+// // generate_coverage_test_suite
+// //
+// // Generates a strategic minimal set of GEMV test parameters designed to
+// // maximize code coverage while minimizing test count. This includes:
+// //   - One test per data type combination (BF16 and INT8)
+// //   - One test per post-op type
+// //   - KC path and Looper path coverage
+// //   - Key boundary tests
+// //
+// // Returns:
+// //   Vector of MatmulParamsAI objects for coverage testing
+// // -----------------------------------------------------------------------------
+// // Note: This is a placeholder implementation. The actual test parameters should be coverage suite
+std::vector<MatmulParamsAI>
+GemvParameterGenerator::generate_coverage_test_suite() {
+  std::vector<MatmulParamsAI> coverage_params;
+  return coverage_params;
 }
 
 } // namespace ai_gtests

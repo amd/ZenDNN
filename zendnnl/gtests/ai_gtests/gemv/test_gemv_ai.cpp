@@ -46,36 +46,38 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
                                      bool create_reference = false) {
     CreatedTensors t;
     t.input   = AITensorFactory::create_uniform_tensor(
-                  {params.m, params.k}, input_dtype, "gemv_input");
+    {params.m, params.k}, input_dtype, "gemv_input");
 
     // transB: weights are {N, K} instead of {K, N}.
     // ldb_pad > 0: allocate wider rows for stride testing (ldb = N + pad).
     const uint64_t ldb_cols = params.trans_b
-        ? params.k + params.ldb_pad : params.n + params.ldb_pad;
+                              ? params.k + params.ldb_pad : params.n + params.ldb_pad;
     const uint64_t ldb_rows = params.trans_b ? params.n : params.k;
     t.weights = AITensorFactory::create_uniform_tensor(
-                  {ldb_rows, ldb_cols}, weight_dtype, "gemv_weights");
+    {ldb_rows, ldb_cols}, weight_dtype, "gemv_weights");
     t.bias    = AITensorFactory::create_uniform_tensor(
-                  {1, params.n}, output_dtype, "gemv_bias");
+    {1, params.n}, output_dtype, "gemv_bias");
     t.output  = AITensorFactory::create_zero_tensor(
-                  {params.m, params.n}, output_dtype, "gemv_output");
+    {params.m, params.n}, output_dtype, "gemv_output");
     if (create_reference)
       t.reference_output = AITensorFactory::create_zero_tensor(
-                             {params.m, params.n}, output_dtype, "gemv_ref_output");
+    {params.m, params.n}, output_dtype, "gemv_ref_output");
 
     int add_cnt = 0, mul_cnt = 0;
     for (auto po_type : params.post_op_config.post_ops) {
       if (po_type == post_op_type_t::binary_add) {
         auto bt = AITensorFactory::create_uniform_tensor(
-                    {params.m, params.n}, output_dtype,
-                    "gemv_binary_add_" + std::to_string(add_cnt++));
+        {params.m, params.n}, output_dtype,
+        "gemv_binary_add_" + std::to_string(add_cnt++));
         t.binary_post_op_tensors.emplace_back(bt.get_name(), bt);
-      } else if (po_type == post_op_type_t::binary_mul) {
+      }
+      else if (po_type == post_op_type_t::binary_mul) {
         auto bt = AITensorFactory::create_uniform_tensor(
-                    {params.m, params.n}, output_dtype,
-                    "gemv_binary_mul_" + std::to_string(mul_cnt++));
+        {params.m, params.n}, output_dtype,
+        "gemv_binary_mul_" + std::to_string(mul_cnt++));
         t.binary_post_op_tensors.emplace_back(bt.get_name(), bt);
-      } else {
+      }
+      else {
         t.binary_post_op_tensors.emplace_back("", tensor_t());
       }
     }
@@ -94,11 +96,11 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
 
   float get_epsilon(data_type_t dt) {
     return (dt == data_type_t::bf16) ? AI_MATMUL_EPSILON_BF16
-                                     : AI_MATMUL_EPSILON_F32;
+           : AI_MATMUL_EPSILON_F32;
   }
   float get_rel_tol(data_type_t dt) {
     return (dt == data_type_t::bf16) ? AI_MATMUL_REL_TOLERANCE_BF16
-                                     : AI_MATMUL_REL_TOLERANCE_F32;
+           : AI_MATMUL_REL_TOLERANCE_F32;
   }
 
   // Transpose an N×K tensor to K×N for reference comparison.
@@ -106,31 +108,38 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
   tensor_t transpose_weights(const tensor_t &src, uint64_t rows, uint64_t cols,
                              data_type_t dtype) {
     auto dst = AITensorFactory::create_zero_tensor({cols, rows}, dtype,
-                                                   "gemv_weights_T");
+               "gemv_weights_T");
     if (dtype == data_type_t::bf16) {
       auto *s = static_cast<const bfloat16_t *>(src.get_raw_handle_const());
       auto *d = static_cast<bfloat16_t *>(dst.get_raw_handle_unsafe());
       for (uint64_t r = 0; r < rows; ++r)
-        for (uint64_t c = 0; c < cols; ++c)
+        for (uint64_t c = 0; c < cols; ++c) {
           d[c * rows + r] = s[r * cols + c];
-    } else if (dtype == data_type_t::s8) {
+        }
+    }
+    else if (dtype == data_type_t::s8) {
       auto *s = static_cast<const int8_t *>(src.get_raw_handle_const());
       auto *d = static_cast<int8_t *>(dst.get_raw_handle_unsafe());
       for (uint64_t r = 0; r < rows; ++r)
-        for (uint64_t c = 0; c < cols; ++c)
+        for (uint64_t c = 0; c < cols; ++c) {
           d[c * rows + r] = s[r * cols + c];
-    } else if (dtype == data_type_t::u8) {
+        }
+    }
+    else if (dtype == data_type_t::u8) {
       auto *s = static_cast<const uint8_t *>(src.get_raw_handle_const());
       auto *d = static_cast<uint8_t *>(dst.get_raw_handle_unsafe());
       for (uint64_t r = 0; r < rows; ++r)
-        for (uint64_t c = 0; c < cols; ++c)
+        for (uint64_t c = 0; c < cols; ++c) {
           d[c * rows + r] = s[r * cols + c];
-    } else {
+        }
+    }
+    else {
       auto *s = static_cast<const float *>(src.get_raw_handle_const());
       auto *d = static_cast<float *>(dst.get_raw_handle_unsafe());
       for (uint64_t r = 0; r < rows; ++r)
-        for (uint64_t c = 0; c < cols; ++c)
+        for (uint64_t c = 0; c < cols; ++c) {
           d[c * rows + r] = s[r * cols + c];
+        }
     }
     return dst;
   }
@@ -167,9 +176,9 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
     float epsilon = is_bf16_out ? epsilon_bf16_val : epsilon_f32_val;
     float rtol    = is_bf16_out ? rtol_bf16_val    : rtol_f32_val;
     float abs_bound = is_bf16_out
-      ? (static_cast<float>(k) * epsilon)
-      : ((C + std::log2(static_cast<float>(k)) / scale_factor)
-         * static_cast<float>(k) + P) * epsilon;
+                      ? (static_cast<float>(k) * epsilon)
+                      : ((C + std::log2(static_cast<float>(k)) / scale_factor)
+                         * static_cast<float>(k) + P) * epsilon;
 
     return AITestUtils::compare_sampled_tensors(test, ref, abs_bound, rtol);
   }
@@ -198,7 +207,8 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
         dtypes.compute = data_type_t::none;
 
         matmul_batch_params_t bp;
-        bp.Batch_A = 1;  bp.Batch_B = 1;
+        bp.Batch_A = 1;
+        bp.Batch_B = 1;
         bp.batch_stride_src = static_cast<size_t>(-1);
         bp.batch_stride_wei = static_cast<size_t>(-1);
         bp.batch_stride_dst = static_cast<size_t>(-1);
@@ -213,10 +223,12 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
           if (const char *nts = std::getenv("GEMV_NUM_THREADS")) {
             if (nts[0] != '\0') {
               int v = std::atoi(nts);
-              if (v <= 0)
+              if (v <= 0) {
                 gemv_nt = omp_get_max_threads();
-              else
+              }
+              else {
                 gemv_nt = std::min(v, 256);
+              }
             }
           }
           mp.num_threads = std::max(1, gemv_nt);
@@ -237,14 +249,16 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
             po_item.dtype = bin_po[i].second.get_data_type();
             auto dims = bin_po[i].second.get_size();
             po_item.dims.assign(dims.begin(), dims.end());
-          } else {
+          }
+          else {
             po_item.buff  = nullptr;
             po_item.dtype = output.get_data_type();
           }
           // Match regular gtest: set alpha for swish/elu postops
           if (po_item.po_type == post_op_type_t::swish ||
-              po_item.po_type == post_op_type_t::elu)
+              po_item.po_type == post_op_type_t::elu) {
             po_item.alpha = 1.0f;
+          }
           mp.postop_.push_back(po_item);
         }
 
@@ -286,14 +300,14 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
         const float test_alpha = params.alpha;
         const float test_beta  = params.beta;
         auto call_kernel = [&](bool wt_const, void *dst_buf) {
-            return matmul_direct(
-                'r', false, params.trans_b,
-                M, N, K,
-                test_alpha, input.get_raw_handle_unsafe(), lda,
-                weights.get_raw_handle_unsafe(), ldb,
-                bias.get_raw_handle_unsafe(),
-                test_beta, dst_buf, ldc,
-                wt_const, bp, mp);
+          return matmul_direct(
+                   'r', false, params.trans_b,
+                   M, N, K,
+                   test_alpha, input.get_raw_handle_unsafe(), lda,
+                   weights.get_raw_handle_unsafe(), ldb,
+                   bias.get_raw_handle_unsafe(),
+                   test_beta, dst_buf, ldc,
+                   wt_const, bp, mp);
         };
 
         // When beta != 0, each output must start with identical random C_old
@@ -303,9 +317,9 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
         tensor_t c_init;
         if (need_c_init)
           c_init = AITensorFactory::create_uniform_tensor(
-              {params.m, params.n}, out_dt, "gemv_c_init");
+        {params.m, params.n}, out_dt, "gemv_c_init");
         const size_t out_bytes = params.m * params.n
-            * (out_dt == data_type_t::bf16 ? 2 : 4);
+                                 * (out_dt == data_type_t::bf16 ? 2 : 4);
         auto seed_output = [&](tensor_t &dst) {
           if (need_c_init)
             std::memcpy(dst.get_raw_handle_unsafe(),
@@ -314,25 +328,31 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
 
         // Path 1: thread_local repack (is_wt_const=false)
         auto tl_out = AITensorFactory::create_zero_tensor(
-            {params.m, params.n}, out_dt, "gemv_tl");
+        {params.m, params.n}, out_dt, "gemv_tl");
         seed_output(tl_out);
         auto st = call_kernel(false, tl_out.get_raw_handle_unsafe());
-        if (st != status_t::success) return st;
+        if (st != status_t::success) {
+          return st;
+        }
 
         // Clear caches so Path 2 is a guaranteed cold miss.
         clear_all_weight_caches();
 
         // Path 2: global_cache cold miss (is_wt_const=true, first call)
         auto gc_cold_out = AITensorFactory::create_zero_tensor(
-            {params.m, params.n}, out_dt, "gemv_gc_cold");
+        {params.m, params.n}, out_dt, "gemv_gc_cold");
         seed_output(gc_cold_out);
         st = call_kernel(true, gc_cold_out.get_raw_handle_unsafe());
-        if (st != status_t::success) return st;
+        if (st != status_t::success) {
+          return st;
+        }
 
         // Path 3: global_cache warm hit (is_wt_const=true, reuses cached)
         seed_output(output);
         st = call_kernel(true, output.get_raw_handle_unsafe());
-        if (st != status_t::success) return st;
+        if (st != status_t::success) {
+          return st;
+        }
 
         // Cross-check: all three paths must produce consistent results.
         EXPECT_TRUE(compare_gemv_output(tl_out, output, params.k, out_dt, is_int8))
@@ -347,28 +367,33 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
         clear_all_weight_caches();
 
         return st;
-      } else {
+      }
+      else {
         // The operator API doesn't support transB — it always expects K×N
         // weight layout. For transB tests, transpose to K×N before calling.
         tensor_t op_weights = params.trans_b
-          ? transpose_weights(weights, params.n, params.k,
-                              weights.get_data_type())
-          : weights;
+                              ? transpose_weights(weights, params.n, params.k,
+                                  weights.get_data_type())
+                              : weights;
         matmul_context_t ctx = matmul_context_t()
-          .set_param("weights", op_weights)
-          .set_param("bias", bias);
+                               .set_param("weights", op_weights)
+                               .set_param("bias", bias);
         for (auto po_type : params.post_op_config.post_ops) {
           post_op_t po{po_type};
           ctx = ctx.set_post_op(po);
         }
         ctx = ctx.create();
-        if (!ctx.check()) return status_t::failure;
+        if (!ctx.check()) {
+          return status_t::failure;
+        }
 
         auto op = matmul_operator_t()
-          .set_name(AITestUtils::generate_unique_name("gemv_ai_op"))
-          .set_context(ctx)
-          .create();
-        if (op.is_bad_object()) return status_t::failure;
+                  .set_name(AITestUtils::generate_unique_name("gemv_ai_op"))
+                  .set_context(ctx)
+                  .create();
+        if (op.is_bad_object()) {
+          return status_t::failure;
+        }
 
         for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
           auto pt = params.post_op_config.post_ops[i];
@@ -377,20 +402,25 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
             std::string tn;
             try {
               tn = (pt == post_op_type_t::binary_add)
-                ? ctx.get_post_op(i).binary_add_params.tensor_name
-                : ctx.get_post_op(i).binary_mul_params.tensor_name;
-            } catch (...) { tn = bin_po[i].first; }
+                   ? ctx.get_post_op(i).binary_add_params.tensor_name
+                   : ctx.get_post_op(i).binary_mul_params.tensor_name;
+            }
+            catch (...) {
+              tn = bin_po[i].first;
+            }
             op = op.set_input(tn, bin_po[i].second);
           }
         }
         return op.set_input("matmul_input", input)
-                 .set_output("matmul_output", output)
-                 .execute();
+               .set_output("matmul_output", output)
+               .execute();
       }
-    } catch (const std::exception &e) {
+    }
+    catch (const std::exception &e) {
       std::cout << "[GEMV_TEST] Exception: " << e.what() << std::endl;
       return status_t::failure;
-    } catch (...) {
+    }
+    catch (...) {
       return status_t::failure;
     }
   }
@@ -406,13 +436,15 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
     auto tensors = create_test_tensors(params, in_dt, wt_dt, out_dt, true);
 
     bool supported = AITestUtils::is_aocl_kernel_supported(
-      in_dt, wt_dt, out_dt, params.post_op_config.post_ops);
+                       in_dt, wt_dt, out_dt, params.post_op_config.post_ops);
     status_t st = run_gemv(tensors.input, tensors.weights, tensors.bias,
                            tensors.output, params,
                            tensors.binary_post_op_tensors);
     if (supported) {
-      EXPECT_EQ(st, status_t::success) << "GEMV kernel failed for " << params.test_name;
-    } else {
+      EXPECT_EQ(st, status_t::success) << "GEMV kernel failed for " <<
+                                       params.test_name;
+    }
+    else {
       EXPECT_NE(st, status_t::success);
       return;
     }
@@ -420,23 +452,26 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
     // Reference comparison: the reference kernel assumes K×N weight layout,
     // alpha=1, beta=0, ldb=N. Skip reference for non-standard configurations.
     bool ref_supported = AITestUtils::is_reference_implementation_supported(
-      in_dt, wt_dt, out_dt, params.post_op_config.post_ops)
-      && params.alpha == 1.0f && params.beta == 0.0f && params.ldb_pad == 0;
+                           in_dt, wt_dt, out_dt, params.post_op_config.post_ops)
+                         && params.alpha == 1.0f && params.beta == 0.0f && params.ldb_pad == 0;
     if (ref_supported && st == status_t::success) {
       tensor_t ref_weights = params.trans_b
-        ? transpose_weights(tensors.weights, params.n, params.k, wt_dt)
-        : tensors.weights;
+                             ? transpose_weights(tensors.weights, params.n, params.k, wt_dt)
+                             : tensors.weights;
 
       std::vector<tensor_t> ref_bins;
-      for (auto &p : tensors.binary_post_op_tensors) ref_bins.push_back(p.second);
+      for (auto &p : tensors.binary_post_op_tensors) {
+        ref_bins.push_back(p.second);
+      }
       status_t ref_st = AITestUtils::run_reference_matmul(
-        tensors.input, ref_weights, tensors.bias,
-        tensors.reference_output, params.post_op_config, ref_bins);
-      EXPECT_EQ(ref_st, status_t::success) << "Reference failed for " << params.test_name;
+                          tensors.input, ref_weights, tensors.bias,
+                          tensors.reference_output, params.post_op_config, ref_bins);
+      EXPECT_EQ(ref_st, status_t::success) << "Reference failed for " <<
+                                           params.test_name;
       if (ref_st == status_t::success) {
         bool is_int8_in = (in_dt == data_type_t::u8 || in_dt == data_type_t::s8);
         bool ok = compare_gemv_output(
-          tensors.output, tensors.reference_output, params.k, out_dt, is_int8_in);
+                    tensors.output, tensors.reference_output, params.k, out_dt, is_int8_in);
         EXPECT_TRUE(ok) << "Accuracy mismatch for " << params.test_name;
       }
     }
@@ -450,7 +485,8 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
     status_t st = run_gemv(tensors.input, tensors.weights, tensors.bias,
                            tensors.output, params,
                            tensors.binary_post_op_tensors);
-    EXPECT_EQ(st, status_t::success) << "Boundary GEMV failed: " << params.test_name;
+    EXPECT_EQ(st, status_t::success) << "Boundary GEMV failed: " <<
+                                     params.test_name;
   }
 
   void run_edge_case_test(const MatmulParamsAI &params) {
@@ -467,14 +503,16 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
           AITestUtils::is_reference_implementation_supported(
             in_dt, wt_dt, out_dt, params.post_op_config.post_ops)) {
         std::vector<tensor_t> ref_bins;
-        for (auto &p : tensors.binary_post_op_tensors) ref_bins.push_back(p.second);
+        for (auto &p : tensors.binary_post_op_tensors) {
+          ref_bins.push_back(p.second);
+        }
         status_t ref_st = AITestUtils::run_reference_matmul(
-          tensors.input, tensors.weights, tensors.bias,
-          tensors.reference_output, params.post_op_config, ref_bins);
+                            tensors.input, tensors.weights, tensors.bias,
+                            tensors.reference_output, params.post_op_config, ref_bins);
         if (ref_st == status_t::success) {
           bool is_int8_in = (in_dt == data_type_t::u8 || in_dt == data_type_t::s8);
           bool ok = compare_gemv_output(
-            tensors.output, tensors.reference_output, params.k, out_dt, is_int8_in);
+                      tensors.output, tensors.reference_output, params.k, out_dt, is_int8_in);
           EXPECT_TRUE(ok) << "Edge case accuracy mismatch: " << params.test_name;
         }
       }
@@ -511,7 +549,7 @@ INSTANTIATE_TEST_SUITE_P(
   TestGemvAI,
   ::testing::ValuesIn(
     get_test_suite_for_mode<MatmulParamsAI, GemvParameterGenerator>()),
-  [](const ::testing::TestParamInfo<MatmulParamsAI> &info) {
-    return info.param.test_name;
-  }
+[](const ::testing::TestParamInfo<MatmulParamsAI> &info) {
+  return info.param.test_name;
+}
 );

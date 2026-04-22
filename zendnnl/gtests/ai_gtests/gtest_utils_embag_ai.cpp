@@ -97,6 +97,17 @@ data_type_t EmbagTestUtils::get_output_dtype(EmbagDataTypeCombination combo) {
   }
 }
 
+data_type_t EmbagTestUtils::get_indices_dtype(EmbagIndicesType indices_type) {
+  switch (indices_type) {
+  case EmbagIndicesType::S64:
+    return data_type_t::s64;
+  case EmbagIndicesType::S32:
+    return data_type_t::s32;
+  default:
+    return data_type_t::s64;
+  }
+}
+
 bool EmbagTestUtils::is_valid_embag_data_type_combination(
   EmbagDataTypeCombination combo) {
   const auto &supported = EmbagParameterGenerator::supported_combinations;
@@ -362,6 +373,235 @@ EmbagParameterGenerator::supported_combinations = {
   EmbagDataTypeCombination::S4_F32,
   EmbagDataTypeCombination::S4_BF16,
 };
+
+// -----------------------------------------------------------------------------
+// generate_coverage_test_suite
+//
+// Generates a strategic minimal set of embedding bag test parameters designed to
+// maximize code coverage while minimizing test count. This includes:
+//   - One test per data type combination (F32, BF16, U4, S4, S8)
+//   - Each algorithm type (sum, mean, max)
+//   - Boundary and edge case tests
+//   - Invalid tests for error handling coverage
+//
+// Returns:
+//   Vector of EmbagParamsAI objects for coverage testing (~25 tests)
+// Usage:
+//   Used by coverage builds to maximize code coverage with minimal runtime.
+// -----------------------------------------------------------------------------
+std::vector<EmbagParamsAI>
+EmbagParameterGenerator::generate_coverage_test_suite() {
+  std::vector<EmbagParamsAI> coverage_params;
+
+  // 1. One test per data type combination (representative shape)
+  const uint64_t cov_embeddings = 100, cov_dim = 64;
+  const uint64_t cov_indices = 32, cov_bags = 8;
+
+  for (auto data_combo : supported_combinations) {
+    if (EmbagTestUtils::is_embag_kernel_supported(
+          EmbagTestUtils::get_table_dtype(data_combo),
+          EmbagTestUtils::get_output_dtype(data_combo),
+          embag_algo_t::sum)) {
+      coverage_params.push_back(create_param(cov_embeddings, cov_dim,
+                                             cov_indices, cov_bags, data_combo,
+                                             embag_algo_t::sum, TestCategory::ACCURACY,
+                                             true, true, "coverage_embag_dtype"));
+    }
+  }
+
+  // 2. Each algorithm type for ALL data type combinations
+  std::vector<embag_algo_t> algos = {embag_algo_t::sum, embag_algo_t::mean, embag_algo_t::max};
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        coverage_params.push_back(create_param(100, 64, 32, 8,
+                                               data_combo, algo,
+                                               TestCategory::ACCURACY, true, true,
+                                               "coverage_embag_algo_" + algo_name));
+      }
+    }
+  }
+
+  // 3. Shape variations for ALL data type combinations with ALL algo combinations
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  shapes = {
+    {10, 8, 4, 2, "tiny"},
+    {100, 64, 16, 4, "small"},
+    {1000, 128, 64, 16, "medium"},
+    {10000, 256, 128, 32, "large"}
+  };
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        for (const auto& [num_emb, dim, indices, bags, desc] : shapes) {
+          coverage_params.push_back(create_param(num_emb, dim, indices, bags,
+                                                 data_combo, algo, TestCategory::ACCURACY,
+                                                 true, true, "coverage_embag_shape_" + desc + "_" + algo_name));
+        }
+      }
+    }
+  }
+
+  // 4. Boundary tests for ALL data type combinations with ALL algo combinations
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  boundary_dims = {
+    {10, 8, 1, 1, "minimal"},
+    {10, 8, 10, 1, "single_bag"},
+    {10, 8, 10, 10, "indices_eq_bags"},
+    {100, 16, 100, 16, "simd_aligned"}
+  };
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        for (const auto& [num_emb, dim, indices, bags, desc] : boundary_dims) {
+          coverage_params.push_back(create_param(num_emb, dim, indices, bags,
+                                                 data_combo, algo, TestCategory::BOUNDARY,
+                                                 true, true, "coverage_embag_boundary_" + desc + "_" + algo_name));
+        }
+      }
+    }
+  }
+
+  // 5. Edge case tests for ALL data type combinations with ALL algo combinations
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, std::string>>
+  edge_dims = {
+    {10000, 8, 4, 2, "large_table_tiny_dim"},
+    {10, 512, 4, 2, "tiny_table_large_dim"},
+    {100, 64, 256, 2, "many_indices_few_bags"},
+    {100, 64, 8, 64, "few_indices_many_bags"}
+  };
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        for (const auto& [num_emb, dim, indices, bags, desc] : edge_dims) {
+          coverage_params.push_back(create_param(num_emb, dim, indices, bags,
+                                                 data_combo, algo, TestCategory::EDGE_CASE,
+                                                 true, true, "coverage_embag_edge_" + desc + "_" + algo_name));
+        }
+      }
+    }
+  }
+
+  // 6. Invalid tests for ALL data type combinations with ALL algo combinations
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                              (algo == embag_algo_t::mean) ? "mean" : "max";
+      // Zero embeddings
+      coverage_params.push_back(create_param(0, 64, 16, 4,
+                                             data_combo, algo, TestCategory::INVALID,
+                                             true, false, "coverage_embag_invalid_zero_emb_" + algo_name));
+      // Zero dimension
+      coverage_params.push_back(create_param(100, 0, 16, 4,
+                                             data_combo, algo, TestCategory::INVALID,
+                                             true, false, "coverage_embag_invalid_zero_dim_" + algo_name));
+      // Zero bags
+      coverage_params.push_back(create_param(100, 64, 16, 0,
+                                             data_combo, algo, TestCategory::INVALID,
+                                             true, false, "coverage_embag_invalid_zero_bags_" + algo_name));
+    }
+  }
+  // Note: OOB indices test removed - kernel does not validate indices at runtime for performance
+
+  // 7. Embedding lookup tests for ALL data type combinations (use_offsets = false)
+  // These tests cover the embedding_direct() code path without offset aggregation
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> lookup_shapes
+  = {
+    {100, 64, 32, "small"},
+    {1000, 128, 64, "medium"}
+  };
+  for (auto data_combo : supported_combinations) {
+    if (EmbagTestUtils::is_embag_kernel_supported(
+          EmbagTestUtils::get_table_dtype(data_combo),
+          EmbagTestUtils::get_output_dtype(data_combo),
+          embag_algo_t::none)) {
+      for (const auto& [num_emb, dim, indices, desc] : lookup_shapes) {
+        coverage_params.push_back(create_param(num_emb, dim, indices, 0,
+                                               data_combo,
+                                               embag_algo_t::none, TestCategory::EDGE_CASE,
+                                               false, true, "coverage_embag_lookup_" + desc));
+      }
+    }
+  }
+
+  // 8. Group embedding bag tests for ALL data type combinations with ALL algo combinations
+  // These tests cover the batched embedding bag operation with multiple tables
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        // Small group test with 2 tables
+        EmbagParamsAI group_small = create_param(100, 64, 32, 8,
+                                    data_combo, algo, TestCategory::ACCURACY,
+                                    true, true, "coverage_embag_group_small_" + algo_name);
+        group_small.is_group_embag = true;
+        group_small.group_size = 2;
+        coverage_params.push_back(group_small);
+
+        // Medium group test with 3 tables
+        EmbagParamsAI group_medium = create_param(1000, 128, 64, 16,
+                                     data_combo, algo, TestCategory::ACCURACY,
+                                     true, true, "coverage_embag_group_medium_" + algo_name);
+        group_medium.is_group_embag = true;
+        group_medium.group_size = 3;
+        coverage_params.push_back(group_medium);
+      }
+    }
+  }
+
+  // 9. S32 indices/offsets tests for ALL data type combinations with ALL algo combinations
+  // These tests cover the int32_t indices/offsets code path in dispatch_kernel.hpp
+  for (auto data_combo : supported_combinations) {
+    for (auto algo : algos) {
+      if (EmbagTestUtils::is_embag_kernel_supported(
+            EmbagTestUtils::get_table_dtype(data_combo),
+            EmbagTestUtils::get_output_dtype(data_combo), algo)) {
+        std::string algo_name = (algo == embag_algo_t::sum) ? "sum" :
+                                (algo == embag_algo_t::mean) ? "mean" : "max";
+        // S32 indices with embedding bag
+        coverage_params.push_back(create_param(100, 64, 32, 8,
+                                               data_combo, algo, TestCategory::ACCURACY,
+                                               true, true, "coverage_embag_s32idx_" + algo_name,
+                                               EmbagIndicesType::S32));
+      }
+    }
+
+    // S32 indices embedding lookup (no offsets) - uses none algo
+    if (EmbagTestUtils::is_embag_kernel_supported(
+          EmbagTestUtils::get_table_dtype(data_combo),
+          EmbagTestUtils::get_output_dtype(data_combo),
+          embag_algo_t::none)) {
+      coverage_params.push_back(create_param(100, 64, 32, 0,
+                                             data_combo,
+                                             embag_algo_t::none, TestCategory::EDGE_CASE,
+                                             false, true, "coverage_embag_s32idx_lookup",
+                                             EmbagIndicesType::S32));
+    }
+  }
+
+  std::cout << "[AI_GTEST] EmbeddingBag coverage test suite generated with "
+            << coverage_params.size() << " strategic tests" << std::endl;
+  return coverage_params;
+}
 
 std::vector<EmbagParamsAI>
 EmbagParameterGenerator::generate_comprehensive_test_suite() {
@@ -692,7 +932,8 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
   TestCategory category,
   bool use_offsets,
   bool expect_success,
-  const std::string &suite_name) {
+  const std::string &suite_name,
+  EmbagIndicesType indices_type) {
 
   EmbagParamsAI param;
   param.num_embeddings = num_embeddings;
@@ -700,6 +941,7 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
   param.num_indices = num_indices;
   param.num_bags = num_bags;
   param.data_types = data_types;
+  param.indices_type = indices_type;
   param.algo = algo;
   param.category = category;
   param.use_offsets = use_offsets;
@@ -750,11 +992,23 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
     }
   };
 
+  auto indices_type_to_str = [](EmbagIndicesType it) {
+    switch (it) {
+    case EmbagIndicesType::S64:
+      return "idx64";
+    case EmbagIndicesType::S32:
+      return "idx32";
+    default:
+      return "idxunk";
+    }
+  };
+
   std::string table_dtype_str = dtype_to_str(
                                   EmbagTestUtils::get_table_dtype(data_types));
   std::string output_dtype_str = dtype_to_str(
                                    EmbagTestUtils::get_output_dtype(data_types));
   std::string algo_str = algo_to_str(algo);
+  std::string indices_type_str = indices_type_to_str(indices_type);
 
   std::string suite_prefix = suite_name.empty() ? "" : suite_name + "_";
   param.test_name = suite_prefix + "emb" + std::to_string(num_embeddings) +
@@ -763,6 +1017,7 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
                     "_bag" + std::to_string(num_bags) +
                     "_tbl_" + table_dtype_str +
                     "_out_" + output_dtype_str +
+                    "_" + indices_type_str +
                     "_" + algo_str +
                     "_" + std::to_string(param_counter.fetch_add(1));
 
