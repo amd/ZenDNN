@@ -14,49 +14,43 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef LOWOHA_SDPA_HPP
-#define LOWOHA_SDPA_HPP
+#ifndef LOWOHA_FLASH_SDPA_HPP
+#define LOWOHA_FLASH_SDPA_HPP
 
 #include <cmath>
 #include <cstring>
-#include "lowoha_operators/sdpa/bmm_sdpa/lowoha_sdpa_utils.hpp"
+#include "lowoha_operators/sdpa/flash_sdpa/lowoha_flash_sdpa_utils.hpp"
+#include "lowoha_operators/sdpa/flash_sdpa/lowoha_sdpa_flash_cpu.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
 /**
- * @brief Execute Scaled Dot-Product Attention
+ * @brief Flash-style SDPA on CPU (LowOHA matmul + fused softmax).
  *
- * Performs: output = softmax(Q * K^T / scale) * V
+ * Inference-only: no logsumexp output (not needed without backward pass).
+ * Tensor layout and strides are described by @c sdpa_params.
  *
- * With optional attention mask:
- *   output = softmax(Q * K^T / scale + mask) * V
- *
- * With causal mask:
- *   output = softmax(Q * K^T / scale + causal_mask) * V
- *   where causal_mask[i,j] = -inf if j > i, else 0
- *
- * @param query        Query tensor [batch, num_heads, seq_len, head_dim]
- * @param key          Key tensor [batch, num_heads, seq_len, head_dim]
- * @param value        Value tensor [batch, num_heads, seq_len, head_dim]
- * @param attn_mask    Optional attention mask (can be nullptr)
- * @param output       Output tensor [batch, num_heads, seq_len, head_dim]
- * @param params       SDPA parameters
+ * @param query     Query data  [batch, num_heads, seq_len, head_dim]
+ * @param key       Key data    [batch, num_heads, seq_len, head_dim]
+ * @param value     Value data  [batch, num_heads, seq_len, head_dim]
+ * @param attn_mask Optional attention mask (nullptr if none)
+ * @param output    Output data [batch, num_heads, seq_len, head_dim]
+ * @param params    Shapes, strides, dtypes, scale, flags
  *
  * @return status_t::success or status_t::failure
  */
-status_t sdpa_direct(
+status_t sdpa_flash_cpu_standalone(
   const void *query,
   const void *key,
   const void *value,
   const void *attn_mask,
   void *output,
-  sdpa_params &params
-);
+  const sdpa_params &params);
 
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_SDPA_HPP
+#endif // LOWOHA_FLASH_SDPA_HPP

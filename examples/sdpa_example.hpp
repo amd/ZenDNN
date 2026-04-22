@@ -31,7 +31,22 @@
 namespace zendnnl {
 namespace examples {
 
+/**
+ * @brief SDPA example using the high-level encoder context/operator API.
+ *
+ * Creates Q/K/V tensors via tensor_factory, builds an sdpa_encoder_context_t
+ * and sdpa_encoder_operator_t, then executes the SDPA operation.
+ */
 int sdpa_example();
+
+/**
+ * @brief SDPA example calling sdpa_direct with raw buffers and sdpa_params.
+ *
+ * Allocates contiguous BHSD float buffers for Q/K/V/output, populates
+ * sdpa_params (dimensions, strides, dtypes, scale), and invokes
+ * sdpa_direct directly.
+ */
+int sdpa_direct_example();
 } //examples
 } //zendnnl
 

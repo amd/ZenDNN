@@ -36,60 +36,71 @@ enum class mask_type_t {
 };
 
 /**
- * @brief Parameter structure for LOWOHA SDPA operations
- *
- * This structure contains all parameters specific to Scaled Dot-Product
- * Attention computation.
+ * @brief Unified parameter structure for all LOWOHA SDPA backends
+ *        (BMM-based and flash-style).
  *
  * SDPA computes: Attention(Q, K, V) = softmax(Q * K^T / scale) * V
  *
- * Tensor shapes (4D):
- *   Q: [batch, num_heads, seq_len, head_dim]
- *   K: [batch, num_heads, seq_len, head_dim]
- *   V: [batch, num_heads, seq_len, head_dim]
- *   Output: [batch, num_heads, seq_len, head_dim]
- *   Attention mask (optional): [batch, 1, seq_len, seq_len] or broadcastable
+ * Tensor shapes (4D BHSD):
+ *   Q/Output     : [batch, num_heads, seq_len, head_dim]
+ *   K/V          : [batch, num_heads, kv_seq_len, head_dim]
+ *   Attention mask: broadcastable 2-D or 4-D (optional)
+ *
+ * For self-attention seq_len == kv_seq_len.  For cross-attention
+ * (e.g. encoder-decoder models) they may differ.
+ *
+ * The flash backend uses the per-tensor BHSD strides to support
+ * non-contiguous layouts.  The BMM backend ignores strides and
+ * expects pre-packed contiguous [batch*heads, seq, dim] tensors.
  */
 struct sdpa_params {
-  // Tensor dimensions
-  uint64_t batch;             ///< Batch size
-  uint64_t num_heads;         ///< Number of attention heads
-  uint64_t seq_len;           ///< Sequence length (same for Q, K, V)
-  uint64_t head_dim;          ///< Head dimension (d_k)
+  // Tensor dimensions [Batch, Heads, Seq, Dim]
+  int64_t batch;
+  int64_t num_heads;
+  int64_t seq_len;
+  int64_t kv_seq_len;
+  int64_t head_dim;
 
-  // Computation parameters
-  float scale;                ///< Scale factor (default: 1/sqrt(head_dim))
-  bool is_causal;             ///< If true, apply causal mask
-  float dropout_p;            ///< Dropout probability (0 = no dropout)
+  // Per-tensor BHSD strides (flash backend)
+  int64_t q_stride_b, q_stride_h, q_stride_s, q_stride_d;
+  int64_t k_stride_b, k_stride_h, k_stride_s, k_stride_d;
+  int64_t v_stride_b, v_stride_h, v_stride_s, v_stride_d;
+  int64_t o_stride_b, o_stride_h, o_stride_s, o_stride_d;
 
-  // Mask parameters
-  mask_type_t mask_type;      ///< Type of attention mask
-  bool has_attn_mask;         ///< Whether attention mask is provided
-  int mask_ndims;             ///< Number of dims in the (reshaped 3D) mask
-  int64_t mask_dims[3];       ///< Mask shape after reshape to 3D [batch_heads, seq_q, seq_k]
+  // Mask parameters — flash backend (raw 4-D sizes + strides)
+  int mask_ndims;
+  int64_t mask_sizes[4];
+  int64_t mask_strides[4];
+
+  // Mask parameters — BMM backend (reshaped 3-D)
+  mask_type_t mask_type;
+  int64_t mask_dims[3];
 
   // Data types
-  data_type_t q_dt;           ///< Query data type
-  data_type_t k_dt;           ///< Key data type
-  data_type_t v_dt;           ///< Value data type
-  data_type_t out_dt;         ///< Output data type
-  data_type_t mask_dt;        ///< Attention mask data type
+  data_type_t qkv_dt;
+  data_type_t out_dt;
+  data_type_t mask_dt;
 
-  //num_threads is int32_t to match the type used by OpenMP APIs
-  int32_t num_threads;        ///< Number of threads (0 = auto)
+  // Computation parameters
+  double scale;
+  bool is_causal;
+  double dropout_p;
 
-  /**
-   * @brief Default constructor
-   */
-  sdpa_params() : batch(1), num_heads(1), seq_len(0),
-    head_dim(0), scale(0.0f), is_causal(false),
-    dropout_p(0.0f), mask_type(mask_type_t::none),
-    has_attn_mask(false), mask_ndims(0), mask_dims{0, 0, 0},
-    q_dt(data_type_t::none), k_dt(data_type_t::none),
-    v_dt(data_type_t::none), out_dt(data_type_t::none),
-    mask_dt(data_type_t::none),
-    num_threads(0) {
-  }
+  // num_threads is int32_t to match the type used by OpenMP APIs
+  int32_t num_threads;
+
+  sdpa_params()
+    : batch(1), num_heads(1), seq_len(0), kv_seq_len(0), head_dim(0),
+      q_stride_b(0), q_stride_h(0), q_stride_s(0), q_stride_d(1),
+      k_stride_b(0), k_stride_h(0), k_stride_s(0), k_stride_d(1),
+      v_stride_b(0), v_stride_h(0), v_stride_s(0), v_stride_d(1),
+      o_stride_b(0), o_stride_h(0), o_stride_s(0), o_stride_d(1),
+      mask_ndims(0), mask_sizes{0, 0, 0, 0}, mask_strides{0, 0, 0, 0},
+      mask_type(mask_type_t::none), mask_dims{0, 0, 0},
+      qkv_dt(data_type_t::none), out_dt(data_type_t::none),
+      mask_dt(data_type_t::none),
+      scale(0.0), is_causal(false), dropout_p(0.0),
+      num_threads(0) {}
 };
 
 } // namespace sdpa

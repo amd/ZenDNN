@@ -22,7 +22,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
-float calculate_default_scale(uint64_t head_dim) {
+float calculate_default_scale(int64_t head_dim) {
   return 1.0f / std::sqrt(static_cast<float>(head_dim));
 }
 
@@ -55,29 +55,45 @@ status_t validate_sdpa_inputs(
   }
 
   // Validate dimensions
-  if (params.batch == 0) {
-    log_error("SDPA: Batch size cannot be zero");
+  if (params.batch <= 0) {
+    log_error("SDPA: Batch size cannot be less than or equal to zero");
     return status_t::failure;
   }
 
-  if (params.num_heads == 0) {
-    log_error("SDPA: Number of heads cannot be zero");
+  if (params.num_heads <= 0) {
+    log_error("SDPA: Number of heads cannot be less than or equal to zero");
     return status_t::failure;
   }
 
-  if (params.seq_len == 0) {
-    log_error("SDPA: Sequence length cannot be zero");
+  if (params.seq_len <= 0) {
+    log_error("SDPA: Sequence length cannot be less than or equal to zero");
     return status_t::failure;
   }
 
-  if (params.head_dim == 0) {
-    log_error("SDPA: Head dimension cannot be zero");
+  if (params.head_dim <= 0) {
+    log_error("SDPA: Head dimension cannot be less than or equal to zero");
     return status_t::failure;
   }
 
   // Validate dropout probability
   if (params.dropout_p < 0.0f || params.dropout_p > 1.0f) {
     log_error("SDPA: Dropout probability must be between 0 and 1");
+    return status_t::failure;
+  }
+
+  if (params.qkv_dt != data_type_t::f32 && params.qkv_dt != data_type_t::bf16) {
+    log_error("SDPA: QKV data type must be f32 or bf16");
+    return status_t::failure;
+  }
+
+  if (params.out_dt != data_type_t::f32 && params.out_dt != data_type_t::bf16) {
+    log_error("SDPA: Output data type must be f32 or bf16");
+    return status_t::failure;
+  }
+
+  // BMM backend expects mask dimensions to be less than or equal to 3
+  if (params.mask_ndims > 3) {
+    log_error("SDPA: Mask dimensions must be less than or equal to 3");
     return status_t::failure;
   }
 

@@ -14,39 +14,35 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef LOWOHA_SDPA_HPP
-#define LOWOHA_SDPA_HPP
+#ifndef LOWOHA_SDPA_BMM_HPP
+#define LOWOHA_SDPA_BMM_HPP
 
-#include <cmath>
-#include <cstring>
 #include "lowoha_operators/sdpa/bmm_sdpa/lowoha_sdpa_utils.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/softmax/lowoha_softmax.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
 /**
- * @brief Execute Scaled Dot-Product Attention
+ * @brief BMM-based Scaled Dot-Product Attention
  *
- * Performs: output = softmax(Q * K^T / scale) * V
+ * Three-step implementation using batched matrix multiplications:
+ *   1. scores = Q @ K^T * scale  (+ optional mask)
+ *   2. attn_weights = softmax(scores)
+ *   3. output = attn_weights @ V
  *
- * With optional attention mask:
- *   output = softmax(Q * K^T / scale + mask) * V
- *
- * With causal mask:
- *   output = softmax(Q * K^T / scale + causal_mask) * V
- *   where causal_mask[i,j] = -inf if j > i, else 0
- *
- * @param query        Query tensor [batch, num_heads, seq_len, head_dim]
- * @param key          Key tensor [batch, num_heads, seq_len, head_dim]
- * @param value        Value tensor [batch, num_heads, seq_len, head_dim]
+ * @param query        Query tensor [batch*num_heads, seq_len, head_dim]
+ * @param key          Key tensor   [batch*num_heads, seq_len, head_dim]
+ * @param value        Value tensor [batch*num_heads, seq_len, head_dim]
  * @param attn_mask    Optional attention mask (can be nullptr)
- * @param output       Output tensor [batch, num_heads, seq_len, head_dim]
+ * @param output       Output tensor [batch*num_heads, seq_len, head_dim]
  * @param params       SDPA parameters
  *
  * @return status_t::success or status_t::failure
  */
-status_t sdpa_direct(
+status_t bmm_based_sdpa(
   const void *query,
   const void *key,
   const void *value,
@@ -55,8 +51,11 @@ status_t sdpa_direct(
   sdpa_params &params
 );
 
+/// Free the thread-local BMM scratch buffer. Must be called from the same thread.
+void sdpa_free_scratch();
+
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_SDPA_HPP
+#endif // LOWOHA_SDPA_BMM_HPP

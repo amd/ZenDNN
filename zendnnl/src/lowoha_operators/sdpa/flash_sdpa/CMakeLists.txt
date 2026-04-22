@@ -14,25 +14,38 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-set(lowoha_sdpa_sources
-    lowoha_sdpa.cpp)
+# ---------------------------------------------------------------------------
+# No per-file ISA flags needed: sdpa_simd.hpp uses
+# __attribute__((target("avx512f,avx512bw,avx512vl,fma"))) on AVX-512
+# functions and runtime dispatch via get_avx512f_status().
+# ---------------------------------------------------------------------------
 
-set(lowoha_sdpa_public_headers
-    lowoha_sdpa.hpp
-    lowoha_sdpa_common.hpp)
+# ---------------------------------------------------------------------------
+# Sources and headers
+# ---------------------------------------------------------------------------
+set(lowoha_flash_sdpa_sources
+    lowoha_flash_sdpa.cpp
+    lowoha_flash_sdpa_utils.cpp
+    lowoha_sdpa_flash_cpu.cpp)
+
+set(lowoha_flash_sdpa_public_headers
+    lowoha_flash_sdpa.hpp
+    lowoha_flash_sdpa_utils.hpp
+    lowoha_sdpa_flash_cpu.hpp
+    sdpa_simd.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
-                 PRIVATE ${lowoha_sdpa_sources}
+                 PRIVATE ${lowoha_flash_sdpa_sources}
                  PUBLIC  FILE_SET zendnnl_headers
-                 TYPE HEADERS FILES ${lowoha_sdpa_public_headers})
+                 TYPE HEADERS FILES ${lowoha_flash_sdpa_public_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
-                 PRIVATE ${lowoha_sdpa_sources}
+                 PRIVATE ${lowoha_flash_sdpa_sources}
                  PUBLIC  FILE_SET zendnnl_headers
-                 TYPE HEADERS FILES ${lowoha_sdpa_public_headers})
+                 TYPE HEADERS FILES ${lowoha_flash_sdpa_public_headers})
 endif()
 
 # append header files to top level include file
@@ -40,11 +53,8 @@ set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
 cmake_path(RELATIVE_PATH inc_subdir
            BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
-list(APPEND lowoha_sdpa_public_headers_list
-     ${lowoha_sdpa_public_headers})
+list(APPEND lowoha_flash_sdpa_public_headers_list
+     ${lowoha_flash_sdpa_public_headers})
 create_header_file(${zendnnl_inc_file}
                    ${inc_subdir}
-                   "${lowoha_sdpa_public_headers_list}")
-
-add_subdirectory(bmm_sdpa)
-add_subdirectory(flash_sdpa)
+                   "${lowoha_flash_sdpa_public_headers_list}")

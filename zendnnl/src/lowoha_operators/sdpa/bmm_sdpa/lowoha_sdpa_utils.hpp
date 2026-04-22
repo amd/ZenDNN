@@ -14,49 +14,49 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef LOWOHA_SDPA_HPP
-#define LOWOHA_SDPA_HPP
+#ifndef LOWOHA_SDPA_UTILS_HPP
+#define LOWOHA_SDPA_UTILS_HPP
 
-#include <cmath>
-#include <cstring>
-#include "lowoha_operators/sdpa/bmm_sdpa/lowoha_sdpa_utils.hpp"
+#include <cstdint>
+#include <string>
+#include "common/zendnnl_global.hpp"
+#include "common/logging.hpp"
+#include "lowoha_operators/sdpa/lowoha_sdpa_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
+using namespace zendnnl::common;
+
 /**
- * @brief Execute Scaled Dot-Product Attention
+ * @brief Validate SDPA inputs
  *
- * Performs: output = softmax(Q * K^T / scale) * V
- *
- * With optional attention mask:
- *   output = softmax(Q * K^T / scale + mask) * V
- *
- * With causal mask:
- *   output = softmax(Q * K^T / scale + causal_mask) * V
- *   where causal_mask[i,j] = -inf if j > i, else 0
- *
- * @param query        Query tensor [batch, num_heads, seq_len, head_dim]
- * @param key          Key tensor [batch, num_heads, seq_len, head_dim]
- * @param value        Value tensor [batch, num_heads, seq_len, head_dim]
- * @param attn_mask    Optional attention mask (can be nullptr)
- * @param output       Output tensor [batch, num_heads, seq_len, head_dim]
+ * @param query        Query tensor pointer
+ * @param key          Key tensor pointer
+ * @param value        Value tensor pointer
+ * @param output       Output tensor pointer
  * @param params       SDPA parameters
- *
- * @return status_t::success or status_t::failure
+ * @return status_t::success if valid, status_t::failure otherwise
  */
-status_t sdpa_direct(
+status_t validate_sdpa_inputs(
   const void *query,
   const void *key,
   const void *value,
-  const void *attn_mask,
-  void *output,
+  const void *output,
   sdpa_params &params
 );
+
+/**
+ * @brief Calculate default scale factor (1/sqrt(head_dim))
+ *
+ * @param head_dim     Head dimension
+ * @return Default scale factor
+ */
+float calculate_default_scale(int64_t head_dim);
 
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // LOWOHA_SDPA_HPP
+#endif // LOWOHA_SDPA_UTILS_HPP

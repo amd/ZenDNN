@@ -275,6 +275,7 @@ int main() {
      *  Demonstrates SDPA encoder operator usage for transformer attention.
      */
     sdpa_example();
+    sdpa_direct_example();
 
     return OK;
   }

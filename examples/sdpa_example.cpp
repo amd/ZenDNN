@@ -14,17 +14,79 @@
 # * limitations under the License.
 # *******************************************************************************/
 #include "sdpa_example.hpp"
-#include <chrono>
 #include <cmath>
-#include <iomanip>
+#include <cstdint>
+#include <vector>
 
 namespace zendnnl {
 namespace examples {
 
 using namespace zendnnl::interface;
+using zendnnl::lowoha::sdpa::sdpa_direct;
+using zendnnl::lowoha::sdpa::sdpa_params;
+
+int sdpa_direct_example() {
+  const int64_t b = static_cast<int64_t>(BS);
+  const int64_t h = static_cast<int64_t>(NUM_HEADS);
+  const int64_t s = static_cast<int64_t>(SEQ_LEN);
+  const int64_t d = static_cast<int64_t>(HEAD_DIM);
+  const size_t elems = static_cast<size_t>(b * h * s * d);
+
+  std::vector<float> q(elems);
+  std::vector<float> k(elems);
+  std::vector<float> v(elems);
+  std::vector<float> out(elems, 0.0f);
+
+  for (size_t i = 0; i < elems; ++i) {
+    const float x = 0.01f * static_cast<float>(static_cast<int>(i % 17) - 8);
+    q[i] = x;
+    k[i] = x * 1.03f;
+    v[i] = x * 0.97f;
+  }
+
+  sdpa_params params{};
+  params.batch     = b;
+  params.num_heads = h;
+  params.seq_len   = s;
+  params.head_dim  = d;
+
+  params.q_stride_d = 1;
+  params.q_stride_s = d;
+  params.q_stride_h = s * d;
+  params.q_stride_b = h * s * d;
+  params.k_stride_d = 1;
+  params.k_stride_s = d;
+  params.k_stride_h = s * d;
+  params.k_stride_b = h * s * d;
+  params.v_stride_d = 1;
+  params.v_stride_s = d;
+  params.v_stride_h = s * d;
+  params.v_stride_b = h * s * d;
+  params.o_stride_d = 1;
+  params.o_stride_s = d;
+  params.o_stride_h = s * d;
+  params.o_stride_b = h * s * d;
+
+  params.qkv_dt  = data_type_t::f32;
+  params.out_dt  = data_type_t::f32;
+  params.mask_dt = data_type_t::none;
+  params.scale   = 1.0 / std::sqrt(static_cast<double>(d));
+  params.is_causal = false;
+  params.dropout_p = 0.0;
+  params.num_threads = 0;
+
+  if (sdpa_direct(q.data(), k.data(), v.data(), nullptr,
+                  out.data(), params) != status_t::success) {
+    testlog_error("sdpa_direct_example: sdpa_direct failed");
+    return NOT_OK;
+  }
+
+  return OK;
+}
 
 int sdpa_example() {
   try {
+
     tensor_factory_t tensor_factory;
 
     // Create Q, K, V tensors with dimensions [B, H, S, D]
@@ -79,8 +141,6 @@ int sdpa_example() {
 
   return OK;
 }
-
-
 
 } //examples
 } //zendnnl
