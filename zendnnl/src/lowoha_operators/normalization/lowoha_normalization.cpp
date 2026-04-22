@@ -18,6 +18,7 @@
 #include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
 #include "lowoha_operators/normalization/kernel/rmsnorm_avx512_kernel.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+#include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -34,15 +35,35 @@ status_t normalization_kernel_wrapper(
   norm_params &params
 ) {
 
+  // Normalization kernels only support f32 and bf16. Reject unsupported
+  // data types early with a clear error instead of silently misinterpreting
+  // the data.
+  const bool src_supported = (params.src_dt == data_type_t::f32 ||
+                              params.src_dt == data_type_t::bf16);
+  const bool dst_supported = (params.dst_dt == data_type_t::f32 ||
+                              params.dst_dt == data_type_t::bf16);
+  if (!src_supported || !dst_supported) {
+    log_error("Normalization: unsupported data type (src=",
+              dtype_info(params.src_dt), ", dst=",
+              dtype_info(params.dst_dt),
+              "). Only f32 and bf16 are supported.");
+    return status_t::failure;
+  }
+
   if (params.norm_type == norm_type_t::RMS_NORM ||
       params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
-    log_info("Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
+    if (zendnnl_platform_info().get_avx512f_status()) {
+      log_info("Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
 
-    status_t status = rms_norm_avx512(input, output, residual, gamma, params);
-    if (status != status_t::success) {
-      log_error(norm_type_to_str(params.norm_type), " kernel failed");
+      status_t status = rms_norm_avx512(input, output, residual, gamma, params);
+      if (status != status_t::success) {
+        log_error(norm_type_to_str(params.norm_type), " kernel failed");
+      }
+      return status;
     }
-    return status;
+    // Fall through to reference kernel on non-AVX512 platforms
+    log_info("AVX512 not available, using reference kernel for ",
+             norm_type_to_str(params.norm_type));
   }
 
   log_info("Using reference kernel for ", norm_type_to_str(params.norm_type));
