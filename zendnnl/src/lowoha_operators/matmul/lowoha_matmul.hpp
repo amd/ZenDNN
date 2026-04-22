@@ -87,8 +87,21 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  * @param dst              Pointer to matrix C data
  * @param ldc              Leading dimension of C
  * @param is_weights_const Whether the weights are constant (enables caching)
- * @param batch_params     Batch parameters including batch sizes and strides
- * @param params           Additional parameters including post-ops and data types
+ * @param[in,out] batch_params  On input supplies Batch_A, Batch_B, and
+ *     optional batch strides. The function may compute default batch
+ *     strides when the caller supplies sentinel values (e.g. -1).
+ * @param[in,out] params   Matmul configuration whose following fields
+ *     may be mutated:
+ *     - @c postop_[].leading_dim : defaulted to N for binary post-ops
+ *       when the caller leaves it at -1.
+ *     - @c dynamic_quant / @c dtypes : reorder-quantization dispatch may
+ *       set the dynamic_quant flag and rewrite the source data type.
+ *     - @c quant_params.wei_scale : GGML weight unpacking populates the
+ *       weight-scale buffer and associated metadata.
+ *
+ * @note Thread safety: callers must not share the same @c matmul_params or
+ *       @c matmul_batch_params_t instance across concurrent calls, since
+ *       the function mutates both in place.
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
@@ -97,7 +110,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       matmul_batch_params_t batch_params, matmul_params params);
+                       matmul_batch_params_t &batch_params, matmul_params &params);
 
 /**
  * @brief Execute group matmul operations (e.g. MoE experts)

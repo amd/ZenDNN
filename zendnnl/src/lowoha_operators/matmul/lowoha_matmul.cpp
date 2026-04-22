@@ -205,7 +205,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       matmul_batch_params_t batch_params, matmul_params params) {
+                       matmul_batch_params_t &batch_params, matmul_params &params) {
   // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
   //  - profiler_t constructor: eliminated by dead store elimination at -O3
   //    when profiler is never used.
@@ -243,9 +243,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     return status;
   }
 
-  // Set leading dimension for binary post-op buffers if not set.
-  // This is parameter initialization, not validation — must always execute
-  // regardless of the ZENDNNL_DIAGNOSTICS_ENABLE flag.
+  // [in,out] Mutates params.postop_[].leading_dim: defaults to N for binary
+  // post-ops when the caller leaves it at -1. Must always execute regardless
+  // of the ZENDNNL_DIAGNOSTICS_ENABLE flag.
   for (auto &po : params.postop_) {
     if (po.po_type == post_op_type_t::binary_add ||
         po.po_type == post_op_type_t::binary_mul) {
@@ -255,6 +255,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     }
   }
 
+  // [in,out] Mutates params.quant_params.wei_scale: GGML weight unpacking
+  // populates the weight-scale buffer and associated metadata.
   if (params.packing.pack_format_b == 1) {
     status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, params);
     if (unpack_status != status_t::success) {
@@ -270,11 +272,15 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   const int32_t omp_mt = thread_guard::max_threads();
   const int32_t num_threads = resolve_num_threads(params.num_threads, omp_mt);
 
-  // Dynamic quantization converts the source matrix from its original dtype
-  // (f32/bf16) to a lower-precision integer type (s8/u8) in a contiguous buffer.
-  // This may change the effective leading dimension (reordered_lda) when the
-  // original source has padding (lda > K), since the quantized buffer is packed
-  // without padding. Non-quantized paths must continue using the original lda.
+  // [in,out] Mutates params.dtypes.src, params.quant_params.src_scale.buff,
+  // params.quant_params.src_zp.buff, and batch_params.batch_stride_src:
+  // dynamic quantization converts the source matrix from its original dtype
+  // (f32/bf16) to a lower-precision integer type (s8/u8) in a contiguous
+  // buffer, populating scale and zero-point buffers. For batched paths,
+  // batch_stride_src is overwritten with the packed stride. This may also
+  // change the effective leading dimension (reordered_lda) when the original
+  // source has padding (lda > K), since the quantized buffer is packed
+  // without padding.
   int reordered_lda = lda;
   reorder_quant_buffers_t quant_buffers;
   if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
