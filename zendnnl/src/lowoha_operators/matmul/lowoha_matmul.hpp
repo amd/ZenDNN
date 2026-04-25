@@ -143,6 +143,17 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  *                         where dim = N/2. Requires N even and dst dtype f32 or
  *                         bf16. nullptr disables (default). Parallel mode only;
  *                         see grp_matmul_gated_act_params.
+ * @param fused_moe        Optional fused MoE parameters describing the full
+ *                         Op1 (gate+up) → activation → Op2 (down_proj) block
+ *                         in a single call. V1 executes this flow as two
+ *                         passes for every GRP_ALGO: Pass 1 runs Op1 plus
+ *                         the gated activation via the parallel dispatcher
+ *                         (honoring ZENDNNL_GRP_MATMUL_ALGO), Pass 2 runs
+ *                         Op2 via the same dispatcher. When moe_postop is
+ *                         also provided, the weighted reduce runs afterward
+ *                         in its own pass. Deep single-pass Op1→Act→Op2
+ *                         chaining is a future optimization.
+ *                         nullptr disables (default).
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */
@@ -164,7 +175,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<bool> &is_weights_const,
                              std::vector<matmul_params> &params,
                              const group_matmul_moe_postop_params *moe_postop = nullptr,
-                             const grp_matmul_gated_act_params *gated_act = nullptr);
+                             const grp_matmul_gated_act_params *gated_act = nullptr,
+                             const grp_matmul_fused_moe_params *fused_moe = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

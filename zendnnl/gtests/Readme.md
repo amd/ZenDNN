@@ -161,7 +161,8 @@ The `zendnnl/gtests/` directory contains all test-related files and subdirectori
 ```plaintext
 gtests/
 ├── gtest_main.cpp           # Entry point for all tests.
-├── test_matmul.cpp          # Matmul testsuite with different test cases.
+├── test_matmul.cpp          # Single-op matmul testsuite (F32, BF16, INT8, WOQ, stride).
+├── test_group_matmul.cpp    # Group matmul testsuite (MoE postop, gated activation, fused MoE).
 ├── test_batchmatmul.cpp     # Batch matmul testsuite with different test cases.
 ├── test_reorder.cpp         # Reorder testsuite (regular + LOWOHA quantization/dequantization).
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.

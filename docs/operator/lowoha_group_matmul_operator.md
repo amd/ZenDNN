@@ -16,6 +16,8 @@ An optional **MoE post-op** can be attached to the parallel path to fuse expert 
 
 An optional **gated activation post-op** can be attached to fuse gate+up projections: after the GEMM (which uses fused `[gate_W | up_W]` weights producing `N = 2*dim` output columns), the activation computes in-place `dst[:, 0:dim] = act(gate) * up`.  Supported activations: `silu_and_mul` (Mixtral, Llama, Qwen), `gelu_and_mul`, `swiglu_oai_mul` (interleaved layout).  Applied after GEMM and before the MoE weighted-reduce (if both are set).
 
+An optional **fused MoE** parameter expresses the entire MoE block — Op1 (gate+up) → gated activation → Op2 (down_proj) — as a single API call.  In the current V1 implementation all `GRP_ALGO` values execute this path as two internal dispatches (Pass 1: Op1 + activation, Pass 2: Op2) behind the single-call interface.  Per-expert or per-M-tile deep fusion that keeps intermediate data hot in cache across all three operations is a future optimization.
+
 Include `lowoha_operators/matmul/lowoha_matmul.hpp` (namespace `zendnnl::lowoha::matmul`).
 
 ### Key benefits
@@ -27,6 +29,7 @@ Include `lowoha_operators/matmul/lowoha_matmul.hpp` (namespace `zendnnl::lowoha:
 - N-tiling for large-N experts: up to 3.9× faster than sequential for Mixtral gate_proj
 - Optional MoE weighted-reduce post-op (`moe_postop`, `nullptr` to disable)
 - Optional gated activation post-op (`gated_act`) for fused gate+up projections (silu_and_mul, gelu_and_mul, swiglu_oai_mul)
+- Optional single-call fused MoE interface (`fused_moe`) for Op1(gate+up) → activation → Op2(down_proj); currently two-pass internally in V1
 - Unified status: `status_t::success` only when everything succeeds
 
 ## API signature
@@ -51,7 +54,8 @@ status_t group_matmul_direct(
   const std::vector<bool> &is_weights_const,
   std::vector<matmul_params> &params,
   const group_matmul_moe_postop_params *moe_postop = nullptr,
-  const grp_matmul_gated_act_params *gated_act = nullptr);
+  const grp_matmul_gated_act_params *gated_act = nullptr,
+  const grp_matmul_fused_moe_params *fused_moe = nullptr);
 ```
 
 ### Parameters
@@ -79,6 +83,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, etc. |
 | `moe_postop` | `const group_matmul_moe_postop_params*` | Optional MoE post-op; **`nullptr`** disables (default) |
 | `gated_act` | `const grp_matmul_gated_act_params*` | Optional gated activation; **`nullptr`** disables (default). Requires N even, dst dtype f32/bf16. Applied after GEMM, before `moe_postop`. |
+| `fused_moe` | `const grp_matmul_fused_moe_params*` | Optional fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one call; **`nullptr`** disables (default). See [Fused MoE](#fused-moe-op1--activation--op2). |
 
 ### Return value
 
@@ -225,7 +230,7 @@ status_t st = group_matmul_direct(
 // moe_output now contains the reduced [NUM_TOKENS, N] tensor
 ```
 
-See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16, MoE post-op, and gated activation examples with verification.
+See `examples/lowoha_group_matmul_example.cpp` for complete runnable FP32, BF16, MoE post-op, gated activation, and fused MoE examples with verification.
 
 ## Gated activation post-op (parallel mode only)
 
@@ -264,6 +269,7 @@ struct grp_matmul_gated_act_params {
 |------------|-------------|
 | `N` | Must be even (`N = 2 * dim`) for all experts |
 | `dst dtype` | Must be FP32 or BF16 (uniform across experts) |
+| `layout` | Must be row-major (`'r'` / `'R'`) for all experts |
 | Mode | Parallel only (`src.size() > 1`) |
 
 ### C++ gated activation example
@@ -284,6 +290,91 @@ status_t st = group_matmul_direct(
     nullptr,   // no MoE weighted-reduce
     &act);     // gated activation: silu(gate) * up
 // dst[:, 0:dim] now contains the activated output
+```
+
+## Fused MoE (Op1 → activation → Op2)
+
+When `fused_moe != nullptr`, the entire MoE block — gate+up projection (Op1), gated activation, and down projection (Op2) — executes as a single fused API call.
+
+### How it works
+
+| ALGO | Strategy | Cache benefit |
+|------|----------|---------------|
+| **All (V1)** | Two-pass — Op1+Act via parallel dispatch, then Op2 via parallel dispatch | Single API call; ALGO env honored for Op1 |
+
+The weighted-reduce (`moe_postop`) always runs in a separate pass after Op2 since it requires all experts' outputs to be complete.
+
+### `grp_matmul_fused_moe_params`
+
+```cpp
+struct grp_matmul_fused_moe_params {
+  std::vector<const void *> down_weight;  // Per-expert down_proj weights [dim, N_down[i]].
+  std::vector<int> N_down;                // Per-expert output columns of down_proj.
+  std::vector<int> ldb_down;              // Leading dimension of down_weight per expert.
+  std::vector<const void *> bias_down;    // Per-expert bias for down_proj (nullptr OK).
+  data_type_t bias_dt_down = data_type_t::none;  // Bias dtype for Op2 (none = no bias).
+  std::vector<void *> dst_down;           // Per-expert down_proj output [M, N_down[i]].
+  std::vector<int> ldc_down;              // Leading dimension of dst_down per expert.
+};
+```
+
+All vectors must have size `num_ops` (matching the main Op1 vectors).
+
+| Field | Description |
+|-------|-------------|
+| `down_weight` | Per-expert weight matrices for the down projection. |
+| `N_down` | Per-expert output column count (typically all the same: `hidden_size`). |
+| `ldb_down` | Leading dimension of each `down_weight[i]` (>= `N_down[i]`). |
+| `bias_down` | Per-expert bias (each entry can be `nullptr` for no bias). |
+| `bias_dt_down` | Bias data type for Op2 (`none` = no bias; must match actual bias buffer dtype). |
+| `dst_down` | Per-expert output buffers for down_proj results. |
+| `ldc_down` | Leading dimension of each `dst_down[i]` (>= `N_down[i]`). |
+
+### Constraints
+
+| Constraint | Requirement |
+|------------|-------------|
+| `down_weight.size()` | `== num_ops` (all fused vectors must match) |
+| `N` | Must be even (`N = 2 * dim`) for all experts |
+| `K_down` | `= N_gate_up / 2` (the `dim` after gated activation) |
+| `dst_down[i]` | Must hold at least `[M[i], N_down[i]]` elements |
+| `layout` | Must be row-major (`'r'` / `'R'`) for all experts |
+| Mode | Parallel only (`src.size() > 1`) |
+| `fused_moe` | Must be `nullptr` to disable; non-null requires all vectors populated |
+
+### C++ fused MoE example
+
+```cpp
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+using namespace zendnnl::lowoha::matmul;
+
+// Op1 params: gate+up projection with N = 2*dim
+// (layouts, transAs, transBs, Ms, Ns, Ks, alphas, srcs, ldas,
+//  gate_up_weights, ldbs, biases, betas, gate_up_dsts, ldcs,
+//  is_weights_const, params already set up)
+
+// Set up fused MoE params for Op2 (down_proj)
+grp_matmul_fused_moe_params fused;
+fused.down_weight = down_proj_weights;   // vector<const void*>
+fused.N_down = std::vector<int>(num_ops, hidden_size);
+fused.ldb_down = std::vector<int>(num_ops, hidden_size);
+fused.bias_down = std::vector<const void*>(num_ops, nullptr);
+fused.dst_down = down_proj_outputs;      // vector<void*>
+fused.ldc_down = std::vector<int>(num_ops, hidden_size);
+
+// Gated activation
+grp_matmul_gated_act_params act;
+act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+// Single call: Op1 → silu(gate)*up → Op2
+status_t st = group_matmul_direct(
+    layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+    srcs, ldas, gate_up_weights, ldbs, biases, betas,
+    gate_up_dsts, ldcs, is_weights_const, params,
+    nullptr,   // no MoE weighted-reduce (or pass &moe for final reduce)
+    &act,      // gated activation
+    &fused);   // fused down_proj
+// fused.dst_down now contains the down_proj output per expert
 ```
 
 ## Notes and best practices

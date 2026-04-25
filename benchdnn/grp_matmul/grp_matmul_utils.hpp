@@ -67,8 +67,10 @@ struct GrpMatmulConfig {
     int warmup = 50;
     int moe_topk = 0;  ///< 0 = no MoE post-op, >0 = enable with this topk
     int gated_act = 0;  ///< 0 = off, 1 = silu_and_mul, 2 = gelu_and_mul, 3 = swiglu_oai_mul
+    int N_down = 0;     ///< 0 = no fused down_proj, >0 = fused Op1→Act→Op2 with this N_down
 
     int max_M() const { return *std::max_element(M_per_op.begin(), M_per_op.end()); }
+    int dim() const { return N / 2; }  ///< intermediate dim = N_gate_up / 2
     int total_M() const { return std::accumulate(M_per_op.begin(), M_per_op.end(), 0); }
     bool is_uniform_M() const {
         return std::all_of(M_per_op.begin(), M_per_op.end(),

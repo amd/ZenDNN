@@ -14,23 +14,14 @@
  * limitations under the License.
  ******************************************************************************/
 
-/// Group MatMul examples — FP32, BF16, MoE post-op, and gated activation.
+/// Group MatMul examples — FP32, BF16, MoE post-op, gated activation, fused MoE.
 ///
 /// Demonstrates the group_matmul_direct API for:
 ///   1. FP32 parallel group GEMM (multiple independent matmuls).
 ///   2. BF16 parallel group GEMM.
 ///   3. BF16 group GEMM with MoE post-op (weighted-reduce over expert outputs).
 ///   4. FP32 group GEMM with gated activation (silu_and_mul for fused gate+up).
-///
-/// The MoE post-op example simulates a Mixture-of-Experts layer:
-///   - 4 experts, topk=2, 8 tokens
-///   - Each token is routed to 2 experts with routing weights
-///   - After expert GEMMs, the post-op reduces:
-///       output[t, d] = Σ_k  weight[t,k] * expert_output[row_ptrs[t*topk+k]][d]
-///
-/// The gated activation example demonstrates fused gate+up projection:
-///   - N = 2*dim, GEMM output is [gate | up]
-///   - Activation computes: dst[:, 0:dim] = silu(gate) * up
+///   5. FP32 fused MoE: gate+up → silu → down_proj in one API call.
 
 #include "lowoha_group_matmul_example.hpp"
 
@@ -435,6 +426,125 @@ int group_matmul_gated_act_example() {
     if (ok) {
       testlog_info("Gated activation (silu_and_mul) verified OK. ",
                    NUM_EXPERTS, " experts, dim=", DIM);
+    } else {
+      return NOT_OK;
+    }
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+// ---------------------------------------------------------------------------
+// Example 5: FP32 fused MoE — gate+up → silu → down_proj in one API call
+// ---------------------------------------------------------------------------
+
+int group_matmul_fused_moe_example() {
+  testlog_info("** group_matmul fused MoE example: "
+               "4 experts, silu, dim=32, hidden=64");
+
+  try {
+    const int NUM_EXPERTS = 4;
+    const int M_PER_EXPERT = 8;
+    const int HIDDEN = 64;   // hidden_size = K for gate+up, N_down for down
+    const int DIM = 32;      // intermediate dim
+    const int N_GATE_UP = 2 * DIM;  // fused gate+up output
+    const int K = HIDDEN;
+
+    std::vector<int> Ms(NUM_EXPERTS, M_PER_EXPERT);
+    std::vector<int> Ns(NUM_EXPERTS, N_GATE_UP);
+    std::vector<int> Ks(NUM_EXPERTS, K);
+
+    // Op1 buffers: src[M,K] × W_gate_up[K,2*DIM] → dst[M,2*DIM]
+    std::vector<std::vector<float>> src(NUM_EXPERTS), wei_gu(NUM_EXPERTS),
+        dst_gu(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      src[i].resize(M_PER_EXPERT * K);
+      wei_gu[i].resize(K * N_GATE_UP);
+      dst_gu[i].resize(M_PER_EXPERT * N_GATE_UP, 0.f);
+      fill_f32(src[i], 0.1f);
+      fill_f32(wei_gu[i], 0.01f);
+    }
+
+    // Op2 buffers: activated[M,DIM] × W_down[DIM,HIDDEN] → dst_down[M,HIDDEN]
+    std::vector<std::vector<float>> wei_down(NUM_EXPERTS),
+        dst_down(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      wei_down[i].resize(DIM * HIDDEN);
+      dst_down[i].resize(M_PER_EXPERT * HIDDEN, 0.f);
+      fill_f32(wei_down[i], 0.02f);
+    }
+
+    // Build API vectors for Op1
+    std::vector<char> layouts(NUM_EXPERTS, 'r');
+    std::vector<bool> transAs(NUM_EXPERTS, false), transBs(NUM_EXPERTS, false);
+    std::vector<float> alphas(NUM_EXPERTS, 1.f), betas(NUM_EXPERTS, 0.f);
+    std::vector<bool> wconst(NUM_EXPERTS, false);
+    std::vector<int> ldas = Ks, ldbs = Ns, ldcs = Ns;
+
+    std::vector<const void *> sp(NUM_EXPERTS), wp(NUM_EXPERTS);
+    std::vector<const void *> bp(NUM_EXPERTS, nullptr);
+    std::vector<void *> dp(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      sp[i] = src[i].data();
+      wp[i] = wei_gu[i].data();
+      dp[i] = dst_gu[i].data();
+    }
+
+    std::vector<matmul_params> params(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      params[i].dtypes.src = data_type_t::f32;
+      params[i].dtypes.wei = data_type_t::f32;
+      params[i].dtypes.dst = data_type_t::f32;
+    }
+
+    // Gated activation
+    grp_matmul_gated_act_params act;
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    // Fused down_proj
+    grp_matmul_fused_moe_params fused;
+    fused.N_down.resize(NUM_EXPERTS, HIDDEN);
+    fused.ldb_down.resize(NUM_EXPERTS, HIDDEN);
+    fused.bias_down.resize(NUM_EXPERTS, nullptr);
+    fused.ldc_down.resize(NUM_EXPERTS, HIDDEN);
+    fused.down_weight.resize(NUM_EXPERTS);
+    fused.dst_down.resize(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      fused.down_weight[i] = wei_down[i].data();
+      fused.dst_down[i] = dst_down[i].data();
+    }
+
+    // Single call: Op1 → silu(gate)*up → Op2
+    status_t st = group_matmul_direct(
+        layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+        sp, ldas, wp, ldbs, bp, betas, dp, ldcs, wconst, params,
+        nullptr, &act, &fused);
+
+    if (st != status_t::success) {
+      testlog_error("Fused MoE group_matmul failed");
+      return NOT_OK;
+    }
+
+    // Verify: down_proj output values should be finite.
+    bool ok = true;
+    for (int i = 0; i < NUM_EXPERTS && ok; ++i) {
+      for (int m = 0; m < M_PER_EXPERT && ok; ++m) {
+        for (int d = 0; d < HIDDEN && ok; ++d) {
+          float val = dst_down[i][m * HIDDEN + d];
+          if (std::isnan(val) || std::isinf(val)) {
+            testlog_error("Fused MoE verify failed: NaN/Inf at expert=", i,
+                          " m=", m, " d=", d);
+            ok = false;
+          }
+        }
+      }
+    }
+
+    if (ok) {
+      testlog_info("Fused MoE (gate+up → silu → down_proj) verified OK. ",
+                   NUM_EXPERTS, " experts, dim=", DIM, " hidden=", HIDDEN);
     } else {
       return NOT_OK;
     }

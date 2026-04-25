@@ -43,13 +43,18 @@ set -euo pipefail
 #   pytorch          -> input/bmm/pytorch_bmm_inputs.txt
 #
 # Input shortcuts (grp_matmul):
-#   uniform          -> input/grp_matmul/moe_uniform.txt
 #   prompt           -> input/grp_matmul/grp_matmul_prompt.txt
 #   decode           -> input/grp_matmul/grp_matmul_decode.txt
+#   mixtral_fused    -> input/grp_matmul/moe_fused/mixtral_moe_fused.txt
+#   qwen3_fused      -> input/grp_matmul/moe_fused/qwen3_30b_moe_fused.txt
+#   gptoss_fused     -> input/grp_matmul/moe_fused/gpt_oss_moe_fused.txt
+#   mixtral_full     -> input/grp_matmul/moe_fused_gate_up_down/mixtral_moe_full_block.txt
+#   qwen3_full       -> input/grp_matmul/moe_fused_gate_up_down/qwen3_30b_moe_full_block.txt
+#   gptoss_full      -> input/grp_matmul/moe_fused_gate_up_down/gpt_oss_moe_full_block.txt
 #
 # Examples:
 #   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 128
-#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i uniform -t 128
+#   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i mixtral_full -t 128
 #   ./run_matmul_benchmark_sweep.sh --op grp_matmul -v 1,2,3 -i prompt -t 128
 #   ./run_matmul_benchmark_sweep.sh --op bmm -a 4,5,6 -i sdpa -t 128
 # ===========================================================================
@@ -112,11 +117,16 @@ done
 # --- Resolve input file ---
 if [[ "$OP" == "grp_matmul" ]]; then
     case "$INPUT_ARG" in
-        uniform)     INPUT_FILE="$GRP_DIR/moe_uniform.txt"; TAG="uniform" ;;
-        prompt)      INPUT_FILE="$GRP_DIR/grp_matmul_prompt.txt"; TAG="prompt" ;;
-        decode)      INPUT_FILE="$GRP_DIR/grp_matmul_decode.txt"; TAG="decode" ;;
-        bf16)        INPUT_FILE="$GRP_DIR/moe_uniform.txt"; TAG="uniform" ;;
-        *)           INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
+        prompt)         INPUT_FILE="$GRP_DIR/grp_matmul_prompt.txt"; TAG="prompt" ;;
+        decode)         INPUT_FILE="$GRP_DIR/grp_matmul_decode.txt"; TAG="decode" ;;
+        bf16)           INPUT_FILE="$GRP_DIR/grp_matmul_decode.txt"; TAG="decode" ;;
+        mixtral_fused)  INPUT_FILE="$GRP_DIR/moe_fused/mixtral_moe_fused.txt"; TAG="mixtral_fused" ;;
+        qwen3_fused)    INPUT_FILE="$GRP_DIR/moe_fused/qwen3_30b_moe_fused.txt"; TAG="qwen3_fused" ;;
+        gptoss_fused)   INPUT_FILE="$GRP_DIR/moe_fused/gpt_oss_moe_fused.txt"; TAG="gptoss_fused" ;;
+        mixtral_full)   INPUT_FILE="$GRP_DIR/moe_fused_gate_up_down/mixtral_moe_full_block.txt"; TAG="mixtral_full" ;;
+        qwen3_full)     INPUT_FILE="$GRP_DIR/moe_fused_gate_up_down/qwen3_30b_moe_full_block.txt"; TAG="qwen3_full" ;;
+        gptoss_full)    INPUT_FILE="$GRP_DIR/moe_fused_gate_up_down/gpt_oss_moe_full_block.txt"; TAG="gptoss_full" ;;
+        *)              INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
     esac
 elif [[ "$OP" == "bmm" ]]; then
     case "$INPUT_ARG" in

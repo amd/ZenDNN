@@ -68,6 +68,19 @@ int group_matmul_moe_postop_example();
  */
 int group_matmul_gated_act_example();
 
+/**
+ * @brief FP32 fused MoE: gate+up → silu → down_proj in one API call.
+ *
+ * Demonstrates the fused_moe parameter for a single-call MoE workflow:
+ *   - 4 experts, each computing Op1 (gate+up GEMM, N=2*dim), activation
+ *     (silu_and_mul), and Op2 (down_proj GEMM, N_down=hidden_size).
+ *   - Exposed as a single API call regardless of GRP_ALGO.  The current
+ *     V1 implementation runs the flow as two internal dispatch passes
+ *     (Op1 + activation, then Op2); per-expert / per-M-tile deep fusion
+ *     is a future optimization.
+ */
+int group_matmul_fused_moe_example();
+
 } // namespace examples
 } // namespace zendnnl
 

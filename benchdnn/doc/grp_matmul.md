@@ -35,7 +35,7 @@ with independent memory layouts.
 CSV, one configuration per line.  Lines starting with `#` are comments.
 
 ```
-num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk[, gated_act]]
+num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk[, gated_act[, N_down]]]
 ```
 
 ### Fields
@@ -52,6 +52,7 @@ num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_to
 | `warmup` | int | Warmup iterations before timing. |
 | `moe_topk` | int (optional) | MoE post-op topk.  `0` or omitted = disabled.  `>0` = enable fused weighted-reduce with that topk.  Requires `total_M % topk == 0`. |
 | `gated_act` | int (optional) | Gated activation.  `0` or omitted = disabled.  `1` = `silu_and_mul` (Mixtral/Llama/Qwen), `2` = `gelu_and_mul`, `3` = `swiglu_oai_mul` (GPT-OSS interleaved).  Requires `N` even. |
+| `N_down` | int (optional) | Fused down_proj output columns.  `0` or omitted = disabled.  `>0` = fused Op1(gate+up) → activation → Op2(down_proj) with this output width.  K_down = N/2 (dim after activation). |
 
 ### Examples
 
@@ -64,6 +65,9 @@ num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_to
 
 # 8 experts, imbalanced M, with MoE topk=2, no activation (down_proj)
 8, 126:323:80:68:256:37:15:119, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2
+
+# Full fused MoE block: gate+up → silu → down_proj (N_down=4096)
+8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096
 ```
 
 ## MoE post-op
@@ -79,6 +83,18 @@ The MoE weighted-reduce runs after all expert GEMMs complete and is
 included in the timed iterations.  GFLOPS accounting includes both GEMM
 FLOPs (`2 * M[i] * K * N` per expert) and MoE FLOPs
 (`2 * num_tokens * N * topk`).
+
+## Fused MoE (Op1 → activation → Op2)
+
+When `N_down > 0`, the benchmark allocates down_proj weights and output
+buffers and passes `grp_matmul_fused_moe_params` to `group_matmul_direct`.
+The entire MoE block — gate+up GEMM, gated activation, and down_proj GEMM —
+runs as a single fused API call.
+
+GFLOPS accounting includes both Op1 (`2 * M[i] * K * N` per expert) and
+Op2 (`2 * M[i] * dim * N_down` per expert, where `dim = N/2`).
+
+Input files for fused benchmarks are in `benchdnn/input/grp_matmul/moe_fused_gate_up_down/`.
 
 ## Output
 
@@ -96,6 +112,7 @@ Results are printed to the console and written to a timestamped CSV file.
 | warmup | Warmup iterations |
 | dtypes | src:wei:dst data types |
 | moe | `off` or `topk=N` |
+| fused | `off` or `N_down=N` |
 | avg_ms | Average iteration time (ms) |
 | min_ms | Minimum iteration time (ms) |
 | GFLOPS_a | GFLOPS based on average time |
@@ -103,7 +120,7 @@ Results are printed to the console and written to a timestamped CSV file.
 
 ### CSV columns
 
-`num_ops, M, K, N, iters, warmup, dtypes, is_weights_const, moe_topk, total_ms, avg_ms, min_ms, GFLOPS_avg, GFLOPS_peak`
+`num_ops, M, K, N, iters, warmup, dtypes, is_weights_const, moe_topk, gated_act, N_down, total_ms, avg_ms, min_ms, GFLOPS_avg, GFLOPS_peak`
 
 ## Sweep script
 
@@ -113,15 +130,14 @@ Use `scripts/run_matmul_benchmark_sweep.sh` for automated benchmarking:
 # Run versions 0-3 on prompt shapes, 128 threads
 ./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 0,1,2,3 -i prompt -t 128
 
-# Run on uniform shapes with specific kernel
-./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 2 -a 1 -i uniform -t 128
+# Run version 2 on decode shapes with specific kernel
+./scripts/run_matmul_benchmark_sweep.sh --op grp_matmul -v 2 -a 1 -i decode -t 128
 ```
 
 ### Input shortcuts
 
 | Shortcut | File |
 |----------|------|
-| `uniform` | `benchdnn/input/grp_matmul/moe_uniform.txt` |
 | `prompt` | `benchdnn/input/grp_matmul/grp_matmul_prompt.txt` |
 | `decode` | `benchdnn/input/grp_matmul/grp_matmul_decode.txt` |
 

@@ -181,6 +181,108 @@ void apply_gated_act_inplace(
     void *dst, int row_start, int row_end,
     int N, int ldc, data_type_t dst_dtype);
 
+/**
+ * @brief Apply swiglu_oai_mul to an M x pairs interleaved tile, in-place.
+ *
+ * Used by the ALGO 3 N-tile fused-swiglu-oai path.  Each OMP thread owns a
+ * pair-aligned column range [col_start, col_start + 2*pairs) of the matmul
+ * output.  After an OMP barrier separates matmul from activation, this
+ * function reads the thread's `pairs` interleaved (g, u) pairs from those
+ * columns of every row and writes `pairs` activated values into columns
+ * [col_start/2, col_start/2 + pairs) of the same rows.
+ *
+ * In-place safety: at col_start == 0 the read-ahead property (read 2n, 2n+1
+ * before writing n) prevents self-corruption; at col_start > 0 the write
+ * range is strictly to the left of the read range and cannot stomp it.
+ * Cross-thread correctness relies on the caller placing a barrier between
+ * the matmul writes and the first call into this function.
+ *
+ * Only swiglu_oai_mul is supported (interleaved gate/up layout).  Legacy
+ * split-halves activations (silu_and_mul / gelu_and_mul) are still handled
+ * via the separate-pass path.
+ *
+ * @param dst_buf    Expert output buffer (base pointer to row 0, col 0).
+ * @param M          Number of rows in the expert's output.
+ * @param col_start  First column in the interleaved buffer (must be even).
+ * @param pairs      Number of (g, u) pairs this thread owns.
+ * @param ldc        Leading dimension of dst_buf (elements, not bytes).
+ * @param dtype      Buffer element type (f32 or bf16).
+ */
+void apply_swiglu_oai_tile_rows(
+    void *dst_buf, int M, int col_start, int pairs,
+    int ldc, data_type_t dtype);
+
+// --- Fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one pass ---
+
+/**
+ * @brief Parameters for fused MoE execution (Op1 → Act → Op2).
+ *
+ * When provided to group_matmul_direct, the entire MoE block is executed
+ * as a single API call.
+ *
+ * V1 current implementation — always two-pass for all GRP_ALGO values:
+ *     Pass 1: Op1 (gate+up) + gated activation via parallel dispatch.
+ *     Pass 2: Op2 (down_proj)                  via parallel dispatch.
+ *   Both passes honor ZENDNNL_GRP_MATMUL_ALGO.  The dispatcher may fuse
+ *   the gated activation into Pass 1's epilogue (all activations on
+ *   ALGO 1/2/4/5, and swiglu_oai_mul on ALGO 3); otherwise a separate
+ *   activation sub-pass is applied to Pass 1's output before Pass 2.
+ *   A future version may add per-expert deep fusion (Op1→Act→Op2
+ *   chained in L1/L2/L3) for further cache-locality wins.
+ *
+ * The weighted-reduce (moe_postop) always runs in a separate pass after
+ * Op2 since it requires all experts' outputs to be complete.
+ *
+ * All vectors must have size num_ops (one entry per expert).
+ *
+ * Constraints:
+ *   - N must be even (K_down = N / 2 for each expert).
+ *   - dst_down[i] must be at least [M[i], N_down[i]].
+ *   - Op2 inherits the caller-provided per-expert layout from Op1;
+ *     transA=false is hardcoded for Op2, transB is inherited from Op1
+ *     (typically both false for MoE row-major weights).
+ *   - When act==none, Op2 reads the raw first-half columns of Op1 output.
+ *     For correct MoE semantics, gated_act should be enabled.
+ */
+struct grp_matmul_fused_moe_params {
+  /// Per-expert down_proj weights [dim, N_down[i]].
+  /// Must use same dtype as Op1 weights (params[i].dtypes.wei).
+  std::vector<const void *> down_weight;
+  std::vector<int> N_down;                ///< Per-expert output columns of down_proj.
+  std::vector<int> ldb_down;              ///< Leading dimension of down_weight per expert.
+  std::vector<const void *> bias_down;    ///< Per-expert bias for down_proj (nullptr OK).
+  data_type_t bias_dt_down = data_type_t::none;  ///< Bias dtype for Op2 (none = no bias).
+  /// Per-expert down_proj output [M, N_down[i]].
+  /// Written with Op1 dst dtype (params[i].dtypes.dst).
+  std::vector<void *> dst_down;
+  std::vector<int> ldc_down;              ///< Leading dimension of dst_down per expert.
+};
+
+/**
+ * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj).
+ *
+ * V1 runs the flow as two passes of group_matmul_run_parallel_dispatch;
+ * both passes honor ZENDNNL_GRP_MATMUL_ALGO.  See grp_matmul_fused_moe_params
+ * (above) for the full design note.
+ *
+ * @param gemm_mode_out If non-null, receives a string literal for logging.
+ */
+status_t group_matmul_fused_moe_execute(
+    const grp_matmul_fused_moe_params &fused,
+    grp_matmul_gated_act_t act, data_type_t act_dtype,
+    const std::vector<char> &layout,
+    const std::vector<bool> &transA, const std::vector<bool> &transB,
+    const std::vector<int> &M, const std::vector<int> &N,
+    const std::vector<int> &K, const std::vector<float> &alpha,
+    const std::vector<const void *> &src, const std::vector<int> &lda,
+    const std::vector<const void *> &weight, const std::vector<int> &ldb,
+    const std::vector<const void *> &bias, const std::vector<float> &beta,
+    const std::vector<void *> &dst, const std::vector<int> &ldc,
+    const std::vector<bool> &is_weights_const,
+    std::vector<matmul_params> &params,
+    int num_threads,
+    const char **gemm_mode_out = nullptr);
+
 // --- Parallel expert dispatch ---
 
 /**
@@ -191,9 +293,15 @@ void apply_gated_act_inplace(
  *                       "multilevel", or "per_expert").
  */
 /**
- * @return true if gated activation was fused into the ALGO (caller should
- *         skip the separate activation pass).  false if caller must apply
- *         activation separately (ALGO 3 N-tile cannot fuse split-layout acts).
+ * @return true if the gated activation was fused into the ALGO's epilogue
+ *         (caller should skip the separate activation pass).  false if
+ *         the caller must apply activation separately.  Today:
+ *           ALGO 1 / 2 / 4 / 5 — always fuse any supported activation.
+ *           ALGO 3 N-tile      — fuses swiglu_oai_mul only (interleaved
+ *                                layout); silu_and_mul / gelu_and_mul are
+ *                                returned unfused because their split-
+ *                                halves layout does not colocate (g, u)
+ *                                pairs on the same thread's N-tile.
  */
 bool group_matmul_run_parallel_dispatch(
     const std::vector<char> &layout,
