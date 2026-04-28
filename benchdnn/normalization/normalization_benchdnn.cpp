@@ -21,7 +21,7 @@ namespace benchdnn {
 namespace normalization {
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size) {
+          const global_options &options, const bool isLOWOHA, size_t cache_size) {
 
   if (!isLOWOHA) {
     testlog_error("Regular (non-LOWOHA) normalization benchmark is not supported. "
@@ -41,7 +41,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   std::vector<std::pair<NormalizationConfig, TimingStats>> normalization_results;
 
   int status = normalization_lowoha_benchdnn(normalizationConfigs,
-               normalization_results, cache_size);
+               normalization_results, options, cache_size);
   if (status != OK) {
     testlog_error("LOWOHA Normalization benchmark failed.");
     return NOT_OK;

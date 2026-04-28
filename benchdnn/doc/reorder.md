@@ -11,13 +11,14 @@ This describes all ways to provide input for the reorder benchmark in BenchDNN, 
 Run the reorder benchmark using the following input methods:
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_inputs.txt [--lowoha=true/false]
+./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_inputs.txt [--lowoha=true/false] [--cache_mode=cold|hot]
 ```
 
 > **Note:**
 > - The `--lowoha` option controls benchmarking for the Low Overhead API (LOWOHA). User can pass either `--lowoha=true` or `--lowoha=false`. If not specified, it is enabled by default.
 > - When `--lowoha=false`, the benchmark runs the regular AOCL-based layout reorder.
 > - When `--lowoha=true` (default), the benchmark runs the LOWOHA-based quantization/type-conversion reorder.
+> - Cache behavior is selected with `--cache_mode` (see [Cache mode](#cache-mode) below). Default is `hot`.
 
 ---
 
@@ -82,6 +83,20 @@ Provide a file with one configuration per line. Each line should contain:
 > **Note:**
 > - The `isInplace` option controls whether the reorder is performed in-place or out-of-place.
 > - The `warmup_iters` parameter is optional and can be used to specify the number of warmup iterations before benchmarking.
+
+### Cache mode
+
+Use `--cache_mode=<value>` on the command line. The value is case-insensitive and must be one of `cold`, or `hot`. If omitted, the default is `hot`.
+
+- **`hot`** (default): No CPU cache flush before each measured iteration. Typical steady-state timing.
+- **`cold`**: Flushes the CPU cache before each measured iteration so each timed run starts from a cold-cache state.
+
+**Example usage:**
+
+```sh
+./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_inputs.txt --lowoha=false --cache_mode=cold
+./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_lowoha_inputs.txt --cache_mode=cold
+```
 
 ## Output
 

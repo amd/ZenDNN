@@ -168,6 +168,7 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
 
 int embag_benchdnn(std::vector<EmbagConfig> configs,
                    std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results,
+                   const global_options &options,
                    size_t cache_size) {
   bool skip;
 
@@ -237,9 +238,9 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
 
       // Benchmark iterations
       for (int i = 0; i < cfg.iters; ++i) {
-#if COLD_CACHE
-        flush_cache(cache_size);
-#endif
+        if (options.cache_mode == CacheMode::COLD) {
+          flush_cache(cache_size);
+        }
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto start = std::chrono::high_resolution_clock::now();
 #endif
@@ -286,7 +287,7 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size) {
+          const global_options &options, const bool isLOWOHA, size_t cache_size) {
 
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
@@ -301,14 +302,14 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   int status;
 
   if (!isLOWOHA) {
-    status = embag_benchdnn(embagConfig, embag_results, cache_size);
+    status = embag_benchdnn(embagConfig, embag_results, options, cache_size);
     if (status != OK) {
       testlog_error("Embag benchmark failed.");
       return NOT_OK;
     }
   }
   else {
-    status = embag_lowoha_benchdnn(embagConfig, embag_results, cache_size);
+    status = embag_lowoha_benchdnn(embagConfig, embag_results, options, cache_size);
     if (status != OK) {
       testlog_error("LOWOHA Embag benchmark failed.");
       return NOT_OK;

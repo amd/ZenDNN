@@ -50,12 +50,13 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
  * @param configs Vector of ReorderConfig objects specifying each benchmark run.
  * @param reorder_results Vector to store pairs of configuration and timing statistics (std::pair<ReorderConfig, TimingStats>).
  *        Each entry corresponds to a unique configuration and its associated timing results.
+ * @param options Global options for the benchmark.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
                      std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
-                     size_t cache_size);
+                     const global_options &options, size_t cache_size);
 
 /**
  * @brief Entry point for the reorder benchmark.
@@ -65,12 +66,13 @@ int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
  *
  * @param in_filename Path to the input configuration file.
  * @param out_filename Path to the output CSV file for results.
+ * @param options Global options for the benchmark.
  * @param isLOWOHA If true, runs LOWOHA benchmark; otherwise regular reorder.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size);
+          const global_options &options, const bool isLOWOHA, size_t cache_size);
 
 } // namespace reorder
 } // namespace benchdnn

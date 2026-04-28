@@ -22,7 +22,7 @@ namespace reorder {
 
 int reorder_lowoha_benchdnn(const std::vector<ReorderConfig> &configs,
                             std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
-                            size_t cache_size) {
+                            const global_options &options, size_t cache_size) {
 
   bool skip;
   for (const auto &cfg : configs) {
@@ -121,9 +121,9 @@ int reorder_lowoha_benchdnn(const std::vector<ReorderConfig> &configs,
 
       // Benchmark iterations
       for (int i = 0; i < cfg.iters && !skip; ++i) {
-#if COLD_CACHE
-        flush_cache(cache_size);
-#endif
+        if (options.cache_mode == CacheMode::COLD) {
+          flush_cache(cache_size);
+        }
         auto start = std::chrono::high_resolution_clock::now();
 
         status_t status = reorder_direct(src_data, dst_data, params);

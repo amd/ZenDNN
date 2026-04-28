@@ -22,7 +22,7 @@ namespace embag {
 
 int embag_lowoha_benchdnn(std::vector<EmbagConfig> configs,
                           std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results,
-                          size_t cache_size) {
+                          const global_options &options, size_t cache_size) {
 
   bool skip;
   for (const auto &cfg : configs) {
@@ -146,9 +146,9 @@ int embag_lowoha_benchdnn(std::vector<EmbagConfig> configs,
 
       // Benchmark iterations
       for (int i = 0; i < cfg.iters && !skip; ++i) {
-#if COLD_CACHE
-        flush_cache(cache_size);
-#endif
+        if (options.cache_mode == CacheMode::COLD) {
+          flush_cache(cache_size);
+        }
         auto start = std::chrono::high_resolution_clock::now();
 
         status_t status = embedding_bag_direct(table_data, indices_data,

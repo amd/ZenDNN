@@ -1,4 +1,4 @@
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Overview
 `benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul, Reorder, Embedding Bag, and Normalization operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
@@ -15,7 +15,7 @@ One of the core strengths of `benchdnn` is its extensible architecture. New oper
 # Precision in Performance Measurement
 Accuracy is at the heart of `benchdnn`'s design. To ensure that performance metrics reflect real-world behavior, the tool incorporates several advanced features:
 - Warmup iterations to eliminate cold-start anomalies.
-- Cache flushing to simulate realistic memory access patterns.
+- Runtime cache behavior via `--cache_mode` (cold, warm for matmul, or hot) to match the scenario under test.
 - Detailed timing breakdowns, including:
   - Context creation
   - Operator setup
@@ -31,7 +31,7 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 | Multi-layer Matmul   | Supported                               |
 | Data Types           | f32, bf16                               |
 | Timing Modes         | end-to-end, detailed timing breakdowns  |
-| Cache Modes          | hot cache, cold cache                   |
+| Cache Modes          | `hot`, `cold`; matmul also `warm` (`--cache_mode`, default `hot`) |
 | Warmup Iterations    | Supported (configurable)                |
 | Batched Matmul (BMM) | Supported (via 'bs' field and --ndims=3)         |
 
@@ -43,13 +43,15 @@ Below is a high-level flow diagram illustrating the benchmarking process:
 
 ### Benchmark Workflow Diagram
 
-#### Cold Cache Control
-The cold cache behavior is controlled by the macro `COLD_CACHE` defined in `utils/benchdnn_utils.hpp`:
+#### Cache mode (runtime)
+Cache behavior is selected at run time with `--cache_mode=<value>`. Values are case-insensitive; default is `hot`.
 
-- If `COLD_CACHE` is set to `1`, the CPU cache is flushed before each operation to simulate cold-start performance. This affects both individual and end-to-end timing modes.
-- If `COLD_CACHE` is set to `0`, cache flushing is disabled and benchmarks run with warm cache.
+- **`hot`**: No extra cache flushing between timed iterations (fastest, warm-cache style measurements).
+- **`cold`**: Flush caches before each timed iteration where the operator path supports it (cold-cache style).
+- **`warm`** (matmul only): Intermediate behavior; see [matmul](doc/matmul.md) for details.
 
-Set this macro according to your benchmarking needs before building the project.
+Reorder and embag support `cold` and `hot`. Matmul supports `cold`, `warm`, and `hot`. Operator-specific examples are in the linked operator documentation.
+
 #### Timing Mode Selection
 The timing mode is controlled by the macro `MEASURE_INDIVIDUAL_TIMINGS` defined in `benchdnn.hpp`:
 
@@ -73,12 +75,12 @@ The flow is split into two main sections:
     - T2: Operator Creation
     - T3: Operator Execution
     - T4: Other Operations
-  - If `cold_cache` is true, the CPU cache is flushed before each operation to simulate cold-start performance.
+  - If `--cache_mode=cold` is set, the CPU cache is flushed before each timed operation where supported.
 
 **2. End-to-End Timings**
   - All operations are timed together using a single timer:
     - T: Measures the total time for Context Creation + Operator Creation + Operator Execution + Other Operations.
-  - Cache flushing also occurs here if `cold_cache` is enabled.
+  - Cache flushing also occurs here if `--cache_mode=cold` is set.
 
 
 
@@ -92,7 +94,8 @@ The flow is split into two main sections:
 - **Multiple Data Types**: Supports a range of data types (e.g., `f32`, `bf16`)
 - **Detailed Timing**: Reports total time, GFLOPS, and detailed timing statistics (context creation, operator creation, execution), including percentage breakdowns for each stage (% of total time)
 - **Warmup Iterations**: Optional warmup runs to stabilize measurements
-- **Cache Control**: Optional cache flush between runs for accurate timing (if enabled at compile time)
+- **Cache control**: `--cache_mode` selects hot, cold, or (matmul) warm behavior at run time
+- **LOWOHA vs regular API**: `--lowoha=true|false` (or `1`/`0`); default is `true` for matmul, reorder, and embag (see operator docs for input format differences)
 - **Comprehensive Output**: Results are printed to the console and saved to a timestamped CSV file for easy analysis
 
 
@@ -111,7 +114,7 @@ cmake --build .
 To run a benchmark, specify the operator and input method as command-line arguments from the build directory. For example:
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=<operator> [--input_file=<file>] [command-line options] [--input_model_file=<model_file>]
+./install/benchdnn/bin/benchdnn --op=<operator> [--input_file=<file>] [command-line options] [--input_model_file=<model_file>] [--lowoha=true|false] [--cache_mode=cold|warm|hot]
 ```
 
 - `<operator>`: Operator can be one of the following :
@@ -123,6 +126,8 @@ To run a benchmark, specify the operator and input method as command-line argume
 - `--input_file=<file>`: Path to a configuration file with one or more test cases.
 - `--input_model_file=<model_file>`: (Optional) Path to a model file for model-based benchmarking.
 - `[command-line options]`: Command-line arguments to specify all required parameters directly. These can be used in combination with model files.
+- `--lowoha`: Select Low Overhead API paths where applicable (`true`/`false` or `1`/`0`; default `true`). See the operator doc for input file layout when toggling.
+- `--cache_mode`: `cold`, `hot`, or (matmul only) `warm`; default `hot`.
 
 The output CSV files (`timings_<timestamp>.csv`) are located in the `build` directory.
 

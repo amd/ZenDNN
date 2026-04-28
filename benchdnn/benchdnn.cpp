@@ -110,6 +110,12 @@ int main(int argc, char **argv) {
     return NOT_OK;
   }
 
+  if (options.cache_mode == benchdnn::CacheMode::WARM && op != "matmul") {
+    commonlog_error(
+      "--cache_mode=warm is only implemented for --op=matmul. Use --cache_mode=hot or --cache_mode=cold instead.");
+    return NOT_OK;
+  }
+
   if ((inputMode == benchdnn::InputMode::MODEL ||
        inputMode == benchdnn::InputMode::FILE) && input_file.empty()) {
     commonlog_error("Input file is required for MODEL or FILE mode.");
@@ -125,10 +131,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  size_t cache_size = 0;
-#if COLD_CACHE
-  cache_size = benchdnn::get_cache_size();
-#endif
+  size_t cache_size = benchdnn::get_cache_size();
   // Generate output filename based on current timestamp for CSV results
   auto now = std::chrono::system_clock::now();
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -149,19 +152,19 @@ int main(int argc, char **argv) {
   }
   else if (op == "reorder") {
     return benchdnn::reorder::bench(in_filename, out_filename,
-                                    isLOWOHA, cache_size); ///< Run reorder benchmark
+                                    options, isLOWOHA, cache_size); ///< Run reorder benchmark
   }
   else if (op == "embag") {
     return benchdnn::embag::bench(in_filename, out_filename,
-                                  isLOWOHA, cache_size); ///< Run embag benchmark
+                                  options, isLOWOHA, cache_size); ///< Run embag benchmark
   }
   else if (op == "normalization") {
     return benchdnn::normalization::bench(in_filename, out_filename,
-                                          isLOWOHA, cache_size);
+                                          options, isLOWOHA, cache_size);
   }
   else if (op == "grp_matmul") {
     return benchdnn::grp_matmul::bench(in_filename, out_filename,
-                                       cache_size);
+                                       options, cache_size);
   }
   else {
     commonlog_error("Unsupported operator: ", op);

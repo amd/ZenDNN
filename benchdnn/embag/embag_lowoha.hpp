@@ -37,12 +37,13 @@ namespace embag {
  *
  * @param configs Vector of EmbagConfig objects specifying benchmark parameters for each run.
  * @param embag_results Vector to store pairs of configuration and timing statistics.
+ * @param options Global options for the benchmark.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int embag_lowoha_benchdnn(std::vector<EmbagConfig> configs,
                           std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results,
-                          size_t cache_size);
+                          const global_options &options, size_t cache_size);
 
 } // namespace embag
 } // namespace benchdnn

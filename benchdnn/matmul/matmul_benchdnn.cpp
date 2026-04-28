@@ -194,13 +194,66 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
 
       tensor_factory_t tensor_factory;
       tensor_t input_tensor;
-      std::vector<tensor_t> weights, bias, output_tensor;
+      int num_weight_buffers = 1;
+      std::vector<std::vector<tensor_t>> weights_buffer_pool(num_weight_buffers);
+      std::vector<tensor_t> bias, output_tensor;
+      int ret;
 
-      int ret = create_weights_tensor(tensor_factory, cfg, weights, options);
+      ret = create_weights_tensor(tensor_factory, cfg, weights_buffer_pool[0],
+                                  options);
       if (ret != OK) {
         testlog_error("create_weights_tensor failed");
         log_benchmark_failure(cfg);
         continue;
+      }
+
+      if (options.cache_mode == CacheMode::WARM) {
+        // Warm cache: rotate several weight buffers across iterations so one resident
+        // copy does not dominate timings. Auto (-1): size the pool from weight bytes vs
+        // CACHE_SIZE_MULTIPLIER * cache_size, then clamp with MIN_NUM_WEIGHT_BUFFERS and
+        // the iteration budget (cfg.iters when set, else MIN_NUM_WEIGHT_BUFFERS).
+        if (options.num_weight_buffers == -1) {
+          int num_weight_buffers_ = (cfg.iters > 0) ? cfg.iters : MIN_NUM_WEIGHT_BUFFERS;
+          size_t weight_bytes = 0;
+          for (const auto &w : weights_buffer_pool[0]) {
+            weight_bytes += w.get_buffer_sz_bytes();
+          }
+          auto cache_size_ = cache_size * CACHE_SIZE_MULTIPLIER;
+          if (weight_bytes > 0 && cache_size_ > 0) {
+            // ceil(cache_size_ / weight_bytes) + 1 so total weight bytes exceed scaled cache.
+            num_weight_buffers = (cache_size_ + weight_bytes - 1) / weight_bytes + 1;
+            num_weight_buffers = std::max(num_weight_buffers, MIN_NUM_WEIGHT_BUFFERS);
+          }
+          else {
+            num_weight_buffers = num_weight_buffers_;
+          }
+          num_weight_buffers = std::min(num_weight_buffers, num_weight_buffers_);
+        }
+        else {
+          // User-specified count; cannot use more buffers than benchmark iterations.
+          if (cfg.iters > 0 && options.num_weight_buffers > cfg.iters) {
+            num_weight_buffers = cfg.iters;
+            commonlog_warning("num_weight_buffers (", options.num_weight_buffers,
+                              ") exceeds iters (", cfg.iters, "); using ", num_weight_buffers);
+          }
+          else {
+            num_weight_buffers = options.num_weight_buffers;
+          }
+        }
+        weights_buffer_pool.resize(num_weight_buffers);
+        for (size_t j = 1; j < weights_buffer_pool.size(); ++j) {
+          ret = create_weights_tensor(tensor_factory, cfg, weights_buffer_pool[j],
+                                      options);
+          if (ret != OK) {
+            testlog_error("create_weights_tensor failed");
+            log_benchmark_failure(cfg);
+            skip = true;
+            break;
+          }
+        }
+        if (skip) {
+          continue;
+        }
       }
 
       ret = create_bias_tensor(tensor_factory, cfg, bias, options);
@@ -233,13 +286,17 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
+      if (options.cache_mode == CacheMode::WARM) {
+        flush_cache(cache_size);
+      }
       TimingStats time_stats;
       // warm-up iterations
       for (auto j = 0; j < cfg.warmup_iters && !skip; j++) {
         for (auto i = 0; i < cfg.n_values.size(); i++) {
           int ret = run_matmul(output_tensor[i],
                                (i == 0) ? input_tensor : output_tensor[i - 1],
-                               weights[i], (bias.empty() ? tensor_t() : bias[i]),
+                               weights_buffer_pool[0][i],
+                               (bias.empty() ? tensor_t() : bias[i]),
                                cfg, binary_post_ops_tensors[i], time_stats);
           if (ret != OK) {
             testlog_error("run_matmul execution failed.");
@@ -260,9 +317,9 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
       std::vector<double> elapsed_ms_layer(cfg.n_values.size(), 0.0);
 
       for (auto j = 0; j < cfg.iters && !skip; j++) {
-#if COLD_CACHE
-        flush_cache(cache_size);
-#endif
+        if (options.cache_mode == CacheMode::COLD) {
+          flush_cache(cache_size);
+        }
         for (auto i = 0; i < cfg.n_values.size(); i++) {
 #if !MEASURE_INDIVIDUAL_TIMINGS
           auto start_layer = std::chrono::high_resolution_clock::now();
@@ -270,7 +327,10 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
           TimingStats time_stats; // Per-layer, per-iteration
           int ret = run_matmul(output_tensor[i],
                                (i == 0) ? input_tensor : output_tensor[i - 1],
-                               weights[i], (bias.empty() ? tensor_t() : bias[i]),
+                               (options.cache_mode == CacheMode::WARM)
+                               ? weights_buffer_pool[(1 + j) % num_weight_buffers][i]
+                               : weights_buffer_pool[0][i],
+                               (bias.empty() ? tensor_t() : bias[i]),
                                cfg, binary_post_ops_tensors[i], time_stats, true);
           if (ret != OK) {
             testlog_error("run_matmul execution failed.");

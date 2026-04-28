@@ -25,7 +25,7 @@ namespace benchdnn {
 namespace grp_matmul {
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          size_t cache_size);
+          const global_options &options, size_t cache_size);
 
 } // namespace grp_matmul
 } // namespace benchdnn

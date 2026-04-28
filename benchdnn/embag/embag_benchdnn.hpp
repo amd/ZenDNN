@@ -59,10 +59,13 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
  * @param configs Vector of EmbagConfig objects specifying benchmark parameters for each run.
  * @param embag_results Vector to store pairs of configuration and timing statistics (std::pair<EmbagConfig, std::vector<TimingStats>>).
  *        Each entry corresponds to a unique configuration and its associated vector of timing results for all runs.
+ * @param options Global options for the benchmark.
+ * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int embag_benchdnn(std::vector<EmbagConfig> configs,
-                   std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results);
+                   std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results,
+                   const global_options &options, size_t cache_size);
 
 /**
  * @brief Runs the full embag benchmark suite from an input file and writes results to a CSV file.
@@ -72,12 +75,13 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
  *
  * @param in_filename Path to the input file containing benchmark configurations.
  * @param out_filename Path to the output CSV file for writing results.
+ * @param options Global options for the benchmark.
  * @param isLOWOHA If true, runs the LOWOHA (Low Overhead API) benchmark variant.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size);
+          const global_options &options, const bool isLOWOHA, size_t cache_size);
 
 } // namespace embag
 } // namespace benchdnn

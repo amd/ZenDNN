@@ -277,7 +277,6 @@ bool validateMatmulKernelName(const std::string &kernel_name) {
                    kernel_name) != VALID_KERNEL_NAMES.end();
 }
 
-#if COLD_CACHE
 void flush_cache(size_t cache_size) {
   // Pre-calculate to avoid runtime variability
   size_t buffer_size = cache_size * 2;
@@ -339,7 +338,6 @@ size_t get_cache_size() {
   }
   return cache_size;
 }
-#endif
 
 int parseCLArgs(benchdnn::global_options &options, std::string arg) {
   if (arg.find("--ndims=") == 0) {
@@ -552,6 +550,38 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.warmup_iters = std::stoi(arg.substr(15));
+  }
+  else if (arg.find("--cache_mode=") == 0) {
+    if (arg.substr(13).empty()) {
+      commonlog_error("Cache mode value cannot be empty. Please provide a valid cache mode.");
+      return NOT_OK;
+    }
+    std::string cache_mode = arg.substr(13);
+    std::transform(cache_mode.begin(), cache_mode.end(), cache_mode.begin(),
+                   ::tolower);
+    if (cache_mode == "cold") {
+      options.cache_mode = CacheMode::COLD;
+    }
+    else if (cache_mode == "warm") {
+      // Matmul-only semantics (weight buffer pool); main() rejects WARM for
+      // other --op values.
+      options.cache_mode = CacheMode::WARM;
+    }
+    else if (cache_mode == "hot") {
+      options.cache_mode = CacheMode::HOT;
+    }
+    else {
+      commonlog_error("Invalid value for cache mode. Use cold, warm, or hot.");
+      return NOT_OK;
+    }
+  }
+  else if (arg.find("--num_weight_buffers=") == 0) {
+    if (arg.substr(21).empty() || std::stoi(arg.substr(21)) <= 0) {
+      commonlog_error(
+        "Number of weight buffers value cannot be empty or <= 0. Please provide a valid positive number.");
+      return NOT_OK;
+    }
+    options.num_weight_buffers = std::stoi(arg.substr(21));
   }
   else {
     commonlog_error("Unknown argument: ", arg);

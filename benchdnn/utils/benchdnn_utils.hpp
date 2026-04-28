@@ -22,17 +22,19 @@ using namespace zendnnl::interface;
 #define  OK          (0)
 #define  NOT_OK      (1)
 
-#define COLD_CACHE 0
-
-#if COLD_CACHE
-  #include <emmintrin.h>
-  #include <numa.h>
-  // Size (in bytes) of a cache line; typically 64 bytes on x86 systems.
-  #define CACHE_LINE_SIZE 64
-#endif
+#include <emmintrin.h>
+#include <numa.h>
+// Size (in bytes) of a cache line; typically 64 bytes on x86 systems.
+#define CACHE_LINE_SIZE 64
 
 namespace zendnnl {
 namespace benchdnn {
+
+enum class CacheMode {
+  COLD,
+  WARM,
+  HOT
+};
 
 /**
  * @struct global_options
@@ -69,15 +71,19 @@ struct global_options {
   data_type_t scale_dt; /**< Datatype of scale. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
   bool perf_counters; /**< Enable per-shape HW perf counter collection (AMD Zen 4/5 PMU). */
-  std::string perf_profile_str; /**< Perf counter profile: "cache" (default), "tlb", "stalls". */
-
+  std::string perf_profile_str; /**< Perf counter profile:
+                                "cache" (default), "tlb", "stalls". */
+  /**< Cache: cold, warm, or hot. Warm is matmul-only; main rejects warm for other --op. */
+  CacheMode cache_mode;
+  int num_weight_buffers; /**< Number of weight buffers to use. */
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
     ddt(data_type_t::f32), is_weights_const(-1), bias_dt(data_type_t::f32),
     post_op_dt(data_type_t::f32),
     isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
     scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32),
-    perf_counters(false), perf_profile_str("cache") {}
+    perf_counters(false), perf_profile_str("cache"), cache_mode(CacheMode::HOT),
+    num_weight_buffers(-1) {}
 };
 
 /**
@@ -200,44 +206,43 @@ inline const std::vector<std::string> VALID_KERNEL_NAMES = {
  */
 bool validateMatmulKernelName(const std::string &kernel_name);
 
-#if COLD_CACHE
-  /**
-  * @brief Simulates cold cache conditions by flushing the entire cache.
-  *
-  * This function allocates a buffer of the specified size and iterates over it,
-  * accessing each cache line and using _mm_clflush to evict it from all cache levels
-  * (L1, L2, and LLC). This ensures a cold cache state before benchmarking operations,
-  * providing more accurate performance measurements under realistic conditions.
-  *
-  * @param cache_size The total size (in bytes) of the cache to flush, typically covering
-  *                   the sum of all cache levels (L1d + L1i + L2 + LLC).
-  */
-  void flush_cache(size_t cache_size);
+/**
+* @brief Simulates cold cache conditions by flushing the entire cache.
+*
+* This function allocates a buffer of the specified size and iterates over it,
+* accessing each cache line and using _mm_clflush to evict it from all cache levels
+* (L1, L2, and LLC). This ensures a cold cache state before benchmarking operations,
+* providing more accurate performance measurements under realistic conditions.
+*
+* @param cache_size The total size (in bytes) of the cache to flush, typically covering
+*                   the sum of all cache levels (L1d + L1i + L2 + LLC).
+*/
+void flush_cache(size_t cache_size);
 
-  /**
-  * @brief Reads and returns the cache size from a specified sysfs path.
-  *
-  * This function reads the cache size information from the Linux sysfs filesystem,
-  * typically from paths like /sys/devices/system/cpu/cpu0/cache/indexN/size.
-  * The value is parsed and converted from KB/MB to bytes.
-  *
-  * @param path The filesystem path to the cache size file (e.g., "/sys/devices/system/cpu/cpu0/cache/index3/size").
-  * @return size_t The cache size in bytes, or 0 if the file cannot be read or parsed.
-  */
-  size_t read_cache_size(const std::string &path);
+/**
+* @brief Reads and returns the cache size from a specified sysfs path.
+*
+* This function reads the cache size information from the Linux sysfs filesystem,
+* typically from paths like /sys/devices/system/cpu/cpu0/cache/indexN/size.
+* The value is parsed and converted from KB/MB to bytes.
+*
+* @param path The filesystem path to the cache size file (e.g., "/sys/devices/system/cpu/cpu0/cache/index3/size").
+* @return size_t The cache size in bytes, or 0 if the file cannot be read or parsed.
+*/
+size_t read_cache_size(const std::string &path);
 
-  /**
-  * @brief Retrieves the total cache size by aggregating all cache levels from the system.
-  *
-  * This function queries the Linux sysfs filesystem to determine the total size of all
-  * CPU cache levels (L1 data, L1 instruction, L2, and LLC/L3). It reads cache information
-  * from /sys/devices/system/cpu/cpu0/cache/ for each cache index and sums them up.
-  * The returned value is used to allocate an appropriate buffer for cache flushing operations.
-  *
-  * @return size_t The total cache size in bytes across all cache levels, or 0 if unable to determine.
-  */
-  size_t get_cache_size();
-#endif
+/**
+* @brief Retrieves the total cache size by aggregating all cache levels from the system.
+*
+* This function queries the Linux sysfs filesystem to determine the total size of all
+* CPU cache levels (L1 data, L1 instruction, L2, and LLC/L3). It reads cache information
+* from /sys/devices/system/cpu/cpu0/cache/ for each cache index and sums them up.
+* The returned value is used to allocate an appropriate buffer for cache flushing operations.
+*
+* @return size_t The total cache size in bytes across all cache levels, or 0 if unable to determine.
+*/
+size_t get_cache_size();
+
 /**
  * @brief Parses a single command-line argument and updates global benchmarking options.
  *

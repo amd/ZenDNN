@@ -37,12 +37,13 @@ namespace reorder {
  *
  * @param configs Vector of ReorderConfig objects for LOWOHA benchmarking.
  * @param reorder_results Vector to store (ReorderConfig, TimingStats) pairs.
+ * @param options Global options for the benchmark.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int reorder_lowoha_benchdnn(const std::vector<ReorderConfig> &configs,
                             std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
-                            size_t cache_size);
+                            const global_options &options, size_t cache_size);
 
 } // namespace reorder
 } // namespace benchdnn

@@ -253,7 +253,7 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
 
 int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
                      std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
-                     size_t cache_size) {
+                     const global_options &options, size_t cache_size) {
   bool skip;
   for (const auto &cfg : configs) {
     try {
@@ -285,9 +285,9 @@ int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
 
       double elapsed_ms = 0.0;
       for (auto i = 0; i < cfg.iters; i++) {
-#if COLD_CACHE
-        flush_cache(cache_size);
-#endif
+        if (options.cache_mode == CacheMode::COLD) {
+          flush_cache(cache_size);
+        }
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto start = std::chrono::high_resolution_clock::now();
 #endif
@@ -329,7 +329,7 @@ int reorder_benchdnn(const std::vector<ReorderConfig> &configs,
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size) {
+          const global_options &options, const bool isLOWOHA, size_t cache_size) {
 
   std::ifstream infile(in_filename);
   if (!infile.is_open()) {
@@ -343,14 +343,15 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   int status;
 
   if (!isLOWOHA) {
-    status = reorder_benchdnn(reorderConfig, reorder_results, cache_size);
+    status = reorder_benchdnn(reorderConfig, reorder_results, options, cache_size);
     if (status != OK) {
       testlog_error("Reorder benchmark failed.");
       return NOT_OK;
     }
   }
   else {
-    status = reorder_lowoha_benchdnn(reorderConfig, reorder_results, cache_size);
+    status = reorder_lowoha_benchdnn(reorderConfig, reorder_results, options,
+                                     cache_size);
     if (status != OK) {
       testlog_error("LOWOHA Reorder benchmark failed.");
       return NOT_OK;

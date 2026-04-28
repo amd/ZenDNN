@@ -36,12 +36,14 @@ namespace normalization {
  *
  * @param configs Vector of NormalizationConfig objects specifying benchmark parameters for each run.
  * @param normalization_results Vector to store pairs of configuration and timing statistics.
+ * @param options Global options for the benchmark.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int normalization_lowoha_benchdnn(
   std::vector<NormalizationConfig> configs,
   std::vector<std::pair<NormalizationConfig, TimingStats>> &normalization_results,
+  const global_options &options,
   size_t cache_size);
 
 } // namespace normalization

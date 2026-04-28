@@ -41,12 +41,13 @@ using namespace zendnnl::examples;
  *
  * @param in_filename Path to the input file containing benchmark configurations.
  * @param out_filename Path to the output CSV file for writing results.
+ * @param options Global options for the benchmark.
  * @param isLOWOHA If true, runs the LOWOHA (Low Overhead API) benchmark variant.
  * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const bool isLOWOHA, size_t cache_size);
+          const global_options &options, const bool isLOWOHA, size_t cache_size);
 
 } // namespace normalization
 } // namespace benchdnn

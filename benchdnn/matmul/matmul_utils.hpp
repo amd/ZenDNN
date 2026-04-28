@@ -21,6 +21,12 @@
 // Number of extra fields in each matmul input line (beyond ndims)
 #define MATMUL_EXTRA_INPUT_FIELD_COUNT 15
 
+// Minimum number of weight buffers to use
+#define MIN_NUM_WEIGHT_BUFFERS 3
+
+// Multiplier for cache size
+#define CACHE_SIZE_MULTIPLIER 2 // 2x cache size
+
 namespace zendnnl {
 namespace benchdnn {
 namespace matmul {

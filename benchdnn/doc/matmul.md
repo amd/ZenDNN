@@ -11,13 +11,15 @@ This describes all ways to provide input for the matmul benchmark in BenchDNN, i
 Run the matmul benchmark using one of the following input methods:
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha=true/false]
+./install/benchdnn/bin/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha=true/false] [--cache_mode=cold|warm|hot] [--num_weight_buffers=<n>]
 ```
 
 > **Note:**
 > - When `--ndims=3` is specified, the benchmark runs in batched matmul (BMM) mode. In this case, `bs` (batch size) must be provided.
 > - The `--lowoha` option controls benchmarking for low overhead API. User can pass either `--lowoha=true` or `--lowoha=false`. If not specified, it is enabled by default.
 > - Algorithm selection can be overridden via environment variables `ZENDNNL_MATMUL_ALGO` (matmul) and `ZENDNNL_BMM_ALGO` (BMM).
+> - Cache behavior for matmul is selected at runtime with `--cache_mode` (see [Cache mode](#5-cache-mode) below). Default is `hot`.
+> - `--num_weight_buffers` is only used when `--cache_mode=warm` (see [Cache mode](#5-cache-mode)).
 
 ### 1. Input File (`--input_file`)
 Provide a file with one configuration per line. Each line should contain:
@@ -113,6 +115,27 @@ export ZENDNNL_MATMUL_ALGO=4
 ./install/benchdnn/bin/benchdnn --op=matmul --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32
 export ZENDNNL_BMM_ALGO=auto
 ./install/benchdnn/bin/benchdnn --op=matmul --ndims=3 --input_file=bmm_inputs.txt
+```
+
+---
+
+### 5. Cache mode
+
+Use `--cache_mode=<value>` on the command line. The value is case-insensitive and must be one of `cold`, `warm`, or `hot`. If omitted, the default is `hot`.
+
+- **`hot`** (default): Single weight buffer; no extra cache flush between measured iterations. Typical “steady state” timing.
+- **`cold`**: Flushes the CPU cache before each measured iteration so each timed run starts from a cold-cache state.
+- **`warm`**: Allocates a pool of weight tensors sized from the detected cache and rotates which buffer is used across iterations (so the same weight bytes are not reused every iteration). The cache is flushed once before the warmup loop; measured iterations use the rotating buffers without a per-iteration flush.
+
+#### `--num_weight_buffers` (warm mode only)
+
+Use `--num_weight_buffers=<n>` with `--cache_mode=warm` to control how many distinct weight tensor copies are allocated and rotated. In `cold` and `hot` modes this option has no effect.
+
+**Example usage:**
+```sh
+./install/benchdnn/bin/benchdnn --op=matmul --m=9216 --k=4096 --n=512 --iters=100 --cache_mode=cold --sdt=f32 --ddt=f32 --wdt=f32
+./install/benchdnn/bin/benchdnn --op=matmul --ndims=3 --input_file=bmm_inputs.txt --cache_mode=warm
+./install/benchdnn/bin/benchdnn --op=matmul --m=9216 --k=4096 --n=512 --iters=100 --cache_mode=warm --num_weight_buffers=8 --sdt=f32 --ddt=f32 --wdt=f32
 ```
 
 ---
