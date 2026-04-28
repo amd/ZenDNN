@@ -773,6 +773,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->bias[bias_index].stor_type = DLP_S32;
     dlp_metadata->bias[bias_index].sf = nullptr;
     dlp_metadata->bias[bias_index].zp = nullptr;
+    dlp_metadata->bias[bias_index].bias_len = N;
     bias_index++;
   }
   else if (zp_comp_ndim == 2 && zp_comp_acc) {
@@ -834,6 +835,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->bias[bias_index].stor_type = to_dlp_type(dtypes.bias);
     dlp_metadata->bias[bias_index].sf = nullptr; // No scale factor for bias
     dlp_metadata->bias[bias_index].zp = nullptr; // No zero point for bias
+    dlp_metadata->bias[bias_index].bias_len = N;
     bias_index++;
   }
 

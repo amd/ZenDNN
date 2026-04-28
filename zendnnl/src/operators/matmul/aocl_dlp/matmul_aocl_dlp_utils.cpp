@@ -145,6 +145,7 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
               add_buff_tensor.get_raw_handle_unsafe();
           (aocl_dlp_po_ptr->bias + add_idx_1d)->stor_type = get_aocl_store_type(
                 add_buff_tensor.get_data_type());
+          (aocl_dlp_po_ptr->bias + add_idx_1d)->bias_len = add_buff_tensor.get_size(0);
           add_idx_1d++;
         }
         else if (found_obj_add->second.get_size().size() == 2 &&
@@ -584,9 +585,11 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
                    src_it->second.get_data_type() == data_type_t::s8) &&
                   weight_tensor.get_data_type() == data_type_t::s8;
 
-  [[maybe_unused]] uint32_t dim_M           = src_it->second.get_size(0);
-  [[maybe_unused]] uint32_t dim_K           = weight_tensor.get_size(0);
-  [[maybe_unused]] uint32_t dim_N           = weight_tensor.get_size(1);
+  const auto src_dim = src_it->second.get_dim();
+  const auto wei_dim = weight_tensor.get_dim();
+  [[maybe_unused]] uint32_t dim_M = src_it->second.get_size(src_dim - 2);
+  [[maybe_unused]] uint32_t dim_K = weight_tensor.get_size(wei_dim - 2);
+  [[maybe_unused]] uint32_t dim_N = weight_tensor.get_size(wei_dim - 1);
   // Src scale
   [[maybe_unused]] void *src_scale_         = nullptr;
   [[maybe_unused]] int src_scale_size       = 0;
@@ -763,6 +766,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
           }
           (aocl_dlp_po_ptr->bias + bias_index)->stor_type = DLP_TYPE::DLP_S32;
           (aocl_dlp_po_ptr->bias + bias_index)->bias      = zp_comp_acc;
+          (aocl_dlp_po_ptr->bias + bias_index)->bias_len  = dim_N;
           bias_index++;
         }
         else if (zp_comp_ndim == 2) {
@@ -820,6 +824,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
             optional_bias_tensor_->get_raw_handle_unsafe();
         (aocl_dlp_po_ptr->bias + bias_index)->stor_type = get_aocl_store_type(
               bias_type);
+        (aocl_dlp_po_ptr->bias + bias_index)->bias_len = dim_N;
         bias_index++;
       }
 
