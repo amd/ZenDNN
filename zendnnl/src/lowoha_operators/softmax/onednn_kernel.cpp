@@ -17,7 +17,9 @@
 #include "onednn_kernel.hpp"
 #include "common/logging.hpp"
 #include "common/profiler.hpp"
+#include "common/bfloat16.hpp"
 #include <sstream>
+#include <vector>
 
 #if ZENDNNL_DEPENDS_ONEDNN
 #include "dnnl.hpp"
@@ -61,8 +63,37 @@ status_t softmax_onednn_wrapper(
         // Build OneDNN memory dimensions from original N-D shape
         dnnl::memory::dims src_dims;
         src_dims.reserve(params.ndims);
+        uint64_t total_elems = 1;
         for (int i = 0; i < params.ndims; ++i) {
             src_dims.push_back(static_cast<dnnl::memory::dim>(params.shape[i]));
+            total_elems *= params.shape[i];
+        }
+
+        // OneDNN has no softmin; run softmax on -input via a scratch buffer.
+        const void *effective_input = input;
+        std::vector<uint8_t> softmin_scratch;
+        if (params.softmin) {
+            const size_t elem_size = (params.src_dt == data_type_t::f32)
+                                         ? sizeof(float)
+                                         : sizeof(bfloat16_t);
+            softmin_scratch.resize(total_elems * elem_size);
+
+            if (params.src_dt == data_type_t::f32) {
+                const float *in  = static_cast<const float*>(input);
+                float       *out = reinterpret_cast<float*>(softmin_scratch.data());
+                #pragma omp parallel for
+                for (uint64_t i = 0; i < total_elems; ++i) {
+                    out[i] = -in[i];
+                }
+            } else { // bf16
+                const bfloat16_t *in  = static_cast<const bfloat16_t*>(input);
+                bfloat16_t       *out = reinterpret_cast<bfloat16_t*>(softmin_scratch.data());
+                #pragma omp parallel for
+                for (uint64_t i = 0; i < total_elems; ++i) {
+                    out[i] = bfloat16_t(-static_cast<float>(in[i]));
+                }
+            }
+            effective_input = softmin_scratch.data();
         }
 
         // Normalize axis to positive value
@@ -88,7 +119,9 @@ status_t softmax_onednn_wrapper(
             shape_str << "," << params.shape[i];
         }
         log_info("Softmax OneDNN: ", params.ndims, "D tensor (shape=[", shape_str.str(),
-                 "]), softmax on axis ", softmax_axis);
+                 "]), softmax on axis ", softmax_axis,
+                 ", log_softmax=", (params.log_softmax ? "true" : "false"),
+                 ", softmin=", (params.softmin ? "true" : "false"));
 
         // Create memory descriptors
         auto src_md = dnnl::memory::desc(src_dims, dtype, format);
@@ -117,8 +150,9 @@ status_t softmax_onednn_wrapper(
             );
         }
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, eng, const_cast<void*>(input));
+        // Create memory objects (src points to -input scratch when softmin).
+        auto src_mem = dnnl::memory(src_md, eng,
+                                    const_cast<void*>(effective_input));
         auto dst_mem = dnnl::memory(dst_md, eng, output);
 
         // Create softmax primitive

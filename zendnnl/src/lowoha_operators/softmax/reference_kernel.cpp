@@ -27,7 +27,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace softmax {
 
-// FP32 softmax implementation
+// FP32 softmax implementation.
+// softmin is handled by flipping the input sign (softmin(x) == softmax(-x)).
 void softmax_reference_fp32_impl(
     const float *input,
     float *output,
@@ -36,6 +37,7 @@ void softmax_reference_fp32_impl(
 ) {
     const uint64_t axis_size = params.axis_dim;
     const uint64_t outer_size = params.batch;
+    const float sign = params.softmin ? -1.0f : 1.0f;
 
     #pragma omp parallel for num_threads(num_threads)
     for (uint64_t outer = 0; outer < outer_size; ++outer) {
@@ -43,7 +45,7 @@ void softmax_reference_fp32_impl(
         float max_val = -std::numeric_limits<float>::infinity();
         for (uint64_t inner = 0; inner < axis_size; ++inner) {
             uint64_t idx = outer * axis_size + inner;
-            max_val = std::max(max_val, input[idx]);
+            max_val = std::max(max_val, sign * input[idx]);
         }
 
         // Compute exp and sum
@@ -51,7 +53,7 @@ void softmax_reference_fp32_impl(
         float sum_exp = 0.0f;
         for (uint64_t i = 0; i < axis_size; ++i) {
             uint64_t idx = outer * axis_size + i;
-            exp_vals[i] = std::exp(input[idx] - max_val);
+            exp_vals[i] = std::exp(sign * input[idx] - max_val);
             sum_exp += exp_vals[i];
         }
 
@@ -60,7 +62,7 @@ void softmax_reference_fp32_impl(
             float log_sum_exp = std::log(sum_exp);
             for (uint64_t i = 0; i < axis_size; ++i) {
                 uint64_t idx = outer * axis_size + i;
-                output[idx] = input[idx] - max_val - log_sum_exp;
+                output[idx] = sign * input[idx] - max_val - log_sum_exp;
             }
         } else {
             for (uint64_t i = 0; i < axis_size; ++i) {

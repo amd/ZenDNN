@@ -74,6 +74,7 @@ status_t softmax_direct(
            << ", axis_dim=" << params.axis_dim
            << ", axis=" << params.axis
            << ", log_softmax=" << (params.log_softmax ? "true" : "false")
+           << ", softmin=" << (params.softmin ? "true" : "false")
            << ", src_dt=" << static_cast<int>(params.src_dt)
            << ", dst_dt=" << static_cast<int>(params.dst_dt);
     }

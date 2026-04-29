@@ -48,8 +48,9 @@ int run_lowoha_softmax_fp32_test() {
     params.src_dt = data_type_t::f32;
     params.dst_dt = data_type_t::f32;
 
-    // Set log_softmax flag
+    // Select softmax variant: plain softmax (log_softmax=false, softmin=false)
     params.log_softmax = false;
+    params.softmin     = false;
 
     // Set algorithm (auto-select)
     params.algorithm = softmax_algo_t::none;
@@ -106,8 +107,9 @@ int run_lowoha_softmax_bf16_test() {
     params.src_dt = data_type_t::bf16;
     params.dst_dt = data_type_t::bf16;
 
-    // Set log_softmax flag
+    // Select softmax variant: plain softmax (log_softmax=false, softmin=false)
     params.log_softmax = false;
+    params.softmin     = false;
 
     // Set algorithm (auto-select)
     params.algorithm = softmax_algo_t::none;
@@ -122,6 +124,62 @@ int run_lowoha_softmax_bf16_test() {
       return NOT_OK;
     }
 
+  }
+  catch (const exception_t &ex) {
+    log_error("Exception: ", ex.what());
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_softmin_fp32_test() {
+  try {
+    // Input tensor dimensions [batch, axis_dim]
+    uint64_t batch = 2;
+    uint64_t axis_dim = 5;
+    uint64_t total_size = batch * axis_dim;
+    // Input data (row-major): 2 batches of 5 elements each
+    // For softmin, the smallest value receives the largest probability.
+    std::vector<float> input = {
+      1.0f, 2.0f, 3.0f, 4.0f, 5.0f,     // batch 0: 1.0 gets highest probability
+      -1.0f, 0.0f, 1.0f, 2.0f, 3.0f     // batch 1: -1.0 gets highest probability
+    };
+
+    std::vector<float> output(total_size, 0.0f);
+
+    // Setup softmax parameters
+    softmax_params params;
+
+    // Initialize shape: 2D tensor [batch, axis_dim]
+    uint64_t shape[] = {batch, axis_dim};
+    status_t setup_status = setup_softmax_shape(params, shape, 2, -1);
+    if (setup_status != status_t::success) {
+      log_error("Failed to setup softmax shape");
+      return NOT_OK;
+    }
+
+    // Set data types
+    params.src_dt = data_type_t::f32;
+    params.dst_dt = data_type_t::f32;
+
+    // Select softmax variant: softmin (softmin=true, log_softmax=false)
+    // Set both log_softmax=true and softmin=true to compute log-softmin.
+    params.log_softmax = false;
+    params.softmin     = true;
+
+    // Set algorithm (auto-select)
+    params.algorithm = softmax_algo_t::none;
+    // Call the low-overhead softmax API (internally computes softmax(-input))
+    status_t status = softmax_direct(
+                        input.data(),
+                        output.data(),
+                        params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA Softmin: Execution failed");
+      return NOT_OK;
+    }
   }
   catch (const exception_t &ex) {
     log_error("Exception: ", ex.what());

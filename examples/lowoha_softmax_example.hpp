@@ -53,6 +53,17 @@ int run_lowoha_softmax_fp32_test();
  */
 int run_lowoha_softmax_bf16_test();
 
+/** @fn run_lowoha_softmin_fp32_test
+ *  @brief Demonstrates softmin operator on fp32 inputs.
+ *
+ *  Softmin is mathematically equivalent to softmax(-x); the smallest input
+ *  receives the largest probability. Setting params.softmin=true (optionally
+ *  combined with params.log_softmax=true for log-softmin) selects this variant.
+ *
+ *  This example uses FP32 on a simple 2D tensor.
+ */
+int run_lowoha_softmin_fp32_test();
+
 } // examples
 } // zendnnl
 

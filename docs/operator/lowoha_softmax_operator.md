@@ -11,6 +11,7 @@ Unlike the standard Softmax operator which uses the operator factory pattern, LO
 - Minimal execution overhead
 - Support for multi-dimensional tensors
 - Log-softmax variant for classification tasks
+- Softmin variant (computes `softmax(-x)`; combinable with log-softmax to yield log-softmin)
 - Backend-native optimizations
 - Direct control over execution parameters
 
@@ -47,6 +48,24 @@ $$
 
 The $\max(X)$ term ensures numerical stability by preventing overflow in the exponential function.
 
+### Softmin
+
+Softmin is the softmax applied to the negated input, assigning higher probability to smaller values. For each element along the softmax axis:
+
+$$
+Y_i = \frac{\exp(-X_i - \max(-X))}{\sum_j \exp(-X_j - \max(-X))}
+$$
+
+This is implemented internally as `softmax(-x)`, so all numerical-stability properties of standard softmax apply.
+
+### Log Softmin
+
+When `softmin` is combined with `log_softmax`, the operator computes log-softmin:
+
+$$
+Y_i = -X_i - \max(-X) - \log\left(\sum_j \exp(-X_j - \max(-X))\right)
+$$
+
 ## Core API: `softmax_direct`
 
 The primary interface for LOWOHA Softmax is the `softmax_direct` function:
@@ -71,6 +90,7 @@ struct softmax_params {
   uint64_t axis_dim;                    // Dimension size along softmax axis
   int axis;                             // Axis along which to compute softmax (-1 for last)
   bool log_softmax;                     // If true, compute log(softmax(x))
+  bool softmin;                         // If true, compute softmax(-x). Combines with log_softmax.
   data_type_t src_dt;                   // Source/input data type
   data_type_t dst_dt;                   // Destination/output data type
   softmax_algo_t algorithm;             // Selected algorithm
@@ -139,6 +159,7 @@ int softmax_fp32_example() {
   params.src_dt = data_type_t::f32;
   params.dst_dt = data_type_t::f32;
   params.log_softmax = false;
+  params.softmin = false;
   params.algorithm = softmax_algo_t::none;  // Auto-select
   
   // Execute softmax
@@ -180,6 +201,7 @@ int softmax_bf16_attention_example() {
   params.src_dt = data_type_t::bf16;
   params.dst_dt = data_type_t::bf16;
   params.log_softmax = false;
+  params.softmin = false;
   params.algorithm = softmax_algo_t::none;
   
   // Execute softmax on attention scores
@@ -278,7 +300,7 @@ softmax_direct(logits, probabilities, params);
 
 | Function | Purpose |
 |----------|---------|
-| `softmax_direct` | Main execution API for softmax/log-softmax |
+| `softmax_direct` | Main execution API for softmax / log-softmax / softmin / log-softmin |
 | `setup_softmax_shape` | Helper to initialize parameters from N-D shape |
 
 | Parameter | Type | Description |

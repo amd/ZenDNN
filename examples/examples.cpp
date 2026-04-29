@@ -200,11 +200,12 @@ int main() {
     run_lowoha_reorder_bf16_scale_dynamic_quant_test();        // Dynamic quant with bf16 scale output
 
     /** LOWOHA Softmax operator functionality examples.
-     *  Demonstrates softmax and log-softmax operations using the low-overhead
-     *  LOWOHA API with support for multi-dimensional tensors.
+     *  Demonstrates softmax, log-softmax, and softmin operations using the
+     *  low-overhead LOWOHA API with support for multi-dimensional tensors.
      */
     run_lowoha_softmax_fp32_test();
     run_lowoha_softmax_bf16_test();
+    run_lowoha_softmin_fp32_test();
 
     /** LOWOHA Normalization operator functionality examples.
      *  Demonstrates LayerNorm, RMSNorm, and BatchNorm operations using the

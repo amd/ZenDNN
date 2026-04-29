@@ -53,6 +53,7 @@ struct softmax_params {
     uint64_t axis_dim;              ///< Dimension size along softmax axis
     int axis;                       ///< Axis along which to compute softmax (-1 for last axis)
     bool log_softmax;               ///< If true, compute log(softmax(x)) instead of softmax(x)
+    bool softmin;                   ///< If true, compute softmax(-x). Combines with log_softmax.
     data_type_t src_dt;             ///< Source/input data type
     data_type_t dst_dt;             ///< Destination/output data type
     softmax_algo_t algorithm;       ///< Selected algorithm
@@ -69,6 +70,7 @@ struct softmax_params {
     softmax_params() : batch(1), axis_dim(0),
                        axis(-1),
                        log_softmax(false),
+                       softmin(false),
                        src_dt(data_type_t::none),
                        dst_dt(data_type_t::none),
                        algorithm(softmax_algo_t::none),
