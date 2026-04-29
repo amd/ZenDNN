@@ -14,7 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-
 #ifndef MATMUL_PARTITIONER_HPP
 #define MATMUL_PARTITIONER_HPP
 
@@ -50,38 +49,118 @@ struct matmul_partition_config_t {
 };
 
 /**
- * @brief Callback function type for BRGEMM kernel execution with K-blocking
+ * @brief Blocking parameters for stride-based BRGEMM.
  *
- * This callback is invoked for each tile when using BRGEMM with KC-blocking.
- * It processes both main K-blocks and tail K-blocks for a given M×N tile.
- *
- * @param m_start Starting row index in the output matrix
- * @param m_len Number of rows in this tile
- * @param n_start Starting column index in the output matrix
- * @param n_len Number of columns in this tile
- * @param A_batch_main Array of pointers to A matrix blocks (main K-blocks)
- * @param B_batch_main Array of pointers to B matrix blocks (main K-blocks)
- * @param A_batch_tail Pointer to A matrix tail block (remaining K elements)
- * @param B_batch_tail Pointer to B matrix tail block (remaining K elements)
- * @param C_tile Pointer to output tile (M×N submatrix)
- * @param tile_bias Pointer to bias vector for this tile (N elements)
- * @param num_main_blocks Number of main K-blocks (size of batch arrays)
- * @param KC_BLOCK Size of each K-block
- * @param K_tail Size of remaining K elements after main blocks
+ * Pre-computed once from (M, N, K) and reused across all tiles.
  */
-using brgemm_kernel_invoker_t = std::function<void(
-                                  int m_start, int m_len,
-                                  int n_start, int n_len,
-                                  const void **A_batch_main,
-                                  const void **B_batch_main,
-                                  const void *A_batch_tail,
-                                  const void *B_batch_tail,
-                                  void *C_tile,
-                                  const void *tile_bias,
-                                  int num_main_blocks,
-                                  int KC_BLOCK,
-                                  int K_tail
-                                )>;
+/**
+ * @brief Blocking parameters for stride-based BRGEMM (Batch-Reduce GEMM).
+ *
+ * These parameters are computed from the input matrix dimensions (M, N, K) and
+ * data layout, and determine how the work is partitioned and tiled for optimal performance.
+ * These parameters are reused for each tile in the matmul execution.
+ */
+struct brgemm_blocking_params_t {
+  int num_k_blocks;          ///< Number of full K blocks in K dimension (K / k_block_size)
+  int k_block_size;          ///< Size of each K block
+  int k_block_rem;           ///< Remaining elements in K dimension (K % k_block_size)
+  int num_n_blocks;          ///< Number of full N blocks in N dimension (N / n_block_size)
+  int n_block_size;          ///< Size of each N block
+  int n_block_rem;           ///< Remaining elements in N dimension (N % n_block_size)
+  int num_m_blocks;          ///< Number of full M blocks in M dimension (M / m_block_size)
+  int m_block_size;          ///< Size of each M block
+  int m_block_rem;           ///< Remaining elements in M dimension (M % m_block_size)
+  int k_blocks_per_reduce;   ///< Number of K-blocks processed in one batch-reduce call
+  int k_blocks_reduce_rem;   ///< Remainder K-blocks in the last reduction (num_k_blocks % k_blocks_per_reduce)
+  bool weight_reuse;         ///< True if weights are reused across multiple K-loop iterations (enables blocked loop schemes)
+  bool use_blocked_weight;   ///< True if weights are pre-converted into blocked layout ([num_n_blocks, num_k_blocks, k_block_size, n_block_size])
+  unsigned long long
+  stride_a;   ///< Byte stride between consecutive A panels for tiled access
+  unsigned long long
+  stride_b;   ///< Byte stride between consecutive B panels for tiled access
+  const char
+  *loop_scheme;       ///< Loop order scheme string ("aCb", "aCB", etc.), used by parallel loopers
+};
+
+/**
+ * @brief Blocking parameters for blocked-weight BRGEMM
+ *
+ * This is a simplified version of brgemm_blocking_params_t, used when weights have been
+ * physically blocked in memory. There is no tail in N/K since blocked weights
+ * always fill complete blocks; only M may have a remainder tile.
+ */
+struct blocked_brgemm_params_t {
+  int num_k_blocks;          ///< Number of K blocks in blocked weights
+  int k_block_size;          ///< Size of each K block
+  int num_n_blocks;          ///< Number of N blocks in blocked weights
+  int n_block_size;          ///< Size of each N block
+  int m_block_size;          ///< Size of each M block (for batch dimension)
+  int m_block_rem;           ///< Remaining elements in M dimension (M % m_block_size)
+  int num_m_blocks;          ///< Number of full M blocks (M / m_block_size)
+  int k_blocks_per_reduce;   ///< K-blocks processed per batch-reduce (same as stride-based variant)
+  int k_blocks_reduce_rem;   ///< Remaining K blocks for last reduction call
+  bool weight_reuse;         ///< True if weights are reused across multiple K-loop iterations (applies to blocked weights too)
+  const char *loop_scheme;   ///< Loop order scheme string
+};
+
+/**
+ * @brief Compute BRGEMM blocking parameters from matrix dimensions.
+ *
+ * Block sizes default to 64 for N, K and 32 for M.
+ */
+brgemm_blocking_params_t compute_brgemm_blocking(
+  const matmul_partition_config_t &config,
+  bool use_blocked_weight = false
+);
+
+/**
+ * @brief Cache key for BRGEMM dispatch cache.
+ *
+ * Two configs with identical key produce identical blocking params and
+ * identical JIT kernels, so they can share the same pre-dispatched set.
+ */
+struct brgemm_cache_key_t {
+  int M, N, K, lda, ldb, ldc;
+  bool transA, transB;
+  int src_dt, dst_dt;
+  bool blocked;
+
+  brgemm_cache_key_t(const matmul_partition_config_t &c, bool blocked = false)
+    : M(c.M), N(c.N), K(c.K), lda(c.lda), ldb(c.ldb), ldc(c.ldc),
+      transA(c.transA), transB(c.transB),
+      src_dt(static_cast<int>(c.dtypes.src)),
+      dst_dt(static_cast<int>(c.dtypes.dst)),
+      blocked(blocked) {}
+
+  bool operator==(const brgemm_cache_key_t &o) const {
+    return M == o.M && N == o.N && K == o.K &&
+           lda == o.lda && ldb == o.ldb && ldc == o.ldc &&
+           transA == o.transA && transB == o.transB &&
+           src_dt == o.src_dt && dst_dt == o.dst_dt &&
+           blocked == o.blocked;
+  }
+
+  struct hash {
+    std::size_t operator()(const brgemm_cache_key_t &k) const {
+      std::size_t h = 0;
+      auto mix = [&](std::size_t v) {
+        h ^= v + 0x9e3779b9 + (h << 6) + (h >> 2);
+      };
+      mix(std::hash<int>()(k.M));
+      mix(std::hash<int>()(k.N));
+      mix(std::hash<int>()(k.K));
+      mix(std::hash<int>()(k.lda));
+      mix(std::hash<int>()(k.ldb));
+      mix(std::hash<int>()(k.ldc));
+      mix(std::hash<bool>()(k.transA));
+      mix(std::hash<bool>()(k.transB));
+      mix(std::hash<int>()(k.src_dt));
+      mix(std::hash<int>()(k.dst_dt));
+      mix(std::hash<bool>()(k.blocked));
+      return h;
+    }
+  };
+};
 
 /**
  * @brief Callback function type for standard tiled kernel execution
@@ -196,7 +275,6 @@ std::pair<int, int> get_tile_sizes_from_config(int default_m, int default_n);
  */
 std::tuple<int, int> select_tile(int M, int N, int K, int num_threads);
 
-
 /**
  * @brief Compute byte offset for post-op buffer access
  *
@@ -243,29 +321,60 @@ const void *compute_bias_offset(
 );
 
 /**
- * @brief Execute matrix multiplication using BRGEMM with KC-blocking
+ * @brief Execute matrix multiplication using stride-based BRGEMM.
  *
- * Divides the computation into M×N tiles and processes K dimension in blocks.
- * Uses OpenMP parallelization across tiles. Handles both main K-blocks and
- * tail blocks for optimal performance.
+ * Loop order: K(outer, sequential) -> N(parallel) -> M(inner).
+ * At c==0 the output tile is initialized with bias (or zeros).
+ * All BRGEMM calls use beta=1.0 to accumulate onto the tile.
+ * PostOps are applied after the last K iteration.
  *
- * @param src Source matrix A (M × K)
+ * @param trans_input  Transpose flag for input matrix  ('N' or 'T')
+ * @param trans_weight Transpose flag for weight matrix ('N' or 'T')
+ * @param src    Source matrix A (M × K)
  * @param weight Weight matrix B (K × N)
- * @param dst Destination matrix C (M × N)
- * @param bias Optional bias vector, can be nullptr
+ * @param dst    Destination matrix C (M × N)
+ * @param bias   Optional bias vector, can be nullptr
  * @param config Partitioning configuration
- * @param brgemm_callback User-provided kernel invoker for BRGEMM tiles
- *
- * @note Requires ENABLE_LIBXSMM_BRGEMM_KERNEL to be enabled
- * @note Uses DEFAULT_KC_BLOCK (64) for K-dimension blocking
+ * @param params Matmul parameters (post-ops, data types)
+ * @param beta   Scaling factor for C accumulation
  */
-void execute_partitioned_matmul_libxsmm_brgemm(
+void execute_brgemm_tiled(
+  const char trans_input,
+  const char trans_weight,
   const void *src,
   const void *weight,
   void *dst,
   const void *bias,
   const matmul_partition_config_t &config,
-  const brgemm_kernel_invoker_t &brgemm_callback
+  matmul_params &params,
+  float beta
+);
+
+/**
+ * @brief Execute matmul using blocked-weight BRGEMM.
+ *
+ * Weight must be pre-blocked as tiles indexed by
+ * No K/N tail handling — only full blocks. No transpose support.
+ * Only M (batch) remainder is handled with a separate kernel.
+ *
+ * @param src            Input matrix A (M x K), row-major
+ * @param blocked_weight Pre-blocked weight
+ * @param dst            Output matrix C (M x N), row-major
+ * @param bias           Bias vector (N elements), or nullptr
+ * @param bp             Blocked BRGEMM parameters
+ * @param config         Partitioning configuration
+ * @param params         Matmul params (post-ops, dtypes)
+ * @param beta           Scaling factor for C
+ */
+void execute_brgemm_tiled_blocked(
+  const void *src,
+  const void *blocked_weight,
+  void *dst,
+  const void *bias,
+  const blocked_brgemm_params_t &bp,
+  const matmul_partition_config_t &config,
+  matmul_params &params,
+  float beta
 );
 
 /**

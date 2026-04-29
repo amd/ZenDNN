@@ -23,7 +23,6 @@
   #include "libxsmm.h"
 #endif
 
-
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
@@ -59,14 +58,12 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
     return false;
   }
 
-
   if (set_sizes_limit) {
     int64_t matrix_b_elements = static_cast<int64_t>(K) * N;
     if (matrix_b_elements > 1000000 || (M > 512 && matrix_b_elements > 1000000)) {
       return false;
     }
   }
-
 
   if (lowoha_param.postop_.size() > 0) {
     //ToDo: Silu is not supported currently, since there is no direct API call available(can use sigm+mul).
@@ -85,7 +82,6 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
     }
   }
 
-
   return (lowoha_param.dtypes.src == data_type_t::f32  &&
           lowoha_param.dtypes.dst == data_type_t::f32) ||
          (lowoha_param.dtypes.src == data_type_t::bf16 &&
@@ -97,8 +93,101 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
   return false;
 }
 
-
 #if ZENDNNL_DEPENDS_LIBXSMM
+
+/**
+ * @brief Compute buffer size (bytes) needed for a blocked weight matrix.
+ *
+ * Total element count equals the original (K * N); only the layout changes.
+ */
+static inline size_t libxsmm_weight_block_size(int K, int N,
+    data_type_t dtype) {
+  size_t elem_size = (dtype == data_type_t::f32) ? sizeof(float)
+                     : sizeof(libxsmm_bfloat16);
+  return static_cast<size_t>(K) * N * elem_size;
+}
+
+/**
+ * @brief Reblock a 2D weight matrix into blocked layout.
+ *
+ * F32:  [K, N] -> [num_n_blocks, num_k_blocks, k_block_size, n_block_size]          (4D, contiguous tiles)
+ * BF16: [K, N] -> [num_n_blocks, num_k_blocks, k_block_size/2, n_block_size, 2]     (5D, VNNI-packed pairs)
+ *
+ * Only full blocks are copied. Remainder elements
+ * are NOT blocked — the caller should use the original weight for tails.
+ *
+ * @param weight         Source 2D weight [K, N] (transB=false) or [N, K] (transB=true)
+ * @param blocked_buf    Caller-allocated output (>= libxsmm_weight_block_size bytes)
+ * @param K              Reduction dimension
+ * @param N              Output dimension
+ * @param ldb            Leading dimension of source weight
+ * @param k_block_size   K-block size
+ * @param n_block_size   N-block size
+ * @param dtype          f32 or bf16
+ * @param transB         If true, source is [N, K] row-major (transposed)
+ */
+static inline void libxsmm_weight_block(
+  const void *weight, void *blocked_buf,
+  int K, int N, int ldb,
+  int k_block_size, int n_block_size,
+  data_type_t dtype, bool transB = false) {
+
+  int num_k_blocks = K / k_block_size;
+  int num_n_blocks = N / n_block_size;
+
+  log_info("libxsmm_weight_block: [", K, ",", N, "] -> [",
+           num_n_blocks, ",", num_k_blocks, ",", n_block_size, ",", k_block_size,
+           "] dtype=", (dtype == data_type_t::f32) ? "f32" : "bf16",
+           " transB=", transB);
+
+  if (dtype == data_type_t::f32) {
+    const float *src = static_cast<const float *>(weight);
+    float *dst = static_cast<float *>(blocked_buf);
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int nblk = 0; nblk < num_n_blocks; ++nblk) {
+      for (int kblk = 0; kblk < num_k_blocks; ++kblk) {
+        float *tile = dst + (static_cast<size_t>(nblk) * num_k_blocks + kblk) *
+                      n_block_size * k_block_size;
+        for (int ki = 0; ki < k_block_size; ++ki) {
+          for (int ni = 0; ni < n_block_size; ++ni) {
+            int k_idx = kblk * k_block_size + ki;
+            int n_idx = nblk * n_block_size + ni;
+            tile[ki * n_block_size + ni] = transB
+                                           ? src[n_idx * ldb + k_idx]
+                                           : src[k_idx * ldb + n_idx];
+          }
+        }
+      }
+    }
+  }
+  else {
+    constexpr int VNNI = 2;
+    const libxsmm_bfloat16 *src = static_cast<const libxsmm_bfloat16 *>(weight);
+    libxsmm_bfloat16 *dst = static_cast<libxsmm_bfloat16 *>(blocked_buf);
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int nblk = 0; nblk < num_n_blocks; ++nblk) {
+      for (int kblk = 0; kblk < num_k_blocks; ++kblk) {
+        libxsmm_bfloat16 *tile = dst +
+                                 (static_cast<size_t>(nblk) * num_k_blocks + kblk) * n_block_size * k_block_size;
+        for (int k_pair = 0; k_pair < k_block_size / VNNI; ++k_pair) {
+          for (int ni = 0; ni < n_block_size; ++ni) {
+            for (int v = 0; v < VNNI; ++v) {
+              int ki = k_pair * VNNI + v;
+              int k_idx = kblk * k_block_size + ki;
+              int n_idx = nblk * n_block_size + ni;
+              tile[k_pair * n_block_size * VNNI + ni * VNNI + v] = transB
+                  ? src[n_idx * ldb + k_idx]
+                  : src[k_idx * ldb + n_idx];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /**
  * @brief Apply post-operations (e.g., ReLU, Sigmoid, Tanh, GELU, Binary Multiply, Binary Add)
  *        on the output matrix in F32/BF16 format using LIBXSMM kernels.
@@ -147,9 +236,9 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
                                         COMP_TYPE
                                       );
 
-    libxsmm_meltwfunction_unary kernel = libxsmm_dispatch_meltw_unary(
-                                           unary_type, shape, LIBXSMM_MELTW_FLAG_UNARY_NONE
-                                         );
+    libxsmm_meltwfunction_unary kernel =
+      libxsmm_dispatch_meltw_unary(unary_type, shape,
+                                   LIBXSMM_MELTW_FLAG_UNARY_NONE);
 
     if (kernel) {
       libxsmm_meltw_unary_param param{};
@@ -182,9 +271,9 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
     s.comp_type = COMP_TYPE;
     s.out_type = OUT_TYPE;
 
-    libxsmm_meltwfunction_binary kernel = libxsmm_dispatch_meltw_binary(
-                                            binary_type, s, LIBXSMM_MELTW_FLAG_BINARY_NONE
-                                          );
+    libxsmm_meltwfunction_binary kernel =
+      libxsmm_dispatch_meltw_binary(binary_type, s,
+                                    LIBXSMM_MELTW_FLAG_BINARY_NONE);
 
     if (kernel) {
       libxsmm_meltw_binary_param param{};
@@ -236,12 +325,9 @@ inline static void libxsmm_bias(const int M, const int N, const int ldc,
   s.comp_type = COMP_TYPE;
   s.out_type = OUT_TYPE;
 
-
-  libxsmm_meltwfunction_binary kernel = libxsmm_dispatch_meltw_binary(
-                                          LIBXSMM_MELTW_TYPE_BINARY_ADD,
-                                          s,
-                                          LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0
-                                        );
+  libxsmm_meltwfunction_binary kernel =
+    libxsmm_dispatch_meltw_binary(LIBXSMM_MELTW_TYPE_BINARY_ADD, s,
+                                  LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0);
 
   if (kernel) {
     libxsmm_meltw_binary_param param{};
