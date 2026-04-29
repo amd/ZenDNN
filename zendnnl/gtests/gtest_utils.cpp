@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+#include <stdexcept>
 
 namespace {
 
@@ -108,115 +109,105 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     std::uniform_int_distribution<int> thread_dist(1, max_threads);
     num_threads = thread_dist(gen);
   }
-  if (!cmd_lowoha.empty()) {
-    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
-  }
+
+  const auto is_libxsmm_algo = [](matmul_algo_t a) {
+    return a == matmul_algo_t::libxsmm || a == matmul_algo_t::libxsmm_blocked;
+  };
+  bool user_specified_lowoha = !cmd_lowoha.empty();
+  use_LOWOHA = user_specified_lowoha && ((cmd_lowoha == "true") ||
+                                         (cmd_lowoha == "1"));
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
-                  : matmul_config.get_algo();
   matmul_config.set_weight_cache(0);
   matmul_config.set_zp_comp_cache(false);
+
+  // Get algo if env-var is set
+  int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
+                  : matmul_config.get_algo();
   algo = static_cast<matmul_algo_t>(algo_);
 
+  // Command-line specified algo if no env-var is set
+  if (algo == matmul_algo_t::none && !cmd_backend.empty()) {
+    algo = strToAlgo(cmd_backend);
+  }
+  // Fail if onednn/onednn_blocked was chosen (env or --backend) but the build has no OneDNN
+  if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn ||
+                                  algo == matmul_algo_t::onednn_blocked)) {
+    EXCEPTION("OneDNN backends (onednn, onednn_blocked) are unavailable: "
+              "ZenDNN build was compiled without OneDNN. Please rebuild ZenDNN with OneDNN support.");
+  }
+  // Fail if libxsmm/libxsmm_blocked was chosen (env or --backend) but the build has no LIBXSMM
+  if (!ZENDNNL_DEPENDS_LIBXSMM && is_libxsmm_algo(algo)) {
+    EXCEPTION("LIBXSMM backends (libxsmm, libxsmm_blocked) are unavailable: "
+              "ZenDNN build was compiled without LIBXSMM. Please rebuild ZenDNN with LIBXSMM support.");
+  }
+
+  // Control LOWOHA and LIBXSMM based on test index
+  // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+  uint32_t third = (total_tests + TEST_PARTITIONS - 1) / TEST_PARTITIONS;
+  bool in_second_third = test_index >= third && test_index < 2 * third;
+  bool in_last_third = test_index >= 2 * third;
+  bool randomized_algo_mode = false;
+
+  // If no algo specified through env-var or command-line, select a random algo
   if (algo == matmul_algo_t::none) {
-    // Algorithm configuration based on command-line input or random selection
-    if (!cmd_backend.empty()) {
-      // Handle oneDNN dependency check for command-line backends
-#if ZENDNNL_DEPENDS_ONEDNN
-      algo = strToAlgo(cmd_backend);
-#else
-      // Fallback to AOCL DLP if oneDNN backends requested but not available
-      algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
-             ? matmul_algo_t::aocl_dlp
-             : strToAlgo(cmd_backend);
-#endif
-      // Configure algorithm-specific parameters and LOWOHA settings
-      if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-        alpha = 1.0f;
-        beta  = rand() % 2;
-        use_LOWOHA = true;
-        //ToDo: Need to support silu, gelu_tanh.
-        if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
-          po_type = post_op_type_t::none;
-        }
-      }
-      else if (cmd_lowoha.empty()) {
-        use_LOWOHA = rand() % 2;
-      }
+    std::vector<int> algo_list;
+    bool onednn_disabled = !ZENDNNL_DEPENDS_ONEDNN;
+    bool libxsmm_disabled = !ZENDNNL_DEPENDS_LIBXSMM;
+    // Drop LIBXSMM backends (libxsmm, libxsmm_blocked) if LOWOHA is explicitly
+    // disabled or if LIBXSMM itself is not available in the build.
+    bool exclude_libxsmm = libxsmm_disabled || (user_specified_lowoha &&
+                           !use_LOWOHA);
+    if (onednn_disabled && exclude_libxsmm) {
+      algo_list = {1, 4};
+    }
+    else if (onednn_disabled) {
+      algo_list = {1, 3, 4, 6};
+    }
+    else if (exclude_libxsmm) {
+      algo_list = {1, 2, 4, 5};
     }
     else {
-      // Random algorithm selection
-      int algo_range_max = 6; // 6 algorithms in total
-      std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
-      algo = static_cast<matmul_algo_t>(algo_dist(gen));
-      if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn ||
-                                      algo == matmul_algo_t::onednn_blocked)) {
-        algo = matmul_algo_t::aocl_dlp;
-      }
-
-      // If no lowoha argument is provided, automatically partition tests into three
-      if (cmd_lowoha.empty()) {
-        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-          algo = matmul_algo_t::aocl_dlp;
-        }
-        // Control LOWOHA and LIBXSMM based on test index
-        // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
-        uint32_t third = total_tests / TEST_PARTITIONS;
-
-        use_LOWOHA = (test_index >= third);
-        if (test_index >= 2 * third) {
-          alpha = 1.0f;
-          beta = rand() % 2;
-          algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
-          if (!ZENDNNL_DEPENDS_LIBXSMM) {
-            algo = matmul_algo_t::aocl_dlp;
-          }
-          // ToDo: Add support for other postops. Currently disabling gelu_tanh, swish.
-          if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
-            po_type = post_op_type_t::none;
-          }
-        }
-      }
-      // If lowoha argument is explicitly set to true
-      else if (use_LOWOHA) {
-        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-          alpha = 1.0f;
-          beta = rand() % 2;
-          algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
-          if (!ZENDNNL_DEPENDS_LIBXSMM) {
-            algo = matmul_algo_t::aocl_dlp;
-          }
-          // ToDo: Add support for other postops. Currently disabling gelu_tanh, swish.
-          if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
-            po_type = post_op_type_t::none;
-          }
-        }
-      }
-      // If lowoha argument is explicitly set to false
-      else {
-        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-          algo = matmul_algo_t::aocl_dlp;
-        }
+      algo_list = {1, 2, 3, 4, 5, 6};
+    }
+    std::uniform_int_distribution<size_t> algo_dist(0, algo_list.size() - 1);
+    algo = static_cast<matmul_algo_t>(algo_list[algo_dist(gen)]);
+    randomized_algo_mode = true;
+  }
+  if (randomized_algo_mode) {
+    // If randomized algo mode is active and we are in first two thirds, switch to aocl_dlp if libxsmm is selected
+    if (!in_last_third && is_libxsmm_algo(algo)) {
+      algo = matmul_algo_t::aocl_dlp;
+    }
+    // If randomized algo mode is active and we are in the last third, randomly choose libxsmm vs libxsmm_blocked
+    // when the build has LIBXSMM and the user did not explicitly disable LOWOHA.
+    else if (in_last_third) {
+      if (ZENDNNL_DEPENDS_LIBXSMM && (!user_specified_lowoha || use_LOWOHA)) {
+        algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
       }
     }
   }
-  else {
-    if (algo == matmul_algo_t::libxsmm ||
-        algo == matmul_algo_t::libxsmm_blocked) {
-      alpha    = 1.0f;
-      beta     = rand() % 2;
-      use_LOWOHA = true;
-      if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
-        po_type = post_op_type_t::none;
-      }
+
+  // LOWOHA: when --lowoha is set by the user, use_LOWOHA is left as parsed above.
+  // Otherwise, in randomized algo mode cover LOWOHA in the second and last thirds
+  // only; else pick LOWOHA at random.
+  if (!user_specified_lowoha) {
+    if (randomized_algo_mode) {
+      use_LOWOHA = in_second_third || in_last_third;
     }
-    else if (algo == matmul_algo_t::native_gemm ||
-             algo == matmul_algo_t::native_brgemm) {
-      // native_gemm/native_brgemm are LOWOHA-only kernels, always force LOWOHA path
-      use_LOWOHA = true;
-    }
-    else if (cmd_lowoha.empty()) {
+    else {
       use_LOWOHA = rand() % 2;
+    }
+  }
+  // set LOWOHA to true for LIBXSMM and native_gemm/native_brgemm
+  const bool algo_forces_lowoha = is_libxsmm_algo(algo) ||
+                                  algo == matmul_algo_t::native_gemm || algo == matmul_algo_t::native_brgemm;
+  use_LOWOHA = algo_forces_lowoha ? true : use_LOWOHA;
+  if (is_libxsmm_algo(algo)) {
+    alpha = 1.0f;
+    beta = rand() % 2;
+    //ToDo: Need to support silu, gelu_tanh.
+    if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
+      po_type = post_op_type_t::none;
     }
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
@@ -1292,7 +1283,7 @@ matmul_algo_t strToAlgo(std::string str) {
   if (str == "native_brgemm") {
     return matmul_algo_t::native_brgemm;
   }
-  return matmul_algo_t::none;
+  EXCEPTION("Invalid algorithm: " + str);
 }
 
 std::string algoToStr(matmul_algo_t algo) {
@@ -1886,7 +1877,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
               auto src_scale_size = input_tensor.get_quant_scale_size();
               params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
-                                                src_scale_size.end());
+                  src_scale_size.end());
               log_info("LOWOHA INT8: Source scale extracted");
             }
             // Extract source zero point (for asymmetric quantization)
@@ -1910,7 +1901,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
               auto wei_scale_size = weight_tensor.get_quant_scale_size();
               params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
-                                                wei_scale_size.end());
+                  wei_scale_size.end());
               log_info("LOWOHA INT8: Weight scale extracted");
             }
             // Extract weight zero point (for asymmetric quantization)
@@ -1934,7 +1925,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
               auto dst_scale_size = output_tensor.get_quant_scale_size();
               params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
-                                                dst_scale_size.end());
+                  dst_scale_size.end());
               log_info("LOWOHA INT8: Destination scale extracted");
             }
             // Extract destination zero point (for asymmetric quantization)
@@ -2070,7 +2061,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
       }
       matmul_operator.set_input("matmul_input", input_tensor)
-                     .set_output("matmul_output", output_tensor);
+      .set_output("matmul_output", output_tensor);
       if (algo != matmul_algo_t::none) {
         matmul_operator.set_forced_kernel(algoToStr(algo));
       }
@@ -2456,9 +2447,9 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
       //define embedding bag operator
       embag_operator_t embedding_bag_operator = embag_operator_t()
-        .set_name("embedding_bag")
-        .set_context(embedding_bag_context)
-        .create();
+          .set_name("embedding_bag")
+          .set_context(embedding_bag_context)
+          .create();
 
       if (embedding_bag_operator.is_bad_object()) {
         testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -2528,9 +2519,9 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
-      .set_name("ref_embedding_bag")
-      .set_context(embedding_bag_context)
-      .create();
+        .set_name("ref_embedding_bag")
+        .set_context(embedding_bag_context)
+        .create();
 
     if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -3043,7 +3034,7 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
       reorder_params.quant_params.scale.dt = scale_tensor.get_data_type();
       auto scale_size = scale_tensor.get_size();
       reorder_params.quant_params.scale.dims.assign(scale_size.begin(),
-                                            scale_size.end());
+          scale_size.end());
     }
 
     if (zp_tensor.get_nelem() > 0) {
