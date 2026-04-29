@@ -205,8 +205,9 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   if (is_libxsmm_algo(algo)) {
     alpha = 1.0f;
     beta = rand() % 2;
-    //ToDo: Need to support silu, gelu_tanh.
-    if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh) {
+    //ToDo: Need to support silu, gelu_tanh, clip.
+    if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh ||
+        po_type == post_op_type_t::clip) {
       po_type = post_op_type_t::none;
     }
   }
@@ -1328,6 +1329,9 @@ post_op_type_t strToPostOps(const std::string &str) {
   if (str == "tanh") {
     return post_op_type_t::tanh;
   }
+  if (str == "clip") {
+    return post_op_type_t::clip;
+  }
   if (str == "binary_add") {
     return post_op_type_t::binary_add;
   }
@@ -1351,6 +1355,8 @@ std::string postOpsToStr(post_op_type_t post_op) {
     return "swish";
   case post_op_type_t::tanh:
     return "tanh";
+  case post_op_type_t::clip:
+    return "clip";
   case post_op_type_t::binary_add:
     return "binary_add";
   case post_op_type_t::binary_mul:
@@ -1975,13 +1981,26 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
             postop_item.dtype = out_data_type;
           }
 
-          // Set default alpha/scale to match standard API (post_op_t) defaults
-          // so LOWOHA and reference kernels compute the same post-op.
+          // Fused post-op scalars from gtest_main.cpp (match reference post_op_t).
           if (po_type == post_op_type_t::swish) {
-            postop_item.alpha = 1.0f;  // swish_params.scale defaults to 1.0
+            postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
+            postop_item.beta = 0.0f;
           }
           else if (po_type == post_op_type_t::elu) {
-            postop_item.alpha = 1.0f;  // elu_params.alpha defaults to 1.0
+            postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
+            postop_item.beta = 0.0f;
+          }
+          else if (po_type == post_op_type_t::clip) {
+            float lo = MATMUL_POSTOP_CLIP_LOWER;
+            float hi = MATMUL_POSTOP_CLIP_UPPER;
+            if (lo > hi) {
+              std::swap(lo, hi);
+            }
+            if (hi - lo < 1e-6f) {
+              hi = lo + 1e-3f;
+            }
+            postop_item.alpha = lo;
+            postop_item.beta = hi;
           }
 
           params.postop_.push_back(postop_item);
@@ -2011,11 +2030,31 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       }
     }
     else {
-      // default postop relu
       post_op_t post_op = post_op_t{post_op_type_t::relu};
-      // postop update according to the post_op_type_t enum value
       if (po_type != post_op_type_t::none) {
-        post_op = post_op_t{po_type};
+        switch (po_type) {
+        case post_op_type_t::clip: {
+          float lo = MATMUL_POSTOP_CLIP_LOWER;
+          float hi = MATMUL_POSTOP_CLIP_UPPER;
+          if (lo > hi) {
+            std::swap(lo, hi);
+          }
+          if (hi - lo < 1e-6f) {
+            hi = lo + 1e-3f;
+          }
+          post_op = post_op_t(clip_params_t{lo, hi});
+          break;
+        }
+        case post_op_type_t::swish:
+          post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+          break;
+        case post_op_type_t::elu:
+          post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+          break;
+        default:
+          post_op = post_op_t{po_type};
+          break;
+        }
       }
       weight_tensor.set_name("weights");
       bias_tensor.set_name("bias");
@@ -2092,11 +2131,31 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        float alpha,
                                        float beta) {
   try {
-    // Default postop relu
     post_op_t post_op = post_op_t{post_op_type_t::relu};
-    // postop update according to the post_op_type_t enum value
     if (po_type != post_op_type_t::none) {
-      post_op = post_op_t{po_type};
+      switch (po_type) {
+      case post_op_type_t::clip: {
+        float lo = MATMUL_POSTOP_CLIP_LOWER;
+        float hi = MATMUL_POSTOP_CLIP_UPPER;
+        if (lo > hi) {
+          std::swap(lo, hi);
+        }
+        if (hi - lo < 1e-6f) {
+          hi = lo + 1e-3f;
+        }
+        post_op = post_op_t(clip_params_t{lo, hi});
+        break;
+      }
+      case post_op_type_t::swish:
+        post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+        break;
+      case post_op_type_t::elu:
+        post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+        break;
+      default:
+        post_op = post_op_t{po_type};
+        break;
+      }
     }
     weight_tensor.set_name("weights");
     bias_tensor.set_name("bias");

@@ -449,6 +449,7 @@ TEST_P(TestMatmul, BF16_BF16) {
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
                             use_LOWOHA, algo, alpha, beta);
+
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

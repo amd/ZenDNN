@@ -194,6 +194,9 @@ extern const float rtol_f32;
 extern const float rtol_bf16;
 extern const float epsilon_woq;
 extern const float rtol_woq;
+extern const float MATMUL_POSTOP_CLIP_LOWER;
+extern const float MATMUL_POSTOP_CLIP_UPPER;
+extern const float MATMUL_POSTOP_ELTWISE_ALPHA;
 extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
@@ -293,6 +296,7 @@ const post_op_type_t post_op_arr[] = {
   post_op_type_t::sigmoid,
   post_op_type_t::swish,
   post_op_type_t::tanh,
+  post_op_type_t::clip,
   post_op_type_t::binary_add,
   post_op_type_t::binary_mul,
   post_op_type_t::none

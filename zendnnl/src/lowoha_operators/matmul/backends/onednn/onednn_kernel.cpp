@@ -430,10 +430,6 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
       }
       case post_op_type_t::clip: {
         log_info("Adding Clip post-op");
-        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
-                                          lowoha_params.postop_[po].alpha : -0.5f;
-        lowoha_params.postop_[po].beta = lowoha_params.postop_[po].beta ?
-                                         lowoha_params.postop_[po].beta : 0.5f;
         matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip,
                                    lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
         break;

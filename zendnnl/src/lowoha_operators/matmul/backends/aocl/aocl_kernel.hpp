@@ -28,6 +28,17 @@
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
+
+// Shared scalar constants used as pointer-targets for AOCL/DLP post-op fields
+inline constexpr float LEAKY_RELU_SLOPE_DEFAULT = 0.01f;
+inline constexpr float ONE_F32            = 1.0f;
+
+// Cast a (const) float address into the non-const void* slot expected by the
+// AOCL/BLIS API. The kernels treat these scalars as read-only inputs, so
+inline void *get_void_ptr(const float &v) {
+  return const_cast<void *>(static_cast<const void *>(&v));
+}
+
 using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
                                        const char, const char, const md_t, const md_t
 #if ZENDNNL_DEPENDS_AOCLDLP
@@ -75,22 +86,23 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             reorder_func_ptr<T> reorder_func, int weight_cache_type);
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-using get_reorder_buf_size_sym_quant_func_ptr = long unsigned int (*)(const char,
-    const char, const char, const md_t, const md_t,
-    DLP_SYMM_STAT_QUANT *, dlp_metadata_t *);
+using get_reorder_buf_size_sym_quant_func_ptr = long unsigned int (*)(
+      const char,
+      const char, const char, const md_t, const md_t,
+      DLP_SYMM_STAT_QUANT *, dlp_metadata_t *);
 
 template <typename T>
 using reorder_sym_quant_func_ptr = void (*)(const char, const char, const char,
-    const T *, T *, const md_t, const md_t, const md_t,
-    DLP_SYMM_STAT_QUANT *, dlp_metadata_t *);
+                                   const T *, T *, const md_t, const md_t, const md_t,
+                                   DLP_SYMM_STAT_QUANT *, dlp_metadata_t *);
 
 template <typename T>
 bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
-    void *&reorder_weights, const int k, const int n, const int ldb,
-    const char order, const char trans, char mem_format_b,
-    get_reorder_buf_size_sym_quant_func_ptr get_reorder_buf_size,
-    reorder_sym_quant_func_ptr<T> reorder_func,
-    DLP_SYMM_STAT_QUANT *symq_meta, int weight_cache_type);
+                                    void *&reorder_weights, const int k, const int n, const int ldb,
+                                    const char order, const char trans, char mem_format_b,
+                                    get_reorder_buf_size_sym_quant_func_ptr get_reorder_buf_size,
+                                    reorder_sym_quant_func_ptr<T> reorder_func,
+                                    DLP_SYMM_STAT_QUANT *symq_meta, int weight_cache_type);
 #endif
 
 #if ZENDNNL_DEPENDS_AOCLDLP

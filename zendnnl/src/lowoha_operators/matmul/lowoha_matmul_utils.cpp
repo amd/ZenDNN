@@ -256,6 +256,16 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
+  for (size_t i = 0; i < params.postop_.size(); ++i) {
+    auto &po = params.postop_[i];
+    if (po.po_type == post_op_type_t::clip) {
+      if (!std::isfinite(po.alpha) || !std::isfinite(po.beta)) {
+        log_error("Clip post-op[", i, "]: alpha (lower) and beta (upper) "
+                  "must be finite, got alpha=", po.alpha, ", beta=", po.beta);
+        return status_t::failure;
+      }
+    }
+  }
   return status_t::success;
 }
 
@@ -278,6 +288,8 @@ inline const char *post_op_type_to_string(post_op_type_t type) {
     return "swish";
   case post_op_type_t::tanh:
     return "tanh";
+  case post_op_type_t::clip:
+    return "clip";
   case post_op_type_t::binary_add:
     return "binary_add";
   case post_op_type_t::binary_mul:
@@ -666,14 +678,17 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
           // For large B near L2 capacity (>500KB) with N>256, DLP wins
           // due to two-block dispatch overhead. Route those to DLP.
           const int kp = (K + 3) & ~3;
-          const int np = ((N + native::BKC_NR_PAD - 1) / native::BKC_NR_PAD) * native::BKC_NR_PAD;
+          const int np = ((N + native::BKC_NR_PAD - 1) / native::BKC_NR_PAD) *
+                         native::BKC_NR_PAD;
           const size_t b_packed = static_cast<size_t>(kp) * np;
           static const size_t l2 =
-              static_cast<size_t>(native::detect_uarch().l2_bytes);
-          if (b_packed <= l2 && !(b_packed > 500*1024 && N > 256))
+            static_cast<size_t>(native::detect_uarch().l2_bytes);
+          if (b_packed <= l2 && !(b_packed > 500*1024 && N > 256)) {
             kernel = matmul_algo_t::native_brgemm;
-          else
+          }
+          else {
             kernel = matmul_algo_t::aocl_dlp_blocked;
+          }
         }
         else {
           kernel = matmul_algo_t::aocl_dlp_blocked;

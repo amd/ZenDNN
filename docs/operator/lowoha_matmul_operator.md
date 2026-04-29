@@ -154,6 +154,7 @@ struct matmul_post_op {
 | `post_op_type_t::swish` | SiLU / Swish | No |
 | `post_op_type_t::sigmoid` | Sigmoid | No |
 | `post_op_type_t::tanh` | Hyperbolic Tangent | No |
+| `post_op_type_t::clip` | Element-wise Clip to `[alpha, beta]` (lower, upper) | No |
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 

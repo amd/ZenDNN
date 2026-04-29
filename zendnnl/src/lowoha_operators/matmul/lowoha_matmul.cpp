@@ -253,6 +253,14 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         po.leading_dim = N;
       }
     }
+    else if (po.po_type == post_op_type_t::clip) {
+      // matmul_post_op encodes clip bounds as (alpha = lower, beta = upper).
+      if (po.alpha > po.beta) {
+        log_info("Clip post-op: alpha (", po.alpha,
+                 ") > beta (", po.beta, "), swapping to keep lower <= upper.");
+        std::swap(po.alpha, po.beta);
+      }
+    }
   }
 
   // [in,out] Mutates params.quant_params.wei_scale: GGML weight unpacking

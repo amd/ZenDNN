@@ -178,8 +178,8 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       }
       dlp_metadata->seq_vector[op_index++] = ELTWISE;
       dlp_metadata->eltwise[eltwise_index].algo.algo_type = PRELU;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      *static_cast<float *>(dlp_metadata->eltwise[eltwise_index].algo.alpha) = 0.01f;
+      dlp_metadata->eltwise[eltwise_index].algo.alpha = get_void_ptr(
+            LEAKY_RELU_SLOPE_DEFAULT);
       dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
       dlp_metadata->eltwise[eltwise_index].sf = nullptr;
       dlp_metadata->eltwise[eltwise_index].algo.stor_type = DLP_F32;
@@ -224,8 +224,7 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       }
       dlp_metadata->seq_vector[op_index++] = ELTWISE;
       dlp_metadata->eltwise[eltwise_index].algo.algo_type = SWISH;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      *static_cast<float *>(dlp_metadata->eltwise[eltwise_index].algo.alpha) = 1.0f;
+      dlp_metadata->eltwise[eltwise_index].algo.alpha = get_void_ptr(ONE_F32);
       dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
       dlp_metadata->eltwise[eltwise_index].sf = nullptr;
       dlp_metadata->eltwise[eltwise_index].algo.stor_type = DLP_F32;
@@ -242,6 +241,19 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       dlp_metadata->eltwise[eltwise_index].sf = nullptr;
       eltwise_index++;
       break;
+    // clip(x; lo, hi): bounds from matmul_post_op::alpha (lower), ::beta (upper).
+    case post_op_type_t::clip:
+      if (eltwise_index >= eltwise_count) {
+        break;
+      }
+      dlp_metadata->seq_vector[op_index++] = ELTWISE;
+      dlp_metadata->eltwise[eltwise_index].algo.algo_type = CLIP;
+      dlp_metadata->eltwise[eltwise_index].algo.stor_type = DLP_F32;
+      dlp_metadata->eltwise[eltwise_index].algo.alpha = get_void_ptr(po.alpha);
+      dlp_metadata->eltwise[eltwise_index].algo.beta = get_void_ptr(po.beta);
+      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
+      eltwise_index++;
+      break;
     case post_op_type_t::binary_add:
       if (matrix_add_index >= matrix_add_count) {
         break;
@@ -251,13 +263,10 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       dlp_metadata->matrix_add[matrix_add_index].ldm = po.leading_dim;
       dlp_metadata->matrix_add[matrix_add_index].stor_type = po.dtype ==
           data_type_t::bf16 ? DLP_BF16 : DLP_F32;
-      // sf structure is already allocated, initialize with default values
-      dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(
-            float));
-      if (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) {
-        *static_cast<float *>
-        (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
-      }
+      // sf structure is already allocated; point its scale_factor at the
+      // shared ONE_F32 constant (scale_factor is read-only for the kernel).
+      dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = get_void_ptr(
+            ONE_F32);
       dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_len = 1;
       matrix_add_index++;
       break;
@@ -270,13 +279,10 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       dlp_metadata->matrix_mul[matrix_mul_index].ldm = po.leading_dim;
       dlp_metadata->matrix_mul[matrix_mul_index].stor_type = po.dtype ==
           data_type_t::bf16 ? DLP_BF16 : DLP_F32;
-      // sf structure is already allocated, initialize with default values
-      dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor = malloc(sizeof(
-            float));
-      if (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) {
-        *static_cast<float *>
-        (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) = 1.0f;
-      }
+      // sf structure is already allocated; point its scale_factor at the
+      // shared ONE_F32 constant (scale_factor is read-only for the kernel).
+      dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor = get_void_ptr(
+            ONE_F32);
       dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor_len = 1;
       matrix_mul_index++;
       break;
@@ -456,6 +462,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::sigmoid:
     case post_op_type_t::swish:
     case post_op_type_t::tanh:
+    case post_op_type_t::clip:
       eltwise_count++;
       break;
     case post_op_type_t::binary_add:
@@ -781,11 +788,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->matrix_add[matrix_add_index].matrix = zp_comp_acc;
     dlp_metadata->matrix_add[matrix_add_index].stor_type = DLP_S32;
     dlp_metadata->matrix_add[matrix_add_index].ldm = N;
-    // Allocate and set scale factor to 1.0
-    dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(
-          float));
-    *static_cast<float *>
-    (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
+    // Point scale factor at the shared ONE_F32 constant (default 1.0, read-only).
+    dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = get_void_ptr(
+          ONE_F32);
     dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_len = 1;
     dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_type = DLP_F32;
     matrix_add_index++;
@@ -920,6 +925,7 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::sigmoid:
     case post_op_type_t::swish:
     case post_op_type_t::tanh:
+    case post_op_type_t::clip:
       eltwise_count++;
       break;
     case post_op_type_t::binary_add:
@@ -1049,9 +1055,9 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::leaky_relu:
       aocl_po->seq_vector[op_index++] = ELTWISE;
       aocl_po->eltwise[eltwise_index].algo.algo_type = PRELU;
-      aocl_po->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      // Use default slope of 0.01 for leaky_relu
-      *static_cast<float *>(aocl_po->eltwise[eltwise_index].algo.alpha) = 0.01f;
+      // Default slope 0.01; shared constant, no allocation needed.
+      aocl_po->eltwise[eltwise_index].algo.alpha = get_void_ptr(
+            LEAKY_RELU_SLOPE_DEFAULT);
       aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
       aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
       aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
@@ -1091,9 +1097,8 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::swish:
       aocl_po->seq_vector[op_index++] = ELTWISE;
       aocl_po->eltwise[eltwise_index].algo.algo_type = SWISH;
-      aocl_po->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      // Use default scale of 1.0 for swish
-      *static_cast<float *>(aocl_po->eltwise[eltwise_index].algo.alpha) = 1.0f;
+      // Default scale 1.0; shared constant, no allocation needed.
+      aocl_po->eltwise[eltwise_index].algo.alpha = get_void_ptr(ONE_F32);
       aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
       aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
       aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
@@ -1110,12 +1115,21 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
       aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
       eltwise_index++;
       break;
+    case post_op_type_t::clip:
+      aocl_po->seq_vector[op_index++] = ELTWISE;
+      aocl_po->eltwise[eltwise_index].algo.algo_type = CLIP;
+      aocl_po->eltwise[eltwise_index].algo.alpha = get_void_ptr(po.alpha);
+      aocl_po->eltwise[eltwise_index].algo.beta = get_void_ptr(po.beta);
+      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
+      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
+      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
+      eltwise_index++;
+      break;
     case post_op_type_t::binary_add:
       aocl_po->seq_vector[op_index++] = MATRIX_ADD;
       aocl_po->matrix_add[matrix_add_index].matrix = po.buff;
-      aocl_po->matrix_add[matrix_add_index].scale_factor = malloc(sizeof(float));
-      *static_cast<float *>(aocl_po->matrix_add[matrix_add_index].scale_factor) =
-        1.0f; // Default scale
+      // Default scale 1.0; shared constant, no allocation needed.
+      aocl_po->matrix_add[matrix_add_index].scale_factor = get_void_ptr(ONE_F32);
       aocl_po->matrix_add[matrix_add_index].scale_factor_len = 1;
       aocl_po->matrix_add[matrix_add_index].ldm = po.leading_dim;
       aocl_po->matrix_add[matrix_add_index].stor_type = po.dtype == data_type_t::bf16
@@ -1125,9 +1139,8 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::binary_mul:
       aocl_po->seq_vector[op_index++] = MATRIX_MUL;
       aocl_po->matrix_mul[matrix_mul_index].matrix = po.buff;
-      aocl_po->matrix_mul[matrix_mul_index].scale_factor = malloc(sizeof(float));
-      *static_cast<float *>(aocl_po->matrix_mul[matrix_mul_index].scale_factor) =
-        1.0f; // Default scale
+      // Default scale 1.0; shared constant, no allocation needed.
+      aocl_po->matrix_mul[matrix_mul_index].scale_factor = get_void_ptr(ONE_F32);
       aocl_po->matrix_mul[matrix_mul_index].scale_factor_len = 1;
       aocl_po->matrix_mul[matrix_mul_index].ldm = N; // Set leading dimension to N
       aocl_po->matrix_mul[matrix_mul_index].stor_type = po.dtype == data_type_t::bf16
@@ -1238,16 +1251,8 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po) {
       }
     }
 
-    // Clean up eltwise operations
+    // Clean up eltwise operations.
     if (aocl_po->eltwise) {
-      for (int i = 0; i < eltwise_count; i++) {
-        if (aocl_po->eltwise[i].algo.alpha) {
-          free(aocl_po->eltwise[i].algo.alpha);
-        }
-        if (aocl_po->eltwise[i].algo.beta) {
-          free(aocl_po->eltwise[i].algo.beta);
-        }
-      }
       free(aocl_po->eltwise);
     }
 
@@ -1256,13 +1261,10 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po) {
       free(aocl_po->bias);
     }
 
-    // Clean up matrix operations
+    // Clean up matrix operations.
     if (aocl_po->matrix_add) {
       for (int i = 0; i < matrix_add_count; i++) {
         if (aocl_po->matrix_add[i].sf) {
-          if (aocl_po->matrix_add[i].sf->scale_factor) {
-            free(aocl_po->matrix_add[i].sf->scale_factor);
-          }
           free(aocl_po->matrix_add[i].sf);
         }
       }
@@ -1272,9 +1274,6 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po) {
     if (aocl_po->matrix_mul) {
       for (int i = 0; i < matrix_mul_count; i++) {
         if (aocl_po->matrix_mul[i].sf) {
-          if (aocl_po->matrix_mul[i].sf->scale_factor) {
-            free(aocl_po->matrix_mul[i].sf->scale_factor);
-          }
           free(aocl_po->matrix_mul[i].sf);
         }
       }
@@ -1356,37 +1355,19 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po) {
 }
 #else
 void cleanup_blis_post_op(aocl_post_op *aocl_po,
-                          const matmul_params &lowoha_param) {
+                          const matmul_params & /*lowoha_param*/) {
   if (aocl_po) {
-    // Clean up eltwise operations
+    // Clean up eltwise operations.
     if (aocl_po->eltwise) {
-      for (int i = 0; i < aocl_po->num_eltwise; i++) {
-        if (aocl_po->eltwise[i].algo.alpha) {
-          free(aocl_po->eltwise[i].algo.alpha);
-        }
-        if (aocl_po->eltwise[i].algo.beta) {
-          free(aocl_po->eltwise[i].algo.beta);
-        }
-      }
       free(aocl_po->eltwise);
     }
 
-    // Clean up matrix operations
+    // Clean up matrix operations.
     if (aocl_po->matrix_add) {
-      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
-        if (aocl_po->matrix_add[i].scale_factor) {
-          free(aocl_po->matrix_add[i].scale_factor);
-        }
-      }
       free(aocl_po->matrix_add);
     }
 
     if (aocl_po->matrix_mul) {
-      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
-        if (aocl_po->matrix_mul[i].scale_factor) {
-          free(aocl_po->matrix_mul[i].scale_factor);
-        }
-      }
       free(aocl_po->matrix_mul);
     }
 

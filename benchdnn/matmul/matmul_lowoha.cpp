@@ -188,6 +188,13 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
         break;
       }
     }
+    if (postop_item.buff == nullptr) {
+      postop_item.dtype = output_tensor.get_data_type();
+    }
+    if (cfg.post_ops[k] == zendnnl::ops::post_op_type_t::clip) {
+      postop_item.alpha = -0.5f;
+      postop_item.beta  =  0.5f;
+    }
     params.postop_.push_back(postop_item);
   }
 }
