@@ -2874,7 +2874,9 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
   const bool is_low_precision = (output_tensor.get_data_type() ==
                                  data_type_t::bf16) ||
                                 (output_tensor.get_data_type() == data_type_t::f16) || is_quant;
-  const float abs_bound = is_low_precision
+  // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
+  bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+  const float abs_bound = is_dst_u8 ? 1.0f : is_low_precision
                           ? (alpha * k * epsilon)
                           : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
@@ -2949,7 +2951,9 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
   const bool is_low_precision = (output_tensor.get_data_type() ==
                                  data_type_t::bf16) ||
                                 (output_tensor.get_data_type() == data_type_t::f16);
-  const float abs_bound = is_low_precision
+  // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
+  bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+  const float abs_bound = is_dst_u8 ? 1.0f : is_low_precision
                           ? (alpha * k * epsilon)
                           : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
