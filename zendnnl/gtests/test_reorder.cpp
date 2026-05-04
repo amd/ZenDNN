@@ -58,7 +58,9 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
   }
 
   /** @brief TearDown is used to free resource used in test */
-  virtual void TearDown() {}
+  virtual void TearDown() {
+    clear_matmul_test_caches();
+  }
 
   uint64_t m, k, n;
   bool transA, transB;

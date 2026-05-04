@@ -105,6 +105,9 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
                                     DLP_SYMM_STAT_QUANT *symq_meta, int weight_cache_type);
 #endif
 
+/** Clear AOCL matmul weight caches and zero-point compensation LRU cache. */
+void clear_aocl_matmul_weight_caches();
+
 #if ZENDNNL_DEPENDS_AOCLDLP
 /**
  * @brief Creates DLP metadata for post-operations

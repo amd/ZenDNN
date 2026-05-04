@@ -79,6 +79,8 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
                                int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
                                const dnnl::engine &eng, const dnnl::primitive_attr &matmul_attr,
                                int32_t weight_cache_type);
+/** Clear oneDNN matmul weight cache. */
+void clear_onednn_matmul_weight_cache();
 #endif
 
 } // namespace matmul

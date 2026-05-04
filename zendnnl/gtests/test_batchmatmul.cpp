@@ -54,7 +54,9 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
   }
 
   /** @brief TearDown is used to free resource used in test */
-  virtual void TearDown() {}
+  virtual void TearDown() {
+    clear_matmul_test_caches();
+  }
   uint64_t batch_size;
   uint64_t m, n, k;
   post_op_type_t po_type;

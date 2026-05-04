@@ -49,6 +49,8 @@ class lru_cache_t {
   void add(const lru_key_t &key, const value_t &value);
   value_t get(const lru_key_t &key);
   bool find_key(const lru_key_t &key) const;
+  /** Clear all entries. Safe to call between test cases to avoid stale pointer-keyed entries. */
+  void clear();
 
  private:
   // Private struct to hold the cache value and its timestamp
@@ -133,6 +135,13 @@ void lru_cache_t<KEY_T, VALUE_T>::remove_if_invalidated(
   if (it != lru_cache_map_->end()) {
     lru_cache_map_->erase(it);
   }
+}
+
+template <typename KEY_T, typename VALUE_T>
+void lru_cache_t<KEY_T, VALUE_T>::clear() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  evict();
+  current_timestamp_ = 0;
 }
 
 template <typename KEY_T, typename VALUE_T>

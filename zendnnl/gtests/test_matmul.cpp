@@ -56,7 +56,9 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   }
 
   /** @brief TearDown is used to free resource used in test */
-  virtual void TearDown() {}
+  virtual void TearDown() {
+    clear_matmul_test_caches();
+  }
   uint64_t m,k,n;
   post_op_type_t po_type;
   bool     transA, transB;
@@ -1027,7 +1029,9 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
  */
 TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
   uint64_t sym_k = (k / 32) * 32;
-  if (sym_k == 0) sym_k = 32;
+  if (sym_k == 0) {
+    sym_k = 32;
+  }
 
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBB01);
   bool use_bf16 = (local_rng() % 2 == 0);
@@ -1062,7 +1066,7 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
   }
 
   const int8_t *raw_wt = static_cast<const int8_t *>(
-      weight_tensor.get_raw_handle_unsafe());
+                           weight_tensor.get_raw_handle_unsafe());
 
   int64_t M_pack = static_cast<int64_t>(n);
   int64_t K_pack = static_cast<int64_t>(sym_k);
@@ -1070,7 +1074,7 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
   size_t num_scales = static_cast<size_t>(num_groups * n);
 
   const auto *raw_scl_bf16 = static_cast<const uint16_t *>(
-      wei_scale.get_raw_handle_unsafe());
+                               wei_scale.get_raw_handle_unsafe());
   std::vector<float> scl_f32(num_scales);
   for (size_t i = 0; i < num_scales; i++) {
     uint32_t bits = static_cast<uint32_t>(raw_scl_bf16[i]) << 16;
@@ -1089,10 +1093,10 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
   repack_weights_q8_0(wt_nk.data(), scl_f32.data(), M_pack, K_pack,
                       packed_buf.data());
 
-  auto packed_weight_tensor = tensor_factory.copy_tensor(
-      {sym_k, n}, data_type_t::s8,
-      std::make_pair(packed_size, static_cast<void *>(packed_buf.data())),
-      true, false);
+  auto packed_weight_tensor = tensor_factory.copy_tensor({sym_k, n},
+                              data_type_t::s8,
+                              std::make_pair(packed_size, static_cast<void *>(packed_buf.data())),
+                              true, false);
 
   auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
                      rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
@@ -1100,8 +1104,10 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
                        ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
                        : tensor_t();
 
-  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
-  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, out_dt,
+                           2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, out_dt,
+                           2.0);
 
   log_info("INT8_SYM_QUANT_GGML_PACKED: dtype=",
            use_bf16 ? "bf16" : "f32",

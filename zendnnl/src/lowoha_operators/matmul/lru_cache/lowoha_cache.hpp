@@ -30,6 +30,18 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
+/** LRU cache for 1D zero-point compensation (src_zp with constant weights). */
+inline lru_cache_t<Key_matmul, int32_t *> &get_zp_comp_lru_cache() {
+  static lru_cache_t<Key_matmul, int32_t *> zp_comp_cache;
+  return zp_comp_cache;
+}
+
+/** Free all cached ZP compensation buffers; use between tests with weight cache clears. */
+inline void clear_zp_compensation_cache() {
+  std::lock_guard<std::mutex> lock(get_lowoha_mutex());
+  get_zp_comp_lru_cache().clear();
+}
+
 /**
  * @brief Get cached or compute zero-point compensation
  * 
@@ -73,10 +85,8 @@ inline int32_t* cache_or_compute_zp_compensation(
   const bool can_cache = (wei_zp == 0 && src_zp != 0) && 
                          is_weights_const &&
                          ops::matmul_config_t::instance().get_zp_comp_cache();
-  
-  // Static LRU cache for 1D zero-point compensation
-  static lru_cache_t<Key_matmul, int32_t*> zp_comp_cache;
-  
+
+  lru_cache_t<Key_matmul, int32_t *> &zp_comp_cache = get_zp_comp_lru_cache();
   // Compute strides based on transpose flags
   int src_s0 = transA ? 1 : lda;
   int src_s1 = transA ? lda : 1;
@@ -92,9 +102,12 @@ inline int32_t* cache_or_compute_zp_compensation(
     zp_comp_ndim = 1;
     
     // Check cache first
-    if (can_cache && zp_comp_cache.find_key(key_obj)) {
-      log_info("Cache hit: reading cached zero-point compensation");
-      return zp_comp_cache.get(key_obj);
+    if (can_cache) {
+      std::lock_guard<std::mutex> lock(get_lowoha_mutex());
+      if (zp_comp_cache.find_key(key_obj)) {
+        log_info("Cache hit: reading cached zero-point compensation");
+        return zp_comp_cache.get(key_obj);
+      }
     }
     
     // Compute compensation
@@ -117,10 +130,18 @@ inline int32_t* cache_or_compute_zp_compensation(
     for (int n = 0; n < N; ++n) {
       zp_comp_acc[n] = -src_zp * wei_col_sum[n];
     }
-    
-    // Add to cache if enabled
+
+    // Add to cache if enabled — re-check under the same lock as insert to avoid
+    // TOCTOU: another thread may have inserted this key while we computed.
     if (can_cache) {
       std::lock_guard<std::mutex> lock(get_lowoha_mutex());
+      if (zp_comp_cache.find_key(key_obj)) {
+        std::free(static_cast<void *>(zp_comp_acc));
+        log_info(
+          "Cache hit after compute: peer inserted zero-point compensation; "
+          "discarding duplicate buffer");
+        return zp_comp_cache.get(key_obj);
+      }
       zp_comp_cache.add(key_obj, zp_comp_acc);
       log_info("Cache add: storing zero-point compensation");
     }

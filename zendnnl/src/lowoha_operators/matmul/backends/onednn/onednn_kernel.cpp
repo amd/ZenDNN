@@ -23,6 +23,27 @@ namespace matmul {
 
 #if ZENDNNL_DEPENDS_ONEDNN
 
+namespace {
+std::unordered_map<Key_matmul, size_t> &get_onednn_hash_values() {
+  static std::unordered_map<Key_matmul, size_t> hash_values;
+  return hash_values;
+}
+lru_cache_t<Key_matmul, dnnl::memory> &get_onednn_matmul_weight_cache() {
+  static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
+  return matmul_weight_cache;
+}
+std::mutex &get_onednn_blocked_weight_mutex() {
+  static std::mutex blocked_weight_mutex;
+  return blocked_weight_mutex;
+}
+}  // namespace
+
+void clear_onednn_matmul_weight_cache() {
+  std::lock_guard<std::mutex> lock(get_onednn_blocked_weight_mutex());
+  get_onednn_hash_values().clear();
+  get_onednn_matmul_weight_cache().clear();
+}
+
 /**
  * @brief Creates matmul primitive descriptor with blocked weight format
  *
@@ -45,7 +66,7 @@ dnnl::matmul::primitive_desc create_blocked_matmul_pd(
 
   dnnl_params.weights.format_tag = "any";
   dnnl::memory::desc dnnl_blocked_weight_desc = onednn_utils_t::to_dnnl_tensor(
-      dnnl_params.weights, eng);
+        dnnl_params.weights, eng);
 
   dnnl::memory::desc dnnl_output_desc = onednn_utils_t::to_dnnl_tensor(
                                           dnnl_params.dst, eng);
@@ -106,9 +127,9 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
                                int32_t weight_cache_type) {
 
   // Static containers with mutex for thread safety
-  static std::unordered_map<Key_matmul, size_t> hash_values;
-  static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
-  static std::mutex blocked_weight_mutex;
+  auto &hash_values = get_onednn_hash_values();
+  auto &matmul_weight_cache = get_onednn_matmul_weight_cache();
+  std::mutex &blocked_weight_mutex = get_onednn_blocked_weight_mutex();
 
   // Full key includes all parameters that affect blocking decision
   Key_matmul full_key(transA, transB, M, K, N, lda, ldb,
@@ -142,7 +163,7 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
 
   // Create blocked matmul primitive descriptor to determine optimal blocking
   dnnl::matmul::primitive_desc matmul_pd = create_blocked_matmul_pd(
-      dnnl_params, eng, matmul_attr);
+        dnnl_params, eng, matmul_attr);
 
   // Compute blocking hash and check if already cached (by another full_key configuration)
   size_t blocking_hash = hashBlockingDesc(matmul_pd.weights_desc());

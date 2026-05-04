@@ -16,6 +16,9 @@
 
 #include "gtest_utils.hpp"
 #include "memory/memory_utils.hpp"
+#include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -23,7 +26,10 @@
 
 namespace {
 
-struct block_q8_0 { uint16_t d; int8_t qs[32]; };
+struct block_q8_0 {
+  uint16_t d;
+  int8_t qs[32];
+};
 
 inline uint32_t gtest_fp32_to_bits(float f) {
   uint32_t bits;
@@ -56,10 +62,19 @@ uint16_t gtest_fp32_to_fp16(float f) {
   const uint32_t mantissa_bits = bits & UINT32_C(0x00000FFF);
   const uint32_t nonsign       = exp_bits + mantissa_bits;
   return static_cast<uint16_t>(
-      (sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign));
+           (sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign));
 }
 
 } // anonymous namespace
+
+void clear_matmul_test_caches() {
+  zendnnl::lowoha::matmul::clear_aocl_matmul_weight_caches();
+#if ZENDNNL_DEPENDS_ONEDNN
+  zendnnl::lowoha::matmul::clear_onednn_matmul_weight_cache();
+#endif
+  using namespace zendnnl::lowoha::matmul::native;
+  clear_all_weight_caches();
+}
 
 void repack_weights_q8_0(const int8_t *weight_buffer,
                          const float *scale_buffer,
@@ -117,10 +132,6 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   use_LOWOHA = user_specified_lowoha && ((cmd_lowoha == "true") ||
                                          (cmd_lowoha == "1"));
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  matmul_config.set_weight_cache(0);
-  matmul_config.set_zp_comp_cache(false);
-
-  // Get algo if env-var is set
   int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
                   : matmul_config.get_algo();
   algo = static_cast<matmul_algo_t>(algo_);
@@ -2005,13 +2016,38 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
           params.postop_.push_back(postop_item);
         }
+        bool is_weights_const = is_woq || is_wei_s8 || (rand() % 2 == 0);
+        if (matmul_config_t::instance().get_weight_cache() != 0 && is_weights_const &&
+            (algo == matmul_algo_t::aocl_dlp_blocked ||
+             algo == matmul_algo_t::onednn_blocked ||
+             algo == matmul_algo_t::libxsmm_blocked)) {
+          matmul_batch_params_t batch_params_warmup = batch_params;
+          matmul_params params_warmup = params;
+          const size_t c_warmup_bytes = output_tensor.get_buffer_sz_bytes();
+          std::vector<uint8_t> C_warmup(c_warmup_bytes);
+          if (beta != 0.0f) {
+            std::memcpy(C_warmup.data(), C_data, c_warmup_bytes);
+          }
+          status_t status = matmul_direct(
+                              'r',  // layout: row-major
+                              transA, transB,
+                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              alpha, A_data, lda, B_data, ldb, bias_data,
+                              beta, C_warmup.data(), ldc, is_weights_const,
+                              batch_params_warmup, params_warmup);
+          if (status != status_t::success) {
+            if (status != status_t::isa_unsupported) {
+              log_error("LOWOHA matmul_direct warmup execution failed.");
+            }
+            return status;
+          }
+        }
         status_t status = matmul_direct(
                             'r',  // layout: row-major
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,
-                            beta, C_data, ldc, (is_woq ||
-                                                is_wei_s8) ? true : rand() % 2 == 0 ? true : false,
+                            beta, C_data, ldc, is_weights_const,
                             batch_params, params);
         if (status != status_t::success) {
           if (status != status_t::isa_unsupported) {

@@ -1397,6 +1397,66 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po,
 }
 #endif
 
+namespace {
+template <typename T>
+lru_cache_t<Key_matmul, void *> &get_aocl_weight_cache() {
+  static lru_cache_t<Key_matmul, void *> c;
+  return c;
+}
+template <typename T>
+std::mutex &get_aocl_weight_cache_mutex() {
+  static std::mutex m;
+  return m;
+}
+lru_cache_t<Key_matmul, void *> &get_aocl_symquant_weight_cache() {
+  static lru_cache_t<Key_matmul, void *> c;
+  return c;
+}
+std::mutex &get_aocl_symquant_weight_cache_mutex() {
+  static std::mutex m;
+  return m;
+}
+lru_cache_t<Key_matmul, void *> &get_aocl_woq_weight_cache() {
+  static lru_cache_t<Key_matmul, void *> c;
+  return c;
+}
+std::mutex &get_aocl_woq_weight_cache_mutex() {
+  static std::mutex m;
+  return m;
+}
+
+template <typename T>
+void clear_aocl_typed_weight_cache_under_lock() {
+  std::lock_guard<std::mutex> lock(get_aocl_weight_cache_mutex<T>());
+  get_aocl_weight_cache<T>().clear();
+}
+void clear_aocl_woq_weight_cache_under_lock() {
+  std::lock_guard<std::mutex> lock(get_aocl_woq_weight_cache_mutex());
+  get_aocl_woq_weight_cache().clear();
+}
+#if ZENDNNL_DEPENDS_AOCLDLP
+void clear_aocl_symquant_weight_cache_under_lock() {
+  std::lock_guard<std::mutex> lock(get_aocl_symquant_weight_cache_mutex());
+  get_aocl_symquant_weight_cache().clear();
+}
+#endif
+}  // namespace
+
+void clear_aocl_matmul_weight_caches() {
+  // Lock only the mutex paired with each cache so clear does not interleave
+  // reorderAndCacheWeights* between find_key() and get()/add(), without
+  // blocking all dtypes for the entire teardown.
+  clear_aocl_typed_weight_cache_under_lock<float>();
+  clear_aocl_typed_weight_cache_under_lock<int16_t>();
+  clear_aocl_typed_weight_cache_under_lock<uint16_t>();
+  clear_aocl_typed_weight_cache_under_lock<int8_t>();
+#if ZENDNNL_DEPENDS_AOCLDLP
+  clear_aocl_symquant_weight_cache_under_lock();
+#endif
+  clear_aocl_woq_weight_cache_under_lock();
+  clear_zp_compensation_cache();
+}
+
 template <typename T>
 bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             void *&reorder_weights, const int k, const int n, const int ldb,
@@ -1404,8 +1464,9 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             get_reorder_buff_size_func_ptr get_reorder_buf_size,
                             reorder_func_ptr<T> reorder_func, int weight_cache_type) {
   // Weight caching
-  static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
-  static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
+  lru_cache_t<Key_matmul, void *> &matmul_weight_cache =
+    get_aocl_weight_cache<T>();
+  std::mutex &weight_cache_mutex = get_aocl_weight_cache_mutex<T>();
 
   // Weights are already reordered and algo is aocl_dlp_blocked
   // Add the key into map and value as nullptr
@@ -1466,15 +1527,19 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   return true;
 }
 
-template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
+template bool reorderAndCacheWeights<int16_t>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-    reorder_func_ptr<short>, int);
+    reorder_func_ptr<int16_t>, int);
 template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<float>, int);
 template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<int8_t>, int);
+template bool reorderAndCacheWeights<uint16_t>(Key_matmul, const void *,
+    void *&,
+    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
+    reorder_func_ptr<uint16_t>, int);
 
 #if ZENDNNL_DEPENDS_AOCLDLP
 template <typename T>
@@ -1485,8 +1550,9 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
                                     reorder_sym_quant_func_ptr<T> reorder_func,
                                     DLP_SYMM_STAT_QUANT *symq_meta, int weight_cache_type) {
 
-  static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
-  static std::mutex weight_cache_mutex;
+  lru_cache_t<Key_matmul, void *> &matmul_weight_cache =
+    get_aocl_symquant_weight_cache();
+  std::mutex &weight_cache_mutex = get_aocl_symquant_weight_cache_mutex();
 
   if (mem_format_b == 'r') {
     matmul_weight_cache.add(key, nullptr);
@@ -1547,8 +1613,9 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                                    int weight_cache_type) {
   // Weight caching inplace support cannot be added since buffer size is
   // always expanded.
-  static lru_cache_t<Key_matmul, void *> matmul_weight_cache_woq;
-  static std::mutex woq_cache_mutex;  // Mutex to prevent TOCTOU race
+  lru_cache_t<Key_matmul, void *> &matmul_weight_cache_woq =
+    get_aocl_woq_weight_cache();
+  std::mutex &woq_cache_mutex = get_aocl_woq_weight_cache_mutex();
 
   bool is_transposed = (trans == 't');
 

@@ -781,4 +781,13 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
                           uint64_t total_elements,
                           float tol, bool &is_comparison_successful);
 
+/** @fn clear_matmul_test_caches
+ *  @brief Clear all matmul weight caches used by gtests.
+ *
+ *  Clears AOCL, oneDNN (when enabled), and native prepacked weight caches.
+ *  Intended for fixture TearDown() to avoid stale pointer-keyed entries from
+ *  freed tensors affecting subsequent tests.
+ */
+void clear_matmul_test_caches();
+
 #endif
