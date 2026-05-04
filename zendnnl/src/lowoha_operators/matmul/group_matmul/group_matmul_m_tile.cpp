@@ -373,7 +373,7 @@ void flat_m_tile(
   //     CCD 0..15 each host 1 expert using 1 of 8 cores.
   //   126t, 16 experts × 1 thr: each expert → distinct CCD (local 0).
   //     CCDs 0..15 host 1 expert each; CCD 15 has only 6 cores but
-  //     only needs 1.  No performance cliff vs 128t.
+  //     only needs 1.
   //   128t, 8 experts × 16 thr: each expert spans 2 adjacent CCDs.
   //     CCD 0-1 host expert 0, CCD 2-3 host expert 1, etc.
   //   126t, 8 experts × ~16 thr: last expert truncated to fit 126.

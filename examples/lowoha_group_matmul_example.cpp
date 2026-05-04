@@ -555,5 +555,125 @@ int group_matmul_fused_moe_example() {
   return OK;
 }
 
+// ---------------------------------------------------------------------------
+// Example 6: FP32 fused MoE in internal-alloc + src-reuse mode
+// ---------------------------------------------------------------------------
+//
+// Same Op1 → silu → Op2 pipeline as Example 5, but the library owns the
+// Op1 (gate+up + activation) scratch and writes the Op2 output back
+// into the caller's src buffers in place.  The caller signals this
+// mode by passing `dst[]` as all-nullptr AND leaving
+// `fused.dst_down` empty.  Requires `lda[i] >= N_down[i]` so the Op2
+// row stride fits within the original src row stride; with
+// hidden = K = N_down here that is naturally satisfied.
+
+int group_matmul_fused_moe_internal_alloc_example() {
+  testlog_info("** group_matmul fused MoE example (internal-alloc + "
+               "src-reuse): 4 experts, silu, dim=32, hidden=64");
+
+  try {
+    const int NUM_EXPERTS  = 4;
+    const int M_PER_EXPERT = 8;
+    const int HIDDEN       = 64;          // K = N_down = hidden_size
+    const int DIM          = 32;          // intermediate dim
+    const int N_GATE_UP    = 2 * DIM;     // fused gate+up output cols
+    const int K            = HIDDEN;
+
+    std::vector<int> Ms(NUM_EXPERTS, M_PER_EXPERT);
+    std::vector<int> Ns(NUM_EXPERTS, N_GATE_UP);
+    std::vector<int> Ks(NUM_EXPERTS, K);
+
+    // src is BOTH the input buffer for Op1 AND the destination buffer
+    // that Op2 will write into in place.  Sized [M, K].
+    std::vector<std::vector<float>> src(NUM_EXPERTS), wei_gu(NUM_EXPERTS),
+        wei_down(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      src[i].resize(M_PER_EXPERT * K);
+      wei_gu[i].resize(K * N_GATE_UP);
+      wei_down[i].resize(DIM * HIDDEN);
+      fill_f32(src[i],     0.1f);
+      fill_f32(wei_gu[i],  0.01f);
+      fill_f32(wei_down[i], 0.02f);
+    }
+
+    // Op1 / per-call vectors.
+    std::vector<char> layouts(NUM_EXPERTS, 'r');
+    std::vector<bool> transAs(NUM_EXPERTS, false), transBs(NUM_EXPERTS, false);
+    std::vector<float> alphas(NUM_EXPERTS, 1.f), betas(NUM_EXPERTS, 0.f);
+    std::vector<bool>  wconst(NUM_EXPERTS, false);
+    std::vector<int>   ldas = Ks, ldbs = Ns;
+
+    std::vector<const void *> sp(NUM_EXPERTS), wp(NUM_EXPERTS);
+    std::vector<const void *> bp(NUM_EXPERTS, nullptr);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      sp[i] = src[i].data();
+      wp[i] = wei_gu[i].data();
+    }
+
+    // Internal-alloc signal: dst[] all nullptr, ldc[] zeros
+    // (ignored), fused.dst_down / fused.ldc_down empty.
+    std::vector<void *> dp(NUM_EXPERTS, nullptr);
+    std::vector<int>    ldcs(NUM_EXPERTS, 0);
+
+    std::vector<matmul_params> params(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i) {
+      params[i].dtypes.src = data_type_t::f32;
+      params[i].dtypes.wei = data_type_t::f32;
+      params[i].dtypes.dst = data_type_t::f32;
+    }
+
+    grp_matmul_gated_act_params act;
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    grp_matmul_fused_moe_params fused;
+    fused.N_down.resize(NUM_EXPERTS, HIDDEN);
+    fused.ldb_down.resize(NUM_EXPERTS, HIDDEN);
+    fused.bias_down.resize(NUM_EXPERTS, nullptr);
+    fused.down_weight.resize(NUM_EXPERTS);
+    for (int i = 0; i < NUM_EXPERTS; ++i)
+      fused.down_weight[i] = wei_down[i].data();
+    // dst_down and ldc_down INTENTIONALLY left empty — this is the
+    // signal that engages internal-alloc + src-reuse mode.
+
+    status_t st = group_matmul_direct(
+        layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+        sp, ldas, wp, ldbs, bp, betas, dp, ldcs, wconst, params,
+        nullptr, &act, &fused);
+
+    if (st != status_t::success) {
+      testlog_error("Internal-alloc fused MoE group_matmul failed");
+      return NOT_OK;
+    }
+
+    // Op2 output now lives in src[i] with row stride lda[i] = K.
+    // Each row holds N_down = HIDDEN columns of Op2 output.
+    bool ok = true;
+    for (int i = 0; i < NUM_EXPERTS && ok; ++i) {
+      for (int m = 0; m < M_PER_EXPERT && ok; ++m) {
+        for (int d = 0; d < HIDDEN && ok; ++d) {
+          const float val = src[i][m * K + d];
+          if (std::isnan(val) || std::isinf(val)) {
+            testlog_error("Internal-alloc fused MoE verify failed: "
+                          "NaN/Inf at expert=", i, " m=", m, " d=", d);
+            ok = false;
+          }
+        }
+      }
+    }
+
+    if (ok) {
+      testlog_info("Fused MoE internal-alloc (Op2 → src in place) "
+                   "verified OK. ", NUM_EXPERTS,
+                   " experts, dim=", DIM, " hidden=", HIDDEN);
+    } else {
+      return NOT_OK;
+    }
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
 } // namespace examples
 } // namespace zendnnl

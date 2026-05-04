@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
+#include "operators/matmul/matmul_config.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -24,6 +25,13 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
+
+// LRU capacity (in entries) shared across every native weight cache.
+// Sourced from matmul_config_t (env: ZENDNNL_LRU_CACHE_CAPACITY).
+// Default UINT32_MAX → eviction disabled.
+uint32_t get_weight_cache_capacity() {
+  return ops::matmul_config_t::instance().get_lru_cache_capacity();
+}
 
 PrepackedWeightCache &PrepackedWeightCache::instance() {
   static PrepackedWeightCache inst;
@@ -38,9 +46,8 @@ const PrepackedWeight *PrepackedWeightCache::get_or_prepack(
   // Consider per-key locking or double-checked locking to allow
   // concurrent packing of independent weight matrices.
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(key);
-  if (it != cache_.end())
-    return it->second.get();
+  if (auto *cached = cache_.find_and_touch(key))
+    return cached;
 
   const int K = key.K, N = key.N, ldb = key.ldb;
   const bool transB = key.transB;
@@ -92,9 +99,7 @@ const PrepackedWeight *PrepackedWeightCache::get_or_prepack(
   pw->N = N;
   pw->n_panels = np;
 
-  const PrepackedWeight *raw = pw.get();
-  cache_[key] = std::move(pw);
-  return raw;
+  return cache_.insert(key, std::move(pw));
 }
 
 // ============================================================================
@@ -110,9 +115,8 @@ const BF16PrepackedWeight *BF16PrepackedWeightCache::get_or_prepack(
   const PrepackedWeightKey &key, const uint16_t *weight) {
 
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(key);
-  if (it != cache_.end())
-    return it->second.get();
+  if (auto *cached = cache_.find_and_touch(key))
+    return cached;
 
   const int K = key.K, N = key.N, ldb = key.ldb;
   const bool transB = key.transB;
@@ -171,9 +175,7 @@ const BF16PrepackedWeight *BF16PrepackedWeightCache::get_or_prepack(
   pw->N = N;
   pw->n_panels = np;
 
-  const BF16PrepackedWeight *raw = pw.get();
-  cache_[key] = std::move(pw);
-  return raw;
+  return cache_.insert(key, std::move(pw));
 }
 
 // ============================================================================
@@ -191,9 +193,8 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
   // Fast path: check cache under lock.
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(key);
-    if (it != cache_.end())
-      return it->second.get();
+    if (auto *cached = cache_.find_and_touch(key))
+      return cached;
   }
 
   // Cache miss: pack outside the lock to avoid serializing threads.
@@ -221,13 +222,10 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
 
   // Re-acquire lock and insert (another thread may have raced).
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(key);
-  if (it != cache_.end())
-    return it->second.get();  // race loser — discard our pack, use winner's
+  if (auto *cached = cache_.find_and_touch(key))
+    return cached;  // race loser — discard our pack, use winner's
 
-  const BF16BKCWeight *raw = pw.get();
-  cache_[key] = std::move(pw);
-  return raw;
+  return cache_.insert(key, std::move(pw));
 }
 
 // ============================================================================
@@ -249,9 +247,7 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
   // Fast path: check cache under lock.
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
-      auto *entry = it->second.get();
+    if (auto *entry = cache_.find_and_touch(key)) {
       if (entry->cached_src_scale == src_scale
           && entry->cached_src_zp == src_zp)
         return entry;
@@ -317,13 +313,10 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
 
   // Re-acquire lock and insert.
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(key);
-  if (it != cache_.end())
-    return it->second.get();
+  if (auto *cached = cache_.find_and_touch(key))
+    return cached;
 
-  const INT8KContiguousWeight *raw = pw.get();
-  cache_[key] = std::move(pw);
-  return raw;
+  return cache_.insert(key, std::move(pw));
 }
 
 // ============================================================================
@@ -340,9 +333,8 @@ const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(key);
-    if (it != cache_.end())
-      return it->second.get();
+    if (auto *cached = cache_.find_and_touch(key))
+      return cached;
   }
 
   const int K = key.K, N = key.N, ldb = key.ldb;
@@ -399,13 +391,10 @@ const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
   pw->n_panels = np;
 
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = cache_.find(key);
-  if (it != cache_.end())
-    return it->second.get();
+  if (auto *cached = cache_.find_and_touch(key))
+    return cached;
 
-  const INT8PrepackedWeight *raw = pw.get();
-  cache_[key] = std::move(pw);
-  return raw;
+  return cache_.insert(key, std::move(pw));
 }
 
 std::atomic<uint64_t> &weight_cache_generation() {

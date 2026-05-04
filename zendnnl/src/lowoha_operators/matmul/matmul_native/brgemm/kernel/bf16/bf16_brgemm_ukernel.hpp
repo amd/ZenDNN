@@ -47,6 +47,20 @@ void bf16_brgemm_tail_kernel(
     fused_postop_t fused_op,
     uint16_t *__restrict__ C_bf16, int ldc_bf16);
 
+// Templated MR + runtime nr_partial ∈ [1..15] masked NV=1 kernel.
+// Selector returns nullptr for unsupported MR (currently anything
+// outside {1..6, 8}).
+using bf16_brgemm_n_masked_fn_t = void (*)(
+    const uint16_t *__restrict__ A, int lda,
+    const uint16_t *__restrict__ B_vnni, int b_stride,
+    float *__restrict__ C, int ldc,
+    int K, int BK, int nr_partial, float beta,
+    const float *__restrict__ bias,
+    fused_postop_t fused_op,
+    uint16_t *__restrict__ C_bf16, int ldc_bf16);
+
+bf16_brgemm_n_masked_fn_t select_bf16_brgemm_n_masked_kernel(int MR);
+
 } // namespace native
 } // namespace matmul
 } // namespace lowoha

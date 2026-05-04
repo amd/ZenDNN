@@ -77,8 +77,25 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
         if (!act_str.empty()) cfg.gated_act = std::stoi(act_str);
         std::string ndown_str = next();
         if (!ndown_str.empty()) cfg.N_down = std::stoi(ndown_str);
+        // 12th column (optional): use_internal_alloc.  Accept "1" / "true"
+        // / "internal_alloc" as ON; anything else (including empty) is OFF.
+        std::string ialloc_str = next();
+        if (!ialloc_str.empty()) {
+            cfg.use_internal_alloc =
+                (ialloc_str == "1" || ialloc_str == "true"
+                 || ialloc_str == "internal_alloc") ? 1 : 0;
+        }
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) {
+        return false;
+    }
+    // Internal-alloc requires fused down_proj: the library only owns
+    // Op1's scratch and reuses src for Op2 output, which is meaningful
+    // only when there IS an Op2.
+    if (cfg.use_internal_alloc && cfg.N_down <= 0) {
+        std::cerr << "parse_config: use_internal_alloc=1 requires N_down>0 "
+                     "(library-managed scratch is only meaningful for "
+                     "fused Op1+Act+Op2). Skipping.\n";
         return false;
     }
     // Reject zero or negative M values.  group_matmul_direct treats M<=0 as

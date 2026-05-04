@@ -18,10 +18,34 @@
  * @file group_matmul_direct.hpp
  * @brief Group matmul: MoE post-op, parallel dispatch, and direct-path helpers.
  *
- * The public entry @c group_matmul_direct is declared in lowoha_matmul.hpp;
- * include that header for the stable API. This header holds shared declarations
- * for group_matmul_parallel.cpp and group_matmul_moe_postop.cpp (and types used by
- * group_matmul_direct.cpp, which implements @c group_matmul_direct).
+ * Stability contract:
+ *
+ *   - PUBLIC (stable) user-facing API surface is declared in
+ *     `lowoha_matmul.hpp`: the @c group_matmul_direct entry point plus
+ *     the three parameter structs it needs (@c group_matmul_moe_postop_params,
+ *     @c grp_matmul_gated_act_params, @c grp_matmul_fused_moe_params) and
+ *     the associated enum `grp_matmul_gated_act_t`.  Those are guaranteed
+ *     API/ABI across patch versions.
+ *
+ *   - The symbols declared in THIS header (`group_matmul_moe_act_execute`,
+ *     `apply_gated_act_inplace`, `apply_swiglu_oai_tile_rows`,
+ *     `apply_swiglu_oai_tile_rows_oop`, `group_matmul_fused_moe_execute`
+ *     [both overloads], `validate_group_matmul_moe_postop`,
+ *     `group_matmul_moe_postop_execute`, and the internal dispatch /
+ *     planner plumbing) are LIBRARY-INTERNAL: they are split across
+ *     multiple translation units (group_matmul_direct.cpp,
+ *     group_matmul_parallel.cpp, group_matmul_moe_postop.cpp,
+ *     group_matmul_fused_moe.cpp, group_matmul_moe_act.cpp) and the
+ *     declarations here exist so those TUs can link against a common
+ *     signature.  They are NOT part of the stable external API and are
+ *     not covered by the compatibility guarantee.
+ *
+ * Implementation note: the entire `include/` tree (including this file)
+ * is installed into the package's public include directory because the
+ * build system installs by prefix.  External callers CAN observe these
+ * symbols, but SHOULD treat everything except the
+ * `group_matmul_direct`-related interface above as implementation
+ * detail that may change without notice.
  */
 
 #ifndef LOWOHA_GROUP_MATMUL_DIRECT_HPP
@@ -121,9 +145,9 @@ status_t group_matmul_moe_postop_execute(
  */
 enum class grp_matmul_gated_act_t : int {
   none = 0,           ///< No gated activation (down_proj or unfused).
-  silu_and_mul = 1,   ///< SiLU(gate) * up — Mixtral, Llama, Qwen.
-  gelu_and_mul = 2,   ///< GELU(gate) * up — some GPT variants.
-  swiglu_oai_mul = 3  ///< SwigluOAI — interleaved gate/up layout (GPT-OSS).
+  silu_and_mul = 1,   ///< SiLU(gate) * up — split-halves [gate | up] layout.
+  gelu_and_mul = 2,   ///< GELU(gate) * up — split-halves [gate | up] layout.
+  swiglu_oai_mul = 3  ///< SwigluOAI — interleaved [g0,u0,g1,u1,...] layout.
 };
 
 /**
@@ -212,6 +236,34 @@ void apply_swiglu_oai_tile_rows(
     void *dst_buf, int M, int col_start, int pairs,
     int ldc, data_type_t dtype);
 
+/**
+ * @brief Out-of-place per-thread tile activation for swiglu_oai_mul.
+ *
+ * Reads pairs interleaved (g, u) elements per row from src_buf
+ * starting at column src_col_start (must be even), applies swiglu_oai
+ * (clamp + α-swish + (1 + u) factor), and writes `pairs` activated
+ * values to dst_buf starting at column dst_col_start.  src_buf and
+ * dst_buf can be different buffers with different strides — used by
+ * the I-only fused MoE path where the matmul writes a wide tile to
+ * per-thread scratch and the activation packs the half-width
+ * activated result directly into a tight output arena, skipping the
+ * round-trip through a global wide intermediate buffer.
+ *
+ * @param src_buf       Source buffer (per-thread scratch from wide matmul).
+ * @param src_ldc       Leading dimension of src_buf (elements, not bytes).
+ * @param src_col_start First column to read from src (must be even).
+ * @param dst_buf       Destination buffer (tight output arena).
+ * @param dst_ldc       Leading dimension of dst_buf (elements, not bytes).
+ * @param dst_col_start First column to write in dst.
+ * @param M             Row count.
+ * @param pairs         Number of (g, u) pairs to process (= dst cols written).
+ * @param dtype         Buffer element type (f32 or bf16).
+ */
+void apply_swiglu_oai_tile_rows_oop(
+    const void *src_buf, int src_ldc, int src_col_start,
+    void *dst_buf, int dst_ldc, int dst_col_start,
+    int M, int pairs, data_type_t dtype);
+
 // --- Fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one pass ---
 
 /**
@@ -227,8 +279,8 @@ void apply_swiglu_oai_tile_rows(
  *   the gated activation into Pass 1's epilogue (all activations on
  *   ALGO 1/2/4/5, and swiglu_oai_mul on ALGO 3); otherwise a separate
  *   activation sub-pass is applied to Pass 1's output before Pass 2.
- *   A future version may add per-expert deep fusion (Op1→Act→Op2
- *   chained in L1/L2/L3) for further cache-locality wins.
+ *   A future version may add per-expert deep fusion of
+ *   Op1 → activation → Op2 chained at L1/L2/L3 boundaries.
  *
  * The weighted-reduce (moe_postop) always runs in a separate pass after
  * Op2 since it requires all experts' outputs to be complete.
@@ -252,21 +304,138 @@ struct grp_matmul_fused_moe_params {
   std::vector<int> ldb_down;              ///< Leading dimension of down_weight per expert.
   std::vector<const void *> bias_down;    ///< Per-expert bias for down_proj (nullptr OK).
   data_type_t bias_dt_down = data_type_t::none;  ///< Bias dtype for Op2 (none = no bias).
-  /// Per-expert down_proj output [M, N_down[i]].
-  /// Written with Op1 dst dtype (params[i].dtypes.dst).
-  std::vector<void *> dst_down;
-  std::vector<int> ldc_down;              ///< Leading dimension of dst_down per expert.
+
+  // ─── Op2 output mode selection (dst_down behaviour) ──────────────────
+  //
+  // The fused MoE op supports TWO modes for the down_proj output:
+  //
+  //   (1) Legacy / caller-allocated mode (BACKWARD COMPATIBLE):
+  //       Caller allocates per-expert dst_down[i] buffers and supplies
+  //       ldc_down[i] strides.  The library writes Op2 output there and
+  //       returns.  Caller (or moe_postop) reads from dst_down[i].
+  //       Engaged when dst_down is non-empty.
+  //
+  //   (2) Internal-alloc + src-reuse mode:
+  //       Caller leaves dst_down empty.  The library:
+  //         (a) obtains Op1 output scratch sized [M[i], N[i]] (wide)
+  //             or [M[i], N[i]/2] (tight / swiglu_oai-compact) per
+  //             expert in dst dtype;
+  //         (b) runs Op1 + activation into the scratch;
+  //         (c) runs Op2 reading from the scratch and writing BACK
+  //             INTO the caller's src[] buffer (in-place reuse);
+  //         (d) releases the scratch back to the library's internal
+  //             per-thread arena for reuse.  The arena keeps its
+  //             high-water capacity for subsequent calls.
+  //       Caller then reads Op2 output from the same src[] buffer.
+  //       Caller's `dst` parameter is ignored in this mode (typically
+  //       passed as a vector of nullptrs or an empty vector).
+  //
+  //       Memory-lifetime note for mode (2):
+  //         - The library does NOT call `free()` on the scratch at
+  //           end-of-call.  Instead, Op1 scratch is allocated from a
+  //           `static thread_local` arena (see `FusedMoEArena` in
+  //           group_matmul_fused_moe.cpp) that grows on demand to
+  //           the largest sizeof(M * N * dst_elem) seen on THIS
+  //           thread across all calls, and is retained for the
+  //           lifetime of the thread (freed in the thread-local
+  //           destructor when the thread exits).
+  //         - Similarly, the Op1 setup-side scratch (dst-ptr arrays,
+  //           per-expert ldc vectors, etc.) lives in a thread-local
+  //           `FusedMoEScratch` whose std::vectors keep their
+  //           allocated capacity across calls.
+  //         - Net per-call allocator traffic in steady state is
+  //           O(num_ops) field writes — no malloc/free on the hot
+  //           path.
+  //         - Per-thread resident-set footprint reflects the largest
+  //           fused-MoE shape that thread has ever executed; across
+  //           a pool of N worker threads the total resident footprint
+  //           is bounded above by
+  //             N × max_seen(M_total × N_max × sizeof(dst_elem)).
+  //           Frameworks that briefly run an outsized MoE shape on
+  //           many worker threads and do not want the footprint
+  //           persisted should either (a) use mode (1) (caller-
+  //           allocated dst_down) where the framework owns buffer
+  //           lifetime directly, or (b) execute such shapes on a
+  //           dedicated thread that can be torn down afterwards.
+  //
+  //       Caller-side preconditions for mode (2):
+  //         - src[i] must point to WRITABLE memory.  The const_cast
+  //           inside the library is well-defined because the caller
+  //           opted in by clearing dst_down and dst[].
+  //         - lda[i] >= N_down[i] so the Op2 row stride (which equals
+  //           lda[i] in mode 2) fits within the original src row
+  //           stride.  Naturally holds for MoE layers with
+  //           hidden_dim = K_input = N_down.
+  //         - **MATCHED PRECISION REQUIRED**: params[i].dtypes.src
+  //           MUST equal params[i].dtypes.dst.  Op2 writes dst-typed
+  //           elements at row stride lda[i] (in dst-element units)
+  //           into the caller's src[i] buffer.  When dst element
+  //           size > src element size (e.g. bf16 src + f32 dst) the
+  //           per-row write footprint (lda[i] * sizeof(dst_elem))
+  //           exceeds the per-row allocation footprint
+  //           (lda[i] * sizeof(src_elem)) and corrupts memory.
+  //           This is enforced as an always-on guard inside
+  //           group_matmul_fused_moe_execute() — mixed-precision
+  //           callers must use mode (1) (caller-allocated dst_down)
+  //           where the destination buffer is sized for dst dtype
+  //           independently of src.
+  //         - src[i] buffer size must be at least
+  //               M[i] * lda[i] * sizeof(dtypes.dst) bytes
+  //           (== M[i] * lda[i] * sizeof(dtypes.src) under matched
+  //           precision).  This is the Op2 row-pitched write footprint.
+  //
+  // Mode (2) is targeted at frameworks that do their own token-grouping
+  // scatter on src (so src is already a writable scratch), and their
+  // own weighted-reduce gather on the Op2 output.  ZenDNN allocating
+  // Op1 scratch internally (and freeing it at end-of-call) avoids
+  // forcing the framework to size and own the W13 intermediate.
+  std::vector<void *> dst_down;           ///< Empty → mode (2); non-empty → mode (1).
+  std::vector<int> ldc_down;              ///< Stride for dst_down (mode (1) only).
 };
 
 /**
- * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj).
+ * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj)
+ *        → optional MoE post-op (weighted reduce).
  *
  * V1 runs the flow as two passes of group_matmul_run_parallel_dispatch;
  * both passes honor ZENDNNL_GRP_MATMUL_ALGO.  See grp_matmul_fused_moe_params
  * (above) for the full design note.
  *
+ * When `moe_postop` is non-null, the weighted-reduce post-op is invoked
+ * automatically after Op2 with `D = fused.N_down[0]` (the planner has
+ * already validated that N_down is uniform across experts in this
+ * combination).  Passing `moe_postop = nullptr` skips the post-op so the
+ * caller can read the per-expert Op2 outputs from `fused.dst_down[]`
+ * and run their own gather elsewhere.
+ *
  * @param gemm_mode_out If non-null, receives a string literal for logging.
  */
+// Primary signature: takes optional moe_postop for the integrated
+// weighted-reduce post-op.  No default on moe_postop so the older
+// 5-trailing-arg overload below remains unambiguous.
+status_t group_matmul_fused_moe_execute(
+    const grp_matmul_fused_moe_params &fused,
+    grp_matmul_gated_act_t act, data_type_t act_dtype,
+    const std::vector<char> &layout,
+    const std::vector<bool> &transA, const std::vector<bool> &transB,
+    const std::vector<int> &M, const std::vector<int> &N,
+    const std::vector<int> &K, const std::vector<float> &alpha,
+    const std::vector<const void *> &src, const std::vector<int> &lda,
+    const std::vector<const void *> &weight, const std::vector<int> &ldb,
+    const std::vector<const void *> &bias, const std::vector<float> &beta,
+    const std::vector<void *> &dst, const std::vector<int> &ldc,
+    const std::vector<bool> &is_weights_const,
+    std::vector<matmul_params> &params,
+    int num_threads,
+    const char **gemm_mode_out,
+    const group_matmul_moe_postop_params *moe_postop);
+
+// Legacy ABI-preserving overload: same as the original (pre-postop)
+// signature.  Kept as a separate exported symbol so binaries linked
+// against the older library version continue to find their mangled
+// name; internally forwards to the primary overload with
+// moe_postop = nullptr.  Source-level callers that previously relied
+// on `gemm_mode_out`'s default get the same default here.
 status_t group_matmul_fused_moe_execute(
     const grp_matmul_fused_moe_params &fused,
     grp_matmul_gated_act_t act, data_type_t act_dtype,

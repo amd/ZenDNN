@@ -24,6 +24,9 @@ set(lowoha_group_matmul_sources
   group_matmul/group_matmul_moe_postop.cpp
   group_matmul/group_matmul_moe_act.cpp
   group_matmul/group_matmul_fused_moe.cpp
+  group_matmul/custom_kernel/pack.cpp
+  group_matmul/custom_kernel/ukernel.cpp
+  group_matmul/custom_kernel/dispatch.cpp
   PARENT_SCOPE)
 
 set(lowoha_group_matmul_public_headers

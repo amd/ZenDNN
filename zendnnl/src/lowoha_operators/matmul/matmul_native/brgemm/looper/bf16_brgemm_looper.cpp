@@ -210,10 +210,28 @@ static void bf16_brgemm_thread_loop(
 
     const bool is_decode = (M <= 4);
     const int actual_MR = is_decode ? M : MR;
-    // Pre-resolve tail kernel for M-remainder panels (avoids dispatch per tile)
+    // Pre-resolve the tail kernel for the M-remainder panel so the
+    // dispatch loop below does not re-enter select_bf16_brgemm_kernel()
+    // per tile.  Templates exist for MR ∈ {1..6, 8}; the selector
+    // returns nullptr for any other m_tail (e.g. 7) and we fall through
+    // to the generic kernel in that case.
     const int m_tail = M % actual_MR;
-    bf16_brgemm_fn_t tail_kernel = (m_tail > 0 && m_tail <= 4)
-        ? select_bf16_brgemm_kernel(m_tail, NR) : nullptr;
+    bf16_brgemm_fn_t tail_kernel =
+        (m_tail > 0) ? select_bf16_brgemm_kernel(m_tail, NR) : nullptr;
+
+    // N-tail templated kernels (NR=16 / NR=32).  When N is not a
+    // multiple of NR=64 the partial strip would otherwise fall onto
+    // the generic kernel — these pre-resolved pointers feed the
+    // templated NV=1 / NV=2 paths instead.  The B prepack always lays
+    // out NR_PACK=64 cols (zero-padding the tail), so the NV=1/2
+    // ukernels can read directly from the same packed B with the
+    // same stride.
+    bf16_brgemm_fn_t hot_kernel_n16  = select_bf16_brgemm_kernel(actual_MR, 16);
+    bf16_brgemm_fn_t hot_kernel_n32  = select_bf16_brgemm_kernel(actual_MR, 32);
+    bf16_brgemm_fn_t tail_kernel_n16 =
+        (m_tail > 0) ? select_bf16_brgemm_kernel(m_tail, 16) : nullptr;
+    bf16_brgemm_fn_t tail_kernel_n32 =
+        (m_tail > 0) ? select_bf16_brgemm_kernel(m_tail, 32) : nullptr;
 
     const int ic_tiles = (M + MB - 1) / MB;
     const int jc_tiles = (N + NB - 1) / NB;
@@ -274,16 +292,45 @@ static void bf16_brgemm_thread_loop(
                     tile_ldc_bf16 = ldc;
                 }
 
+                // Templated dispatch for (mr_act, nr_act).  The
+                // hot_/tail_kernel pointers are pre-resolved above for
+                // the four combinations the planner produces; for
+                // partial-N strips ≤ 15 cols a templated masked NV=1
+                // kernel takes over (otherwise the generic kernel
+                // below absorbs the case but at ~3× lower throughput
+                // due to register spill).
+                bf16_brgemm_fn_t k = nullptr;
                 if (hot_kernel && full_nr && mr_act == actual_MR) {
-                    hot_kernel(At, lda, pb, pb_stride,
-                               Ct, ldc_fp32, K, BK, beta,
-                               tile_bias, tile_fop,
-                               tile_bf16, tile_ldc_bf16);
+                    k = hot_kernel;
                 } else if (full_nr && tail_kernel && mr_act == m_tail) {
-                    tail_kernel(At, lda, pb, pb_stride,
-                                Ct, ldc_fp32, K, BK, beta,
-                                tile_bias, tile_fop,
-                                tile_bf16, tile_ldc_bf16);
+                    k = tail_kernel;
+                } else if (nr_act == 32) {
+                    if (mr_act == actual_MR) k = hot_kernel_n32;
+                    else if (mr_act == m_tail) k = tail_kernel_n32;
+                } else if (nr_act == 16) {
+                    if (mr_act == actual_MR) k = hot_kernel_n16;
+                    else if (mr_act == m_tail) k = tail_kernel_n16;
+                }
+
+                if (k) {
+                    k(At, lda, pb, pb_stride,
+                      Ct, ldc_fp32, K, BK, beta,
+                      tile_bias, tile_fop,
+                      tile_bf16, tile_ldc_bf16);
+                } else if (nr_act >= 1 && nr_act < 16) {
+                    if (auto km = select_bf16_brgemm_n_masked_kernel(mr_act);
+                        km) {
+                        km(At, lda, pb, pb_stride,
+                           Ct, ldc_fp32, K, BK, nr_act, beta,
+                           tile_bias, tile_fop,
+                           tile_bf16, tile_ldc_bf16);
+                    } else {
+                        bf16_brgemm_tail_kernel(At, lda, pb, pb_stride,
+                                                Ct, ldc_fp32, K, BK,
+                                                mr_act, nr_act, beta,
+                                                tile_bias, tile_fop,
+                                                tile_bf16, tile_ldc_bf16);
+                    }
                 } else {
                     bf16_brgemm_tail_kernel(At, lda, pb, pb_stride,
                                             Ct, ldc_fp32, K, BK,
@@ -435,16 +482,37 @@ static void bf16_brgemm_thread_loop(
                     ? C_bf16_dst + ir * ldc + col : nullptr;
                 int dbf_ldc = can_direct_bf16 ? ldc : 0;
 
+                // Templated dispatch for (mr_act, nr_act):
+                //   1) NR=64 hot kernel for the common full-MR case;
+                //   2) NR=64 templated for any other mr_act ∈ {1..6, 8};
+                //   3) NR=32 / NR=16 templated for partial-N strips
+                //      (e.g. N=720 has a 16-wide tail);
+                //   4) Masked NV=1 templated for nr_act ∈ [1..15]
+                //      (e.g. N=523 → 11-col tail);
+                //   5) generic bf16_brgemm_tail_kernel for the few
+                //      shapes none of the templates cover (mr_act=7,
+                //      odd nr_act ∈ {17..31, 33..47, 49..63}).
+                bf16_brgemm_fn_t k = nullptr;
                 if (full_nr && mr_act == actual_MR && hot_kernel) {
-                    hot_kernel(At, lda, pb, vnni_stride,
-                               Ct, ldc_fp32, K, BK, beta,
-                               tb, fused_op, dbf, dbf_ldc);
-                } else if (full_nr && mr_act >= 1 && mr_act <= 4) {
-                    auto tail_uk = select_bf16_brgemm_kernel(mr_act, NR);
-                    if (tail_uk) {
-                        tail_uk(At, lda, pb, vnni_stride,
-                                Ct, ldc_fp32, K, BK, beta,
-                                tb, fused_op, dbf, dbf_ldc);
+                    k = hot_kernel;
+                } else if (full_nr) {
+                    k = select_bf16_brgemm_kernel(mr_act, NR);
+                } else if (nr_act == 32) {
+                    k = select_bf16_brgemm_kernel(mr_act, 32);
+                } else if (nr_act == 16) {
+                    k = select_bf16_brgemm_kernel(mr_act, 16);
+                }
+
+                if (k) {
+                    k(At, lda, pb, vnni_stride,
+                      Ct, ldc_fp32, K, BK, beta,
+                      tb, fused_op, dbf, dbf_ldc);
+                } else if (nr_act >= 1 && nr_act < 16) {
+                    if (auto km = select_bf16_brgemm_n_masked_kernel(mr_act);
+                        km) {
+                        km(At, lda, pb, vnni_stride,
+                           Ct, ldc_fp32, K, BK, nr_act, beta,
+                           tb, fused_op, dbf, dbf_ldc);
                     } else {
                         bf16_brgemm_tail_kernel(At, lda, pb, vnni_stride,
                                                 Ct, ldc_fp32, K, BK,

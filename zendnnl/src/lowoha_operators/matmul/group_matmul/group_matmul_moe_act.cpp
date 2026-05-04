@@ -186,10 +186,10 @@ static inline __m512 fast_exp_neg_avx512(__m512 x) {
 }
 
 // sigmoid = 1/(1+exp(-x)) using rcp14 + 1 Newton-Raphson step.
-// rcp14 alone gives ~2^-14 relative error (~6e-5).
-// One NR iteration refines to ~2^-28 (~3.7e-9) — well below the
-// exp polynomial error (5e-5), so overall sigmoid accuracy is unchanged.
-// Cost: rcp14(4c) + fnmadd(0.5c) + mul(0.5c) ≈ 5c  vs  div(14c) = 2.8x faster.
+// rcp14 alone gives ~2^-14 relative error (~6e-5).  One NR iteration
+// refines to ~2^-28 (~3.7e-9), which is below the exp polynomial
+// error (5e-5), so the overall sigmoid accuracy is unchanged.
+// rcp14 + NR avoids the high-latency hardware divide.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline __m512 sigmoid_avx512(__m512 x) {
   const __m512 one = _mm512_set1_ps(1.0f);
@@ -206,9 +206,9 @@ static inline __m512 silu_avx512(__m512 x) {
   return _mm512_mul_ps(x, sigmoid_avx512(x));
 }
 
-// GELU: per-lane scalar std::erf (no AVX-512 erf intrinsic).
-// A vectorized tanh-based approximation could be added if GELU becomes
-// a hot path; MoE models overwhelmingly use SiLU.
+// GELU: per-lane scalar std::erf (no AVX-512 erf intrinsic).  A
+// vectorised tanh-based approximation could replace this if a more
+// accurate / faster path is needed.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline __m512 gelu_avx512(__m512 x) {
   alignas(64) float arr[16];
@@ -568,6 +568,7 @@ void execute_act_rows_scalar(
   }
 }
 
+
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -623,7 +624,16 @@ status_t group_matmul_moe_act_execute(
   }
 
   // Prefix sums over active experts: O(num_ops) instead of O(total_rows).
-  std::vector<int64_t> row_offsets(num_ops + 1, 0);
+  // Persistent thread-local so the vector capacity grows monotonically
+  // and steady-state calls reuse the existing allocation.  resize() to
+  // num_ops+1 (idempotent when the capacity is already sufficient) and
+  // explicitly seed the first slot to 0 — the prefix-sum loop then
+  // overwrites the rest.  Avoids a per-call heap allocation that the
+  // V1 fused_moe path would otherwise hit on every call (V2 doesn't go
+  // through this function — it fuses activation in-tile).
+  static thread_local std::vector<int64_t> row_offsets;
+  row_offsets.resize(num_ops + 1);
+  row_offsets[0] = 0;
   for (int e = 0; e < num_ops; ++e) {
     const int64_t rows = (dst[e] != nullptr && M[e] > 0) ? M[e] : 0;
     row_offsets[e + 1] = row_offsets[e] + rows;
@@ -645,6 +655,7 @@ status_t group_matmul_moe_act_execute(
 
   return status_t::success;
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // Single-threaded per-expert activation (for fused ALGO 1/2/4/5 paths)
@@ -760,6 +771,62 @@ void apply_swiglu_oai_tile_rows(
     for (int m = 0; m < M; ++m) {
       const bfloat16_t *src_row = base + static_cast<size_t>(m) * ldc + col_start;
       bfloat16_t *dst_row       = base + static_cast<size_t>(m) * ldc + dst_col;
+      if (use_avx512)
+        swiglu_oai_tile_avx512_bf16(src_row, dst_row, pairs);
+      else
+        swiglu_oai_tile_scalar_bf16(src_row, dst_row, pairs);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Out-of-place per-thread tile activation for the I-only fused MoE path
+// ═══════════════════════════════════════════════════════════════════════
+
+void apply_swiglu_oai_tile_rows_oop(
+    const void *src_buf, int src_ldc, int src_col_start,
+    void *dst_buf, int dst_ldc, int dst_col_start,
+    int M, int pairs, data_type_t dtype) {
+  // Preconditions identical to the in-place sibling, plus: src_buf may
+  // alias dst_buf only when the read range [src_col_start ..
+  // src_col_start + 2*pairs) is disjoint from the write range
+  // [dst_col_start .. dst_col_start + pairs).  The fused MoE path
+  // always passes distinct buffers (per-thread scratch vs tight arena),
+  // so the alias case isn't exercised today.
+  assert(src_buf != nullptr && "apply_swiglu_oai_tile_rows_oop: src_buf is null");
+  assert(dst_buf != nullptr && "apply_swiglu_oai_tile_rows_oop: dst_buf is null");
+  assert((src_col_start & 1) == 0
+         && "apply_swiglu_oai_tile_rows_oop: src_col_start must be even");
+  assert((dtype == data_type_t::f32 || dtype == data_type_t::bf16)
+         && "apply_swiglu_oai_tile_rows_oop: dtype must be f32 or bf16");
+  if (pairs <= 0 || M <= 0 || src_buf == nullptr || dst_buf == nullptr) return;
+  if ((src_col_start & 1) != 0) return;
+  if (dtype != data_type_t::f32 && dtype != data_type_t::bf16) return;
+
+  const bool is_f32 = (dtype == data_type_t::f32);
+  const bool use_avx512 = avx512f_available();
+
+  if (is_f32) {
+    const auto *src_base = static_cast<const float *>(src_buf);
+    auto       *dst_base = static_cast<float *>(dst_buf);
+    for (int m = 0; m < M; ++m) {
+      const float *src_row =
+          src_base + static_cast<size_t>(m) * src_ldc + src_col_start;
+      float *dst_row =
+          dst_base + static_cast<size_t>(m) * dst_ldc + dst_col_start;
+      if (use_avx512)
+        swiglu_oai_tile_avx512_f32(src_row, dst_row, pairs);
+      else
+        swiglu_oai_tile_scalar_f32(src_row, dst_row, pairs);
+    }
+  } else {
+    const auto *src_base = static_cast<const bfloat16_t *>(src_buf);
+    auto       *dst_base = static_cast<bfloat16_t *>(dst_buf);
+    for (int m = 0; m < M; ++m) {
+      const bfloat16_t *src_row =
+          src_base + static_cast<size_t>(m) * src_ldc + src_col_start;
+      bfloat16_t *dst_row =
+          dst_base + static_cast<size_t>(m) * dst_ldc + dst_col_start;
       if (use_avx512)
         swiglu_oai_tile_avx512_bf16(src_row, dst_row, pairs);
       else

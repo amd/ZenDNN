@@ -68,6 +68,9 @@ struct GrpMatmulConfig {
     int moe_topk = 0;  ///< 0 = no MoE post-op, >0 = enable with this topk
     int gated_act = 0;  ///< 0 = off, 1 = silu_and_mul, 2 = gelu_and_mul, 3 = swiglu_oai_mul
     int N_down = 0;     ///< 0 = no fused down_proj, >0 = fused Op1→Act→Op2 with this N_down
+    int use_internal_alloc = 0;  ///< 0 = caller-allocated dst/dst_down (legacy);
+                                 ///< 1 = library-allocated Op1 scratch + src-reuse
+                                 ///<     for Op2 output (requires N_down > 0).
 
     int max_M() const { return *std::max_element(M_per_op.begin(), M_per_op.end()); }
     int dim() const { return N / 2; }  ///< intermediate dim = N_gate_up / 2

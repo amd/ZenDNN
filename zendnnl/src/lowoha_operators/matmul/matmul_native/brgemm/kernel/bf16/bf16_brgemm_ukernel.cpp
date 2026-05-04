@@ -134,19 +134,35 @@ void bf16_brgemm_ukernel(
 }
 
 // ── Explicit instantiations ──────────────────────────────────────────────
-// Same register pressure analysis as GEMM ukernel (see bf16_gemm_ukernel.cpp).
-// BRGEMM has one extra parameter (BK) but identical ZMM usage in K-loop.
+// Same register pressure analysis as the GEMM ukernel (see
+// bf16_gemm_ukernel.cpp); BRGEMM has one extra parameter (BK) but
+// identical ZMM usage in the K-loop.
+//
+// Live ZMM count = MR×NV (accumulators) + NV (b vectors) + 1 (a
+// broadcast).  Zen 4/5 EPYC exposes 32 ZMM; over-budget instantiations
+// spill to L1 in the inner loop but compile and run correctly.
+//
+//   NV=4 (NR=64): clean up to MR=6 (29 ZMM); MR=8 spills (37 ZMM).
+//   NV=2 (NR=32): register-pressure clean through MR≤8; this file
+//                 currently instantiates/selects MR ∈ {1..6}.
+//   NV=1 (NR=16): register-pressure clean for practical MR values;
+//                 this file currently instantiates/selects MR ∈ {1..6}.
+//
+// MR=5 covers the m_tail == 5 case that occurs when M values fall on
+// the M ≡ 5 (mod 6) sequence (5, 11, 17, 23, 29, ...) under
+// planner.MR = 6, and is also the preferred MR for several mid-M
+// cases — see plan_bf16_brgemm() in brgemm_planner.cpp.
 #define INST(MR, NV) \
     template void bf16_brgemm_ukernel<MR,NV>( \
         const uint16_t*, int, const uint16_t*, int, float*, int, \
         int, int, float, const float*, fused_postop_t, uint16_t*, int);
 
-// NR=64 (NV=4): MR=1-8
-INST(1,4) INST(2,4) INST(3,4) INST(4,4) INST(6,4) INST(8,4)
-// NR=32 (NV=2): MR=1-6
-INST(1,2) INST(2,2) INST(3,2) INST(4,2) INST(6,2)
-// NR=16 (NV=1): MR=1-6
-INST(1,1) INST(2,1) INST(3,1) INST(4,1) INST(6,1)
+// NR=64 (NV=4): MR ∈ {1..6, 8}
+INST(1,4) INST(2,4) INST(3,4) INST(4,4) INST(5,4) INST(6,4) INST(8,4)
+// NR=32 (NV=2): MR ∈ {1..6}
+INST(1,2) INST(2,2) INST(3,2) INST(4,2) INST(5,2) INST(6,2)
+// NR=16 (NV=1): MR ∈ {1..6}
+INST(1,1) INST(2,1) INST(3,1) INST(4,1) INST(5,1) INST(6,1)
 #undef INST
 
 using bf16_brgemm_fn_t = void (*)(const uint16_t*, int, const uint16_t*, int,
@@ -162,6 +178,7 @@ bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
         case 2: return bf16_brgemm_ukernel<2, 4>;
         case 3: return bf16_brgemm_ukernel<3, 4>;
         case 4: return bf16_brgemm_ukernel<4, 4>;
+        case 5: return bf16_brgemm_ukernel<5, 4>;
         case 6: return bf16_brgemm_ukernel<6, 4>;
         case 8: return bf16_brgemm_ukernel<8, 4>;
         }
@@ -172,6 +189,7 @@ bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
         case 2: return bf16_brgemm_ukernel<2, 2>;
         case 3: return bf16_brgemm_ukernel<3, 2>;
         case 4: return bf16_brgemm_ukernel<4, 2>;
+        case 5: return bf16_brgemm_ukernel<5, 2>;
         case 6: return bf16_brgemm_ukernel<6, 2>;
         }
         break;
@@ -181,11 +199,144 @@ bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
         case 2: return bf16_brgemm_ukernel<2, 1>;
         case 3: return bf16_brgemm_ukernel<3, 1>;
         case 4: return bf16_brgemm_ukernel<4, 1>;
+        case 5: return bf16_brgemm_ukernel<5, 1>;
         case 6: return bf16_brgemm_ukernel<6, 1>;
         }
         break;
     }
     return nullptr;
+}
+
+// ============================================================================
+// BF16 BRGEMM masked NV=1 kernel (templated MR, runtime nr_partial ∈ [1..15])
+//
+// Specialised version of the templated ukernel for the common
+// partial-N strip case where N is not a multiple of 64 and the trailing
+// strip is between 1 and 15 columns wide.  The generic
+// bf16_brgemm_tail_kernel has an `acc[MAX_MR][MAX_NV]` stack array
+// sized for 12×4 = 48 ZMMs which exceeds the 32-register AVX-512
+// file; the compiler is forced to spill accumulators and re-loaded
+// B-vectors to the stack on every K-pair iteration, costing several
+// times the templated-ukernel's wall-clock.
+//
+// Templating MR keeps the accumulator array inside the register file
+// (MR ZMMs at NV=1, which is at most 8 for MR=8) and the runtime
+// `mask` only affects loads/stores, not the FMA hot path.
+// ============================================================================
+template<int MR>
+__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"), noinline))
+void bf16_brgemm_ukernel_n_masked(
+    const uint16_t *__restrict__ A, int lda,
+    const uint16_t *__restrict__ B_vnni, int b_stride,
+    float *__restrict__ C, int ldc,
+    int K, int BK, int nr_partial, float beta,
+    const float *__restrict__ bias, fused_postop_t fused_op,
+    uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+
+    assert(nr_partial >= 1 && nr_partial < 16);
+    const __mmask16 mask =
+        static_cast<__mmask16>((1u << nr_partial) - 1);
+
+    __m512 acc[MR];
+
+    if (beta != 0.0f) {
+        __m512 bv = _mm512_set1_ps(beta);
+        for (int m = 0; m < MR; ++m)
+            acc[m] = _mm512_mul_ps(bv,
+                _mm512_maskz_loadu_ps(mask, C + m * ldc));
+    } else {
+        for (int m = 0; m < MR; ++m)
+            acc[m] = _mm512_setzero_ps();
+    }
+
+    for (int pc = 0; pc < K; pc += BK) {
+        const int kb_orig = std::min(BK, K - pc);
+        const uint16_t *a_off = A + pc;
+        const uint16_t *b_off = B_vnni + (pc / 2) * b_stride;
+        const int k_full_pairs = kb_orig / 2;
+        const bool has_odd_tail = (kb_orig & 1) != 0;
+
+        // K-pair loop, B-load hoisted (NV=1 → single ZMM per kk).
+        int kk = 0;
+        for (; kk + 1 < k_full_pairs; kk += 2) {
+            for (int u = 0; u < 2; ++u) {
+                const __m512bh bv = (__m512bh)_mm512_loadu_si512(
+                    b_off + (kk + u) * b_stride);
+                for (int m = 0; m < MR; ++m) {
+                    uint32_t a_pair;
+                    std::memcpy(&a_pair, &a_off[m * lda + 2 * (kk + u)],
+                                sizeof(a_pair));
+                    __m512bh av = (__m512bh)_mm512_set1_epi32(
+                        static_cast<int>(a_pair));
+                    acc[m] = _mm512_dpbf16_ps(acc[m], av, bv);
+                }
+            }
+        }
+        for (; kk < k_full_pairs; ++kk) {
+            const __m512bh bv = (__m512bh)_mm512_loadu_si512(
+                b_off + kk * b_stride);
+            for (int m = 0; m < MR; ++m) {
+                uint32_t a_pair;
+                std::memcpy(&a_pair, &a_off[m * lda + 2 * kk],
+                            sizeof(a_pair));
+                __m512bh av = (__m512bh)_mm512_set1_epi32(
+                    static_cast<int>(a_pair));
+                acc[m] = _mm512_dpbf16_ps(acc[m], av, bv);
+            }
+        }
+        if (has_odd_tail) {
+            const __m512bh bv = (__m512bh)_mm512_loadu_si512(
+                b_off + k_full_pairs * b_stride);
+            for (int m = 0; m < MR; ++m) {
+                uint32_t a_pair = static_cast<uint32_t>(
+                    a_off[m * lda + 2 * k_full_pairs]);
+                __m512bh av = (__m512bh)_mm512_set1_epi32(
+                    static_cast<int>(a_pair));
+                acc[m] = _mm512_dpbf16_ps(acc[m], av, bv);
+            }
+        }
+    }
+
+    for (int m = 0; m < MR; ++m) {
+        __m512 val = acc[m];
+        if (bias)
+            val = _mm512_add_ps(val,
+                _mm512_maskz_loadu_ps(mask, bias));
+        if (fused_op != fused_postop_t::none)
+            val = apply_fused_postop(val, fused_op);
+        if (C_bf16) {
+            _mm256_mask_storeu_epi16(
+                C_bf16 + m * ldc_bf16, mask,
+                (__m256i)_mm512_cvtneps_pbh(val));
+        } else {
+            _mm512_mask_storeu_ps(C + m * ldc, mask, val);
+        }
+    }
+}
+
+// Explicit instantiations + selector for the masked NV=1 kernel.
+#define INST_MASKED_NV1(MR) \
+    template void bf16_brgemm_ukernel_n_masked<MR>( \
+        const uint16_t*, int, const uint16_t*, int, float*, int, \
+        int, int, int, float, const float*, fused_postop_t, \
+        uint16_t*, int);
+
+INST_MASKED_NV1(1) INST_MASKED_NV1(2) INST_MASKED_NV1(3)
+INST_MASKED_NV1(4) INST_MASKED_NV1(5) INST_MASKED_NV1(6)
+INST_MASKED_NV1(8)
+#undef INST_MASKED_NV1
+
+bf16_brgemm_n_masked_fn_t select_bf16_brgemm_n_masked_kernel(int MR) {
+    switch (MR) {
+        case 1: return bf16_brgemm_ukernel_n_masked<1>;
+        case 2: return bf16_brgemm_ukernel_n_masked<2>;
+        case 3: return bf16_brgemm_ukernel_n_masked<3>;
+        case 4: return bf16_brgemm_ukernel_n_masked<4>;
+        case 5: return bf16_brgemm_ukernel_n_masked<5>;
+        case 6: return bf16_brgemm_ukernel_n_masked<6>;
+        case 8: return bf16_brgemm_ukernel_n_masked<8>;
+        default: return nullptr;
+    }
 }
 
 // ============================================================================

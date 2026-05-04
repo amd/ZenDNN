@@ -134,22 +134,41 @@ BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
   plan.NR = 64;
 
   // ── MR: adaptive for decode vs throughput ──
+  //
+  // Three structural rules drive the selection:
+  //
+  //   • For larger K (decode-class K with M ≥ 5), MR=5 keeps the
+  //     A-panel smaller than MR=6 (one fewer K-row per MR).  That
+  //     leaves more L1 head-room for B, which lets the planner pick
+  //     a larger BK without exceeding its effective L1 budget
+  //     (~0.8 × uarch.l1d_bytes).
+  //   • MR=8 spills on AVX-512 (8 × NV=4 = 32 ZMM accumulators leave
+  //     no head-room for the A/B vectors), so M=8 is split as 2 × MR=4.
+  //   • At small M-tails with narrow N, MR=4 has cleaner M-panel
+  //     divisibility and lower register pressure than MR=6.
+  //
+  // The decode branch (M ≤ 4) retains plan.MR = M because the looper
+  // forces actual_MR = M for decode shapes.
+  //
+  // M values that fall into the trailing else branch (M ∈ {6, 11, 12,
+  // 16..30}) take MR=6: M%6 panel layouts are tight (2 panels for
+  // M=11/12, 3 for M=16/17/18) and BRGEMM's accumulator persistence
+  // amortises the BK = K/2 split cost.
   if (is_decode) {
     plan.MR = M;
-  } else if (M == 8) {
-    plan.MR = 8;
-  } else if (M % 6 == 0 || M >= 18) {
-    plan.MR = 6;
-  } else if (M % 4 == 0) {
-    plan.MR = 4;
-  } else if (M % 6 <= 3 && M > 12) {
+  } else if (M == 5 || M == 7 || M == 9 || M == 10
+             || M == 13 || M == 14 || M == 15) {
+    plan.MR = 5;
+  } else if (M == 8 || M == 31 || M == 32) {
     plan.MR = 4;
   } else {
     plan.MR = 6;
   }
 
   // ── BK: maximize to keep accumulators live longer ──
-  // A panel (MR×BK×2B) in L1, B panel (NR_PACK×BK×2B) in L2/2.
+  // A panel (MR×BK×2B) lives in L1; B panel (NR_PACK×BK×2B) lives in
+  // L2/2.  The 0.8 fudge factor leaves head-room for B prefetch /
+  // accumulator stores in L1.
   constexpr int NR_PACK = 64;
   {
     int kb_a = static_cast<int>(0.8 * uarch.l1d_bytes)
@@ -158,7 +177,7 @@ BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
                / (NR_PACK * static_cast<int>(sizeof(uint16_t)));
     int bk_max = std::min(kb_a, kb_b);
     bk_max = std::max(bk_max, 64);
-    bk_max = (bk_max + 1) & ~1;
+    bk_max = (bk_max + 1) & ~1;                  // even (K-pair loop)
     if (K_padded <= bk_max) {
       plan.BK = K_padded;
     } else {

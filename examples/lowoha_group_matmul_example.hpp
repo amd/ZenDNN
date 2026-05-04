@@ -78,8 +78,47 @@ int group_matmul_gated_act_example();
  *     V1 implementation runs the flow as two internal dispatch passes
  *     (Op1 + activation, then Op2); per-expert / per-M-tile deep fusion
  *     is a future optimization.
+ *
+ * Legacy / caller-allocated mode: caller supplies both the Op1 dst
+ * buffers (`dst[]` / `ldc[]`) and the Op2 dst buffers
+ * (`fused.dst_down[]` / `fused.ldc_down[]`).  See
+ * `group_matmul_fused_moe_internal_alloc_example` for the alternative
+ * mode where the library allocates the Op1 scratch internally and
+ * writes Op2 output back into the caller's src buffers in place.
  */
 int group_matmul_fused_moe_example();
+
+/**
+ * @brief FP32 fused MoE in internal-alloc + src-reuse mode.
+ *
+ * Demonstrates the alternative fused MoE invocation where the library
+ * owns the Op1 (gate+up + activation) intermediate buffer:
+ *   - Caller passes `dst[]` as a vector of nullptrs (or empty) and
+ *     leaves `fused.dst_down` empty.
+ *   - The library obtains Op1 scratch sized for [M[i], N[i]] of the
+ *     dst dtype (wide) or [M[i], N[i]/2] (tight / swiglu_oai-compact)
+ *     per expert, runs Op1 + activation into it, then runs Op2
+ *     reading from the scratch and writing the per-expert output
+ *     BACK INTO the caller's `src[]` buffer (in-place reuse).
+ *   - Scratch storage is NOT freed at end-of-call — it is backed by
+ *     a `static thread_local` arena that grows to the largest
+ *     fused-MoE call this thread has ever serviced and is released
+ *     only when the thread exits.  Steady-state per-call allocator
+ *     traffic is O(num_ops) field writes; per-thread resident-set
+ *     reflects the high-water scratch size, and across N worker
+ *     threads the total retained footprint is bounded above by
+ *     N × max_seen(M_total × N_max × sizeof(dst_elem)).  Frameworks
+ *     that need to bound RSS after an outsized MoE shape should
+ *     either use the legacy caller-allocated mode or execute such
+ *     shapes on a dedicated thread that can be torn down.
+ *   - Caller reads the final per-expert Op2 output from the same
+ *     `src[]` buffer it provided.
+ *
+ * Constraints: requires `lda[i] >= N_down[i]` so each Op2 row stride
+ * fits within the original src row stride.  Naturally satisfied when
+ * the MoE layer uses `hidden_dim = K_input = N_down`.
+ */
+int group_matmul_fused_moe_internal_alloc_example();
 
 } // namespace examples
 } // namespace zendnnl

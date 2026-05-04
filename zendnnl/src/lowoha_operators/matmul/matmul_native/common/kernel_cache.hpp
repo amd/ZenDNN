@@ -21,6 +21,9 @@
 #include <mutex>
 #include <memory>
 #include <unordered_map>
+#include <list>
+#include <limits>
+#include <utility>
 #include <functional>
 #include <cstddef>
 #include <cstdint>
@@ -119,6 +122,172 @@ struct PrepackedWeightKeyHash {
   }
 };
 
+// ============================================================================
+// LRU map for prepacked-weight caches (move-only values).
+// ============================================================================
+
+/// Capacity (in entries) for every native weight cache.
+/// Sourced from matmul_config_t (env: ZENDNNL_LRU_CACHE_CAPACITY).
+/// Default = UINT32_MAX → unbounded growth, identical to behavior
+/// before this knob existed.  When set to a finite value the cache
+/// enforces the cap by REFUSING to insert new entries once full
+/// (not by evicting existing ones — see `LRUWeightMap::insert()`
+/// for the UAF-safety rationale).  Callers that hit a refused
+/// insert transparently fall back to their thread-local repack
+/// path, so correctness is unaffected; the only cost is the
+/// amortised pack hit on every call for the (N+1)th unique weight.
+/// Defined in kernel_cache.cpp to avoid including matmul_config.hpp
+/// from this header.
+uint32_t get_weight_cache_capacity();
+
+/// Generation counter incremented on every cache clear or in-place
+/// value replacement.  Defined in kernel_cache.cpp.  Declared early
+/// so LRUWeightMap can call it.  Thread-local fast-paths that cache
+/// a raw pointer should compare their captured generation against
+/// this counter on each call and fall back to `find_and_touch()` on
+/// mismatch.  This protects only ACROSS calls — the in-flight call
+/// relies on the never-evict property documented in `LRUWeightMap`.
+std::atomic<uint64_t> &weight_cache_generation();
+
+/// Move-aware LRU map for weight caches. Caller owns synchronization
+/// (the enclosing cache class holds its own std::mutex).
+///
+/// Capacity policy: EVICTION IS DISABLED.  When a caller goes
+/// through `get_or_prepack()` / `get_or_pack()`, the returned raw
+/// pointer is consumed by the GEMM/BRGEMM looper AFTER the cache
+/// mutex is released — a concurrent `insert()` on another thread
+/// that evicted the same entry would call `std::free()` on the
+/// packed buffer while the first thread is still reading it, a
+/// use-after-free.  The `weight_cache_generation()` counter only
+/// guards the thread-local pointer-reuse fast-path across calls;
+/// it does NOT keep an in-use entry alive during the current call.
+///
+/// Capacity is instead enforced by REFUSING new inserts once
+/// `list_.size() >= get_weight_cache_capacity()` — `insert()`
+/// returns `nullptr` and the caller's `std::unique_ptr<V>` falls
+/// out of scope, freeing the just-packed buffer immediately.  The
+/// caller of `get_or_prepack()` / `get_or_pack()` already handles
+/// a `nullptr` return by falling back to its thread-local repack
+/// path (see `bkc_resolve_packed_B_st` fallback block for an
+/// example), so correctness is preserved; the only cost is paying
+/// the pack on every call for weights beyond the cap.  This gives
+/// the `ZENDNNL_LRU_CACHE_CAPACITY` env knob back its advertised
+/// "bound my resident set" semantic without introducing a UAF.
+///
+/// Steady-state RSS bound = `cap × max(per-entry pack size)`.  For
+/// deployments that rotate weights (LoRA hot-swap, recompile
+/// cycles, retraining loops) call `clear_all_weight_caches()`
+/// during a quiescent window to release everything at once.
+///
+/// All operations are O(1) amortized.
+template <typename V>
+class LRUWeightMap {
+ public:
+  using ListItem = std::pair<PrepackedWeightKey, std::unique_ptr<V>>;
+  using ListIter = typename std::list<ListItem>::iterator;
+
+  /// Lookup. On hit, moves the entry to MRU and returns the raw pointer.
+  /// Returns nullptr on miss. Caller must hold the cache's mutex.
+  V *find_and_touch(const PrepackedWeightKey &k) {
+    auto it = map_.find(k);
+    if (it == map_.end()) return nullptr;
+    list_.splice(list_.begin(), list_, it->second);
+    return it->second->second.get();
+  }
+
+  /// Insert at MRU. If size() exceeds capacity, evicts LRU entries
+  /// (and bumps weight_cache_generation()). Returns the raw pointer
+  /// to the just-inserted value. Caller must hold the cache's mutex.
+  ///
+  /// Re-insert (key already present) replaces the existing value,
+  /// splices its node to MRU, and does NOT grow the map — preventing
+  /// orphan list nodes that would break LRU bookkeeping.  Callers
+  /// typically check `find_and_touch()` first and only `insert()` on
+  /// miss, but the in-place update path keeps the API safe under
+  /// concurrent re-pack races (e.g. two threads racing on the same
+  /// key after both saw a miss before the first one's insert
+  /// completed).
+  ///
+  /// When a re-insert happens the old `std::unique_ptr<V>` is
+  /// destructed as part of the `std::move` assignment — every other
+  /// thread that has already cached the OLD raw pointer in its
+  /// thread-local fast path (BF16 / INT8 paths, see callers) now
+  /// holds a dangling reference.  We therefore bump
+  /// `weight_cache_generation()` on this path too: the TL fast paths
+  /// compare their cached generation against the global one before
+  /// reusing their pointer and fall back to `find_and_touch()` on
+  /// mismatch, which returns the new MRU pointer under the cache
+  /// mutex.  Without this bump a concurrent re-pack race can leave
+  /// the other thread UAFing the freed unique_ptr target.
+  V *insert(const PrepackedWeightKey &k, std::unique_ptr<V> v) {
+    auto existing = map_.find(k);
+    if (existing != map_.end()) {
+      // Re-insert of an already-cached key: replace value in-place,
+      // splice node to MRU, bump generation.  Note this DOES free
+      // the prior unique_ptr target at the `=` assignment; any
+      // thread-local fast-path holding the old raw pointer detects
+      // the gen bump on its next call and re-fetches.  This is
+      // still UAF-free under the cache mutex because only one
+      // insert runs at a time per cache and the in-flight callers
+      // from other threads compare their gen before touching their
+      // cached pointer.
+      existing->second->second = std::move(v);
+      list_.splice(list_.begin(), list_, existing->second);
+      weight_cache_generation().fetch_add(1, std::memory_order_relaxed);
+      return list_.front().second.get();
+    }
+
+    // ── Capacity enforcement (REFUSE-NEW, not evict-old) ──────────
+    // Eviction of an existing entry is unsafe because GEMM/BRGEMM
+    // loopers hold the raw pointer returned by `find_and_touch()`
+    // across the entire kernel call AFTER releasing the cache
+    // mutex.  A concurrent `std::free` on that pointer would UAF;
+    // `weight_cache_generation()` protects only the next-call TL
+    // fast path, not the in-flight call.
+    //
+    // Instead, when the map is at capacity we refuse the new
+    // insert: `v` drops out of scope, the just-packed buffer is
+    // freed by the caller's `unique_ptr`, and we return `nullptr`.
+    // The caller of `get_or_prepack()` / `get_or_pack()` already
+    // handles `nullptr` as a pack miss and falls back to its
+    // thread-local repack path (see `bkc_resolve_packed_B_st` for
+    // the canonical fallback pattern) — correctness is preserved,
+    // the cost is paying a pack on every call for weights beyond
+    // the cap.  Cap = UINT32_MAX (default) means "never refuse",
+    // restoring the historical unbounded-growth behaviour.
+    const uint32_t cap = get_weight_cache_capacity();
+    if (cap != std::numeric_limits<uint32_t>::max()
+        && list_.size() >= cap) {
+      return nullptr;  // cap hit: unique_ptr destructor frees the pack
+    }
+
+    list_.emplace_front(k, std::move(v));
+    map_[k] = list_.begin();
+    return list_.front().second.get();
+  }
+
+  /// Drop every entry.  Bumps weight_cache_generation() when the map
+  /// was non-empty so any thread-local fast path that holds a raw
+  /// entry pointer guarded by a generation snapshot detects the
+  /// staleness on its next call (otherwise the per-cache
+  /// `clear()` wrappers exposed publicly would silently invalidate
+  /// pointers without notifying the TL paths).
+  void clear() {
+    const bool had_entries = !list_.empty();
+    map_.clear();
+    list_.clear();
+    if (had_entries) {
+      weight_cache_generation().fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  size_t size() const { return list_.size(); }
+
+ private:
+  std::list<ListItem> list_;  // front = MRU, back = LRU
+  std::unordered_map<PrepackedWeightKey, ListIter, PrepackedWeightKeyHash> map_;
+};
+
 /// Thread-safe singleton cache for prepacked weight matrices.
 class PrepackedWeightCache {
 public:
@@ -133,9 +302,7 @@ public:
   PrepackedWeightCache &operator=(const PrepackedWeightCache &) = delete;
 private:
   PrepackedWeightCache() = default;
-  std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<PrepackedWeight>,
-             PrepackedWeightKeyHash> cache_;
+  LRUWeightMap<PrepackedWeight> cache_;
   std::mutex mutex_;
 };
 
@@ -191,9 +358,7 @@ public:
   BF16PrepackedWeightCache &operator=(const BF16PrepackedWeightCache &) = delete;
 private:
   BF16PrepackedWeightCache() = default;
-  std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<BF16PrepackedWeight>,
-             PrepackedWeightKeyHash> cache_;
+  LRUWeightMap<BF16PrepackedWeight> cache_;
   std::mutex mutex_;
 };
 
@@ -243,9 +408,7 @@ public:
   BF16BKCWeightCache &operator=(const BF16BKCWeightCache &) = delete;
 private:
   BF16BKCWeightCache() = default;
-  std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<BF16BKCWeight>,
-             PrepackedWeightKeyHash> cache_;
+  LRUWeightMap<BF16BKCWeight> cache_;
   std::mutex mutex_;
 };
 
@@ -316,9 +479,7 @@ public:
   INT8KContiguousWeightCache &operator=(const INT8KContiguousWeightCache &) = delete;
 private:
   INT8KContiguousWeightCache() = default;
-  std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<INT8KContiguousWeight>,
-             PrepackedWeightKeyHash> cache_;
+  LRUWeightMap<INT8KContiguousWeight> cache_;
   std::mutex mutex_;
 };
 
@@ -360,16 +521,9 @@ public:
   INT8PrepackedWeightCache &operator=(const INT8PrepackedWeightCache &) = delete;
 private:
   INT8PrepackedWeightCache() = default;
-  std::unordered_map<PrepackedWeightKey,
-             std::unique_ptr<INT8PrepackedWeight>,
-             PrepackedWeightKeyHash> cache_;
+  LRUWeightMap<INT8PrepackedWeight> cache_;
   std::mutex mutex_;
 };
-
-/// Generation counter incremented on every cache clear. Thread-local
-/// fast paths compare against this to detect stale pointers.
-/// Defined in kernel_cache.cpp to ensure a single instance across TUs.
-std::atomic<uint64_t> &weight_cache_generation();
 
 /// Clear all weight caches. Must only be called when no thread is using
 /// any previously returned pointer (e.g., between test cases or model swap).

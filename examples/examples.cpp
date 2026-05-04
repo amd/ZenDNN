@@ -92,6 +92,7 @@ int main() {
     group_matmul_moe_postop_example();
     group_matmul_gated_act_example();
     group_matmul_fused_moe_example();
+    group_matmul_fused_moe_internal_alloc_example();
 
     /** LOWOHA Conv2D operator functionality examples.
      *  Demonstrates 2D convolution with low-overhead API including:

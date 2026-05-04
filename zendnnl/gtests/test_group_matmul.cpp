@@ -16,24 +16,32 @@
 
 /// @file test_group_matmul.cpp
 /// @brief GTests for group_matmul_direct API, organized into sections:
-///   [1] Shared helpers (moe_test_utils): buffers, init, params, reference math
-///   [2] TestGroupMatmul         — F32/BF16 basic + moe_postop coverage
-///   [3] TestGatedAct            — gated activation correctness (silu/gelu/swiglu)
-///   [4] TestMoEPostop           — weighted-reduce post-op correctness
-///   [5] TestFusedMoE            — fused Op1→Act→Op2 vs 2-call reference
-///   [6] TestGroupMatmulCombined — all 2³=8 combinations of (moe,act,fused)
-///   [7] TestFusedMoEAlgos       — fused path × ALGOs 1/2/3 × mixed precision
-///   [8] TestFusedMoENegative    — validation fast-fail paths
+///   [1]  Shared helpers (moe_test_utils): buffers, init, params, ref math
+///   [2]  TestGroupMatmul          — F32/BF16 basic + moe_postop coverage
+///   [3]  TestGatedAct             — gated activation correctness
+///   [4]  TestMoEPostop            — weighted-reduce post-op correctness
+///   [5]  TestFusedMoE             — fused Op1→Act→Op2 (legacy mode:
+///                                   caller-allocated dst & dst_down)
+///   [5b] TestFusedMoEInternalAlloc — same fused MoE, but internal-alloc
+///                                    + src-reuse mode (caller passes
+///                                    dst all-null and fused.dst_down
+///                                    empty; library allocates Op1
+///                                    scratch and writes Op2 back into
+///                                    src in place)
+///   [6]  TestGroupMatmulCombined  — all 2³=8 combinations (moe,act,fused)
+///   [7]  TestFusedMoEAlgos        — fused path × ALGOs × mixed precision
+///   [8]  TestFusedMoENegative     — validation fast-fail paths
 ///
 /// Coverage matrix (separate suites for each optional feature):
 ///   1. GEMM + activation only        → TestGatedAct
 ///      • all 4 acts (none/silu/gelu/swiglu), both f32/bf16, many dim×M×E
 ///   2. GEMM + moe_postop only        → TestMoEPostop
 ///      • weighted-reduce + skip_weighted, both f32/bf16, many E×M×topk
-///   3. GEMM + fused MoE (Op1→Act→Op2)→ TestFusedMoE, TestFusedMoEAlgos
+///   3. GEMM + fused MoE (Op1→Act→Op2)→ TestFusedMoE, TestFusedMoEAlgos,
+///                                       TestFusedMoEInternalAlloc
 ///      • all 4 acts (none/silu/gelu/swiglu), both f32/bf16,
 ///        mixed precision (bf16→f32), with/without down_proj bias,
-///        per-ALGO coverage (1/2/3), BF16 realistic-decode shapes.
+///        per-ALGO coverage, both legacy and internal-alloc modes.
 ///   4. All three combined            → TestGroupMatmulCombined
 ///      • 2³=8 combinations of (moe, act, fused) × both dtypes × key shapes.
 /// BF16 is verified in every suite; it is the primary precision for MoE inference.
@@ -271,23 +279,23 @@ struct AlgoEnvGuard {
   }
 };
 
-// RAII override for ZENDNNL_GRP_N_TILE_FUSED_ACT.  The production default
-// is OFF (opt-in), so tests that need to exercise the fused-swiglu_oai
-// epilogue must flip it on explicitly.  The env var is read per-call
-// (no process caching), so toggling here takes effect immediately.
-struct FusedActEnvGuard {
+// Generic RAII setter for any single env var (saves & restores prior
+// value).  Used to flip optional feature flags ON for tests that must
+// exercise the gated code path (e.g. ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT for
+// the ALGO 3 fused-swiglu_oai epilogue).
+struct EnvVarGuard {
+  const char *name;
   std::string prev_value;
   bool had_prev = false;
-  explicit FusedActEnvGuard(bool enable) {
-    if (const char *p = std::getenv("ZENDNNL_GRP_N_TILE_FUSED_ACT")) {
+  EnvVarGuard(const char *env_name, const char *new_value) : name(env_name) {
+    if (const char *p = std::getenv(name)) {
       prev_value = p; had_prev = true;
     }
-    setenv("ZENDNNL_GRP_N_TILE_FUSED_ACT", enable ? "1" : "0", 1);
+    setenv(name, new_value, 1);
   }
-  ~FusedActEnvGuard() {
-    if (had_prev) setenv("ZENDNNL_GRP_N_TILE_FUSED_ACT",
-                         prev_value.c_str(), 1);
-    else          unsetenv("ZENDNNL_GRP_N_TILE_FUSED_ACT");
+  ~EnvVarGuard() {
+    if (had_prev) setenv(name, prev_value.c_str(), 1);
+    else          unsetenv(name);
   }
 };
 
@@ -913,6 +921,133 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoE, TestFusedMoE,
     ::testing::ValuesIn(make_fused_moe_params()), FusedMoEParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// [5b] TestFusedMoEInternalAlloc: fused MoE with internal-alloc + src-reuse
+//
+// Exercises mode (2) of grp_matmul_fused_moe_params: caller leaves
+// `fused.dst_down` empty, the library allocates a per-expert Op1
+// scratch internally, runs Op1 + activation into it, then runs Op2
+// reading from the scratch and writing back into the caller's `src[]`
+// buffer (in-place reuse).  Test reuses the same parameter generator
+// as TestFusedMoE so coverage is identical.
+//
+// Reference is the legacy 2-call path (group_matmul_direct without
+// fused_moe).  Verification reads the Op2 output back from src[] and
+// compares against the reference dst_down.
+//
+// K = H is naturally satisfied by make_fused_moe_params (M K = H = h
+// in the param struct), so lda = K = H = N_down and the in-place
+// reuse fits exactly within the original src row stride.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFusedMoEInternalAlloc
+    : public ::testing::TestWithParam<FusedMoETestParam> {};
+
+TEST_P(TestFusedMoEInternalAlloc, Correctness) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+
+  const auto &p = GetParam();
+  const int dim = p.dim, N_gate_up = 2 * dim, H = p.hidden_size;
+  const int M = p.M, K = H, num_ops = p.num_ops;
+  const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+  const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+
+  // Two src copies: src_orig (consumed by the legacy reference path,
+  // remains untouched), src_intalloc (consumed AND repurposed by the
+  // internal-alloc path — receives Op2 output in-place).
+  TypedBuffers src_orig, src_intalloc, w1, d1_ref, w2, d2_ref;
+  src_orig    .alloc(num_ops, (size_t)M * K,         p.is_bf16);
+  src_intalloc.alloc(num_ops, (size_t)M * K,         p.is_bf16);
+  w1          .alloc(num_ops, (size_t)K * N_gate_up, p.is_bf16);
+  d1_ref      .alloc(num_ops, (size_t)M * N_gate_up, p.is_bf16);
+  w2          .alloc(num_ops, (size_t)dim * H,       p.is_bf16);
+  d2_ref      .alloc(num_ops, (size_t)M * H,         p.is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    if (p.is_bf16) {
+      fill_src(src_orig.bf16[e], e); fill_src(src_intalloc.bf16[e], e);
+      fill_wei1(w1.bf16[e], e); fill_wei2(w2.bf16[e], e);
+    } else {
+      fill_src(src_orig.f32[e], e); fill_src(src_intalloc.f32[e], e);
+      fill_wei1(w1.f32[e], e); fill_wei2(w2.f32[e], e);
+    }
+  }
+
+  auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H,         dim);
+  gv_op2.lda.assign(num_ops, N_gate_up);
+
+  auto srcs_orig     = src_orig.cptrs(p.is_bf16);
+  auto srcs_intalloc = src_intalloc.cptrs(p.is_bf16);
+  auto wei1          = w1.cptrs(p.is_bf16);
+  auto wei2          = w2.cptrs(p.is_bf16);
+  auto dst1_ref      = d1_ref.ptrs(p.is_bf16);
+  auto dst2_r        = d2_ref.ptrs(p.is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+  auto params   = make_uniform_params(num_ops, dt);
+
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+  auto act_ptr = (act_type != grp_matmul_gated_act_t::none) ? &act : nullptr;
+
+  // Reference path: two-call legacy → dst2_r.
+  {
+    auto pr1 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_orig, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
+        gv_op1.is_wc, pr1, nullptr, act_ptr), status_t::success);
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs2[e] = dst1_ref[e];
+    auto pr2 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2, gv_op2.lda,
+        wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
+        gv_op2.is_wc, pr2), status_t::success);
+  }
+
+  // Internal-alloc fused path: dst[] = nullptr, fused.dst_down empty.
+  // Library allocates the per-expert Op1 scratch, runs Op1 + act + Op2,
+  // and writes Op2 output back into srcs_intalloc.
+  grp_matmul_fused_moe_params fused{};
+  fused.down_weight = wei2;
+  fused.N_down      = std::vector<int>(num_ops, H);
+  fused.ldb_down    = std::vector<int>(num_ops, H);
+  fused.bias_down   = no_bias;
+  // fused.dst_down and fused.ldc_down INTENTIONALLY left empty — the
+  // signal that engages internal-alloc + src-reuse mode.
+
+  std::vector<void *>  dst_null(num_ops, nullptr);
+  std::vector<int>     ldc_null(num_ops, 0);
+  {
+    auto pf = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_intalloc, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
+        gv_op1.is_wc, pf, nullptr, act_ptr, &fused), status_t::success);
+  }
+
+  // Compare srcs_intalloc (now contains Op2 output, row stride lda=K=H)
+  // against the reference dst2_r (row stride H).
+  const auto tol = tol_fused(p.is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    for (int r = 0; r < M; ++r) {
+      for (int c = 0; c < H; ++c) {
+        const float got = src_intalloc.at(e, (size_t)r * K + c, p.is_bf16);
+        const float ref = d2_ref      .at(e, (size_t)r * H + c, p.is_bf16);
+        ASSERT_NEAR(got, ref, std::abs(ref) * tol.rel + tol.abs)
+            << "act=" << p.act_int << (p.is_bf16 ? " bf16" : " f32")
+            << " dim=" << dim << " h=" << H << " M=" << M
+            << " E=" << num_ops << " e=" << e << " r=" << r << " c=" << c;
+      }
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEInternalAlloc,
+    TestFusedMoEInternalAlloc,
+    ::testing::ValuesIn(make_fused_moe_params()), FusedMoEParamName);
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // [6] TestGroupMatmulCombined: all 2³=8 combinations of (moe, act, fused)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1181,13 +1316,15 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
   const bool use_bf16_out = !p.mixed_prec && p.is_bf16;
 
   AlgoEnvGuard algo_guard(p.algo);
-  // The fused-swiglu_oai epilogue in ALGO 3 is opt-in (default OFF).
-  // Force it on for every test case in this suite so the correctness
-  // check actually covers the fused path — in particular the shapes
-  // below where N_gate_up > kDecodeNTile let the epilogue run with
-  // n_thr > 1 threads per expert, which is the path the row-split fix
-  // in apply_n_tile_paired_swiglu_oai is there to protect.
-  FusedActEnvGuard fused_act_guard(/*enable=*/true);
+  // The fused-swiglu_oai epilogue in ALGO 3 is gated by
+  // ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT (default OFF) — see
+  // get_grp_n_tile_fused_act() in group_matmul_parallel_common.hpp.
+  // Force it ON here so the shapes below (where N_gate_up >
+  // kDecodeNTile) drive ALGO 3's per-thread fused epilogue with
+  // n_thr > 1 threads per expert.  That is the row-split path the
+  // matmul→activation barrier + GroupNTileContext::apply_swiglu_oai
+  // correctness fix exists to protect.
+  EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT", "1");
 
   // Allocate: input-side may be bf16; output-side may differ (mixed_prec).
   TypedBuffers src, w1, d1, d1r, w2, d2, d2r;
@@ -1349,7 +1486,466 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgos, TestFusedMoEAlgos,
     ::testing::ValuesIn(make_fused_algo_params()), FusedAlgoParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// [8] TestFusedMoENegative: validation error paths (fast-fail)
+// [7b] TestFusedMoEAlgoCustom: fused-MoE env-knob matrix
+//
+// Mirrors TestGroupMatmulAlgoCustom for the non-fused path but for the
+// fused MoE entry (Op1+act → Op2).  Targets the strategy-selection
+// contract cemented in Option A:
+//
+//   * ZENDNNL_GRP_MATMUL_ALGO = 1..5         — strategy selector, the
+//                                              single source of truth
+//                                              for the fused path.
+//   * ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT=0/1 — V1 vs V2 (V2 is the
+//                                              ALGO 3 + swiglu + tight
+//                                              specialist; engages only
+//                                              when env_algo ∈ {0, 3}).
+//   * ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0/1   — custom BF16 ukernel hook
+//                                              (flat_n_tile + V2 Op2).
+//
+// Reference strategy: a single known-good baseline — forced ALGO=1,
+// TIGHT=0, CUSTOM=0, legacy two-call (Op1 via group_matmul_direct +
+// Op2 via group_matmul_direct) — compared against the fused
+// internal-alloc call under the parameterised env.  Any breakage of
+// Option A's gating surface (e.g. V2 silently engaging for ALGO 5,
+// or CUSTOM_KERNEL=1 corrupting Op2 for non-BF16 dtypes) produces a
+// comparison failure.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct FusedAlgoCustomParam {
+  int algo;            // ALGO strategy 1..5
+  int tight;           // 0 or 1 (FUSED_MOE_TIGHT)
+  int custom_kernel;   // 0 or 1
+  int act_int;         // 1=silu, 2=gelu, 3=swiglu_oai (act=none skipped —
+                       // fused MoE always has an activation in practice)
+  int M, num_ops, dim;
+};
+
+static std::string FusedAlgoCustomParamName(
+    const ::testing::TestParamInfo<FusedAlgoCustomParam> &info) {
+  static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
+  const auto &p = info.param;
+  return "algo" + std::to_string(p.algo)
+       + "_tight" + std::to_string(p.tight)
+       + "_custom" + std::to_string(p.custom_kernel)
+       + "_" + act_names[p.act_int]
+       + "_M" + std::to_string(p.M)
+       + "_E" + std::to_string(p.num_ops)
+       + "_d" + std::to_string(p.dim);
+}
+
+class TestFusedMoEAlgoCustom
+    : public ::testing::TestWithParam<FusedAlgoCustomParam> {};
+
+TEST_P(TestFusedMoEAlgoCustom, Correctness) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+
+  const auto &p = GetParam();
+  const int H = 256, dim = p.dim, K = H;
+  const int N_gate_up = 2 * dim;
+  const int M = p.M, num_ops = p.num_ops;
+  const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+  // BF16-only: custom kernel contract + the fused-MoE V2 executor
+  // both require BF16 throughout.
+  const bool is_bf16 = true;
+  const data_type_t dt = data_type_t::bf16;
+
+  // Two src copies: `src_ref` for the legacy reference pass (unchanged
+  // after use), `src_fused` for the internal-alloc fused path (Op2
+  // writes back in-place, so the buffer is consumed).
+  TypedBuffers src_ref, src_fused, w1, d1_ref, w2, d2_ref;
+  src_ref  .alloc(num_ops, (size_t)M * K,         is_bf16);
+  src_fused.alloc(num_ops, (size_t)M * K,         is_bf16);
+  w1       .alloc(num_ops, (size_t)K * N_gate_up, is_bf16);
+  d1_ref   .alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
+  w2       .alloc(num_ops, (size_t)dim * H,       is_bf16);
+  d2_ref   .alloc(num_ops, (size_t)M * H,         is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    fill_src (src_ref  .bf16[e], e);
+    fill_src (src_fused.bf16[e], e);
+    fill_wei1(w1.bf16[e], e);
+    fill_wei2(w2.bf16[e], e);
+  }
+
+  auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H, dim);
+  gv_op2.lda.assign(num_ops, N_gate_up);
+
+  auto srcs_ref   = src_ref  .cptrs(is_bf16);
+  auto srcs_fused = src_fused.cptrs(is_bf16);
+  auto wei1       = w1.cptrs(is_bf16);
+  auto wei2       = w2.cptrs(is_bf16);
+  auto dst1_ref   = d1_ref.ptrs(is_bf16);
+  auto dst2_r     = d2_ref.ptrs(is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+  auto params = make_uniform_params(num_ops, dt);
+
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+  auto act_ptr = (act_type != grp_matmul_gated_act_t::none) ? &act : nullptr;
+
+  // ── Reference: ALGO=1, TIGHT=0, CUSTOM=0, two-call legacy ────────
+  // Everything else in the test can be evaluated against this single
+  // baseline.  The `AlgoEnvGuard(1)` + cleared TIGHT / CUSTOM guards
+  // are scoped to this block so they don't contaminate the later
+  // parameterised run.
+  {
+    AlgoEnvGuard algo_guard(1);
+    EnvVarGuard tight_guard ("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", "0");
+    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",   "0");
+
+    auto pr1 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_ref, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
+        gv_op1.is_wc, pr1, nullptr, act_ptr),
+        status_t::success) << "Ref Op1 failed";
+
+    std::vector<const void *> srcs_op2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs_op2[e] = dst1_ref[e];
+    auto pr2 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs_op2, gv_op2.lda,
+        wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
+        gv_op2.is_wc, pr2), status_t::success) << "Ref Op2 failed";
+  }
+
+  // ── Test: parameterised ALGO × TIGHT × CUSTOM, internal-alloc fused ──
+  // Also forces N_TILE_FUSED_ACT=1 so that when the caller picks
+  // ALGO 3 + swiglu in V1 mode, the inline-fused epilogue path is
+  // actually exercised (otherwise the ALGO 3 swiglu case would run a
+  // separate-pass activation and we'd miss that code path).
+  {
+    AlgoEnvGuard algo_guard(p.algo);
+    EnvVarGuard tight_guard ("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT",
+                             p.tight ? "1" : "0");
+    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",
+                             p.custom_kernel ? "1" : "0");
+    EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT", "1");
+
+    grp_matmul_fused_moe_params fused{};
+    fused.down_weight = wei2;
+    fused.N_down      = std::vector<int>(num_ops, H);
+    fused.ldb_down    = std::vector<int>(num_ops, H);
+    fused.bias_down   = no_bias;
+    // fused.dst_down / ldc_down intentionally empty → internal-alloc.
+
+    std::vector<void *> dst_null(num_ops, nullptr);
+    std::vector<int>    ldc_null(num_ops, 0);
+
+    auto pf = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_fused, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
+        gv_op1.is_wc, pf, nullptr, act_ptr, &fused),
+        status_t::success)
+        << "Fused call failed (algo=" << p.algo
+        << " tight=" << p.tight << " custom=" << p.custom_kernel
+        << " act=" << p.act_int << ")";
+  }
+
+  // ── Compare: src_fused now holds Op2 output (in-place, stride lda=K=H) ──
+  const auto tol = tol_fused(is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    for (int r = 0; r < M; ++r) {
+      for (int c = 0; c < H; ++c) {
+        const float got = src_fused.at(e, (size_t)r * K + c, is_bf16);
+        const float ref = d2_ref  .at(e, (size_t)r * H + c, is_bf16);
+        ASSERT_NEAR(got, ref, std::abs(ref) * tol.rel + tol.abs)
+            << "algo=" << p.algo << " tight=" << p.tight
+            << " custom=" << p.custom_kernel
+            << " act=" << p.act_int
+            << " e=" << e << " r=" << r << " c=" << c;
+      }
+    }
+  }
+}
+
+static std::vector<FusedAlgoCustomParam> make_fused_algo_custom_params() {
+  std::vector<FusedAlgoCustomParam> out;
+  // All 5 ALGOs × TIGHT {0,1} × CUSTOM {0,1} × act {silu, gelu, swiglu}.
+  // TIGHT=1 with act ∈ {silu, gelu} or ALGO ∉ {0,3} exercises the gate
+  // that routes back to V1 (Option A) — expected to produce identical
+  // outputs to the baseline.
+  for (int algo : {1, 2, 3, 4, 5}) {
+    for (int tight : {0, 1}) {
+      for (int custom : {0, 1}) {
+        for (int act : {1, 2, 3}) {
+          // M=4 × num_ops=4 keeps the shape small enough for fast
+          // sharded execution.  dim=64 gives N_gate_up=128 which is
+          // a multiple of the custom kernel's pack_nr=32 so the
+          // custom path is reachable.
+          out.push_back({algo, tight, custom, act,
+                         /*M=*/4, /*num_ops=*/4, /*dim=*/64});
+        }
+      }
+    }
+  }
+  return out;
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgoCustom, TestFusedMoEAlgoCustom,
+    ::testing::ValuesIn(make_fused_algo_custom_params()),
+    FusedAlgoCustomParamName);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [8] TestGroupMatmulAlgoCustom: non-fused Phase B env-knob matrix
+//
+// Targets the env-knob combinations that gate the custom BF16 microkernel's
+// engagement in the non-fused group_matmul path (ALGO 3 via flat_n_tile):
+//
+//   * GRP_MATMUL_ALGO          — 1 (sequential_experts), 3 (flat_n_tile),
+//                                5 (per_expert); covers "custom kernel
+//                                engages", "no engagement but same output",
+//                                and "per-expert distribution" respectively.
+//   * CUSTOM_KERNEL            — 0 vs 1; 0 is the trusted standard path.
+//   * N_TILE_FUSED_ACT         — 0 vs 1 on swiglu; forces the inline
+//                                fused-swiglu epilogue (otherwise the
+//                                caller does a separate post-pass).
+//   * gated_act                — none / silu / gelu / swiglu_oai_mul.
+//   * bias dtype               — none / bf16 / fp32 (fp32 bias on bf16 dst
+//                                exercises the BiasKind::fp32 load path).
+//   * moe_postop (weighted)    — off / on.
+//
+// Reference strategy: run the same call twice — once with CUSTOM_KERNEL=0
+// (standard dispatch, already verified by TestGroupMatmul / TestGatedAct /
+// TestMoEPostop) and once with CUSTOM_KERNEL at the parameterised value
+// — and assert bit-identical (for configs where the custom kernel doesn't
+// actually engage, e.g. ALGO 1 or ALGO 5) or within BF16 tolerance.  This
+// covers the whole product of env toggles that the Phase B code added
+// without duplicating the scalar-reference math elsewhere in this file.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct AlgoCustomParam {
+  int algo;               // GRP_MATMUL_ALGO strategy (1, 3, 5)
+  int custom_kernel;      // 0 or 1
+  int n_tile_fused_act;   // 0 or 1 (only meaningful for ALGO 3 + swiglu)
+  int act_int;            // 0=none, 1=silu, 2=gelu, 3=swiglu_oai
+  int bias_kind;          // 0=none, 1=bf16, 2=fp32
+  int M, num_ops, dim;
+  // NOTE: moe_postop is intentionally not swept here.  The moe_postop
+  // executor reduces the full wide Op1 output (D = N[0]), which for
+  // gated activations is 2*dim and includes the un-activated second
+  // half — that region's contents legitimately differ between the
+  // custom-kernel path (leaves cols [dim:2*dim] at zero) and the
+  // standard path (leaves them at the raw Op1 GEMM output), making a
+  // differential comparison ill-defined for act ∈ {swiglu}.  The
+  // moe + gated_act combination is already covered by
+  // TestGroupMatmulCombined, which uses a full step-by-step reference
+  // so both paths are checked against a known ground truth.
+};
+
+static std::string AlgoCustomParamName(
+    const ::testing::TestParamInfo<AlgoCustomParam> &info) {
+  static const char *act_names[]  = {"none", "silu", "gelu", "swiglu"};
+  static const char *bias_names[] = {"noBias", "biasBF16", "biasFP32"};
+  const auto &p = info.param;
+  return "algo" + std::to_string(p.algo)
+       + "_custom" + std::to_string(p.custom_kernel)
+       + "_fusedAct" + std::to_string(p.n_tile_fused_act)
+       + "_" + act_names[p.act_int]
+       + "_" + bias_names[p.bias_kind]
+       + "_M" + std::to_string(p.M)
+       + "_E" + std::to_string(p.num_ops)
+       + "_d" + std::to_string(p.dim);
+}
+
+class TestGroupMatmulAlgoCustom
+    : public ::testing::TestWithParam<AlgoCustomParam> {};
+
+// One parameterised call — sets the CUSTOM_KERNEL env to `custom_value`,
+// runs group_matmul_direct, and copies the final Op1 + activation
+// output into `out_dst`.  Separated so the TEST_P body can invoke it
+// twice (once with "0" for the reference, once with the parameter
+// value for the test) and compare.
+//
+// The outer AlgoEnvGuard + N_TILE_FUSED_ACT EnvVarGuard are set in the
+// TEST_P body so both runs share the same strategy and activation
+// routing; only CUSTOM_KERNEL flips between runs.
+static void run_one_algo_custom_pass(
+    const AlgoCustomParam &p,
+    const char *custom_value,
+    const std::vector<std::vector<bfloat16_t>> &src,
+    const std::vector<std::vector<bfloat16_t>> &wei,
+    const std::vector<std::vector<bfloat16_t>> &bias_bf16,
+    const std::vector<std::vector<float>>      &bias_fp32,
+    int N_op1, int K,
+    std::vector<std::vector<bfloat16_t>> &out_dst) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+
+  EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",
+                           custom_value);
+
+  // Zero the dst buffers so any untouched region (e.g. cols
+  // [dim:2*dim] under the custom-kernel swiglu write) has a
+  // well-defined value across both ref and test runs.
+  for (auto &v : out_dst)
+    std::fill(v.begin(), v.end(), bfloat16_t(0.0f));
+
+  std::vector<const void *> srcs(p.num_ops), weis(p.num_ops),
+                            biases(p.num_ops, nullptr);
+  std::vector<void *>       dsts(p.num_ops);
+  for (int e = 0; e < p.num_ops; ++e) {
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+    dsts[e] = out_dst[e].data();
+    if (p.bias_kind == 1) biases[e] = bias_bf16[e].data();
+    else if (p.bias_kind == 2) biases[e] = bias_fp32[e].data();
+  }
+
+  auto gv = GemmVecs::uniform(p.num_ops, p.M, N_op1, K);
+  const data_type_t bias_dt = (p.bias_kind == 1) ? data_type_t::bf16
+                            : (p.bias_kind == 2) ? data_type_t::f32
+                                                 : data_type_t::none;
+  auto params = make_uniform_params(p.num_ops, data_type_t::bf16, bias_dt);
+
+  const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+  auto *act_ptr = (p.act_int != 0) ? &act : nullptr;
+
+  ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+      gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+      biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+      /*moe_postop=*/nullptr, act_ptr),
+      status_t::success) << "call failed: custom=" << custom_value;
+}
+
+TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
+  using namespace moe_test_utils;
+
+  const auto &p = GetParam();
+
+  // N_op1 is the Op1 GEMM output width.  For act=none the output is
+  // just `dim` cols wide; for any gated activation the GEMM produces
+  // 2*dim cols and the activation compacts to [0:dim].
+  const int N_op1 = (p.act_int == 0) ? p.dim : 2 * p.dim;
+  const int K     = 64;
+
+  // Custom kernel requires N_op1 % pack_nr == 0 (32 or 64).  When the
+  // grid lands on a smaller or misaligned N_op1 the custom path will
+  // cleanly fall back to the standard dispatch — the `== 0` case is
+  // still valuable because it regression-tests the fallback path.
+
+  AlgoEnvGuard algo_guard(p.algo);
+  EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT",
+                              p.n_tile_fused_act ? "1" : "0");
+
+  // ── Prepare shared src / wei / bias (both runs see identical inputs) ──
+  std::vector<std::vector<bfloat16_t>> src(p.num_ops,
+      std::vector<bfloat16_t>((size_t)p.M * K));
+  std::vector<std::vector<bfloat16_t>> wei(p.num_ops,
+      std::vector<bfloat16_t>((size_t)K * N_op1));
+  std::vector<std::vector<bfloat16_t>> bias_bf16(p.num_ops);
+  std::vector<std::vector<float>>      bias_fp32(p.num_ops);
+  for (int e = 0; e < p.num_ops; ++e) {
+    fill_src (src[e], e, 0.02f);
+    fill_wei1(wei[e], e, 0.005f);
+    if (p.bias_kind == 1) {
+      bias_bf16[e].resize(N_op1);
+      for (int n = 0; n < N_op1; ++n)
+        bias_bf16[e][n] = bfloat16_t(0.01f * ((n + e) % 7 - 3));
+    } else if (p.bias_kind == 2) {
+      bias_fp32[e].resize(N_op1);
+      for (int n = 0; n < N_op1; ++n)
+        bias_fp32[e][n] = 0.01f * ((n + e) % 7 - 3);
+    }
+  }
+
+  // ── Reference run: CUSTOM_KERNEL=0 ─────────────────────────────────
+  std::vector<std::vector<bfloat16_t>> dst_ref(p.num_ops,
+      std::vector<bfloat16_t>((size_t)p.M * N_op1, bfloat16_t(0.0f)));
+  ASSERT_NO_FATAL_FAILURE(
+      run_one_algo_custom_pass(p, "0", src, wei, bias_bf16, bias_fp32,
+                               N_op1, K, dst_ref));
+
+  // ── Test run: CUSTOM_KERNEL as parameterised ──────────────────────
+  std::vector<std::vector<bfloat16_t>> dst_test(p.num_ops,
+      std::vector<bfloat16_t>((size_t)p.M * N_op1, bfloat16_t(0.0f)));
+  ASSERT_NO_FATAL_FAILURE(
+      run_one_algo_custom_pass(p,
+                               p.custom_kernel ? "1" : "0",
+                               src, wei, bias_bf16, bias_fp32,
+                               N_op1, K, dst_test));
+
+  // ── Compare ────────────────────────────────────────────────────────
+  // When the custom kernel doesn't actually engage (ALGO 1 / 2 / 4 / 5,
+  // or contract-rejected shapes), both runs take the same code path
+  // and should match bit-for-bit.  When it does engage (ALGO 3 with a
+  // satisfying contract), the FP32 accumulator numerics are nearly
+  // identical to the AOCL DLP path; BF16 tolerance captures the
+  // per-element rounding of the final `_mm512_cvtneps_pbh`.
+  //
+  // For gated activations we only compare the activated half
+  // [0:dim] of each row.  The un-activated half [dim:2*dim] is
+  // "don't care" per the library contract and legitimately differs
+  // between paths (custom-kernel swiglu leaves zeros, standard
+  // leaves raw GEMM output).
+  const auto tol = tol_act(true);
+  const int cmp_N = (p.act_int == 0) ? N_op1 : p.dim;
+  for (int e = 0; e < p.num_ops; ++e) {
+    for (int m = 0; m < p.M; ++m) {
+      for (int n = 0; n < cmp_N; ++n) {
+        const size_t idx = static_cast<size_t>(m) * N_op1 + n;
+        const float ref_v  = static_cast<float>(dst_ref[e][idx]);
+        const float test_v = static_cast<float>(dst_test[e][idx]);
+        ASSERT_NEAR(test_v, ref_v, std::abs(ref_v) * tol.rel + tol.abs)
+            << "algo=" << p.algo << " custom=" << p.custom_kernel
+            << " fusedAct=" << p.n_tile_fused_act
+            << " act=" << p.act_int << " bias=" << p.bias_kind
+            << " e=" << e << " m=" << m << " n=" << n;
+      }
+    }
+  }
+}
+
+static std::vector<AlgoCustomParam> make_algo_custom_params() {
+  std::vector<AlgoCustomParam> out;
+  // Strategy coverage — 1 (sequential), 3 (flat_n_tile = custom hook),
+  // 5 (per-expert).  Skip 2 and 4 to keep the grid tight; those
+  // executors don't look at CUSTOM_KERNEL anyway (ALGO 3 is the only
+  // engagement site in the non-fused path).
+  const int algos[] = {1, 3, 5};
+  // dim=64 → N_op1=128 for act=none, N_op1=128 for gated; K=64.
+  // This lets ALGO 3 exercise its N-tile split on ≥2 threads while
+  // keeping the test shape small enough to run fast.
+  const int dim = 64;
+
+  // Core grid — every (algo × custom × act × bias) combo.
+  // N_TILE_FUSED_ACT is only meaningful for swiglu (the only gated
+  // activation the custom kernel's inline epilogue supports), so we
+  // only sweep both values of that knob for act=swiglu_oai_mul.
+  for (int algo : algos) {
+    for (int custom : {0, 1}) {
+      for (int act : {0, 1, 2, 3}) {
+        for (int bias : {0, 1, 2}) {
+          const std::vector<int> fused_acts =
+              (act == 3) ? std::vector<int>{0, 1}
+                         : std::vector<int>{0};
+          for (int fa : fused_acts) {
+            // M=4 × num_ops=8 keeps the shape small enough to run
+            // fast under 8×64 sharding.  dim=64 → N_op1=128 for the
+            // gated cases (multiple of pack_nr=32 so the custom
+            // kernel's contract is met) and N_op1=64 for act=none
+            // (also a clean multiple of 32).
+            out.push_back({algo, custom, fa, act, bias,
+                           /*M=*/4, /*num_ops=*/8, dim});
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulAlgoCustom, TestGroupMatmulAlgoCustom,
+    ::testing::ValuesIn(make_algo_custom_params()), AlgoCustomParamName);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [9] TestFusedMoENegative: validation error paths (fast-fail)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace {
