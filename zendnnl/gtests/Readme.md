@@ -32,6 +32,7 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `NORM_F32_TOL`: Tolerance for normalization F32 tests (default: `0.001`).
 - `NORM_BF16_TOL`: Tolerance for normalization BF16 tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `100`).
+- `POST_OPS_LIMIT`: Maximum number of post-ops allowed in a single chain (default: `3`). Defined in `gtest_utils.hpp`. Applies to `--postop`, matmul/batch-matmul/reorder input file `postOp` fields, and random post-op generation (which picks a chain length uniformly from `1` … `POST_OPS_LIMIT`). If the parsed chain exceeds this limit, gtest reports an error (`Post-op chain length exceeds POST_OPS_LIMIT.`).
 
 ## **Matrix Dimension Ranges**
 
@@ -148,6 +149,8 @@ The following post-operations are supported for matmul and its variations:
 
 **Note:** If specified post-op is not from above mention list, then no post-op will be applied to operator.
 
+**Post-op chain length:** At most `POST_OPS_LIMIT` post-ops may appear in one chain (see **Configurable Parameters**). Longer chains from `--postop` or an input file are rejected.
+
 ## **Bias Support**
 - **Default Behavior**: Bias is enabled by default for all matrix multiplication tests
 - **Data Types**: Bias tensors support both F32 and BF16 data types, randomly selected during test execution
@@ -188,6 +191,8 @@ cmake --build .
 ./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend> --lowoha <true/false> --num_threads <num_threads>
 ```
 
+**Multiple post-ops:** in `--postop` and in the matmul input file `postOp` column, join op names with **`:`**; order is the execution order after the GEMM. The chain length is capped by **`POST_OPS_LIMIT`** (default `3`). See **3. `--postop`**, below.
+
 ### **Command Structure with Input File**
 ```bash
 ./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --input_file <InputFile> --op <Operator> --ndims <Dimensions> --lowoha <true/false> --num_threads <num_threads>
@@ -207,7 +212,10 @@ cmake --build .
 
 3. **`--postop <PostOp>`** (Optional):
    - Specifies the post-operation to apply during tests.
-
+   - **Multiple post-ops:** use **`:`** between names so more than one post-op runs in sequence after the GEMM, left to right, e.g. `relu:tanh`, `sigmoid:binary_add:gelu_erf`.
+   - The total number of post-ops in the chain must not exceed **`POST_OPS_LIMIT`** (default `3`, see `gtest_utils.hpp` and **Configurable Parameters**).
+   - The same `:`-separated list can appear in the `postOp` field of a matmul input file line; you would use the file (not this flag) when running from `--input_file`.
+   - *Examples:* `--postop relu:sigmoid`; a matmul input file line can use the same in the `postOp` field, e.g. `…,relu:tanh,…` between the shape fields and the kernel (see *Input File Format* / *Matmul (2D) Input File Format*).
 4. **`--test <num_of_tests>`** (Optional):
    - Specifies the number of tests to be run for test-suite.
 
@@ -328,7 +336,7 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 **Field Descriptions:**
 - **M, K, N**: Matrix dimensions
 - **BS**: Batch size (for batch matmul only)
-- **postOp**: Post-operation (relu, gelu_tanh, gelu_erf, sigmoid, swish, tanh, binary_add, binary_mul, or none)
+- **postOp**: Post-op(s) after the GEMM; for a chain, join with **`:`** (e.g. `relu:tanh`). Same token names as a single op: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `binary_add`, `binary_mul`, or `none`. The chain may include at most **`POST_OPS_LIMIT`** operations (default `3`).
 - **kernel**: Backend algorithm (aocl_dlp, aocl_dlp_blocked, onednn, onednn_blocked, libxsmm, libxsmm_blocked)
 - **transA, transB**: Transpose flags (0 or 1)
 - **alpha, beta**: Scaling factors for matmul operations

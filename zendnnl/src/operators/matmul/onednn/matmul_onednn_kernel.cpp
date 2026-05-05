@@ -189,8 +189,8 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
 
   if (!post_ops_list.empty()) {
     [[maybe_unused]] int mul_index = 0, add_index = 0;
-    [[maybe_unused]] float po_alpha = 0.0f, po_beta = 0.0f;
     for (size_t po = 0; po < post_ops_list.size(); po++) {
+      float po_alpha = 0.0f, po_beta = 0.0f;
       post_op_t zen_po = post_ops_list[po];
 
       switch (zen_po.type) {

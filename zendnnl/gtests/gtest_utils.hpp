@@ -43,6 +43,7 @@
 #define BATCH_END 256
 #define TEST_PARTITIONS 3
 #define ENABLE_F32_RELAXATION 0
+#define POST_OPS_LIMIT 3
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
@@ -60,7 +61,7 @@ struct MatmulType {
   uint64_t matmul_m;
   uint64_t matmul_k;
   uint64_t matmul_n;
-  post_op_type_t po_type;
+  std::vector<post_op_type_t> po_types;
   bool     transA;
   bool     transB;
   //TODO: Add support for other data_types as well
@@ -288,6 +289,11 @@ class Parser {
 };
 
 bool is_binary_postop(post_op_type_t post_op);
+
+std::vector<tensor_t> make_binary_postop_tensors(
+  tensor_factory_t &factory, const std::vector<post_op_type_t> &po_types,
+  const std::vector<tensor_factory_t::index_type> &output_shape,
+  data_type_t binary_dtype = data_type_t::f32, float uniform_range = 2.0f);
 // Array of supported post operations
 const post_op_type_t post_op_arr[] = {
   post_op_type_t::relu,
@@ -362,6 +368,16 @@ post_op_type_t strToPostOps(const std::string &str);
  * @return std::string The string representation of the post operation.
  */
 std::string postOpsToStr(post_op_type_t post_op);
+
+/**
+ * @brief Joins a sequence of post-op types for logging (e.g. "relu:binary_add").
+ *        Entries equal to `none` are skipped so the string matches the
+ *        post-op chain actually built by tests (e.g. matmul_kernel_test).
+ * @return Empty string if all entries are `none` or the vector is empty; otherwise
+ *         non-`none` names joined with ':'.
+ */
+std::string postOpTypesToStr(const std::vector<post_op_type_t> &po_types);
+
 /** @fn read_matmul_inputs
  *  @brief Read and parse matmul test configurations from a file
  *
@@ -424,8 +440,10 @@ std::vector<std::string> split(const std::string &s, char delimiter);
  *  @return matmul status
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                            tensor_t &bias, tensor_t &output_tensor, post_op_type_t po_type,
-                            tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                            tensor_t &bias, tensor_t &output_tensor,
+                            const std::vector<post_op_type_t> &po_types,
+                            const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
+                            matmul_algo_t algo,
                             float alpha = 1.0f,
                             float beta = 0.0f,
                             int pack_format_b = 0);
@@ -442,7 +460,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       post_op_type_t po_type, tensor_t &binary_tensor, bool use_LOWOHA,
+                                       const std::vector<post_op_type_t> &po_types,
+                                       const std::vector<tensor_t> &binary_tensors,
+                                       bool use_LOWOHA,
                                        matmul_algo_t algo,
                                        float alpha = 1.0f,
                                        float beta = 0.0f);

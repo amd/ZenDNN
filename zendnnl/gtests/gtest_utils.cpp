@@ -93,6 +93,8 @@ void repack_weights_q8_0(const int8_t *weight_buffer,
 }
 
 MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
+  // Use std::mt19937 for random float generation
+  std::mt19937 gen(rand());
   bool test_gemv_m1 = false;
   if (!cmd_test_gemv_m1.empty()) {
     test_gemv_m1 = (cmd_test_gemv_m1 == "1") || (cmd_test_gemv_m1 == "true");
@@ -104,14 +106,21 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   transB     = rand() % 2;
   // Post-op selection based on command-line input or random selection
   if (!cmd_post_op.empty()) {
-    po_type = strToPostOps(cmd_post_op);
+    for (const auto &po : split(cmd_post_op, ':')) {
+      po_types.push_back(strToPostOps(po));
+    }
+    if (po_types.size() > POST_OPS_LIMIT) {
+      EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
+    }
   }
   else {
-    po_type = post_op_arr[rand() % (po_size + 1)];
+    std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
+    int num_po_local = num_po(gen);
+    for (int i = 0; i < num_po_local; ++i) {
+      po_types.push_back(post_op_arr[rand() % (po_size + 1)]);
+    }
   }
 
-  // Use std::mt19937 for random float generation
-  std::mt19937 gen(rand());
   std::uniform_real_distribution<float> dist(0.0, 10.0);
   alpha    = dist(gen);
   beta     = dist(gen);
@@ -217,9 +226,12 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     alpha = 1.0f;
     beta = rand() % 2;
     //ToDo: Need to support silu, gelu_tanh, clip.
-    if (po_type == post_op_type_t::swish || po_type == post_op_type_t::gelu_tanh ||
-        po_type == post_op_type_t::clip) {
-      po_type = post_op_type_t::none;
+    for (uint32_t i = 0; i < po_types.size(); ++i) {
+      if (po_types[i] == post_op_type_t::swish ||
+          po_types[i] == post_op_type_t::gelu_tanh ||
+          po_types[i] == post_op_type_t::clip) {
+        po_types[i] = post_op_type_t::none;
+      }
     }
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
@@ -484,6 +496,21 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 bool is_binary_postop(post_op_type_t post_op) {
   return post_op == post_op_type_t::binary_add ||
          post_op == post_op_type_t::binary_mul;
+}
+
+std::vector<tensor_t> make_binary_postop_tensors(
+  tensor_factory_t &tensor_factory, const std::vector<post_op_type_t> &po_types,
+  const std::vector<tensor_factory_t::index_type> &output_shape,
+  data_type_t binary_dtype, float uniform_range) {
+  std::vector<tensor_t> out;
+  out.reserve(po_types.size());
+  for (const auto &po : po_types) {
+    if (is_binary_postop(po)) {
+      out.push_back(
+        tensor_factory.uniform_dist_tensor(output_shape, binary_dtype, uniform_range));
+    }
+  }
+  return out;
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
@@ -1194,10 +1221,11 @@ bool Parser::isInteger(const std::string &s) {
 }
 
 void PrintTo(const MatmulType &value, ::std::ostream *os) {
+  const std::string po_str = postOpTypesToStr(value.po_types);
   *os << "m=" << value.matmul_m << ", k=" << value.matmul_k << ", n="
       << value.matmul_n << ", transA=" << value.transA << ", transB="
       << value.transB << ", alpha=" << value.alpha << ", beta=" << value.beta
-      << ", postop=" << postOpsToStr(value.po_type)
+      << ", postop=" << po_str
       << ", algo=" << algoToStr(value.algo)
       << ", src_dtype=" << dtype_info(value.source_dtype)
       << ", dst_dtype=" << dtype_info(value.output_dtype)
@@ -1322,6 +1350,12 @@ std::string algoToStr(matmul_algo_t algo) {
 }
 
 post_op_type_t strToPostOps(const std::string &str) {
+  if (str.empty()) {
+    log_warning(
+      "Empty post-op token in ':'-separated chain (extra ':'); treating as "
+      "none.");
+    return post_op_type_t::none;
+  }
   if (str == "relu") {
     return post_op_type_t::relu;
   }
@@ -1349,7 +1383,10 @@ post_op_type_t strToPostOps(const std::string &str) {
   if (str == "binary_mul") {
     return post_op_type_t::binary_mul;
   }
-  return post_op_type_t::none;
+  if (str == "none") {
+    return post_op_type_t::none;
+  }
+  EXCEPTION("Unknown post-op name \"" + str + "\".");
 }
 
 std::string postOpsToStr(post_op_type_t post_op) {
@@ -1375,6 +1412,22 @@ std::string postOpsToStr(post_op_type_t post_op) {
   default:
     return "none";
   }
+}
+
+std::string postOpTypesToStr(const std::vector<post_op_type_t> &po_types) {
+  std::string s;
+  bool first = true;
+  for (size_t i = 0; i < po_types.size(); ++i) {
+    if (po_types[i] == post_op_type_t::none) {
+      continue;
+    }
+    if (!first) {
+      s += ':';
+    }
+    s += postOpsToStr(po_types[i]);
+    first = false;
+  }
+  return s;
 }
 
 void trim(std::string &str) {
@@ -1465,11 +1518,22 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
         }
         id++;
 
+        cfg.mat.po_types.clear();
         if (fields[id].empty()) {
-          cfg.mat.po_type = post_op_arr[rand() % (po_size + 1)];
+          std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
+          int num_po_local = num_po(gen);
+          for (int i = 0; i < num_po_local; ++i) {
+            cfg.mat.po_types.push_back(post_op_arr[rand() % (po_size + 1)]);
+          }
         }
         else {
-          cfg.mat.po_type = strToPostOps(fields[id]);
+          for (const auto &po : split(fields[id], ':')) {
+            cfg.mat.po_types.push_back(strToPostOps(po));
+          }
+          if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
+            EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
+            continue;
+          }
         }
         id++;
 
@@ -1545,6 +1609,16 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
         else {
           cfg.mat.use_LOWOHA = rand() % 2;
         }
+        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
+            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
+          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
+            if (cfg.mat.po_types[i] == post_op_type_t::swish ||
+                cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
+                cfg.mat.po_types[i] == post_op_type_t::clip) {
+              cfg.mat.po_types[i] = post_op_type_t::none;
+            }
+          }
+        }
         cfg.mat.source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
         cfg.mat.output_dtype = dtype_arr[rand() % dtype_size];
         cfg.mat.weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
@@ -1604,11 +1678,22 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
         id++;
 
         // Parse post-op: search for the string in po_arr and assign its index
+        cfg.mat.po_types.clear();
         if (fields[id].empty()) {
-          cfg.mat.po_type = post_op_arr[rand() % (po_size + 1)];
+          std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
+          int num_po_local = num_po(gen);
+          for (int i = 0; i < num_po_local; ++i) {
+            cfg.mat.po_types.push_back(post_op_arr[rand() % (po_size + 1)]);
+          }
         }
         else {
-          cfg.mat.po_type = strToPostOps(fields[id]);
+          for (const auto &po : split(fields[id], ':')) {
+            cfg.mat.po_types.push_back(strToPostOps(po));
+          }
+          if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
+            EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
+            continue;
+          }
         }
         id++;
 
@@ -1678,6 +1763,16 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
             cfg.inplace_reorder = false;
           }
         }
+        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
+            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
+          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
+            if (cfg.mat.po_types[i] == post_op_type_t::swish ||
+                cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
+                cfg.mat.po_types[i] == post_op_type_t::clip) {
+              cfg.mat.po_types[i] = post_op_type_t::none;
+            }
+          }
+        }
         inputs.push_back(cfg);
       }
       catch (const std::exception &e) {
@@ -1694,7 +1789,9 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias_tensor, tensor_t &output_tensor,
-                            post_op_type_t po_type, tensor_t &binary_tensor, bool use_LOWOHA,
+                            const std::vector<post_op_type_t> &po_types,
+                            const std::vector<tensor_t> &binary_tensors,
+                            bool use_LOWOHA,
                             matmul_algo_t algo,
                             float alpha,
                             float beta,
@@ -1974,18 +2071,33 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         batch_params.batch_stride_wei = batch_stride_wei;
         batch_params.batch_stride_dst = batch_stride_dst;
 
-        // Add post-ops based on po_type
-        if (po_type != post_op_type_t::none) {
-          matmul_post_op postop_item;
-          postop_item.po_type = po_type;
+        size_t expected_binary_tensors = 0;
+        for (const auto &p : po_types) {
+          if (is_binary_postop(p)) {
+            ++expected_binary_tensors;
+          }
+        }
+        if (expected_binary_tensors != binary_tensors.size()) {
+          log_error("LOWOHA: binary post-ops in po_types (", expected_binary_tensors,
+                    ") do not match binary_tensors size (", binary_tensors.size(), ")");
+          return status_t::failure;
+        }
 
+        // Add post-ops based on po_types
+        int binary_index = 0;
+        for (const auto &po : po_types) {
+          if (po == post_op_type_t::none) {
+            continue;
+          }
+          matmul_post_op postop_item;
+          postop_item.po_type = po;
           // For binary operations, set the buffer to binary_tensor
-          if (po_type == post_op_type_t::binary_add ||
-              po_type == post_op_type_t::binary_mul) {
-            postop_item.buff = binary_tensor.get_raw_handle_unsafe();
-            postop_item.dtype = binary_tensor.get_data_type();
-            auto binary_tensor_dims = binary_tensor.get_size();
+          if (po == post_op_type_t::binary_add || po == post_op_type_t::binary_mul) {
+            postop_item.buff = binary_tensors[binary_index].get_raw_handle_unsafe();
+            postop_item.dtype = binary_tensors[binary_index].get_data_type();
+            auto binary_tensor_dims = binary_tensors[binary_index].get_size();
             postop_item.dims.assign(binary_tensor_dims.begin(), binary_tensor_dims.end());
+            binary_index++;
           }
           else {
             postop_item.buff = nullptr; // For element-wise operations
@@ -1993,15 +2105,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           }
 
           // Fused post-op scalars from gtest_main.cpp (match reference post_op_t).
-          if (po_type == post_op_type_t::swish) {
+          if (po == post_op_type_t::swish) {
             postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
             postop_item.beta = 0.0f;
           }
-          else if (po_type == post_op_type_t::elu) {
+          else if (po == post_op_type_t::elu) {
             postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
             postop_item.beta = 0.0f;
           }
-          else if (po_type == post_op_type_t::clip) {
+          else if (po == post_op_type_t::clip) {
             float lo = MATMUL_POSTOP_CLIP_LOWER;
             float hi = MATMUL_POSTOP_CLIP_UPPER;
             if (lo > hi) {
@@ -2013,7 +2125,6 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
             postop_item.alpha = lo;
             postop_item.beta = hi;
           }
-
           params.postop_.push_back(postop_item);
         }
         bool is_weights_const = is_woq || is_wei_s8 || (rand() % 2 == 0);
@@ -2066,32 +2177,6 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       }
     }
     else {
-      post_op_t post_op = post_op_t{post_op_type_t::relu};
-      if (po_type != post_op_type_t::none) {
-        switch (po_type) {
-        case post_op_type_t::clip: {
-          float lo = MATMUL_POSTOP_CLIP_LOWER;
-          float hi = MATMUL_POSTOP_CLIP_UPPER;
-          if (lo > hi) {
-            std::swap(lo, hi);
-          }
-          if (hi - lo < 1e-6f) {
-            hi = lo + 1e-3f;
-          }
-          post_op = post_op_t(clip_params_t{lo, hi});
-          break;
-        }
-        case post_op_type_t::swish:
-          post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
-          break;
-        case post_op_type_t::elu:
-          post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
-          break;
-        default:
-          post_op = post_op_t{po_type};
-          break;
-        }
-      }
       weight_tensor.set_name("weights");
       bias_tensor.set_name("bias");
 
@@ -2106,12 +2191,36 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
             output_tensor.get_data_type() == data_type_t::f16)) {
         matmul_context = matmul_context.set_param("bias", bias_tensor);
       }
-      if (po_type != post_op_type_t::none) {
-        matmul_context = matmul_context.set_post_op(post_op).create();
+      for (const auto &po : po_types) {
+        auto post_op = post_op_t{po};
+        if (po  != post_op_type_t::none) {
+          switch (po) {
+          case post_op_type_t::clip: {
+            float lo = MATMUL_POSTOP_CLIP_LOWER;
+            float hi = MATMUL_POSTOP_CLIP_UPPER;
+            if (lo > hi) {
+              std::swap(lo, hi);
+            }
+            if (hi - lo < 1e-6f) {
+              hi = lo + 1e-3f;
+            }
+            post_op = post_op_t(clip_params_t{lo, hi});
+            break;
+          }
+          case post_op_type_t::swish:
+            post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+            break;
+          case post_op_type_t::elu:
+            post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+            break;
+          default:
+            post_op = post_op_t{po};
+            break;
+          }
+          matmul_context = matmul_context.set_post_op(post_op);
+        }
       }
-      else {
-        matmul_context = matmul_context.create();//No Postop case
-      }
+      matmul_context = matmul_context.create();
 
       //define matmul operator
       matmul_operator_t matmul_operator = matmul_operator_t()
@@ -2127,13 +2236,31 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       input_tensor.set_name("matmul_input");
       output_tensor.set_name("matmul_output");
       // Set binary tensor for binary postops
-      if (po_type != post_op_type_t::none) {
-        if (po_type == post_op_type_t::binary_add) {
-          matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+      size_t expected_binary_tensors = 0;
+      for (const auto &p : po_types) {
+        if (is_binary_postop(p)) {
+          ++expected_binary_tensors;
         }
-        else if (po_type == post_op_type_t::binary_mul) {
-          matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+      }
+      if (expected_binary_tensors != binary_tensors.size()) {
+        log_error("matmul: binary post-ops in po_types (", expected_binary_tensors,
+                  ") do not match binary_tensors size (", binary_tensors.size(), ")");
+        return status_t::failure;
+      }
+      uint32_t binary_index = 0, po_index = 0;
+      for (auto po : po_types) {
+        if (po == post_op_type_t::none) {
+          continue;
         }
+        if (po == post_op_type_t::binary_add) {
+          matmul_operator.set_input(matmul_context.get_post_op(
+                                      po_index).binary_add_params.tensor_name, binary_tensors[binary_index++]);
+        }
+        else if (po == post_op_type_t::binary_mul) {
+          matmul_operator.set_input(matmul_context.get_post_op(
+                                      po_index).binary_mul_params.tensor_name, binary_tensors[binary_index++]);
+        }
+        po_index++;
       }
       matmul_operator.set_input("matmul_input", input_tensor)
       .set_output("matmul_output", output_tensor);
@@ -2162,37 +2289,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weight_tensor,
                                        tensor_t &bias_tensor, tensor_t &output_tensor,
-                                       post_op_type_t po_type, tensor_t &binary_tensor, bool use_LOWOHA,
+                                       const std::vector<post_op_type_t> &po_types,
+                                       const std::vector<tensor_t> &binary_tensors,
+                                       bool use_LOWOHA,
                                        matmul_algo_t algo,
                                        float alpha,
                                        float beta) {
   try {
-    post_op_t post_op = post_op_t{post_op_type_t::relu};
-    if (po_type != post_op_type_t::none) {
-      switch (po_type) {
-      case post_op_type_t::clip: {
-        float lo = MATMUL_POSTOP_CLIP_LOWER;
-        float hi = MATMUL_POSTOP_CLIP_UPPER;
-        if (lo > hi) {
-          std::swap(lo, hi);
-        }
-        if (hi - lo < 1e-6f) {
-          hi = lo + 1e-3f;
-        }
-        post_op = post_op_t(clip_params_t{lo, hi});
-        break;
-      }
-      case post_op_type_t::swish:
-        post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
-        break;
-      case post_op_type_t::elu:
-        post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
-        break;
-      default:
-        post_op = post_op_t{po_type};
-        break;
-      }
-    }
     weight_tensor.set_name("weights");
     bias_tensor.set_name("bias");
 
@@ -2214,12 +2317,36 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
     }
 
 
-    if (po_type != post_op_type_t::none) {
-      matmul_context = matmul_context.set_post_op(post_op).create();
+    for (const auto &po : po_types) {
+      auto post_op = post_op_t{po};
+      if (po != post_op_type_t::none) {
+        switch (po) {
+        case post_op_type_t::clip: {
+          float lo = MATMUL_POSTOP_CLIP_LOWER;
+          float hi = MATMUL_POSTOP_CLIP_UPPER;
+          if (lo > hi) {
+            std::swap(lo, hi);
+          }
+          if (hi - lo < 1e-6f) {
+            hi = lo + 1e-3f;
+          }
+          post_op = post_op_t(clip_params_t{lo, hi});
+          break;
+        }
+        case post_op_type_t::swish:
+          post_op = post_op_t(swish_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+          break;
+        case post_op_type_t::elu:
+          post_op = post_op_t(elu_params_t{MATMUL_POSTOP_ELTWISE_ALPHA});
+          break;
+        default:
+          post_op = post_op_t{po};
+          break;
+        }
+        matmul_context = matmul_context.set_post_op(post_op);
+      }
     }
-    else {
-      matmul_context = matmul_context.create(); //No postop case
-    }
+    matmul_context = matmul_context.create();
 
     //define matmul operator
     matmul_operator_t matmul_operator = matmul_operator_t()
@@ -2234,15 +2361,35 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
 
-    if (po_type != post_op_type_t::none) {
-      if (po_type == post_op_type_t::binary_add) {
-        matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
-      }
-      else if (po_type == post_op_type_t::binary_mul) {
-        // Set binary tensor for binary postops
-        matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+    size_t expected_binary_tensors = 0;
+    for (const auto &p : po_types) {
+      if (is_binary_postop(p)) {
+        ++expected_binary_tensors;
       }
     }
+    if (expected_binary_tensors != binary_tensors.size()) {
+      log_error("matmul_forced_ref: binary post-ops in po_types (",
+                expected_binary_tensors,
+                ") do not match binary_tensors size (", binary_tensors.size(), ")");
+      return status_t::failure;
+    }
+
+    uint32_t binary_index = 0, po_index = 0;
+    for (auto po : po_types) {
+      if (po == post_op_type_t::none) {
+        continue;
+      }
+      if (po == post_op_type_t::binary_add) {
+        matmul_operator.set_input(matmul_context.get_post_op(
+                                    po_index).binary_add_params.tensor_name, binary_tensors[binary_index++]);
+      }
+      else if (po == post_op_type_t::binary_mul) {
+        matmul_operator.set_input(matmul_context.get_post_op(
+                                    po_index).binary_mul_params.tensor_name, binary_tensors[binary_index++]);
+      }
+      po_index++;
+    }
+
     status_t status = matmul_operator.set_input("matmul_input", input_tensor)
                       .set_output("matmul_output", output_tensor)
                       .set_forced_kernel("reference")
