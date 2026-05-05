@@ -15,9 +15,11 @@
 # *******************************************************************************/
 
 # ---------------------------------------------------------------------------
-# No per-file ISA flags needed: sdpa_simd.hpp uses
-# __attribute__((target("avx512f,avx512bw,avx512vl,fma"))) on AVX-512
-# functions and runtime dispatch via get_avx512f_status().
+#  No per-file ISA flags needed: lowoha_operators/common/simd_ops.hpp provides
+#  AVX-512 target attributes/wrappers (for example,
+#  __attribute__((target("avx512f,avx512bw,avx512vl,fma")))), while
+#  runtime ISA dispatch is handled in the flash SDPA implementation (for
+#  example, lowoha_sdpa_flash_cpu.cpp).
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -31,8 +33,7 @@ set(lowoha_flash_sdpa_sources
 set(lowoha_flash_sdpa_public_headers
     lowoha_flash_sdpa.hpp
     lowoha_flash_sdpa_utils.hpp
-    lowoha_sdpa_flash_cpu.hpp
-    sdpa_simd.hpp)
+    lowoha_sdpa_flash_cpu.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

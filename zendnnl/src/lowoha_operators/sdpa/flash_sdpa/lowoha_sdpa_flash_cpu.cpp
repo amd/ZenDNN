@@ -6,7 +6,7 @@
 # *******************************************************************************/
 
 #include "lowoha_sdpa_flash_cpu.hpp"
-#include "sdpa_simd.hpp"
+#include "lowoha_operators/common/simd_ops.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 #include <algorithm>
@@ -41,7 +41,7 @@ namespace sdpa {
 
 static_assert(simd::SimdOps<simd::avx512_tag>::kFloatLanes >= 1 &&
               simd::SimdOps<simd::scalar_tag>::kFloatLanes >= 1,
-              "sdpa_simd.hpp must provide at least 1 float lane per tag");
+              "simd_ops.hpp must provide at least 1 float lane per tag");
 
 struct scratch_buffer {
   void  *ptr = nullptr;

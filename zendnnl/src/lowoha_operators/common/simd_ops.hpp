@@ -2,8 +2,7 @@
  * Modifications Copyright (c) 2025-2026 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
- * Phase 1 SIMD abstraction for SDPA standalone kernel (see
- * zen_Sdpa_standalone_performance_plan.md). No ATen dependency.
+ * Cross-operator SIMD abstraction. No ATen / operator dependency.
  *
  * Two specializations selected at runtime via SimdOps<Tag>:
  *   - avx512_tag: 16 floats per vector, AVX-512 intrinsics via
@@ -21,7 +20,6 @@
 
 namespace zendnnl {
 namespace lowoha {
-namespace sdpa {
 namespace simd {
 
 // ---------------------------------------------------------------------------
@@ -123,7 +121,7 @@ struct SimdOps<scalar_tag> {
 // AVX-512 specialization — 16 float lanes, enabled via target attribute.
 // ===========================================================================
 
-#define SDPA_AVX512_ATTR __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+#define LOWOHA_SIMD_AVX512_ATTR __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 
 template <>
 struct SimdOps<avx512_tag> {
@@ -131,64 +129,64 @@ struct SimdOps<avx512_tag> {
   using VecF32 = __m512;
   static constexpr int kFloatLanes = 16;
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_loadu(const float *p) {
     return _mm512_loadu_ps(p);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline void vec_storeu(float *p, VecF32 x) {
     _mm512_storeu_ps(p, x);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_set1(float f) {
     return _mm512_set1_ps(f);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_add(VecF32 a, VecF32 b) {
     return _mm512_add_ps(a, b);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_sub(VecF32 a, VecF32 b) {
     return _mm512_sub_ps(a, b);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_mul(VecF32 a, VecF32 b) {
     return _mm512_mul_ps(a, b);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_fmadd(VecF32 a, VecF32 b, VecF32 c) {
     return _mm512_fmadd_ps(a, b, c);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_max(VecF32 a, VecF32 b) {
     return _mm512_max_ps(a, b);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_min(VecF32 a, VecF32 b) {
     return _mm512_min_ps(a, b);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline float vec_hsum(VecF32 v) {
     return _mm512_reduce_add_ps(v);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline float vec_hmax(VecF32 v) {
     return _mm512_reduce_max_ps(v);
   }
 
   // ── Fast exp (~20 ULP, Malossi et al.) ──────────────────────────────
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline __m512 fexp_u20_ps_512(__m512 values) {
     static const __m512 vec_c0 = _mm512_set1_ps(0.00010703434948458272f);
     static const __m512 vec_c1 = _mm512_set1_ps(0.30354260500649682f);
@@ -231,7 +229,7 @@ struct SimdOps<avx512_tag> {
     return _mm512_castsi512_ps(casted_integer);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline __m512 exp_u20_ps_512(__m512 values) {
     static const __m512 vec_factorial_1 = _mm512_set1_ps(0.999999701f);
     static const __m512 vec_factorial_2 = _mm512_set1_ps(0.499991506f);
@@ -290,31 +288,31 @@ struct SimdOps<avx512_tag> {
 
   // ── Public exp wrappers ─────────────────────────────────────────────
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_exp_u20(VecF32 v) {
     return exp_u20_ps_512(v);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_fexp_u20(VecF32 v) {
     return fexp_u20_ps_512(v);
   }
 
   // ── Reductions ──────────────────────────────────────────────────────
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline float vec_reduce_sum(VecF32 acc) {
     return vec_hsum(acc);
   }
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline float vec_reduce_max(VecF32 acc) {
     return vec_hmax(acc);
   }
 
   // ── BF16 ────────────────────────────────────────────────────────────
 
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline VecF32 vec_mask_bf16_loadu(const uint16_t *p) {
     __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
     __m512i wide = _mm512_slli_epi32(_mm512_cvtepu16_epi32(u), 16);
@@ -323,7 +321,7 @@ struct SimdOps<avx512_tag> {
 
   // FP32 → BF16 store with round-to-nearest-even (no avx512bf16 ISA needed).
   // Inverse of vec_mask_bf16_loadu: packs 16 × FP32 into 16 × BF16.
-  SDPA_AVX512_ATTR
+  LOWOHA_SIMD_AVX512_ATTR
   static inline void vec_bf16_storeu(uint16_t *dst, VecF32 v) {
     __m512i u = _mm512_castps_si512(v);
     __m512i rounding_bias = _mm512_add_epi32(
@@ -335,9 +333,8 @@ struct SimdOps<avx512_tag> {
   }
 };
 
-#undef SDPA_AVX512_ATTR
+#undef LOWOHA_SIMD_AVX512_ATTR
 
 } // namespace simd
-} // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl

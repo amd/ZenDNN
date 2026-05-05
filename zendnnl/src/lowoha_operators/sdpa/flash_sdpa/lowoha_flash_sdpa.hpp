@@ -41,7 +41,7 @@ namespace sdpa {
  *
  * @return status_t::success or status_t::failure
  */
-status_t sdpa_flash_cpu_standalone(
+status_t flash_sdpa(
   const void *query,
   const void *key,
   const void *value,

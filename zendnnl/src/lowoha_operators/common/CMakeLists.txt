@@ -16,7 +16,8 @@
 
 set(lowoha_common_public_headers
   omp_thread_control.hpp
-  operator_instrumentation.hpp)
+  operator_instrumentation.hpp
+  simd_ops.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

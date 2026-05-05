@@ -40,8 +40,8 @@ status_t sdpa_direct(
   // Log string built lazily -- only after computation when profiling
   const bool needs_log = apilog_info_enabled() || is_profile;
 
-  status_t st = sdpa_flash_cpu_standalone(query, key, value, attn_mask,
-                                          output, params);
+  status_t st = flash_sdpa(query, key, value, attn_mask,
+                           output, params);
   if (st != status_t::success) {
     return st;
   }
