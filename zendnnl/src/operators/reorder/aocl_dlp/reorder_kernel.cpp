@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -94,6 +94,19 @@ status_t reorder_kernel_t::execute(const context_type &context_,
 #endif
       data_copy<int16_t>(output, interim_output, output_buff_size);
     }
+#if (ZENDNNL_DEPENDS_AOCLDLP)
+    else if (input_dtype == data_type_t::f16) {
+      aocl_reorder_f16f16f16of16(order, trans, reorder_param0, (uint16_t *)input,
+                                 (uint16_t *)interim_output, K, N, ldb, nullptr);
+      data_copy<uint16_t>(output, interim_output, output_buff_size);
+    }
+#else
+    else if (input_dtype == data_type_t::f16) {
+      log_error("f16 reorder requires AOCL DLP; rebuild with ZENDNNL_DEPENDS_AOCLDLP");
+      free(interim_output);
+      return status_t::unimplemented;
+    }
+#endif
     else if (input_dtype == data_type_t::s8) {
       if (source_dtype == data_type_t::s8) {
         aocl_reorder_s8s8s32os32(order, trans, reorder_param0, (int8_t *)input,
@@ -145,6 +158,20 @@ status_t reorder_kernel_t::execute(const context_type &context_,
 #endif
       data_copy<int16_t>(output, interim_output, output_buff_size);
     }
+#if (ZENDNNL_DEPENDS_AOCLDLP)
+    else if (input_dtype == data_type_t::f16) {
+      aocl_unreorder_f16f16f16of16(is_transpose ? 'c' : 'r', reorder_param0,
+                                   (uint16_t *)input, (uint16_t *)interim_output,
+                                   K, N, ldb, nullptr);
+      data_copy<uint16_t>(output, interim_output, output_buff_size);
+    }
+#else
+    else if (input_dtype == data_type_t::f16) {
+      log_error("f16 unreorder requires AOCL DLP; rebuild with ZENDNNL_DEPENDS_AOCLDLP");
+      free(interim_output);
+      return status_t::unimplemented;
+    }
+#endif
     else if (input_dtype == data_type_t::s8) {
       aocl_unreorder_s8s8s32os32_reference(is_transpose ? 'c' : 'r', reorder_param0,
                                            (int8_t *)input, (int8_t *)interim_output,

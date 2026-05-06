@@ -39,6 +39,17 @@ status_t reorder_impl_t::validate() {
     return status_t::failure;
   }
 
+  if (input->get_data_type() == data_type_t::f16 ||
+      output->get_data_type() == data_type_t::f16) {
+    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+    if (!platform_info.get_f16_status()) {
+      apilog_error("F16 data type is not supported on this platform "
+                   "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+      reorder_status = status_t::isa_unsupported;
+      return reorder_status;
+    }
+  }
+
   auto input_size  = input->get_size();
   auto output_size = output->get_size();
 
@@ -154,19 +165,47 @@ status_t reorder_impl_t::kernel_factory() {
   return status_t::success;
 }
 
+status_t reorder_impl_t::get_reorder_isa_status() const {
+  return reorder_status;
+}
+
 size_t reorder_impl_t::get_reorder_size() {
-  auto algo_format   = context.get_algo_format();
+  // Reset every call so a previous failure on a reused operator instance
+  // does not leak into get_reorder_isa_status().
+  reorder_status = status_t::success;
+  reorder_size   = 0;
+
+  auto algo_format = context.get_algo_format();
 
   if (algo_format == "aocl") {
     auto input_tensor = get_input("reorder_input");
+
+    if (!input_tensor) {
+      apilog_error("Input tensor is not available");
+      reorder_status = status_t::op_bad_io;
+      return reorder_size;
+    }
+
+    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+    if (input_tensor->get_data_type() == data_type_t::f16) {
+      if (!platform_info.get_f16_status()) {
+        apilog_error("F16 data type is not supported on this platform "
+                     "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+        reorder_status = status_t::isa_unsupported;
+        return reorder_size;
+      }
+    }
+
     reorder_size = aocl_dlp_reorder_utils_t::get_aocl_reorder_size(context,
                    *input_tensor);
   }
   else if (algo_format == "onednn") {
     apilog_error("onednn reorder is not supported");
+    reorder_status = status_t::unimplemented;
   }
   else {
     apilog_error("Unsupported algorithm format for reorder");
+    reorder_status = status_t::unimplemented;
   }
   return reorder_size;
 }

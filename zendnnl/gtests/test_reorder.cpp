@@ -388,6 +388,65 @@ TEST_P(TestReorder, S8) {
 
 /** @fn TEST_P
  *  @param TestReorder parameterized test class to initialize parameters
+ *  @param F16 user-defined name of test according to test
+ *  @brief Test to validate Reorder Contiguous to Blocked and vice-versa
+ *  with aocl kernel.
+ */
+TEST_P(TestReorder, F16) {
+  if (use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  auto weights            = tensor_factory.uniform_dist_tensor({k, n},
+                            data_type_t::f16, 2.0f);
+  auto weights_ref        = tensor_factory.zero_tensor({k, n}, data_type_t::f16);
+  void *weights_ptr       = weights.get_raw_handle_unsafe();
+  void *weights_ptr_ref   = weights_ref.get_raw_handle_unsafe();
+
+  std::memcpy(weights_ptr_ref, weights_ptr, k * n * sizeof(uint16_t));
+  void *weights_buff      = nullptr;
+  auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
+      inplace_reorder, &weights_buff, source_dtype);
+  if (reorder_status == status_t::isa_unsupported) {
+    if (weights_buff) {
+      free(weights_buff);
+    }
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  if (reorder_status == status_t::unimplemented) {
+    if (weights_buff) {
+      free(weights_buff);
+    }
+    GTEST_SKIP();
+  }
+
+  void *weights_buffer    = nullptr;
+  auto [unreorder_weights,
+        unreorder_status] = reorder_kernel_test(reorder_weights, inplace_reorder,
+                            &weights_buffer, source_dtype);
+  if (unreorder_status == status_t::unimplemented) {
+    if (weights_buffer) {
+      free(weights_buffer);
+    }
+    GTEST_SKIP();
+  }
+
+  bool is_test_successful =
+    (reorder_status == status_t::success && unreorder_status == status_t::success);
+
+  compare_tensor_2D(unreorder_weights, weights_ref, k, n, REORDER_TOL,
+                    is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+
+  if (weights_buff) {
+    free(weights_buff);
+  }
+  if (weights_buffer) {
+    free(weights_buffer);
+  }
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
  *  @param F32_F32_Stride user-defined name of test
  *  @brief Test to validate Reorder + strided matmul F32 aocl kernel support
  *  wrt Reference kernel with strided tensors.

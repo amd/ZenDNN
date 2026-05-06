@@ -27,7 +27,7 @@ namespace ops {
  *  @brief Implementation class for reorder operator.
  */
 class reorder_impl_t final : public operator_impl_t<reorder_context_t> {
-public:
+ public:
   /** @brief Self type **/
   using self_type = reorder_impl_t;
   /** @brief Parent type **/
@@ -44,9 +44,14 @@ public:
   using   create_kernel_handle_type  = parent_type::create_kernel_handle_type;
 
   size_t get_reorder_size();
-  size_t reorder_size;
+  status_t get_reorder_isa_status() const;
 
-protected:
+  size_t reorder_size = 0;
+
+ private:
+  status_t reorder_status = status_t::success;
+
+ protected:
   /** @brief Validate input/output
    *
    * Validates if all mandatory inputs and outputs are given.

@@ -2518,6 +2518,10 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
       // Compute the reorder size
       size_t reorder_size         = reorder_operator.get_reorder_size();
+      // Check if ISA is unsupported (e.g., F16 on non-F16 platform)
+      if (reorder_operator.get_reorder_isa_status() == status_t::isa_unsupported) {
+        return std::make_pair(tensor_t(), status_t::isa_unsupported);
+      }
       // Extract the input buffer size
       size_t input_buffer_size    = input_tensor.get_buffer_sz_bytes();
 
@@ -2598,6 +2602,10 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
       else if (memory_unreorder) {
         // Compute the output buffer size for reorder
         auto reorder_size = reorder_operator.get_reorder_size();
+        // Check if ISA is unsupported (e.g., F16 on non-F16 platform)
+        if (reorder_operator.get_reorder_isa_status() == status_t::isa_unsupported) {
+          return std::make_pair(tensor_t(), status_t::isa_unsupported);
+        }
 
         // create a buffer with reorderd size
         size_t alignment = 64;

@@ -25,13 +25,14 @@ namespace zendnnl {
 namespace ops {
 
 class reorder_operator_t final : public operator_t<reorder_operator_t,
-                                                    reorder_context_t,
-                                                    reorder_impl_t> {
-public:
+  reorder_context_t,
+  reorder_impl_t> {
+ public:
   /** @brief Self type **/
   using self_type = reorder_operator_t;
   /** @brief Parent type **/
-  using parent_type = operator_t<reorder_operator_t, reorder_context_t, reorder_impl_t>;
+  using parent_type =
+    operator_t<reorder_operator_t, reorder_context_t, reorder_impl_t>;
   /** @brief context type **/
   using context_type = parent_type::context_type;
   /** @brief impl type **/
@@ -39,7 +40,12 @@ public:
   /** @brief impl pointer type **/
   using impl_sptr_type = parent_type::impl_sptr_type;
 
-  size_t get_reorder_size() { return impl->get_reorder_size(); }
+  size_t get_reorder_size() {
+    return impl->get_reorder_size();
+  }
+  status_t get_reorder_isa_status() const {
+    return impl->get_reorder_isa_status();
+  }
 };
 
 } //namespace ops

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -54,6 +54,16 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
                      reorder_param1, reorder_param2);
 #endif
     }
+    else if (reorder_dtype == data_type_t::f16) {
+#if (ZENDNNL_DEPENDS_AOCLDLP)
+      reorder_size = aocl_get_reorder_buf_size_f16f16f16of16(order, trans,
+                     reorder_param0,
+                     reorder_param1, reorder_param2, nullptr);
+#else
+      apilog_error("f16 reorder requires AOCL DLP; rebuild with ZENDNNL_DEPENDS_AOCLDLP");
+      return 0;
+#endif
+    }
     else if (reorder_dtype == data_type_t::s8) {
       if (source_dtype == data_type_t::s8) {
         reorder_size = aocl_get_reorder_buf_size_s8s8s32os32(order, trans,
@@ -96,6 +106,9 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
     }
     else if (input_tensor.get_data_type() == data_type_t::bf16) {
       return k * n * sizeof(int16_t);
+    }
+    else if (input_tensor.get_data_type() == data_type_t::f16) {
+      return k * n * sizeof(uint16_t);
     }
     else if (input_tensor.get_data_type() == data_type_t::s8 ||
              input_tensor.get_data_type() == data_type_t::u8) {
