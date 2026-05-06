@@ -712,7 +712,7 @@ TEST_P(TestBatchMatmul, F16_3D) {
       algo == matmul_algo_t::aocl_dlp_blocked) {
     log_info("Post-ops/bias are not supported for F16 with AOCL-DLP kernel; "
              "disabling post-ops and bias (po_type=none)");
-    po_type = post_op_type_t::none;
+    po_types = {post_op_type_t::none};
     disable_bias = true;
   }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
@@ -727,22 +727,21 @@ TEST_P(TestBatchMatmul, F16_3D) {
                             tensor_factory.uniform_dist_tensor({1, 1, n},
                                 bias_dtype, 2.0);
   //Binary Tensor {}
-  auto binary_tensor      = is_binary_postop(po_type) ?
-                            tensor_factory.uniform_dist_tensor({m, n},
-                                binary_dtype, 2.0) : tensor_t();
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+                        binary_dtype);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f16);
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f16);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA, algo, alpha,
                             beta);
   if (status == status_t::isa_unsupported) {
     GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
   }
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_types, binary_tensors,
                             use_LOWOHA, algo, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
@@ -766,6 +765,8 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
       algo == matmul_algo_t::aocl_dlp_blocked) {
     GTEST_SKIP() << "F16_F32_3D is not supported with AOCL-DLP kernel";
   }
+  auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
                             data_type_t::f16, 2.0, transA);
@@ -773,24 +774,23 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
                             data_type_t::f16, 2.0, transB);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
-                            data_type_t::f32, 2.0);
+                            bias_dtype, 2.0);
   //Binary Tensor {}
-  auto binary_tensor      = is_binary_postop(po_type) ?
-                            tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+                        binary_dtype);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA, algo, alpha,
                             beta);
   if (status == status_t::isa_unsupported) {
     GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
   }
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_types, binary_tensors,
                             use_LOWOHA, algo, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&

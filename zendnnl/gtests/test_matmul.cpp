@@ -474,8 +474,9 @@ TEST_P(TestMatmul, F16_F16) {
                             data_type_t::f16, 2.0, transA);
   auto bias_tensor        = disable_bias ? tensor_t() :
                             tensor_factory.uniform_dist_tensor({1, n},
-                                data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+                                bias_dtype, 2.0);
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+                        binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -517,8 +518,9 @@ TEST_P(TestMatmul, F16_F32) {
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::f16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
-                            data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+                            bias_dtype, 2.0);
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+                        binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -739,7 +741,7 @@ TEST_P(TestMatmul, F16_F16_Stride) {
   if (algo == matmul_algo_t::aocl_dlp ||
       algo == matmul_algo_t::aocl_dlp_blocked) {
     log_info("Post-ops/bias are not supported for F16_F16_Stride with AOCL-DLP kernel; disabling post-ops and bias (po_type=none)");
-    po_type = post_op_type_t::none;
+    po_types = {post_op_type_t::none};
     disable_bias = true;
   }
   size_t stride_in_inc           = rand() % 50;
@@ -766,9 +768,11 @@ TEST_P(TestMatmul, F16_F16_Stride) {
                             stride_wt, data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
                             stride_in, data_type_t::f16, 2.0, transA);
-  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
-                            data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto bias_tensor        = disable_bias ? tensor_t() :
+                            tensor_factory.uniform_dist_tensor({1, n},
+                                bias_dtype, 2.0);
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+                        binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
