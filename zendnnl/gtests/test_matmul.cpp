@@ -466,6 +466,8 @@ TEST_P(TestMatmul, F16_F16) {
     po_types = {post_op_type_t::none};
     disable_bias = true;
   }
+  auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
@@ -508,6 +510,8 @@ TEST_P(TestMatmul, F16_F32) {
       algo == matmul_algo_t::aocl_dlp_blocked) {
     GTEST_SKIP() << "F16_F32 is not supported with AOCL-DLP kernel";
   }
+  auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
@@ -731,9 +735,12 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *
  */
 TEST_P(TestMatmul, F16_F16_Stride) {
+  bool disable_bias = false;
   if (algo == matmul_algo_t::aocl_dlp ||
       algo == matmul_algo_t::aocl_dlp_blocked) {
-    GTEST_SKIP() << "F16_F16_Stride is not supported with AOCL-DLP kernel";
+    log_info("Post-ops/bias are not supported for F16_F16_Stride with AOCL-DLP kernel; disabling post-ops and bias (po_type=none)");
+    po_type = post_op_type_t::none;
+    disable_bias = true;
   }
   size_t stride_in_inc           = rand() % 50;
   size_t stride_wt_inc           = rand() % 50;
@@ -753,6 +760,8 @@ TEST_P(TestMatmul, F16_F16_Stride) {
   else {
     stride_in[1] += stride_in_inc;
   }
+  auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto weight_tensor      = tensor_factory.uniform_dist_strided_tensor({k, n},
                             stride_wt, data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},

@@ -208,8 +208,8 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, matmul_params &lowoha_params,
                            matmul_batch_params_t &batch_params,
-                           const void *bias, zendnnl::ops::matmul_algo_t &kernel, bool is_weights_const,
-                           size_t src_batch_stride, size_t weight_batch_stride, size_t dst_batch_stride) {
+                           const void *bias, zendnnl::ops::matmul_algo_t &kernel, size_t src_batch_stride,
+                           size_t weight_batch_stride, size_t dst_batch_stride) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
   onednn_utils_t::onednn_matmul_params dnnl_params;
@@ -512,16 +512,12 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     matmul_attr.set_post_ops(matmul_pops);
   }
 
-  bool is_blocked = kernel == matmul_algo_t::onednn_blocked &&
-                    is_weights_const;
-  if (is_blocked) {
+  if (kernel == matmul_algo_t::onednn_blocked) {
     getOrCreateBlockedWeights(transA == 't', transB == 't', M, K, N, lda, ldb,
                               dnnl_params, eng, matmul_attr, weight_cache_type);
     dnnl_params.is_blocked = true;
   }
-  else {
-    kernel = zendnnl::ops::matmul_algo_t::onednn;
-  }
+
   dnnl_params.algo = kernel;
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,

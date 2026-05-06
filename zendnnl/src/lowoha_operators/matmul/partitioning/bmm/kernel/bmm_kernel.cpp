@@ -60,7 +60,7 @@ void bmm_tile_execute(
     matmul_onednn_wrapper(ctx.trans_input, ctx.trans_weight, m_len, ctx.N, ctx.K,
                           ctx.alpha, A, ctx.lda, weight_ptr, ctx.ldb, ctx.beta, C,
                           ctx.ldc, tile_params, batch_params, ctx.bias,
-                          tile_kernel, ctx.is_weights_const);
+                          tile_kernel);
     return;
   }
 #endif

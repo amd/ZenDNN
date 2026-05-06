@@ -149,8 +149,7 @@ static void execute_partitioned(
   ctx.is_weights_const = is_weights_const;
 
   auto process_tile = [&](int batch_idx, int m_start, int m_len,
-                          const uint8_t *src_ptr, const uint8_t *weight_ptr,
-                          uint8_t *dst_ptr) {
+  const uint8_t *src_ptr, const uint8_t *weight_ptr, uint8_t *dst_ptr) {
     bmm_tile_execute(batch_idx, m_start, m_len,
                      src_ptr, weight_ptr, dst_ptr,
                      ctx, params, batch_params);
@@ -232,8 +231,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
 
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
                           weight, ldb, beta, dst, ldc, params, batch_params,
-                          bias, kernel, is_weights_const,
-                          src_batch_stride_elems, weight_batch_stride_elems,
+                          bias, kernel, src_batch_stride_elems, weight_batch_stride_elems,
                           dst_batch_stride_elems);
     return;
   }

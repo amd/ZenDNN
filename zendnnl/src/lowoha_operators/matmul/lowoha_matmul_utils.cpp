@@ -696,13 +696,6 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
       }
     }
   }
-  if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
-                                   kernel == matmul_algo_t::onednn_blocked)) ||
-      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm ||
-                                    kernel == matmul_algo_t::libxsmm_blocked)) ||
-      (kernel >= matmul_algo_t::algo_count)) {
-    kernel = matmul_algo_t::aocl_dlp;
-  }
 
   // Force aocl_dlp or aocl_dlp_blocked for WOQ (Weight-Only Quantization) cases
   if (is_woq && kernel != matmul_algo_t::aocl_dlp &&
@@ -763,6 +756,21 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
       log_info("Switching to onednn_blocked kernel for F16 GEMM");
       kernel = matmul_algo_t::onednn_blocked;
     }
+  }
+
+  // Blocked kernels require constant weights for weight caching/reordering.
+  // Fall back to non-blocked variant when weights are not constant.
+  if (!is_weights_const && kernel == matmul_algo_t::onednn_blocked) {
+    log_info("onednn_blocked requires constant weights, falling back to onednn");
+    kernel = matmul_algo_t::onednn;
+  }
+
+  if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
+                                   kernel == matmul_algo_t::onednn_blocked)) || (!ZENDNNL_DEPENDS_LIBXSMM &&
+                                       (kernel == matmul_algo_t::libxsmm ||
+                                        kernel == matmul_algo_t::libxsmm_blocked)) ||
+      (kernel >= matmul_algo_t::algo_count)) {
+    kernel = matmul_algo_t::aocl_dlp;
   }
 
   params.lowoha_algo = kernel;

@@ -173,13 +173,14 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
   }
   else {
     params.algo = static_cast<matmul_algo_t>(matmul_config.get_algo());
-    if ((params.src.dtype == data_type_t::f16 ||
-         params.weights.dtype == data_type_t::f16 ||
-         params.dst.dtype == data_type_t::f16) &&
-        ((params.algo != matmul_algo_t::onednn_blocked) &&
-         (params.algo != matmul_algo_t::onednn))) {
-      params.algo = matmul_algo_t::onednn_blocked;
-    }
+  }
+
+  if ((params.src.dtype == data_type_t::f16 ||
+       params.weights.dtype == data_type_t::f16 ||
+       params.dst.dtype == data_type_t::f16) &&
+      ((params.algo != matmul_algo_t::onednn_blocked) &&
+       (params.algo != matmul_algo_t::onednn))) {
+    params.algo = matmul_algo_t::onednn_blocked;
   }
 
   if (params.beta != 0.0f) {
@@ -440,7 +441,7 @@ void matmul_onednn_kernel_t::execute_matmul(const
   [[maybe_unused]] dnnl::memory::desc  dnnl_blocked_weight_desc;
   [[maybe_unused]] dnnl::memory        dnnl_blocked_weight_tensor;
 
-  bool is_reorder = !params.is_blocked && params.weights.dims.size() == 2 &&
+  bool is_reorder = !params.is_blocked &&
                     params.algo == matmul_algo_t::onednn_blocked;
   if (is_reorder) {
     // Create a mutable copy of the weights params to change the format tag

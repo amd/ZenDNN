@@ -312,7 +312,7 @@ This table provides a detailed overview of supported configurations for matrix m
 |------------------|---------------------|--------------------|--------------------------------|-------|-----------|-----------------|
 | FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       | AVX2+           |
 | BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       | AVX512+         |
-| F16              | F16                 | FP32               | F16, FP32                      | N/A   | N/A       | AVX512-FP16 or AVX-NE-CONVERT |
+| F16              | F16                 | F16, FP32          | F16, FP32                      | N/A   | N/A       | AVX512-FP16 or AVX-NE-CONVERT |
 | UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       | AVX2+           |
 | BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | No        | AVX512+         |
 | BF16             | U4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Yes (S8/BF16)  | AVX512+         |

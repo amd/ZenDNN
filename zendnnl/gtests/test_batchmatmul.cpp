@@ -701,6 +701,109 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
   EXPECT_TRUE(is_test_successful);
 }
 
+/** @fn TEST_P
+ *  @param TestBatchMatmul parameterized test class to initialize parameters
+ *  @param F16_3D user-defined name of test
+ *  @brief Test to validate batchmatmul F16
+ */
+TEST_P(TestBatchMatmul, F16_3D) {
+  bool disable_bias = false;
+  if (algo == matmul_algo_t::aocl_dlp ||
+      algo == matmul_algo_t::aocl_dlp_blocked) {
+    log_info("Post-ops/bias are not supported for F16 with AOCL-DLP kernel; "
+             "disabling post-ops and bias (po_type=none)");
+    po_type = post_op_type_t::none;
+    disable_bias = true;
+  }
+  auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
+  //INPUT {MB,M,K}
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
+                            data_type_t::f16, 2.0, transA);
+  //WEI {MB,K,N}
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
+                            data_type_t::f16, 2.0, transB);
+  auto bias_tensor        = disable_bias ? tensor_t() :
+                            tensor_factory.uniform_dist_tensor({1, 1, n},
+                                bias_dtype, 2.0);
+  //Binary Tensor {}
+  auto binary_tensor      = is_binary_postop(po_type) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                binary_dtype, 2.0) : tensor_t();
+  //OUTPUT {MB,M,N}
+  auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
+                            data_type_t::f16);
+  auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
+                            data_type_t::f16);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            beta);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            use_LOWOHA, algo, alpha,
+                            beta);
+  bool is_test_successful = (status == status_t::success &&
+                             ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
+                             m, n, k, rtol_bf16, epsilon_bf16,
+                             is_test_successful, false, alpha);
+  }
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestBatchMatmul parameterized test class to initialize parameters
+ *  @param F16_F32_3D user-defined name of test
+ *  @brief Test to validate batchmatmul F16 input/weight with F32 output
+ */
+TEST_P(TestBatchMatmul, F16_F32_3D) {
+  if (algo == matmul_algo_t::aocl_dlp ||
+      algo == matmul_algo_t::aocl_dlp_blocked) {
+    GTEST_SKIP() << "F16_F32_3D is not supported with AOCL-DLP kernel";
+  }
+  //INPUT {MB,M,K}
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
+                            data_type_t::f16, 2.0, transA);
+  //WEI {MB,K,N}
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
+                            data_type_t::f16, 2.0, transB);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
+                            data_type_t::f32, 2.0);
+  //Binary Tensor {}
+  auto binary_tensor      = is_binary_postop(po_type) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+  //OUTPUT {MB,M,N}
+  auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
+                            data_type_t::f32);
+  auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
+                            data_type_t::f32);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            beta);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            use_LOWOHA, algo, alpha,
+                            beta);
+  bool is_test_successful = (status == status_t::success &&
+                             ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
+                             m, n, k, rtol_f32, epsilon_f32,
+                             is_test_successful, false, alpha);
+  }
+  EXPECT_TRUE(is_test_successful);
+}
+
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers Matmul parameterized test suite
  */

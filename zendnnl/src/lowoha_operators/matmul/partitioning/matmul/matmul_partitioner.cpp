@@ -801,8 +801,7 @@ void execute_partitioned_matmul(
                             src, config.lda,
                             weight, config.ldb,
                             beta, dst, config.ldc,
-                            params, batch_params, bias, config.kernel,
-                            is_weights_const);
+                            params, batch_params, bias, config.kernel);
       return;
     }
 #endif

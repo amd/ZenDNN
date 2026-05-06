@@ -60,7 +60,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
       kernel == matmul_algo_t::onednn_blocked) {
     log_info("Using onednn kernel");
     matmul_onednn_wrapper(transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C,
-                          ldc, lowoha_param, batch_params, bias, kernel, is_weights_const);
+                          ldc, lowoha_param, batch_params, bias, kernel);
     return;
   }
 #endif
@@ -141,8 +141,7 @@ void matmul_execute(const char layout,
                 static_cast<int>(kernel));
 
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                          weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
-                          is_weights_const);
+                          weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel);
     return;
   }
 

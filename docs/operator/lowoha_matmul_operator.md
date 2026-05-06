@@ -118,7 +118,7 @@ struct matmul_data_types {
 |----------|-------------|-----------|-------------|-------|
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
-| F16 | F16 | FP32 | F16/FP32 | Half-precision (requires AVX512-FP16 or AVX-NE-CONVERT ISA) |
+| F16 | F16 | F16/FP32 | F16/FP32 | Half-precision (requires AVX512-FP16 or AVX-NE-CONVERT ISA) |
 | BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), symmetric |
 | BF16 | U4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
 | U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
