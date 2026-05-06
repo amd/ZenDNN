@@ -16,7 +16,6 @@
 #ifndef _SDPA_ENCODER_KERNEL_LIST_HPP_
 #define _SDPA_ENCODER_KERNEL_LIST_HPP_
 
-#include "sdpa_encoder_fp32_kernel.hpp"
-//#include "sdpa_encoder_bf16_avx512_kernel.hpp"
+#include "sdpa_encoder_ref_kernel.hpp"
 
 #endif

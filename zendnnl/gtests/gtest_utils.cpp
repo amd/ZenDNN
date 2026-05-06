@@ -402,6 +402,58 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
 }
 
+// SdpaType constructor: random SDPA shape and configuration
+SdpaType::SdpaType() {
+  static std::mt19937 gen(rand());
+
+  // Keep dimensions modest so total elements stay reasonable for CI runtime
+  // and so the seq_len * seq_len attention scratch fits comfortably.
+  std::uniform_int_distribution<uint64_t> batch_dist(1, 4);
+  std::uniform_int_distribution<uint64_t> heads_dist(1, 16);
+  std::uniform_int_distribution<uint64_t> seq_dist(1, 128);
+  // Restrict head_dim to powers-of-two-ish typical transformer sizes.
+  static const uint64_t head_dim_choices[] = {16, 32, 64, 96, 128};
+  std::uniform_int_distribution<size_t> hd_dist(0,
+      sizeof(head_dim_choices) / sizeof(head_dim_choices[0]) - 1);
+
+  batch     = batch_dist(gen);
+  num_heads = heads_dist(gen);
+  seq_len   = seq_dist(gen);
+  head_dim  = head_dim_choices[hd_dist(gen)];
+
+  // ~50% self-attention (kv_seq_len == seq_len), ~50% cross-attention
+  // (independently drawn kv_seq_len). Cross-attn exercises the distinct
+  // q/kv stride paths in the kernel and the [S_q, S_kv] mask layout.
+  kv_seq_len = (std::rand() % 2 == 0) ? seq_len : seq_dist(gen);
+
+  // 1/sqrt(head_dim) is the canonical SDPA scale; keep it positive (validate())
+  scale     = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+  // Randomly exercise all causal/mask combinations, including the combined
+  // causal+explicit-mask path, to cover SDPA behavior in all modes.
+  // Mode encoding (~25% probability each):
+  //   0 -> neither (pure softmax(QK^T * scale) V)
+  //   1 -> causal only
+  //   2 -> explicit additive mask only
+  //   3 -> causal AND explicit mask: causal sets scores[i][j>i] to -inf
+  //        first, then the mask is added; -inf + finite stays -inf so the
+  //        upper triangle remains masked. The bounded [-0.5, +0.5] mask
+  //        used by the dependent tests guarantees row 0 retains a finite
+  //        entry at position 0 (no all-(-inf) row -> no NaN softmax).
+  int mode = std::rand() % 4;
+  is_causal = (mode == 1 || mode == 3);
+  has_mask  = (mode == 2 || mode == 3);
+
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
+}
+
 // @param test_index Index of current test (for partitioning)
 // @param total_tests Total number of tests
 ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
@@ -1294,6 +1346,19 @@ void PrintTo(const NormalizationType &value, ::std::ostream *os) {
       << ", use_shift=" << value.use_shift
       << ", gamma_dt=" << dtype_info(value.gamma_dt)
       << ", beta_dt=" << dtype_info(value.beta_dt)
+      << ", num_threads=" << value.num_threads
+      << ", seed=" << seed;
+}
+
+void PrintTo(const SdpaType &value, ::std::ostream *os) {
+  *os << "batch=" << value.batch
+      << ", num_heads=" << value.num_heads
+      << ", seq_len=" << value.seq_len
+      << ", kv_seq_len=" << value.kv_seq_len
+      << ", head_dim=" << value.head_dim
+      << ", scale=" << value.scale
+      << ", is_causal=" << value.is_causal
+      << ", has_mask=" << value.has_mask
       << ", num_threads=" << value.num_threads
       << ", seed=" << seed;
 }
@@ -3136,6 +3201,7 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
                                 (output_tensor.get_data_type() == data_type_t::f16);
   // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
   bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+
   const float abs_bound = is_dst_u8 ? 1.0f : is_low_precision
                           ? (alpha * k * epsilon)
                           : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
@@ -3886,3 +3952,271 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
   }
 }
 
+status_t sdpa_kernel_test(tensor_t &query_tensor,
+                          tensor_t &key_tensor,
+                          tensor_t &value_tensor,
+                          tensor_t &mask_tensor,
+                          tensor_t &output_tensor,
+                          float scale,
+                          bool is_causal,
+                          bool has_mask) {
+  try {
+    if (!query_tensor.check() || !key_tensor.check() ||
+        !value_tensor.check() || !output_tensor.check()) {
+      log_error("SDPA LOWOHA: Invalid tensor state detected");
+      return status_t::failure;
+    }
+    if (has_mask && !mask_tensor.check()) {
+      log_error("SDPA LOWOHA: has_mask=true but mask tensor is invalid");
+      return status_t::failure;
+    }
+
+    // Tensors are logically 4D [B, H, S, D] per the SDPA contract;
+    // their physical memory layout may vary according to stride.
+    auto q_size = query_tensor.get_size();
+    auto k_size = key_tensor.get_size();
+    auto v_size = value_tensor.get_size();
+    auto o_size = output_tensor.get_size();
+    if (q_size.size() != 4 || k_size.size() != 4 ||
+        v_size.size() != 4 || o_size.size() != 4) {
+      log_error("SDPA LOWOHA: Q/K/V/O tensors must be 4D [B, H, S, D]");
+      return status_t::failure;
+    }
+
+    sdpa_params params{};
+    params.batch      = static_cast<int64_t>(q_size[0]);
+    params.num_heads  = static_cast<int64_t>(q_size[1]);
+    params.seq_len    = static_cast<int64_t>(q_size[2]);
+    params.kv_seq_len = static_cast<int64_t>(k_size[2]);
+    params.head_dim   = static_cast<int64_t>(q_size[3]);
+
+    // Per-tensor BHSD strides taken directly from each tensor (NOT recomputed
+    // from sizes). The flash backend supports any per-tensor stride pattern
+    // on logical [B, H, S, D] inputs -- in particular BHSD canonical contiguous
+    // (stride = [H*S*D, S*D, D, 1]) and BSHD physical layout (stride =
+    // [S*H*D, D, H*D, 1], i.e. the PyTorch .transpose(1, 2) view of BSHD
+    // memory). Reading get_stride() makes this helper work uniformly for
+    // BHSD-, BSHD-, or otherwise-strided tensors built by the test fixture.
+    auto q_str = query_tensor.get_stride();
+    auto k_str = key_tensor.get_stride();
+    auto v_str = value_tensor.get_stride();
+    auto o_str = output_tensor.get_stride();
+
+    params.q_stride_b = static_cast<int64_t>(q_str[0]);
+    params.q_stride_h = static_cast<int64_t>(q_str[1]);
+    params.q_stride_s = static_cast<int64_t>(q_str[2]);
+    params.q_stride_d = static_cast<int64_t>(q_str[3]);
+
+    params.k_stride_b = static_cast<int64_t>(k_str[0]);
+    params.k_stride_h = static_cast<int64_t>(k_str[1]);
+    params.k_stride_s = static_cast<int64_t>(k_str[2]);
+    params.k_stride_d = static_cast<int64_t>(k_str[3]);
+
+    params.v_stride_b = static_cast<int64_t>(v_str[0]);
+    params.v_stride_h = static_cast<int64_t>(v_str[1]);
+    params.v_stride_s = static_cast<int64_t>(v_str[2]);
+    params.v_stride_d = static_cast<int64_t>(v_str[3]);
+
+    params.o_stride_b = static_cast<int64_t>(o_str[0]);
+    params.o_stride_h = static_cast<int64_t>(o_str[1]);
+    params.o_stride_s = static_cast<int64_t>(o_str[2]);
+    params.o_stride_d = static_cast<int64_t>(o_str[3]);
+
+    params.qkv_dt    = query_tensor.get_data_type();
+    params.out_dt    = output_tensor.get_data_type();
+    params.scale     = static_cast<double>(scale);
+    params.is_causal = is_causal;
+    params.dropout_p = 0.0;
+    params.num_threads = 0;
+
+    const void *mask_ptr = nullptr;
+    if (has_mask) {
+      mask_ptr = mask_tensor.get_raw_handle_unsafe();
+      auto m_size = mask_tensor.get_size();
+      params.mask_ndims = static_cast<int>(m_size.size());
+      // Build the per-dim sizes/strides that sdpa_direct expects in two
+      // phases:
+      //   1. For the mask's actual `m_size.size()` dims (2 or 4), assign
+      //      canonical row-major contiguous strides
+      //      (stride[i] = prod(size[i+1..])), including for size-1 dims.
+      //      The flash backend's normalize_mask keys broadcast off
+      //      size==1 (not stride==0; see lowoha_sdpa_flash_cpu.cpp::
+      //      expand_stride), so the size-1 strides are inert under
+      //      broadcast even when non-zero.
+      //   2. Pad the remaining trailing slots up to 4 with size=1,
+      //      stride=0 so the params struct is fully initialised;
+      //      sdpa_direct only reads slots [0..mv.ndim) so the padded
+      //      slots are unused.
+      int64_t prev_stride = 1;
+      for (int i = static_cast<int>(m_size.size()) - 1; i >= 0; --i) {
+        params.mask_sizes[i]   = static_cast<int64_t>(m_size[i]);
+        params.mask_strides[i] = prev_stride;
+        prev_stride *= params.mask_sizes[i];
+      }
+      for (int i = static_cast<int>(m_size.size()); i < 4; ++i) {
+        params.mask_sizes[i]   = 1;
+        params.mask_strides[i] = 0;
+      }
+      params.mask_dt = mask_tensor.get_data_type();
+    }
+    else {
+      params.mask_ndims = 0;
+      params.mask_dt    = data_type_t::none;
+    }
+
+    log_info("SDPA LOWOHA: Calling sdpa_direct with batch=", params.batch,
+             ", num_heads=", params.num_heads, ", seq_len=", params.seq_len,
+             ", head_dim=", params.head_dim, ", scale=", params.scale,
+             ", is_causal=", params.is_causal, ", has_mask=", has_mask);
+
+    void *q_data = query_tensor.get_raw_handle_unsafe();
+    void *k_data = key_tensor.get_raw_handle_unsafe();
+    void *v_data = value_tensor.get_raw_handle_unsafe();
+    void *o_data = output_tensor.get_raw_handle_unsafe();
+    if (!q_data || !k_data || !v_data || !o_data) {
+      log_error("SDPA LOWOHA: Null data pointer detected");
+      return status_t::failure;
+    }
+
+    status_t status = sdpa_direct(q_data, k_data, v_data, mask_ptr,
+                                  o_data, params);
+    if (status != status_t::success) {
+      log_error("SDPA LOWOHA: sdpa_direct execution failed");
+    }
+    return status;
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("SDPA LOWOHA: ", e.what());
+    return status_t::failure;
+  }
+  catch (...) {
+    log_error("SDPA LOWOHA: unknown exception");
+    return status_t::failure;
+  }
+}
+
+status_t sdpa_forced_ref_kernel_test(tensor_t &query_tensor,
+                                     tensor_t &key_tensor,
+                                     tensor_t &value_tensor,
+                                     tensor_t &mask_tensor,
+                                     tensor_t &output_tensor,
+                                     float scale,
+                                     bool is_causal,
+                                     bool has_mask) {
+  try {
+    query_tensor.set_name("query");
+    key_tensor.set_name("key");
+    value_tensor.set_name("value");
+    output_tensor.set_name("sdpa_output");
+
+    sdpa_encoder_context_t sdpa_context = sdpa_encoder_context_t()
+                                          .set_param("query", query_tensor)
+                                          .set_param("key", key_tensor)
+                                          .set_param("value", value_tensor)
+                                          .set_scale(scale)
+                                          .set_is_dropout(false)
+                                          .set_is_causal(is_causal)
+                                          .set_has_mask(has_mask);
+
+    if (has_mask) {
+      mask_tensor.set_name("mask");
+      sdpa_context = sdpa_context.set_param("mask", mask_tensor);
+    }
+
+    sdpa_context = sdpa_context.create();
+    if (!sdpa_context.check()) {
+      log_error("SDPA REF: encoder context creation failed");
+      return status_t::failure;
+    }
+
+    sdpa_encoder_operator_t sdpa_operator = sdpa_encoder_operator_t()
+                                            .set_name("sdpa_forced_ref_operator")
+                                            .set_context(sdpa_context)
+                                            .create();
+
+    if (sdpa_operator.is_bad_object()) {
+      log_error("operator ", sdpa_operator.get_name(), " creation failed.");
+      return status_t::failure;
+    }
+
+    status_t status = sdpa_operator
+                      .set_output("sdpa_output", output_tensor)
+                      .execute();
+
+    if (status != status_t::success) {
+      log_info("operator ", sdpa_operator.get_name(), " execution failed.");
+      return status_t::failure;
+    }
+    return status_t::success;
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("SDPA REF: ", e.what());
+    return status_t::failure;
+  }
+  catch (...) {
+    log_error("SDPA REF: unknown exception");
+    return status_t::failure;
+  }
+}
+
+void compare_tensor_4D_sdpa(tensor_t &output_tensor,
+                            tensor_t &output_tensor_ref,
+                            uint64_t batch, uint64_t num_heads,
+                            uint64_t seq_len_q, uint64_t seq_len_kv,
+                            uint64_t head_dim,
+                            const float rtol, const float epsilon,
+                            bool &is_comparison_successful) {
+  // Error model: SDPA is two GEMM reductions (first over head_dim, then over
+  // seq_len_kv) separated by a stable softmax. The constants below mirror the
+  // matmul bound used in compare_tensor_2D_matrix; we sum the two reduction
+  // lengths since softmax is well-conditioned (outputs in [0,1] that sum to 1).
+  constexpr int C  = 20;
+  constexpr int P  = 15;
+  constexpr int sf = 4;
+  const float reduction_len =
+      static_cast<float>(head_dim) + static_cast<float>(seq_len_kv);
+  const float abs_bound =
+      ((C + std::log2(reduction_len) / sf) * reduction_len + P) * epsilon;
+
+  log_verbose("SDPA abs_bound: ", abs_bound);
+
+  std::atomic<bool> success(is_comparison_successful);
+
+  // Output is [B, H, S_q, head_dim] -- iterate over its actual shape.
+  #pragma omp parallel for collapse(4)
+  for (uint64_t b = 0; b < batch; ++b) {
+    for (uint64_t h = 0; h < num_heads; ++h) {
+      for (uint64_t i = 0; i < seq_len_q; ++i) {
+        for (uint64_t j = 0; j < head_dim; ++j) {
+          if (success.load(std::memory_order_relaxed)) {
+            float actual_val = output_tensor.at({b, h, i, j});
+            float ref_val    = output_tensor_ref.at({b, h, i, j});
+            float abs_err    = std::fabs(ref_val - actual_val);
+            float allowed_err = abs_bound + rtol * std::fabs(ref_val);
+
+            if (abs_err > allowed_err) {
+              log_verbose("SDPA mismatch at [", b, ",", h, ",", i, ",", j,
+                          "]: actual=", actual_val, " , ref=", ref_val,
+                          " , abs_err=", abs_err,
+                          " , allowed_err=", allowed_err,
+                          " , abs_bound=", abs_bound);
+              success.store(false, std::memory_order_relaxed);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!success.load()) {
+    is_comparison_successful = false;
+  }
+}

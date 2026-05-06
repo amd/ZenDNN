@@ -28,7 +28,9 @@ namespace ops {
  * @par Synopsys
  *
  * Implements Scaled Dot-Product Attention (SDPA) for encoder architectures.
- * Invokes a fp32 kernel if input type is fp32.
+ * Dispatches to the unified reference kernel (@c sdpa_encoder_ref_kernel_t),
+ * which handles every supported QKV dtype (currently @c data_type_t::f32 and
+ * @c data_type_t::bf16) via an internal compile-time dispatch.
  *
  * @par Parameters, Inputs, Outputs
  *

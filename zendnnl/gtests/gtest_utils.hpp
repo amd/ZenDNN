@@ -35,6 +35,10 @@
 #include "lowoha_operators/normalization/lowoha_normalization.hpp"
 #include "lowoha_operators/normalization/lowoha_normalization_utils.hpp"
 #include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
+#include "lowoha_operators/sdpa/lowoha_sdpa.hpp"
+#include "lowoha_operators/sdpa/lowoha_sdpa_common.hpp"
+#include "operators/sdpa/sdpa_encoder_context.hpp"
+#include "operators/sdpa/sdpa_encoder_operator.hpp"
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 3000
@@ -53,6 +57,7 @@ using namespace zendnnl::lowoha::matmul;
 using namespace zendnnl::lowoha::reorder;
 using namespace zendnnl::lowoha::embag;
 using namespace zendnnl::lowoha::normalization;
+using namespace zendnnl::lowoha::sdpa;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
@@ -167,6 +172,26 @@ struct NormalizationType {
   NormalizationType();
 };
 
+/** @brief SDPA Op Parameters Structure
+ *
+ *  Holds the randomized shape/configuration shared across all SDPA test
+ *  variants. Each test (F32_F32_*, BF16_BF16_*, *_MASK_*) hard-codes its
+ *  own QKV dtype, so the same SdpaType instance is fanned out across both
+ *  the FP32 and BF16 reference kernels for matched per-shape coverage.
+ */
+struct SdpaType {
+  uint64_t batch;
+  uint64_t num_heads;
+  uint64_t seq_len;       // Q sequence length (S_q)
+  uint64_t kv_seq_len;    // K/V sequence length (S_kv); == seq_len for self-attn
+  uint64_t head_dim;
+  float scale;
+  bool is_causal;
+  bool has_mask;
+  int32_t num_threads;
+  SdpaType();
+};
+
 
 extern int gtest_argc;
 extern char **gtest_argv;
@@ -204,6 +229,7 @@ extern std::vector<ReorderType> reorder_test;
 extern std::vector<EmbagType> embag_test;
 extern std::vector<EmbeddingType> embedding_test;
 extern std::vector<NormalizationType> normalization_test;
+extern std::vector<SdpaType> sdpa_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -323,6 +349,8 @@ void PrintTo(const EmbagType &value, ::std::ostream *os);
 void PrintTo(const EmbeddingType &value, ::std::ostream *os);
 /** @brief Print NormalizationType for GTest parameterized test failure messages. */
 void PrintTo(const NormalizationType &value, ::std::ostream *os);
+/** @brief Print SdpaType for GTest parameterized test failure messages. */
+void PrintTo(const SdpaType &value, ::std::ostream *os);
 
 /** @fn strToAlgo
  *  @brief Convert string representation to matmul algorithm type
@@ -809,5 +837,84 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
  *  freed tensors affecting subsequent tests.
  */
 void clear_matmul_test_caches();
+
+/** @fn sdpa_kernel_test
+ *  @brief Compute SDPA Operation using LOWOHA sdpa_direct API.
+ *
+ *  Executes Scaled Dot-Product Attention via the LOWOHA flash-style backend.
+ *  Inputs are 4D tensors with [batch, num_heads, seq_len, head_dim] layout.
+ *
+ *  @param query_tensor  Query tensor (4D)
+ *  @param key_tensor    Key tensor (4D)
+ *  @param value_tensor  Value tensor (4D)
+ *  @param mask_tensor   Optional attention mask tensor (empty if has_mask=false)
+ *  @param output_tensor Output tensor (4D)
+ *  @param scale         Scale factor applied to Q.K^T
+ *  @param is_causal     If true, apply causal (upper-triangular) mask
+ *  @param has_mask      If true, use provided mask_tensor as additive mask
+ *  @return status_t::success or status_t::failure
+ */
+status_t sdpa_kernel_test(tensor_t &query_tensor,
+                          tensor_t &key_tensor,
+                          tensor_t &value_tensor,
+                          tensor_t &mask_tensor,
+                          tensor_t &output_tensor,
+                          float scale,
+                          bool is_causal,
+                          bool has_mask);
+
+/** @fn sdpa_forced_ref_kernel_test
+ *  @brief Compute SDPA Operation via the operator-based reference path.
+ *
+ *  Executes Scaled Dot-Product Attention via @c sdpa_encoder_operator_t which
+ *  dispatches to the reference kernel based on the Q/K/V dtype (FP32 or BF16).
+ *  This serves as the ground-truth reference against which the LOWOHA
+ *  implementation is validated.
+ *
+ *  @param query_tensor  Query tensor (4D)
+ *  @param key_tensor    Key tensor (4D)
+ *  @param value_tensor  Value tensor (4D)
+ *  @param mask_tensor   Optional attention mask tensor (empty if has_mask=false)
+ *  @param output_tensor Output tensor (4D)
+ *  @param scale         Scale factor applied to Q.K^T
+ *  @param is_causal     If true, apply causal mask
+ *  @param has_mask      If true, use provided mask_tensor as additive mask
+ *  @return status_t::success or status_t::failure
+ */
+status_t sdpa_forced_ref_kernel_test(tensor_t &query_tensor,
+                                     tensor_t &key_tensor,
+                                     tensor_t &value_tensor,
+                                     tensor_t &mask_tensor,
+                                     tensor_t &output_tensor,
+                                     float scale,
+                                     bool is_causal,
+                                     bool has_mask);
+
+/** @fn compare_tensor_4D_sdpa
+ *  @brief Compare two 4D SDPA output tensors element-by-element.
+ *
+ *  Uses an error bound derived from the SDPA computation chain: the first
+ *  matmul reduces over @p head_dim, softmax is well-conditioned, and the
+ *  second matmul reduces over @p seq_len_kv (== seq_len_q for self-attn).
+ *  Both tensors must have shape [batch, num_heads, seq_len_q, head_dim].
+ *
+ *  @param output_tensor      Tensor under test  [B, H, S_q, D]
+ *  @param output_tensor_ref  Reference tensor   [B, H, S_q, D]
+ *  @param batch              Batch dimension
+ *  @param num_heads          Number of attention heads
+ *  @param seq_len_q          Q sequence length (rows of output)
+ *  @param seq_len_kv         K/V sequence length (second matmul reduction)
+ *  @param head_dim           Per-head feature dimension (cols of output)
+ *  @param rtol               Relative tolerance
+ *  @param epsilon            Per-op numerical epsilon
+ *  @param is_comparison_successful Flag set to false on first mismatch
+ */
+void compare_tensor_4D_sdpa(tensor_t &output_tensor,
+                            tensor_t &output_tensor_ref,
+                            uint64_t batch, uint64_t num_heads,
+                            uint64_t seq_len_q, uint64_t seq_len_kv,
+                            uint64_t head_dim,
+                            const float rtol, const float epsilon,
+                            bool &is_comparison_successful);
 
 #endif

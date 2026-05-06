@@ -17,7 +17,7 @@
 set(sdpa_encoder_sources
   sdpa_encoder_context.cpp
   sdpa_encoder_operator_impl.cpp
-  sdpa_encoder_fp32_kernel.cpp)
+  sdpa_encoder_ref_kernel.cpp)
 
 set(sdpa_encoder_public_headers
   sdpa_encoder_context.hpp
@@ -26,7 +26,8 @@ set(sdpa_encoder_public_headers
 
 set(sdpa_encoder_private_headers
   sdpa_encoder_kernel_list.hpp
-  sdpa_encoder_fp32_kernel.hpp)
+  sdpa_encoder_kernel_helpers.hpp
+  sdpa_encoder_ref_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

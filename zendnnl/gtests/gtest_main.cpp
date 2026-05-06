@@ -91,6 +91,9 @@ std::vector<EmbeddingType> embedding_test{};
 /** @brief normalization_test Data Structure(vector of structures) to hold random Normalization Parameters */
 std::vector<NormalizationType> normalization_test{};
 
+/** @brief sdpa_test Data Structure(vector of structures) to hold random SDPA Parameters */
+std::vector<SdpaType> sdpa_test{};
+
 
 int main(int argc, char **argv) {
   try {
@@ -158,6 +161,9 @@ int main(int argc, char **argv) {
 
     // Creating Random parameters for Normalization
     normalization_test.resize(test_num);
+
+    // Creating Random parameters for SDPA
+    sdpa_test.resize(test_num);
 
     ::testing :: InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

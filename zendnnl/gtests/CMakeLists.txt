@@ -36,6 +36,7 @@ if(ZENDNNL_BUILD_GTEST)
     test_embag.cpp
     test_embedding.cpp
     test_normalization.cpp
+    test_sdpa.cpp
     test_omp_api.cpp)
 
   set(gtests_headers
