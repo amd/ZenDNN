@@ -23,7 +23,7 @@ using namespace zendnnl::interface;
 #define  NOT_OK      (1)
 
 #include <emmintrin.h>
-#include <numa.h>
+
 // Size (in bytes) of a cache line; typically 64 bytes on x86 systems.
 #define CACHE_LINE_SIZE 64
 

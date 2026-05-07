@@ -37,7 +37,8 @@ if(ZENDNNL_BUILD_GTEST)
     test_embedding.cpp
     test_normalization.cpp
     test_sdpa.cpp
-    test_omp_api.cpp)
+    test_omp_api.cpp
+    test_softmax.cpp)
 
   set(gtests_headers
     gtest_utils.hpp)

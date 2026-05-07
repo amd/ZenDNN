@@ -17,6 +17,7 @@
 #ifndef _GTEST_UTILS_HPP_
 #define _GTEST_UTILS_HPP_
 #include <string>
+#include <vector>
 #include <random>
 #include <algorithm>
 #include <variant>
@@ -39,6 +40,8 @@
 #include "lowoha_operators/sdpa/lowoha_sdpa_common.hpp"
 #include "operators/sdpa/sdpa_encoder_context.hpp"
 #include "operators/sdpa/sdpa_encoder_operator.hpp"
+#include "lowoha_operators/softmax/lowoha_softmax.hpp"
+#include "lowoha_operators/softmax/reference_kernel.hpp"
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 3000
@@ -58,6 +61,7 @@ using namespace zendnnl::lowoha::reorder;
 using namespace zendnnl::lowoha::embag;
 using namespace zendnnl::lowoha::normalization;
 using namespace zendnnl::lowoha::sdpa;
+using namespace zendnnl::lowoha::softmax;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
@@ -192,6 +196,16 @@ struct SdpaType {
   SdpaType();
 };
 
+/** @brief Softmax Op Parameters Structure */
+struct SoftmaxType {
+  int ndims;
+  uint64_t shape[SOFTMAX_MAX_NDIMS];
+  int axis;
+  bool log_softmax;
+  bool softmin;
+  int32_t num_threads;
+  SoftmaxType();
+};
 
 extern int gtest_argc;
 extern char **gtest_argv;
@@ -214,6 +228,8 @@ extern const float LOWOHA_REORDER_BF16_TOL;
 extern const float LOWOHA_REORDER_F32_TOL;
 extern const float NORM_F32_TOL;
 extern const float NORM_BF16_TOL;
+extern const float SOFTMAX_F32_TOL;
+extern const float SOFTMAX_BF16_TOL;
 extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;
@@ -230,6 +246,7 @@ extern std::vector<EmbagType> embag_test;
 extern std::vector<EmbeddingType> embedding_test;
 extern std::vector<NormalizationType> normalization_test;
 extern std::vector<SdpaType> sdpa_test;
+extern std::vector<SoftmaxType> softmax_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -351,6 +368,8 @@ void PrintTo(const EmbeddingType &value, ::std::ostream *os);
 void PrintTo(const NormalizationType &value, ::std::ostream *os);
 /** @brief Print SdpaType for GTest parameterized test failure messages. */
 void PrintTo(const SdpaType &value, ::std::ostream *os);
+/** @brief Print SoftmaxType for GTest parameterized test failure messages. */
+void PrintTo(const SoftmaxType &value, ::std::ostream *os);
 
 /** @fn strToAlgo
  *  @brief Convert string representation to matmul algorithm type
@@ -916,5 +935,47 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
                             uint64_t head_dim,
                             const float rtol, const float epsilon,
                             bool &is_comparison_successful);
+/** @fn softmax_kernel_test
+ *  @brief Test function for softmax kernel (OneDNN path)
+ *
+ *  Calls softmax_direct() with algorithm forced to OneDNN.
+ *
+ *  @return status_t Success or failure status
+ */
+status_t softmax_kernel_test(
+  const void *input,
+  void *output,
+  softmax_params &params);
+
+/** @fn softmax_forced_ref_kernel_test
+ *  @brief Test function for softmax reference kernel (forced)
+ *
+ *  Calls softmax_reference_wrapper() directly, bypassing the
+ *  kernel dispatcher to always use the reference implementation.
+ *
+ *  @return status_t Success or failure status
+ */
+status_t softmax_forced_ref_kernel_test(
+  const void *input,
+  void *output,
+  softmax_params &params);
+
+/** @fn compare_softmax_tensors
+ *  @brief Compare two tensors element-by-element for any dimensionality
+ *
+ *  Iterates over all elements using flat-to-multidim index conversion,
+ *  so it works correctly for 1D through 5D tensors.
+ *
+ *  @param output Actual output tensor
+ *  @param output_ref Reference output tensor
+ *  @param shape Tensor shape vector
+ *  @param total_elements Total number of elements in the tensor
+ *  @param tol Base tolerance value
+ *  @param is_comparison_successful Output flag indicating comparison result
+ */
+void compare_softmax_tensors(tensor_t &output, tensor_t &output_ref,
+                             const std::vector<uint64_t> &shape,
+                             uint64_t total_elements,
+                             float tol, bool &is_comparison_successful);
 
 #endif

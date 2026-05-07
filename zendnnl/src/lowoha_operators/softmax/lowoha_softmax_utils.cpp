@@ -48,10 +48,11 @@ status_t validate_softmax_inputs(
         return status_t::failure;
     }
 
-    // Both backends size output elements by src_dt; reject mismatched dst_dt.
+    // Both backends pick a code path from src_dt and write output in that
+    // same dtype; src_dt != dst_dt would corrupt the caller's output buffer.
     if (params.src_dt != params.dst_dt) {
-        log_error("Softmax: src_dt (", static_cast<int>(params.src_dt),
-                  ") must match dst_dt (", static_cast<int>(params.dst_dt),
+        log_error("Softmax: src_dt (", dtype_info(params.src_dt),
+                  ") must match dst_dt (", dtype_info(params.dst_dt),
                   "); mixed-precision I/O is not supported");
         return status_t::failure;
     }

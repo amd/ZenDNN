@@ -60,6 +60,10 @@ const float LOWOHA_REORDER_F32_TOL  = 0.001; // For f32 output
 const float NORM_F32_TOL  = 0.001;
 const float NORM_BF16_TOL = 0.01;
 
+// Softmax tolerance constants
+const float SOFTMAX_F32_TOL  = 0.001;
+const float SOFTMAX_BF16_TOL = 0.01;
+
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
@@ -94,6 +98,8 @@ std::vector<NormalizationType> normalization_test{};
 /** @brief sdpa_test Data Structure(vector of structures) to hold random SDPA Parameters */
 std::vector<SdpaType> sdpa_test{};
 
+/** @brief softmax_test Data Structure(vector of structures) to hold random Softmax Parameters */
+std::vector<SoftmaxType> softmax_test{};
 
 int main(int argc, char **argv) {
   try {
@@ -164,6 +170,9 @@ int main(int argc, char **argv) {
 
     // Creating Random parameters for SDPA
     sdpa_test.resize(test_num);
+
+    // Creating Random parameters for Softmax
+    softmax_test.resize(test_num);
 
     ::testing :: InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

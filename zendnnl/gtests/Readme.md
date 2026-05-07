@@ -31,7 +31,9 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - F16 tests use the same tolerance as BF16 (`MATMUL_BF16_TOL`).
 - `NORM_F32_TOL`: Tolerance for normalization F32 tests (default: `0.001`).
 - `NORM_BF16_TOL`: Tolerance for normalization BF16 tests (default: `0.01`).
-- `TEST_NUM`: Number of test cases to generate (default: `100`).
+- `SOFTMAX_F32_TOL`: Tolerance for softmax F32 tests (default: `0.001`).
+- `SOFTMAX_BF16_TOL`: Tolerance for softmax BF16 tests (default: `0.01`).
+- `TEST_NUM`: Number of test cases to generate (default: `400`).
 - `POST_OPS_LIMIT`: Maximum number of post-ops allowed in a single chain (default: `3`). Defined in `gtest_utils.hpp`. Applies to `--postop`, matmul/batch-matmul/reorder input file `postOp` fields, and random post-op generation (which picks a chain length uniformly from `1` … `POST_OPS_LIMIT`). If the parsed chain exceeds this limit, gtest reports an error (`Post-op chain length exceeds POST_OPS_LIMIT.`).
 
 ## **Matrix Dimension Ranges**
@@ -172,6 +174,7 @@ gtests/
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
 ├── test_normalization.cpp   # Normalization testsuite with different test cases.
 ├── test_omp_api.cpp         # OpenMP thread-control utility testsuite (omp_thread_control.hpp).
+├── test_softmax.cpp         # Softmax testsuite (OneDNN vs Reference).
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
 ```
 
@@ -246,6 +249,7 @@ cmake --build .
        - Last third: LOWOHA on with LIBXSMM backend
      - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
      - **Normalization tests**: Always use LOWOHA API (normalization is a LOWOHA-only operator)
+     - **Softmax tests**: Always use LOWOHA API (softmax is a LOWOHA-only operator)
    - **Note**: For LIBXSMM backends, LOWOHA is always enabled by default
 
 7. **`--input_file <InputFile>`** (Optional):
@@ -664,6 +668,35 @@ export OMP_MAX_ACTIVE_LEVELS=2
 6. Run only the parallel-region tests (per-task ICV, loop pattern, concurrent max_threads):
 ```bash
 ./install/gtests/gtests --gtest_filter='OmpApiTest.*ParallelRegion*:OmpApiTest.*PerTaskIcv*:OmpApiTest.*ParallelThreads*'
+```
+
+### Softmax Tests
+ - Softmax TestSuite has two testcases (F32_F32, BF16_BF16)
+ - Validates **OneDNN kernel** output against the **reference kernel** output
+ - Randomized per-parameter: `ndims` (1D–5D), `shape`, `log_softmax`, `softmin`, `num_threads`
+ - Fixed: `axis = -1` (last-axis only); dtype is selected by the test case (F32_F32 or BF16_BF16), not randomized
+ - Supports both standard softmax and log-softmax variants, plus the `softmin` mode
+   (computes `softmax(-x)`; composes with `log_softmax` when both are true)
+
+1. Run all softmax tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/*
+```
+2. Run all F32 Input, F32 Output softmax tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/TestSoftmax.F32_F32/*
+```
+3. Run all BF16 Input, BF16 Output softmax tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/TestSoftmax.BF16_BF16/*
+```
+4. Run softmax tests with fixed seed and thread count:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/* --seed 42 --num_threads 4
+```
+5. Run 100 softmax tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/* --test 100
 ```
 
 ### Example with more Arguments Support

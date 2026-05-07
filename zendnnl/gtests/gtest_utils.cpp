@@ -397,6 +397,38 @@ NormalizationType::NormalizationType() {
   }
 }
 
+SoftmaxType::SoftmaxType() {
+  ndims = 1 + std::rand() % SOFTMAX_MAX_NDIMS;
+
+  // Per-dim limits scaled by ndims to keep total elements under ~1M
+  // and avoid excessive memory usage for high-dimensional tensors.
+  static const int dim_limit[] = {10000, 1000, 100, 32, 16};
+  int max_per_dim = dim_limit[ndims - 1];
+  for (int i = 0; i < ndims; ++i) {
+    shape[i] = 1 + std::rand() % max_per_dim;
+  }
+  for (int i = ndims; i < SOFTMAX_MAX_NDIMS; ++i) {
+    shape[i] = 0;
+  }
+  // Restrict to last-axis softmax (axis=-1) which is the standard case
+  // for attention mechanisms and classification layers.
+  // TODO: Extend to non-last-axis after root-causing the OneDNN vs
+  // reference kernel discrepancy for strided (non-contiguous) axis layouts.
+  axis = -1;
+  log_softmax = (std::rand() % 2 == 0);
+  softmin     = (std::rand() % 2 == 0);
+
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    static std::mt19937 gen(std::rand());
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
+}
+
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   batch_size = BATCH_START + rand() % BATCH_END;
   mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
@@ -1359,6 +1391,20 @@ void PrintTo(const SdpaType &value, ::std::ostream *os) {
       << ", scale=" << value.scale
       << ", is_causal=" << value.is_causal
       << ", has_mask=" << value.has_mask
+      << ", num_threads=" << value.num_threads
+      << ", seed=" << seed;
+}
+
+void PrintTo(const SoftmaxType &value, ::std::ostream *os) {
+  *os << "ndims=" << value.ndims
+      << ", shape=[" << value.shape[0];
+  for (int i = 1; i < value.ndims; ++i) {
+    *os << "," << value.shape[i];
+  }
+  *os << "]"
+      << ", axis=" << value.axis
+      << ", log_softmax=" << value.log_softmax
+      << ", softmin=" << value.softmin
       << ", num_threads=" << value.num_threads
       << ", seed=" << seed;
 }
@@ -3921,10 +3967,18 @@ status_t normalization_forced_ref_kernel_test(
   }
 }
 
-void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
-                          const std::vector<uint64_t> &shape,
-                          uint64_t total_elements,
-                          float tol, bool &is_comparison_successful) {
+// Shared element-wise tensor comparator for any dimensionality.
+// Uses flat-to-multidim index conversion so it handles 1D through 5D
+// tensors. Tolerance is `atol + rtol * |ref|` with rtol = 10 * atol.
+// The `mismatch_label` prefix is included in the log message so callers
+// can distinguish which operator reported the mismatch.
+static void compare_tensors_elementwise(
+  tensor_t &output, tensor_t &output_ref,
+  const std::vector<uint64_t> &shape,
+  uint64_t total_elements,
+  float tol,
+  const char *mismatch_label,
+  bool &is_comparison_successful) {
   const float atol = tol;
   const float rtol = tol * 10;
   std::atomic<bool> success{true};
@@ -3945,7 +3999,7 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
         float abs_err    = std::fabs(ref_val - actual_val);
 
         if (abs_err > (atol + rtol * std::fabs(ref_val))) {
-          log_verbose("Mismatch at flat=", flat,
+          log_verbose(mismatch_label, " at flat=", flat,
                       ": actual=", actual_val,
                       ", ref=", ref_val,
                       ", abs_err=", abs_err);
@@ -3958,6 +4012,14 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
   if (!success.load()) {
     is_comparison_successful = false;
   }
+}
+
+void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
+                          const std::vector<uint64_t> &shape,
+                          uint64_t total_elements,
+                          float tol, bool &is_comparison_successful) {
+  compare_tensors_elementwise(output, output_ref, shape, total_elements,
+                              tol, "Normalization Mismatch", is_comparison_successful);
 }
 
 status_t sdpa_kernel_test(tensor_t &query_tensor,
@@ -4227,4 +4289,56 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
   if (!success.load()) {
     is_comparison_successful = false;
   }
+}
+
+status_t softmax_kernel_test(
+  const void *input,
+  void *output,
+  softmax_params &params) {
+  try {
+    params.algorithm = softmax_algo_t::onednn;
+    status_t status = softmax_direct(input, output, params);
+    if (status != status_t::success) {
+      log_error("softmax_direct (onednn) execution failed");
+    }
+    return status;
+  }
+  catch (const exception_t &ex) {
+    log_error("softmax_kernel_test exception: ", ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("softmax_kernel_test std::exception: ", e.what());
+    return status_t::failure;
+  }
+}
+
+status_t softmax_forced_ref_kernel_test(
+  const void *input,
+  void *output,
+  softmax_params &params) {
+  try {
+    params.algorithm = softmax_algo_t::reference;
+    status_t status = softmax_reference_wrapper(input, output, params);
+    if (status != status_t::success) {
+      log_error("softmax_reference_wrapper execution failed");
+    }
+    return status;
+  }
+  catch (const exception_t &ex) {
+    log_error("softmax_forced_ref_kernel_test exception: ", ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("softmax_forced_ref_kernel_test std::exception: ", e.what());
+    return status_t::failure;
+  }
+}
+
+void compare_softmax_tensors(tensor_t &output, tensor_t &output_ref,
+                             const std::vector<uint64_t> &shape,
+                             uint64_t total_elements,
+                             float tol, bool &is_comparison_successful) {
+  compare_tensors_elementwise(output, output_ref, shape, total_elements,
+                              tol, "Softmax Mismatch", is_comparison_successful);
 }
