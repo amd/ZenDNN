@@ -17,7 +17,7 @@
 /// Fused MoE: Op1(gate+up) → activation → Op2(down_proj) → optional
 /// weighted-reduce post-op, all in one API call.
 ///
-/// Unified dispatch architecture (no V1/V2 split):
+/// Unified dispatch architecture:
 ///   * Op1 + activation and Op2 both route through
 ///     `group_matmul_run_parallel_dispatch`, which selects the ALGO
 ///     via `ZENDNNL_GRP_MATMUL_ALGO` (1..5 manual, 0 auto) and the
@@ -89,6 +89,17 @@ using zendnnl::common::op_instrumentation;
 using zendnnl::common::size_of;
 
 namespace {
+
+// Op2's K-dimension as a function of the fused activation.  Gated
+// activations (swiglu/silu/gelu_and_mul) collapse the [gate, up] pair
+// into half the columns, so Op2 sees K_down = N/2.  Without an
+// activation Op1's full output flows into Op2, so K_down = N.  The
+// caller's `down_weight[i]` must be shaped accordingly:
+//   * act != none → [N/2, N_down] row-major (or [N_down, N/2] transB).
+//   * act == none → [N,   N_down] row-major (or [N_down, N  ] transB).
+inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
+  return (act == grp_matmul_gated_act_t::none) ? n_op1 : (n_op1 / 2);
+}
 
 // Per-thread persistent Op1 arena used by fused-MoE internal-alloc.
 // Owns a single 64-byte-aligned slab whose capacity monotonically
@@ -177,9 +188,7 @@ struct FusedMoEScratch {
 // Op1-src DRAM traffic and flat_n_tile's full planner (DecodeD, pair-
 // balanced rounds, N_ORDER, multi-round batching) adapts to any
 // num_ops so there is no scheduler deficit vs the wide path.  If a
-// future shape regresses, plug a `num_ops`-keyed threshold here (see
-// the earlier V1-best vs V2-best benchmark at ops=22 for the data
-// point that would inform a split).
+// future shape regresses, plug a `num_ops`-keyed threshold here.
 inline bool pick_fused_moe_want_tight(
     bool internal_alloc,
     grp_matmul_gated_act_t act,
@@ -195,8 +204,12 @@ inline bool pick_fused_moe_want_tight(
   if (env_algo != 0 && env_algo != 3) return false;
   const int env_tight = get_grp_matmul_fused_moe_tight();
   if (env_tight == 0) return false;
-  // env_tight == -1 (auto) or 1 (force) — confirm the dispatcher
-  // would actually route Op1 to flat_n_tile for this shape.
+  // env_tight == 1 (default / forced).  The getter was historically
+  // tri-state with -1 meaning "auto", but auto collapsed to the same
+  // behaviour as 1 (the dispatcher re-validates every gate below)
+  // and was merged into the default.  Confirm the dispatcher would
+  // actually route Op1 to flat_n_tile for this shape before
+  // committing to the tight layout.
   const int algo_would =
       select_grp_matmul_algo(layout, M, N, K, params, num_threads);
   return algo_would == 3;
@@ -368,7 +381,8 @@ status_t group_matmul_fused_moe_execute(
   // the first call so the gate check is free when logging is off.
   static const bool s_apilog = apilog_info_enabled();
   if (s_apilog) {
-    apilog_info("[fused_moe] arena=", (want_tight ? "tight" : "wide"),
+    apilog_info("[GRP_MATMUL Level2 fused_moe] arena=",
+                (want_tight ? "tight" : "wide"),
                 " internal_alloc=", internal_alloc,
                 " act=", act_name(act),
                 " env_algo=", env_algo_fused,
@@ -394,9 +408,11 @@ status_t group_matmul_fused_moe_execute(
   for (size_t i = 0; i < num_ops; ++i) {
     // Core dimensions.
     if (M[i] < 0 || N[i] <= 0 || K[i] <= 0) return status_t::failure;
-    // N must be even (Op2's K_down = N/2 derives from the swiglu
-    // half-split).  Odd N would silently halve incorrectly.
-    if ((N[i] & 1) != 0) return status_t::failure;
+    // N must be even ONLY when a gated activation is fused (swiglu /
+    // silu / gelu_and_mul collapse pairs of cols).  For act=none Op1
+    // output flows into Op2 verbatim, so any N is admissible.
+    if (act != grp_matmul_gated_act_t::none && (N[i] & 1) != 0)
+      return status_t::failure;
     if (fused.N_down[i] <= 0) return status_t::failure;
 
     // Op1 leading strides (row-major).  Each row m starts at
@@ -405,8 +421,10 @@ status_t group_matmul_fused_moe_execute(
     // GEMM kernel from indexing past the row.
     if (lda[i] < K[i]) return status_t::failure;
     if (ldb[i] < (transB[i] ? K[i] : N[i])) return status_t::failure;
-    // Op2 weight ldb (K_down = N/2 read width, N_down = col count).
-    const int K_down = N[i] / 2;
+    // Op2 weight ldb — `K_down` (the row count of the down_weight
+    // matrix Op2 reads) is N/2 for gated activations, N for act=none.
+    // See `op2_k_for_act` above for the contract.
+    const int K_down = op2_k_for_act(N[i], act);
     if (fused.ldb_down[i] < (transB[i] ? K_down : fused.N_down[i]))
       return status_t::failure;
 
@@ -665,9 +683,12 @@ status_t group_matmul_fused_moe_execute(
   if (internal_alloc) scratch.op2_dst_internal.resize(num_ops);
 
   for (size_t i = 0; i < num_ops; ++i) {
-    scratch.K_down[i]      = N[i] / 2;
+    // Op2's K dimension follows the activation: gated => N/2 (half),
+    // none => N (full pass-through).  See `op2_k_for_act` for the
+    // contract; matches the validator's ldb_down check above.
+    scratch.K_down[i]      = op2_k_for_act(N[i], act);
     // Op2 src = activated Op1 output (in op1_dst at op1_ldc stride:
-    // N for V1, N/2 for V2).
+    // N for wide layouts, N/2 for tight layout).
     scratch.src_down[i]    = op1_dst[i];
 
     // params_down slot layout:
@@ -716,11 +737,13 @@ status_t group_matmul_fused_moe_execute(
   // inside flat_n_tile when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
   // the ALGO 3 path is selected.
   //
-  // Op2's lda (= op1_ldc) per Op1 layout:
-  //   wide  — N     (caller-allocated or internal-alloc wide arena;
-  //                  Op2 reads the first K_down=I cols of each row
-  //                  and skips the second half).
-  //   tight — N/2   (internal-alloc tight arena, perfectly packed).
+  // Op2's lda (= op1_ldc) per Op1 layout × activation:
+  //   wide  + gated act  — lda=N,    K_down=N/2 (reads first half;
+  //                                  skips up cols compacted by act).
+  //   wide  + act=none   — lda=N,    K_down=N   (full pass-through).
+  //   tight + gated act  — lda=N/2,  K_down=N/2 (perfectly packed).
+  //   (tight + act=none is precluded by `pick_fused_moe_want_tight`,
+  //    which gates tight on swiglu_oai_mul.)
   const char *pass2_mode = nullptr;
   group_matmul_run_parallel_dispatch(
       layout, scratch.transA_down, transB, M, fused.N_down, scratch.K_down,

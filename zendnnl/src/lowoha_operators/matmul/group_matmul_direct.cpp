@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "group_matmul/group_matmul_direct.hpp"
+#include "group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -468,6 +469,42 @@ status_t validate_group_matmul_direct_inputs(
   return status_t::success;
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// L1 APILOG helpers
+//
+// One log line per group_matmul_direct() call summarising every input
+// the dispatch saw (shape + dtype + leading dims + per-expert
+// uniformity flags) plus the dispatch decision (`mode`).  The line
+// runs after the inner executor returns, so a model-level read top-to-
+// bottom shows:
+//   [L2 dispatch]  → [L3 executor]  → [L4 kernel]  → [L1]
+// for every call.
+//
+// First-expert-only dumps (lda[0], ldb[0], …, wconst[0]) keep the line
+// bounded for MoE workloads with many experts; when a value varies
+// across experts we append a trailing "(*)" so readers see mixed state
+// at a glance.  M is printed in full because it is the primary shape
+// variance axis.
+// ───────────────────────────────────────────────────────────────────────
+
+inline const char *dt_name(data_type_t dt) {
+  switch (dt) {
+    case data_type_t::f32:  return "f32";
+    case data_type_t::bf16: return "bf16";
+    case data_type_t::f16:  return "f16";
+    case data_type_t::s8:   return "s8";
+    case data_type_t::u8:   return "u8";
+    default:                return "?";
+  }
+}
+
+template <typename T>
+inline const char *uniformity_marker(const std::vector<T> &v) {
+  for (size_t i = 1; i < v.size(); ++i)
+    if (v[i] != v[0]) return "(*)";
+  return "";
+}
+
 } // namespace
 
 status_t group_matmul_direct(const std::vector<char> &layout,
@@ -628,6 +665,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   const int32_t num_threads = resolve_num_threads(params[0].num_threads, omp_mt);
   thread_guard tg(num_threads, omp_mt);
 
+  // Cache the apilog gate; the post-dispatch L1 summary at the bottom
+  // of this function reads it through a single predicted-not-taken
+  // branch when API logging is below info level.
+  static const bool s_l1_log = apilog_info_enabled();
+
   if (src.size() == 1) {
     // ── Sequential chain dispatch ─────────────────────────────────────
     static unsigned int auto_version = get_auto_tuner_ver();
@@ -640,7 +682,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
 
       matmul_algo_t kernel = kernel_select(
           params[i], bp.Batch_A, bp.Batch_B,
-          1, M[i], N[i], K[i], num_threads, bias[i], is_weights_const[i]);
+          1, M[i], N[i], K[i], num_threads, bias[i], is_weights_const[i],
+          transB[i]);
 
       params[i].num_threads = num_threads;
       matmul_execute(
@@ -710,70 +753,75 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   if (is_profile)
     profiler.tbp_stop();
 
-  if (apilog_info_enabled() || is_profile) {
-    auto dt_str = [](data_type_t dt) -> const char * {
-      switch (dt) {
-      case data_type_t::f32:  return "f32";
-      case data_type_t::bf16: return "bf16";
-      case data_type_t::f16:  return "f16";
-      case data_type_t::s8:   return "s8";
-      case data_type_t::u8:   return "u8";
-      default:                return "?";
-      }
-    };
-
+  // ── L1 APILOG (single per-call summary) ───────────────────────────
+  // Built once; consumed by both apilog (full structured line) and
+  // profilelog (same line + timing breakdown).  Skipped entirely
+  // when both gates are off.  See the helper-comment block above
+  // `dt_name` for the format contract.
+  if (s_l1_log || is_profile) {
     std::ostringstream ss;
-    ss << "LOWOHA group_matmul_direct: "
-       << "num_ops=" << num_ops
-       << ", mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
-       << ", threads=" << num_threads
-       << ", dtype=" << dt_str(params[0].dtypes.src)
-       << ">" << dt_str(params[0].dtypes.dst);
+    ss << "[GRP_MATMUL Level1] num_ops=" << num_ops
+       << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
+       << " threads=" << num_threads
+       << " dtype=" << dt_name(params[0].dtypes.src)
+       << ">"       << dt_name(params[0].dtypes.wei)
+       << ">"       << dt_name(params[0].dtypes.dst)
+       << " layout=" << layout[0] << uniformity_marker(layout)
+       << " transA=" << (transA[0] ? 'T' : 'N')
+                     << uniformity_marker(transA)
+       << " transB=" << (transB[0] ? 'T' : 'N')
+                     << uniformity_marker(transB)
+       << " alpha[0]=" << alpha[0] << uniformity_marker(alpha)
+       << " beta[0]="  << beta[0]  << uniformity_marker(beta)
+       << " wconst[0]=" << (is_weights_const[0] ? 1 : 0)
+                        << uniformity_marker(is_weights_const)
+       << " lda[0]=" << lda[0]
+       << " ldb[0]=" << ldb[0]
+       << " ldc[0]=" << (ldc.empty() ? -1 : ldc[0])
+       << " N[0]="   << N[0]
+       << " K[0]="   << K[0]
+       << " M=[";
 
-    // M values (vary per expert) + sum
     int64_t m_sum = 0;
-    ss << ", M=[";
     for (size_t i = 0; i < num_ops; ++i) {
-      if (i > 0) ss << ",";
+      if (i > 0) ss << ',';
       ss << M[i];
       m_sum += M[i];
     }
     ss << "](sum=" << m_sum << ")";
 
-    ss << ", N[0]=" << N[0] << ", K[0]=" << K[0];
-
-    // Fusion flags: compact summary of what was enabled
+    // Fused-operation summary — empty list when this is a plain GEMM,
+    // otherwise records activation kind, fused down-projection (with
+    // N_down for cross-checking), and weighted-reduce post-op
+    // (with token count + topk).
     const bool has_act = (gated_act != nullptr
         && gated_act->act != grp_matmul_gated_act_t::none);
-    const bool has_fused = (fused_moe != nullptr);
-    const bool has_moe = (moe_postop != nullptr);
-
-    if (has_act || has_fused || has_moe) {
-      ss << ", fused=[";
-      bool need_comma = false;
-      if (has_act) {
-        static const char *act_names[] = {
-            "none", "silu_and_mul", "gelu_and_mul", "swiglu_oai_mul"};
-        int ai = static_cast<int>(gated_act->act);
-        ss << "act=" << ((ai >= 0 && ai <= 3) ? act_names[ai] : "?");
-        need_comma = true;
-      }
-      if (has_fused) {
-        if (need_comma) ss << ",";
-        ss << "down_proj=N_down[0]=" << fused_moe->N_down[0];
-        need_comma = true;
-      }
-      if (has_moe) {
-        if (need_comma) ss << ",";
-        ss << "moe_postop(tokens=" << moe_postop->num_tokens
-           << ",topk=" << moe_postop->topk << ")";
-      }
-      ss << "]";
+    const bool has_fused = (fused_moe  != nullptr);
+    const bool has_moe   = (moe_postop != nullptr);
+    ss << " fused=[";
+    bool need_comma = false;
+    if (has_act) {
+      ss << "act=" << act_name(gated_act->act);
+      need_comma = true;
     }
+    if (has_fused) {
+      if (need_comma) ss << ',';
+      ss << "down_proj=N_down[0]=" << fused_moe->N_down[0];
+      need_comma = true;
+    }
+    if (has_moe) {
+      if (need_comma) ss << ',';
+      ss << "moe_postop(tokens=" << moe_postop->num_tokens
+         << ",topk=" << moe_postop->topk << ')';
+      need_comma = true;
+    }
+    if (!need_comma) ss << "none";
+    ss << ']';
+    ss << " sequential_chain=" << (src.size() == 1 ? 1 : 0);
 
-    apilog_info(ss.str());
+    if (s_l1_log) apilog_info(ss.str());
     if (is_profile)
-      profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+      profilelog_verbose(ss.str(), " time=", profiler.tbp_elapsedtime(),
                          profiler.get_res_str());
   }
 

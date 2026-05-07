@@ -924,13 +924,20 @@ TEST_P(TestFusedMoE, Correctness) {
   const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
   const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
 
+  // Op2's K dimension follows the activation: gated activations halve
+  // Op1 output to `dim` cols, act=none flows the full N_gate_up cols
+  // through.  See `op2_k_for_act` in group_matmul_fused_moe.cpp for
+  // the contract.
+  const bool act_is_none = (act_type == grp_matmul_gated_act_t::none);
+  const int K_down = act_is_none ? N_gate_up : dim;
+
   // Allocate buffers.
   TypedBuffers src, w1, d1, d1_ref, w2, d2_fused, d2_ref;
   src     .alloc(num_ops, (size_t)M * K,         p.is_bf16);
   w1      .alloc(num_ops, (size_t)K * N_gate_up, p.is_bf16);
   d1      .alloc(num_ops, (size_t)M * N_gate_up, p.is_bf16);
   d1_ref  .alloc(num_ops, (size_t)M * N_gate_up, p.is_bf16);
-  w2      .alloc(num_ops, (size_t)dim * H,       p.is_bf16);
+  w2      .alloc(num_ops, (size_t)K_down * H,    p.is_bf16);
   d2_fused.alloc(num_ops, (size_t)M * H,         p.is_bf16);
   d2_ref  .alloc(num_ops, (size_t)M * H,         p.is_bf16);
   for (int e = 0; e < num_ops; ++e) {
@@ -947,8 +954,8 @@ TEST_P(TestFusedMoE, Correctness) {
   }
 
   auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K);
-  auto gv_op2 = GemmVecs::uniform(num_ops, M, H,         dim);
-  gv_op2.lda.assign(num_ops, N_gate_up);  // Op2 reads dst1 with stride 2*dim.
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H,         K_down);
+  gv_op2.lda.assign(num_ops, N_gate_up);  // Op2 reads dst1 with stride N_gate_up.
 
   auto srcs     = src.cptrs(p.is_bf16);
   auto wei1     = w1.cptrs(p.is_bf16);
@@ -1071,6 +1078,19 @@ static std::vector<FusedMoETestParam> make_fused_moe_params() {
            4, 16
          })
       out.push_back({256, 128, m, e, 1, /*is_bf16=*/true});
+  // num_ops > 16 coverage for the internal-alloc + custom-kernel path
+  // (GPT-OSS-class decode workload — `dim=128, h=128`).  Earlier test
+  // sweeps capped num_ops at 16; this band exercises the
+  // ManyExperts/Multi-round dispatch that was previously uncovered.
+  // Three activation modes:
+  //   1 = silu_and_mul (concatenated [gate|up])
+  //   3 = swiglu_oai_mul (interleaved [g0,u0,g1,u1,...])
+  //   0 = none (pass-through; `op2_k_for_act` returns full N_op1)
+  for (int act_mode : {0, 1, 3})
+    for (bool bf : {false, true})
+      for (int m : {1, 4})
+        for (int e : {17, 21, 22, 32})
+          out.push_back({128, 128, m, e, act_mode, bf});
   return out;
 }
 
@@ -1109,6 +1129,11 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
   const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
 
+  // Op2's K dimension follows the activation: gated => dim, none =>
+  // N_gate_up.  See `op2_k_for_act` in group_matmul_fused_moe.cpp.
+  const bool act_is_none = (act_type == grp_matmul_gated_act_t::none);
+  const int K_down = act_is_none ? N_gate_up : dim;
+
   // Two src copies: src_orig (consumed by the legacy reference path,
   // remains untouched), src_intalloc (consumed AND repurposed by the
   // internal-alloc path — receives Op2 output in-place).
@@ -1117,7 +1142,7 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   src_intalloc.alloc(num_ops, (size_t)M * K,         p.is_bf16);
   w1          .alloc(num_ops, (size_t)K * N_gate_up, p.is_bf16);
   d1_ref      .alloc(num_ops, (size_t)M * N_gate_up, p.is_bf16);
-  w2          .alloc(num_ops, (size_t)dim * H,       p.is_bf16);
+  w2          .alloc(num_ops, (size_t)K_down * H,    p.is_bf16);
   d2_ref      .alloc(num_ops, (size_t)M * H,         p.is_bf16);
   for (int e = 0; e < num_ops; ++e) {
     if (p.is_bf16) {
@@ -1130,7 +1155,7 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   }
 
   auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K);
-  auto gv_op2 = GemmVecs::uniform(num_ops, M, H,         dim);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H,         K_down);
   gv_op2.lda.assign(num_ops, N_gate_up);
 
   auto srcs_orig     = src_orig.cptrs(p.is_bf16);
@@ -1205,6 +1230,198 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEInternalAlloc,
     ::testing::ValuesIn(make_fused_moe_params()), FusedMoEParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// [5c] TestFusedMoEInternalAllocMixedM — internal-alloc + per-expert M skew.
+//
+// Real MoE decode routes only `topk` experts per token, so per-expert M
+// values vary (most experts at small M, a few at zero, occasional
+// hot-expert with larger M).  Earlier tests use uniform M across all
+// experts, missing this dimension.  This test injects M vectors taken
+// from real GPT-OSS decode frames — it covers the (num_ops > 16,
+// mixed-M, internal_alloc, custom-kernel-engaged) cube that wasn't
+// previously exercised.  Shapes are scaled down for test runtime.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct MixedMTestParam {
+  int dim, hidden_size;
+  std::vector<int> M_per_expert;  // explicit per-expert M
+  int act_int;
+  bool is_bf16;
+};
+
+static std::string MixedMParamName(
+    const ::testing::TestParamInfo<MixedMTestParam> &info) {
+  const auto &p = info.param;
+  std::string name = (p.is_bf16 ? "bf16" : "f32");
+  name += "_act" + std::to_string(p.act_int);
+  name += "_d" + std::to_string(p.dim) + "_h" + std::to_string(p.hidden_size);
+  name += "_E" + std::to_string(p.M_per_expert.size());
+  int sum_M = 0;
+  for (int m : p.M_per_expert) sum_M += m;
+  name += "_sumM" + std::to_string(sum_M);
+  return name;
+}
+
+class TestFusedMoEInternalAllocMixedM
+    : public ::testing::TestWithParam<MixedMTestParam> {};
+
+TEST_P(TestFusedMoEInternalAllocMixedM, Correctness) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+
+  const auto &p = GetParam();
+  const int dim = p.dim, N_gate_up = 2 * dim, H = p.hidden_size;
+  const int K = H, num_ops = static_cast<int>(p.M_per_expert.size());
+  const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+  const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+
+  const bool act_is_none = (act_type == grp_matmul_gated_act_t::none);
+  const int K_down = act_is_none ? N_gate_up : dim;
+
+  // Allocate buffers sized to the LARGEST per-expert M so the in-place
+  // src reuse fits even for the hot expert.  Inactive (M=0) experts
+  // get the same allocation (harmless; their slice is just unused).
+  int max_M = 0;
+  for (int m : p.M_per_expert) if (m > max_M) max_M = m;
+  if (max_M == 0) GTEST_SKIP() << "all M=0; nothing to test";
+
+  TypedBuffers src_orig, src_intalloc, w1, d1_ref, w2, d2_ref;
+  src_orig    .alloc(num_ops, (size_t)max_M * K,         p.is_bf16);
+  src_intalloc.alloc(num_ops, (size_t)max_M * K,         p.is_bf16);
+  w1          .alloc(num_ops, (size_t)K * N_gate_up,     p.is_bf16);
+  d1_ref      .alloc(num_ops, (size_t)max_M * N_gate_up, p.is_bf16);
+  w2          .alloc(num_ops, (size_t)K_down * H,        p.is_bf16);
+  d2_ref      .alloc(num_ops, (size_t)max_M * H,         p.is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    if (p.is_bf16) {
+      fill_src(src_orig.bf16[e], e); fill_src(src_intalloc.bf16[e], e);
+      fill_wei1(w1.bf16[e], e); fill_wei2(w2.bf16[e], e);
+    } else {
+      fill_src(src_orig.f32[e], e); fill_src(src_intalloc.f32[e], e);
+      fill_wei1(w1.f32[e], e); fill_wei2(w2.f32[e], e);
+    }
+  }
+
+  // Per-expert vectors (using the real M_per_expert distribution).
+  GemmVecs gv_op1, gv_op2;
+  gv_op1.layout.assign(num_ops, 'r');
+  gv_op1.transA.assign(num_ops, false);
+  gv_op1.transB.assign(num_ops, false);
+  gv_op1.is_wc .assign(num_ops, false);
+  gv_op1.alpha .assign(num_ops, 1.0f);
+  gv_op1.beta  .assign(num_ops, 0.0f);
+  gv_op1.Ms    = p.M_per_expert;
+  gv_op1.Ns    .assign(num_ops, N_gate_up);
+  gv_op1.Ks    .assign(num_ops, K);
+  gv_op1.lda   .assign(num_ops, K);
+  gv_op1.ldb   .assign(num_ops, N_gate_up);
+  gv_op1.ldc   .assign(num_ops, N_gate_up);
+
+  gv_op2 = gv_op1;
+  gv_op2.Ns .assign(num_ops, H);
+  gv_op2.Ks .assign(num_ops, K_down);
+  gv_op2.lda.assign(num_ops, N_gate_up);  // src for Op2 = Op1 dst at stride N_gate_up
+  gv_op2.ldb.assign(num_ops, H);
+  gv_op2.ldc.assign(num_ops, H);
+
+  auto srcs_orig     = src_orig.cptrs(p.is_bf16);
+  auto srcs_intalloc = src_intalloc.cptrs(p.is_bf16);
+  auto wei1          = w1.cptrs(p.is_bf16);
+  auto wei2          = w2.cptrs(p.is_bf16);
+  auto dst1_ref      = d1_ref.ptrs(p.is_bf16);
+  auto dst2_r        = d2_ref.ptrs(p.is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+  auto params = make_uniform_params(num_ops, dt);
+
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+  auto act_ptr = (act_type != grp_matmul_gated_act_t::none) ? &act : nullptr;
+
+  // Reference: legacy two-call path.
+  {
+    auto pr1 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_orig, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
+        gv_op1.is_wc, pr1, nullptr, act_ptr), status_t::success);
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs2[e] = dst1_ref[e];
+    auto pr2 = params;
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2, gv_op2.lda,
+        wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
+        gv_op2.is_wc, pr2), status_t::success);
+  }
+
+  // Internal-alloc fused path.
+  grp_matmul_fused_moe_params fused{};
+  fused.down_weight = wei2;
+  fused.N_down      = std::vector<int>(num_ops, H);
+  fused.ldb_down    = std::vector<int>(num_ops, H);
+  fused.bias_down   = no_bias;
+  std::vector<void *>  dst_null(num_ops, nullptr);
+  std::vector<int>     ldc_null(num_ops, 0);
+  {
+    auto pf = params;
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_intalloc, gv_op1.lda,
+        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
+        gv_op1.is_wc, pf, nullptr, act_ptr, &fused), status_t::success);
+  }
+
+  // Compare per active expert (skip M=0 — Op2 doesn't write that slot).
+  const auto tol = tol_fused(p.is_bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    const int M_e = p.M_per_expert[e];
+    if (M_e == 0) continue;
+    for (int r = 0; r < M_e; ++r) {
+      for (int c = 0; c < H; ++c) {
+        const float got = src_intalloc.at(e, (size_t)r * K + c, p.is_bf16);
+        const float ref = d2_ref      .at(e, (size_t)r * H + c, p.is_bf16);
+        ASSERT_NEAR(got, ref, std::abs(ref) * tol.rel + tol.abs)
+            << "act=" << p.act_int << (p.is_bf16 ? " bf16" : " f32")
+            << " dim=" << dim << " h=" << H
+            << " E=" << num_ops << " e=" << e
+            << " M_e=" << M_e << " r=" << r << " c=" << c;
+      }
+    }
+  }
+}
+
+// Real GPT-OSS decode routing patterns (sum_M=128 is one decode token).
+// Frames lifted from gpt_oss_moe_decode_fused_profiled.txt with shapes
+// scaled down (dim=128, hidden=128) for test runtime.
+static std::vector<MixedMTestParam> make_mixed_m_params() {
+  std::vector<MixedMTestParam> out;
+  // Frame 126: num_ops=21, M=[2,26,2,1,8,1,9,3,1,1,3,2,6,3,5,1,1,28,12,4,9].
+  const std::vector<int> frame126 = {2,26,2,1,8,1,9,3,1,1,3,2,6,3,5,1,1,28,12,4,9};
+  // Synthetic: num_ops=24 with two zero experts mid-list (the case the
+  // packing arena sees most often when topk<num_ops).
+  const std::vector<int> frame_sparse = {1,4,0,2,8,0,3,5,1,2,0,16,0,4,2,1,3,0,6,1,2,0,9,1};
+  // Synthetic: num_ops=21 hot expert at the edges.
+  const std::vector<int> frame_edges  = {32,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,30};
+  for (int act_mode : {1, 3, 0}) {
+    for (bool bf : {true, false}) {
+      out.push_back({128, 128, frame126,    act_mode, bf});
+      out.push_back({128, 128, frame_sparse, act_mode, bf});
+      out.push_back({128, 128, frame_edges,  act_mode, bf});
+    }
+  }
+  // Exact GPT-OSS-20B decode shapes (K=H=2880, dim=hidden=2880),
+  // bf16 + swiglu_oai, for the precise mixed-M frames the user is
+  // reporting failures on.  Limited to bf16 + swiglu (act=3) since
+  // fp32 would balloon the test runtime and the failure mode the
+  // user described is bf16-specific.
+  out.push_back({2880, 2880, frame126,    /*act=*/3, /*is_bf16=*/true});
+  out.push_back({2880, 2880, frame_sparse, /*act=*/3, /*is_bf16=*/true});
+  out.push_back({2880, 2880, frame_edges,  /*act=*/3, /*is_bf16=*/true});
+  return out;
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEInternalAllocMixedM,
+    TestFusedMoEInternalAllocMixedM,
+    ::testing::ValuesIn(make_mixed_m_params()), MixedMParamName);
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // [6] TestGroupMatmulCombined: all 2³=8 combinations of (moe, act, fused)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1240,15 +1457,31 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
   const bool need_gate_up = p.use_act || p.use_fused;
   const int N_op1 = need_gate_up ? N_gate_up : H;
 
+  // Op2's K_down depends on whether a gated activation runs between
+  // Op1 and Op2: the gated activation compacts gate+up into N_op1/2
+  // columns (= dim), while no-act passes the full N_op1 width into
+  // Op2.  Mirrors the library contract `op2_k_for_act` in
+  // group_matmul_fused_moe.cpp.  Without this the test would
+  // allocate `wei2` for the gated case unconditionally and read OOB
+  // when `use_fused=true && use_act=false` (silent corruption with
+  // values like 2e+28 from heap junk past `wei2`'s end).
+  //
+  // Sibling tests in this file (TestFusedMoE / TestFusedMoEAlgos /
+  // TestFusedMoEAlgoCustom / TestFusedMoEInternalAlloc) already
+  // follow the same `K_down = act_is_none ? N_gate_up : dim` idiom;
+  // this is just bringing TestGroupMatmulCombined into line.
+  const bool act_is_none_for_op2 = !p.use_act;
+  const int K_down = act_is_none_for_op2 ? N_op1 : dim;
+
   // Allocate all buffers (some won't be used — harmless).
   TypedBuffers src, w1, d1, d1_ref, w2, d2_fused, d2_ref;
-  src    .alloc(num_ops, (size_t)M * K,    p.is_bf16);
-  w1     .alloc(num_ops, (size_t)K * N_op1,p.is_bf16);
-  d1     .alloc(num_ops, (size_t)M * N_op1,p.is_bf16);
-  d1_ref .alloc(num_ops, (size_t)M * N_op1,p.is_bf16);
-  w2     .alloc(num_ops, (size_t)dim * H,  p.is_bf16);
-  d2_fused.alloc(num_ops, (size_t)M * H,   p.is_bf16);
-  d2_ref  .alloc(num_ops, (size_t)M * H,   p.is_bf16);
+  src    .alloc(num_ops, (size_t)M * K,        p.is_bf16);
+  w1     .alloc(num_ops, (size_t)K * N_op1,    p.is_bf16);
+  d1     .alloc(num_ops, (size_t)M * N_op1,    p.is_bf16);
+  d1_ref .alloc(num_ops, (size_t)M * N_op1,    p.is_bf16);
+  w2     .alloc(num_ops, (size_t)K_down * H,   p.is_bf16);
+  d2_fused.alloc(num_ops, (size_t)M * H,       p.is_bf16);
+  d2_ref  .alloc(num_ops, (size_t)M * H,       p.is_bf16);
   for (int e = 0; e < num_ops; ++e) {
     if (p.is_bf16) {
       fill_src(src.bf16[e], e);
@@ -1357,7 +1590,9 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
     for (int e = 0; e < num_ops; ++e) {
       srcs2[e] = dst1_r[e];
     }
-    auto gv2 = GemmVecs::uniform(num_ops, M, H, dim);
+    // Reference Op2 must use the same `K_down` as the fused-MoE
+    // path: full N_op1 when no activation runs, half when gated.
+    auto gv2 = GemmVecs::uniform(num_ops, M, H, K_down);
     gv2.lda.assign(num_ops, N_op1);
     auto pr2 = params;
     ASSERT_EQ(group_matmul_direct(gv2.layout, gv2.transA, gv2.transB, gv2.Ms,
@@ -1513,6 +1748,11 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
   const bool use_bf16_in  = (p.is_bf16 || p.mixed_prec);
   const bool use_bf16_out = !p.mixed_prec && p.is_bf16;
 
+  // Op2's K dimension follows the activation: gated => dim, none =>
+  // N_gate_up.  See `op2_k_for_act` in group_matmul_fused_moe.cpp.
+  const bool act_is_none = (act_type == grp_matmul_gated_act_t::none);
+  const int K_down = act_is_none ? N_gate_up : dim;
+
   AlgoEnvGuard algo_guard(p.algo);
   // The fused-swiglu_oai epilogue in ALGO 3 is gated by
   // ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT (default OFF) — see
@@ -1528,7 +1768,7 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
   TypedBuffers src, w1, d1, d1r, w2, d2, d2r;
   src.alloc(num_ops, (size_t)M * K,         use_bf16_in,  p.mixed_prec);
   w1 .alloc(num_ops, (size_t)K * N_gate_up, use_bf16_in,  p.mixed_prec);
-  w2 .alloc(num_ops, (size_t)dim * H,       use_bf16_in,  p.mixed_prec);
+  w2 .alloc(num_ops, (size_t)K_down * H,    use_bf16_in,  p.mixed_prec);
   d1 .alloc(num_ops, (size_t)M * N_gate_up, use_bf16_out);
   d1r.alloc(num_ops, (size_t)M * N_gate_up, use_bf16_out);
   d2 .alloc(num_ops, (size_t)M * H,         use_bf16_out);
@@ -1538,7 +1778,7 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
   for (int e = 0; e < num_ops; ++e) {
     // Always generate in f32 then mirror to bf16 when needed.
     std::vector<float> s_tmp((size_t)M * K), w1_tmp((size_t)K * N_gate_up),
-        w2_tmp((size_t)dim * H);
+        w2_tmp((size_t)K_down * H);
     fill_src(s_tmp,  e);
     fill_wei1(w1_tmp, e);
     fill_wei2(w2_tmp, e);
@@ -1604,7 +1844,7 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
     for (int e = 0; e < num_ops; ++e) {
       s2[e] = dst1r[e];
     }
-    auto gv2 = GemmVecs::uniform(num_ops, M, H, dim);
+    auto gv2 = GemmVecs::uniform(num_ops, M, H, K_down);
     gv2.lda.assign(num_ops, N_gate_up);
     auto pr2 = make_mixed_params(num_ops, dst_dt, wei_dt, dst_dt,
                                  p.use_bias ? data_type_t::f32 : data_type_t::none);
@@ -1789,6 +2029,11 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   const bool is_bf16 = true;
   const data_type_t dt = data_type_t::bf16;
 
+  // Op2's K dimension follows the activation: gated => dim, none =>
+  // N_gate_up.  See `op2_k_for_act` in group_matmul_fused_moe.cpp.
+  const bool act_is_none = (act_type == grp_matmul_gated_act_t::none);
+  const int K_down = act_is_none ? N_gate_up : dim;
+
   // Two src copies: `src_ref` for the legacy reference pass (unchanged
   // after use), `src_fused` for the internal-alloc fused path (Op2
   // writes back in-place, so the buffer is consumed).
@@ -1797,7 +2042,7 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   src_fused.alloc(num_ops, (size_t)M * K,         is_bf16);
   w1       .alloc(num_ops, (size_t)K * N_gate_up, is_bf16);
   d1_ref   .alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
-  w2       .alloc(num_ops, (size_t)dim * H,       is_bf16);
+  w2       .alloc(num_ops, (size_t)K_down * H,    is_bf16);
   d2_ref   .alloc(num_ops, (size_t)M * H,         is_bf16);
   for (int e = 0; e < num_ops; ++e) {
     fill_src (src_ref  .bf16[e], e);
@@ -1807,7 +2052,7 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   }
 
   auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K);
-  auto gv_op2 = GemmVecs::uniform(num_ops, M, H, dim);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H, K_down);
   gv_op2.lda.assign(num_ops, N_gate_up);
 
   auto srcs_ref   = src_ref  .cptrs(is_bf16);
@@ -1962,6 +2207,14 @@ struct AlgoCustomParam {
   int act_int;            // 0=none, 1=silu, 2=gelu, 3=swiglu_oai
   int bias_kind;          // 0=none, 1=bf16, 2=fp32
   int M, num_ops, dim;
+  // transB toggle — exercises BOTH caller layouts the custom-kernel
+  // pack now supports (false: [K,N] row-major, true: [N,K] row-major
+  // PyTorch convention).  Differential test compares custom_kernel=1
+  // run vs custom_kernel=0 reference with the SAME transB, so both
+  // paths interpret `wei[]` identically; the test verifies the new
+  // pack addressing produces bit-equivalent output to the standard
+  // AOCL path.
+  int transB;             // 0 or 1
   // NOTE: moe_postop is intentionally not swept here.  The moe_postop
   // executor reduces the full wide Op1 output (D = N[0]), which for
   // gated activations is 2*dim and includes the un-activated second
@@ -1984,6 +2237,7 @@ static std::string AlgoCustomParamName(
        + "_fusedAct" + std::to_string(p.n_tile_fused_act)
        + "_" + act_names[p.act_int]
        + "_" + bias_names[p.bias_kind]
+       + "_tB" + std::to_string(p.transB)
        + "_M" + std::to_string(p.M)
        + "_E" + std::to_string(p.num_ops)
        + "_d" + std::to_string(p.dim);
@@ -2035,7 +2289,10 @@ static void run_one_algo_custom_pass(
     else if (p.bias_kind == 2) biases[e] = bias_fp32[e].data();
   }
 
-  auto gv = GemmVecs::uniform(p.num_ops, p.M, N_op1, K);
+  auto gv = GemmVecs::uniform(p.num_ops, p.M, N_op1, K,
+                              /*alpha=*/1.0f, /*beta=*/0.0f,
+                              /*wc=*/false, /*tA=*/false,
+                              /*tB=*/p.transB != 0);
   const data_type_t bias_dt = (p.bias_kind == 1) ? data_type_t::bf16
                             : (p.bias_kind == 2) ? data_type_t::f32
                                                  : data_type_t::none;
@@ -2165,13 +2422,20 @@ static std::vector<AlgoCustomParam> make_algo_custom_params() {
               (act == 3) ? std::vector<int>{0, 1}
                          : std::vector<int>{0};
           for (int fa : fused_acts) {
-            // M=4 × num_ops=8 keeps the shape small enough to run
-            // fast under 8×64 sharding.  dim=64 → N_op1=128 for the
-            // gated cases (multiple of pack_nr=32 so the custom
-            // kernel's contract is met) and N_op1=64 for act=none
-            // (also a clean multiple of 32).
-            out.push_back({algo, custom, fa, act, bias,
-                           /*M=*/4, /*num_ops=*/8, dim});
+            // transB sweep — exercises both [K,N] and [N,K] caller
+            // layouts.  The custom-kernel pack now supports both,
+            // and this differential test catches any addressing
+            // regression on the transB=true path that would
+            // otherwise only show up in framework integrations.
+            for (int tB : {0, 1}) {
+              // M=4 × num_ops=8 keeps the shape small enough to run
+              // fast under 8×64 sharding.  dim=64 → N_op1=128 for the
+              // gated cases (multiple of pack_nr=32 so the custom
+              // kernel's contract is met) and N_op1=64 for act=none
+              // (also a clean multiple of 32).
+              out.push_back({algo, custom, fa, act, bias,
+                             /*M=*/4, /*num_ops=*/8, dim, tB});
+            }
           }
         }
       }

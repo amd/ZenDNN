@@ -62,10 +62,10 @@ namespace matmul {
 namespace custom_kernel {
 
 /// Activation kinds the microkernel epilogue supports.  `swiglu_oai_mul`
-/// is used only by the fused MoE V2 Op1 path (tight halved output);
-/// `none` is used by the non-fused flat_n_tile path and by fused MoE
-/// V2 Op2.  `silu_and_mul` / `gelu_and_mul` use a split layout that
-/// does not fit the in-register epilogue and stay on the standard
+/// is used by the fused-MoE Op1 tight-arena path (halved output);
+/// `none` is used by the non-fused flat_n_tile path and by Op2 of the
+/// fused-MoE flow.  `silu_and_mul` / `gelu_and_mul` use a split layout
+/// that does not fit the in-register epilogue and stay on the standard
 /// dispatcher.
 enum class ActKind {
   none,            ///< Store full NR BF16 cols.

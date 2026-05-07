@@ -272,15 +272,15 @@ void apply_swiglu_oai_tile_rows_oop(
  * When provided to group_matmul_direct, the entire MoE block is executed
  * as a single API call.
  *
- * V1 current implementation — always two-pass for all GRP_ALGO values:
+ * Current implementation — always two-pass for all GRP_ALGO values:
  *     Pass 1: Op1 (gate+up) + gated activation via parallel dispatch.
  *     Pass 2: Op2 (down_proj)                  via parallel dispatch.
- *   Both passes honor ZENDNNL_GRP_MATMUL_ALGO.  The dispatcher may fuse
- *   the gated activation into Pass 1's epilogue (all activations on
- *   ALGO 1/2/4/5, and swiglu_oai_mul on ALGO 3); otherwise a separate
- *   activation sub-pass is applied to Pass 1's output before Pass 2.
- *   A future version may add per-expert deep fusion of
- *   Op1 → activation → Op2 chained at L1/L2/L3 boundaries.
+ *   Both passes honour ZENDNNL_GRP_MATMUL_ALGO.  The dispatcher may
+ *   fuse the gated activation into Pass 1's epilogue (all activations
+ *   on ALGO 1/2/4/5, and swiglu_oai_mul on ALGO 3); otherwise a
+ *   separate activation sub-pass is applied to Pass 1's output before
+ *   Pass 2.  Per-expert deep fusion of Op1 → activation → Op2 chained
+ *   at L1/L2/L3 boundaries is a possible future extension.
  *
  * The weighted-reduce (moe_postop) always runs in a separate pass after
  * Op2 since it requires all experts' outputs to be complete.
@@ -288,16 +288,28 @@ void apply_swiglu_oai_tile_rows_oop(
  * All vectors must have size num_ops (one entry per expert).
  *
  * Constraints:
- *   - N must be even (K_down = N / 2 for each expert).
+ *   - N must be even when a gated activation (swiglu/silu/gelu_and_mul)
+ *     is selected — those activations collapse pairs of cols.  N may be
+ *     any positive value for act=none.
  *   - dst_down[i] must be at least [M[i], N_down[i]].
+ *   - Op2's K-dimension (the row count of `down_weight[i]`) follows
+ *     the activation:
+ *         act gated   →  K_down = N[i] / 2  (down_weight is [N/2, N_down]).
+ *         act = none  →  K_down = N[i]      (down_weight is [N,   N_down]).
+ *     The caller's `down_weight[i]` and `ldb_down[i]` MUST be sized
+ *     accordingly.  See `op2_k_for_act` in group_matmul_fused_moe.cpp
+ *     for the formal contract.
  *   - Op2 inherits the caller-provided per-expert layout from Op1;
  *     transA=false is hardcoded for Op2, transB is inherited from Op1
  *     (typically both false for MoE row-major weights).
- *   - When act==none, Op2 reads the raw first-half columns of Op1 output.
- *     For correct MoE semantics, gated_act should be enabled.
+ *   - Op2's alpha/beta are hardcoded to 1.0/0.0 (down_proj is a clean
+ *     overwrite-style GEMM; caller-provided alpha/beta apply to Op1
+ *     only).
  */
 struct grp_matmul_fused_moe_params {
-  /// Per-expert down_proj weights [dim, N_down[i]].
+  /// Per-expert down_proj weights — shape depends on activation
+  /// (see the contract above): [N/2, N_down[i]] for gated acts,
+  /// [N, N_down[i]] for act=none.
   /// Must use same dtype as Op1 weights (params[i].dtypes.wei).
   std::vector<const void *> down_weight;
   std::vector<int> N_down;                ///< Per-expert output columns of down_proj.
@@ -397,9 +409,9 @@ struct grp_matmul_fused_moe_params {
  * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj)
  *        → optional MoE post-op (weighted reduce).
  *
- * V1 runs the flow as two passes of group_matmul_run_parallel_dispatch;
- * both passes honor ZENDNNL_GRP_MATMUL_ALGO.  See grp_matmul_fused_moe_params
- * (above) for the full design note.
+ * The flow runs as two passes of group_matmul_run_parallel_dispatch;
+ * both passes honour ZENDNNL_GRP_MATMUL_ALGO.  See
+ * grp_matmul_fused_moe_params (above) for the full design note.
  *
  * When `moe_postop` is non-null, the weighted-reduce post-op is invoked
  * automatically after Op2 with `D = fused.N_down[0]` (the planner has

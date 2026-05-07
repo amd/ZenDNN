@@ -76,8 +76,8 @@ namespace {
 // When `fused_epilogue=swiglu` AND the caller's dst is a tight
 // [M, I]-layout buffer (ldc < N), the classic matmul-then-in-place-
 // compact pattern no longer fits (matmul writes 2I cols but dst only
-// has I cols per row).  In that case `do_tile()` switches to the
-// per-thread flow that the fused-MoE V2 executor pioneered:
+// has I cols per row).  In that case `do_tile()` switches to a
+// per-thread scratch + out-of-place activation flow:
 //
 //   1. matmul the thread's N-tile slice into a thread-local scratch
 //      buffer (wide, `n_tile` cols, ldc=n_tile),
@@ -205,6 +205,35 @@ struct GroupNTilePlan {
   std::array<int, kMaxExperts> expert_order{};
   int expert_order_size = 0;
 
+  // ── AOCL-path stable n_thr override ────────────────────────────────
+  // Populated in `plan_group_n_tile` when the env knob
+  // `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` is on (default).  Each
+  // entry is `aocl_stable_n_thr(topo.num_threads, topo.max_N)`, which
+  // under the strict-stable design is intentionally a stable,
+  // num_threads-only choice: the current implementation in
+  // `group_matmul_parallel_common.hpp::aocl_stable_n_thr` ignores its
+  // `N` parameter and returns a value derived solely from
+  // `num_threads` and `target_slots`.  It is therefore num_ops-,
+  // shape-, and phase-INDEPENDENT.  For a fixed model + OMP team size,
+  // the chosen value is invariant across calls regardless of
+  // per-call gating, strategy, batch size, num_ops, or phase
+  // (prompt vs decode) — exactly what the AOCL reorder cache key
+  // (col_start, n_tile) needs to stay byte-identical across calls.
+  //
+  // `do_tile` / `apply_swiglu_oai` consume the per-expert slot via
+  // `participating_n_thr(plan, e, team_size, min_n_tile)`, which on
+  // the non-custom path returns
+  //     min(stable_n_thr_per_expert[e], N[e] / nr_align)
+  // — the safety re-clamp uses `plan.nr_align` (backend-determined,
+  // phase-independent) rather than `min_n_tile` (planner-derived
+  // from `max_M`, phase-dependent).  Using nr_align here keeps the
+  // clamp PHASE-INVARIANT, which is required for AOCL's reorder
+  // cache key (B + col_start·elem, n_tile) to stay byte-identical
+  // across prompt and decode calls.
+  // Sentinel: zero means "disabled — use the classic dynamic
+  // `participating_n_thr(team_size, min_n_tile)` formula".
+  std::array<int16_t, kMaxExperts> stable_n_thr_per_expert{};
+
   // When the env `ZENDNNL_GRP_MATMUL_N_ORDER` is 0 (auto), the picker
   // resolves a concrete sub-mode and stashes it here for APILOG
   // transparency.  Left at -1 when the env was explicitly set
@@ -294,22 +323,64 @@ struct GroupNTileContext {
   // across the parallel region.
   std::atomic<int> *alloc_fail = nullptr;
 
-  // Number of threads that actually share the work for expert e in a
-  // team of `team_size`.  Capped at the number of N-tiles available
-  // (N[e] / min_n_tile) so each participant has at least `min_n_tile`
-  // columns to chew on; floored at 1.
+  // Returns the number of threads that share the work for expert `e`
+  // in a team of `team_size`.  Used by `do_tile()` (column split for
+  // matmul) and `apply_swiglu_oai()` (row split for the in-place
+  // swiglu epilogue).
   //
-  // CRITICAL invariant: this formula is shared by `do_tile()` (matmul
-  // column split) and `apply_swiglu_oai()` (activation row split).
-  // The two MUST agree on which threads participate so that:
-  //   1. Every column written by matmul has a corresponding row-split
-  //      reader in the activation, and vice versa.
-  //   2. Threads with `local_tid >= participating_n_thr` skip BOTH
-  //      matmul and activation.
-  // Centralising the formula here makes any future tweak land in
-  // both code paths automatically.
-  inline int participating_n_thr(int e, int team_size,
+  // INVARIANT: do_tile() and apply_swiglu_oai() MUST agree on the
+  // returned value so every column written has a row-reader and
+  // vice versa.  Centralising it here makes that automatic.
+  //
+  // Two distinct paths, picked at the planner:
+  //
+  //   AOCL strict-stable path (`!use_custom && stable[e] > 0`):
+  //     Returns `stable[e]` — populated by the planner from
+  //     `aocl_stable_n_thr(num_threads)` (depends ONLY on
+  //     num_threads).  The planner also forces team_size = stable[e]
+  //     for every expert, so the AOCL reorder cache key
+  //     (col_start, n_tile) is byte-identical across calls.  The
+  //     `min({...})` below is defence-in-depth: under the strict-
+  //     stable plan all three terms equal `stable[e]`, so the result
+  //     is just `stable[e]`.  The clamps remain so that any future
+  //     planner regression breaking the invariant degrades gracefully
+  //     to dynamic-tile behaviour (some cache thrash, no corruption)
+  //     rather than reopening a silent-miscompute window.
+  //
+  //   Custom kernel path (`use_custom`):
+  //     Returns `min(team_size, N[e] / min_n_tile)` — the tile count
+  //     scales freely with team_size because the custom kernel's
+  //     pack cache is shape-keyed (full-N pack per expert), not
+  //     tile-keyed.  No cache-stability constraint on (col_start,
+  //     n_tile).
+  //
+  // See the doc-block in group_matmul_parallel_common.hpp for the
+  // cache-stability contract that motivates the AOCL path.
+  inline int participating_n_thr(const GroupNTilePlan &plan,
+                                 int e, int team_size,
                                  int min_n_tile) const {
+    // Defence-in-depth bounds check: `stable_n_thr_per_expert` is a
+    // stack-resident `std::array<int16_t, kMaxExperts=256>`.  The
+    // strict-stable planner only populates indices in
+    // `[0, min(num_ops, kMaxExperts))`, and `plan_group_n_tile`
+    // additionally routes any caller with `num_ops > kMaxExperts` to
+    // Sequential — so this branch should never see `e >= kMaxExperts`
+    // in production.  We still guard the read here so a future
+    // regression in the upstream gate cannot reopen an OOB-read
+    // window: experts past `kMaxExperts` silently fall through to the
+    // dynamic-tile branch instead of touching invalid memory.
+    if (!use_custom
+        && e >= 0
+        && e < GroupNTilePlan::kMaxExperts
+        && plan.stable_n_thr_per_expert[e] > 0) {
+      const int nr_align_safe = std::max(1, plan.nr_align);
+      const int align_cap     = std::max(1, N[e] / nr_align_safe);
+      const int clamped       = std::min({
+          static_cast<int>(plan.stable_n_thr_per_expert[e]),
+          align_cap,
+          team_size});
+      return std::max(1, clamped);
+    }
     return std::max(1, std::min(team_size, N[e] / min_n_tile));
   }
 
@@ -331,7 +402,13 @@ struct GroupNTileContext {
                       int e, int local_tid, int team_size,
                       int min_n_tile) const {
     if (M[e] <= 0) return;
-    const int n_thr = participating_n_thr(e, team_size, min_n_tile);
+    const int n_thr = participating_n_thr(plan, e, team_size, min_n_tile);
+    // Coverage trip-wire: n_thr > team_size would mean aligned_n_split
+    // produces more slots than the executor has threads, leaving the
+    // surplus slots' dst columns uncomputed (silent corruption).
+    assert(n_thr <= team_size
+           && "do_tile: n_thr > team_size; aligned_n_split would "
+              "leave dst cols uncomputed");
     if (local_tid >= n_thr) return;
 
     const auto split =
@@ -382,7 +459,7 @@ struct GroupNTileContext {
     // Caller's dst is a tight [M, I]-layout buffer (ldc < N).  The
     // classic matmul-then-in-place-compact pattern can't run here (no
     // room for 2I cols in dst).  Switch to per-thread-scratch + OOP
-    // activation, cribbed from the fused MoE V2 executor:
+    // activation:
     //
     //   1. matmul the thread's N-tile slice into a thread-local
     //      scratch buffer (stride = n_tile, holds wide 2I cols for
@@ -481,12 +558,16 @@ struct GroupNTileContext {
   //
   //   When M[e] < n_thr some threads get m_slice == 0 and no-op — the
   //   outer omp parallel region barrier still lets them exit cleanly.
-  inline void apply_swiglu_oai(int e, int local_tid, int team_size,
+  inline void apply_swiglu_oai(const GroupNTilePlan &plan,
+                               int e, int local_tid, int team_size,
                                int min_n_tile) const {
     if (M[e] <= 0) return;
-    // Same formula as do_tile() — see participating_n_thr() above for
-    // why this MUST stay in lockstep with the matmul split.
-    const int n_thr = participating_n_thr(e, team_size, min_n_tile);
+    // Same `n_thr` as do_tile() — they MUST agree (see comment on
+    // participating_n_thr()) so every matmul column has a row-reader.
+    const int n_thr = participating_n_thr(plan, e, team_size, min_n_tile);
+    assert(n_thr <= team_size
+           && "apply_swiglu_oai: n_thr > team_size; row-split would "
+              "leave dst rows un-activated");
     if (local_tid >= n_thr) return;
 
     // swiglu_oai requires even N (gate+up = 2 * intermediate_dim).
@@ -523,6 +604,13 @@ struct GroupNTileContext {
 // tuning (e.g. INT8) is a one-place change.
 
 // Build the topology summary once at the top of flat_n_tile.
+//
+// Single pass over M / N / K computes max_M, max_N, max_K, and
+// min_M_active in one cache-friendly traversal — replaces the prior
+// 3 std::max_element passes + 1 min loop (4 separate sweeps over the
+// caller-owned vectors).  At num_ops=32 the saving is ~50 ns per
+// call; the win is mostly code clarity (one explicit reduction loop
+// vs four library calls) since the cost was already noise-floor.
 inline GroupNTileTopology summarise_topology(
     const std::vector<int> &M, const std::vector<int> &N,
     const std::vector<int> &K, int num_threads, size_t wei_elem) {
@@ -534,12 +622,24 @@ inline GroupNTileTopology summarise_topology(
   // = 6 cores) still counts — keeps num_ccds consistent with
   // flat_m_tile's planner.
   t.num_ccds = std::max(1, (num_threads + t.ccd_size - 1) / t.ccd_size);
-  t.max_M = *std::max_element(M.begin(), M.end());
-  t.max_N = *std::max_element(N.begin(), N.end());
-  t.max_K = *std::max_element(K.begin(), K.end());
-  t.min_M_active = t.max_M;
-  for (int i = 0; i < t.num_ops; ++i)
-    if (M[i] > 0) t.min_M_active = std::min(t.min_M_active, M[i]);
+
+  // Seed the running maxima with element 0; sentinel-based
+  // initialisation for `min_M_active` so a "no expert has M > 0"
+  // input falls through to the `min_M_active = max_M` fallback below
+  // (matches the prior behaviour of the seed-with-max-then-narrow loop).
+  t.max_M = M[0];
+  t.max_N = N[0];
+  t.max_K = K[0];
+  t.min_M_active = std::numeric_limits<int>::max();
+  for (int i = 0; i < t.num_ops; ++i) {
+    if (M[i] > t.max_M) t.max_M = M[i];
+    if (N[i] > t.max_N) t.max_N = N[i];
+    if (K[i] > t.max_K) t.max_K = K[i];
+    if (M[i] > 0 && M[i] < t.min_M_active) t.min_M_active = M[i];
+  }
+  if (t.min_M_active == std::numeric_limits<int>::max())
+    t.min_M_active = t.max_M;
+
   t.wei_elem = wei_elem;
   t.wei_per_expert = static_cast<size_t>(t.max_N)
                    * static_cast<size_t>(t.max_K) * wei_elem;
@@ -590,11 +690,11 @@ inline int compute_target_batch(const GroupNTileTopology &topo,
 
 
 // (`sort_indices_by_m` is defined in group_matmul_parallel_common.hpp
-//  and shared with the V2 fused-MoE Op1 executor.)
+//  and is also used by the fused-MoE Op1 executor.)
 
-// V1-side thin wrapper around the generic `fill_ntile_expert_order()`
-// helper (defined in group_matmul_parallel_common.hpp, shared with the
-// V2 fused-MoE Op1 executor).  V1 plumbs the result into the stack-
+// Thin wrapper around the generic `fill_ntile_expert_order()` helper
+// (defined in group_matmul_parallel_common.hpp, shared with the
+// fused-MoE Op1 executor).  Plumbs the result into the stack-
 // resident fields on `GroupNTilePlan`: `expert_order[]`,
 // `expert_order_size`, and `auto_resolved_order` (the concrete sub-
 // mode the auto-picker resolved when env = 0, for APILOG
@@ -650,6 +750,15 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
 // ALGO 0 uses (kMediumWeight, kDecodeMaxM) so the two code paths
 // agree.
 //
+// Goal: a deployment that pins `ZENDNNL_GRP_MATMUL_ALGO=3` should
+// never run materially slower than `ZENDNNL_GRP_MATMUL_ALGO=0` on
+// the shapes where ALGO 0 silently routes to Sequential.  Mirroring
+// `auto_select_algo`'s full gate (not just its decode + tiny-num_ops
+// fast paths) closes that gap on the tall-N few-experts prompt-large-
+// weight regime that `auto_select_algo` measured ALGO 1 wins by
+// 40-189% (Mixtral 8x* class — see auto_select_algo's notes block in
+// group_matmul_parallel.cpp).
+//
 // (R1) Few experts (≤ 3): the per-expert matmul is large enough that
 //      one-expert-at-a-time with the full thread team beats column-
 //      parallel across 2-3 experts.  Matches ALGO 0's
@@ -657,16 +766,42 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
 //
 // (R2) Large-weight DRAM-streaming (wei_per_expert > kMediumWeight):
 //      AOCL DLP's internal panel blocking with the full thread team
-//      is near-optimal.  ALGO 3 only beats it in a narrow regime —
-//      prompt-class shapes (max_M > kDecodeMaxM) with enough experts
-//      (num_ops ≥ 5).  Outside that regime, fall back to Sequential.
+//      is near-optimal.  ALGO 3 only beats it when column-parallel
+//      has enough per-thread work to amortise the per-thread BKC
+//      pack + round-scheduling overhead.  Mirror ALGO 0's gate
+//      exactly:
+//        * prompt-class           (max_M  > kDecodeMaxM) AND
+//        * enough experts         (num_ops ≥ 5)         AND
+//        * (wide_N || many_experts)
+//          where wide_N      = (max_N  > max_K)   — more N to split
+//                many_experts = (num_ops ≥ 16)    — amortise overhead
+//      Anything else in the large-weight class falls back to
+//      Sequential.  This includes:
+//        - decode-class (max_M ≤ kDecodeMaxM)
+//        - very few experts (num_ops < 5)
+//        - tall-N few-experts prompt (e.g., Mixtral down_proj
+//          K=14336, N=4096, num_ops=8): ALGO 1 measured 40-189%
+//          faster than ALGO 3.
+//
+// GPT-OSS note: GPT-OSS-20B per-expert weights (≈ 33 MB Op1, 16 MB
+// Op2) sit BELOW kMediumWeight, so R2 does not fire and forced
+// ALGO 3 + GPT-OSS retains its existing N-tile path.  R2 only
+// affects models in the >64 MB/expert class (Mixtral 8x22B et al.).
 inline bool self_fallback_to_sequential(const GroupNTileTopology &topo) {
   // (R1)
   if (topo.num_ops <= 3) return true;
-  // (R2) — ntile_viable is the caller's precondition; this is the
-  // remaining ALGO-3-wins gate for large weights.
-  if (topo.wei_per_expert > kMediumWeight
-      && (topo.num_ops < 5 || topo.max_M <= kDecodeMaxM)) return true;
+  // (R2) — large-weight DRAM-streaming: keep ALGO 3 only in the
+  // narrow regime where ALGO 0 itself would pick ALGO 3.  Otherwise
+  // route to Sequential so forced ALGO 3 ≥ auto ALGO 0 in
+  // performance.  ntile_viable is the caller's precondition, so we
+  // don't re-check it here.
+  if (topo.wei_per_expert > kMediumWeight) {
+    if (topo.num_ops < 5)            return true;  // very few experts
+    if (topo.max_M <= kDecodeMaxM)   return true;  // decode-class
+    const bool wide_N       = (topo.max_N > topo.max_K);
+    const bool many_experts = (topo.num_ops >= 16);
+    if (!(wide_N || many_experts))   return true;  // tall-N few-experts
+  }
   return false;
 }
 
@@ -817,13 +952,48 @@ inline RoundCandidates build_round_candidates(
 //   Ties resolve to multi (keeps thr = ccd_size, the DLP sweet spot).
 //   Forced single falls back to balanced when single is infeasible
 //   (num_threads < num_ops).
+//
+// SCOPE: this cost model is consulted only on the legacy / custom-
+// kernel path of `plan_group_n_tile`.  The default non-custom AOCL
+// path takes the strict-stable shortcut (n_thr_fixed = stable,
+// batch_size = num_threads/stable) and does NOT call this function.
+// Empirical observations below apply specifically to the custom
+// BF16 microkernel running with shape-keyed pack cache.
 enum class RoundPick { Single, Multi, Balanced };
 
 inline RoundPick pick_round_strategy(const GroupNTileTopology &topo,
                                      const RoundCandidates &c) {
   const int rounds_mode = get_grp_n_rounds_mode();
-  if (rounds_mode == 1)
-    return c.single_eligible ? RoundPick::Single : RoundPick::Balanced;
+  if (rounds_mode == 1) {
+    if (c.single_eligible) return RoundPick::Single;
+    // Force-Single is infeasible (num_threads < num_ops): fall back
+    // to Balanced.  Emit a one-shot warning so an A/B benchmarker
+    // running with `ZENDNNL_GRP_MATMUL_N_ROUNDS=1` knows the env
+    // override didn't take effect for this call.  The gate uses an
+    // `std::atomic<bool>` + `compare_exchange_strong` so concurrent
+    // planner invocations (e.g. multiple application threads each
+    // calling group_matmul) emit the warning exactly once across the
+    // process — a plain `static bool` would race here in release
+    // builds, with both readers seeing `false` and emitting the
+    // warning twice (or, with sufficiently bad interleaving, not at
+    // all).  Subsequent calls follow the documented fallback
+    // silently.
+    static const bool s_log_fallback = apilog_warning_enabled();
+    static std::atomic<bool> s_warned{false};
+    bool expected = false;
+    if (s_log_fallback
+        && s_warned.compare_exchange_strong(
+               expected, true, std::memory_order_relaxed)) {
+      apilog_warning(
+          "[GRP_MATMUL Level3 N_ROUNDS=1 FALLBACK] forced single-round"
+          " infeasible (num_threads=", topo.num_threads,
+          " < num_ops=", topo.num_ops,
+          "); using RoundPick::Balanced instead.  This warning fires"
+          " once per process; subsequent calls follow the same"
+          " documented fallback silently.");
+    }
+    return RoundPick::Balanced;
+  }
   if (rounds_mode == 2) return RoundPick::Multi;
   if (rounds_mode == 3) return RoundPick::Balanced;
 
@@ -899,21 +1069,55 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 
 // Strategy decision + parameter computation for ALGO 3.
 //
-// Thin orchestrator — defers each decision to a named helper above:
-//   1. ntile_viable             — falls back to Sequential if false.
-//   2. self_fallback_to_sequential  — (R1/R2) gates.
-//   3. try_decode_d_plan        — decode-class parallel, if eligible.
-//   4. build_few_experts_plan   — (A) when num_ops ≤ num_ccds.
-//   5. build_round_candidates
-//      + pick_round_strategy
-//      + apply_round_pick       — (B) many-experts round scheduler.
+// Two-path planner — pick the path up front based on whether the
+// custom BF16 microkernel will run:
 //
-// The order is kept stable so that a future dtype-specific override
-// only needs to swap tile constants or add a new strategy without
-// changing the existing thresholds.
+//   ┌────────────────────────────────────────────────────────────┐
+//   │ AOCL DLP / oneDNN_blocked / native_brgemm   (!use_custom)  │
+//   ├────────────────────────────────────────────────────────────┤
+//   │ STRICT-STABLE plan.  Tile partition is fixed by             │
+//   │ `num_threads` alone; every expert team has exactly         │
+//   │ `stable = num_threads / kAoclTargetConcurrentSlots`        │
+//   │ threads.  Cache key (col_start, n_tile) is invariant       │
+//   │ across calls → AOCL reorder cache hit-rate ≈ 100%          │
+//   │ post-warmup.  Cost model (Single/Multi/Balanced) NOT       │
+//   │ consulted on this path.                                    │
+//   ├────────────────────────────────────────────────────────────┤
+//   │ Custom BF16 microkernel                  (use_custom=true) │
+//   ├────────────────────────────────────────────────────────────┤
+//   │ DYNAMIC plan via cost model (try_decode_d / FewExperts /   │
+//   │ ManyExperts with Single/Multi/Balanced picks).             │
+//   │ Pack cache is shape-keyed (full-N pack per expert), so     │
+//   │ tile-level cache stability is not required.                │
+//   └────────────────────────────────────────────────────────────┘
+//
+// Both paths share the up-front fail-fast checks (viability + R1/R2
+// self-fallback to Sequential) and the narrow-N escape: in either
+// path, very narrow N falls through to Sequential which uses the
+// full thread team per expert and bypasses tile-level concerns
+// entirely.
+//
+// Helper map (in execution order):
+//   1. ntile_viable             — Sequential if false.
+//   2. self_fallback_to_sequential  — (R1) num_ops≤3, or
+//                                     (R2) large-weight regimes where
+//                                     ALGO 0 itself picks ALGO 1
+//                                     (decode-class, very few experts,
+//                                     or tall-N few-experts prompt).
+//   3. R3 capacity guard        — Sequential if num_ops exceeds the
+//                                 plan's fixed-size kMaxExperts arrays
+//                                 (defence against OOB on the
+//                                 strict-stable per-expert table).
+//   4. strict-stable AOCL plan  — non-custom path, when stable env on.
+//   5. try_decode_d_plan        — custom path, decode-class.
+//   6. build_few_experts_plan   — custom path, (A) num_ops ≤ num_ccds.
+//   7. build_round_candidates
+//      + pick_round_strategy
+//      + apply_round_pick       — custom path, (B) many-experts.
 inline GroupNTilePlan plan_group_n_tile(
     const GroupNTileTopology &topo,
     matmul_algo_t algo, int nr_align, bool fused_epilogue,
+    bool use_custom_at_plan_time,
     const std::vector<int> &M) {
 
   GroupNTilePlan plan{};
@@ -924,23 +1128,154 @@ inline GroupNTilePlan plan_group_n_tile(
 
   const bool decode_tile_ab_on = get_grp_n_decode_tile_ab();
 
-  // Viability + R1/R2 self-fallbacks — both route to Sequential.
-  if (!ntile_viable(topo) || self_fallback_to_sequential(topo)) {
+  // Viability + R1/R2/R3 self-fallbacks — all route to Sequential.
+  // Attribute the reason explicitly so readers can tell
+  // "no-tile" (tiny N) from "large-weight + tall-N few-experts" or
+  // "too-many-experts-for-fixed-arrays" at a glance; otherwise every
+  // flat_n_tile Sequential line looks the same in the log regardless
+  // of root cause.
+  //
+  // The R1 / R2 booleans below MUST stay byte-identical to
+  // `self_fallback_to_sequential`'s body — the inline form here exists
+  // only so we can attribute the reason to APILOG.  If you change the
+  // gate, change both.
+  //
+  // R3 (capacity guard): GroupNTilePlan carries fixed-size stack
+  // arrays sized to `kMaxExperts = 256` (currently `expert_order` and
+  // `stable_n_thr_per_expert`).  When `num_ops > kMaxExperts` the
+  // strict-stable populator only writes the first 256 entries, which
+  // would leave executors that index `[0, num_ops)` reading either
+  // zeros (silently disabling the stable path for late experts) or —
+  // if the read site forgets to bounds-check — accessing memory past
+  // the array.  Both are fragile, so we route the entire call to
+  // Sequential at planning time.  Sequential walks experts via
+  // `for (e=0; e<num_ops; ++e)` with no fixed-size lookup arrays, so
+  // it is safe at any num_ops.  In the dispatcher, `num_ops > num_threads`
+  // already routes to ALGO 5; this R3 gate covers the residual case
+  // `kMaxExperts < num_ops <= num_threads` (e.g. 300 experts on a
+  // 512-thread system).
+  const bool viable = ntile_viable(topo);
+  const bool r1     = (topo.num_ops <= 3);
+  bool r2 = false;
+  const char *r2_subreason = nullptr;
+  if (topo.wei_per_expert > kMediumWeight) {
+    const bool wide_N       = (topo.max_N > topo.max_K);
+    const bool many_experts = (topo.num_ops >= 16);
+    if (topo.num_ops < 5) {
+      r2 = true;  r2_subreason = "num_ops<5";
+    } else if (topo.max_M <= kDecodeMaxM) {
+      r2 = true;  r2_subreason = "decode_M";
+    } else if (!(wide_N || many_experts)) {
+      r2 = true;  r2_subreason = "tall_N_few_experts";
+    }
+  }
+  const bool r3 = (topo.num_ops > GroupNTilePlan::kMaxExperts);
+  if (!viable || r1 || r2 || r3) {
     plan.strategy = GroupNTileStrategy::Sequential;
+    static const bool s_fb_log = apilog_info_enabled();
+    if (s_fb_log) {
+      const char *reason =
+          !viable ? "ntile_unviable(N_too_small_for_team_split)"
+        : r1      ? "R1_num_ops<=3"
+        : r2      ? "R2_large_weight"
+        :           "R3_num_ops_exceeds_plan_capacity";
+      apilog_info("[GRP_MATMUL Level3 flat_n_tile FALLBACK] strategy=Sequential "
+                  "reason=", reason,
+                  (r2 && r2_subreason ? " r2_sub=" : ""),
+                  (r2 && r2_subreason ? r2_subreason : ""),
+                  " num_ops=", topo.num_ops,
+                  " plan_capacity=", GroupNTilePlan::kMaxExperts,
+                  " max_M=", topo.max_M,
+                  " max_N=", topo.max_N,
+                  " max_K=", topo.max_K,
+                  " wide_N=", (topo.max_N > topo.max_K),
+                  " many_experts=", (topo.num_ops >= 16),
+                  " wei_per_expert_MB=", (topo.wei_per_expert >> 20),
+                  " num_threads=", topo.num_threads,
+                  " num_ccds=", topo.num_ccds);
+    }
     return plan;
   }
 
-  // Decode-class shapes may take the DecodeD fast path.
-  if (try_decode_d_plan(topo, plan)) return plan;
-
-  // For paths (A) and (B): when max_M is small (decode-class shape),
-  // use the smaller decode-n-tile as min-tile so max_n_thr is high
-  // enough to saturate all threads.  See `decode_tile_ab` in
-  // group_matmul_parallel_common.hpp for the rationale.
-  // `effective_decode_n_tile()` honors the optional
+  // For paths (A), (B), and the strict-stable AOCL path: when max_M is
+  // small (decode-class shape), use the smaller decode-n-tile as
+  // min-tile so max_n_thr is high enough to saturate all threads.
+  // See `decode_tile_ab` in group_matmul_parallel_common.hpp for the
+  // rationale.  `effective_decode_n_tile()` honors the optional
   // `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` override.
   const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
       ? effective_decode_n_tile() : kMinNTile;
+
+  // ── AOCL strict-stable plan (path 1 of 2; see header above) ────────
+  // Forces `team_size == stable` for every expert in every round,
+  // making the AOCL reorder cache key invariant across calls.
+  //
+  // Narrow-N escape: when `stable > max_N / nr_align` we cannot have
+  // `stable` aligned partitions of N (aligned_n_split would fall
+  // back to its unaligned even-split, breaking the kernel's
+  // nr-alignment contract).  Route to Sequential instead.
+  //
+  // DecodeD is skipped on this path: its `thr_per_expert =
+  // num_threads / num_ops` is num_ops-dependent, which would
+  // re-introduce shape sensitivity into the cache key.  The
+  // single-round ManyExperts shape (when num_ops ≤ batch_max) gives
+  // the same parallelism plus a sub-µs end-of-region barrier.
+  if (!use_custom_at_plan_time && get_grp_matmul_aocl_stable_ntile()) {
+    const int stable = aocl_stable_n_thr(topo.num_threads, topo.max_N);
+    const int max_align_slots = std::max(1,
+        topo.max_N / std::max(1, nr_align));
+    if (stable > max_align_slots) {
+      // Narrow-N escape: route to Sequential.
+      plan.strategy = GroupNTileStrategy::Sequential;
+      static const bool s_log_narrow = apilog_info_enabled();
+      if (s_log_narrow) {
+        apilog_info(
+            "[GRP_MATMUL Level3 flat_n_tile FALLBACK] strategy=Sequential "
+            "reason=F3_narrow_N_escape "
+            "stable=", stable,
+            " max_align_slots=", max_align_slots,
+            " nr_align=", nr_align,
+            " max_N=", topo.max_N,
+            " num_threads=", topo.num_threads);
+      }
+      return plan;
+    }
+
+    const int batch_max = std::max(1, topo.num_threads / stable);
+    plan.strategy   = GroupNTileStrategy::ManyExperts;
+    plan.min_n_tile = ab_min_tile;
+    plan.batch_size  = std::min(topo.num_ops, batch_max);
+    plan.n_thr_fixed = stable;
+    plan.max_n_thr   = stable;  // metadata for APILOG; executor consults
+                                // n_thr_fixed when > 0
+
+    // Self-gating on ZENDNNL_GRP_MATMUL_N_ORDER (mode 0 = off, no-op).
+    fill_sorted_expert_order(plan, M, topo.num_ops);
+
+    // Populate stable_n_thr_per_expert so participating_n_thr's
+    // safety clamps (defence-in-depth — see comment above the
+    // function in this file) return `stable` directly.  Under the
+    // strict-stable plan these clamps are no-ops because the planner
+    // guarantees team_size == stable; if a future regression breaks
+    // that, the clamps degrade gracefully to dynamic-tile behaviour.
+    for (int e = 0; e < topo.num_ops && e < GroupNTilePlan::kMaxExperts;
+         ++e) {
+      if (M[e] > 0) {
+        plan.stable_n_thr_per_expert[e] = static_cast<int16_t>(stable);
+      }
+    }
+    return plan;
+  }
+
+  // ── Custom-kernel path (path 2 of 2): cost-model strategy ──────────
+  // Reached when `use_custom_at_plan_time` (the BF16 microkernel
+  // engaged at flat_n_tile entry) OR when the AOCL stable env knob
+  // is OFF (legacy A/B mode).  Pack cache is shape-keyed, so the
+  // cost model is free to optimise wall time without cache-key
+  // constraints.
+
+  // Decode-class shapes may take the DecodeD fast path.
+  if (try_decode_d_plan(topo, plan)) return plan;
 
   if (topo.num_ops <= topo.num_ccds) {
     // (A) Few experts: L3-aware adaptive batching, proportional
@@ -957,6 +1292,20 @@ inline GroupNTilePlan plan_group_n_tile(
 
   // Self-gating on ZENDNNL_GRP_MATMUL_N_ORDER (mode 0 = off, no-op).
   fill_sorted_expert_order(plan, M, topo.num_ops);
+
+  // No stable_n_thr_per_expert population on this branch.  Reasons:
+  //   * Custom-kernel path: participating_n_thr's `!use_custom` gate
+  //     skips the stable branch entirely — the field would never be
+  //     read.
+  //   * Legacy non-strict (env=0) path: by user intent the field
+  //     stays zero so participating_n_thr falls back to the dynamic
+  //     formula (caller opted out of cache stability for A/B perf
+  //     comparison).
+  // The strict-stable branch (above) is the only place that
+  // populates this field, and it's only reachable when stable env is
+  // on AND custom is off — exactly the configuration that consumes
+  // the field downstream.
+
   return plan;
 }
 
@@ -969,9 +1318,25 @@ inline GroupNTilePlan plan_group_n_tile(
 // barriers live here.
 
 // (F) Sequential — N too small for tiling.  Runs one expert at a time
-// with the full thread team per kernel, then runs any fused activation
-// as a second pass (no tile-local epilogue, since the matmul did not
-// split N).
+// with the full thread team per kernel.  Two flows:
+//
+//   (1) Wide caller (ldc[e] >= N[e]) OR no fused activation: matmul
+//       directly into caller's dst; if `plan.fused_epilogue`, run an
+//       in-place activation pass on the wide buffer afterward.
+//
+//   (2) Tight caller + fused swiglu (ldc[e] < N[e] AND fused_epilogue):
+//       caller's dst is `[M, I]` (e.g. fused-MoE internal-alloc tight
+//       arena).  The matmul produces `2I` cols (gate+up) which can't
+//       fit in caller's tight dst — AOCL would refuse with
+//       `ldc < N`.  Allocate a thread-local wide scratch of size
+//       `M[e] * N[e] * dst_elem`, matmul into scratch at stride
+//       `N[e]`, then OOP swiglu compacts to caller's tight dst at
+//       its halved stride.  Same shape as the do_tile() tight branch
+//       but executed serially per expert (no col split).
+//
+// The tight branch is rare in practice — it only fires when a tight-
+// arena fused-MoE call has shapes that fail flat_n_tile's viability
+// check (small N, large weight + few experts, num_ops <= 3).
 inline void execute_sequential(const GroupNTilePlan &plan,
                                GroupNTileContext &ctx) {
   const int num_ops = static_cast<int>(ctx.M.size());
@@ -979,6 +1344,38 @@ inline void execute_sequential(const GroupNTilePlan &plan,
     if (ctx.M[e] <= 0) continue;
     static thread_local matmul_params local_params;
     local_params = ctx.params[e];
+
+    const bool tight_caller = plan.fused_epilogue
+                              && ctx.fused_act ==
+                                 grp_matmul_gated_act_t::swiglu_oai_mul
+                              && ctx.ldc[e] < ctx.N[e];
+    if (tight_caller) {
+      // Tight caller layout — wide scratch + OOP swiglu.
+      assert((ctx.N[e] % 2) == 0
+             && "Sequential tight: N must be even (gate+up pair)");
+      static thread_local PerThreadScratch scratch;
+      const size_t need_bytes =
+          static_cast<size_t>(ctx.M[e]) * ctx.N[e] * ctx.dst_elem;
+      if (!grow_scratch(scratch, need_bytes)) {
+        if (ctx.alloc_fail)
+          ctx.alloc_fail->store(1, std::memory_order_relaxed);
+        return;
+      }
+      execute_expert_slice(ctx.layout[e], ctx.transA[e], ctx.transB[e],
+          ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e],
+          ctx.src[e], ctx.lda[e], ctx.weight[e], ctx.ldb[e],
+          ctx.bias[e], ctx.beta[e], scratch.buf, ctx.N[e],
+          ctx.is_weights_const[e], plan.num_threads, local_params,
+          plan.algo);
+      const int pairs = ctx.N[e] / 2;
+      apply_swiglu_oai_tile_rows_oop(
+          scratch.buf, /*src_ldc=*/ctx.N[e], /*src_col_start=*/0,
+          ctx.dst[e], /*dst_ldc=*/ctx.ldc[e], /*dst_col_start=*/0,
+          ctx.M[e], pairs, ctx.act_dtype);
+      continue;
+    }
+
+    // Wide path (default).
     execute_expert_slice(ctx.layout[e], ctx.transA[e], ctx.transB[e],
         ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e],
         ctx.src[e], ctx.lda[e], ctx.weight[e], ctx.ldb[e],
@@ -1003,12 +1400,22 @@ inline void execute_decode_d(const GroupNTilePlan &plan,
                              GroupNTileContext &ctx) {
   const int thr_per_expert = plan.decode_thr_per_expert;
   const int total_threads = plan.decode_total_threads;
+  // Respect ZENDNNL_GRP_MATMUL_N_ORDER even on DecodeD: ordering is
+  // perf-neutral here (DecodeD has no rounds, all experts are
+  // processed concurrently), but keeping the indirection consistent
+  // with execute_rounds means a user A/B-testing N_ORDER sees the
+  // env knob applied uniformly across all ALGO 3 strategies.  Walk-
+  // input remains the default for num_ops in the auto-mode walk-
+  // input band (see auto_pick_n_order).
+  const bool sort_on = (plan.expert_order_size > 0);
 
   #pragma omp parallel num_threads(total_threads)
   {
     const int tid = omp_get_thread_num();
-    const int e = tid / thr_per_expert;
+    const int local_expert = tid / thr_per_expert;
     const int local_tid = tid % thr_per_expert;
+    const int e = sort_on ? plan.expert_order[local_expert]
+                          : local_expert;
 
     ctx.do_tile(plan, e, local_tid, thr_per_expert, plan.min_n_tile);
 
@@ -1032,7 +1439,8 @@ inline void execute_decode_d(const GroupNTilePlan &plan,
     if (plan.fused_epilogue && !ctx.use_custom
         && !plan.tight_fused_epilogue) {
       #pragma omp barrier
-      ctx.apply_swiglu_oai(e, local_tid, thr_per_expert, plan.min_n_tile);
+      ctx.apply_swiglu_oai(plan, e, local_tid, thr_per_expert,
+                           plan.min_n_tile);
     }
   }
 }
@@ -1077,27 +1485,68 @@ inline void execute_rounds(const GroupNTilePlan &plan,
   const int max_n_thr = plan.max_n_thr;
   const bool sort_on = (plan.expert_order_size > 0);
 
+  // Pre-compute the round structure ONCE per call (same values
+  // would otherwise be recomputed by every thread on every iteration
+  // inside the OMP region: 128 threads × N rounds = N × 128 redundant
+  // mod/div/min ops per call).  Stack-allocated array — 4 × int per
+  // round × kMaxRounds = 1 KB max, no allocator traffic.
+  //
+  // For the FewExperts path (`n_thr_fixed == 0`), `thr_per_expert`
+  // varies per round (depends on `round_size`); for ManyExperts
+  // (`n_thr_fixed > 0`) it's the same on every round but we treat
+  // both uniformly via the precomputed array.
+  struct RoundInfo {
+    int round_start;
+    int round_size;
+    int thr_per_expert;
+    int round_threads;
+  };
+  static constexpr int kMaxRounds = kNTileMaxExperts;  // 256 — same upper bound as expert order
+  RoundInfo rounds[kMaxRounds];
+  const int n_rounds = (num_ops + batch_size - 1) / batch_size;
+  // Defensive runtime check: a debug-only `assert` is not enough
+  // here — `RoundInfo rounds[kMaxRounds]` is stack-allocated, and
+  // `n_rounds > kMaxRounds` would write past the end (UB → memory
+  // corruption) in release builds.  Trips for pathological inputs
+  // (e.g., 8 threads × num_ops > 256, with N_ROUNDS=2 forcing
+  // batch_multi=1) that were previously silently undefined.
+  if (n_rounds > kMaxRounds) {
+    apilog_error(
+        "[execute_rounds] n_rounds=", n_rounds,
+        " exceeds kMaxRounds=", kMaxRounds,
+        " (num_ops=", num_ops, " batch_size=", batch_size, ")"
+        " — refusing to run flat_n_tile rounds path; caller's dst"
+        " is left untouched.  Increase kNTileMaxExperts or route"
+        " through a different ALGO 3 strategy.");
+    return;
+  }
+  assert(n_rounds <= kMaxRounds);
+
+  for (int r = 0; r < n_rounds; ++r) {
+    const int rs  = r * batch_size;
+    const int re  = std::min(num_ops, rs + batch_size);
+    const int rsz = re - rs;
+    const int tpe = (n_thr_fixed > 0)
+        ? n_thr_fixed
+        : std::min(plan.num_threads / rsz, max_n_thr);
+    rounds[r] = {rs, rsz, tpe, rsz * tpe};
+  }
+
   #pragma omp parallel num_threads(plan.num_threads)
   {
     const int tid = omp_get_thread_num();
 
-    for (int round_start = 0; round_start < num_ops;
-         round_start += batch_size) {
-      const int round_end = std::min(num_ops, round_start + batch_size);
-      const int round_size = round_end - round_start;
-      const int thr_per_expert = (n_thr_fixed > 0)
-          ? n_thr_fixed
-          : std::min(plan.num_threads / round_size, max_n_thr);
-      const int round_threads = round_size * thr_per_expert;
+    for (int r = 0; r < n_rounds; ++r) {
+      const RoundInfo &ri = rounds[r];
 
       int e = -1;
       int local_tid = -1;
-      if (tid < round_threads) {
-        const int local_expert = tid / thr_per_expert;
-        local_tid = tid % thr_per_expert;
-        e = sort_on ? plan.expert_order[round_start + local_expert]
-                    : (round_start + local_expert);
-        ctx.do_tile(plan, e, local_tid, thr_per_expert, min_n_tile);
+      if (tid < ri.round_threads) {
+        const int local_expert = tid / ri.thr_per_expert;
+        local_tid = tid % ri.thr_per_expert;
+        e = sort_on ? plan.expert_order[ri.round_start + local_expert]
+                    : (ri.round_start + local_expert);
+        ctx.do_tile(plan, e, local_tid, ri.thr_per_expert, min_n_tile);
       }
       // Fused-mode matmul → activation ordering: every thread's
       // matmul writes must be globally visible before any thread
@@ -1111,7 +1560,8 @@ inline void execute_rounds(const GroupNTilePlan &plan,
           && !plan.tight_fused_epilogue) {
         #pragma omp barrier
         if (e >= 0) {
-          ctx.apply_swiglu_oai(e, local_tid, thr_per_expert, min_n_tile);
+          ctx.apply_swiglu_oai(plan, e, local_tid, ri.thr_per_expert,
+                               min_n_tile);
         }
       }
       // End-of-round barrier (see function-level comment): preserves
@@ -1209,9 +1659,9 @@ void flat_n_tile(
             " (ldc[e]=", ldc[e], ", N[e]=", N[e],
             "); tight_fused_epilogue inferred from ldc[0]=", ldc[0],
             " < N[0]=", N[0],
-            " but this expert disagrees.  Refusing to run — caller-"
-            "boundary validation should have rejected this combo "
-            "(please file a bug).  The caller's dst buffer(s) are "
+            " but this expert disagrees.  Refusing to run — the "
+            "caller-boundary validator should have rejected this "
+            "combination upstream.  The caller's dst buffer(s) are "
             "unmodified by this call.");
         return;
       }
@@ -1251,7 +1701,7 @@ void flat_n_tile(
   // caller's separate silu/gelu pass runs on the wide GEMM output.
   // `engage_ntile_custom_kernel` (group_matmul_parallel_common.hpp)
   // does the env check, dispatcher hand-off, and contract gating in
-  // one helper shared with the V2 fused-MoE Op1 executor.  When it
+  // one helper shared with the fused-MoE Op1 executor.  When it
   // returns with `kctx.enabled = false` (env off, or dispatcher
   // refused — alpha != 1, beta != 0, non-bf16 dst, transB, etc.) we
   // stay on the standard execute_expert_slice path.
@@ -1266,7 +1716,7 @@ void flat_n_tile(
       /*dst_dtype=*/params[0].dtypes.dst,
       act_dtype,
       /*bias_dtype=*/params[0].dtypes.bias,
-      transA, transB, M, N, K, alpha, beta, weight, kctx);
+      transA, transB, M, N, K, ldb, alpha, beta, weight, kctx);
 
   // Custom-kernel engagement guard for the wide swiglu path.
   //
@@ -1299,6 +1749,24 @@ void flat_n_tile(
   const bool use_custom =
       kctx.enabled
       && (!fused_epilogue || tight_fused_epilogue);
+
+  // Log the two distinct "kctx.enabled but use_custom=false" paths so
+  // the operator shows the downgrade root cause.  A silent kernel=
+  // standard line would leave debuggers guessing whether the env is
+  // off, the dispatcher refused, or the wide-swiglu guard fired.
+  if (kctx.enabled && !use_custom) {
+    static const bool s_skip_log = apilog_info_enabled();
+    if (s_skip_log) {
+      apilog_info("[GRP_MATMUL Level3 flat_n_tile SKIP_CUSTOM] reason="
+                  "wide_swiglu_correctness_guard "
+                  "(fused_epilogue=1 tight=0 → custom writes "
+                  "compacted [M,I] into caller's [M,2I] buffer, "
+                  "leaving cols [I,2I) uninitialised; downstream "
+                  "moe_postop on full 2I would reduce garbage). "
+                  "FALLBACK to kernel=standard wide matmul + "
+                  "separate activation pass.");
+    }
+  }
 
   // Widen the per-thread N-slice floor to the custom kernel's pack_nr
   // when engaged (no-op otherwise).  Two `pair_aligned` regimes:
@@ -1352,23 +1820,25 @@ void flat_n_tile(
 
   const GroupNTileTopology topo =
       summarise_topology(M, N, K, num_threads, wei_elem);
+  // Pass `use_custom` so the planner can short-circuit to the
+  // strict-stable plan for the non-custom path.
+  // The custom path keeps the legacy cost-model picks because its
+  // pack cache is shape-keyed, not tile-keyed.
   GroupNTilePlan plan =
-      plan_group_n_tile(topo, algo, nr_align, fused_epilogue, M);
+      plan_group_n_tile(topo, algo, nr_align, fused_epilogue,
+                        use_custom, M);
   // The tight-dst switch is orthogonal to the planner's strategy /
   // threading decisions: it only toggles how each thread writes its
   // final swiglu output (scratch + OOP vs in-place).  Set after the
   // plan is built so the planner's shape-driven choices are unaffected.
-  // Sequential strategy + tight is not supported (its sequential path
-  // calls execute_expert_slice directly at caller's ldc — which is too
-  // narrow to fit the 2I matmul output).  In practice the fused-MoE
-  // tight callers always route to DecodeD / FewExperts / ManyExperts
-  // because their shapes are N-tile viable; assert defensively.
-  plan.tight_fused_epilogue =
-      tight_fused_epilogue && !use_custom
-      && plan.strategy != GroupNTileStrategy::Sequential;
-  assert((!tight_fused_epilogue || use_custom
-          || plan.strategy != GroupNTileStrategy::Sequential)
-         && "tight_fused_epilogue unsupported on Sequential strategy");
+  // Sequential handles tight callers via its own scratch+OOP path
+  // (see execute_sequential()) so this flag is set whenever the
+  // caller is tight and the custom kernel isn't engaged.  The flag is
+  // consumed by DecodeD / FewExperts / ManyExperts to route do_tile
+  // through the per-thread scratch + OOP swiglu code; Sequential
+  // detects the same `ldc[e] < N[e]` condition locally and doesn't
+  // depend on this flag.
+  plan.tight_fused_epilogue = tight_fused_epilogue && !use_custom;
 
   // ── Surface the concrete path to the caller (gemm_mode_out) ────────
   // Seven possible strings: Sequential + six (fused_epilogue ×
@@ -1413,9 +1883,32 @@ void flat_n_tile(
     const int env_order = get_grp_matmul_n_order();
     const bool is_auto_resolved =
         (env_order == 0 && plan.auto_resolved_order >= 0);
-    apilog_info("[flat_n_tile] act=", act_name(fused_act),
+    const char *strategy_name =
+        (plan.strategy == GroupNTileStrategy::Sequential)   ? "Sequential"
+      : (plan.strategy == GroupNTileStrategy::DecodeD)      ? "DecodeD"
+      : (plan.strategy == GroupNTileStrategy::FewExperts)   ? "FewExperts"
+      : (plan.strategy == GroupNTileStrategy::ManyExperts)  ? "ManyExperts"
+      :                                                      "unknown";
+    // `path` distinguishes the AOCL strict-stable plan from the
+    // custom-kernel cost-model plan — see the path-overview header
+    // above `plan_group_n_tile`.  Sequential is reachable from
+    // either path's fail-fast / narrow-N escape so it labels itself.
+    const bool aocl_strict =
+        !use_custom && plan.stable_n_thr_per_expert[0] > 0;
+    const char *path_name = (plan.strategy == GroupNTileStrategy::Sequential)
+        ? "sequential_fallback"
+        : (use_custom        ? "custom_dynamic"
+        :  aocl_strict       ? "aocl_strict_stable"
+        :                       "aocl_legacy_costmodel");
+    apilog_info("[GRP_MATMUL Level3 flat_n_tile] act=", act_name(fused_act),
                 " fused_epilogue=", fused_epilogue,
                 " tight=", plan.tight_fused_epilogue,
+                " path=", path_name,
+                " strategy=", strategy_name,
+                " batch_size=", plan.batch_size,
+                " thr_per_expert=", plan.decode_thr_per_expert,
+                " n_thr_fixed=", plan.n_thr_fixed,
+                " max_n_thr=", plan.max_n_thr,
                 " kernel=", (use_custom ? "custom" : "standard"),
                 " pack_nr=", (use_custom ? kctx.pack_nr : 0),
                 " subtile_cols=", (use_custom ? kctx.subtile_cols : 0),
@@ -1425,7 +1918,13 @@ void flat_n_tile(
                 " n_order_env=", env_order,
                 " n_order_used=",
                 is_auto_resolved ? plan.auto_resolved_order : env_order,
-                is_auto_resolved ? " (auto)" : "");
+                is_auto_resolved ? " (auto)" : "",
+                " stable_n_thr[0]=",
+                static_cast<int>(plan.stable_n_thr_per_expert[0]),
+                " aocl_target_slots=",
+                get_grp_matmul_aocl_target_slots(),
+                " aocl_blis_nc=",
+                get_grp_matmul_aocl_blis_nc());
   }
 
   switch (plan.strategy) {

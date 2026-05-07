@@ -15,7 +15,8 @@
  *******************************************************************************/
 
 /// BF16 custom kernel — adaptive weight pack and per-process pack cache.
-/// Shared by both non-fused flat_n_tile (ALGO 3) and fused MoE V2.
+/// Shared by both non-fused flat_n_tile (ALGO 3) and the fused-MoE
+/// tight-arena path.
 ///
 /// PACK LAYOUT (BF16, VDPBF16PS-friendly, "VNNI" style — same as
 /// `bf16_brgemm_ukernel.cpp`'s NR-templated layout):
@@ -62,16 +63,33 @@ inline constexpr int kVNNIPair = 2;
 inline constexpr int kNRMin = 32;
 inline constexpr int kNRMax = 64;
 
-/// Look up the pre-packed BF16 weight for one (weight, K, N, pack_nr)
-/// tuple, packing on the first miss and caching for subsequent calls.
+/// Look up the pre-packed BF16 weight for one
+/// (weight, K, N, pack_nr, transB) tuple, packing on the first miss
+/// and caching for subsequent calls.
 ///
 /// Contract:
-///   * `weight`  — caller-owned BF16 row-major buffer of shape [K, N].
+///   * `weight`  — caller-owned BF16 buffer.  Logical layout depends
+///                 on `transB`:
+///                   * `transB == false` → row-major [K, N] with row
+///                     stride `ldb` (typically `ldb == N`).
+///                   * `transB == true`  → row-major [N, K] with row
+///                     stride `ldb` (typically `ldb == K`).  This is
+///                     the PyTorch / vLLM / TGI convention for
+///                     `nn.Linear` weight (`y = x @ w^T`, weight
+///                     stored as `[out_features, in_features]`).
 ///                 Pointer identity is part of the cache key (callers
 ///                 must keep it alive while the entry is cached).
-///   * `K`, `N`  — dimensions; `N` MUST be a multiple of `pack_nr`.
+///   * `K`, `N`  — logical dimensions; `N` MUST be a multiple of
+///                 `pack_nr` regardless of `transB`.
+///   * `ldb`     — caller's row stride.  Pack reads the weight as
+///                 `weight[row * ldb + col]` (row-major) — passing the
+///                 actual stride (rather than assuming N or K) lets
+///                 the pack handle non-contiguous slices correctly.
 ///   * `pack_nr` — pack width, MUST be one of {kNRMin, kNRMax}.
-///   * `transB`  — false (only row-major weight is supported today).
+///   * `transB`  — false: standard [K, N] caller layout.
+///                 true:  PyTorch [N, K] caller layout.  The pack
+///                 produces an identical VNNI output for both
+///                 layouts; only the input access pattern differs.
 ///
 /// On success `*out_packed` points into cache-owned storage that is
 /// retained for the lifetime of the process (or until
@@ -80,9 +98,13 @@ inline constexpr int kNRMax = 64;
 /// pointers held in `CallContext.packed_ptrs[]` across an OMP region
 /// cannot be freed underneath the microkernel.  Returns failure on
 /// bad arguments or out-of-memory while packing.
+///
+/// `transB` is folded into the cache key so transB=true and
+/// transB=false on the same weight pointer occupy distinct entries
+/// (would otherwise alias and produce silent-wrong output).
 status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
-    int K, int N, int pack_nr,
+    int K, int N, int ldb, int pack_nr,
     bool transB,
     const bfloat16_t **out_packed);
 

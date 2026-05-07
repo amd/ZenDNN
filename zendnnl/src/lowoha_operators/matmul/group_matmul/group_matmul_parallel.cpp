@@ -338,11 +338,31 @@ static int auto_select_algo(
   const bool ntile_ok =
       n_tile_safe && (tiles_per_expert >= min_ntiles);
 
-  // Large weights (DRAM-streaming): ALGO 1 unless we have a
-  // prompt-class shape with enough experts and a long N axis to
-  // make column-parallel pay off.
+  // Large weights (DRAM-streaming): ALGO 1 by default.  Escape to
+  // ALGO 3 only when column-parallel has enough per-thread work to
+  // amortise its per-thread BKC pack + round-scheduling overhead.
+  //
+  // Measurements on `grp_matmul_prompt.txt` (Mixtral 8×, BS=32..512,
+  // K=14336/4096, N=4096/14336, 128 threads) showed:
+  //   * ops=8 with K > N (tall shape)  → ALGO 1 wins by 40–189%.
+  //     With 128/8=16 threads/expert, ALGO 3 splits N=4096 into 256-
+  //     col slices and each thread packs K×256×2B = 7MB — too much
+  //     per-thread memory + pack traffic vs AOCL DLP's sequential-
+  //     experts-with-full-team approach.
+  //   * ops=8 with N > K (wide shape)  → ALGO 3 wins by 30–33%.
+  //     More N to split gives the thread team better parallelism.
+  //   * ops≥16 (either orientation)    → ALGO 3 wins by 20%+.
+  //     Many experts amortise ALGO 3's round scheduling and pack
+  //     cost across experts.
+  //
+  // Heuristic: route to ALGO 3 iff (wide-N || many-experts).
+  // Otherwise fall back to ALGO 1 for tall-N few-experts shapes.
   if (weight_per_expert > kMediumWeight) {
-    if (num_ops >= 5 && ntile_ok && max_M > kDecodeMaxM) return 3;
+    const bool wide_N        = (max_N > max_K);
+    const bool many_experts  = (num_ops >= 16);
+    if (num_ops >= 5 && ntile_ok && max_M > kDecodeMaxM
+        && (wide_N || many_experts))
+      return 3;
     return 1;
   }
 
@@ -383,8 +403,34 @@ int select_grp_matmul_algo(
   const int env_algo = get_grp_matmul_algo();
   if (env_algo >= 1 && env_algo <= 5) {
     int algo = env_algo;
-    if (algo == 2 && !m_tile_safe) algo = 1;
-    if (algo == 3 && !n_tile_safe) algo = 1;
+    // Silent-override → apilog_warning so a user debugging
+    // `ZENDNNL_GRP_MATMUL_ALGO=3 but actually ran ALGO 1` sees the
+    // reason in the library log.  Gated by apilog_warning_enabled()
+    // (cached) so the warning fires whenever the API log level is
+    // ≥ warning — the framework already filters by level, but the
+    // cached bool lets us skip the message-construction overhead
+    // when warnings are suppressed without a per-call level query.
+    if (algo == 2 && !m_tile_safe) {
+      static const bool s_log = apilog_warning_enabled();
+      if (s_log) {
+        apilog_warning(
+            "[GRP_MATMUL Level2 dispatch WARN] env_algo=2 (flat_m_tile) "
+            "REJECTED: m_tile unsafe (non-row-major or per-expert "
+            "dtype mismatch). FALLBACK algo=1 (sequential_experts).");
+      }
+      algo = 1;
+    }
+    if (algo == 3 && !n_tile_safe) {
+      static const bool s_log = apilog_warning_enabled();
+      if (s_log) {
+        apilog_warning(
+            "[GRP_MATMUL Level2 dispatch WARN] env_algo=3 (flat_n_tile) "
+            "REJECTED: n_tile unsafe (non-row-major, dtype mismatch, "
+            "quantised weights, or buffer post-op). FALLBACK algo=1 "
+            "(sequential_experts).");
+      }
+      algo = 1;
+    }
     return algo;
   }
 
@@ -440,6 +486,43 @@ bool group_matmul_run_parallel_dispatch(
       && (caller_layout_tight || get_grp_n_tile_fused_act());
   const bool act_fused = a3_fuses
       || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
+
+  // ── Top-level dispatch APILOG ─────────────────────────────────────
+  // Emits the final routing decision (POST env-override, POST auto-
+  // select) with the discriminator values that drove it.  Users
+  // debugging "why did my shape land on ALGO X" get a single line
+  // that tells the complete story — shape + all gates + the
+  // chosen algo.  Gated by apilog_info_enabled() (cached); free
+  // when logging is off.
+  static const bool s_dispatch_log = apilog_info_enabled();
+  if (s_dispatch_log && !M.empty()) {
+    const int env_algo = get_grp_matmul_algo();
+    const int max_M_v = *std::max_element(M.begin(), M.end());
+    const int max_N_v = *std::max_element(N.begin(), N.end());
+    const int max_K_v = *std::max_element(K.begin(), K.end());
+    const size_t wei_elem_b = size_of(params[0].dtypes.wei);
+    const size_t wei_per_expert_mb =
+        (static_cast<size_t>(max_K_v) * max_N_v * wei_elem_b) >> 20;
+    const char *reason =
+        (env_algo >= 1 && env_algo <= 5)
+            ? (env_algo == use_algo ? "env_ok" : "env_fallback")
+            : "auto";
+    apilog_info(
+        "[GRP_MATMUL Level2 dispatch] algo=", use_algo,
+        " env=", env_algo,
+        " reason=", reason,
+        " act=", act_name(fused_act),
+        " act_fused=", act_fused,
+        " num_ops=", static_cast<int>(M.size()),
+        " num_threads=", num_threads,
+        " max_M=", max_M_v,
+        " max_N=", max_N_v,
+        " max_K=", max_K_v,
+        " wei/expert(MB)=", wei_per_expert_mb,
+        " wide_N=", (max_N_v > max_K_v),
+        " many_experts=", (static_cast<int>(M.size()) >= 16),
+        " caller_tight=", caller_layout_tight);
+  }
 
   auto set_mode = [&](const char *s) {
     if (gemm_mode_out != nullptr) *gemm_mode_out = s;

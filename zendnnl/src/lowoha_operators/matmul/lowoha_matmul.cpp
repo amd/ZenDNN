@@ -298,7 +298,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
   matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
                                        batch_params.Batch_B, batch_count, M,
-                                       N, K, num_threads, bias, is_weights_const);
+                                       N, K, num_threads, bias, is_weights_const,
+                                       transB);
   matmul_algo_t api_log_kernel = kernel;
   static unsigned int auto_version = get_auto_tuner_ver();
 

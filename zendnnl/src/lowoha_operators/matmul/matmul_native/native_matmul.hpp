@@ -43,11 +43,18 @@ bool native_matmul_execute(
   matmul_params &params);
 
 /// Best-algo selector for BF16 M≤8 (GEMV/decode) shapes.
-/// Returns the optimal algo (native_brgemm or aocl_dlp_blocked)
-/// based on empirical benchmarks on AMD Zen 5.
-/// For M>1, always returns native_brgemm (BRGEMM dominates DLP for M=2-8).
-/// For M=1 single-thread, applies shape-based DLP gates for small-N high-K.
-matmul_algo_t bf16_gemv_best_algo(int M, int N, int K, int num_threads);
+/// Returns the optimal algo (native_brgemm or aocl_dlp_blocked) based
+/// on empirical benchmarks on AMD Zen 5.
+///   * M>1            → native_brgemm (BRGEMM dominates DLP for M=2-8).
+///   * M=1, !transB,
+///     N ≤ 4          → native_brgemm (engages pack-free narrow GEMV).
+///   * M=1, transB,
+///     N ≤ 4          → falls through to the shape-based DLP gates
+///                      (narrow kernel can't engage; BKC pad waste
+///                      makes it lose to DLP).
+///   * other M=1      → shape-based DLP gates for small-N high-K.
+matmul_algo_t bf16_gemv_best_algo(int M, int N, int K, int num_threads,
+                                  bool transB);
 
 } // namespace native
 } // namespace matmul

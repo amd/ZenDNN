@@ -17,10 +17,12 @@
 #include "dispatch.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstdlib>
 
 #include "../group_matmul_parallel_common.hpp"
+#include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "pack.hpp"
@@ -29,6 +31,9 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
+
+using zendnnl::error_handling::apilog_info;
+using zendnnl::error_handling::apilog_info_enabled;
 
 bool dispatch_supported() {
   return avx512bf16_available();
@@ -116,6 +121,7 @@ status_t prepare_for_call(
     const std::vector<int>           &M,
     const std::vector<int>           &N,
     const std::vector<int>           &K,
+    const std::vector<int>           &ldb,
     const std::vector<float>         &alpha,
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
@@ -123,8 +129,55 @@ status_t prepare_for_call(
 
   out.enabled = false;
 
+  // ── Refusal logging helper ───────────────────────────────────────
+  // Every early return below represents a concrete dispatch-contract
+  // violation that forces the caller to fall back to the standard
+  // AOCL / BRGEMM path.  Log the reason so a model-level read makes
+  // it immediately obvious why the custom kernel was skipped — a
+  // silent refusal just produced `kernel=standard` with no clue
+  // whether the env was off, a dtype mismatched, or the pack-NR
+  // check failed.  Single cached apilog_info_enabled() check.
+  //
+  // Lambda overhead note: both helpers are captureless (`[]`, not
+  // `[&]`) so they are stateless functors — zero construction cost
+  // at runtime.  `s_refuse_log` is a function-scope `static const`
+  // which C++ lambdas can reference without capture, so the `if
+  // (s_refuse_log)` guard inside `refuse()` still compiles and still
+  // short-circuits to the plain `return status_t::failure` when API
+  // info logging is off.  Net impact on a successful
+  // `prepare_for_call` with logging disabled: zero — neither lambda
+  // object is ever instantiated nor invoked on the success path,
+  // and `dt_name` only gets called from the failure paths that also
+  // read `s_refuse_log`.
+  static const bool s_refuse_log = apilog_info_enabled();
+  auto refuse = [](const char *reason_tag,
+                   const char *detail = nullptr) -> status_t {
+    if (s_refuse_log) {
+      if (detail != nullptr) {
+        apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason=",
+                    reason_tag, " (", detail, ")");
+      } else {
+        apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason=",
+                    reason_tag);
+      }
+    }
+    return status_t::failure;
+  };
+  auto dt_name = [](data_type_t dt) -> const char * {
+    switch (dt) {
+    case data_type_t::none: return "none";
+    case data_type_t::f32:  return "f32";
+    case data_type_t::bf16: return "bf16";
+    case data_type_t::f16:  return "f16";
+    case data_type_t::s8:   return "s8";
+    case data_type_t::u8:   return "u8";
+    default:                return "?";
+    }
+  };
+
   // ── Run-once invariants (CPU + dtypes + activation) ──────────────
-  if (!dispatch_supported())                    return status_t::failure;
+  if (!dispatch_supported())
+    return refuse("avx512bf16_not_available");
   // A / B / C dtype gate: the custom microkernel implements only the
   // bf16 × bf16 → bf16 VDPBF16PS math path.  Accepting any dtype other
   // than bf16 for src / wei / dst would cause the microkernel to
@@ -132,12 +185,22 @@ status_t prepare_for_call(
   // output (no runtime type conversion inside the kernel).  Callers
   // on mixed-precision paths (e.g. fp32 weights + bf16 dst) fall back
   // to the standard path on dispatcher refusal.
-  if (src_dtype != data_type_t::bf16)           return status_t::failure;
-  if (wei_dtype != data_type_t::bf16)           return status_t::failure;
-  if (dst_dtype != data_type_t::bf16)           return status_t::failure;
+  if (src_dtype != data_type_t::bf16
+      || wei_dtype != data_type_t::bf16
+      || dst_dtype != data_type_t::bf16) {
+    if (s_refuse_log) {
+      apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason="
+                  "unsupported_dtype (src=", dt_name(src_dtype),
+                  " wei=", dt_name(wei_dtype),
+                  " dst=", dt_name(dst_dtype),
+                  " — custom kernel is bf16×bf16→bf16 only)");
+    }
+    return status_t::failure;
+  }
   if (act != grp_matmul_gated_act_t::swiglu_oai_mul
       && act != grp_matmul_gated_act_t::none) {
-    return status_t::failure;
+    return refuse("unsupported_activation",
+                  "custom kernel fuses only swiglu_oai_mul or none");
   }
   // `act_dtype` only matters when an activation is actually applied —
   // for `act = none` (plain GEMM) we accept any act_dtype (including
@@ -145,7 +208,8 @@ status_t prepare_for_call(
   // fabricate a dummy value.
   if (act != grp_matmul_gated_act_t::none
       && act_dtype != data_type_t::bf16) {
-    return status_t::failure;
+    return refuse("unsupported_act_dtype",
+                  "fused activation requires act_dtype=bf16");
   }
   // Bias dtype resolution — the ukernel handles three cases:
   //   * no bias buffer at all (caller passes nullptr per-expert).
@@ -160,12 +224,14 @@ status_t prepare_for_call(
   } else if (bias_dtype == data_type_t::f32) {
     bias_kind = BiasKind::fp32;
   } else {
-    return status_t::failure;
+    return refuse("unsupported_bias_dtype",
+                  "custom kernel supports none/bf16/fp32 bias only");
   }
 
   const int num_ops = static_cast<int>(M.size());
   if (num_ops <= 0 || num_ops > CallContext::kMaxExperts) {
-    return status_t::failure;
+    return refuse("num_ops_out_of_range",
+                  "num_ops must be in [1, kMaxExperts]");
   }
 
   // ── Pack-NR planner — uniform across experts in any call we
@@ -176,7 +242,10 @@ status_t prepare_for_call(
     pack_nr = plan_pack_nr(K[i], N[i]);
     break;  // first active expert is representative
   }
-  if (pack_nr != kNRMin && pack_nr != kNRMax) return status_t::failure;
+  if (pack_nr != kNRMin && pack_nr != kNRMax) {
+    return refuse("N_not_multiple_of_pack_nr",
+                  "pack_nr must be 32 or 64 and divide N");
+  }
 
   // ── Per-expert contract gate ─────────────────────────────────────
   // Any failing expert disables the custom kernel for the whole
@@ -184,19 +253,42 @@ status_t prepare_for_call(
   // custom path and others fall back inside the OMP loop.
   int m_max = 0;
   int K_for_subtile = 0;
+  // Per-expert ldb sanity (also catches a missized `ldb` vector
+  // before we index it inside the pack).
+  if (ldb.size() != static_cast<size_t>(num_ops))
+    return refuse("ldb_size_mismatch",
+                  "ldb vector size != num_ops");
   for (int i = 0; i < num_ops; ++i) {
     if (M[i] <= 0) continue;
-    if (transA[i] || transB[i])              return status_t::failure;
-    if (weight[i] == nullptr)                return status_t::failure;
-    if ((N[i] % pack_nr) != 0)               return status_t::failure;
-    if (alpha[i] != 1.0f || beta[i] != 0.0f) return status_t::failure;
+    if (transA[i])
+      return refuse("transA_not_supported",
+                    "custom kernel reads src in row-major only");
+    // Note: transB[i]=true is now SUPPORTED (PyTorch [N,K] layout).
+    // The pack reads with the appropriate addressing and the cache
+    // key folds transB into the discriminator so the two layouts
+    // never alias.
+    if (weight[i] == nullptr)
+      return refuse("null_weight_in_active_expert");
+    if ((N[i] % pack_nr) != 0)
+      return refuse("N_not_multiple_of_pack_nr",
+                    "an active expert's N is not a multiple of pack_nr");
+    if (alpha[i] != 1.0f || beta[i] != 0.0f)
+      return refuse("alpha_beta_not_supported",
+                    "custom kernel requires alpha=1, beta=0 per expert");
+    // ldb must accommodate the inner row of the chosen layout.
+    const int min_ldb = transB[i] ? K[i] : N[i];
+    if (ldb[i] < min_ldb)
+      return refuse("ldb_below_min_row_stride",
+                    "an active expert's ldb is smaller than min row stride");
     if (M[i] > m_max) m_max = M[i];
     if (K_for_subtile == 0) K_for_subtile = K[i];
   }
   if (m_max == 0) {
-    // No active experts — mark disabled but treat as a successful
-    // no-op so the caller can still complete its own bookkeeping.
-    return status_t::failure;
+    // No active experts — mark disabled but treat as a no-op so the
+    // caller can still complete its own bookkeeping.  Not strictly a
+    // "refusal" (nothing to dispatch), but we log so all_zero_M
+    // problems are visible too.
+    return refuse("all_experts_have_M_zero");
   }
 
   // ── Build the run context ─────────────────────────────────────────
@@ -212,7 +304,8 @@ status_t prepare_for_call(
 
   if (fill_kfn_table(out.NV, out.act_kind, out.kfn_table)
       != status_t::success) {
-    return status_t::failure;
+    return refuse("kfn_table_fill_failed",
+                  "no microkernel for this (NV, act_kind) pair");
   }
 
   // ── Pre-pack every active expert's weight (single-threaded; the
@@ -231,9 +324,17 @@ status_t prepare_for_call(
     if (M[i] <= 0) continue;
     status_t pst = get_or_pack_weight_bf16(
         static_cast<const bfloat16_t *>(weight[i]),
-        K[i], N[i], pack_nr, /*transB=*/false,
+        K[i], N[i], ldb[i], pack_nr,
+        /*transB=*/transB[i],
         &out.packed_ptrs[i]);
-    if (pst != status_t::success) return pst;
+    if (pst != status_t::success) {
+      // `get_or_pack_weight_bf16` already logged the concrete reason
+      // (OOM / transB mismatch) via log_error.  Attribute the
+      // refusal here so the L4 chain is self-contained.
+      return refuse("weight_pack_failed",
+                    "get_or_pack_weight_bf16 returned failure — "
+                    "see preceding log_error for OOM/arg detail");
+    }
     if (per_expert_subtile) {
       out.subtile_cols_per_expert[i] =
           pick_l2_subtile_cols(M[i], K[i], pack_nr);
@@ -241,6 +342,20 @@ status_t prepare_for_call(
   }
 
   out.enabled = true;
+  if (s_refuse_log) {
+    apilog_info("[GRP_MATMUL Level4 custom_kernel] ENGAGED pack_nr=",
+                out.pack_nr,
+                " NV=", out.NV,
+                " max_mr=", out.max_mr,
+                " subtile_cols=", out.subtile_cols,
+                " act_kind=", (out.act_kind == ActKind::swiglu_oai_mul
+                               ? "swiglu_oai_mul" : "none"),
+                " bias_kind=", (out.bias_kind == BiasKind::none ? "none"
+                                : out.bias_kind == BiasKind::bf16 ? "bf16"
+                                : "fp32"),
+                " num_ops=", num_ops,
+                " per_expert_subtile=", (per_expert_subtile ? 1 : 0));
+  }
   return status_t::success;
 }
 
@@ -252,6 +367,34 @@ void dispatch_tile(
     const void *src,  int lda,
     const void *bias,
     void       *tight_dst, int tight_ldc) {
+
+  // Tile-shape contract for the custom microkernel: every per-thread
+  // tile produced by `aligned_n_split` must be a multiple of
+  // `pack_nr` (the kernel processes B in `pack_nr`-wide blocks via
+  // truncating `n_blocks = sub_n / pack_nr`; any non-multiple tail
+  // would be SILENTLY DROPPED, leaving dst columns uninitialised).
+  //
+  // This holds for the current production envelope because:
+  //   1. `prepare_for_call` refuses (N % pack_nr != 0);
+  //   2. for any `n_thr ≤ N / pack_nr`, `aligned_n_split` always
+  //      finds an aligned candidate that satisfies the 2× imbalance
+  //      bound, never falling back to its unaligned even-split path;
+  //   3. `participating_n_thr` upstream caps `n_thr` by
+  //      `N / min_n_tile` (= `N / kDecodeNTile` = `N / 256`), and
+  //      `min_n_tile >= pack_nr`, so condition 2 holds.
+  //
+  // Asserts are debug-only; in release the contract is upheld by the
+  // upstream gates above.  If a future change introduces a per-tile
+  // shape that violates either contract, this assert turns the
+  // silent drop into a loud debug failure rather than wrong output.
+  assert(ctx.pack_nr > 0
+         && "dispatch_tile: pack_nr is zero — call prepare_for_call");
+  assert((n_tile % ctx.pack_nr) == 0
+         && "dispatch_tile: n_tile not a multiple of pack_nr — tail "
+            "cols would be silently dropped by truncating n_blocks");
+  assert((col_start % ctx.pack_nr) == 0
+         && "dispatch_tile: col_start not a multiple of pack_nr — "
+            "B-pack offset (col_start / pack_nr) would mis-align");
 
   const bfloat16_t *Bpacked_full = ctx.packed_ptrs[expert_idx];
   const auto       *A            = static_cast<const bfloat16_t *>(src);

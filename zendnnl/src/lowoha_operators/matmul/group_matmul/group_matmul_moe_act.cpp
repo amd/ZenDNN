@@ -629,8 +629,9 @@ status_t group_matmul_moe_act_execute(
   // num_ops+1 (idempotent when the capacity is already sufficient) and
   // explicitly seed the first slot to 0 — the prefix-sum loop then
   // overwrites the rest.  Avoids a per-call heap allocation that the
-  // V1 fused_moe path would otherwise hit on every call (V2 doesn't go
-  // through this function — it fuses activation in-tile).
+  // separate-pass fused_moe path would otherwise hit on every call
+  // (the in-tile fused-activation path doesn't go through this
+  // function — it fuses activation in-register).
   static thread_local std::vector<int64_t> row_offsets;
   row_offsets.resize(num_ops + 1);
   row_offsets[0] = 0;
@@ -740,7 +741,7 @@ void apply_swiglu_oai_tile_rows(
     int ldc, data_type_t dtype) {
   // Preconditions (documented in the header).  Silently no-op on misuse
   // rather than reinterpreting the buffer or mis-halving columns, and
-  // assert in debug builds so tests catch the bug early.
+  // assert in debug builds so tests catch contract violations early.
   assert(dst_buf != nullptr && "apply_swiglu_oai_tile_rows: dst_buf is null");
   assert((col_start & 1) == 0
          && "apply_swiglu_oai_tile_rows: col_start must be even "

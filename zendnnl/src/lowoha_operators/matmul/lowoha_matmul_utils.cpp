@@ -603,7 +603,7 @@ unsigned int get_auto_tuner_ver() {
 
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
-                            const bool is_weights_const) {
+                            const bool is_weights_const, bool transB) {
 
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo;
@@ -666,7 +666,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             // M=2-8: BRGEMM with MR=M (decode) or MR=8, with
             // b_exceeds_l2 exemption. Both dominate DLP at high
             // thread counts (up to +50% at 128t on MoE shapes).
-            kernel = native::bf16_gemv_best_algo(M, N, K, num_threads);
+            // transB threaded through so the M=1 narrow-N gate can
+            // route transB=true shapes back to the DLP rules (the
+            // narrow xmm kernel inside bf16_gemv_direct only engages
+            // when !transB).
+            kernel =
+                native::bf16_gemv_best_algo(M, N, K, num_threads, transB);
           }
           else {
             kernel = select_algo_by_heuristics_bf16_mm(M, N, K);

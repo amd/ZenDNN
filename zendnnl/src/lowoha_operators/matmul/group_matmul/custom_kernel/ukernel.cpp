@@ -17,7 +17,8 @@
 /// BF16 custom microkernel implementation — templated on (MR, NV, Act).
 ///
 /// See ukernel.hpp for the role this kernel plays in the group_matmul
-/// dispatch stack (both non-fused ALGO 3 and fused MoE V2).
+/// dispatch stack (both non-fused ALGO 3 and the fused-MoE tight-
+/// arena path).
 ///
 /// PER K-PAIR INNER LOOP (VDPBF16PS, AVX512_BF16):
 ///
@@ -76,8 +77,8 @@ alignas(64) constexpr int32_t kUpLaneIdx[16] =
 
 // Polynomial exp(-x) — 5th-degree Cephes 2^f approximation.
 // Identical numerics to group_matmul_moe_act.cpp's swiglu_oai
-// reference path (V1 fallback), so the custom kernel matches the
-// existing per-element tolerance.
+// reference path, so the custom kernel matches the existing
+// per-element tolerance.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline __m512 fast_exp_neg(__m512 x) {
   const __m512 log2e = _mm512_set1_ps(-1.4426950408889634f);
@@ -125,45 +126,71 @@ static inline __m512 bf16x16_to_fp32(__m256i bf16) {
       _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
 }
 
+// FP32 → BF16 (round-to-nearest-even, manual sequence).  Bit-for-bit
+// identical to the standard reference path's `f32_to_bf16x16` in
+// group_matmul_moe_act.cpp.
+//
+// Why not the hardware `_mm512_cvtneps_pbh` (VCVTNEPS2BF16):
+//   The instruction is documented as round-to-nearest-even and agrees
+//   with this manual sequence on the vast majority of inputs.  Half-
+//   way (tie) cases can diverge between the silicon and the integer
+//   sequence depending on uarch implementation details, and that
+//   divergence becomes visible end-to-end on the fused MoE tight-
+//   arena path:
+//     custom matmul (FP32 acc) → swiglu(g, u) = (1+u)·g·σ(α·g)
+//                              → FP32→BF16
+//                              → Op2 GEMM amplifies × √K_down
+//   Using the manual sequence makes the custom path produce BIT-
+//   IDENTICAL BF16 output to the standard reference for the FP32→
+//   BF16 step, removing one source of cross-path divergence.  Cost:
+//   one extra integer add + shift per cvt vs a single VCVTNEPS2BF16
+//   — neutral end-to-end (the Op2 GEMM dominates by ~10×).
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static inline __m256i fp32_to_bf16x16_rne(__m512 f32) {
+  __m512i i32 = _mm512_castps_si512(f32);
+  // bias = 0x7FFF + (LSB of upper-16-bits) — implements RNE on the
+  // truncated mantissa via integer add + shift.  Identical to the
+  // standard reference path so cross-path comparisons are bit-exact.
+  __m512i bias = _mm512_add_epi32(
+      _mm512_set1_epi32(0x7FFF),
+      _mm512_and_si512(_mm512_srli_epi32(i32, 16),
+                       _mm512_set1_epi32(1)));
+  return _mm512_cvtepi32_epi16(_mm512_srli_epi32(
+      _mm512_add_epi32(i32, bias), 16));
+}
+
 // Apply swiglu_oai_mul in registers to one (gate, up) pair of FP32
 // accumulators and store 16 activated BF16 cols.  `dst_row` is the
 // tight destination row pointer (caller pre-offsets for col_start/2
 // and the within-row epilogue index `p`).
 //
 // ── Numerical contract ───────────────────────────────────────────────
-// Mathematically this routine is IDENTICAL to the reference swiglu_oai
-// path in group_matmul_moe_act.cpp: same 5-term Cephes exp(-x)
-// polynomial (c0..c5 = {1.0, 0.6931472, 0.2402265, 0.0555042,
+// Mathematically this routine is IDENTICAL to the standard reference
+// swiglu_oai path in group_matmul_moe_act.cpp: same 5-term Cephes
+// exp(-x) polynomial (c0..c5 = {1.0, 0.6931472, 0.2402265, 0.0555042,
 // 0.0096838, 0.0013364}), same rcp14 + 1-step Newton-Raphson sigmoid,
 // same clamp bounds [-7, 7] on gate/up, same multiply order
-// `(1 + up) * (gate * sigmoid(gate * 1.702f))`.  Any bit-for-bit
-// divergence between the two paths therefore reduces to a single
-// FP32 → BF16 rounding question, covered by the two notes below.
+// `(1 + up) * (gate * sigmoid(gate * 1.702f))`.
 //
-// Precision characteristic (vs V1 reference pipeline):
-//   V1 reference: matmul writes BF16 to memory → activation reads
-//     BF16 → cvt BF16→FP32 → swiglu → cvt FP32→BF16 → store.  The
-//     accumulator is rounded to BF16 BEFORE the activation sees it.
+// Precision characteristic vs the standard two-pass pipeline:
+//   Standard reference: matmul writes BF16 to memory → activation
+//     reads BF16 → cvt BF16→FP32 → swiglu → cvt FP32→BF16 → store.
+//     The accumulator is rounded to BF16 before the activation sees
+//     it.
 //   Custom kernel: matmul FP32 accumulator stays in register →
 //     swiglu on raw FP32 → cvt FP32→BF16 once → store.  No mid-pipe
 //     BF16 rounding.
-// Net effect: the custom path is STRICTLY MORE PRECISE than the V1
-// reference — it skips one lossy BF16 rounding in the middle.  For
-// any (A, B, bias) input the absolute BF16 error of the custom path
-// is ≤ that of the reference path.  Deployments comparing outputs
-// across the two paths should expect sub-ULP differences in the
-// "better" direction; gtest tolerance is sized to accept both.
+// Net effect: the custom path skips one lossy BF16 rounding in the
+// middle, so its absolute BF16 error is ≤ that of the reference path
+// for any (A, B, bias) input.  Cross-path comparisons should expect
+// sub-ULP differences in the "better" direction; the gated-act gtest
+// tolerance is sized to accept both.
 //
-// BF16 rounding-mode caveat:
-//   We use the hardware `_mm512_cvtneps_pbh` (AVX-512 BF16) for the
-//   final FP32→BF16 cast.  The V1 reference uses a manual RNE
-//   sequence (`f32_to_bf16x16` — add 0x7FFF + lsb, then right-shift
-//   16).  Both conform to round-to-nearest-even per the BF16 spec
-//   and agree bit-for-bit on every input we've tested.  A theoretical
-//   divergence is possible on half-way cases if silicon interprets
-//   "nearest even" subtly differently from the manual sequence, but
-//   this has never been observed in gtest regression runs.
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma")))
+// FP32→BF16 conversion uses the manual `fp32_to_bf16x16_rne` (above)
+// instead of the hardware `_mm512_cvtneps_pbh` so the cvt step is
+// bit-identical to the standard reference.  See the policy block on
+// `fp32_to_bf16x16_rne` for the rationale.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline void swiglu_oai_store_pair(
     __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
   const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
@@ -183,9 +210,10 @@ static inline void swiglu_oai_store_pair(
   __m512 r   = _mm512_mul_ps(_mm512_add_ps(one, up),
                              _mm512_mul_ps(gate, sig));
 
-  __m256bh out = _mm512_cvtneps_pbh(r);
-  _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row),
-                      reinterpret_cast<__m256i &>(out));
+  // Manual RNE FP32→BF16 — bit-identical to the standard reference's
+  // f32_to_bf16x16.  See the policy block above the function for why.
+  __m256i out = fp32_to_bf16x16_rne(r);
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -346,6 +374,25 @@ static void ukernel_impl(
     constexpr int buf0 = 0;
     constexpr int buf1 = (kBuffers == 2) ? 1 : 0;
 
+    // ── No software prefetch in the K-loop (intentional) ────────────
+    // A `_mm_prefetch(B + N K-pairs ahead, _MM_HINT_T0)` per outer
+    // iteration was tried on the hypothesis that explicit prefetch
+    // would close the IPC gap to AOCL DLP at high thread counts on
+    // MoE decode.  Result: a consistent regression across every
+    // num_ops bucket (~3-5% slower at every bin, ~5% slower in
+    // aggregate on the same workload).
+    //
+    // Explanation: Zen 4 / Zen 5's hardware prefetcher detects the
+    // streaming (kp_stride-strided) B access pattern reliably; the
+    // K-loop is not memory-latency bound at the shapes that reach
+    // this kernel.  Adding software prefetch consumed load-port
+    // issue slots and polluted L1 with addresses the HW unit was
+    // already streaming, hurting FMA dispatch.  The remaining IPC
+    // gap vs AOCL is in instruction scheduling (compiler-emitted vs
+    // hand-tuned asm), not memory hiding — closing it would require
+    // an asm rewrite rather than prefetch hints.  Note kept here so
+    // a future optimiser does not re-attempt the same fix.
+
     for (; kp + 1 < K_pair; kp += 2) {
       // ── Stage 1: load bv_next = B[kp+1], overlaps FMAs for kp ──
       __m512bh bv_next[NV];
@@ -494,9 +541,14 @@ static void ukernel_impl(
       for (int v = 0; v < NV; ++v) {
         bfloat16_t *dst = Cout
             + static_cast<size_t>(m) * ldc + v * 16;
-        __m256bh out = _mm512_cvtneps_pbh(acc[0][m][v]);
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
-                            reinterpret_cast<__m256i &>(out));
+        // Manual RNE FP32→BF16 (see fp32_to_bf16x16_rne policy block
+        // above).  Bit-identical to the standard reference path's
+        // f32_to_bf16x16, so the act=none custom kernel produces the
+        // same BF16 output as the reference — Op2 (in fused MoE)
+        // reads the same bytes whether or not the custom kernel was
+        // engaged.
+        __m256i out = fp32_to_bf16x16_rne(acc[0][m][v]);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), out);
       }
     }
   }

@@ -16,6 +16,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "operators/matmul/matmul_config.hpp"
@@ -331,6 +332,49 @@ bool bf16_gemv_direct(
 
     // Single-thread
     if (desc.ldc < N) return false;
+
+    // ── Narrow-N fast path (N ∈ [1, kBf16GemvNarrowMaxN]) ─────────────
+    // BKC pads N up to BKC_NR_PAD = 16, so for N ≤ 4 the kernel
+    // wastes 75–94% of its VDPBF16PS compute on padded lanes plus
+    // 4–16× of the pack footprint.  The `bf16_gemv_narrow` kernel
+    // instead streams B directly out of the caller's row-major
+    // buffer and accumulates in one 128-bit xmm register (4 FP32
+    // lanes), matching the work perfectly at N=4 and wasting at
+    // most 3/4 of a 128-bit register at N=1 — still far less than
+    // the 512-bit BKC waste, with zero pack cost.  Engages only
+    // when the BF16 kernel's other preconditions (transB,
+    // postops, bias dtype, ldc) are already met.
+    if (N <= kBf16GemvNarrowMaxN && !desc.transB) {
+        uint16_t *C_bf16_ptr =
+            dst_is_bf16 ? static_cast<uint16_t *>(dst) : nullptr;
+        float *C_fp32_ptr =
+            !dst_is_bf16 ? static_cast<float *>(dst) : nullptr;
+        // Bias needs to be FP32 for the narrow epilogue; convert
+        // BF16 bias if required via the same helper the BKC path
+        // uses.  Helper returns `nullptr` into `bias_f_row` when
+        // `has_bias` is false.
+        const float *bias_f_narrow = nullptr;
+        if (!bkc_resolve_bias_f(desc, N, bias, has_bias, &bias_f_narrow))
+            return false;
+
+        bf16_gemv_narrow(
+            A, K,
+            B_raw, desc.ldb,
+            C_bf16_ptr, C_fp32_ptr,
+            (has_bias && bias_f_narrow) ? bias_f_narrow : nullptr,
+            kc_fused_op, alpha, beta, dst_is_bf16, N);
+
+        static bool s_log_narrow = apilog_info_enabled();
+        if (s_log_narrow) {
+            apilog_info("Native BF16 narrow-GEMV: M=1 K=", K, " N=", N,
+                        " beta=", beta,
+                        " bias=", has_bias ? "yes" : "no",
+                        " fused_op=", static_cast<int>(kc_fused_op),
+                        " dst=", dst_is_bf16 ? "bf16" : "fp32");
+        }
+        return true;
+    }
+
     const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
     const size_t b_packed_bytes =
         static_cast<size_t>(K_padded) * N_padded * sizeof(uint16_t);
@@ -360,8 +404,14 @@ bool bf16_gemv_direct(
 
     static bool s_log = apilog_info_enabled();
     if (s_log) {
+        // Diagnostic-only scalars — computed inside the logging gate
+        // so the hot path doesn't pay for them when APILOG is off.
+        const int waste_cols = N_padded - N;
+        const int waste_pct =
+            (N_padded > 0) ? (waste_cols * 100 / N_padded) : 0;
         apilog_info("Native BF16 BKC-GEMV: M=1 K=", K, " N=", N,
                     " K_padded=", K_padded, " N_padded=", N_padded,
+                    " waste=", waste_cols, "cols(", waste_pct, "%)",
                     " packed_B=", b_packed_bytes / 1024, "KB",
                     " beta=", beta,
                     " transB=", desc.transB ? "true" : "false",

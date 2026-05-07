@@ -174,10 +174,15 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     }
 
     std::vector<char> layout(n, 'r');
-    std::vector<bool> transA(n, false), transB(n, false);
+    // transB=true matches the PyTorch / vLLM / TGI nn.Linear weight
+    // convention (weight stored as [N, K] row-major; ldb = K).  This
+    // is the layout real LLM frameworks pass, so benchdnn benchmarks
+    // here exercise the same dispatcher / pack / kernel path as
+    // production model-level callers.
+    std::vector<bool> transA(n, false), transB(n, true);
     std::vector<int> Mv(cfg.M_per_op), Nv(n, cfg.N), Kv(n, cfg.K);
     std::vector<float> alpha(n, 1.0f), beta(n, 0.0f);
-    std::vector<int> lda(n, lda_val), ldb(n, cfg.N), ldc(n, cfg.N);
+    std::vector<int> lda(n, lda_val), ldb(n, cfg.K), ldc(n, cfg.N);
     std::vector<bool> wconst(n, cfg.is_weights_const);
 
     std::vector<const void *> src_ptrs(n), wei_ptrs(n), bias_ptrs(n, nullptr);

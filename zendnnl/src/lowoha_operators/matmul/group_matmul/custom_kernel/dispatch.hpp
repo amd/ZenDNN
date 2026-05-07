@@ -36,7 +36,8 @@
 ///         * computes the L2-friendly sub-tile width.
 ///       Returns success ⇒ `out.enabled` is true.  Returns failure ⇒
 ///       `out.enabled` is false; the caller must take the standard
-///       path (e.g. `execute_expert_slice` or the V1 fused MoE path).
+///       path (e.g. `execute_expert_slice` or the standard fused-MoE
+///       two-pass path).
 ///
 ///   2.  `dispatch_tile()` — runs once per (expert, per-thread N
 ///       range) inside the caller's OMP region.  Internally chunks the
@@ -161,6 +162,7 @@ status_t prepare_for_call(
     const std::vector<int>           &M,
     const std::vector<int>           &N,
     const std::vector<int>           &K,
+    const std::vector<int>           &ldb,
     const std::vector<float>         &alpha,
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,

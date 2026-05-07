@@ -20,6 +20,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
@@ -55,8 +56,9 @@ using namespace zendnnl::error_handling;
 //
 // M=1 single-thread: shape-based DLP gates for small-N high-K where
 // BKC dispatch overhead exceeds DLP's thin-dispatcher advantage.
-// Decision tree (AMD EPYC 9B45, Zen 5, L1d=48KB, L2=1MB, L3=32MB/CCD),
-// validated against 188 BF16 GEMV shapes + 22 MoE shapes.
+// Decision tree (AMD Zen 5, L1d=48KB, L2=1MB, L3=32MB/CCD),
+// validated against a broad BF16 GEMV shape sweep plus a focused
+// narrow-N decode set.
 //
 //   Rules are evaluated in order (first match wins):
 //
@@ -66,6 +68,12 @@ using namespace zendnnl::error_handling;
 //   │ M≤4 MT: per-CCD BKC ≥ L3/CCD,  │ DLP      │ BKC overflows CCD L3; │
 //   │   raw B < agg L3,               │          │ DLP stays L3-resident  │
 //   │   K≤5120 or NR-waste>25%        │          │                        │
+//   │ N ≤ 4                            │ BRGEMM   │ Narrow-GEMV xmm kernel │
+//   │                                  │          │ inside bf16_gemv_direct│
+//   │                                  │          │ is pack-free, 0–25%    │
+//   │                                  │          │ waste.  Beats DLP by   │
+//   │                                  │          │ a wide margin on       │
+//   │                                  │          │ narrow-N decode shapes.│
 //   │ N≤32, K≥256                     │ DLP      │ 50-75% NR-pad waste    │
 //   │ N=33-48, K≥384                 │ DLP      │ BKC dispatch overhead  │
 //   │ N∈(49,63), ≥25%pad, K≥8N,384  │ DLP      │ High zero-pad BW waste │
@@ -74,7 +82,8 @@ using namespace zendnnl::error_handling;
 //   │ Everything else                  │ BRGEMM   │ General BRGEMM looper  │
 //   └──────────────────────────────────┴──────────┴────────────────────────┘
 // ════════════════════════════════════════════════════════════════════════
-static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K, int num_threads) {
+static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K,
+                                              int num_threads, bool transB) {
   // M=5-8: always native BRGEMM. The L3/CCD overflow heuristic below is
   // validated for M=1-4 paths (BKC GEMV + decode flat); M=5-8 uses the
   // general BRGEMM looper which has different cache access patterns.
@@ -114,6 +123,35 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K, int num_threa
   if (num_threads != 1)
     return matmul_algo_t::native_brgemm;
 
+  // ── Narrow-GEMV zone (M == 1, N ≤ 4, !transB) ──────────────────────
+  // native_brgemm's M=1 entry (`bf16_gemv_direct`) routes N ≤ 4 to
+  // the pack-free `bf16_gemv_narrow` xmm kernel.  That kernel beats
+  // DLP by a wide margin across all K on narrow-N decode shapes
+  // (e.g., N=1 at K=234 is ~2.8× DLP, N=3 at K~6000 is ~1.3× DLP).
+  // Must short-circuit BEFORE the N ≤ 32
+  // DLP zone below, otherwise high-K narrow shapes hit the legacy
+  // DLP rule and miss the narrow kernel entirely.  Applies at any
+  // K (narrow kernel has no K-based dispatch overhead).
+  //
+  // Gated on M == 1 because `bf16_gemv_direct` itself only engages
+  // for M=1 (returns false otherwise).  For M=2..4 with N ≤ 4, the
+  // dispatch falls through to `bf16_brgemm_execute` — standard
+  // BRGEMM, not the narrow kernel — which was NOT re-validated at
+  // narrow-N after the narrow-kernel addition.  Keeping those
+  // shapes on the legacy DLP rule avoids a silent behaviour change
+  // on M=2..4 narrow-N paths that haven't been benchmarked.
+  //
+  // Gated on `!transB` because `bf16_gemv_narrow` only engages for
+  // row-major (non-transposed) B (see bf16_gemv_direct.cpp:347
+  // `if (N <= kBf16GemvNarrowMaxN && !desc.transB)`).  When transB
+  // is true the narrow path is bypassed and BKC packing fires
+  // instead — for N ≤ 4 BKC pads to NR=64, wasting 75–94% of every
+  // VDPBF16PS load on zero-padded lanes — measurably worse than
+  // DLP.  Letting transB=true narrow shapes fall through to the
+  // DLP rules below routes them onto the better backend.
+  if (M == 1 && !transB && N <= kBf16GemvNarrowMaxN)
+    return matmul_algo_t::native_brgemm;
+
   const int packed_N = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
   const int pad_waste = packed_N - N;
   const size_t packed_K = static_cast<size_t>((K + 1) & ~1);
@@ -123,7 +161,8 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K, int num_threa
   // N≤48: BKC dispatch overhead (pack + block iteration + tail-only
   // kernel) dominates for K-dominant shapes. DLP's thin dispatcher
   // and row-major streaming avoid this entirely.
-  //   N≤32, K≥256: 50-75% NR-pad waste on every ZMM load.
+  //   N∈[5,32], K≥256: 50-75% NR-pad waste on every ZMM load.
+  //     (N ≤ 4 is handled above by the narrow-GEMV zone.)
   //   N=33-48, K≥384: no pad waste but BKC dispatch cost is high
   //     relative to the small per-row compute.
   if (N <= 32 && K >= 256)
@@ -158,14 +197,16 @@ static matmul_algo_t bf16_gemv_best_algo_impl(int M, int N, int K, int num_threa
 }
 
 // Wrapper that logs the dispatch decision.
-matmul_algo_t bf16_gemv_best_algo(int M, int N, int K, int num_threads) {
-  matmul_algo_t result = bf16_gemv_best_algo_impl(M, N, K, num_threads);
+matmul_algo_t bf16_gemv_best_algo(int M, int N, int K, int num_threads,
+                                  bool transB) {
+  matmul_algo_t result =
+      bf16_gemv_best_algo_impl(M, N, K, num_threads, transB);
   static bool s_log = apilog_info_enabled();
   if (s_log) {
     const char *name = (result == matmul_algo_t::native_brgemm) ? "BRGEMM" :
                        (result == matmul_algo_t::aocl_dlp_blocked) ? "DLP" : "???";
     apilog_info("ALGO0 decode dispatch: M=", M, " K=", K, " N=", N,
-                " threads=", num_threads,
+                " threads=", num_threads, " transB=", transB,
                 " B=", static_cast<size_t>(K)*N*2/1024, "KB"
                 " → ", name);
   }
