@@ -37,6 +37,21 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t N);
 
+// Fused per-group AVX512 native kernels. Scale/zp layout is {M, G};
+// group size is K / G and must divide K exactly.
+void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
+                                             float *scales,
+                                             int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
+                                            float *scales,
+                                            int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
+                                             float *scales, int32_t *zps,
+                                             int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
+                                            float *scales, int32_t *zps,
+                                            int64_t M, int64_t K, int64_t G);
+
 // Unfused 2-pass per-token AVX512 native kernels
 void dynamic_per_token_quant_bf16_s8_unfused_native(const uint16_t *src,
                                                      int8_t *dst, float *scales,
@@ -60,6 +75,9 @@ bool dispatch_fused_per_token(const void *src, void *dst,
 bool dispatch_unfused_per_token(const void *src, void *dst,
                                  const reorder_params_t &params,
                                  int64_t M, int64_t N);
+bool dispatch_fused_per_group(const void *src, void *dst,
+                               const reorder_params_t &params,
+                               int64_t M, int64_t K);
 
 } // namespace reorder
 } // namespace lowoha

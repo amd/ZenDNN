@@ -146,6 +146,25 @@ status_t reorder_direct(const void *src, void *dst,
       }
     }
 
+    if (dst != nullptr && params.is_2d() &&
+        (!params.has_src_strides() || params.is_src_contiguous()) &&
+        is_per_group_col_dims(scale_dims_dq, params.src_shape)) {
+
+      if (((dq_algo_override == 0 && algo_dq == reorder_algo_t::native) ||
+           dq_algo_override == 1) &&
+          dispatch_fused_per_group(src, dst, params, params.M(), params.N())) {
+        if (is_profile) {
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          profiler.tbp_stop();
+          profilelog_verbose(dq_log,
+                             ", kernel=native (fused per-group), time=",
+                             profiler.tbp_elapsedtime(),
+                             profiler.get_res_str());
+        }
+        return status_t::success;
+      }
+    }
+
     // Compute dynamic quantization parameters (scale and zero_point)
     status_t status = compute_dynamic_quant_params(src, params);
     if (status != status_t::success) {

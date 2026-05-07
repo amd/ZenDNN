@@ -162,6 +162,78 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
   return dispatched;
 }
 
+/**
+ * @brief Dispatch fused per-group dynamic quantization (native AVX-512 path)
+ *
+ * Handles 2D contiguous per-group-col scale layout {M, G}.  Each native
+ * kernel computes scale/zp and quantizes one contiguous K-direction group.
+ */
+bool dispatch_fused_per_group(const void *src, void *dst,
+                                      const reorder_params_t &params,
+                                      int64_t M, int64_t K) {
+  const auto scale_dt = params.quant_params.scale.dt;
+  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+    return false;
+  if (!is_per_group_col_dims(params.quant_params.scale.dims, params.src_shape))
+    return false;
+
+  const int64_t G = get_num_groups_col(params.quant_params.scale.dims);
+  if (G <= 1 || K % G != 0)
+    return false;
+
+  const int64_t scale_nelems = M * G;
+  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  std::vector<float> scale_f32_tmp;
+  float *scale_f32;
+
+  if (scale_is_bf16) {
+    scale_f32_tmp.resize(scale_nelems);
+    scale_f32 = scale_f32_tmp.data();
+  } else {
+    scale_f32 = static_cast<float *>(params.quant_params.scale.buff);
+  }
+
+  const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+  bool dispatched = false;
+
+  if (is_symmetric) {
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_group_quant_bf16_s8_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, K, G);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_group_quant_f32_s8_native(
+          static_cast<const float *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, K, G);
+      dispatched = true;
+    }
+  } else {
+    if (params.quant_params.zero_point.dims != params.quant_params.scale.dims)
+      return false;
+    int32_t *zp_out = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_group_quant_bf16_u8_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, K, G);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_group_quant_f32_u8_native(
+          static_cast<const float *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, K, G);
+      dispatched = true;
+    }
+  }
+
+  if (dispatched && scale_is_bf16) {
+    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    for (int64_t i = 0; i < scale_nelems; ++i)
+      bf16_out[i] = float_to_bf16(scale_f32[i]);
+  }
+
+  return dispatched;
+}
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
