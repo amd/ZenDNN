@@ -19,9 +19,6 @@
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 
-#include <functional>
-#include <utility>
-
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
@@ -49,11 +46,6 @@ struct matmul_partition_config_t {
 };
 
 /**
- * @brief Blocking parameters for stride-based BRGEMM.
- *
- * Pre-computed once from (M, N, K) and reused across all tiles.
- */
-/**
  * @brief Blocking parameters for stride-based BRGEMM (Batch-Reduce GEMM).
  *
  * These parameters are computed from the input matrix dimensions (M, N, K) and
@@ -73,7 +65,6 @@ struct brgemm_blocking_params_t {
   int k_blocks_per_reduce;   ///< Number of K-blocks processed in one batch-reduce call
   int k_blocks_reduce_rem;   ///< Remainder K-blocks in the last reduction (num_k_blocks % k_blocks_per_reduce)
   bool weight_reuse;         ///< True if weights are reused across multiple K-loop iterations (enables blocked loop schemes)
-  bool use_blocked_weight;   ///< True if weights are pre-converted into blocked layout ([num_n_blocks, num_k_blocks, k_block_size, n_block_size])
   unsigned long long
   stride_a;   ///< Byte stride between consecutive A panels for tiled access
   unsigned long long
@@ -109,8 +100,7 @@ struct blocked_brgemm_params_t {
  * Block sizes default to 64 for N, K and 32 for M.
  */
 brgemm_blocking_params_t compute_brgemm_blocking(
-  const matmul_partition_config_t &config,
-  bool use_blocked_weight = false
+  const matmul_partition_config_t &config
 );
 
 /**
@@ -162,118 +152,6 @@ struct brgemm_cache_key_t {
   };
 };
 
-/**
- * @brief Callback function type for standard tiled kernel execution
- *
- * This callback is invoked for each tile when using standard tiling
- * without K-blocking (e.g., libxsmm or other non-BRGEMM kernels).
- *
- * @param m_start Starting row index in the output matrix
- * @param m_len Number of rows in this tile
- * @param n_start Starting column index in the output matrix
- * @param n_len Number of columns in this tile
- * @param A_tile Pointer to A matrix tile (m_len × K)
- * @param B_tile Pointer to B matrix tile (K × n_len)
- * @param C_tile Pointer to output tile (m_len × n_len)
- * @param tile_bias Pointer to bias vector for this tile (n_len elements)
- */
-using tile_kernel_invoker_t = std::function<void(
-                                int m_start, int m_len,
-                                int n_start, int n_len,
-                                const void *A_tile,
-                                const void *B_tile,
-                                void *C_tile,
-                                const void *tile_bias
-                              )>;
-
-/**
- * @brief Execute matrix multiplication using standard tiling
- *
- * Divides the computation into M×N tiles without K-blocking.
- * Uses OpenMP parallelization across tiles. This path is used for
- * standard kernels (libxsmm etc.).
- *
- * @param src Source matrix A (M × K)
- * @param weight Weight matrix B (K × N)
- * @param dst Destination matrix C (M × N)
- * @param bias Optional bias vector, can be nullptr
- * @param config Partitioning configuration
- * @param tile_callback User-provided kernel invoker for standard tiles
- */
-void execute_partitioned_matmul_standard(
-  const void *src,
-  const void *weight,
-  void *dst,
-  const void *bias,
-  const matmul_partition_config_t &config,
-  const tile_kernel_invoker_t &tile_callback
-);
-
-/**
- * @brief Calculate optimal tile sizes for M and N dimensions
- *
- * Uses heuristics based on matrix dimensions, K size, and thread count
- * to determine optimal M_BLOCK and N_BLOCK sizes. Can be overridden
- * using ZENDNN_MATMUL_M_TILE and ZENDNN_MATMUL_N_TILE environment variables.
- *
- * @param config Partitioning configuration containing M, N, K, num_threads
- * @return Pair of (M_BLOCK, N_BLOCK) tile sizes
- *
- * @note Default heuristics are tuned for BF16 performance
- */
-std::pair<int, int> calculate_optimal_tile_sizes(
-  const matmul_partition_config_t &config
-);
-
-/**
- * @brief Determine if KC-blocking (BRGEMM path) should be used
- * @param config Partitioning configuration
- * @param params Matmul parameters (for future extensions)
- * @return true if BRGEMM path should be used, false otherwise
- */
-bool should_use_kc_blocking(
-  const matmul_partition_config_t &config,
-  const matmul_params &params
-);
-
-/**
- * @brief Get tile sizes from configuration with fallback to defaults
- *
- * Reads tile size values from matmul_config_t (which reads from environment
- * variables ZENDNN_MM_TILE_M and ZENDNN_MM_TILE_N). Returns the default
- * values if the configuration values are not set or invalid (≤ 0).
- *
- * @param default_m Fallback value for M tile size if not configured
- * @param default_n Fallback value for N tile size if not configured
- * @return Pair of (tile_m, tile_n) sizes from config or defaults
- *
- * @note This replaces get_tile_size_from_env() to use centralized config
- *
- * @example
- * auto [m_tile, n_tile] = get_tile_sizes_from_config(128, 64);
- */
-std::pair<int, int> get_tile_sizes_from_config(int default_m, int default_n);
-
-/**
- * @brief Select optimal tile sizes for BF16 matrix multiplication
- *
- * Internal heuristic function that determines M and N tile sizes based on
- * matrix dimensions and available thread count. Used by calculate_optimal_tile_sizes().
- *
- * @param M Number of rows in matrix A
- * @param N Number of columns in matrix B
- * @param K Inner dimension (columns of A, rows of B)
- * @param num_threads Number of threads available for parallel execution
- * @return Tuple of (M_tile, N_tile) sizes
- *
- * @note Heuristics:
- *       - Small matrices (M≤2048, N≤128): 32×32 tiles
- *       - Medium matrices (M≤4096, 768<N≤1024): 64×64 tiles
- *       - Large matrices: 128×64 tiles (default)
- *
- * @see calculate_optimal_tile_sizes() for the public interface
- */
-std::tuple<int, int> select_tile(int M, int N, int K, int num_threads);
 
 /**
  * @brief Compute byte offset for post-op buffer access
@@ -324,7 +202,7 @@ const void *compute_bias_offset(
  * @brief Execute matrix multiplication using stride-based BRGEMM.
  *
  * Loop order: K(outer, sequential) -> N(parallel) -> M(inner).
- * At c==0 the output tile is initialized with bias (or zeros).
+ * At k==0 the output tile is initialized with bias (or zeros).
  * All BRGEMM calls use beta=1.0 to accumulate onto the tile.
  * PostOps are applied after the last K iteration.
  *
@@ -338,7 +216,7 @@ const void *compute_bias_offset(
  * @param params Matmul parameters (post-ops, data types)
  * @param beta   Scaling factor for C accumulation
  */
-void execute_brgemm_tiled(
+void execute_brgemm_std(
   const char trans_input,
   const char trans_weight,
   const void *src,
@@ -353,7 +231,7 @@ void execute_brgemm_tiled(
 /**
  * @brief Execute matmul using blocked-weight BRGEMM.
  *
- * Weight must be pre-blocked as tiles indexed by
+ * Weight must be pre-blocked
  * No K/N tail handling — only full blocks. No transpose support.
  * Only M (batch) remainder is handled with a separate kernel.
  *
@@ -366,7 +244,7 @@ void execute_brgemm_tiled(
  * @param params         Matmul params (post-ops, dtypes)
  * @param beta           Scaling factor for C
  */
-void execute_brgemm_tiled_blocked(
+void execute_brgemm_prepacked(
   const void *src,
   const void *blocked_weight,
   void *dst,
@@ -381,10 +259,8 @@ void execute_brgemm_tiled_blocked(
  * @brief Main entry point for partitioned matrix multiplication
  *
  * Orchestrates the entire partitioned matrix multiplication workflow:
- * 1. Selects the optimal kernel algorithm based on matrix properties
- * 2. Determines whether to use KC-blocking (BRGEMM) or standard tiling
- * 3. Creates appropriate callback functions for kernel execution
- * 4. Dispatches to the appropriate execution path
+ * Selects the optimal kernel algorithm based on matrix properties
+ * Dispatches to the appropriate execution path
  *
  * @param layout Matrix layout ('R' for row-major, 'C' for column-major)
  * @param trans_input Transpose flag for input matrix ('N' or 'T')
@@ -408,7 +284,7 @@ void execute_partitioned_matmul(
   const void *weight,
   void *dst,
   const void *bias,
-  matmul_partition_config_t config,
+  matmul_partition_config_t &config,
   matmul_params &params,
   matmul_batch_params_t &batch_params,
   bool is_weights_const,

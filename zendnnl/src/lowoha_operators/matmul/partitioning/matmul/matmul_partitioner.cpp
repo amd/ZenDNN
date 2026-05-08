@@ -44,8 +44,7 @@ static constexpr const char *LOOP_SCHEME_REUSE     = "aCB";
 static constexpr const char *LOOP_SCHEME_STREAMING = "aCb";
 
 brgemm_blocking_params_t compute_brgemm_blocking(
-  const matmul_partition_config_t &config,
-  bool use_blocked_weight
+  const matmul_partition_config_t &config
 ) {
   brgemm_blocking_params_t bp{};
 
@@ -71,7 +70,6 @@ brgemm_blocking_params_t compute_brgemm_blocking(
 
   bp.k_blocks_reduce_rem = (bp.k_blocks_per_reduce > 0) ?
                            (bp.num_k_blocks % bp.k_blocks_per_reduce) : 0;
-  bp.use_blocked_weight = use_blocked_weight;
   bp.loop_scheme = bp.weight_reuse ? LOOP_SCHEME_REUSE
                    : LOOP_SCHEME_STREAMING;
 
@@ -84,11 +82,7 @@ brgemm_blocking_params_t compute_brgemm_blocking(
                   config.src_type_size;
   }
 
-  if (use_blocked_weight) {
-    bp.stride_b = static_cast<unsigned long long>(bp.num_n_blocks) *
-                  bp.n_block_size * bp.k_block_size * config.src_type_size;
-  }
-  else if (config.transB) {
+  if (config.transB) {
     bp.stride_b = static_cast<unsigned long long>(bp.k_block_size) *
                   config.src_type_size;
   }
@@ -98,71 +92,6 @@ brgemm_blocking_params_t compute_brgemm_blocking(
   }
 
   return bp;
-}
-
-std::pair<int, int> get_tile_sizes_from_config(int default_m, int default_n) {
-  matmul_config_t &matmul_config = matmul_config_t::instance();
-
-  int tile_m = matmul_config.get_tile_m();
-  int tile_n = matmul_config.get_tile_n();
-
-  if (tile_m <= 0) {
-    tile_m = default_m;
-  }
-  if (tile_n <= 0) {
-    tile_n = default_n;
-  }
-
-  return {tile_m, tile_n};
-}
-
-// This function selects tile sizes for BF16 matmul based on heuristics
-// TODO: Further tune the heuristics based on num_threads
-std::tuple<int, int> select_tile(int M, int N, int K, int num_threads) {
-  if (M <= 2048 && N <= 128) {
-    return {32, 32};
-  }
-
-  if (M <= 4096 && N > 768 && N <= 1024) {
-    return {64, 64};
-  }
-
-  return {128, 64};
-}
-
-std::pair<int, int> calculate_optimal_tile_sizes(
-  const matmul_partition_config_t &config
-) {
-  auto [M_block, N_block] = select_tile(config.M, config.N, config.K,
-                                        config.num_threads);
-
-  // Get tile sizes from config (which reads from env vars)
-  auto [tile_m, tile_n] = get_tile_sizes_from_config(M_block, N_block);
-
-  M_block = std::min(tile_m, config.M);
-  N_block = std::min(tile_n, config.N);
-
-  return {M_block, N_block};
-}
-
-bool should_use_kc_blocking(
-  const matmul_partition_config_t &config,
-  const matmul_params &params
-) {
-#if ENABLE_LIBXSMM_BRGEMM_KERNEL
-  if (config.kernel != matmul_algo_t::libxsmm_blocked &&
-      config.kernel != matmul_algo_t::libxsmm) {
-    return false;
-  }
-  if (config.dtypes.src != data_type_t::f32 &&
-      config.dtypes.src != data_type_t::bf16) {
-    apilog_info("Only F32 and BF16 BRGEMM Supported, Executing matmul LOWOHA kernel with fallback Algo");
-    return false;
-  }
-  return true;
-#else
-  return false;
-#endif
 }
 
 size_t compute_postop_offset(
@@ -201,79 +130,49 @@ static matmul_algo_t select_partition_kernel(
   const char trans_weight,
   float alpha, float beta,
   const matmul_partition_config_t &config,
-  const matmul_params &params
+  const matmul_params &params,
+  bool is_weights_const
 ) {
-  if (config.kernel == matmul_algo_t::libxsmm_blocked ||
-      config.kernel == matmul_algo_t::libxsmm) {
-    if (can_use_libxsmm(trans_input, trans_weight, config.M, config.N, config.K,
-                        alpha, beta,
-                        params,false)) {
+  const matmul_algo_t kernel = config.kernel;
+
+  if (kernel != matmul_algo_t::libxsmm &&
+      kernel != matmul_algo_t::libxsmm_blocked) {
+    return kernel;
+  }
+
+  // LibXSMM matmul path (libxsmm / libxsmm_blocked) is currently supported
+  // only for the BF16 x BF16 case (src and weight both BF16). Any other
+  // src/weight dtype combination must fall back to the DLP kernel.
+  if (config.dtypes.src != data_type_t::bf16 ||
+      config.dtypes.wei != data_type_t::bf16) {
+    apilog_info("LibXSMM kernel is only supported for BF16 x BF16 inputs, falling back to DLP");
+    return matmul_algo_t::aocl_dlp;
+  }
+
+  if (!can_use_libxsmm(trans_input, trans_weight,
+                       config.M, config.N, config.K,
+                       alpha, beta, params, false)) {
+    apilog_info("LibXSMM kernel cannot be used for current configuration, falling back to DLP");
+    return matmul_algo_t::aocl_dlp;
+  }
+  if (kernel == matmul_algo_t::libxsmm_blocked && !is_weights_const) {
+    apilog_info("LibXSMM blocked kernel is not supported for non-constant weights, falling back to LibXSMM");
+    return matmul_algo_t::libxsmm;
+  }
+  // If libxsmm_blocked, check if N and K are multiples of blocking sizes.
+  if (kernel == matmul_algo_t::libxsmm_blocked) {
+    if ((config.N % BRGEMM_N_BLOCK != 0) || (config.K % BRGEMM_K_BLOCK != 0)) {
+      apilog_info("LibXSMM blocked kernel requires N and K to be multiples of nc and kc. Falling back to libxsmm.");
       return matmul_algo_t::libxsmm;
     }
-    else {
-      apilog_info("LibXSMM kernel cannot be used for current configuration, falling back to DLP");
-      return matmul_algo_t::aocl_dlp;
-    }
-  }
-  else {
-    return config.kernel;
   }
 
-}
-
-static tile_kernel_invoker_t create_tile_callback(
-  const char layout,
-  const char trans_input,
-  const char trans_weight,
-  const matmul_partition_config_t &config,
-  matmul_params &params,
-  matmul_batch_params_t &batch_params,
-  bool is_weights_const,
-  float alpha,
-  float beta
-) {
-  return [ &, layout, trans_input, trans_weight, alpha, beta, is_weights_const](
-           int m_start, int m_len,
-           int n_start, int n_len,
-           const void *A_tile,
-           const void *B_tile,
-           void *C_tile,
-           const void *tile_bias
-  ) {
-    // Adjust post-op buffers for this tile
-    matmul_params tile_params = params;
-    for (auto &po : tile_params.postop_) {
-      if ((po.po_type == post_op_type_t::binary_add ||
-           po.po_type == post_op_type_t::binary_mul) &&
-          po.buff != nullptr) {
-
-        size_t offset = compute_postop_offset(
-                          m_start, n_start, po.leading_dim, po.dtype
-                        );
-        po.buff = apply_offset(const_cast<void *>(po.buff), offset);
-      }
-    }
-
-    // Create a local copy of kernel since matmul_kernel_wrapper takes a non-const ref
-    matmul_algo_t tile_kernel = config.kernel;
-
-    // Call standard kernel wrapper
-    matmul_kernel_wrapper(
-      layout, trans_input, trans_weight,
-      m_len, n_len, config.K, alpha,
-      A_tile, config.lda,
-      B_tile, config.ldb,
-      beta, C_tile, config.ldc,
-      tile_params.dtypes, tile_kernel,
-      tile_params.mem_format_a, tile_params.mem_format_b,
-      tile_params, batch_params, tile_bias, is_weights_const
-    );
-  };
+  return kernel;
 }
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 /**
- * @brief Apply per-tile post-operations (binary add/mul with relocated buffer pointers).
+ * @brief Apply all post-ops on a tile, with binary-op operand pointers relocated to the tile's (m_start, n_start) position.
  */
 static void apply_tile_postops(
   int m_start, int n_start, int m_len, int n_len, int ldc,
@@ -314,13 +213,13 @@ struct BrgemmCachedContext {
  *
  * @return Pointer to blocked weight, or nullptr if blocking is not applicable.
  */
-static const void *blockAndCacheWeights(
+static const void *libxsmm_weight_prepack(
   const void *weight, int M, int K, int N, int ldb,
   bool transB, int k_block_size, int n_block_size,
   data_type_t src_dtype, bool is_weights_const,
   blocked_brgemm_params_t &bp) {
 
-  apilog_info("blockAndCacheWeights: K=", K, " N=", N, " k_block_size=",
+  apilog_info("libxsmm_weight_prepack: K=", K, " N=", N, " k_block_size=",
               k_block_size,
               " n_block_size=", n_block_size, " is_weights_const=", is_weights_const);
 
@@ -452,7 +351,7 @@ static const PreDispatchedBrgemm &get_brgemm_context_blocked(
   return it->second.pd;
 }
 
-void execute_brgemm_tiled(
+void execute_brgemm_std(
   const char trans_input,
   const char trans_weight,
   const void *src,
@@ -473,7 +372,6 @@ void execute_brgemm_tiled(
 
   const int M = config.M;
   const int N = config.N;
-  // const int K = config.K;
   const bool has_postops = params.postop_.size() > 0;
 
   const int k_full = bp.num_k_blocks * bp.k_block_size;
@@ -569,7 +467,7 @@ void execute_brgemm_tiled(
 #endif
 }
 
-void execute_brgemm_tiled_blocked(
+void execute_brgemm_prepacked(
   const void *src,
   const void *blocked_weight,
   void *dst,
@@ -579,7 +477,7 @@ void execute_brgemm_tiled_blocked(
   matmul_params &params,
   float beta
 ) {
-  apilog_info("execute_brgemm_tiled_blocked: M=", config.M,
+  apilog_info("execute_brgemm_prepacked: M=", config.M,
               " num_k_blocks=", bp.num_k_blocks, " num_n_blocks=", bp.num_n_blocks,
               " k_block_size=", bp.k_block_size, " n_block_size=", bp.n_block_size,
               " m_block_size=", bp.m_block_size,
@@ -675,55 +573,6 @@ void execute_brgemm_tiled_blocked(
 }
 #endif
 
-void execute_partitioned_matmul_standard(
-  const void *src,
-  const void *weight,
-  void *dst,
-  const void *bias,
-  const matmul_partition_config_t &config,
-  const tile_kernel_invoker_t &tile_callback
-) {
-  std::pair<int, int> block_sizes = calculate_optimal_tile_sizes(config);
-  int M_block = block_sizes.first;
-  int N_block = block_sizes.second;
-
-  const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
-  const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
-  uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
-
-  #pragma omp parallel for collapse(2) schedule(static) num_threads(config.num_threads)
-  for (int i = 0; i < config.M; i += M_block) {
-    for (int j = 0; j < config.N; j += N_block) {
-
-      int m_len = std::min(M_block, config.M - i);
-      int n_len = std::min(N_block, config.N - j);
-
-      const void *A_tile = get_matrix_block(
-                             src_ptr, i, 0, config.lda,
-                             config.transA, config.src_type_size
-                           );
-
-      const void *B_tile = get_matrix_block(
-                             weight_ptr, 0, j, config.ldb,
-                             config.transB, config.src_type_size
-                           );
-
-      void *C_tile = get_output_block(
-                       dst_ptr, i, j, config.ldc, config.out_type_size
-                     );
-
-      const void *tile_bias = compute_bias_offset(
-                                bias, j, config.dtypes.bias
-                              );
-
-      tile_callback(
-        i, m_len, j, n_len,
-        A_tile, B_tile, C_tile, tile_bias
-      );
-    }
-  }
-}
-
 void execute_partitioned_matmul(
   const char layout,
   const char trans_input,
@@ -732,7 +581,7 @@ void execute_partitioned_matmul(
   const void *weight,
   void *dst,
   const void *bias,
-  matmul_partition_config_t config,
+  matmul_partition_config_t &config,
   matmul_params &params,
   matmul_batch_params_t &batch_params,
   bool is_weights_const,
@@ -741,84 +590,57 @@ void execute_partitioned_matmul(
 ) {
   config.kernel = select_partition_kernel(
                     trans_input, trans_weight,
-                    alpha, beta, config, params
-                  );
-  if (config.kernel == matmul_algo_t::libxsmm) {
+                    alpha, beta, config, params, is_weights_const);
 #if ZENDNNL_DEPENDS_LIBXSMM
-
-    bool use_libxsmm_brgemm = should_use_kc_blocking(config,
-                              params);
-
-    if (use_libxsmm_brgemm) {
-      bool use_blocked = false;
-      if (is_weights_const) {
-        int k_blk = BRGEMM_K_BLOCK;
-        int n_blk = BRGEMM_N_BLOCK;
-        blocked_brgemm_params_t bbp{};
-        const void *blocked_wt = blockAndCacheWeights(
-                                   weight, config.M, config.K, config.N, config.ldb,
-                                   config.transB, k_blk, n_blk,
-                                   config.dtypes.src, is_weights_const, bbp);
-        if (blocked_wt) {
-          execute_brgemm_tiled_blocked(
-            src, blocked_wt, dst, bias,
-            bbp, config, params, beta);
-          use_blocked = true;
-        }
-      }
-      if (!use_blocked) {
-        execute_brgemm_tiled(
-          trans_input, trans_weight,
-          src, weight, dst, bias,
-          config, params, beta
-        );
-      }
-    }
-    else
-#endif
-    {
-      auto tile_callback = create_tile_callback(
-                             layout, trans_input, trans_weight,
-                             config, params, batch_params,
-                             is_weights_const, alpha, beta
-                           );
-
-      execute_partitioned_matmul_standard(
-        src, weight, dst, bias, config, tile_callback
-      );
-    }
-  }
-  else {
-    // Fallback to OneDNN or DLP if libxsmm can't be used
-#if ZENDNNL_DEPENDS_ONEDNN
-    if (config.kernel == matmul_algo_t::onednn ||
-        config.kernel == matmul_algo_t::onednn_blocked) {
-      apilog_info("Given combination is not supported for matmul parallel primitive, executing matmul LOWOHA kernel with OneDNN fallback, algo: ",
-                  static_cast<int>(config.kernel));
-
-      matmul_onednn_wrapper(trans_input, trans_weight,
-                            config.M, config.N, config.K, alpha,
-                            src, config.lda,
-                            weight, config.ldb,
-                            beta, dst, config.ldc,
-                            params, batch_params, bias, config.kernel);
+  if (config.kernel == matmul_algo_t::libxsmm_blocked) {
+    blocked_brgemm_params_t bbp{};
+    const void *blocked_wt = libxsmm_weight_prepack(
+                               weight, config.M, config.K, config.N, config.ldb,
+                               config.transB, BRGEMM_K_BLOCK, BRGEMM_N_BLOCK,
+                               config.dtypes.src, is_weights_const, bbp);
+    if (blocked_wt) {
+      apilog_info("Executing LIBXSMM brgemm prepacked");
+      execute_brgemm_prepacked(
+        src, blocked_wt, dst, bias, bbp, config, params, beta);
       return;
     }
-#endif
-
-    config.kernel = matmul_algo_t::aocl_dlp;
-    apilog_info("Given combination is not supported for matmul parallel primitive, executing matmul LOWOHA kernel with DLP fallback, algo: ",
-                static_cast<int>(config.kernel));
-
-    matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                          config.M, config.N, config.K, alpha,
-                          src, config.lda, weight, config.ldb,
-                          beta, dst, config.ldc,
-                          params.dtypes, config.kernel,
-                          params.mem_format_a, params.mem_format_b,
-                          params, batch_params,
-                          bias, is_weights_const);
+    config.kernel = matmul_algo_t::libxsmm;
   }
+  if (config.kernel == matmul_algo_t::libxsmm) {
+    apilog_info("Executing LIBXSMM brgemm strided");
+    execute_brgemm_std(
+      trans_input, trans_weight,
+      src, weight, dst, bias,
+      config, params, beta);
+    return;
+  }
+#endif
+#if ZENDNNL_DEPENDS_ONEDNN
+  if (config.kernel == matmul_algo_t::onednn ||
+      config.kernel == matmul_algo_t::onednn_blocked) {
+    apilog_info("Given combination is not supported for matmul parallel primitive, executing matmul LOWOHA kernel with OneDNN fallback, algo: ",
+                static_cast<int>(config.kernel));
+    matmul_onednn_wrapper(trans_input, trans_weight,
+                          config.M, config.N, config.K, alpha,
+                          src, config.lda,
+                          weight, config.ldb,
+                          beta, dst, config.ldc,
+                          params, batch_params, bias, config.kernel,
+                          is_weights_const);
+    return;
+  }
+#endif
+  config.kernel = matmul_algo_t::aocl_dlp;
+  apilog_info("Given combination is not supported for matmul parallel primitive, executing matmul LOWOHA kernel with DLP fallback, algo: ",
+              static_cast<int>(config.kernel));
+  matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                        config.M, config.N, config.K, alpha,
+                        src, config.lda, weight, config.ldb,
+                        beta, dst, config.ldc,
+                        params.dtypes, config.kernel,
+                        params.mem_format_a, params.mem_format_b,
+                        params, batch_params,
+                        bias, is_weights_const);
 }
 } // namespace matmul
 } // namespace lowoha

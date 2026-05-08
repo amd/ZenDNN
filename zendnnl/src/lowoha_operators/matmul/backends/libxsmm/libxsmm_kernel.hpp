@@ -94,82 +94,6 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
 }
 
 /**
- * @brief Template function for LibXSMM BRGEMM dispatch and execution
- */
-template<typename TA, typename TB, typename TC>
-int libxsmm_brgemm(const TA **A_ptrs, const TB **B_ptrs, TC *C,
-                   int M, int N, int K, int batch,
-                   float beta, int lda, int ldb, int ldc,
-                   char transA, char transB,
-                   libxsmm_datatype a_type, libxsmm_datatype b_type,
-                   libxsmm_datatype c_type, libxsmm_datatype comp_type,
-                   const matmul_params &lowoha_param, const void *bias,
-                   const data_type_t &bias_type, bool apply_postops = true,
-                   libxsmm_gemmfunction precompiled = nullptr) {
-  libxsmm_gemmfunction kernel = precompiled;
-
-  if (!kernel) {
-    libxsmm_bitfield l_flags = 0;
-    if (transA == 'T' || transA == 't') {
-      l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
-    }
-    if (transB == 'T' || transB == 't') {
-      l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
-    }
-    if (beta == 0.0f) {
-      l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
-    }
-    libxsmm_gemm_shape shape{};
-    shape.m   = N;
-    shape.n   = M;
-    shape.k   = K;
-    shape.lda = ldb;
-    shape.ldb = lda;
-    shape.ldc = ldc;
-    shape.a_in_type = b_type;
-    shape.b_in_type = a_type;
-    shape.out_type  = c_type;
-    shape.comp_type = comp_type;
-
-    libxsmm_gemm_batch_reduce_config brcfg{};
-    brcfg.br_type = LIBXSMM_GEMM_BATCH_REDUCE_ADDRESS;
-    brcfg.br_unroll_hint = batch;
-
-    kernel = libxsmm_dispatch_brgemm(shape, l_flags, 0, brcfg);
-  }
-
-  if (!kernel) {
-    log_error("Failed to dispatch LibXSMM BRGEMM kernel");
-    return 0;
-  }
-
-  libxsmm_gemm_param p{};
-  p.a.primary = const_cast<void *>(static_cast<const void *>(B_ptrs));
-  p.b.primary = const_cast<void *>(static_cast<const void *>(A_ptrs));
-  p.c.primary = C;
-  p.op.tertiary = &batch;
-
-  kernel(&p);
-
-  if (bias != nullptr) {
-    if (bias_type == data_type_t::f32) {
-      libxsmm_bias<TC, float>(M, N, ldc, C, bias);
-    }
-    else if (bias_type == data_type_t::bf16) {
-      libxsmm_bias<TC, libxsmm_bfloat16>(M, N, ldc, C, bias);
-    }
-  }
-
-  if (lowoha_param.postop_.size() > 0 && apply_postops) {
-    for (const auto &postop : lowoha_param.postop_) {
-      libxsmm_postop<TC>(M, N, ldc, C, postop);
-    }
-  }
-
-  return 1;
-}
-
-/**
  * @brief Pre-dispatched stride-based BRGEMM kernel set.
  *
  * Holds JIT function pointers for every unique (tile-shape, K-variant)
@@ -256,8 +180,8 @@ static inline libxsmm_gemmfunction dispatch_brgemm(
   libxsmm_gemm_batch_reduce_config brcfg{};
   brcfg.br_type          = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
   brcfg.br_unroll_hint   = count;
-  brcfg.br_stride_a_hint = stride_b;   // libxsmm's A = our B
-  brcfg.br_stride_b_hint = stride_a;   // libxsmm's B = our A
+  brcfg.br_stride_a_hint = stride_b;
+  brcfg.br_stride_b_hint = stride_a;
 
   return libxsmm_dispatch_brgemm(shape, l_flags, /*prefetch_flags=*/0, brcfg);
 }
@@ -285,8 +209,8 @@ static inline void run_brgemm(
   }
 
   libxsmm_gemm_param p{};
-  p.a.primary  = const_cast<void *>(B_base);   // libxsmm's A = our B
-  p.b.primary  = const_cast<void *>(A_base);   // libxsmm's B = our A
+  p.a.primary  = const_cast<void *>(B_base);
+  p.b.primary  = const_cast<void *>(A_base);
   p.c.primary  = C;
   p.op.tertiary = &count;
 
@@ -401,66 +325,13 @@ static inline void init_output_tile(
 }
 
 /**
- * @brief Run LibXSMM BRGEMM with automatic type dispatch
- */
-static inline int run_libxsmm_brgemm(char transA, char transB,
-                                     int M, int N, int K, int batch,
-                                     float beta, int lda, int ldb, int ldc,
-                                     const void **A_ptrs, const void **B_ptrs, void *C,
-                                     const matmul_data_types &dtypes,
-                                     const matmul_params &lowoha_para,
-                                     const void *bias, bool apply_postops,
-                                     libxsmm_gemmfunction precompiled = nullptr) {
-  int kernel_status = 0;
-
-  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    log_info("Using libxsmm BRGEMM f32->f32 kernel");
-    kernel_status = libxsmm_brgemm<float, float, float>(
-                      reinterpret_cast<const float **>(A_ptrs),
-                      reinterpret_cast<const float **>(B_ptrs),
-                      static_cast<float *>(C),
-                      M, N, K, batch, beta, lda, ldb, ldc, transA, transB,
-                      LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
-                      LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
-                      lowoha_para, bias, dtypes.bias, apply_postops,
-                      precompiled);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    log_info("Using libxsmm BRGEMM bf16->f32 kernel");
-    kernel_status = libxsmm_brgemm<libxsmm_bfloat16, libxsmm_bfloat16, float>(
-                      reinterpret_cast<const libxsmm_bfloat16 **>(A_ptrs),
-                      reinterpret_cast<const libxsmm_bfloat16 **>(B_ptrs),
-                      static_cast<float *>(C),
-                      M, N, K, batch, beta, lda, ldb, ldc, transA, transB,
-                      LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_BF16,
-                      LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
-                      lowoha_para, bias, dtypes.bias, apply_postops,
-                      precompiled);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    log_info("Using libxsmm BRGEMM bf16->bf16 kernel");
-    kernel_status =
-      libxsmm_brgemm<libxsmm_bfloat16, libxsmm_bfloat16, libxsmm_bfloat16>(
-        reinterpret_cast<const libxsmm_bfloat16 **>(A_ptrs),
-        reinterpret_cast<const libxsmm_bfloat16 **>(B_ptrs),
-        reinterpret_cast<libxsmm_bfloat16 *>(C),
-        M, N, K, batch, beta, lda, ldb, ldc, transA, transB,
-        LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_BF16,
-        LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_F32,
-        lowoha_para, bias, dtypes.bias, apply_postops,
-        precompiled);
-  }
-  return kernel_status;
-}
-
-/**
  * @brief Run LibXSMM GEMM with automatic type dispatch
  */
-static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
-                              float beta, int lda, int ldb, int ldc,
-                              const void *A, const void *B, void *C,
-                              const matmul_data_types &dtypes, const matmul_params &lowoha_para,
-                              const void *bias) {
+static inline int run_libxsmm_std(char transA, char transB, int M, int N, int K,
+                                  float beta, int lda, int ldb, int ldc,
+                                  const void *A, const void *B, void *C,
+                                  const matmul_data_types &dtypes, const matmul_params &lowoha_para,
+                                  const void *bias) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     log_info("Using libxsmm GEMM f32->f32 kernel");

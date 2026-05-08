@@ -25,8 +25,6 @@
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "operators/matmul/matmul_context.hpp"
 
-#define ENABLE_LIBXSMM_BRGEMM_KERNEL 0
-
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {

@@ -66,7 +66,6 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
   }
 
   if (lowoha_param.postop_.size() > 0) {
-    //ToDo: Silu is not supported currently, since there is no direct API call available(can use sigm+mul).
     for (const auto &postop : lowoha_param.postop_) {
       switch (postop.po_type) {
       case post_op_type_t::binary_add:
@@ -75,6 +74,13 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
       case post_op_type_t::relu:
       case post_op_type_t::tanh:
       case post_op_type_t::sigmoid:
+        continue;
+      case post_op_type_t::swish:
+        // SiLU only: alpha == 1.0 (or 0.0, treated as default 1.0 by callers).
+        // Anything else falls back to OneDNN/DLP.
+        if (postop.alpha != 0.0f && postop.alpha != 1.0f) {
+          return false;
+        }
         continue;
       default:
         return false;
@@ -189,7 +195,7 @@ static inline void libxsmm_weight_block(
 }
 
 /**
- * @brief Apply post-operations (e.g., ReLU, Sigmoid, Tanh, GELU, Binary Multiply, Binary Add)
+ * @brief Apply post-operations (e.g., ReLU, Sigmoid, Tanh, GELU, SiLU/Swish, Binary Multiply, Binary Add)
  *        on the output matrix in F32/BF16 format using LIBXSMM kernels.
  *
  * @param M Number of rows in the output matrix.
@@ -197,6 +203,10 @@ static inline void libxsmm_weight_block(
  * @param ldc Leading dimension of the output matrix.
  * @param output Pointer to the output matrix where the post-operation will be applied.
  * @param po A `matmul_post_op` object containing the type of post-operation and any additional buffers required.
+ *
+ * Note: the SiLU/Swish path uses a function-local stack scratch buffer of
+ * exactly M*N elements of type T. Each thread already owns its own stack,
+ * so no shared state, indexing, or thread-id math is needed.
  */
 template<typename T>
 inline static void libxsmm_postop(const int M, const int N, const int ldc,
@@ -285,6 +295,68 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
     else {
       log_error("Failed to dispatch LIBXSMM binary post-op kernel");
     }
+    break;
+  }
+
+  case post_op_type_t::swish: {
+    // SiLU = swish with alpha == 1.0:  out = out * sigmoid(out)
+    //
+    // Implemented as two LIBXSMM kernels with a tile-local stack scratch.
+    // Each thread already owns its own stack, so the buffer is automatically
+    // private — no shared pool, no thread-id math, no synchronization.
+    // Sized exactly to the current tile (M*N elements, <= a few KB on the
+    // partitioner's BRGEMM_M_BLOCK*BRGEMM_N_BLOCK upper bound).
+    //
+    //   Step 1 (unary sigmoid):  scratch = sigmoid(output)   ldi=ldc, ldo=N
+    //   Step 2 (binary mul):     output  = output * scratch  ldi=ldc, ldi2=N, ldo=ldc
+    T scratch[M * N];
+
+    libxsmm_meltw_unary_shape sig_shape = libxsmm_create_meltw_unary_shape(
+                                            N, M, ldc, N,
+                                            IN_TYPE,
+                                            OUT_TYPE,
+                                            COMP_TYPE
+                                          );
+
+    libxsmm_meltwfunction_unary sig_kernel =
+      libxsmm_dispatch_meltw_unary(LIBXSMM_MELTW_TYPE_UNARY_SIGMOID, sig_shape,
+                                   LIBXSMM_MELTW_FLAG_UNARY_NONE);
+
+    if (!sig_kernel) {
+      log_error("Failed to dispatch LIBXSMM sigmoid kernel for SiLU post-op");
+      break;
+    }
+
+    libxsmm_meltw_unary_param sig_param{};
+    sig_param.in.primary = output;
+    sig_param.out.primary = scratch;
+    sig_kernel(&sig_param);
+
+    libxsmm_meltw_binary_shape mul_shape{};
+    mul_shape.m = N;
+    mul_shape.n = M;
+    mul_shape.ldi = ldc;
+    mul_shape.ldi2 = N;
+    mul_shape.ldo = ldc;
+    mul_shape.in0_type = IN_TYPE;
+    mul_shape.in1_type = IN_TYPE;
+    mul_shape.comp_type = COMP_TYPE;
+    mul_shape.out_type = OUT_TYPE;
+
+    libxsmm_meltwfunction_binary mul_kernel =
+      libxsmm_dispatch_meltw_binary(LIBXSMM_MELTW_TYPE_BINARY_MUL, mul_shape,
+                                    LIBXSMM_MELTW_FLAG_BINARY_NONE);
+
+    if (!mul_kernel) {
+      log_error("Failed to dispatch LIBXSMM binary-mul kernel for SiLU post-op");
+      break;
+    }
+
+    libxsmm_meltw_binary_param mul_param{};
+    mul_param.in0.primary = output;
+    mul_param.in1.primary = scratch;
+    mul_param.out.primary = output;
+    mul_kernel(&mul_param);
     break;
   }
 

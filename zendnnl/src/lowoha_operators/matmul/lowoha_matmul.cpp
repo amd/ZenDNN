@@ -49,7 +49,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     log_info("Using libxsmm kernel");
-    if (run_libxsmm(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
+    if (run_libxsmm_std(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
                     lowoha_param, bias)) {
       return;
     }

@@ -45,10 +45,10 @@ void bmm_tile_execute(
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (tile_kernel == matmul_algo_t::libxsmm) {
     log_info("Using libxsmm kernel");
-    if (run_libxsmm(ctx.trans_input, ctx.trans_weight, m_len, ctx.N, ctx.K,
-                    ctx.beta, ctx.lda, ctx.ldb, ctx.ldc,
-                    A, weight_ptr, C, tile_params.dtypes,
-                    tile_params, ctx.bias)) {
+    if (run_libxsmm_std(ctx.trans_input, ctx.trans_weight, m_len, ctx.N, ctx.K,
+                        ctx.beta, ctx.lda, ctx.ldb, ctx.ldc,
+                        A, weight_ptr, C, tile_params.dtypes,
+                        tile_params, ctx.bias)) {
       return;
     }
   }
