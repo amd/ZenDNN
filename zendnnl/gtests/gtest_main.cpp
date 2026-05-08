@@ -80,6 +80,10 @@ std::string ai_test_mode_str {};
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
 
+/** @brief quant_matmul_test holds the constrained-by-construction parameters
+ *  for the quantized group-matmul gtest fixture (TestGroupMatmulQuant)*/
+std::vector<GroupQuantMatmulType> quant_matmul_test{};
+
 /** @brief batchmatmul_test Data Structure(vector of structures) to hold random BatchMatmul Parameters */
 std::vector<BatchMatmulType> batchmatmul_test{};
 
@@ -132,6 +136,11 @@ int main(int argc, char **argv) {
       for (uint32_t i = 0; i < test_num; ++i) {
         matmul_test[i] = MatmulType(i, test_num);
       }
+    }
+    // Constrained-parameter set for the quantized group-matmul fixture.
+    quant_matmul_test.resize(test_num);
+    for (uint32_t i = 0; i < test_num; ++i) {
+      quant_matmul_test[i] = GroupQuantMatmulType(i, test_num);
     }
     if (!cmd_input_file.empty() && cmd_operator == "matmul" && ndims == 3) {
       std::cout << "Using input file: " << cmd_input_file << std::endl;

@@ -155,7 +155,7 @@ export OMP_NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 # --- Validate args ---
 if [[ "$OP" == "grp_matmul" ]]; then
     if [ ${#VERS[@]} -eq 0 ]; then VERS=(1); fi
-    if [ ${#ALGOS[@]} -eq 0 ]; then ALGOS=(11); fi
+    if [ ${#ALGOS[@]} -eq 0 ]; then ALGOS=(1); fi
 elif [[ "$OP" == "bmm" ]]; then
     if [ ${#ALGOS[@]} -eq 0 ]; then
         echo "ERROR: -a/--algo is required for bmm (e.g. -a 6 for libxsmm, -a 5,6)"; show_help

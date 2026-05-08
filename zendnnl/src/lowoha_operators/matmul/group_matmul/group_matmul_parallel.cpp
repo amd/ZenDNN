@@ -40,30 +40,34 @@ namespace lowoha {
 namespace matmul {
 namespace {
 
+// ── ALGO=1: sequential — serial over experts ────────────────────────────
+
 void sequential_experts(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
 
   const size_t num_ops = M.size();
-  if (num_ops == 0 || num_threads <= 0) return;
+  if (num_ops == 0 || num_threads <= 0) {
+    return;
+  }
   matmul_algo_t algo = resolve_kernel();
 
   for (size_t i = 0; i < num_ops; ++i) {
     execute_expert_slice(layout[i], transA[i], transB[i],
-        M[i], N[i], K[i], alpha[i],
-        src[i], lda[i], weight[i], ldb[i],
-        bias[i], beta[i], dst[i], ldc[i],
-        is_weights_const[i], num_threads, params[i], algo);
+                         M[i], N[i], K[i], alpha[i],
+                         src[i], lda[i], weight[i], ldb[i],
+                         bias[i], beta[i], dst[i], ldc[i],
+                         is_weights_const[i], num_threads, params[i], algo);
     // Fused activation: dst[i] is hot in L3 from the GEMM that just finished.
     if (fused_act != grp_matmul_gated_act_t::none)
       apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i], ldc[i],
@@ -78,21 +82,23 @@ void sequential_experts(
 // Uses nested OMP (scoped_active_levels(2)).
 
 void parallel_multilevel(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
 
   const int num_ops = static_cast<int>(M.size());
-  if (num_ops == 0 || num_threads <= 0) return;
+  if (num_ops == 0 || num_threads <= 0) {
+    return;
+  }
   matmul_algo_t algo = resolve_kernel();
 
   const int ccd_size = std::min(8, num_threads);
@@ -103,25 +109,33 @@ void parallel_multilevel(
   if (num_ops <= num_ccds && max_M >= ccd_size) {
     // (A) Few experts, large M: multi-CCD per expert, all concurrent.
     int64_t total_M = 0;
-    for (int i = 0; i < num_ops; ++i) total_M += M[i];
-    if (total_M <= 0) total_M = num_ops;
+    for (int i = 0; i < num_ops; ++i) {
+      total_M += M[i];
+    }
+    if (total_M <= 0) {
+      total_M = num_ops;
+    }
 
     std::vector<int> ccds_per_op(num_ops, 1);
     int remaining = num_ccds - num_ops;
     if (remaining > 0) {
       for (int i = 0; i < num_ops; ++i) {
         int extra = static_cast<int>(
-            static_cast<int64_t>(remaining) * M[i] / total_M);
+                      static_cast<int64_t>(remaining) * M[i] / total_M);
         ccds_per_op[i] += extra;
       }
       int used = 0;
-      for (int i = 0; i < num_ops; ++i) used += ccds_per_op[i];
-      for (int i = 0; used < num_ccds; ++i, ++used)
+      for (int i = 0; i < num_ops; ++i) {
+        used += ccds_per_op[i];
+      }
+      for (int i = 0; used < num_ccds; ++i, ++used) {
         ccds_per_op[i % num_ops]++;
+      }
     }
     std::vector<int> thr_per_op(num_ops);
-    for (int i = 0; i < num_ops; ++i)
+    for (int i = 0; i < num_ops; ++i) {
       thr_per_op[i] = ccds_per_op[i] * ccd_size;
+    }
 
     scoped_active_levels guard(2);
     #pragma omp parallel num_threads(num_ops)
@@ -129,17 +143,18 @@ void parallel_multilevel(
       const int i = omp_get_thread_num();
       if (i < num_ops) {
         execute_expert_slice(layout[i], transA[i], transB[i],
-            M[i], N[i], K[i], alpha[i],
-            src[i], lda[i], weight[i], ldb[i],
-            bias[i], beta[i], dst[i], ldc[i],
-            is_weights_const[i], thr_per_op[i],
-            params[i], algo);
+                             M[i], N[i], K[i], alpha[i],
+                             src[i], lda[i], weight[i], ldb[i],
+                             bias[i], beta[i], dst[i], ldc[i],
+                             is_weights_const[i], thr_per_op[i],
+                             params[i], algo);
         if (fused_act != grp_matmul_gated_act_t::none)
           apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
                                   N[i], ldc[i], act_dtype);
       }
     }
-  } else {
+  }
+  else {
     // (B) Round-based, 1 CCD per expert.
     const int batch = std::min(num_ops, num_ccds);
 
@@ -155,10 +170,10 @@ void parallel_multilevel(
         if (slot < round_size) {
           const int e = round_start + slot;
           execute_expert_slice(layout[e], transA[e], transB[e],
-              M[e], N[e], K[e], alpha[e],
-              src[e], lda[e], weight[e], ldb[e],
-              bias[e], beta[e], dst[e], ldc[e],
-              is_weights_const[e], ccd_size, params[e], algo);
+                               M[e], N[e], K[e], alpha[e],
+                               src[e], lda[e], weight[e], ldb[e],
+                               bias[e], beta[e], dst[e], ldc[e],
+                               is_weights_const[e], ccd_size, params[e], algo);
           if (fused_act != grp_matmul_gated_act_t::none)
             apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
                                     N[e], ldc[e], act_dtype);
@@ -172,31 +187,33 @@ void parallel_multilevel(
 // Parallel-for over experts; each expert gets 1 thread.
 
 void parallel_per_expert(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
 
   const size_t num_ops = M.size();
-  if (num_ops == 0 || num_threads <= 0) return;
+  if (num_ops == 0 || num_threads <= 0) {
+    return;
+  }
   matmul_algo_t algo = resolve_kernel();
   scoped_active_levels guard(1);
 
   #pragma omp parallel for num_threads(num_threads)
   for (size_t i = 0; i < num_ops; ++i) {
     execute_expert_slice(layout[i], transA[i], transB[i],
-        M[i], N[i], K[i], alpha[i],
-        src[i], lda[i], weight[i], ldb[i],
-        bias[i], beta[i], dst[i], ldc[i],
-        is_weights_const[i], 1, params[i], algo);
+                         M[i], N[i], K[i], alpha[i],
+                         src[i], lda[i], weight[i], ldb[i],
+                         bias[i], beta[i], dst[i], ldc[i],
+                         is_weights_const[i], 1, params[i], algo);
     if (fused_act != grp_matmul_gated_act_t::none)
       apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
                               N[i], ldc[i], act_dtype);
@@ -233,22 +250,42 @@ void parallel_per_expert(
 // quantization, GGML unpack).  Row-major layout and uniform
 // dtypes across experts are additionally required.
 static bool check_m_tile_safe(
-    const std::vector<char> &layout,
-    const std::vector<matmul_params> &params) {
+  const std::vector<char> &layout,
+  const std::vector<matmul_params> &params) {
   const int num_ops = static_cast<int>(params.size());
   for (int i = 0; i < num_ops; ++i) {
-    if (layout[i] != 'r' && layout[i] != 'R')                   return false;
-    if (params[i].dtypes.src  != params[0].dtypes.src)          return false;
-    if (params[i].dtypes.wei  != params[0].dtypes.wei)          return false;
-    if (params[i].dtypes.dst  != params[0].dtypes.dst)          return false;
-    if (params[i].dtypes.bias != params[0].dtypes.bias)         return false;
-    if (params[i].mem_format_a != 'n')                          return false;
-    if (params[i].mem_format_b != 'n')                          return false;
-    if (params[i].dynamic_quant)                                return false;
-    if (params[i].packing.pack_format_b != 0)                   return false;
+    if (layout[i] != 'r' && layout[i] != 'R') {
+      return false;
+    }
+    if (params[i].dtypes.src  != params[0].dtypes.src) {
+      return false;
+    }
+    if (params[i].dtypes.wei  != params[0].dtypes.wei) {
+      return false;
+    }
+    if (params[i].dtypes.dst  != params[0].dtypes.dst) {
+      return false;
+    }
+    if (params[i].dtypes.bias != params[0].dtypes.bias) {
+      return false;
+    }
+    if (params[i].mem_format_a != 'n') {
+      return false;
+    }
+    if (params[i].mem_format_b != 'n') {
+      return false;
+    }
+    if (params[i].dynamic_quant) {
+      return false;
+    }
+    if (params[i].packing.pack_format_b != 0) {
+      return false;
+    }
     for (const auto &po : params[i].postop_) {
       if (po.po_type == post_op_type_t::softmax
-          || po.po_type == post_op_type_t::pooling)             return false;
+          || po.po_type == post_op_type_t::pooling) {
+        return false;
+      }
     }
   }
   return true;
@@ -266,15 +303,25 @@ static bool check_m_tile_safe(
 // always calls M-tile first and only invokes this when m_tile_safe is
 // true, so a second pass would just be duplicated work.
 static bool check_n_tile_extra(
-    const std::vector<matmul_params> &params) {
+  const std::vector<matmul_params> &params) {
   const int num_ops = static_cast<int>(params.size());
   for (int i = 0; i < num_ops; ++i) {
-    if (params[i].quant_params.wei_scale.buff != nullptr) return false;
-    if (params[i].quant_params.wei_zp   .buff != nullptr) return false;
-    if (params[i].quant_params.src_scale.buff != nullptr) return false;
-    if (params[i].quant_params.src_zp   .buff != nullptr) return false;
+    if (params[i].quant_params.wei_scale.buff != nullptr) {
+      return false;
+    }
+    if (params[i].quant_params.wei_zp   .buff != nullptr) {
+      return false;
+    }
+    if (params[i].quant_params.src_scale.buff != nullptr) {
+      return false;
+    }
+    if (params[i].quant_params.src_zp   .buff != nullptr) {
+      return false;
+    }
     for (const auto &po : params[i].postop_) {
-      if (po.buff != nullptr) return false;
+      if (po.buff != nullptr) {
+        return false;
+      }
     }
   }
   return true;
@@ -301,19 +348,23 @@ static bool check_n_tile_extra(
 //   3. max_M vs kDecodeMaxM   — decode-class vs prompt-class?
 //   4. n_tile_safe + tiles_per_expert ≥ min_ntiles — N-tile viable?
 static int auto_select_algo(
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<matmul_params> &params,
-    int num_threads,
-    bool n_tile_safe) {
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<matmul_params> &params,
+  int num_threads,
+  bool n_tile_safe) {
 
   const int num_ops = static_cast<int>(M.size());
-  if (num_threads <= 1 || num_ops == 0) return 1;
+  if (num_threads <= 1 || num_ops == 0) {
+    return 1;
+  }
 
   // num_ops > num_threads → per-expert is the only way to cover every
   // expert in one wave; ALGO 1 would run them serially.
-  if (num_ops > num_threads) return 5;
+  if (num_ops > num_threads) {
+    return 5;
+  }
 
   const int max_M = *std::max_element(M.begin(), M.end());
   const int max_N = *std::max_element(N.begin(), N.end());
@@ -321,22 +372,22 @@ static int auto_select_algo(
 
   const size_t wei_elem = size_of(params[0].dtypes.wei);
   const size_t weight_per_expert =
-      static_cast<size_t>(max_K) * max_N * wei_elem;
+    static_cast<size_t>(max_K) * max_N * wei_elem;
 
   // N-tile viability — ceiling division models partial last CCD
   // (e.g., 126 threads → 16 CCDs, last has 6 cores) consistently
   // with flat_m_tile's num_ccds.
   const int ccd_size_est = std::min(8, num_threads);
   const int num_ccds_est = std::max(1,
-      (num_threads + ccd_size_est - 1) / ccd_size_est);
+                                    (num_threads + ccd_size_est - 1) / ccd_size_est);
   const int eff_tile = (max_M <= kDecodeMaxM) ? kDecodeNTile : kMinNTile;
   const int tiles_per_expert = max_N / eff_tile;
   const int team_est = num_threads / std::max(1, num_ops);
   const int min_ntiles = (num_ops > num_ccds_est)
-      ? std::max(2, ccd_size_est / 2)
-      : std::max(2, team_est / 2);
+                         ? std::max(2, ccd_size_est / 2)
+                         : std::max(2, team_est / 2);
   const bool ntile_ok =
-      n_tile_safe && (tiles_per_expert >= min_ntiles);
+    n_tile_safe && (tiles_per_expert >= min_ntiles);
 
   // Large weights (DRAM-streaming): ALGO 1 by default.  Escape to
   // ALGO 3 only when column-parallel has enough per-thread work to
@@ -369,7 +420,9 @@ static int auto_select_algo(
   // Small / medium weights — prompt-class falls through to the
   // ntile_ok check below; decode-class requires ≥4 experts.
   if (max_M <= kDecodeMaxM) {
-    if (num_ops >= 4 && ntile_ok) return 3;
+    if (num_ops >= 4 && ntile_ok) {
+      return 3;
+    }
     return 1;
   }
 
@@ -383,12 +436,12 @@ static int auto_select_algo(
 // commits to a tight arena.  See the forward declaration there for
 // the contract; the body below is the single source of truth.
 int select_grp_matmul_algo(
-    const std::vector<char> &layout,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<matmul_params> &params,
-    int num_threads) {
+  const std::vector<char> &layout,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<matmul_params> &params,
+  int num_threads) {
 
   const bool m_tile_safe = check_m_tile_safe(layout, params);
   const bool n_tile_safe = m_tile_safe && check_n_tile_extra(params);
@@ -440,30 +493,30 @@ int select_grp_matmul_algo(
 // ── Dispatch ────────────────────────────────────────────────────────────
 
 bool group_matmul_run_parallel_dispatch(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA,
-    const std::vector<bool> &transB,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<float> &alpha,
-    const std::vector<const void *> &src,
-    const std::vector<int> &lda,
-    const std::vector<const void *> &weight,
-    const std::vector<int> &ldb,
-    const std::vector<const void *> &bias,
-    const std::vector<float> &beta,
-    const std::vector<void *> &dst,
-    const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    const int num_threads,
-    const char **gemm_mode_out,
-    grp_matmul_gated_act_t fused_act,
-    data_type_t act_dtype) {
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA,
+  const std::vector<bool> &transB,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src,
+  const std::vector<int> &lda,
+  const std::vector<const void *> &weight,
+  const std::vector<int> &ldb,
+  const std::vector<const void *> &bias,
+  const std::vector<float> &beta,
+  const std::vector<void *> &dst,
+  const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  const int num_threads,
+  const char **gemm_mode_out,
+  grp_matmul_gated_act_t fused_act,
+  data_type_t act_dtype) {
 
   const int use_algo = select_grp_matmul_algo(layout, M, N, K, params,
-                                               num_threads);
+                       num_threads);
 
   // Decide whether the chosen ALGO fuses the gated activation inline.
   //   - ALGOs 1/2/4/5 always fuse (per-expert or per-M-tile).
@@ -480,12 +533,12 @@ bool group_matmul_run_parallel_dispatch(
   //   - For any fused_act we cannot fuse, the caller runs a separate
   //     activation pass after this function returns.
   const bool caller_layout_tight = (use_algo == 3)
-      && !ldc.empty() && !N.empty() && ldc[0] < N[0];
+                                   && !ldc.empty() && !N.empty() && ldc[0] < N[0];
   const bool a3_fuses = (use_algo == 3)
-      && a3_can_fuse_act(fused_act)
-      && (caller_layout_tight || get_grp_n_tile_fused_act());
+                        && a3_can_fuse_act(fused_act)
+                        && (caller_layout_tight || get_grp_n_tile_fused_act());
   const bool act_fused = a3_fuses
-      || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
+                         || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
 
   // ── Top-level dispatch APILOG ─────────────────────────────────────
   // Emits the final routing decision (POST env-override, POST auto-
@@ -525,21 +578,23 @@ bool group_matmul_run_parallel_dispatch(
   }
 
   auto set_mode = [&](const char *s) {
-    if (gemm_mode_out != nullptr) *gemm_mode_out = s;
+    if (gemm_mode_out != nullptr) {
+      *gemm_mode_out = s;
+    }
   };
 
   switch (use_algo) {
   case 1:
     set_mode("sequential_experts");
     sequential_experts(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads, fused_act, act_dtype);
+                       src, lda, weight, ldb, bias, beta, dst, ldc,
+                       is_weights_const, params, num_threads, fused_act, act_dtype);
     break;
   case 2:
     set_mode("flat_m_tile");
     flat_m_tile(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        fused_act, act_dtype, is_weights_const, params, num_threads);
+                src, lda, weight, ldb, bias, beta, dst, ldc,
+                fused_act, act_dtype, is_weights_const, params, num_threads);
     break;
   case 3:
     // flat_n_tile handles both the legacy non-fused path and the fused
@@ -553,28 +608,28 @@ bool group_matmul_run_parallel_dispatch(
     // profiler output reveals whether the custom BF16 microkernel
     // engaged for this call without needing APILOG enabled.
     flat_n_tile(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads,
-        a3_fuses ? fused_act : grp_matmul_gated_act_t::none,
-        act_dtype, gemm_mode_out);
+                src, lda, weight, ldb, bias, beta, dst, ldc,
+                is_weights_const, params, num_threads,
+                a3_fuses ? fused_act : grp_matmul_gated_act_t::none,
+                act_dtype, gemm_mode_out);
     break;
   case 4:
     set_mode("multilevel");
     parallel_multilevel(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads, fused_act, act_dtype);
+                        src, lda, weight, ldb, bias, beta, dst, ldc,
+                        is_weights_const, params, num_threads, fused_act, act_dtype);
     break;
   case 5:
     set_mode("per_expert");
     parallel_per_expert(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads, fused_act, act_dtype);
+                        src, lda, weight, ldb, bias, beta, dst, ldc,
+                        is_weights_const, params, num_threads, fused_act, act_dtype);
     break;
   default:
     set_mode("sequential_experts");
     sequential_experts(layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params, num_threads, fused_act, act_dtype);
+                       src, lda, weight, ldb, bias, beta, dst, ldc,
+                       is_weights_const, params, num_threads, fused_act, act_dtype);
     break;
   }
   return act_fused;

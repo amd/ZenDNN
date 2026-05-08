@@ -41,6 +41,7 @@
 #include "custom_kernel/dispatch.hpp"
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "operators/matmul/matmul_config.hpp"
 
@@ -59,10 +60,14 @@ using zendnnl::common::size_of;
 // across executors.
 inline const char *act_name(grp_matmul_gated_act_t a) {
   switch (a) {
-    case grp_matmul_gated_act_t::none:           return "none";
-    case grp_matmul_gated_act_t::silu_and_mul:   return "silu_and_mul";
-    case grp_matmul_gated_act_t::gelu_and_mul:   return "gelu_and_mul";
-    case grp_matmul_gated_act_t::swiglu_oai_mul: return "swiglu_oai_mul";
+  case grp_matmul_gated_act_t::none:
+    return "none";
+  case grp_matmul_gated_act_t::silu_and_mul:
+    return "silu_and_mul";
+  case grp_matmul_gated_act_t::gelu_and_mul:
+    return "gelu_and_mul";
+  case grp_matmul_gated_act_t::swiglu_oai_mul:
+    return "swiglu_oai_mul";
   }
   return "?";
 }
@@ -342,10 +347,13 @@ inline int aocl_stable_n_thr(int num_threads, int /*N*/) {
 inline int get_grp_matmul_custom_kernel_nr() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR");
-    if (e == nullptr || e[0] == '\0') return 0;
+    if (e == nullptr || e[0] == '\0') {
+      return 0;
+    }
     int parsed = std::atoi(e);
     return (parsed == 32 || parsed == 64) ? parsed : 0;
-  }();
+  }
+  ();
   return v;
 }
 
@@ -356,9 +364,10 @@ inline int get_grp_matmul_custom_kernel_nr() {
 inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
   static const bool v = []() {
     const char *e = std::getenv(
-        "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT");
+                      "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT");
     return (e != nullptr && e[0] != '\0' && e[0] != '0');
-  }();
+  }
+  ();
   return v;
 }
 
@@ -373,7 +382,8 @@ inline int get_grp_matmul_custom_kernel_n_tile() {
     if (e == nullptr || e[0] == '\0') return 0;
     const int parsed = std::atoi(e);
     return (parsed > 0 && (parsed % 32) == 0) ? parsed : 0;
-  }();
+  }
+  ();
   return v;
 }
 
@@ -383,11 +393,11 @@ inline int get_grp_matmul_custom_kernel_n_tile() {
 /// after rounding; otherwise it falls back to the unaligned even split.
 inline int backend_n_align(matmul_algo_t algo) {
   switch (algo) {
-    case matmul_algo_t::native_brgemm:
-    case matmul_algo_t::native_gemm:
-      return 64;
-    default:
-      return 1;
+  case matmul_algo_t::native_brgemm:
+  case matmul_algo_t::native_gemm:
+    return 64;
+  default:
+    return 1;
   }
 }
 
@@ -405,21 +415,23 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// Falls back to even split (N*tid/n_thr) when n_thr<=1 or align<=1
 /// or no aligned slice meets the 2× bound.
 inline std::pair<int, int> aligned_n_split(int N, int n_thr, int tid,
-                                           int align) {
+    int align) {
   // Hardened against pathological inputs: n_thr<=0 used to hit
   // even_split's divide-by-zero (`N * tid / n_thr`).
-  if (n_thr <= 0 || N <= 0)
+  if (n_thr <= 0 || N <= 0) {
     return std::make_pair(0, 0);
+  }
 
   auto even_split = [&]() {
     const int s = static_cast<int>(static_cast<int64_t>(N) * tid / n_thr);
     const int e = static_cast<int>(
-        static_cast<int64_t>(N) * (tid + 1) / n_thr);
+                    static_cast<int64_t>(N) * (tid + 1) / n_thr);
     return std::make_pair(s, e);
   };
 
-  if (align <= 1 || n_thr <= 1)
+  if (align <= 1 || n_thr <= 1) {
     return even_split();
+  }
 
   // Walk slice size down in `align` quanta from ceil(N/n_thr) until
   // the imbalance bound holds.  Cost is at most a handful of
@@ -431,9 +443,9 @@ inline std::pair<int, int> aligned_n_split(int N, int n_thr, int tid,
   // signed overflow (UB) for any (N, n_thr) combination representable
   // as int.
   const int64_t even_per_thr =
-      (static_cast<int64_t>(N) + n_thr - 1) / n_thr;
+    (static_cast<int64_t>(N) + n_thr - 1) / n_thr;
   for (int64_t aligned_per_thr =
-           ((even_per_thr + align - 1) / align) * align;
+         ((even_per_thr + align - 1) / align) * align;
        aligned_per_thr >= align;
        aligned_per_thr -= align) {
     const int64_t n_full = aligned_per_thr * (n_thr - 1);
@@ -441,7 +453,7 @@ inline std::pair<int, int> aligned_n_split(int N, int n_thr, int tid,
     if (last > 0 && last * 2 >= aligned_per_thr) {
       const int64_t s = aligned_per_thr * tid;
       const int64_t e =
-          (tid < n_thr - 1) ? aligned_per_thr * (tid + 1) : N;
+        (tid < n_thr - 1) ? aligned_per_thr * (tid + 1) : N;
       return std::make_pair(static_cast<int>(s), static_cast<int>(e));
     }
   }
@@ -468,35 +480,50 @@ inline size_t get_grp_l3_total_bytes(int num_ccds) {
 inline matmul_algo_t resolve_kernel() {
   static const matmul_algo_t algo = []() {
     int32_t a = matmul_config_t::instance().get_algo();
-    if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count))
+    if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count)) {
       return matmul_algo_t::aocl_dlp_blocked;
+    }
     return static_cast<matmul_algo_t>(a);
-  }();
+  }
+  ();
   return algo;
 }
 
 /// Thin wrapper around matmul_execute that packages per-expert slice
 /// arguments into the batch/params objects the kernel expects.
 inline void execute_expert_slice(
-    char layout, bool transA, bool transB,
-    int M, int N, int K, float alpha,
-    const void *src, int lda,
-    const void *weight, int ldb,
-    const void *bias, float beta,
-    void *dst, int ldc,
-    bool is_weights_const, int num_thr,
-    matmul_params &params,
-    matmul_algo_t algo) {
+  char layout, bool transA, bool transB,
+  int M, int N, int K, float alpha,
+  const void *src, int lda,
+  const void *weight, int ldb,
+  const void *bias, float beta,
+  void *dst, int ldc,
+  bool is_weights_const, int num_thr,
+  matmul_params &params,
+  matmul_algo_t algo) {
 
   matmul_batch_params_t bp;
   bp.Batch_A = 1;
   bp.Batch_B = 1;
   matmul_algo_t kernel = algo;
+
+  int         reordered_lda = lda;
+  size_t      src_type_size = size_of(params.dtypes.src);
+  reorder_quant_buffers_t quant_buffers;
+  if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
+                                   params, bp, transA, M, K,
+                                   num_thr, quant_buffers) != status_t::success) {
+    log_error("execute_expert_slice: reorder_quantization_wrapper failed");
+    return;
+  }
+
   matmul_execute(layout, transA, transB,
-      M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-      is_weights_const, size_of(params.dtypes.src),
-      size_of(params.dtypes.dst),
-      num_thr, kernel, params, bp, 0);
+                 M, N, K, alpha, src,
+                 params.dynamic_quant ? reordered_lda : lda,
+                 weight, ldb, bias, beta, dst, ldc,
+                 is_weights_const, src_type_size,
+                 size_of(params.dtypes.dst),
+                 num_thr, kernel, params, bp, 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -508,7 +535,9 @@ inline void execute_expert_slice(
 /// owns the buffer and guarantees `indices.size() >= n` and `M.size() >= n`.
 inline void sort_indices_by_m(int *indices, int n,
                               const std::vector<int> &M, bool ascending) {
-  for (int i = 0; i < n; ++i) indices[i] = i;
+  for (int i = 0; i < n; ++i) {
+    indices[i] = i;
+  }
   std::sort(indices, indices + n, [&M, ascending](int a, int b) {
     return ascending ? (M[a] < M[b]) : (M[a] > M[b]);
   });
@@ -550,12 +579,16 @@ inline void engage_ntile_custom_kernel(
 /// activation requires even col boundaries (e.g. swiglu_oai_mul must
 /// keep gate+up pairs on the same thread).
 inline int ntile_effective_nr_align(
-    int backend_nr,
-    const custom_kernel::CallContext &kctx,
-    bool pair_aligned) {
+  int backend_nr,
+  const custom_kernel::CallContext &kctx,
+  bool pair_aligned) {
   int a = backend_nr;
-  if (kctx.enabled) a = std::max(a, kctx.pack_nr);
-  if (pair_aligned) a = std::max(a, 2);
+  if (kctx.enabled) {
+    a = std::max(a, kctx.pack_nr);
+  }
+  if (pair_aligned) {
+    a = std::max(a, 2);
+  }
   return a;
 }
 
@@ -575,8 +608,12 @@ inline constexpr int kNTileMaxExperts = 256;
 ///    19 ≤ ops ≤ 25   |       ~26 %       |       ~35 %       ← regression band
 ///    num_ops ≥ 26    |       ~42 %       |        ~0 %       ← strong win
 inline int auto_pick_n_order(int num_ops) {
-  if (num_ops <= 18) return 3;   // sweet spot: few active experts
-  if (num_ops >= 26) return 3;   // strong win + zero losses in data
+  if (num_ops <= 18) {
+    return 3;  // sweet spot: few active experts
+  }
+  if (num_ops >= 26) {
+    return 3;  // strong win + zero losses in data
+  }
   return 0;                      // mid-band: walk input order
 }
 
@@ -591,9 +628,9 @@ inline int auto_pick_n_order(int num_ops) {
 /// `auto_resolved_out` (optional): when env mode = 0, the resolved
 /// concrete sub-mode is written here for APILOG diagnostics.
 inline void fill_ntile_expert_order(
-    int *out, int &out_size, int max_size,
-    const std::vector<int> &M, int num_ops,
-    int *auto_resolved_out = nullptr) {
+  int *out, int &out_size, int max_size,
+  const std::vector<int> &M, int num_ops,
+  int *auto_resolved_out = nullptr) {
 
   if (num_ops <= 0 || num_ops > max_size
       || num_ops > kNTileMaxExperts) {
@@ -606,7 +643,9 @@ inline void fill_ntile_expert_order(
   // Mode 0 — auto: shape-aware sub-mode selection.
   if (order == 0) {
     order = auto_pick_n_order(num_ops);
-    if (auto_resolved_out != nullptr) *auto_resolved_out = order;
+    if (auto_resolved_out != nullptr) {
+      *auto_resolved_out = order;
+    }
     if (order == 0) {
       // Auto chose walk-input; leave out empty.
       out_size = 0;
@@ -632,7 +671,9 @@ inline void fill_ntile_expert_order(
     int lo = 0, hi = num_ops - 1, o = 0;
     while (lo <= hi) {
       out[o++] = sorted_desc[lo++];
-      if (lo <= hi) out[o++] = sorted_desc[hi--];
+      if (lo <= hi) {
+        out[o++] = sorted_desc[hi--];
+      }
     }
     out_size = num_ops;
     return;
@@ -653,7 +694,9 @@ inline void fill_ntile_expert_order(
                       /*ascending=*/false);
 
     int64_t total = 0;
-    for (int i = 0; i < num_ops; ++i) total += M[i];
+    for (int i = 0; i < num_ops; ++i) {
+      total += M[i];
+    }
 
     std::array<bool, kNTileMaxExperts> used{};  // zero-init
     int64_t cum = 0;
@@ -662,15 +705,20 @@ inline void fill_ntile_expert_order(
       // target_scaled = (p + 1) × total.  Integer-only; scales
       // cancel out across candidates.
       const int64_t target_scaled =
-          static_cast<int64_t>(p + 1) * total;
+        static_cast<int64_t>(p + 1) * total;
       int best_j = -1;
       int64_t best_err = std::numeric_limits<int64_t>::max();
       for (int j = 0; j < num_ops; ++j) {
-        if (used[j]) continue;
+        if (used[j]) {
+          continue;
+        }
         const int64_t new_cum = cum + M[sorted_desc[j]];
         const int64_t err = std::llabs(
-            target_scaled - static_cast<int64_t>(num_ops) * new_cum);
-        if (err < best_err) { best_err = err; best_j = j; }
+                              target_scaled - static_cast<int64_t>(num_ops) * new_cum);
+        if (err < best_err) {
+          best_err = err;
+          best_j = j;
+        }
       }
       used[best_j] = true;
       out[p] = sorted_desc[best_j];
@@ -688,18 +736,18 @@ inline void fill_ntile_expert_order(
 
 /// ALGO 2 — M-tile parallel GEMM.  Defined in group_matmul_m_tile.cpp.
 void flat_m_tile(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads);
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads);
 
 /// ALGO 3 — N-tile parallel GEMM, with optional fused-swiglu-oai
 /// epilogue.  Defined in group_matmul_n_tile.cpp.
@@ -711,20 +759,20 @@ void flat_m_tile(
 /// gemm_mode_out so benchdnn / profiler output reveals whether the
 /// custom BF16 microkernel engaged.
 void flat_n_tile(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
-    data_type_t act_dtype = data_type_t::none,
-    const char **gemm_mode_out = nullptr);
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
+  data_type_t act_dtype = data_type_t::none,
+  const char **gemm_mode_out = nullptr);
 
 /// Peek at the ALGO the dispatcher would pick for this call (1=seq,
 /// 2=m_tile, 3=n_tile, 4=multilevel, 5=per_expert).  Mirrors the
@@ -733,12 +781,12 @@ void flat_n_tile(
 /// (no side-effects); used by the fused-MoE entry to choose tight
 /// vs wide arena before committing the buffer layout.
 int select_grp_matmul_algo(
-    const std::vector<char> &layout,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<matmul_params> &params,
-    int num_threads);
+  const std::vector<char> &layout,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<matmul_params> &params,
+  int num_threads);
 
 } // namespace matmul
 } // namespace lowoha

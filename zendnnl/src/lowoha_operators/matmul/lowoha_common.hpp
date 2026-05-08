@@ -152,12 +152,14 @@ struct matmul_params {
   std::string plugin_op;                       ///< Plugin op name
   bool dynamic_quant;                          ///< Enable dynamic quantization of source
   pack_format packing;                         ///< Weight packing format for matrix B
+  uint32_t total_matmul;                       ///< Total number of matmuls
+  uint32_t active_matmul;                      ///< Number of active matmuls
   /**
    * @brief Default constructor for matmul_params
    */
   matmul_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
     mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0),
-    plugin_op(""), dynamic_quant(false), packing() {}
+    plugin_op(""), dynamic_quant(false), packing(), total_matmul(0), active_matmul(0) {}
 };
 
 } // namespace matmul

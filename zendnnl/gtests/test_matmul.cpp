@@ -1511,6 +1511,3 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
  */
 INSTANTIATE_TEST_SUITE_P(Matmul, TestMatmul,
                          ::testing::ValuesIn(matmul_test));
-
-// Group matmul tests (TestGroupMatmul, TestGatedAct, TestFusedMoE) moved to
-// test_group_matmul.cpp to keep this file focused on single-op matmul tests.

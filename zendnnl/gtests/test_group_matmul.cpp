@@ -17,20 +17,29 @@
 /// @file test_group_matmul.cpp
 /// @brief GTests for group_matmul_direct API, organized into sections:
 ///   [1]  Shared helpers (moe_test_utils): buffers, init, params, ref math
-///   [2]  TestGroupMatmul          — F32/BF16 basic + moe_postop coverage
-///   [3]  TestGatedAct             — gated activation correctness
-///   [4]  TestMoEPostop            — weighted-reduce post-op correctness
-///   [5]  TestFusedMoE             — fused Op1→Act→Op2 (legacy mode:
-///                                   caller-allocated dst & dst_down)
+///   [2]  TestGroupMatmul           — F32/BF16 basic + moe_postop coverage
+///   [3]  TestGatedAct              — gated activation correctness
+///   [4]  TestMoEPostop             — weighted-reduce post-op correctness
+///   [5]  TestFusedMoE              — fused Op1→Act→Op2 (legacy mode:
+///                                    caller-allocated dst & dst_down)
 ///   [5b] TestFusedMoEInternalAlloc — same fused MoE, but internal-alloc
 ///                                    + src-reuse mode (caller passes
 ///                                    dst all-null and fused.dst_down
 ///                                    empty; library allocates Op1
 ///                                    scratch and writes Op2 back into
 ///                                    src in place)
-///   [6]  TestGroupMatmulCombined  — all 2³=8 combinations (moe,act,fused)
-///   [7]  TestFusedMoEAlgos        — fused path × ALGOs × mixed precision
-///   [8]  TestFusedMoENegative     — validation fast-fail paths
+///   [6]  TestGroupMatmulCombined   — all 2³=8 combinations (moe,act,fused)
+///   [7]  TestFusedMoEAlgos         — fused path × ALGOs × mixed precision
+///   [7b] TestFusedMoEAlgoCustom    — fused MoE × strategy/tight/custom
+///                                    BF16 ukernel env-knob matrix
+///   [8]  TestGroupMatmulAlgoCustom — non-fused custom BF16 ukernel matrix
+///   [9]  TestFusedMoENegative      — validation fast-fail paths
+///   [10] TestGroupMatmulQuant      — WOQ / INT8 / dynamic-quant suites,
+///                                    parameterised by GroupQuantMatmulType
+///                                    (constrained: alpha=1, beta=0, no
+///                                    transpose, K aligned to 4) so that
+///                                    activated comparison stays in a
+///                                    well-bounded numerical regime.
 ///
 /// Coverage matrix (separate suites for each optional feature):
 ///   1. GEMM + activation only        → TestGatedAct
@@ -44,10 +53,17 @@
 ///        per-ALGO coverage, both legacy and internal-alloc modes.
 ///   4. All three combined            → TestGroupMatmulCombined
 ///      • 2³=8 combinations of (moe, act, fused) × both dtypes × key shapes.
+///   5. Quantized GEMM + random gated act → TestGroupMatmulQuant
+///      • WOQ (S4/U4), symmetric INT8 (per-group / per-token / dynamic),
+///        random act selection per-test (skipped on odd N), reference
+///        applies apply_ref_gated_act_tensor on the un-activated reference
+///        and compares only the activated [0:N/2) half via
+///        compare_activated_2D's three-regime envelope.
 /// BF16 is verified in every suite; it is the primary precision for MoE inference.
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include "gtest_utils.hpp"
@@ -262,7 +278,7 @@ inline float ref_gated_act(grp_matmul_gated_act_t act, float g_or_even,
 // Apply activation in-place on dst[:, 0:dim].  dst has M rows with stride ldc.
 // Matches the kernel semantics in group_matmul_moe_act.cpp.
 template <typename T>
-inline void apply_ref_gated_act(std::vector<T> &dst, int M, int N, int ldc,
+inline void apply_ref_gated_act(T *dst, int M, int N, int ldc,
                                 grp_matmul_gated_act_t act) {
   if (act == grp_matmul_gated_act_t::none) {
     return;
@@ -270,7 +286,7 @@ inline void apply_ref_gated_act(std::vector<T> &dst, int M, int N, int ldc,
   const int dim = N / 2;
   const bool swiglu = (act == grp_matmul_gated_act_t::swiglu_oai_mul);
   for (int m = 0; m < M; ++m) {
-    T *row = dst.data() + m * ldc;
+    T *row = dst + m * ldc;
     // Read raw values first (since we write to row[n] below, which may be read).
     std::vector<float> g(dim), u(dim);
     for (int n = 0; n < dim; ++n) {
@@ -290,6 +306,114 @@ inline void apply_ref_gated_act(std::vector<T> &dst, int M, int N, int ldc,
       }
       else {
         row[n] = static_cast<T>(v);
+      }
+    }
+  }
+}
+
+template <typename T>
+inline void apply_ref_gated_act(std::vector<T> &dst, int M, int N, int ldc,
+                                grp_matmul_gated_act_t act) {
+  apply_ref_gated_act<T>(dst.data(), M, N, ldc, act);
+}
+
+// Tensor-aware reference activation: dispatches on dtype and operates on the
+// underlying contiguous buffer.  The reference activation only writes columns
+// [0, N/2); columns [N/2, N) keep the raw GEMM output, matching the kernel
+// contract that those positions are "don't care".
+inline void apply_ref_gated_act_tensor(tensor_t &t, int M, int N, int ldc,
+                                       grp_matmul_gated_act_t act) {
+  if (act == grp_matmul_gated_act_t::none) {
+    return;
+  }
+  const data_type_t dtype = t.get_data_type();
+  if (dtype == data_type_t::f32) {
+    apply_ref_gated_act<float>(
+      static_cast<float *>(t.get_raw_handle_unsafe()), M, N, ldc, act);
+  }
+  else if (dtype == data_type_t::bf16) {
+    apply_ref_gated_act<bfloat16_t>(
+      static_cast<bfloat16_t *>(t.get_raw_handle_unsafe()), M, N, ldc, act);
+  }
+  // Other dtypes intentionally unsupported — gated_act validation in
+  // group_matmul_direct rejects non-f32/bf16 dst before reaching the kernel.
+}
+
+// Pick a random gated activation type compatible with the given output width.
+// Returns `none` when N is odd (gated activations require even N), otherwise
+// uniformly samples from {none, silu_and_mul, gelu_and_mul, swiglu_oai_mul}.
+// Uses the supplied RNG so the choice is reproducible per test parameter set.
+inline grp_matmul_gated_act_t pick_random_gated_act(uint64_t n,
+                                                    std::mt19937 &rng) {
+  if (n % 2 != 0 || n < 2) {
+    return grp_matmul_gated_act_t::none;
+  }
+  return static_cast<grp_matmul_gated_act_t>(rng() % 4);
+}
+
+// Activation-aware comparison for the [0, N/2) columns of an activated
+// kernel output against the post-`apply_ref_gated_act_tensor` reference.
+// The gated activation `silu(g) * u` (or analogues) amplifies the per-row
+// GEMM noise multiplicatively: an input pair (g, u) carrying error ~δ
+// each produces output error roughly (|g| + |u|) · δ.  Both |g| and
+// |u| can be O(alpha · k) — especially with quantization, where
+// dequantized weights have a non-zero mean so the GEMM accumulator
+// scales linearly in k rather than √k.  Combined with the alpha · k · ε
+// per-element matmul noise, that yields an activated error budget on
+// the order of alpha² · k² · ε for some configurations.  We use a
+// generous mixed bound: 4 · alpha² · k · ε absolute (matches the
+// loose-but-stable tolerance the gated MoE reference comparisons in
+// this file already use) plus 30% relative.  These aren't tight bounds;
+// they're "test does not regress on reasonable shapes" bounds.
+// Three-regime tolerance envelope for the activated [0, N/2) comparison.
+// Activation amplifies per-element kernel↔reference noise multiplicatively
+// (silu(g) · u → output error ~2 · max(|g|, |u|) · δ where δ is the per-
+// element GEMM noise).  A flat rel%+abs bound undershoots near-zero
+// reference values (where the kernel sees milli-scale drift even when
+// the reference rounds to exactly 0), so we max three regimes:
+//
+//   floor_abs   max(16·α²·k·ε, 0.5).  Hard 0.5 floor handles INT8 quant
+//               outliers — `epsilon = ε_f32 ≈ 1e-7` would otherwise give
+//               a sub-millis floor that doesn't bound INT8 noise near 0.
+//   sqrt_term   16·α·k·ε · √|ref| — dominates the moderate-|ref| regime
+//               where |g|, |u| ≈ √|ref|.
+//   rel_term    30% · |ref| — takes over for very large |ref|.
+//
+// The bound is a "no order-of-magnitude regression" envelope, not a
+// BF16-precise tracking bound.  When `ok` flips false the per-element
+// fprintf prints the full breakdown (regime contributions) so the
+// dominating term is obvious in the test log; only the FIRST miss is
+// printed (subsequent ones short-circuit via `i < m && ok`).
+inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
+                                 uint64_t m, uint64_t cmp_n, uint64_t k,
+                                 float alpha, float epsilon,
+                                 bool &ok) {
+  if (!ok) {
+    return;
+  }
+  const float kf = static_cast<float>(k);
+  const float a_abs = std::fabs(alpha);
+  const float floor_abs_formula = 16.0f * a_abs * a_abs * kf * epsilon;
+  const float floor_abs   = std::max(floor_abs_formula, 0.5f);
+  const float sqrt_factor = 16.0f * a_abs * kf * epsilon;
+  const float rel_bound   = 0.30f;
+  for (uint64_t i = 0; i < m && ok; ++i) {
+    for (uint64_t j = 0; j < cmp_n && ok; ++j) {
+      const float a = const_cast<tensor_t &>(out).at({i, j});
+      const float r = const_cast<tensor_t &>(out_ref).at({i, j});
+      const float r_abs     = std::fabs(r);
+      const float sqrt_term = sqrt_factor * std::sqrt(r_abs);
+      const float rel_term  = rel_bound * r_abs;
+      float allowed = floor_abs;
+      if (sqrt_term > allowed) {
+        allowed = sqrt_term;
+      }
+      if (rel_term > allowed) {
+        allowed = rel_term;
+      }
+      const float abs_err = std::fabs(a - r);
+      if (abs_err > allowed) {
+        ok = false;
       }
     }
   }
@@ -350,13 +474,18 @@ struct EnvVarGuard {
   bool had_prev = false;
   EnvVarGuard(const char *env_name, const char *new_value) : name(env_name) {
     if (const char *p = std::getenv(name)) {
-      prev_value = p; had_prev = true;
+      prev_value = p;
+      had_prev = true;
     }
     setenv(name, new_value, 1);
   }
   ~EnvVarGuard() {
-    if (had_prev) setenv(name, prev_value.c_str(), 1);
-    else          unsetenv(name);
+    if (had_prev) {
+      setenv(name, prev_value.c_str(), 1);
+    }
+    else {
+      unsetenv(name);
+    }
   }
 };
 
@@ -385,6 +514,9 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
     beta         = params.beta;
     algo         = params.algo;
     num_threads  = params.num_threads;
+    source_dtype       = params.source_dtype;
+    output_dtype       = params.output_dtype;
+    weight_granularity = params.weight_granularity;
     omp_set_num_threads(num_threads);
     num_ops = 2 + (rand() % 4);
     log_info("GroupMatmul test: m=", m, " k=", k, " n=", n,
@@ -392,8 +524,10 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
              " alpha=", alpha, " beta=", beta,
              " num_ops=", num_ops, " num_threads=", num_threads);
   }
-  virtual void TearDown() {}
-
+  /** @brief TearDown is used to free resource used in test */
+  virtual void TearDown() {
+    clear_matmul_test_caches();
+  }
   uint64_t m, k, n;
   bool transA, transB;
   tensor_factory_t tensor_factory{};
@@ -401,12 +535,101 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
   matmul_algo_t algo;
   int32_t num_threads;
   size_t num_ops;
+  // Quant-specific params forwarded from MatmulType (used by INT8/WOQ tests).
+  data_type_t source_dtype{};
+  data_type_t output_dtype{};
+  quant_granularity_t weight_granularity{};
 
-  // Shared body for the 3 parameterized tests (F32_F32, BF16_F32, BF16_BF16).
+  // Shared body for the 6 parameterized tests:
+  //  F32_F32, BF16_F32, BF16_BF16                         (use_stride=false, default)
+  //  F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride    (use_stride=true)
   // src_dt/wei_dt/dst_dt/bias_dt control the dtype configuration.
+  // When use_stride is true we exercise the non-contiguous lda/ldb/ldc paths
+  // (no MoE post-op); otherwise we drive the lower-level direct API and
+  // optionally enable the top-2 MoE post-op.
   void run_basic_test(data_type_t src_dt, data_type_t wei_dt,
                       data_type_t dst_dt, data_type_t bias_dt,
-                      float rtol_pref, float eps_pref) {
+                      float rtol_pref, float eps_pref,
+                      bool use_stride = false) {
+    if (use_stride) {
+      // Random stride increments on input/weight/output so that each tensor's
+      // leading dimension exceeds the minimum.  No MoE post-op in this mode.
+      size_t stride_in_inc  = rand() % 50;
+      size_t stride_wt_inc  = rand() % 50;
+      size_t stride_dst_inc = rand() % 50;
+      std::vector<size_t> stride_in  = {m, k};
+      std::vector<size_t> stride_wt  = {k, n};
+      std::vector<size_t> stride_dst = {m, n + stride_dst_inc};
+      if (transB) {
+        stride_wt[0] += stride_wt_inc;
+      }
+      else {
+        stride_wt[1] += stride_wt_inc;
+      }
+      if (transA) {
+        stride_in[0] += stride_in_inc;
+      }
+      else {
+        stride_in[1] += stride_in_inc;
+      }
+
+      // Same bias-skip predicate as in the non-strided path / the kernel
+      // helpers in gtest_utils: libxsmm doesn't accept bias for bf16 dst, and
+      // aocl_dlp doesn't accept it for f16 dst.  Skip allocating bias here so
+      // the kernel-under-test and reference both see an empty bias.
+      const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
+                                      algo == matmul_algo_t::libxsmm_blocked);
+      const bool is_aocl_kernel    = (algo == matmul_algo_t::aocl_dlp ||
+                                      algo == matmul_algo_t::aocl_dlp_blocked);
+      const bool skip_bias =
+        (is_libxsmm_kernel && dst_dt == data_type_t::bf16) ||
+        (is_aocl_kernel    && dst_dt == data_type_t::f16);
+
+      std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+          out(num_ops), out_ref(num_ops);
+      for (size_t i = 0; i < num_ops; ++i) {
+        inp[i]     = tensor_factory.uniform_dist_strided_tensor({m, k}, stride_in,
+                     src_dt, 2.0, transA);
+        wt[i]      = tensor_factory.uniform_dist_strided_tensor({k, n}, stride_wt,
+                     wei_dt, 2.0, transB);
+        bias[i]    = skip_bias
+                     ? tensor_t{}
+                     :
+                     tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
+        out[i]     = tensor_factory.uniform_dist_strided_tensor({m, n}, stride_dst,
+                     dst_dt, 2.0);
+        out_ref[i] = tensor_factory.uniform_dist_strided_tensor({m, n}, stride_dst,
+                     dst_dt, 2.0);
+      }
+
+      status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo,
+                        alpha, beta);
+
+      status_t ref_status = status_t::success;
+      for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+        std::vector<post_op_type_t> ref_po;
+        std::vector<tensor_t> bin;
+        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                     out_ref[i], ref_po, bin, false, algo, alpha, beta);
+      }
+
+      bool ok = (status == status_t::success && ref_status == status_t::success);
+      // F32 relaxation only matters when accumulating into an f32 destination
+      // on the libxsmm / native kernels; bf16 has its own bf16-tolerance path.
+      const bool enable_f32_relaxation = (dst_dt == data_type_t::f32) &&
+                                         (algo == matmul_algo_t::libxsmm    ||
+                                          algo == matmul_algo_t::libxsmm_blocked ||
+                                          algo == matmul_algo_t::native_gemm ||
+                                          algo == matmul_algo_t::native_brgemm);
+      if (ok) {
+        for (size_t i = 0; i < num_ops && ok; ++i)
+          compare_tensor_2D_matrix(out[i], out_ref[i], m, n, k,
+                                   rtol_pref, eps_pref, ok, enable_f32_relaxation, alpha);
+      }
+      EXPECT_TRUE(ok);
+      return;
+    }
+
     const int D = static_cast<int>(n);
     const int num_tokens = static_cast<int>(m);
     const int topk = 2;
@@ -449,10 +672,22 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
       params[i].num_threads = num_threads;
     }
 
-    // Some BLAS kernels don't accept bias for libxsmm — disable.
-    if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-      for (auto &b : biases) {
-        b = nullptr;
+    // libxsmm doesn't accept bias for bf16 dst, and aocl_dlp doesn't accept it
+    // for f16 dst.  matmul_forced_ref_kernel_test applies the same condition,
+    // so we must drop bias here too to keep kernel-under-test and reference in
+    // sync.
+    {
+      const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
+                                      algo == matmul_algo_t::libxsmm_blocked);
+      const bool is_aocl_kernel    = (algo == matmul_algo_t::aocl_dlp ||
+                                      algo == matmul_algo_t::aocl_dlp_blocked);
+      const bool skip_bias =
+        (is_libxsmm_kernel && dst_dt == data_type_t::bf16) ||
+        (is_aocl_kernel    && dst_dt == data_type_t::f16);
+      if (skip_bias) {
+        for (auto &b : biases) {
+          b = nullptr;
+        }
       }
     }
 
@@ -492,9 +727,10 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
     // Reference using the per-op forced reference kernel.
     status_t ref_st = status_t::success;
     for (size_t i = 0; i < num_ops && ref_st == status_t::success; ++i) {
+      std::vector<post_op_type_t> ref_po;
       std::vector<tensor_t> dummy;
       ref_st = matmul_forced_ref_kernel_test(in_t[i], wei_t[i], bias_t[i],
-                                             out_ref_t[i], {post_op_type_t::none}, dummy, false, algo, alphas[i], betas[i]);
+                                             out_ref_t[i], ref_po, dummy, false, algo, alphas[i], betas[i]);
     }
 
     bool ok = (st == status_t::success && ref_st == status_t::success);
@@ -564,8 +800,20 @@ TEST_P(TestGroupMatmul, BF16_BF16) {
                  data_type_t::bf16, rtol_bf16, epsilon_bf16);
 }
 
-// TODO: INT8, WOQ, and dynamic-quant group matmul tests need dedicated fixtures
-// (no transpose, alpha=1, beta=0, aligned K, compatible algos) — follow-up PR.
+TEST_P(TestGroupMatmul, F32_F32_Stride) {
+  run_basic_test(data_type_t::f32, data_type_t::f32, data_type_t::f32,
+                 data_type_t::f32, rtol_f32, epsilon_f32, /*use_stride=*/true);
+}
+
+TEST_P(TestGroupMatmul, BF16_F32_Stride) {
+  run_basic_test(data_type_t::bf16, data_type_t::bf16, data_type_t::f32,
+                 data_type_t::f32, rtol_f32, epsilon_f32, /*use_stride=*/true);
+}
+
+TEST_P(TestGroupMatmul, BF16_BF16_Stride) {
+  run_basic_test(data_type_t::bf16, data_type_t::bf16, data_type_t::bf16,
+                 data_type_t::bf16, rtol_bf16, epsilon_bf16, /*use_stride=*/true);
+}
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmul, TestGroupMatmul,
                          ::testing::ValuesIn(matmul_test));
@@ -1117,7 +1365,7 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoE, TestFusedMoE,
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class TestFusedMoEInternalAlloc
-    : public ::testing::TestWithParam<FusedMoETestParam> {};
+  : public ::testing::TestWithParam<FusedMoETestParam> {};
 
 TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   using namespace zendnnl::lowoha::matmul;
@@ -1146,11 +1394,16 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   d2_ref      .alloc(num_ops, (size_t)M * H,         p.is_bf16);
   for (int e = 0; e < num_ops; ++e) {
     if (p.is_bf16) {
-      fill_src(src_orig.bf16[e], e); fill_src(src_intalloc.bf16[e], e);
-      fill_wei1(w1.bf16[e], e); fill_wei2(w2.bf16[e], e);
-    } else {
-      fill_src(src_orig.f32[e], e); fill_src(src_intalloc.f32[e], e);
-      fill_wei1(w1.f32[e], e); fill_wei2(w2.f32[e], e);
+      fill_src(src_orig.bf16[e], e);
+      fill_src(src_intalloc.bf16[e], e);
+      fill_wei1(w1.bf16[e], e);
+      fill_wei2(w2.bf16[e], e);
+    }
+    else {
+      fill_src(src_orig.f32[e], e);
+      fill_src(src_intalloc.f32[e], e);
+      fill_wei1(w1.f32[e], e);
+      fill_wei2(w2.f32[e], e);
     }
   }
 
@@ -1175,16 +1428,18 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   {
     auto pr1 = params;
     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
-        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_orig, gv_op1.lda,
-        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
-        gv_op1.is_wc, pr1, nullptr, act_ptr), status_t::success);
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_orig, gv_op1.lda,
+                                  wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
+                                  gv_op1.is_wc, pr1, nullptr, act_ptr), status_t::success);
     std::vector<const void *> srcs2(num_ops);
-    for (int e = 0; e < num_ops; ++e) srcs2[e] = dst1_ref[e];
+    for (int e = 0; e < num_ops; ++e) {
+      srcs2[e] = dst1_ref[e];
+    }
     auto pr2 = params;
     ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
-        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2, gv_op2.lda,
-        wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
-        gv_op2.is_wc, pr2), status_t::success);
+                                  gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2, gv_op2.lda,
+                                  wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
+                                  gv_op2.is_wc, pr2), status_t::success);
   }
 
   // Internal-alloc fused path: dst[] = nullptr, fused.dst_down empty.
@@ -1203,9 +1458,9 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
   {
     auto pf = params;
     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
-        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_intalloc, gv_op1.lda,
-        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
-        gv_op1.is_wc, pf, nullptr, act_ptr, &fused), status_t::success);
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_intalloc, gv_op1.lda,
+                                  wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
+                                  gv_op1.is_wc, pf, nullptr, act_ptr, &fused), status_t::success);
   }
 
   // Compare srcs_intalloc (now contains Op2 output, row stride lda=K=H)
@@ -1226,8 +1481,8 @@ TEST_P(TestFusedMoEInternalAlloc, Correctness) {
 }
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEInternalAlloc,
-    TestFusedMoEInternalAlloc,
-    ::testing::ValuesIn(make_fused_moe_params()), FusedMoEParamName);
+                         TestFusedMoEInternalAlloc,
+                         ::testing::ValuesIn(make_fused_moe_params()), FusedMoEParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // [5c] TestFusedMoEInternalAllocMixedM — internal-alloc + per-expert M skew.
@@ -1995,25 +2250,25 @@ struct FusedAlgoCustomParam {
   int tight;           // 0 or 1 (FUSED_MOE_TIGHT)
   int custom_kernel;   // 0 or 1
   int act_int;         // 1=silu, 2=gelu, 3=swiglu_oai (act=none skipped —
-                       // fused MoE always has an activation in practice)
+  // fused MoE always has an activation in practice)
   int M, num_ops, dim;
 };
 
 static std::string FusedAlgoCustomParamName(
-    const ::testing::TestParamInfo<FusedAlgoCustomParam> &info) {
+  const ::testing::TestParamInfo<FusedAlgoCustomParam> &info) {
   static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
   const auto &p = info.param;
   return "algo" + std::to_string(p.algo)
-       + "_tight" + std::to_string(p.tight)
-       + "_custom" + std::to_string(p.custom_kernel)
-       + "_" + act_names[p.act_int]
-       + "_M" + std::to_string(p.M)
-       + "_E" + std::to_string(p.num_ops)
-       + "_d" + std::to_string(p.dim);
+         + "_tight" + std::to_string(p.tight)
+         + "_custom" + std::to_string(p.custom_kernel)
+         + "_" + act_names[p.act_int]
+         + "_M" + std::to_string(p.M)
+         + "_E" + std::to_string(p.num_ops)
+         + "_d" + std::to_string(p.dim);
 }
 
 class TestFusedMoEAlgoCustom
-    : public ::testing::TestWithParam<FusedAlgoCustomParam> {};
+  : public ::testing::TestWithParam<FusedAlgoCustomParam> {};
 
 TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   using namespace zendnnl::lowoha::matmul;
@@ -2045,8 +2300,8 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   w2       .alloc(num_ops, (size_t)K_down * H,    is_bf16);
   d2_ref   .alloc(num_ops, (size_t)M * H,         is_bf16);
   for (int e = 0; e < num_ops; ++e) {
-    fill_src (src_ref  .bf16[e], e);
-    fill_src (src_fused.bf16[e], e);
+    fill_src(src_ref  .bf16[e], e);
+    fill_src(src_fused.bf16[e], e);
     fill_wei1(w1.bf16[e], e);
     fill_wei2(w2.bf16[e], e);
   }
@@ -2075,23 +2330,25 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   // parameterised run.
   {
     AlgoEnvGuard algo_guard(1);
-    EnvVarGuard tight_guard ("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", "0");
+    EnvVarGuard tight_guard("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", "0");
     EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",   "0");
 
     auto pr1 = params;
     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
-        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_ref, gv_op1.lda,
-        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
-        gv_op1.is_wc, pr1, nullptr, act_ptr),
-        status_t::success) << "Ref Op1 failed";
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_ref, gv_op1.lda,
+                                  wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst1_ref, gv_op1.ldc,
+                                  gv_op1.is_wc, pr1, nullptr, act_ptr),
+              status_t::success) << "Ref Op1 failed";
 
     std::vector<const void *> srcs_op2(num_ops);
-    for (int e = 0; e < num_ops; ++e) srcs_op2[e] = dst1_ref[e];
+    for (int e = 0; e < num_ops; ++e) {
+      srcs_op2[e] = dst1_ref[e];
+    }
     auto pr2 = params;
     ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
-        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs_op2, gv_op2.lda,
-        wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
-        gv_op2.is_wc, pr2), status_t::success) << "Ref Op2 failed";
+                                  gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs_op2, gv_op2.lda,
+                                  wei2, gv_op2.ldb, no_bias, gv_op2.beta, dst2_r, gv_op2.ldc,
+                                  gv_op2.is_wc, pr2), status_t::success) << "Ref Op2 failed";
   }
 
   // ── Test: parameterised ALGO × TIGHT × CUSTOM, internal-alloc fused ──
@@ -2101,8 +2358,8 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
   // separate-pass activation and we'd miss that code path).
   {
     AlgoEnvGuard algo_guard(p.algo);
-    EnvVarGuard tight_guard ("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT",
-                             p.tight ? "1" : "0");
+    EnvVarGuard tight_guard("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT",
+                            p.tight ? "1" : "0");
     EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",
                              p.custom_kernel ? "1" : "0");
     EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT", "1");
@@ -2119,10 +2376,10 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
 
     auto pf = params;
     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
-        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_fused, gv_op1.lda,
-        wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
-        gv_op1.is_wc, pf, nullptr, act_ptr, &fused),
-        status_t::success)
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs_fused, gv_op1.lda,
+                                  wei1, gv_op1.ldb, no_bias, gv_op1.beta, dst_null, ldc_null,
+                                  gv_op1.is_wc, pf, nullptr, act_ptr, &fused),
+              status_t::success)
         << "Fused call failed (algo=" << p.algo
         << " tight=" << p.tight << " custom=" << p.custom_kernel
         << " act=" << p.act_int << ")";
@@ -2151,10 +2408,18 @@ static std::vector<FusedAlgoCustomParam> make_fused_algo_custom_params() {
   // TIGHT=1 with act ∈ {silu, gelu} or ALGO ∉ {0,3} exercises the gate
   // that routes back to V1 (Option A) — expected to produce identical
   // outputs to the baseline.
-  for (int algo : {1, 2, 3, 4, 5}) {
-    for (int tight : {0, 1}) {
-      for (int custom : {0, 1}) {
-        for (int act : {1, 2, 3}) {
+  for (int algo : {
+         1, 2, 3, 4, 5
+       }) {
+    for (int tight : {
+           0, 1
+         }) {
+      for (int custom : {
+             0, 1
+           }) {
+        for (int act : {
+               1, 2, 3
+             }) {
           // M=4 × num_ops=4 keeps the shape small enough for fast
           // sharded execution.  dim=64 gives N_gate_up=128 which is
           // a multiple of the custom kernel's pack_nr=32 so the
@@ -2169,8 +2434,8 @@ static std::vector<FusedAlgoCustomParam> make_fused_algo_custom_params() {
 }
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedAlgoCustom, TestFusedMoEAlgoCustom,
-    ::testing::ValuesIn(make_fused_algo_custom_params()),
-    FusedAlgoCustomParamName);
+                         ::testing::ValuesIn(make_fused_algo_custom_params()),
+                         FusedAlgoCustomParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // [8] TestGroupMatmulAlgoCustom: non-fused Phase B env-knob matrix
@@ -2228,7 +2493,7 @@ struct AlgoCustomParam {
 };
 
 static std::string AlgoCustomParamName(
-    const ::testing::TestParamInfo<AlgoCustomParam> &info) {
+  const ::testing::TestParamInfo<AlgoCustomParam> &info) {
   static const char *act_names[]  = {"none", "silu", "gelu", "swiglu"};
   static const char *bias_names[] = {"noBias", "biasBF16", "biasFP32"};
   const auto &p = info.param;
@@ -2244,7 +2509,7 @@ static std::string AlgoCustomParamName(
 }
 
 class TestGroupMatmulAlgoCustom
-    : public ::testing::TestWithParam<AlgoCustomParam> {};
+  : public ::testing::TestWithParam<AlgoCustomParam> {};
 
 // One parameterised call — sets the CUSTOM_KERNEL env to `custom_value`,
 // runs group_matmul_direct, and copies the final Op1 + activation
@@ -2256,14 +2521,14 @@ class TestGroupMatmulAlgoCustom
 // TEST_P body so both runs share the same strategy and activation
 // routing; only CUSTOM_KERNEL flips between runs.
 static void run_one_algo_custom_pass(
-    const AlgoCustomParam &p,
-    const char *custom_value,
-    const std::vector<std::vector<bfloat16_t>> &src,
-    const std::vector<std::vector<bfloat16_t>> &wei,
-    const std::vector<std::vector<bfloat16_t>> &bias_bf16,
-    const std::vector<std::vector<float>>      &bias_fp32,
-    int N_op1, int K,
-    std::vector<std::vector<bfloat16_t>> &out_dst) {
+  const AlgoCustomParam &p,
+  const char *custom_value,
+  const std::vector<std::vector<bfloat16_t>> &src,
+  const std::vector<std::vector<bfloat16_t>> &wei,
+  const std::vector<std::vector<bfloat16_t>> &bias_bf16,
+  const std::vector<std::vector<float>>      &bias_fp32,
+  int N_op1, int K,
+  std::vector<std::vector<bfloat16_t>> &out_dst) {
   using namespace moe_test_utils;
   using zendnnl::lowoha::matmul::group_matmul_direct;
   using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
@@ -2275,18 +2540,23 @@ static void run_one_algo_custom_pass(
   // Zero the dst buffers so any untouched region (e.g. cols
   // [dim:2*dim] under the custom-kernel swiglu write) has a
   // well-defined value across both ref and test runs.
-  for (auto &v : out_dst)
+  for (auto &v : out_dst) {
     std::fill(v.begin(), v.end(), bfloat16_t(0.0f));
+  }
 
   std::vector<const void *> srcs(p.num_ops), weis(p.num_ops),
-                            biases(p.num_ops, nullptr);
+      biases(p.num_ops, nullptr);
   std::vector<void *>       dsts(p.num_ops);
   for (int e = 0; e < p.num_ops; ++e) {
     srcs[e] = src[e].data();
     weis[e] = wei[e].data();
     dsts[e] = out_dst[e].data();
-    if (p.bias_kind == 1) biases[e] = bias_bf16[e].data();
-    else if (p.bias_kind == 2) biases[e] = bias_fp32[e].data();
+    if (p.bias_kind == 1) {
+      biases[e] = bias_bf16[e].data();
+    }
+    else if (p.bias_kind == 2) {
+      biases[e] = bias_fp32[e].data();
+    }
   }
 
   auto gv = GemmVecs::uniform(p.num_ops, p.M, N_op1, K,
@@ -2294,8 +2564,8 @@ static void run_one_algo_custom_pass(
                               /*wc=*/false, /*tA=*/false,
                               /*tB=*/p.transB != 0);
   const data_type_t bias_dt = (p.bias_kind == 1) ? data_type_t::bf16
-                            : (p.bias_kind == 2) ? data_type_t::f32
-                                                 : data_type_t::none;
+                              : (p.bias_kind == 2) ? data_type_t::f32
+                              : data_type_t::none;
   auto params = make_uniform_params(p.num_ops, data_type_t::bf16, bias_dt);
 
   const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
@@ -2304,10 +2574,10 @@ static void run_one_algo_custom_pass(
   auto *act_ptr = (p.act_int != 0) ? &act : nullptr;
 
   ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
-      gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
-      biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
-      /*moe_postop=*/nullptr, act_ptr),
-      status_t::success) << "call failed: custom=" << custom_value;
+                                gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                                biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                                /*moe_postop=*/nullptr, act_ptr),
+            status_t::success) << "call failed: custom=" << custom_value;
 }
 
 TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
@@ -2338,16 +2608,19 @@ TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
   std::vector<std::vector<bfloat16_t>> bias_bf16(p.num_ops);
   std::vector<std::vector<float>>      bias_fp32(p.num_ops);
   for (int e = 0; e < p.num_ops; ++e) {
-    fill_src (src[e], e, 0.02f);
+    fill_src(src[e], e, 0.02f);
     fill_wei1(wei[e], e, 0.005f);
     if (p.bias_kind == 1) {
       bias_bf16[e].resize(N_op1);
-      for (int n = 0; n < N_op1; ++n)
+      for (int n = 0; n < N_op1; ++n) {
         bias_bf16[e][n] = bfloat16_t(0.01f * ((n + e) % 7 - 3));
-    } else if (p.bias_kind == 2) {
+      }
+    }
+    else if (p.bias_kind == 2) {
       bias_fp32[e].resize(N_op1);
-      for (int n = 0; n < N_op1; ++n)
+      for (int n = 0; n < N_op1; ++n) {
         bias_fp32[e][n] = 0.01f * ((n + e) % 7 - 3);
+      }
     }
   }
 
@@ -2355,17 +2628,17 @@ TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
   std::vector<std::vector<bfloat16_t>> dst_ref(p.num_ops,
       std::vector<bfloat16_t>((size_t)p.M * N_op1, bfloat16_t(0.0f)));
   ASSERT_NO_FATAL_FAILURE(
-      run_one_algo_custom_pass(p, "0", src, wei, bias_bf16, bias_fp32,
-                               N_op1, K, dst_ref));
+    run_one_algo_custom_pass(p, "0", src, wei, bias_bf16, bias_fp32,
+                             N_op1, K, dst_ref));
 
   // ── Test run: CUSTOM_KERNEL as parameterised ──────────────────────
   std::vector<std::vector<bfloat16_t>> dst_test(p.num_ops,
       std::vector<bfloat16_t>((size_t)p.M * N_op1, bfloat16_t(0.0f)));
   ASSERT_NO_FATAL_FAILURE(
-      run_one_algo_custom_pass(p,
-                               p.custom_kernel ? "1" : "0",
-                               src, wei, bias_bf16, bias_fp32,
-                               N_op1, K, dst_test));
+    run_one_algo_custom_pass(p,
+                             p.custom_kernel ? "1" : "0",
+                             src, wei, bias_bf16, bias_fp32,
+                             N_op1, K, dst_test));
 
   // ── Compare ────────────────────────────────────────────────────────
   // When the custom kernel doesn't actually engage (ALGO 1 / 2 / 4 / 5,
@@ -2415,12 +2688,19 @@ static std::vector<AlgoCustomParam> make_algo_custom_params() {
   // activation the custom kernel's inline epilogue supports), so we
   // only sweep both values of that knob for act=swiglu_oai_mul.
   for (int algo : algos) {
-    for (int custom : {0, 1}) {
-      for (int act : {0, 1, 2, 3}) {
-        for (int bias : {0, 1, 2}) {
+    for (int custom : {
+           0, 1
+         }) {
+      for (int act : {
+             0, 1, 2, 3
+           }) {
+        for (int bias : {
+               0, 1, 2
+             }) {
           const std::vector<int> fused_acts =
-              (act == 3) ? std::vector<int>{0, 1}
-                         : std::vector<int>{0};
+            (act == 3) ? std::vector<int> {0, 1}
+            :
+            std::vector<int> {0};
           for (int fa : fused_acts) {
             // transB sweep — exercises both [K,N] and [N,K] caller
             // layouts.  The custom-kernel pack now supports both,
@@ -2445,7 +2725,7 @@ static std::vector<AlgoCustomParam> make_algo_custom_params() {
 }
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmulAlgoCustom, TestGroupMatmulAlgoCustom,
-    ::testing::ValuesIn(make_algo_custom_params()), AlgoCustomParamName);
+                         ::testing::ValuesIn(make_algo_custom_params()), AlgoCustomParamName);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // [9] TestFusedMoENegative: validation error paths (fast-fail)
@@ -2541,3 +2821,1053 @@ TEST_F(TestFusedMoENegative, LdcDown_TooSmall_Rejected) {
   EXPECT_EQ(c.call(), status_t::failure)
       << "ldc_down below N_down should be rejected";
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [10] TestGroupMatmulQuant: dedicated fixture for quantized group-matmul
+//
+// The shared `MatmulType` random grid (alpha, beta ∈ U[0,10]; random
+// transA/transB; arbitrary K) drives the quantized kernels into regimes
+// where no useful tolerance can be derived for activated comparison —
+// silu(g)·u-style outputs inherit an O(α²·k²·ε) noise term that swamps
+// any rel/abs bound for large α·β.  Per the long-standing TODO at the
+// bottom of this file, the quantized suites move to a dedicated fixture
+// with hardcoded alpha=1, beta=0, no-transpose, K aligned to 4, and the
+// compatible-algos algo selector baked into `GroupQuantMatmulType`.
+//
+// Within the fixture, alpha / beta / transA / transB are `static
+// constexpr` members so the migrated test bodies use them as plain
+// member names (no rename needed) and the un-activated comparison
+// tolerances scale exactly as before for alpha=1.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupMatmulQuant
+    : public ::testing::TestWithParam<GroupQuantMatmulType> {
+ protected:
+  virtual void SetUp() {
+    GroupQuantMatmulType params = GetParam();
+    srand(static_cast<unsigned int>(seed));
+    m            = params.matmul_m;
+    k            = params.matmul_k;
+    n            = params.matmul_n;
+    algo         = params.algo;
+    num_threads  = params.num_threads;
+    source_dtype       = params.source_dtype;
+    output_dtype       = params.output_dtype;
+    weight_granularity = params.weight_granularity;
+    omp_set_num_threads(num_threads);
+    num_ops = 2 + (rand() % 4);
+    log_info("GroupMatmulQuant test: m=", m, " k=", k, " n=", n,
+             " (alpha=1 beta=0 no-transpose) num_ops=", num_ops,
+             " num_threads=", num_threads);
+  }
+  /** @brief TearDown is used to free resource used in test */
+  virtual void TearDown() {
+    clear_matmul_test_caches();
+  }
+
+  uint64_t m, k, n;
+  matmul_algo_t algo{};
+  int32_t num_threads{};
+  data_type_t source_dtype{};
+  data_type_t output_dtype{};
+  quant_granularity_t weight_granularity{};
+  size_t num_ops{};
+  tensor_factory_t tensor_factory{};
+
+  // Pinned by construction — these are the constraints the TODO calls for.
+  // Members rather than locals so the migrated test bodies (which read
+  // `alpha`, `beta`, `transA`, `transB`) keep working unchanged.
+  static constexpr float alpha = 1.0f;
+  static constexpr float beta  = 0.0f;
+  static constexpr bool  transA = false;
+  static constexpr bool  transB = false;
+};
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param WOQ_BF16_S4 user-defined name of test
+ *  @brief Test to validate group_matmul_direct weight-only quantization with
+ *         BF16 activation and signed 4-bit (S4) weights. Randomly selects
+ *         per-tensor, per-channel, or per-group scale granularity and
+ *         scale dtype (F32/BF16). Output dtype is randomly BF16 or F32.
+ *         Skips oneDNN algo paths.
+ */
+TEST_P(TestGroupMatmulQuant, WOQ_BF16_S4) {
+  if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
+    GTEST_SKIP() << "WOQ_BF16_S4 is not supported for oneDNN-based algorithms.";
+  }
+
+  int quant_combo = rand() % 3;
+
+  std::vector<uint64_t> scale_size;
+  uint64_t group_size = 0;
+  uint64_t num_groups = 1;
+
+  std::vector<uint64_t> valid_group_sizes;
+  for (uint64_t gs = 2; gs <= k; gs += 2) {
+    if (k % gs == 0) {
+      valid_group_sizes.push_back(gs);
+    }
+  }
+  bool has_valid_group_size = !valid_group_sizes.empty() || (k % 2 == 0);
+  if (valid_group_sizes.empty() && k % 2 == 0) {
+    valid_group_sizes.push_back(k);
+  }
+  if (!has_valid_group_size && quant_combo == 2) {
+    quant_combo = 1;
+  }
+
+  switch (quant_combo) {
+  case 0:
+    scale_size = {1, 1};
+    break;
+  case 1:
+    scale_size = {1, n};
+    break;
+  case 2: {
+    uint64_t gs = valid_group_sizes[rand() % valid_group_sizes.size()];
+    group_size = gs;
+    num_groups = k / group_size;
+    scale_size = {num_groups, n};
+    break;
+  }
+  }
+
+  auto scale_dtype = (rand() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops), wei_scale(num_ops);
+
+  auto out_dt = rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32;
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    wei_scale[i] = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
+    wt[i]      = tensor_factory.uniform_dist_tensor({k, n}, data_type_t::s4, 7.0,
+                 transB, wei_scale[i]);
+    inp[i]     = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::bf16, 2.0,
+                 transA);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+  }
+
+  // Random gated activation: paired with the WOQ kernel exercises
+  // bf16-src + s4-wei + (bf16/f32)-dst dispatch through the gated
+  // epilogue.  `pick_random_gated_act` returns `none` when N is odd
+  // since gated activations require even N.  Activation must agree
+  // across experts (the validator enforces uniform dst dtype, so we
+  // pick once outside the loop).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xAC54u);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, alpha,
+                    beta, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, alpha, beta);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    // For activated runs apply the scalar gated-activation reference
+    // to out_ref in-place (modifies cols [0:N/2]) and compare only the
+    // activated half — cols [N/2:N] are "don't care" per the kernel
+    // contract (TestGroupMatmulAlgoCustom comment).  Activated values
+    // amplify noise multiplicatively, so use the looser
+    // `compare_activated_2D` bound instead of `compare_tensor_2D_matrix`.
+    if (act_type != grp_matmul_gated_act_t::none) {
+      const float eps = (out_dt == data_type_t::bf16) ? epsilon_bf16
+                        : epsilon_woq;
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2, k,
+                                             alpha, eps, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, k,
+                                 out_dt == data_type_t::bf16 ? rtol_bf16 : rtol_woq,
+                                 out_dt == data_type_t::bf16 ? epsilon_bf16 : epsilon_woq,
+                                 ok, false, alpha, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param WOQ_BF16_U4 user-defined name of test
+ *  @brief Test to validate group_matmul_direct weight-only quantization with
+ *         BF16 activation and unsigned 4-bit (U4) weights. Exercises
+ *         asymmetric quantization with zero-point support. Randomly selects
+ *         per-tensor, per-channel, or per-group scale/zp granularity, zp
+ *         dtype (BF16/S8), scale dtype (F32/BF16), and output dtype
+ *         (BF16/F32).
+ */
+TEST_P(TestGroupMatmulQuant, WOQ_BF16_U4) {
+  int quant_combo = (rand() + k) % 4;
+  bool random_zp_domain = (rand() + k) % 2 == 0;
+
+  std::vector<uint64_t> scale_size, zp_size;
+  uint64_t group_size = 0;
+  uint64_t num_groups = 1;
+
+  std::vector<uint64_t> valid_group_sizes;
+  for (uint64_t gs = 2; gs <= k; gs += 2) {
+    if (k % gs == 0) {
+      valid_group_sizes.push_back(gs);
+    }
+  }
+  bool has_valid_group_size = !valid_group_sizes.empty() || (k % 2 == 0);
+  if (valid_group_sizes.empty() && k % 2 == 0) {
+    valid_group_sizes.push_back(k);
+  }
+  if (!has_valid_group_size && (quant_combo == 2 || quant_combo == 3)) {
+    quant_combo = 1;
+  }
+
+  switch (quant_combo) {
+  case 0:
+    scale_size = {1, 1};
+    zp_size = {1, 1};
+    break;
+  case 1:
+    scale_size = {1, n};
+    zp_size = {1, 1};
+    break;
+  case 2:
+    scale_size = {1, n};
+    zp_size = {1, n};
+    break;
+  case 3: {
+    uint64_t gs = valid_group_sizes[rand() % valid_group_sizes.size()];
+    group_size = gs;
+    num_groups = k / group_size;
+    scale_size = {num_groups, n};
+    zp_size    = {num_groups, n};
+    break;
+  }
+  }
+
+  auto scale_dtype = (rand() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto out_dt = rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32;
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops),
+      w_scale(num_ops), w_zp(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    w_scale[i] = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
+    w_zp[i]    = tensor_factory.uniform_dist_tensor(zp_size,
+                 random_zp_domain ? data_type_t::bf16 : data_type_t::s8,
+                 random_zp_domain ? 2.0 : 25.0);
+    wt[i]      = tensor_factory.uniform_dist_tensor({k, n}, data_type_t::u4,
+                 15.0, transB, w_scale[i], w_zp[i]);
+    inp[i]     = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::bf16, 2.0,
+                 transA);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
+  }
+
+  // Random gated activation (asymmetric U4 WOQ + gated epilogue).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACE4u);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, alpha,
+                    beta, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, alpha, beta);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      const float eps = (out_dt == data_type_t::bf16) ? epsilon_bf16
+                        : epsilon_woq;
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2, k,
+                                             alpha, eps, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, k,
+                                 out_dt == data_type_t::bf16 ? rtol_bf16 : rtol_woq,
+                                 out_dt == data_type_t::bf16 ? epsilon_bf16 : epsilon_woq,
+                                 ok, false, alpha, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8 user-defined name of test
+ *  @brief Test to validate group_matmul_direct INT8 (S8 weight) kernel support.
+ *         Uses parameterized source_dtype/output_dtype and weight_granularity
+ *         (per-tensor or per-channel) to exercise asymmetric dynamic
+ *         quantization paths. Constrains alpha=1, beta=0.
+ */
+TEST_P(TestGroupMatmulQuant, INT8) {
+  std::vector<uint64_t> wei_scale_size = (weight_granularity ==
+                                          quant_granularity_t::tensor) ?
+                                         std::vector<uint64_t> {1, 1} :
+                                         std::vector<uint64_t> {1, n};
+  data_type_t ref_dt = (output_dtype == data_type_t::f32) ? data_type_t::f32
+                       : data_type_t::bf16;
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref = tensor_factory.uniform_dist_tensor({k, n}, ref_dt, 25.0, transB);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wei_ref, ref_dt, data_type_t::s8, {
+    static_cast<int64_t>(wei_scale_size[0]),
+      static_cast<int64_t>(wei_scale_size[1])
+    },
+    data_type_t::f32, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+
+    auto src_ref = tensor_factory.uniform_dist_tensor({m, k}, ref_dt, 25.0, transA);
+    tensor_t input_tensor, src_scale, src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, source_dtype,
+  {1, 1}, data_type_t::f32, src_scale, src_zp,
+  &input_tensor) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+
+    tensor_t dst_scale, dst_zp;
+    if (output_dtype != data_type_t::f32 && output_dtype != data_type_t::bf16) {
+      auto dst_ref = tensor_factory.uniform_dist_tensor({m, n}, ref_dt, 2.0);
+      if (quant_params_compute(tensor_factory, dst_ref, ref_dt, output_dtype,
+      {1, 1}, data_type_t::f32, dst_scale, dst_zp) != status_t::success) {
+        FAIL() << "destination scale/zp computation failed";
+      }
+    }
+
+    inp[i]     = input_tensor;
+    wt[i]      = weight_tensor;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, output_dtype, 2.0,
+                 false, dst_scale, dst_zp);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, output_dtype, 2.0,
+                 false, dst_scale, dst_zp);
+  }
+
+  // Random gated activation — only when dst is f32/bf16.  Quantized
+  // dst dtypes (s8/u8/...) are rejected by the gated_act validator.
+  // INT8 GEMMs always run with alpha=1, beta=0 (see kernel call below),
+  // so the bound here is informational; real bounding is per-suite.
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACE8u);
+  const bool act_dtype_ok = (output_dtype == data_type_t::f32
+                             || output_dtype == data_type_t::bf16);
+  grp_matmul_gated_act_t act_type = act_dtype_ok
+                                    ? moe_test_utils::pick_random_gated_act(
+                                        static_cast<uint64_t>(n), act_rng)
+                                    : grp_matmul_gated_act_t::none;
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2, k,
+                                             1.0f, epsilon_bf16, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, k,
+                                 rtol_bf16, epsilon_bf16, ok, false, 1.0f, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_SYM_QUANT_PER_GROUP_BF16 user-defined name of test
+ *  @brief Test to validate group_matmul_direct symmetric INT8 quantization
+ *         with per-group scaling and BF16 output. K is rounded to a multiple
+ *         of 4 and group_size is randomly selected from valid divisors.
+ *         Both source and weight are symmetrically quantized to S8.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  std::vector<uint64_t> valid_gs;
+  for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+    if (sym_k % gs == 0) {
+      valid_gs.push_back(gs);
+    }
+  }
+  if (valid_gs.empty()) {
+    GTEST_SKIP() << "No valid group_size for K=" << sym_k;
+  }
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF16);
+  uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+
+  data_type_t ref_dt = data_type_t::bf16;
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  uint64_t ngroups = sym_k / group_size;
+  std::vector<int64_t> wei_sd = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(ngroups)};
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                   transB);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wei_ref, ref_dt, data_type_t::s8,
+                             wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                   transA);
+    tensor_t input_tensor, src_scale, src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, data_type_t::s8,
+                             src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+
+    inp[i]     = input_tensor;
+    wt[i]      = weight_tensor;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+  }
+
+  // Random gated activation paired with the symmetric INT8 + per-group
+  // GEMM (dst dtype is bf16, satisfying gated_act's f32/bf16 requirement).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACBEu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f, epsilon_bf16, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_bf16, epsilon_bf16, ok, false, 1.0f);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_SYM_QUANT_PER_GROUP_F32 user-defined name of test
+ *  @brief Test to validate group_matmul_direct symmetric INT8 quantization
+ *         with per-group scaling and F32 output. Same quantization setup as
+ *         INT8_SYM_QUANT_PER_GROUP_BF16 but accumulates into FP32.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  std::vector<uint64_t> valid_gs;
+  for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+    if (sym_k % gs == 0) {
+      valid_gs.push_back(gs);
+    }
+  }
+  if (valid_gs.empty()) {
+    GTEST_SKIP() << "No valid group_size for K=" << sym_k;
+  }
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF320);
+  uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+
+  data_type_t ref_dt = data_type_t::f32;
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  uint64_t ngroups = sym_k / group_size;
+  std::vector<int64_t> wei_sd = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(ngroups)};
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 2.0,
+                   transB);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wei_ref, ref_dt, data_type_t::s8,
+                             wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                   transA);
+    tensor_t input_tensor, src_scale, src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, data_type_t::s8,
+                             src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+
+    inp[i]     = input_tensor;
+    wt[i]      = weight_tensor;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+  }
+
+  // Random gated activation paired with the symmetric INT8 + per-group
+  // GEMM (dst dtype is f32, satisfying gated_act's f32/bf16 requirement).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACFEu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f, epsilon_f32, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_f32, epsilon_f32, ok, false, 1.0f);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_SYM_QUANT_PER_TOKEN_BF16 user-defined name of test
+ *  @brief Test to validate group_matmul_direct symmetric INT8 quantization
+ *         with per-token source scaling and per-channel weight scaling,
+ *         producing BF16 output. Exercises the token-wise quantization path
+ *         used in inference-time activation quantization.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  data_type_t ref_dt = data_type_t::bf16;
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF17);
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                   transB);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wei_ref, ref_dt, data_type_t::s8,
+                             wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                   transA);
+    tensor_t input_tensor, src_scale, src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, data_type_t::s8,
+                             src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+
+    inp[i]     = input_tensor;
+    wt[i]      = weight_tensor;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+  }
+
+  // Random gated activation paired with the symmetric INT8 + per-token
+  // GEMM (dst dtype is bf16).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACBDu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f, epsilon_bf16, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_bf16, epsilon_bf16, ok, false, 1.0f, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_SYM_QUANT_PER_TOKEN_F32 user-defined name of test
+ *  @brief Test to validate group_matmul_direct symmetric INT8 quantization
+ *         with per-token source scaling and per-channel weight scaling,
+ *         producing F32 output. Same quantization setup as
+ *         INT8_SYM_QUANT_PER_TOKEN_BF16 but accumulates into FP32.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  data_type_t ref_dt = data_type_t::f32;
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF321);
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
+  std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
+      out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref = tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0,
+                   transB);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wei_ref, ref_dt, data_type_t::s8,
+                             wei_sd, scale_dt, wei_scale, wei_zp, &weight_tensor) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_ref = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0,
+                   transA);
+    tensor_t input_tensor, src_scale, src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, data_type_t::s8,
+                             src_sd, scale_dt, src_scale, src_zp, &input_tensor) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+
+    inp[i]     = input_tensor;
+    wt[i]      = weight_tensor;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+  }
+
+  // Random gated activation paired with the symmetric INT8 + per-token
+  // GEMM (dst dtype is f32).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xACFDu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f, epsilon_f32, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_f32, epsilon_f32, ok, false, 1.0f, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_DYNAMIC_GEMM_BF16 user-defined name of test
+ *  @brief Test to validate group_matmul_direct dynamic quantization GEMM path
+ *         with BF16 activation, S8 weights, and BF16 output. The source
+ *         tensor carries pre-allocated scale buffers for runtime quantization.
+ *         Randomly selects per-token or per-group source scaling.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  data_type_t test_dt = data_type_t::bf16;
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF18);
+  bool use_per_group = (local_rng() % 2 == 0);
+  uint64_t group_size = 0, ngroups = 0;
+
+  if (use_per_group) {
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+      if (sym_k % gs == 0) {
+        valid_gs.push_back(gs);
+      }
+    }
+    if (valid_gs.empty()) {
+      use_per_group = false;
+    }
+    else {
+      group_size = valid_gs[local_rng() % valid_gs.size()];
+      ngroups = sym_k / group_size;
+    }
+  }
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  std::vector<int64_t> wei_scale_dims;
+  std::vector<uint64_t> src_scale_shape;
+  if (use_per_group) {
+    wei_scale_dims = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
+    src_scale_shape = {m, ngroups};
+  }
+  else {
+    wei_scale_dims = {1, static_cast<int64_t>(n)};
+    src_scale_shape = {m, 1};
+  }
+
+  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops),
+      wt_s8(num_ops), wt_ref(num_ops),
+      bias(num_ops), out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wt_ref_t = tensor_factory.uniform_dist_tensor({sym_k, n}, test_dt, 2.0);
+    tensor_t wt_s8_t, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wt_ref_t, test_dt, data_type_t::s8,
+                             wei_scale_dims, scale_dt, wei_scale, wei_zp, &wt_s8_t) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_scale = tensor_factory.zero_tensor(src_scale_shape, scale_dt);
+    auto inp_t     = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                     transA, src_scale, tensor_t());
+    auto inp_ref_t = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                     transA);
+
+    inp[i]     = inp_t;
+    inp_ref[i] = inp_ref_t;
+    wt_s8[i]   = wt_s8_t;
+    wt_ref[i]  = wt_ref_t;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+  }
+
+  // Random gated activation paired with the dynamic INT8 quant GEMM
+  // (dst dtype is bf16).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xADCBu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt_s8, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp_ref[i], wt_ref[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f,
+                                             16 * epsilon_bf16, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_bf16, 16 * epsilon_bf16, ok, false, 1.0f, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupMatmulQuant parameterized test class
+ *  @param INT8_DYNAMIC_GEMM_F32 user-defined name of test
+ *  @brief Test to validate group_matmul_direct dynamic quantization GEMM path
+ *         with F32 activation, S8 weights, and F32 output. Same dynamic
+ *         quantization setup as INT8_DYNAMIC_GEMM_BF16 but operates entirely
+ *         in FP32 precision.
+ */
+TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  data_type_t test_dt = data_type_t::f32;
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF322);
+  bool use_per_group = (local_rng() % 2 == 0);
+  uint64_t group_size = 0, ngroups = 0;
+
+  if (use_per_group) {
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+      if (sym_k % gs == 0) {
+        valid_gs.push_back(gs);
+      }
+    }
+    if (valid_gs.empty()) {
+      use_per_group = false;
+    }
+    else {
+      group_size = valid_gs[local_rng() % valid_gs.size()];
+      ngroups = sym_k / group_size;
+    }
+  }
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+  std::vector<int64_t> wei_scale_dims;
+  std::vector<uint64_t> src_scale_shape;
+  if (use_per_group) {
+    wei_scale_dims = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
+    src_scale_shape = {m, ngroups};
+  }
+  else {
+    wei_scale_dims = {1, static_cast<int64_t>(n)};
+    src_scale_shape = {m, 1};
+  }
+
+  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops),
+      wt_s8(num_ops), wt_ref(num_ops),
+      bias(num_ops), out(num_ops), out_ref(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wt_ref_t = tensor_factory.uniform_dist_tensor({sym_k, n}, test_dt, 2.0);
+    tensor_t wt_s8_t, wei_scale, wei_zp;
+    if (quant_params_compute(tensor_factory, wt_ref_t, test_dt, data_type_t::s8,
+                             wei_scale_dims, scale_dt, wei_scale, wei_zp, &wt_s8_t) != status_t::success) {
+      FAIL() << "weight dynamic quantization failed";
+    }
+    auto src_scale = tensor_factory.zero_tensor(src_scale_shape, scale_dt);
+    auto inp_t     = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                     transA, src_scale, tensor_t());
+    auto inp_ref_t = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                     transA);
+
+    inp[i]     = inp_t;
+    inp_ref[i] = inp_ref_t;
+    wt_s8[i]   = wt_s8_t;
+    wt_ref[i]  = wt_ref_t;
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
+                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+  }
+
+  // Random gated activation paired with the dynamic INT8 quant GEMM
+  // (dst dtype is f32).
+  std::mt19937 act_rng((m << 1) ^ (k << 7) ^ (n << 13) ^ 0xADCFu);
+  grp_matmul_gated_act_t act_type = moe_test_utils::pick_random_gated_act(
+                                      static_cast<uint64_t>(n), act_rng);
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+    (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  status_t status = group_matmul_kernel_test(inp, wt_s8, bias, out, algo, 1.0f,
+                    0.0f, /*moe_postop=*/nullptr, act_ptr);
+
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp_ref[i], wt_ref[i], bias[i],
+                 out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+  }
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    if (act_type != grp_matmul_gated_act_t::none) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        moe_test_utils::apply_ref_gated_act_tensor(
+          out_ref[i], static_cast<int>(m), static_cast<int>(n),
+          static_cast<int>(n), act_type);
+      }
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
+                                             sym_k, 1.0f,
+                                             18 * epsilon_bf16, ok);
+    }
+    else {
+      for (size_t i = 0; i < num_ops && ok; ++i)
+        compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
+                                 rtol_bf16, 18 * epsilon_bf16, ok, false, 1.0f, true);
+    }
+  }
+  EXPECT_TRUE(ok);
+
+// TODO: Add per-ALGO coverage tests for ZENDNNL_GRP_MATMUL_ALGO=1..5.
+// get_grp_matmul_algo() reads the env var on every call (no caching),
+// so setenv/putenv can switch algos within a single test process.
+// Exercise all dispatch paths (1=sequential, 2=flat_ccd_m_tile,
+// 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert). Add in a follow-up PR.
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulQuant, TestGroupMatmulQuant,
+                         ::testing::ValuesIn(quant_matmul_test));
+
+// Note:
+//   * TestGroupMatmul (basic F32/BF16 suite) is instantiated near the top
+//     of the file (search for `INSTANTIATE_TEST_SUITE_P(GroupMatmul,
+//     TestGroupMatmul, ...)`).
+//   * TestGroupMatmulQuant (WOQ / INT8 / dynamic-quant suite) is
+//     instantiated immediately above this comment with the constrained
+//     `quant_matmul_test` parameter list — see GroupQuantMatmulType in
+//     gtest_utils.hpp for the rationale.
