@@ -31,8 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp tag AOCL-20260404
-set(AOCLDLP_GIT_TAG "d33ffbfd0e49d34341771898be5030d338c08c77")
+# aocl-dlp tag AOCL-202605W02
+set(AOCLDLP_GIT_TAG "59b42ab1ae5e977ace905e27305fc775e6bb6737")
 option(AOCLDLP_GIT_PROGRESS ON)
 
 # amdblis repo information
@@ -67,7 +67,7 @@ option(JSON_GIT_PROGRESS ON)
 set(ONEDNN_ROOT_DIR "${ZENDNNL_DEPS_DIR}/onednn"
   CACHE PATH "ONEDNN root dir")
 set(ONEDNN_GIT_REPO "https://github.com/oneapi-src/oneDNN.git")
-set(ONEDNN_GIT_TAG "v3.11")
+set(ONEDNN_GIT_TAG "v3.12")
 option(ONEDNN_GIT_PROGRESS ON)
 
 # libxsmm repo information

@@ -758,13 +758,16 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   }
   else if (dtypes.src == data_type_t::f16 && dtypes.wei == data_type_t::f16) {
     switch (dtypes.dst) {
-    case data_type_t::f16:
-      aocl_gemm_f16f16f16of16(layout, transA, transB, M, N, K, alpha,
+    case data_type_t::f16: {
+      const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);
+      const uint16_t beta_f16  = common::float16_t::f32_to_f16_val(beta);
+      aocl_gemm_f16f16f16of16(layout, transA, transB, M, N, K, alpha_f16,
                               static_cast<const uint16_t *>(A), lda, mem_format_a,
                               is_weight_blocked ? (uint16_t *)reordered_mem : static_cast<const uint16_t *>
-                              (B), ldb, mem_format_b, beta, static_cast<uint16_t *>(C), ldc,
+                              (B), ldb, mem_format_b, beta_f16, static_cast<uint16_t *>(C), ldc,
                               nullptr);  // post-ops are not supported for f16
       break;
+    }
     default:
       log_error("Unsupported output data type for f16 source");
       break;

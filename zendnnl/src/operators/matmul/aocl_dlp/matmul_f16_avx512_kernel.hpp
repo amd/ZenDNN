@@ -23,6 +23,7 @@
 #include <cstdlib>
 
 #include "common/zendnnl_global.hpp"
+#include "common/float16.hpp"
 #include "operators/common/operator_kernel.hpp"
 #include "operators/matmul/matmul_context.hpp"
 

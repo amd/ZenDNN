@@ -18,6 +18,7 @@
 #define _AOCL_KERNEL_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "common/float16.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"
