@@ -24,7 +24,7 @@ The **Regular and Low Overhead API Layer** is the critical interface that connec
 #### 2.1. Tensor Creation and Management
 - Accepts input and output buffers from the framework.
 - Wraps them into ZenDNN-compatible tensor objects.
-- Handles metadata such as shape, data type (FP32, BF16, INT8), and memory layout (blocked and non blocked).
+- Handles metadata such as shape, data type (FP32, FP16, BF16, INT8), and memory layout (blocked and non blocked).
 - Ensures zero-copy or minimal-copy data handling to reduce overhead.
 
 #### 2.2. Operator Registration and Dispatch
@@ -35,6 +35,7 @@ The **Regular and Low Overhead API Layer** is the critical interface that connec
 #### 2.3. Precision Control
 - Allows frameworks to specify the desired precision for inference:
   - **FP32**: Full precision for accuracy-sensitive tasks.
+  - **FP16**: Half-precision (IEEE 754) for reduced memory footprint and bandwidth with moderate precision.
   - **BF16**: Balanced precision for performance and accuracy.
   - **INT8**: Quantized precision for reduced memory and faster inference.
 
@@ -230,7 +231,7 @@ ZenDNN is engineered to extract maximum performance from **general-purpose CPUs*
 #### 5.1 Instruction Set Utilization
 ZenDNN is optimized to leverage modern CPU instruction sets that enable vectorized and parallel computation:
 - **AVX2 (Advanced Vector Extensions 2):** Widely supported on modern x86 CPUs, enables 256-bit SIMD operations.
-- **AVX-512:** Offers 512-bit SIMD operations, allowing more data to be processed per instruction cycle. Ideal for FP32 and BF16 workloads.
+- **AVX-512:** Offers 512-bit SIMD operations, allowing more data to be processed per instruction cycle. Ideal for FP32, FP16, and BF16 workloads.
 
 These instruction sets are detected at runtime, and ZenDNN dynamically selects the best kernel path based on the available hardware.
 

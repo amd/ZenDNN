@@ -20,9 +20,12 @@
 #include <algorithm>
 #include <string>
 #include "operators/common/operator_config.hpp"
+#include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
 namespace ops {
+
+using zendnnl::common::data_type_t;
 
 /** @enum embag_kernel_t
  *  @brief defines different kernel levels.
@@ -99,6 +102,45 @@ class embag_config_t final : public op_config_t {
    */
   int32_t get_kernel();
 
+  /** @brief Sets the accumulation type for the reference kernel.
+   *
+   * Communicates which accumulation precision the reference kernel should
+   * use when validating the output of a given embedding-bag backend. The
+   * actual kernel (FBGEMM, native AVX512 F16-FMA, native AVX512 F32, AVX2,
+   * etc.) writes this value immediately before invoking its compute path,
+   * and the reference kernel reads it to produce a bit-exact match.
+   *
+   * Note: this mirrors the matmul_config_t::set_accum_type pattern. It is
+   * a process-wide singleton; callers running the reference kernel
+   * concurrently with multiple actual kernels should serialize those flows.
+   *
+   * TODO(embag-accum-singleton): this field is process-wide and
+   * unsynchronized. Two known issues:
+   *   1. Duplicated write logic - dispatch_avx512_kernel() and the
+   *      embag_{f16,f32}_avx512_kernel_t::execute() paths each call
+   *      set_accum_type() with the same F16-FMA-vs-F32 selection rule,
+   *      so any change must be kept in sync in both places.
+   *   2. Data race - lowoha::group_embedding_bag_direct() invokes
+   *      dispatch_avx512_kernel() from inside #pragma omp parallel, so
+   *      mixed-dtype groups concurrently write this field (UB per the
+   *      C++ memory model). Today this is benign because only the
+   *      reference kernel reads accum_type and the lowoha path does
+   *      not run it, but a future ref-validation hookup would observe
+   *      a torn / last-writer-wins value.
+   * Likely fix: make embag_accum_type thread_local (matches the
+   * producer -> ref-kernel same-thread contract) and route the operator
+   * execute paths through a shared helper to remove the duplication.
+   *
+   * @param type The accumulation data type (data_type_t::f32 or data_type_t::f16).
+   */
+  void set_accum_type(data_type_t type);
+
+  /** @brief Get the accumulation type for the reference kernel.
+   *
+   * @return The current accumulation data type.
+   */
+  data_type_t get_accum_type();
+
   /** @brief Sets thread algorithm for group embedding bag.
   *
   * @param algo The thread algorithm to set.
@@ -140,6 +182,7 @@ class embag_config_t final : public op_config_t {
 
   embag_kernel_t embag_kernel;  /**< Embag runtime kernel. */
   eb_thread_algo_t thread_algo; /**< Thread algorithm. */
+  data_type_t embag_accum_type{data_type_t::f32}; /**< Accumulation type for reference kernel. Default F32. */
 };
 
 }

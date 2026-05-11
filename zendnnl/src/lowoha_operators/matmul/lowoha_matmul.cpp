@@ -223,9 +223,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   const bool is_f16 = (params.dtypes.src == data_type_t::f16 ||
                        params.dtypes.wei == data_type_t::f16 ||
                        params.dtypes.dst == data_type_t::f16);
-  if (is_f16 && !zendnnl_platform_info().get_f16_status()) {
+  if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
     log_error("F16 data type is not supported on this platform "
-              "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+              "(requires AVX512-FP16).");
     return status_t::isa_unsupported;
   }
 

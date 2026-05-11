@@ -61,17 +61,15 @@ class platform_info_t final {
    */
   bool get_avx512f_status() const;
 
-  /** @brief Get F16 (half-precision) ISA support status.
+  /** @brief Get native AVX512-FP16 ISA status (full FP16 arithmetic).
    *
-   *  F16 is supported if any of the following ISA levels are available:
-   *    - avx512_core_fp16
-   *        Detected via AVX512-FP16: CPUID leaf 7, subleaf 0, EDX bit 23.
-   *    - avx2_vnni_2
-   *        Detected via AVX-NE-CONVERT: CPUID leaf 7, subleaf 1, EDX bit 5.
+   *  True only when the CPU supports AVX512-FP16 (CPUID leaf 7, subleaf 0,
+   *  EDX bit 23), which provides native FP16 FMA, add, mul, etc.
+   *  Required for embag_avx512_f16_fma_kernel.
    *
-   *  @return true if platform supports F16 compute, false otherwise.
+   *  @return true if platform supports AVX512-FP16, false otherwise.
    */
-  bool get_f16_status() const;
+  bool get_avx512_f16_status() const;
 
   /** @brief Get isa version
    *  @return isa version.
@@ -102,16 +100,14 @@ class platform_info_t final {
  private:
   /** @brief Detect F16 ISA support via raw CPUID queries.
    *
-   *  Checks for AVX512-FP16 (leaf 7, sub 0, EDX bit 23) and
-   *  AVX-NE-CONVERT (leaf 7, sub 1, EDX bit 5).
-   *
-   *  @return true if any F16-capable ISA is detected, false otherwise.
+   *  Populates is_avx512_f16_native by checking AVX512-FP16
+   *  (leaf 7, sub 0, EDX bit 23).
    */
-  static bool detect_f16_isa();
+  void detect_f16_isa();
 
   bool          is_avx2;
   bool          is_avx512f;
-  bool          is_avx512f16;
+  bool          is_avx512_f16_native;
   uint32_t      isa_version;
   uint32_t      cpu_family;
   uint32_t      cpu_model;

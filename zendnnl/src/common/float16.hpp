@@ -140,9 +140,81 @@ class float16_t {
   static void f16_to_f32_buf(const uint16_t *f16_buf, float *f32_buf,
                              int64_t size_);
 
+  /**
+   * @brief Convert a float32 buffer to float16 buffer.
+   * @param f32_buf Pointer to the float32 buffer.
+   * @param f16_buf Pointer to the output float16 buffer.
+   * @param size_ Size of the buffer.
+   */
+  static void f32_to_f16(const float *f32_buf, uint16_t *f16_buf,
+                         int64_t size_);
+
+#if defined(__GNUC__) && (__GNUC__ >= 12)
+  //===--------------------------------------------------------------------===//
+  // SIMD vector conversions (AVX-512 + AVX-512-FP16)
+  //
+  // These are pure register-to-register conversions: the caller is
+  // responsible for the F32 load/store (with full or masked memory
+  // access). Because the conversion itself is uniform across all 32
+  // lanes, a single API serves both the regular (32-lane) and tail
+  // (< 32 lanes) paths in vectorized kernels.
+  //
+  // The host CPU must support AVX-512 + AVX-512-FP16; the caller is
+  // responsible for ISA dispatch before invoking these.
+  //===--------------------------------------------------------------------===//
+
+  /**
+   * @brief Convert 32 float32 lanes (split as two __m512) to a single
+   *        __m512h. Round mode is nearest-even, no exception bits raised.
+   * @param lo Lanes 0..15 as float32.
+   * @param hi Lanes 16..31 as float32.
+   * @return The 32 converted float16 lanes as a __m512h.
+   */
+  static __m512h cvt_f32_to_f16_vec(__m512 lo, __m512 hi);
+
+  /**
+   * @brief Convert a __m512h to 32 float32 lanes split as two __m512.
+   * @param val The float16 source vector.
+   * @param lo  [out] Lanes 0..15 widened to float32.
+   * @param hi  [out] Lanes 16..31 widened to float32.
+   */
+  static void cvt_f16_to_f32_vec(__m512h val, __m512 &lo, __m512 &hi);
+#endif
+
  private:
   uint16_t raw_bits_; /*!< float16 raw bits (IEEE 754 half-precision) */
 };
+
+#if defined(__GNUC__) && (__GNUC__ >= 12)
+//===----------------------------------------------------------------------===//
+// AVX-512-FP16 masked load/store shims
+//
+// GCC 12 and 13 ship AVX-512-FP16 intrinsics but are missing
+// _mm512_maskz_loadu_ph and _mm512_mask_storeu_ph (added in GCC 14).
+// Both lower to the same VMOVDQU16 instruction as their epi16
+// counterparts, so on GCC < 14 we forward to the epi16 form. On
+// GCC >= 14, the real intrinsics are used. Defined inline in this
+// header so they always inline at the call site.
+//===----------------------------------------------------------------------===//
+
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline __m512h f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
+#if (__GNUC__ < 14)
+  return (__m512h)_mm512_maskz_loadu_epi16(k, addr);
+#else
+  return _mm512_maskz_loadu_ph(k, addr);
+#endif
+}
+
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline void f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
+#if (__GNUC__ < 14)
+  _mm512_mask_storeu_epi16(addr, k, (__m512i)val);
+#else
+  _mm512_mask_storeu_ph(addr, k, val);
+#endif
+}
+#endif  // __GNUC__ >= 12
 
 }//namespace common
 

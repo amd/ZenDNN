@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include "embag_operator_impl.hpp"
 #include "embag_kernel_list.hpp"
+#include "embag_config.hpp"
 #include "common/platform_info.hpp"
 
 namespace zendnnl {
@@ -46,7 +47,19 @@ status_t embag_impl_t::validate() {
   auto indices_data_type = get_input("indices")->get_data_type();
   auto output_data_type  = get_output("output")->get_data_type();
 
+  // F16 ISA check — requires AVX512-FP16
+  if (table_data_type == data_type_t::f16 ||
+      output_data_type == data_type_t::f16) {
+    if (!platform_info.get_avx512_f16_status()) {
+      apilog_error(obj_name,
+                   ": F16 data type is not supported on this platform "
+                   "(requires AVX512-FP16).");
+      return status_t::isa_unsupported;
+    }
+  }
+
   if (table_data_type == data_type_t::f32 ||
+      table_data_type == data_type_t::f16 ||
       table_data_type == data_type_t::bf16 ||
       table_data_type == data_type_t::s8 ||
       table_data_type == data_type_t::s4 ||
@@ -59,17 +72,38 @@ status_t embag_impl_t::validate() {
   }
   else {
     log_error(obj_name, " unsupported table datatype");
+    return status_t::failure;
   }
 
-  if ((table_data_type != data_type_t::f32 &&
-       table_data_type != data_type_t::bf16 &&
-       table_data_type != data_type_t::s8 &&
-       table_data_type != data_type_t::s4 &&
-       table_data_type != data_type_t::u4) ||
-      (output_data_type != data_type_t::f32 &&
-       output_data_type != data_type_t::bf16)) {
-    apilog_error(obj_name,
-                 ": table datatype must be float32 or bfloat16 or int8 or uint8 and output datatype must be float32 or bfloat16");
+  {
+    bool valid_pair = false;
+    if (table_data_type == data_type_t::f32) {
+      valid_pair = (output_data_type == data_type_t::f32 ||
+                    output_data_type == data_type_t::bf16 ||
+                    output_data_type == data_type_t::f16);
+    }
+    else if (table_data_type == data_type_t::bf16) {
+      valid_pair = (output_data_type == data_type_t::f32 ||
+                    output_data_type == data_type_t::bf16);
+    }
+    else if (table_data_type == data_type_t::f16) {
+      valid_pair = (output_data_type == data_type_t::f32 ||
+                    output_data_type == data_type_t::f16);
+    }
+    else if (table_data_type == data_type_t::s8 ||
+             table_data_type == data_type_t::s4 ||
+             table_data_type == data_type_t::u4) {
+      valid_pair = (output_data_type == data_type_t::f32 ||
+                    output_data_type == data_type_t::bf16);
+    }
+
+    if (!valid_pair) {
+      apilog_error(obj_name,
+                   ": unsupported table/output dtype combination. "
+                   "Supported: f32->{f32,bf16,f16}, bf16->{f32,bf16}, "
+                   "f16->{f32,f16}, s8/s4/u4->{f32,bf16}");
+      return status_t::failure;
+    }
   }
 
   if (indices_data_type != data_type_t::s64 &&
@@ -84,6 +118,11 @@ status_t embag_impl_t::validate() {
     if (offsets_data_type != data_type_t::s64 &&
         offsets_data_type != data_type_t::s32) {
       apilog_error(obj_name, ": offsets datatype must be int64 or int32");
+      return status_t::failure;
+    }
+
+    if (offsets_data_type != indices_data_type) {
+      apilog_error(obj_name, ": offsets and indices must have the same data type");
       return status_t::failure;
     }
 
@@ -149,6 +188,7 @@ status_t embag_impl_t::validate_forced_kernel() {
     auto output_data_type  = get_output("output")->get_data_type();
 
     if (table_data_type == data_type_t::f32 ||
+        table_data_type == data_type_t::f16 ||
         table_data_type == data_type_t::bf16 ||
         table_data_type == data_type_t::s8 ||
         table_data_type == data_type_t::s4 ||
@@ -163,15 +203,35 @@ status_t embag_impl_t::validate_forced_kernel() {
       log_error(obj_name, "unsupported table datatype");
     }
 
-    if ((table_data_type != data_type_t::f32 &&
-         table_data_type != data_type_t::bf16 &&
-         table_data_type != data_type_t::s8 &&
-         table_data_type != data_type_t::s4 &&
-         table_data_type != data_type_t::u4) ||
-        (output_data_type != data_type_t::f32 &&
-         output_data_type != data_type_t::bf16)) {
-      apilog_error(obj_name,
-                   ": table datatype must be float32 or bfloat16 or int8 or uint8 and output datatype must be float32 or bfloat16");
+    {
+      bool valid_pair = false;
+      if (table_data_type == data_type_t::f32) {
+        valid_pair = (output_data_type == data_type_t::f32 ||
+                      output_data_type == data_type_t::bf16 ||
+                      output_data_type == data_type_t::f16);
+      }
+      else if (table_data_type == data_type_t::bf16) {
+        valid_pair = (output_data_type == data_type_t::f32 ||
+                      output_data_type == data_type_t::bf16);
+      }
+      else if (table_data_type == data_type_t::f16) {
+        valid_pair = (output_data_type == data_type_t::f32 ||
+                      output_data_type == data_type_t::f16);
+      }
+      else if (table_data_type == data_type_t::s8 ||
+               table_data_type == data_type_t::s4 ||
+               table_data_type == data_type_t::u4) {
+        valid_pair = (output_data_type == data_type_t::f32 ||
+                      output_data_type == data_type_t::bf16);
+      }
+
+      if (!valid_pair) {
+        apilog_error(obj_name,
+                     ": unsupported table/output dtype combination. "
+                     "Supported: f32->{f32,bf16,f16}, bf16->{f32,bf16}, "
+                     "f16->{f32,f16}, s8/s4/u4->{f32,bf16}");
+        return status_t::failure;
+      }
     }
 
     if (indices_data_type != data_type_t::s64 &&
@@ -186,6 +246,11 @@ status_t embag_impl_t::validate_forced_kernel() {
       if (offsets_data_type != data_type_t::s64 &&
           offsets_data_type != data_type_t::s32) {
         apilog_error(obj_name, ": offsets datatype must be int64 or int32");
+        return status_t::failure;
+      }
+
+      if (offsets_data_type != indices_data_type) {
+        apilog_error(obj_name, ": offsets and indices must have the same data type");
         return status_t::failure;
       }
 
@@ -344,6 +409,17 @@ status_t embag_impl_t::kernel_factory() {
                    (get_embag_bf16_avx2_kernel());
         }
       }
+      else if (table_dtype == data_type_t::f16) {
+        if (platform_info.get_avx512_f16_status()) {
+          kernel = std::shared_ptr<embag_f16_avx512_kernel_t>
+                   (get_embag_f16_avx512_kernel());
+        }
+        else {
+          apilog_error("<", obj_name,
+                       "> F16 kernel requires AVX512-FP16 support.");
+          return status_t::isa_unsupported;
+        }
+      }
       else if (table_dtype == data_type_t::s8 ||
                table_dtype == data_type_t::s4 ||
                table_dtype == data_type_t::u4) {
@@ -360,6 +436,7 @@ status_t embag_impl_t::kernel_factory() {
     else {
       if (forced_kernel == "reference" &&
           (table_dtype == data_type_t::f32 ||
+           table_dtype == data_type_t::f16 ||
            table_dtype == data_type_t::bf16)) {
         kernel = std::shared_ptr<embag_ref_kernel_t>(get_embag_ref_kernel());
       }

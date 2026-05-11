@@ -19,6 +19,7 @@
 
 #include <vector>
 #include "lowoha_embag_common.hpp"
+#include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
 namespace lowoha {

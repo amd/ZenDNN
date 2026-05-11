@@ -252,6 +252,7 @@ extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
 extern const float EMBAG_F32_TOL;
 extern const float EMBAG_BF16_TOL;
+extern const float EMBAG_F16_TOL;
 extern const float EMBAG_INT4_TOL;
 extern const float LOWOHA_REORDER_INT8_TOL;
 extern const float LOWOHA_REORDER_BF16_TOL;

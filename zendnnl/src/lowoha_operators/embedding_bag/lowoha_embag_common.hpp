@@ -232,6 +232,8 @@ inline static const char *dtype_to_string(data_type_t dtype) {
     return "none";
   case data_type_t::f32:
     return "f32";
+  case data_type_t::f16:
+    return "f16";
   case data_type_t::bf16:
     return "bf16";
   case data_type_t::s8:

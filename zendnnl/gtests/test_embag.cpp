@@ -229,6 +229,135 @@ TEST_P(TestEmbag, BF16_BF16) {
 
 /** @fn TEST_P
  *  @param TestEmbag parameterized test class to initialize parameters
+ *  @param F32_F16 user-defined name of test
+ *  @brief Test to validate embag F32 input F16 output kernel support wrt Reference kernel
+ */
+TEST_P(TestEmbag, F32_F16) {
+  auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
+                           data_type_t::f32, 2.0f);
+  auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
+                           num_embeddings, indices_dtype);
+  uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
+  auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
+                           num_indices, offsets_dtype, include_last_offset);
+  auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
+                           data_type_t::f32, 2.0f) : tensor_t();
+  auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f16, tensor_t(), tensor_t(), strided);
+  auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f16, tensor_t(), tensor_t(), strided);
+
+  status_t status         = embag_kernel_test(table_tensor, indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias, use_LOWOHA);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
+                            indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor_ref,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias);
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
+                      EMBAG_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestEmbag parameterized test class to initialize parameters
+ *  @param F16_F32 user-defined name of test
+ *  @brief Test to validate embag F16 input F32 output kernel support wrt Reference kernel
+ */
+TEST_P(TestEmbag, F16_F32) {
+  auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
+                           data_type_t::f16, 2.0f);
+  auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
+                           num_embeddings, indices_dtype);
+  uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
+  auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
+                           num_indices, offsets_dtype, include_last_offset);
+  auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
+                           data_type_t::f32, 2.0f) : tensor_t();
+  auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
+  auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
+
+  status_t status         = embag_kernel_test(table_tensor, indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias, use_LOWOHA);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
+                            indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor_ref,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias);
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
+                      EMBAG_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestEmbag parameterized test class to initialize parameters
+ *  @param F16_F16 user-defined name of test
+ *  @brief Test to validate embag F16 input F16 output kernel support wrt Reference kernel
+ */
+TEST_P(TestEmbag, F16_F16) {
+  auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
+                           data_type_t::f16, 2.0f);
+  auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
+                           num_embeddings, indices_dtype);
+  uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
+  auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
+                           num_indices, offsets_dtype, include_last_offset);
+  auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
+                           data_type_t::f32, 2.0f) : tensor_t();
+  auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f16, tensor_t(), tensor_t(), strided);
+  auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
+                           data_type_t::f16, tensor_t(), tensor_t(), strided);
+
+  status_t status         = embag_kernel_test(table_tensor, indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias, use_LOWOHA);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
+                            indices_tensor,
+                            offsets_tensor, weights_tensor, output_tensor_ref,
+                            algo, padding_index, include_last_offset, is_weights,
+                            fp16_scale_bias);
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
+                      EMBAG_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestEmbag parameterized test class to initialize parameters
  *  @param INT8_F32 user-defined name of test
  *  @brief Test to validate embag INT8 input F32 output kernel support wrt Reference kernel
  */

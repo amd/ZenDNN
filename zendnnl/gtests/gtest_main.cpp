@@ -49,6 +49,7 @@ const float MATMUL_POSTOP_ELTWISE_ALPHA = 1.0f;
 // Test tolerance constants
 const float EMBAG_F32_TOL  = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
+const float EMBAG_F16_TOL  = 0.01;
 const float EMBAG_INT4_TOL = 0.01;
 
 // LOWOHA Reorder tolerance constants

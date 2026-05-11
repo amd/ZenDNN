@@ -112,12 +112,13 @@ int embag_lowoha_benchdnn(std::vector<EmbagConfig> configs,
       // Validate data types
       if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16 &&
           cfg.dt[0] != data_type_t::s8 && cfg.dt[0] != data_type_t::s4 &&
-          cfg.dt[0] != data_type_t::u4) {
+          cfg.dt[0] != data_type_t::u4 && cfg.dt[0] != data_type_t::f16) {
         testlog_error("LOWOHA: Unsupported table data type");
         log_benchmark_failure(cfg);
         continue;
       }
-      if (cfg.dt[1] != data_type_t::f32 && cfg.dt[1] != data_type_t::bf16) {
+      if (cfg.dt[1] != data_type_t::f32 && cfg.dt[1] != data_type_t::bf16 &&
+          cfg.dt[1] != data_type_t::f16) {
         testlog_error("LOWOHA: Unsupported output data type");
         log_benchmark_failure(cfg);
         continue;

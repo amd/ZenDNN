@@ -22,7 +22,8 @@ set(embag_operator_public_headers
   embag_avx2_kernels.hpp
   embag_avx512_kernels.hpp
   embag_avx512_fp32_bf16_utils.hpp
-  embag_avx512_int8_int4_utils.hpp)
+  embag_avx512_int8_int4_utils.hpp
+  embag_avx512_f16_utils.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

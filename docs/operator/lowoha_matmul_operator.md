@@ -118,7 +118,7 @@ struct matmul_data_types {
 |----------|-------------|-----------|-------------|-------|
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
-| F16 | F16 | F16/FP32 | F16/FP32 | Half-precision (requires AVX512-FP16 or AVX-NE-CONVERT ISA) |
+| F16 | F16 | FP32/F16 | F16/FP32 | Half-precision (requires AVX512-FP16) |
 | BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), symmetric |
 | BF16 | U4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
 | U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
@@ -126,7 +126,7 @@ struct matmul_data_types {
 | BF16 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 | FP32 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 
-> **Note:** F16 matmul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16 or AVX-NE-CONVERT ISA, F16 operations return `status_t::isa_unsupported`.
+> **Note:** F16 matmul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16, F16 operations return `status_t::isa_unsupported`.
 
 
 ### `matmul_post_op`
@@ -584,7 +584,7 @@ int lowoha_int8_matmul_example() {
 
 ### Example 5: F16 (Half-Precision) MatMul
 
-This example demonstrates F16 matmul where all tensors (source, weights, destination) use half-precision floating point. F16 matmul is only supported via the OneDNN backend and requires AVX512-FP16 or AVX-NE-CONVERT ISA.
+This example demonstrates F16 matmul where all tensors (source, weights, destination) use half-precision floating point. F16 matmul is only supported via the OneDNN backend and requires AVX512-FP16.
 
 ```cpp
 int lowoha_matmul_f16_example() {
@@ -638,7 +638,7 @@ int lowoha_matmul_f16_example() {
 ```
 
 **Key Points for F16:**
-- **ISA Requirement**: F16 requires AVX512-FP16 or AVX-NE-CONVERT instruction set support. The check is performed via CPUID (leaf 7, subleaf 0, EDX bit 23 for AVX512-FP16; leaf 7, subleaf 1, EDX bit 5 for AVX-NE-CONVERT).
+- **ISA Requirement**: F16 requires AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23). Available on Zen 5 / Sapphire Rapids and later.
 - **Backend**: F16 is only supported via OneDNN backend. Kernel selection automatically routes to `onednn_blocked`.
 
 ## Reorder Quantization (Source Quantization via Reorder)

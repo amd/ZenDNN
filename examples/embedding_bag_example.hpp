@@ -68,6 +68,18 @@ int embedding_bag_f32_forced_ref_kernel_example();
  */
 int embedding_f32_kernel_example();
 
+/** @fn embedding_bag_f16_kernel_example
+ *  @brief Demonstrates embedding bag operator on fp16 inputs and outputs.
+ *
+ * embedding bag operator performs efficient lookups and aggregations
+ * (such as sum or mean) over a set of embedding vectors selected by indices.
+ *
+ * This example demonstrates embedding bag with FP16 table and FP16 output.
+ * Accumulation is performed in FP16 (native F16 FMA, GCC >= 12) or FP32
+ * (fallback, GCC < 12) depending on compiler support for AVX512-FP16 intrinsics.
+ */
+int embedding_bag_f16_kernel_example();
+
 /** @fn embedding_bag_u4_ref_kernel_example
  *  @brief Demonstrates embedding bag operator reference kernel enforced by user.
  *

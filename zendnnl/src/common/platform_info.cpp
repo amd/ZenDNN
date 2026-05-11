@@ -27,7 +27,9 @@ namespace common {
 using namespace Au;
 
 platform_info_t::platform_info_t()
-  : is_avx2{false}, is_avx512f{false}, is_avx512f16{false}, isa_version{0},
+  : is_avx2{false}, is_avx512f{false},
+    is_avx512_f16_native{false},
+    isa_version{0},
     cpu_family{0}, cpu_model{0}, cpu_vendor{}, cpu_uarch{0} {
 }
 
@@ -41,31 +43,20 @@ status_t platform_info_t::populate() {
   cpu_uarch       = static_cast<uint32_t>(v_info.m_uarch);
   is_avx2         = cpu.hasFlag(ECpuidFlag::avx2);
   is_avx512f      = cpu.hasFlag(ECpuidFlag::avx512f);
-  is_avx512f16    = detect_f16_isa();
+  detect_f16_isa();
 
   return status_t::success;
 }
 
-bool platform_info_t::detect_f16_isa() {
+void platform_info_t::detect_f16_isa() {
 #ifdef __x86_64__
   uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
 
-  // Check 1: AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23)
-  // Covers: avx512_core_fp16
+  // AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23)
+  // Full FP16 arithmetic (FMA, add, mul, div, etc.)
   __cpuid_count(7, 0, eax, ebx, ecx, edx);
-  if ((edx >> 23) & 1) {
-    return true;
-  }
-
-  // Check 2: AVX-NE-CONVERT (CPUID leaf 7, subleaf 1, EDX bit 5)
-  // Covers: avx2_vnni_2
-  eax = ebx = ecx = edx = 0;
-  __cpuid_count(7, 1, eax, ebx, ecx, edx);
-  if ((edx >> 5) & 1) {
-    return true;
-  }
+  is_avx512_f16_native = (edx >> 23) & 1;
 #endif
-  return false;
 }
 
 bool platform_info_t::get_avx2_status() const {
@@ -76,8 +67,8 @@ bool platform_info_t::get_avx512f_status() const {
   return is_avx512f;
 }
 
-bool platform_info_t::get_f16_status() const {
-  return is_avx512f16;
+bool platform_info_t::get_avx512_f16_status() const {
+  return is_avx512_f16_native;
 }
 
 uint32_t platform_info_t::get_isa_version() const {

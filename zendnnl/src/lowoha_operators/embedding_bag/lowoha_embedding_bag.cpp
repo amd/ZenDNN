@@ -48,6 +48,14 @@ status_t embedding_bag_direct(
     return status_t::failure;
   }
 
+  const bool is_f16 = (params.dtypes.table == data_type_t::f16 ||
+                       params.dtypes.output == data_type_t::f16);
+  if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
+    log_error("F16 data type is not supported on this platform "
+              "(requires AVX512-FP16).");
+    return status_t::isa_unsupported;
+  }
+
   if (params.algo != embag_algo_t::none && offsets == nullptr) {
     log_error("embedding_bag_direct: offsets required for reduction operations");
     return status_t::failure;
@@ -124,13 +132,26 @@ status_t group_embedding_bag_direct(
     return status_t::failure;
   }
 
+  const bool has_f16_isa = zendnnl_platform_info().get_avx512_f16_status();
+  for (int i = 0; i < num_tables; ++i) {
+    const bool is_f16 = (params[i].dtypes.table == data_type_t::f16 ||
+                         params[i].dtypes.output == data_type_t::f16);
+    if (is_f16 && !has_f16_isa) {
+      log_error("group_embedding_bag_direct: F16 data type is not supported "
+                "on this platform (requires AVX512-FP16). Failing table index = ",
+                i);
+      return status_t::isa_unsupported;
+    }
+  }
+
   // Read environment configuration
   using namespace zendnnl::ops;
   embag_config_t &embag_config = embag_config_t::instance();
   embag_config.set_env_config();
 
   const int32_t omp_mt = thread_guard::max_threads();
-  const int32_t eb_thread_qty = resolve_num_threads(params[0].num_threads, omp_mt);
+  const int32_t eb_thread_qty = resolve_num_threads(params[0].num_threads,
+                                omp_mt);
   thread_guard tg(eb_thread_qty, omp_mt);
   eb_thread_algo_t thread_algo = thread_algo_select();
   const char *thread_type = thread_algo_to_string(thread_algo);
@@ -144,14 +165,14 @@ status_t group_embedding_bag_direct(
     scoped_active_levels active_levels_guard(2);
     int ccd_num_threads = CCD_NUM_THREADS;
     int32_t outer_threads = (eb_thread_qty % ccd_num_threads) == 0 ?
-                                 eb_thread_qty / ccd_num_threads :
-                                 ((eb_thread_qty / ccd_num_threads) + 1);
+                            eb_thread_qty / ccd_num_threads :
+                            ((eb_thread_qty / ccd_num_threads) + 1);
     int32_t rem = (eb_thread_qty % ccd_num_threads) == 0 ?
-                       ccd_num_threads :
-                       eb_thread_qty % ccd_num_threads;
+                  ccd_num_threads :
+                  eb_thread_qty % ccd_num_threads;
     int32_t loopCount = (num_tables % outer_threads) == 0 ?
-                             num_tables / outer_threads :
-                             ((num_tables / outer_threads) + 1);
+                        num_tables / outer_threads :
+                        ((num_tables / outer_threads) + 1);
 
     #pragma omp parallel num_threads(outer_threads)
     {
@@ -198,8 +219,8 @@ status_t group_embedding_bag_direct(
   else if (thread_algo == eb_thread_algo_t::table_threaded) {
     // Thread-per-table parallelism
     int32_t loopCount = (num_tables % eb_thread_qty) == 0 ?
-                             num_tables / eb_thread_qty :
-                             ((num_tables / eb_thread_qty) + 1);
+                        num_tables / eb_thread_qty :
+                        ((num_tables / eb_thread_qty) + 1);
 
     #pragma omp parallel num_threads(eb_thread_qty)
     {

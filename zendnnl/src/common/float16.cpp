@@ -212,5 +212,37 @@ void float16_t::f16_to_f32_buf(const uint16_t *f16_buf, float *f32_buf,
   }
 }
 
+void float16_t::f32_to_f16(const float *f32_buf, uint16_t *f16_buf,
+                           int64_t size_) {
+  for (int64_t j = 0; j < size_; ++j) {
+    f16_buf[j] = f32_to_f16_val(f32_buf[j]);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// SIMD vector conversions
+//===----------------------------------------------------------------------===//
+
+#if defined(__GNUC__) && (__GNUC__ >= 12)
+
+__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
+__m512h float16_t::cvt_f32_to_f16_vec(__m512 lo, __m512 hi) {
+  __m256i h_lo = _mm512_cvtps_ph(lo,
+                                 _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  __m256i h_hi = _mm512_cvtps_ph(hi,
+                                 _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  return (__m512h)_mm512_inserti64x4(_mm512_castsi256_si512(h_lo), h_hi, 1);
+}
+
+__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
+void float16_t::cvt_f16_to_f32_vec(__m512h val, __m512 &lo, __m512 &hi) {
+  __m256i lo_half = _mm512_castsi512_si256((__m512i)val);
+  __m256i hi_half = _mm512_extracti64x4_epi64((__m512i)val, 1);
+  lo = _mm512_cvtph_ps(lo_half);
+  hi = _mm512_cvtph_ps(hi_half);
+}
+
+#endif  // __GNUC__ >= 12
+
 }//namespace common
 }//namespace zendnnl

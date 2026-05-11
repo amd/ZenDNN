@@ -340,7 +340,7 @@ status_t matmul_impl_t::validate() {
   }
 
   if (weights && (weights->get_data_type() == data_type_t::s4 ||
-      weights->get_data_type() == data_type_t::u4) &&
+                  weights->get_data_type() == data_type_t::u4) &&
       forced_kernel != "reference") {
     apilog_info("Weight tensor is S4/U4, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
@@ -394,10 +394,10 @@ status_t matmul_impl_t::validate() {
   if (input->get_data_type() == data_type_t::f16 ||
       weights->get_data_type() == data_type_t::f16 ||
       output->get_data_type() == data_type_t::f16) {
-    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
-    if (!platform_info.get_f16_status()) {
+    // F16 requires AVX512-FP16
+    if (!platform_info.get_avx512_f16_status()) {
       apilog_error("F16 data type is not supported on this platform "
-                   "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+                   "(requires AVX512-FP16).");
       return status_t::isa_unsupported;
     }
 

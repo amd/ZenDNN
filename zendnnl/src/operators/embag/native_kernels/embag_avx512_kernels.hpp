@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -22,12 +22,21 @@
 #include "operators/common/operator_kernel.hpp"
 #include "operators/embag/embag_context.hpp"
 #include "embag_avx512_fp32_bf16_utils.hpp"
+#include "embag_avx512_f16_utils.hpp"
 #include "embag_avx512_int8_int4_utils.hpp"
 
 namespace zendnnl {
 namespace ops {
 
 using namespace zendnnl::error_handling;
+
+inline bool can_use_f16_fma_kernel() {
+#if !defined(ZENDNNL_EMBAG_NATIVE_F32_ACCUM)
+  return common::zendnnl_platform_info().get_avx512_f16_status();
+#else
+  return false;
+#endif
+}
 
 class embag_f32_avx512_kernel_t final : public op_kernel_t<embag_context_t> {
  public:
@@ -44,6 +53,13 @@ class embag_bf16_avx512_kernel_t final : public op_kernel_t<embag_context_t> {
 
 };
 
+class embag_f16_avx512_kernel_t final : public op_kernel_t<embag_context_t> {
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
+};
+
 class embag_int8_int4_avx512_kernel_t final : public
   op_kernel_t<embag_context_t> {
  public:
@@ -55,6 +71,7 @@ class embag_int8_int4_avx512_kernel_t final : public
 extern "C" {
   embag_f32_avx512_kernel_t *get_embag_f32_avx512_kernel();
   embag_bf16_avx512_kernel_t *get_embag_bf16_avx512_kernel();
+  embag_f16_avx512_kernel_t *get_embag_f16_avx512_kernel();
   embag_int8_int4_avx512_kernel_t *get_embag_int8_int4_avx512_kernel();
 }
 

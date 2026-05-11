@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ status_t reorder_impl_t::validate() {
   if (input->get_data_type() == data_type_t::f16 ||
       output->get_data_type() == data_type_t::f16) {
     // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
-    if (!platform_info.get_f16_status()) {
+    if (!platform_info.get_avx512_f16_status()) {
       apilog_error("F16 data type is not supported on this platform "
                    "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
       reorder_status = status_t::isa_unsupported;
@@ -188,7 +188,7 @@ size_t reorder_impl_t::get_reorder_size() {
 
     // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
     if (input_tensor->get_data_type() == data_type_t::f16) {
-      if (!platform_info.get_f16_status()) {
+      if (!platform_info.get_avx512_f16_status()) {
         apilog_error("F16 data type is not supported on this platform "
                      "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
         reorder_status = status_t::isa_unsupported;

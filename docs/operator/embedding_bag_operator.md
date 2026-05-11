@@ -5,7 +5,7 @@
 
 ## Overview
 
-This section provides a high-level overview of embedding bag (`embag`) operations with support for FP32, BF16, INT8, INT4 data types and multiple aggregation algorithms (sum, mean, max). The support matrix summarizes valid combinations of table, indices, offsets, weights, and output data types along with supported operations. Practical examples from `embedding_bag_example.cpp` demonstrate these configurations, such as `embedding_bag_f32_kernel_example`, `embedding_bag_u4_kernel_example`, which performs embedding bag operations with sum aggregation methods.
+This section provides a high-level overview of embedding bag (`embag`) operations with support for FP32, FP16, BF16, INT8, INT4 data types and multiple aggregation algorithms (sum, mean, max). The support matrix summarizes valid combinations of table, indices, offsets, weights, and output data types along with supported operations. Practical examples from `embedding_bag_example.cpp` demonstrate these configurations, such as `embedding_bag_f32_kernel_example`, `embedding_bag_u4_kernel_example`, which performs embedding bag operations with sum aggregation methods.
 
 # General EmbeddingBag Operation
 
@@ -154,8 +154,11 @@ This table provides a detailed overview of supported configurations for embeddin
 |--------------------|----------------------|----------------------|----------------------|---------------------------|
 |FP32	               |INT32/INT64	          |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
 |FP32	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            |
+|FP32	               |INT32/INT64           |FP32	(Only Sum)       |FP16	                |Sum, Mean, Max	            |
 |BF16	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
 |BF16	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            |
+|FP16	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
+|FP16	               |INT32/INT64           |FP32	(Only Sum)       |FP16	                |Sum, Mean, Max	            |
 |INT8	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
 |INT8	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            |
 |INT4	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
@@ -193,8 +196,8 @@ output.set_size({B, D});
 ```
 
 #### Data Type Constraints
-Table: FP32, BF16, INT8, INT4
-Output: FP32, BF16
+Table: FP32, FP16, BF16, INT8, INT4
+Output: FP32, FP16, BF16
 Indices and Offsets: INT32, INT64
 Weights: FP32
 
@@ -202,8 +205,9 @@ Weights: FP32
 indices.set_data_type(data_type_t::s32);
 offsets.set_data_type(data_type_t::s64);
 table.set_data_type(data_type_t::f32);
-table.set_data_type(data_type_t::s4); // For signed int4
-table.set_data_type(data_type_t::u4); // For unsigned int4
+table.set_data_type(data_type_t::f16);  // For float16
+table.set_data_type(data_type_t::s4);   // For signed int4
+table.set_data_type(data_type_t::u4);   // For unsigned int4
 output.set_data_type(data_type_t::bf16);
 ```
 
@@ -376,7 +380,121 @@ int embag_sum_f32_kernel_example() {
 
 ```
 
-### 2. embedding_bag_u4_kernel_example
+### 2. embedding_bag_f16_kernel_example
+
+This example performs embedding bag operation with `float16 (f16)` table and output data types, using `sum` aggregation algorithm. FP16 (IEEE 754 half-precision) provides a good balance between precision and memory efficiency with 10-bit mantissa and 5-bit exponent.
+
+**Key Components**
+
+- **Embedding Table Initialization**
+  - Table: Uniform tensor with dimensions `{R, D}` in FP16 data type
+- **Indices and Offsets**
+  - Indices: Random integers within vocabulary range
+  - Offsets: Define bag boundaries for grouping embeddings
+- **Output**
+  - FP16 output tensor — accumulation precision depends on the kernel selected at compile time and runtime (see [FP16 Accumulation Modes](#fp16-accumulation-modes) below)
+- **Aggregation**
+  - Applies `sum` aggregation across embeddings in each bag
+
+```cpp
+int embedding_bag_f16_kernel_example() {
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+
+    std::vector<uint32_t> indices = generate_random_indices(INDICES_SIZE);
+    std::vector<uint32_t> offsets = generate_offsets(BATCH_SIZE);
+
+    // Create an FP16 embedding table with dimensions [VOCAB_SIZE, EMBEDDING_DIM]
+    auto embedding_table = tensor_factory.uniform_tensor({R, D},
+                                                         data_type_t::f16,
+                                                         1.0, "table");
+
+    auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
+                                                            data_type_t::s32,
+                                                            indices, "indices");
+
+    auto offsets_tensor = tensor_factory.non_uniform_tensor({BATCH_SIZE},
+                                                            data_type_t::s32,
+                                                            offsets, "offsets");
+
+    // Create embedding bag context with sum aggregation
+    auto embag_context = embag_context_t()
+      .set_param("table", embedding_table)
+      .set_algo(embag_algo_t::sum)
+      .set_padding_index(-1)
+      .create();
+
+    auto embag_operator = embag_operator_t()
+      .set_name("embag_sum_f16")
+      .set_context(embag_context)
+      .create();
+
+    if (!embag_operator.check()) {
+      testlog_error(" operator ", embag_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    // Create FP16 output tensor with dimensions [NUM_BAGS, EMBEDDING_DIM]
+    auto output_tensor = tensor_factory.zero_tensor({B, D},
+                                                    data_type_t::f16,
+                                                    "output");
+
+    output_tensor.set_stride({D, 1});
+
+    status = embag_operator
+      .set_input("indices", indices_tensor)
+      .set_input("offsets", offsets_tensor)
+      .set_output("output", output_tensor)
+      .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<", embag_operator.get_name(), ">", " operator execution successful.");
+    } else {
+      testlog_error("<", embag_operator.get_name(), ">", " operator execution failed.");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t& ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+```
+
+**Supported FP16 Combinations:**
+- **FP16 table → FP16 output**: Both input and output in half-precision, minimizing memory bandwidth.
+- **FP16 table → FP32 output**: Half-precision input with full-precision output for downstream computation.
+- **FP32 table → FP16 output**: Full-precision input with half-precision output for memory-efficient storage.
+
+### FP16 Accumulation Modes
+
+FP16 embedding bag requires **AVX512-FP16** and **GCC >= 12**. On hardware without AVX512-FP16 the operator returns `status_t::isa_unsupported`. By default, the library uses the native F16 FMA kernel; a build-time toggle is provided to force F32 accumulation for numerical reproducibility.
+
+| Mode | Compiler | ISA | Accumulation | Kernel | Throughput |
+|------|----------|-----|--------------|--------|------------|
+| **F16 FMA** (default) | GCC >= 12 | AVX512-FP16 | FP16 (`__m512h`) | `embag_avx512_f16_fma_kernel` | 32 elements/ZMM |
+| **F32 FMA** (`-DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON`) | GCC >= 12 | AVX512-FP16 | FP32 (`__m512`) | `embag_avx512_kernel` | 16 elements/ZMM |
+
+**F16 FMA mode** — All arithmetic (FMA, max, division) is performed natively in FP16 using `__m512h` registers, providing 2x throughput over the F32 path. Type conversions happen only at load/store boundaries. Each intermediate FMA result is rounded to FP16 precision before the next accumulation step.
+
+**F32 FMA mode** — Enabled by passing `-DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON` to CMake at configure time. The same identifier serves as both the CMake cache variable and the C++ preprocessor macro the kernels read, so a single name is enough to remember. FP16 inputs are widened to FP32 on load, all arithmetic is performed in FP32 using `__m512` registers, and results are narrowed back to FP16 on store. Slower but more accurate and useful for numerical reproducibility studies.
+
+**Precision implications:** F16 FMA mode accumulates in half-precision, so results may differ slightly from the F32 FMA mode due to intermediate FP16 rounding at each accumulation step. The reference kernel mirrors whichever mode is selected at build time so that the gtest tolerance bounds remain consistent.
+
+**Compiler matrix:**
+
+| Compiler | F16 path on AVX-512-FP16 hardware | F16 path elsewhere |
+|---|---|---|
+| GCC ≥ 12 (default build) | Native F16 FMA (`_mm512_fmadd_ph`), F16 accumulation | Rejected at validate/dispatch with `status_t::isa_unsupported` |
+| GCC ≥ 12 with `ZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON` | F32 FMA, F32 accumulation | Rejected at validate/dispatch with `status_t::isa_unsupported` |
+| GCC < 12 | F32 FMA fallback (FP16 intrinsics unavailable) | Rejected at validate/dispatch with `status_t::isa_unsupported` |
+
+On AVX-512-FP16 hardware built with GCC < 12 the native FP16 intrinsics (`_mm512_fmadd_ph`, `_mm512_loadu_ph`, etc.) are not provided by the compiler, so the library transparently routes F16 through the FP32 path; behaviour and accuracy are identical to a GCC ≥ 12 build with `-DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON`. On hardware without AVX-512-FP16 the operator returns `status_t::isa_unsupported` regardless of compiler version.
+
+### 3. embedding_bag_u4_kernel_example
 
 This example performs embedding bag operation with U4 table data type, using `sum` aggregation algorithm.
 

@@ -24,6 +24,7 @@ void embag_config_t::set_default_config() {
   // Set default configuration for embag
   set_kernel(static_cast<int32_t>(embag_kernel_t::none));
   set_thread_algo(static_cast<int32_t>(eb_thread_algo_t::table_threaded));
+  set_accum_type(data_type_t::f32);  // Default to F32 accumulation
 }
 
 status_t embag_config_t::set_user_config(json config_json) {
@@ -124,6 +125,14 @@ void embag_config_t::set_kernel(int32_t kernel) {
 
 int32_t embag_config_t::get_kernel() {
   return static_cast<int32_t>(embag_kernel);
+}
+
+void embag_config_t::set_accum_type(data_type_t type) {
+  embag_accum_type = type;
+}
+
+data_type_t embag_config_t::get_accum_type() {
+  return embag_accum_type;
 }
 
 void embag_config_t::set_thread_algo(int32_t algo) {

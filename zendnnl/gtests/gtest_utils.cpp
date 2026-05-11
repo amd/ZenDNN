@@ -305,24 +305,18 @@ GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index, uint32_t total_t
 
 // EmbagType constructor
 EmbagType::EmbagType() {
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  static std::uniform_int_distribution<int> algo_dist(1,
-      3);  // sum=1, mean=2, max=3
-
   num_embeddings = 128 + std::rand() % 2048;
   embedding_dim = 16 + std::rand() % 512;
   num_indices = 128 + std::rand() % 2048;
   num_bags = 16 + std::rand() % 512;
-  algo = static_cast<embag_algo_t>(algo_dist(gen));
+  algo = static_cast<embag_algo_t>(1 + std::rand() % 3);  // sum=1, mean=2, max=3
   padding_index = -1;
   include_last_offset = std::rand() % 2;
   is_weights = std::rand() % 2;
-  indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  indices_dtype = std::rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   offsets_dtype = indices_dtype;
   fp16_scale_bias = std::rand() % 2;
   strided = std::rand() % 2;
-  // LOWOHA configuration based on command-line input or random selection
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
@@ -334,8 +328,7 @@ EmbagType::EmbagType() {
   }
   else {
     int max_threads = omp_get_max_threads();
-    std::uniform_int_distribution<int> thread_dist(1, max_threads);
-    num_threads = thread_dist(gen);
+    num_threads = 1 + std::rand() % max_threads;
   }
 }
 
@@ -2982,8 +2975,10 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                    params);
 
         if (status != status_t::success) {
-          log_error("LOWOHA embedding_bag_direct execution failed.");
-          return status_t::failure;
+          if (status != status_t::isa_unsupported) {
+            log_error("LOWOHA embedding_bag_direct execution failed.");
+          }
+          return status;
         }
       }
       catch (const std::exception &e) {
@@ -3044,8 +3039,10 @@ status_t embag_kernel_test(tensor_t &table_tensor,
       }
 
       if (status != status_t::success) {
-        log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
-        return status_t::failure;
+        if (status != status_t::isa_unsupported) {
+          log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+        }
+        return status;
       }
     }
   }

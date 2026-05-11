@@ -176,19 +176,19 @@ int main() {
     // ---- BF16 -> S8 Symmetric Tests ----
     run_lowoha_reorder_dynamic_quant_per_tensor_test();       // BF16->S8 per-tensor
     run_lowoha_reorder_dynamic_quant_per_channel_row_test();  // BF16->S8 per-token
-    
+
     // ---- F32 -> S8 Symmetric Tests ----
     run_lowoha_reorder_dynamic_quant_per_channel_col_test();  // F32->S8 per-column
     run_lowoha_reorder_dynamic_quant_per_group_row_test();    // F32->S8 per-group
     run_lowoha_reorder_dynamic_quant_f32_to_s8_test();        // F32->S8 per-tensor
-    
+
     // ---- Compute-Only Mode ----
     run_lowoha_reorder_dynamic_quant_compute_only_test();     // Compute scale only
-    
+
     // ---- F32 -> U8 Asymmetric Tests ----
     run_lowoha_reorder_dynamic_quant_f32_to_u8_test();        // F32->U8 per-tensor
     run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test();// F32->U8 per-column
-    
+
     // ---- BF16 -> U8 Asymmetric Tests ----
     run_lowoha_reorder_dynamic_quant_bf16_to_u8_test();          // BF16->U8 per-tensor
     run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test();// BF16->U8 per-token
@@ -264,6 +264,7 @@ int main() {
     embedding_bag_f32_kernel_example();
     embedding_bag_f32_forced_ref_kernel_example();
     embedding_f32_kernel_example();
+    embedding_bag_f16_kernel_example();
     embedding_bag_u4_kernel_example();
     embedding_bag_u4_ref_kernel_example();
     group_embedding_bag_direct_example();

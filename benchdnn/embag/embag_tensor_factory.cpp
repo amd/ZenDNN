@@ -23,7 +23,8 @@ namespace embag {
 int create_table_tensor(tensor_factory_t &tensor_factory, EmbagConfig cfg,
                         tensor_t &table) {
   if (cfg.dt[0] == data_type_t::f32 ||
-      cfg.dt[0] == data_type_t::bf16) {
+      cfg.dt[0] == data_type_t::bf16 ||
+      cfg.dt[0] == data_type_t::f16) {
     table = tensor_factory.uniform_dist_tensor({cfg.num_embeddings, cfg.embedding_dims},cfg.dt[0],
             2.0f, "table_tensor");
   }

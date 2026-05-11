@@ -29,6 +29,7 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `MATMUL_F32_TOL`: Tolerance for floating-point precision in tests (default: `0.001`).
 - `MATMUL_BF16_TOL`: Tolerance for BF16 precision in tests (default: `0.01`).
 - F16 tests use the same tolerance as BF16 (`MATMUL_BF16_TOL`).
+- `EMBAG_F16_TOL`: Tolerance for EmbeddingBag FP16 precision in tests (default: `0.01`).
 - `NORM_F32_TOL`: Tolerance for normalization F32 tests (default: `0.001`).
 - `NORM_BF16_TOL`: Tolerance for normalization BF16 tests (default: `0.01`).
 - `SOFTMAX_F32_TOL`: Tolerance for softmax F32 tests (default: `0.001`).
@@ -471,7 +472,7 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ### Matmul Tests
  - Matmul TestSuite has nine testcases (F32_F32, BF16_F32, BF16_BF16, F16_F16, F16_F32, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride, F16_F16_Stride)
 
-> **Note:** F16 tests (F16_F16, F16_F32, F16_F16_Stride) require **AVX512-FP16** or **AVX-NE-CONVERT** ISA support. On unsupported platforms, these tests are automatically skipped via `GTEST_SKIP()` with an informative message.
+> **Note:** F16 tests (F16_F16, F16_F32, F16_F16_Stride) require **AVX512-FP16** support. On unsupported platforms, these tests are automatically skipped via `GTEST_SKIP()` with an informative message.
 
 1. Run all BF16 Input, F32 Output matmul tests:
 ``` bash
@@ -503,7 +504,10 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```
 
 ### Embedding Bag Tests
- - Embedding Bag TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16)
+ - Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+
 1. Run all F32 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F32_F32/*
@@ -512,41 +516,56 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F32_BF16/*
 ```
-3. Run all BF16 Input, F32 Output embedding bag tests:
+3. Run all F32 Input, F16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F32_F16/*
+```
+4. Run all BF16 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.BF16_F32/*
 ```
-4. Run all BF16 Input, BF16 Output embedding bag tests:
+5. Run all BF16 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.BF16_BF16/*
 ```
-5. Run all INT8 Input, F32 Output embedding bag tests:
+6. Run all F16 Input, F32 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F16_F32/*
+```
+7. Run all F16 Input, F16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F16_F16/*
+```
+8. Run all INT8 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_F32/*
 ```
-6. Run all INT8 Input, BF16 Output embedding bag tests:
+9. Run all INT8 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_BF16/*
 ```
-7. Run all S4 Input, F32 Output embedding bag tests:
+10. Run all S4 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_F32/*
 ```
-8. Run all S4 Input, BF16 Output embedding bag tests:
+11. Run all S4 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_BF16/*
 ```
-9. Run all U4 Input, F32 Output embedding bag tests:
+12. Run all U4 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_F32/*
 ```
-10. Run all U4 Input, BF16 Output embedding bag tests:
+13. Run all U4 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_BF16/*
 ```
 
 ### Embedding Tests
- - Embedding TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U_BF16)
+ - Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+
 1. Run all F32 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_F32/*
@@ -555,35 +574,47 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_BF16/*
 ```
-3. Run all BF16 Input, F32 Output embedding tests:
+3. Run all F32 Input, F16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_F16/*
+```
+4. Run all BF16 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.BF16_F32/*
 ```
-4. Run all BF16 Input, BF16 Output embedding tests:
+5. Run all BF16 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.BF16_BF16/*
 ```
-5. Run all INT8 Input, F32 Output embedding tests:
+6. Run all F16 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F16_F32/*
+```
+7. Run all F16 Input, F16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F16_F16/*
+```
+8. Run all INT8 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_F32/*
 ```
-6. Run all INT8 Input, BF16 Output embedding tests:
+9. Run all INT8 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_BF16/*
 ```
-7. Run all S4 Input, F32 Output embedding tests:
+10. Run all S4 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_F32/*
 ```
-8. Run all S4 Input, BF16 Output embedding tests:
+11. Run all S4 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_BF16/*
 ```
-9. Run all U4 Input, F32 Output embedding tests:
+12. Run all U4 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_F32/*
 ```
-10. Run all U4 Input, BF16 Output embedding tests:
+13. Run all U4 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_BF16/*
 ```
