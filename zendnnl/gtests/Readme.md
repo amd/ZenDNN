@@ -23,6 +23,8 @@ ZenDNN GTest provides flexibility in configuring tests through command-line argu
 - **LOWOHA**: Enable or disable Low Overhead API using `--lowoha` parameter.
 - **Thread Control**: Specify the number of threads for parallel execution using `--num_threads` parameter.
 - **Input File Support**: Use `--input_file` with `--op` and optionally `--ndims` parameters to read test configurations from a file instead of random generation.
+- **Per-suite overrides**: Optional flags (`--m`, `--k`, `--batch_size`, `--dim_choice`, `--norm_type`, etc.) fix specific fields when building randomized `MatmulType`, `BatchMatmulType`, `ReorderType`, embedding, or normalization parameters. See [Command-line parameters (reference)](#command-line-parameters-reference).
+- **LOWOHA dimension mode**: With `--lowoha true`, `--dim_choice` selects how LOWOHA reorder shapes `M`, `N`, and `batch` are constrained (see [LOWOHA Reorder Tests](#lowoha-reorder-tests)).
 
 ## **Configurable Parameters**
 You can modify the following parameters in the source code (`gtest_main.cpp`):
@@ -128,7 +130,7 @@ Key tolerance parameters in `gtest_main.cpp`:
 const float epsilon_f32     = 1.19e-7;  // Base F32 tolerance
 const float epsilon_bf16    = 9.76e-4;    // Base BF16 tolerance
 const float rtol_f32        = 1e-5;    // F32 relative tolerance
-const float rtol_bf16       = 1e-2;;    // BF16 relative tolerance
+const float rtol_bf16       = 1e-2;    // BF16 relative tolerance
 ```
 
 ### **Adaptive Scaling**
@@ -202,102 +204,89 @@ cmake --build .
 ./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --input_file <InputFile> --op <Operator> --ndims <Dimensions> --lowoha <true/false> --num_threads <num_threads>
 ```
 
-## **Parameters**
-1. **`--gtest_filter=<TestSuite>/<TestCase>`** (Optional):
-   - Specifies the test suite and test case to run.
-   - *Example*:
-     - `Reorder/TestReorder.BF16_F32/*`: Runs all tests for BF16 reorder followed by Matrix (BF16 Input and FP32 Output).
-     - `Matmul/TestMatmul.BF16_BF16/23`: Runs the 23rd test case for BF16 Input and BF16 Output with matrix multiplication.
+## **Command-line parameters (reference)**
 
-2. **`--seed <Seed>`** (Optional):
-   - Sets the seed based on the seed value for generating test data.
-   - *Example*:
-     - `1245`: Uses 1245 as the seed for randomization.
+Custom ZenDNN flags use a **two-token** form: `--<name> <value>`. The internal parser ignores any `--` argument whose name contains `gtest` (GoogleTest still receives those via `InitGoogleTest`).
 
-3. **`--postop <PostOp>`** (Optional):
-   - Specifies the post-operation to apply during tests.
-   - **Multiple post-ops:** use **`:`** between names so more than one post-op runs in sequence after the GEMM, left to right, e.g. `relu:tanh`, `sigmoid:binary_add:gelu_erf`.
-   - The total number of post-ops in the chain must not exceed **`POST_OPS_LIMIT`** (default `3`, see `gtest_utils.hpp` and **Configurable Parameters**).
-   - The same `:`-separated list can appear in the `postOp` field of a matmul input file line; you would use the file (not this flag) when running from `--input_file`.
-   - *Examples:* `--postop relu:sigmoid`; a matmul input file line can use the same in the `postOp` field, e.g. `…,relu:tanh,…` between the shape fields and the kernel (see *Input File Format* / *Matmul (2D) Input File Format*).
-4. **`--test <num_of_tests>`** (Optional):
-   - Specifies the number of tests to be run for test-suite.
+**Booleans:** `true` / `false` or `1` / `0`.
 
-5. **`--backend <Backend>`** (Optional):
-   - Specifies the computational backend/algorithm to use.
-   - *Supported backends*:
-     - `aocl_dlp`
-     - `aocl_dlp_blocked`
-     - `onednn`
-     - `onednn_blocked`
-     - `libxsmm`
-     - `libxsmm_blocked`
-   - *Example*:
-     - `aocl_dlp`: Uses AOCL DLP backend for computations
+### **Global**
 
-6. **`--lowoha <true/false>`** (Optional):
-   - Specifies whether to use LOWOHA (Low Overhead API) mode.
-   - *Example*:
-     - `true`: Use Low Overhead API
-     - `false`: Use Regular API
-   - **Default behavior varies by test suite**:
-     - **Reorder tests**: Random 50/50 selection between LOWOHA and regular reorder tests per instance
-       - `--lowoha true`: Only LOWOHA reorder tests run (regular tests are skipped)
-       - `--lowoha false`: Only regular reorder tests run (LOWOHA tests are skipped)
-     - **Matmul/BatchMatmul tests**: Tests are automatically partitioned into thirds:
-       - First third: LOWOHA off
-       - Second third: LOWOHA on
-       - Last third: LOWOHA on with LIBXSMM backend
-     - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
-     - **Normalization tests**: Always use LOWOHA API (normalization is a LOWOHA-only operator)
-     - **Softmax tests**: Always use LOWOHA API (softmax is a LOWOHA-only operator)
-   - **Note**: For LIBXSMM backends, LOWOHA is always enabled by default
-
-7. **`--input_file <InputFile>`** (Optional):
-   - Specifies an input file containing test configurations for operators.
-   - When provided, test inputs will be read from the file instead of random generation.
-   - Must be used in conjunction with `--op` parameter.
-   - *Example*:
-     - `input.txt`: Reads test configurations from input.txt file
-
-8. **`--op <Operator>`** (Optional):
-   - Specifies the operator type when using input file mode.
-   - Required when `--input_file` is provided to determine how to parse the file.
-   - *Supported operators*:
-     - `matmul`: Matrix multiplication operator
-     - `reorder`: Reorder operator
-   - *Example*:
-     - `matmul`: Process matmul test configurations from input file
-
-9. **`--ndims <Dimensions>`** (Optional):
-   - Specifies the number of dimensions for the operator.
-   - Required when `--input_file` is provided to distinguish between operation types.
-   - **Required for batch matmul** (3D matmul) operations.
-   - *Supported values*:
-     - `2`: 2D matmul (standard matrix multiplication)
-     - `3`: 3D matmul (batch matrix multiplication) - **required for batch matmul**
-   - *Example*:
-     - `2`: Process 2D matmul test configurations
-     - `3`: Process batch matmul test configurations
-
-10. **`--num_threads <num_threads>`** (Optional):
-   - Specifies the number of threads to use for parallel execution.
-   - *Example*:
-     - `8`: Uses 8 threads for execution
-   - *Default*: Random value is selected from available thread count
+| Flag | Description |
+|------|-------------|
+| `--seed` | `int64_t` seed for RNG (`gtest_main.cpp` default: wall-clock if omitted). |
+| `--test` | Number of randomized parameter sets per suite (`uint32`, executable init default **400**). |
+| `--postop` | One post-op or a **`:`**-separated chain (max **`POST_OPS_LIMIT`**). |
+| `--backend` | Matmul/reorder kernel name (`aocl_dlp`, `onednn`, `libxsmm`, …). |
+| `--ai_test_mode` | AI gtests only (`ZENDNNL_BUILD_AI_GTESTS=ON`): mode string (`presub`, `postsub`, `nightly`, `minimal`, `accuracy`, `invalid`, `boundary`, `coverage`, …). |
+| `--lowoha` | `true`/`false`/`1`/`0`; behavior varies by suite. |
+| `--num_threads` | Positive `uint32`: fixed OpenMP thread count for tests; **0** means “not set” and thread count is randomized. |
+| `--input_file` | Path to operator-specific input file (with `--op`, `--ndims` as needed). |
+| `--op` | `matmul` or `reorder` for input-file mode. |
+| `--ndims` | `2` (2D matmul) or `3` (batch matmul) for matmul input files. |
 
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
  - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
- - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
+ - If **`<num_of_tests>`** parameter is not provided, gtest uses the executable default for `--test` (currently `400`).
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
  - If **`<lowoha>`** parameter is not provided:
    - **Reorder tests**: Random 50/50 selection between LOWOHA and regular reorder tests per instance
    - **Matmul/BatchMatmul tests**: Tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios
    - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
+   - **Normalization tests**: Always use LOWOHA API (normalization is a LOWOHA-only operator)
+   - **Softmax tests**: Always use LOWOHA API (softmax is a LOWOHA-only operator)
  - If **`<num_threads>`** parameter is not provided, a random value is selected from available thread count.
  - If **`<InputFile>`**, **`<Operator>`**, or **`<Dimensions>`** are not provided, tests will use randomly generated parameters instead of reading from a file.
  - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops and backends.
+
+### **Matmul, batch matmul, and reorder (`CLIParams` in `gtest_utils.hpp`)**
+
+| Flag | Type / values | Purpose |
+|------|----------------|--------|
+| `--m`, `--k`, `--n` | Positive integer | Fixed GEMM / reorder dimensions. |
+| `--batch_size` | Positive integer | Batch for batch matmul; also used in LOWOHA reorder paths. |
+| `--transA`, `--transB` | Boolean | Transpose flags for A/B. |
+| `--alpha`, `--beta` | Float | GEMM scaling factors. |
+| `--src_dtype`, `--dst_dtype` | See below | Source / destination dtypes (`strToDatatype` in `gtest_utils.cpp`). |
+| `--weight_granularity` | Matmul / batch matmul: `tensor`, `per_tensor`, `channel`, `per_channel`; LOWOHA reorder: `tensor`, `per_tensor`, `channel`, `per_channel`, `group`, `per_group` | Weight quantization granularity. |
+| `--inplace_reorder` | Boolean | Regular reorder + matmul path. |
+| `--num_groups` | Positive integer | Group count for LOWOHA reorder when granularity is `group` or `per_group`. |
+| `--dim_choice` | Integer, **`1`–`3` only** | **LOWOHA reorder only** (`--lowoha true`). Parsed strictly: values outside `1`–`3`, zero, negatives, or non-integers are **ignored** (logged) and behave like omitting the flag. Controls tensor dimensionality as below. |
+
+**`--dim_choice` (LOWOHA reorder):** After resolving `--m`, `--n`, and `--batch_size` (or their random defaults), the constructor applies:
+- **`3`**: explicit 3D mode — keeps `M`, `N`, and the initialized 3D-capable `batch` (from `--batch_size` when set, otherwise a random value in the usual 3D batch range).
+- **`2`**: explicit 2D mode — sets `batch = 1` (`M` and `N` unchanged).
+- **`1`**: explicit 1D mode — sets `M = 1` and `batch = 0`.
+
+If `--dim_choice` is omitted **or invalid on the command line**, dimensionality is chosen at random: ~20% 1D (`M = 1`, `batch = 0`), ~50% 2D (`batch = 1`), ~30% 3D (`batch = --batch_size` if provided, otherwise random in the 3D-capable range `[2, 256]`).
+
+**Note:** If `dim_choice` were supplied programmatically with a value outside `1`–`3`, the reorder parameter constructor would leave `M`, `N`, and `batch` unchanged and log a message; the CLI path does not pass invalid values through because of parse-time validation above.
+
+**`--src_dtype` / `--dst_dtype` strings (exact, lowercase):** `f32`, `f16`, `bf16`, `s32`, `s16`, `s8`, `s4`, `u32`, `u16`, `u8`, `u4`.
+
+**Note:** **`s64`** is for **`--indices_dtype`** only, not **`--src_dtype`** / **`--dst_dtype`**. Unsupported matmul src/dst dtypes are replaced at random. **`group`** / **`per_group`** granularity is LOWOHA reorder only; matmul uses tensor or channel granularity.
+
+### **Embedding bag**
+
+| Flag | Type / values |
+|------|----------------|
+| `--num_embeddings`, `--embedding_dim`, `--num_bags`, `--num_indices` | Positive integers |
+| `--embag_algo` | `sum`, `mean`, `max` |
+| `--padding_index` | Signed integer (e.g. `-1` for none) |
+| `--include_last_offset`, `--is_weights`, `--fp16_scale_bias`, `--strided` | Boolean |
+| `--indices_dtype` | **`s32`** or **`s64`** |
+
+### **Normalization**
+
+| Flag | Type / values |
+|------|----------------|
+| `--norm_type` | `layer` → LayerNorm, `batch` → BatchNorm, `rms` → RMSNorm, `fusedaddrms` → FusedAddRMSNorm |
+| `--norm_shape` | Comma-separated positive integers; a single dimension is valid for `layer`, `rms`, and `fusedaddrms`, while `batch` requires **at least two** (e.g. `32`, `2,8,32`) |
+| `--use_scale`, `--use_shift` | Boolean |
+| `--gamma_dt`, `--beta_dt` | **`bf16`** or **`f32`** |
+
+Unset optional flags keep the suite’s **random defaults** defined in the corresponding `*Type` constructors.
 
 ## **Input File Format**
 
@@ -386,7 +375,7 @@ Each LOWOHA reorder test instance is parameterized with randomly generated value
 
 | Parameter | Range / Distribution | Description |
 |-----------|---------------------|-------------|
-| **Dimensionality** | 1D (20%), 2D (50%), 3D (30%) | Tensor dimensionality |
+| **Dimensionality** | 1D (20%), 2D (50%), 3D (30%) unless overridden | Tensor dimensionality; use `--dim_choice` `1`/`2`/`3` to fix rank (`--dim_choice` must be in range or it is ignored; see [Command-line parameters (reference)](#command-line-parameters-reference)) |
 | **M** | [1, 3000] | Row dimension (fixed to 1 for 1D) |
 | **N** | [1, 3000] | Column dimension |
 | **Batch** | [2, 256] for 3D | Batch dimension |
@@ -449,22 +438,26 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT/0 --seed 42 --num_threads 8 --lowoha true
 ```
+7. Force LOWOHA tensor rank with `--dim_choice` (`1` = 1D, `2` = 2D, `3` = 3D; invalid values are ignored):
+```bash
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT/* --lowoha true --dim_choice 2
+```
 
 #### Regular Reorder Tests (Reorder + Matmul)
 
-7. Run all regular reorder tests:
+8. Run all regular reorder tests:
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.* --lowoha false
 ```
-8. Run FP32 reorder + matmul tests:
+9. Run FP32 reorder + matmul tests:
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/* --lowoha false
 ```
-9. Run BF16 reorder + matmul tests (F32 output):
+10. Run BF16 reorder + matmul tests (F32 output):
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F32/* --lowoha false
 ```
-10. Run BF16 reorder + matmul tests (BF16 output):
+11. Run BF16 reorder + matmul tests (BF16 output):
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_BF16/* --lowoha false
 ```

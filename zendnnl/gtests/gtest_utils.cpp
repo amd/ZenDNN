@@ -95,15 +95,17 @@ void repack_weights_q8_0(const int8_t *weight_buffer,
 MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   // Use std::mt19937 for random float generation
   std::mt19937 gen(rand());
-  bool test_gemv_m1 = false;
-  if (!cmd_test_gemv_m1.empty()) {
-    test_gemv_m1 = (cmd_test_gemv_m1 == "1") || (cmd_test_gemv_m1 == "true");
-  }
-  matmul_m   = test_gemv_m1 ? 1 : MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  transA     = rand() % 2;
-  transB     = rand() % 2;
+  matmul_m = (cli_params.m &&
+              *cli_params.m > 0) ? *cli_params.m : MATMUL_SIZE_START + rand() %
+             MATMUL_SIZE_END;
+  matmul_k = (cli_params.k &&
+              *cli_params.k > 0) ? *cli_params.k : MATMUL_SIZE_START + rand() %
+             MATMUL_SIZE_END;
+  matmul_n = (cli_params.n &&
+              *cli_params.n > 0) ? *cli_params.n : MATMUL_SIZE_START + rand() %
+             MATMUL_SIZE_END;
+  transA     = cli_params.transA ? *cli_params.transA : rand() % 2;
+  transB     = cli_params.transB ? *cli_params.transB : rand() % 2;
   // Post-op selection based on command-line input or random selection
   if (!cmd_post_op.empty()) {
     for (const auto &po : split(cmd_post_op, ':')) {
@@ -122,8 +124,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   }
 
   std::uniform_real_distribution<float> dist(0.0, 10.0);
-  alpha    = dist(gen);
-  beta     = dist(gen);
+  alpha    = cli_params.alpha ? *cli_params.alpha : dist(gen);
+  beta     = cli_params.beta ? *cli_params.beta : dist(gen);
 
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -224,7 +226,13 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   use_LOWOHA = algo_forces_lowoha ? true : use_LOWOHA;
   if (is_libxsmm_algo(algo)) {
     alpha = 1.0f;
-    beta = rand() % 2;
+    if (cli_params.beta && beta != 0.0f && beta != 1.0f) {
+      log_info("Unsupported beta for LIBXSMM: ", beta,
+               " (use 0 or 1); using random beta.");
+    }
+    if (!cli_params.beta || (beta != 0.0f && beta != 1.0f)) {
+      beta = rand() % 2;
+    }
     //ToDo: Need to support silu, gelu_tanh, clip.
     for (uint32_t i = 0; i < po_types.size(); ++i) {
       if (po_types[i] == post_op_type_t::gelu_tanh ||
@@ -233,10 +241,43 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
       }
     }
   }
-  source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
-  output_dtype = dtype_arr[rand() % dtype_size];
-  weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
-                       quant_granularity_t::channel;
+
+  if (cli_params.src_dtype &&
+      (*cli_params.src_dtype == data_type_t::s8 ||
+       *cli_params.src_dtype == data_type_t::u8)) {
+    source_dtype = *cli_params.src_dtype;
+  }
+  else {
+    if (cli_params.src_dtype) {
+      log_info("Unsupported src_dtype: ", dtype_info(*cli_params.src_dtype),
+               " (use s8, u8); using random src_dtype.");
+    }
+    source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+  }
+
+  if (cli_params.dst_dtype && (*cli_params.dst_dtype == data_type_t::s8 ||
+                               *cli_params.dst_dtype == data_type_t::u8 ||
+                               *cli_params.dst_dtype == data_type_t::f32 ||
+                               *cli_params.dst_dtype == data_type_t::bf16)) {
+    output_dtype = *cli_params.dst_dtype;
+  }
+  else {
+    if (cli_params.dst_dtype) {
+      log_info("Unsupported dst_dtype: ", dtype_info(*cli_params.dst_dtype),
+               " (use s8, u8, f32, bf16); using random dst_dtype.");
+    }
+    output_dtype = dtype_arr[rand() % dtype_size];
+  }
+
+  if (cli_params.weight_granularity &&
+      (*cli_params.weight_granularity == quant_granularity_t::tensor ||
+       *cli_params.weight_granularity == quant_granularity_t::channel)) {
+    weight_granularity = *cli_params.weight_granularity;
+  }
+  else {
+    weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
+                         quant_granularity_t::channel;
+  }
 }
 
 // GroupQuantMatmulType constructor — constrained-by-construction params for the
@@ -247,7 +288,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
 // INT8 K-grouping doesn't need per-test rounding.  The fixture's
 // alpha=1, beta=0, transA=transB=false constants live on
 // `TestGroupMatmulQuant`; this struct only carries the random axes.
-GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index, uint32_t total_tests) {
+GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index,
+    uint32_t total_tests) {
   std::mt19937 gen(rand());
   matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   // K aligned to 4 — INT8 SYM/DYNAMIC tests previously rounded internally
@@ -305,18 +347,42 @@ GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index, uint32_t total_t
 
 // EmbagType constructor
 EmbagType::EmbagType() {
-  num_embeddings = 128 + std::rand() % 2048;
-  embedding_dim = 16 + std::rand() % 512;
-  num_indices = 128 + std::rand() % 2048;
-  num_bags = 16 + std::rand() % 512;
-  algo = static_cast<embag_algo_t>(1 + std::rand() % 3);  // sum=1, mean=2, max=3
-  padding_index = -1;
-  include_last_offset = std::rand() % 2;
-  is_weights = std::rand() % 2;
-  indices_dtype = std::rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  num_embeddings = (cli_params.num_embeddings && *cli_params.num_embeddings > 0)
+                   ? *cli_params.num_embeddings
+                   : (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
+  embedding_dim = (cli_params.embedding_dim && *cli_params.embedding_dim > 0)
+                  ? *cli_params.embedding_dim
+                  : (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
+  num_indices = (cli_params.num_indices && *cli_params.num_indices > 0)
+                ? *cli_params.num_indices : (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
+  num_bags = (cli_params.num_bags && *cli_params.num_bags > 0)
+             ? *cli_params.num_bags
+             : (NUM_BAGS_START + std::rand() % NUM_BAGS_END);
+  algo = cli_params.embag_algo ? *cli_params.embag_algo :
+         static_cast<embag_algo_t>(1 + std::rand() % 3); // sum=1, mean=2, max=3
+  padding_index = cli_params.padding_index ? *cli_params.padding_index : -1;
+  include_last_offset = cli_params.include_last_offset ?
+                        *cli_params.include_last_offset : std::rand() % 2;
+  is_weights = cli_params.is_weights ? *cli_params.is_weights : std::rand() % 2;
+  if (cli_params.indices_dtype) {
+    if (*cli_params.indices_dtype == data_type_t::s32 ||
+        *cli_params.indices_dtype == data_type_t::s64) {
+      indices_dtype = *cli_params.indices_dtype;
+    }
+    else {
+      log_info("Unsupported indices_dtype: ", dtype_info(*cli_params.indices_dtype),
+               " (use s32, s64); using random indices_dtype.");
+      indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+    }
+  }
+  else {
+    indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  }
   offsets_dtype = indices_dtype;
-  fp16_scale_bias = std::rand() % 2;
-  strided = std::rand() % 2;
+  fp16_scale_bias = cli_params.fp16_scale_bias ? *cli_params.fp16_scale_bias :
+                    std::rand() % 2;
+  strided = cli_params.strided ? *cli_params.strided : std::rand() % 2;
+  // LOWOHA configuration based on command-line input or random selection
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
@@ -334,14 +400,34 @@ EmbagType::EmbagType() {
 
 // EmbeddingType constructor
 EmbeddingType::EmbeddingType() {
-  num_embeddings = 128 + std::rand() % 2048;
-  embedding_dim = 16 + std::rand() % 512;
-  num_indices = 128 + std::rand() % 2048;
-  padding_index = -1;
-  is_weights = std::rand() % 2;
-  indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
-  fp16_scale_bias = std::rand() % 2;
-  strided = std::rand() % 2;
+  num_embeddings = (cli_params.num_embeddings && *cli_params.num_embeddings > 0)
+                   ? *cli_params.num_embeddings
+                   : (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
+  embedding_dim = (cli_params.embedding_dim && *cli_params.embedding_dim > 0)
+                  ? *cli_params.embedding_dim
+                  : (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
+  num_indices = (cli_params.num_indices && *cli_params.num_indices > 0)
+                ? *cli_params.num_indices
+                : (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
+  padding_index = cli_params.padding_index ? *cli_params.padding_index : -1;
+  is_weights = cli_params.is_weights ? *cli_params.is_weights : std::rand() % 2;
+  if (cli_params.indices_dtype) {
+    if (*cli_params.indices_dtype == data_type_t::s32 ||
+        *cli_params.indices_dtype == data_type_t::s64) {
+      indices_dtype = *cli_params.indices_dtype;
+    }
+    else {
+      log_info("Unsupported indices_dtype: ", dtype_info(*cli_params.indices_dtype),
+               " (use s32, s64); using random indices_dtype.");
+      indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+    }
+  }
+  else {
+    indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  }
+  fp16_scale_bias = cli_params.fp16_scale_bias ? *cli_params.fp16_scale_bias :
+                    std::rand() % 2;
+  strided = cli_params.strided ? *cli_params.strided : std::rand() % 2;
   // LOWOHA configuration based on command-line input or random selection
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
@@ -362,29 +448,48 @@ EmbeddingType::EmbeddingType() {
 
 // NormalizationType constructor
 NormalizationType::NormalizationType() {
-  int type_choice = std::rand() % 4;
-  switch (type_choice) {
-  case 0:
-    norm_type = norm_type_t::LAYER_NORM;
-    break;
-  case 1:
-    norm_type = norm_type_t::RMS_NORM;
-    break;
-  case 2:
-    norm_type = norm_type_t::FUSED_ADD_RMS_NORM;
-    break;
-  case 3:
-    norm_type = norm_type_t::BATCH_NORM;
-    break;
+  if (cli_params.norm_type) {
+    norm_type = *cli_params.norm_type;
+  }
+  else {
+    int type_choice = std::rand() % 4;
+    switch (type_choice) {
+    case 0:
+      norm_type = norm_type_t::LAYER_NORM;
+      break;
+    case 1:
+      norm_type = norm_type_t::RMS_NORM;
+      break;
+    case 2:
+      norm_type = norm_type_t::FUSED_ADD_RMS_NORM;
+      break;
+    case 3:
+      norm_type = norm_type_t::BATCH_NORM;
+      break;
+    }
   }
 
   if (norm_type == norm_type_t::BATCH_NORM) {
-    int ndims = 2 + std::rand() % 4;
-    shape.resize(ndims);
-    shape[0] = 1 + std::rand() % 8;
-    shape[1] = 1 + std::rand() % 32;
-    for (int i = 2; i < ndims; ++i) {
-      shape[i] = 1 + std::rand() % 16;
+    int ndims = 0;
+    if (cli_params.norm_shape) {
+      const auto &cli_shape = *cli_params.norm_shape;
+      if (cli_shape.size() < 2) {
+        log_info("norm_shape for batch norm needs at least two dimensions; "
+                 "using random shape.");
+      }
+      else {
+        shape = cli_shape;
+        ndims = static_cast<int>(shape.size());
+      }
+    }
+    if (ndims == 0) {
+      ndims = 2 + std::rand() % 4;
+      shape.resize(ndims);
+      shape[0] = 1 + std::rand() % 8;
+      shape[1] = 1 + std::rand() % 32;
+      for (int i = 2; i < ndims; ++i) {
+        shape[i] = 1 + std::rand() % 16;
+      }
     }
     batch = shape[0];
     num_channels = shape[1];
@@ -394,12 +499,25 @@ NormalizationType::NormalizationType() {
     }
   }
   else {
-    int ndims = 1 + std::rand() % 5;
-    shape.resize(ndims);
-    for (int i = 0; i < ndims - 1; ++i) {
-      shape[i] = 1 + std::rand() % 8;
+    int ndims = 0;
+    if (cli_params.norm_shape) {
+      const auto &cli_shape = *cli_params.norm_shape;
+      if (cli_shape.empty()) {
+        log_info("norm_shape needs at least one dimension; using random shape.");
+      }
+      else {
+        shape = cli_shape;
+        ndims = static_cast<int>(shape.size());
+      }
     }
-    shape[ndims - 1] = 1 + std::rand() % 512;
+    if (ndims == 0) {
+      ndims = 1 + std::rand() % 5;
+      shape.resize(ndims);
+      for (int i = 0; i < ndims - 1; ++i) {
+        shape[i] = 1 + std::rand() % 8;
+      }
+      shape[ndims - 1] = 1 + std::rand() % 512;
+    }
 
     int norm_ndims_local;
     int choice = std::rand() % 20;
@@ -430,17 +548,45 @@ NormalizationType::NormalizationType() {
   epsilon = (norm_type == norm_type_t::RMS_NORM ||
              norm_type == norm_type_t::FUSED_ADD_RMS_NORM) ? 1e-6f : 1e-5f;
 
-  use_scale = (std::rand() % 4 != 0); // 75% true
+  use_scale = cli_params.use_scale ? *cli_params.use_scale :
+              (std::rand() % 4 != 0); // 75% true
   if (norm_type == norm_type_t::LAYER_NORM ||
       norm_type == norm_type_t::BATCH_NORM) {
-    use_shift = (std::rand() % 4 != 0); // 75% true
+    use_shift = cli_params.use_shift ? *cli_params.use_shift :
+                (std::rand() % 4 != 0); // 75% true
   }
   else {
-    use_shift = false;
+    use_shift = cli_params.use_shift ? *cli_params.use_shift : false;
   }
 
-  gamma_dt = (std::rand() % 4 == 0) ? data_type_t::bf16 : data_type_t::f32;
-  beta_dt  = (std::rand() % 4 == 0) ? data_type_t::bf16 : data_type_t::f32;
+  if (cli_params.gamma_dt) {
+    if (*cli_params.gamma_dt == data_type_t::bf16 ||
+        *cli_params.gamma_dt == data_type_t::f32) {
+      gamma_dt = *cli_params.gamma_dt;
+    }
+    else {
+      log_info("Unsupported gamma_dt: ", dtype_info(*cli_params.gamma_dt),
+               " (use bf16, f32); using random gamma_dt.");
+      gamma_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
+    }
+  }
+  else {
+    gamma_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
+  }
+  if (cli_params.beta_dt) {
+    if (*cli_params.beta_dt == data_type_t::bf16 ||
+        *cli_params.beta_dt == data_type_t::f32) {
+      beta_dt = *cli_params.beta_dt;
+    }
+    else {
+      log_info("Unsupported beta_dt: ", dtype_info(*cli_params.beta_dt),
+               " (use bf16, f32); using random beta_dt.");
+      beta_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
+    }
+  }
+  else {
+    beta_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
+  }
 
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -486,7 +632,9 @@ SoftmaxType::SoftmaxType() {
 }
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
-  batch_size = BATCH_START + rand() % BATCH_END;
+  batch_size = (cli_params.batch_size &&
+                *cli_params.batch_size > 0) ? *cli_params.batch_size : BATCH_START + rand() %
+               BATCH_END;
   mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
 }
 
@@ -555,33 +703,56 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 
   if (!is_lowoha_test) {
     // Initialize Regular Reorder params
-    inplace_reorder = rand() % 2;
+    inplace_reorder = cli_params.inplace_reorder ? *cli_params.inplace_reorder :
+                      rand() % 2;
     mat = MatmulType(test_index, total_tests);
     mat.use_LOWOHA = is_lowoha_test;
   }
   else {
-    // Initialize LOWOHA params
-    // Randomly decide dimensionality: 1D (20%), 2D (50%), 3D (30%)
-    int dim_choice = std::rand() % 10;
-    if (dim_choice < 2) {
-      M = 1;
-      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
-      batch = 0;
-    }
-    else if (dim_choice < 7) {
-      M = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
-      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
-      batch = 1;
+    M = (cli_params.m && *cli_params.m > 0)
+        ? *cli_params.m
+        : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
+    N = (cli_params.n && *cli_params.n > 0)
+        ? *cli_params.n
+        : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
+    // Default batch to a 3D-capable value unless dimensionality overrides it.
+    batch = (cli_params.batch_size && *cli_params.batch_size > 0)
+            ? *cli_params.batch_size
+            : 2 + std::rand() % (BATCH_END - 1);
+
+    // dim_choice: LOWOHA tensor rank after M/N/batch defaults. CLI --dim_choice:
+    // 1 -> 1D (M=1, batch=0), 2 -> 2D (batch=1), 3 -> leave sizes (3D). If
+    // omitted, random dim_choice in [0,9] gives ~20% 1D, ~50% 2D, ~30% 3D.
+    if (cli_params.dim_choice) {
+      int dim_choice = *cli_params.dim_choice;
+      if (dim_choice == 1) {
+        M = 1;
+        batch = 0;
+      }
+      else if (dim_choice == 2) {
+        batch = 1;
+      }
     }
     else {
-      M = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
-      N = MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END;
-      batch = 2 + std::rand() % (BATCH_END - 1);
+      // Initialize LOWOHA params
+      // Randomly decide dimensionality: 1D (20%), 2D (50%), 3D (30%)
+      int dim_choice = std::rand() % 10;
+      if (dim_choice < 2) {
+        M = 1;
+        batch = 0;
+      }
+      else if (dim_choice < 7) {
+        batch = 1;
+      }
+      else {
+        batch = (cli_params.batch_size &&
+                 *cli_params.batch_size > 0) ? *cli_params.batch_size : 2 + std::rand() %
+                (BATCH_END - 1);
+      }
     }
-
     // Default data types (will be overridden by individual TEST_P tests)
-    src_dtype = data_type_t::f32;
-    dst_dtype = data_type_t::s8;
+    src_dtype = cli_params.src_dtype ? *cli_params.src_dtype : data_type_t::f32;
+    dst_dtype = cli_params.dst_dtype ? *cli_params.dst_dtype : data_type_t::s8;
     use_strided_src = false;
     lowoha_algo = reorder_algo_t::native;
 
@@ -594,39 +765,64 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
       num_threads = 1 + (std::rand() % max_threads);
     }
 
-    // Quantization granularity: per-tensor (60%), per-channel (30%), per-group (10%)
-    int granularity_choice = std::rand() % 10;
-    if (batch == 0) {
-      granularity = (granularity_choice < 7) ? quant_granularity_t::tensor
-                    : quant_granularity_t::channel;
-      num_groups = 1;
-    }
-    else {
-      // 2D/3D: per-tensor (60%), per-channel (30%), per-group (10%)
-      if (granularity_choice < 6) {
-        granularity = quant_granularity_t::tensor;
+    if (cli_params.weight_granularity) {
+      granularity = *cli_params.weight_granularity;
+      if (granularity == quant_granularity_t::group) {
+        num_groups = cli_params.num_groups.has_value() ? *cli_params.num_groups : 1;
+        const bool group_ok = (batch != 0) && (num_groups >= 1) &&
+                              (M % num_groups == 0);
+        if (!group_ok) {
+          if (batch == 0) {
+            log_info("LOWOHA: per-group quantization requires batch>0 (2D/3D); "
+                     "falling back to per-channel");
+          }
+          else {
+            log_info("LOWOHA: invalid num_groups=", num_groups, " for M=", M,
+                     " (must be >= 1 and divide M); falling back to per-channel");
+          }
+          granularity = quant_granularity_t::channel;
+          num_groups = 1;
+        }
+      }
+      else {
         num_groups = 1;
       }
-      else if (granularity_choice < 9) {
-        granularity = quant_granularity_t::channel;
+    }
+    else {
+      // Quantization granularity: per-tensor (60%), per-channel (30%), per-group (10%)
+      int granularity_choice = std::rand() % 10;
+      if (batch == 0) {
+        granularity = (granularity_choice < 7) ? quant_granularity_t::tensor
+                      : quant_granularity_t::channel;
         num_groups = 1;
       }
       else {
-        granularity = quant_granularity_t::group;
-        // For per-group, num_groups must divide M evenly
-        std::vector<uint64_t> valid_groups;
-        for (uint64_t g = 2; g <= M && g <= 16; ++g) {
-          if (M % g == 0) {
-            valid_groups.push_back(g);
-          }
+        // 2D/3D: per-tensor (60%), per-channel (30%), per-group (10%)
+        if (granularity_choice < 6) {
+          granularity = quant_granularity_t::tensor;
+          num_groups = 1;
         }
-        if (valid_groups.empty()) {
-          // Fallback to per-channel if no valid group size
+        else if (granularity_choice < 9) {
           granularity = quant_granularity_t::channel;
           num_groups = 1;
         }
         else {
-          num_groups = valid_groups[std::rand() % valid_groups.size()];
+          granularity = quant_granularity_t::group;
+          // For per-group, num_groups must divide M evenly
+          std::vector<uint64_t> valid_groups;
+          for (uint64_t g = 2; g <= M && g <= 16; ++g) {
+            if (M % g == 0) {
+              valid_groups.push_back(g);
+            }
+          }
+          if (valid_groups.empty()) {
+            // Fallback to per-channel if no valid group size
+            granularity = quant_granularity_t::channel;
+            num_groups = 1;
+          }
+          else {
+            num_groups = valid_groups[std::rand() % valid_groups.size()];
+          }
         }
       }
     }
@@ -647,7 +843,7 @@ std::vector<tensor_t> make_binary_postop_tensors(
   for (const auto &po : po_types) {
     if (is_binary_postop(po)) {
       out.push_back(
-           tensor_factory.uniform_dist_tensor(output_shape, binary_dtype, uniform_range));
+        tensor_factory.uniform_dist_tensor(output_shape, binary_dtype, uniform_range));
     }
   }
   return out;
@@ -1269,7 +1465,8 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
                         uint32_t &tests, std::string &po, std::string &backend,
                         std::string &ai_test_mode, std::string &lowoha,
                         uint32_t &num_threads, std::string &input_file, std::string &op,
-                        uint32_t &ndims, std::string &test_gemv_m1) {
+                        uint32_t &ndims,
+                        CLIParams &cli_params) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -1283,11 +1480,41 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("backend", backend);
   read_from_umap("ai_test_mode", ai_test_mode);
   read_from_umap("lowoha", lowoha);
-  read_from_umap("num_threads", cmd_num_threads);
+  read_from_umap("num_threads", num_threads);
   read_from_umap("input_file", input_file);
   read_from_umap("op", op);
   read_from_umap("ndims", ndims);
-  read_from_umap("test_gemv_m1", test_gemv_m1);
+  read_from_umap("batch_size", cli_params.batch_size);
+  read_from_umap("m", cli_params.m);
+  read_from_umap("k", cli_params.k);
+  read_from_umap("n", cli_params.n);
+  read_from_umap("transA", cli_params.transA);
+  read_from_umap("transB", cli_params.transB);
+  read_from_umap("alpha", cli_params.alpha);
+  read_from_umap("beta", cli_params.beta);
+  read_from_umap("src_dtype", cli_params.src_dtype);
+  read_from_umap("dst_dtype", cli_params.dst_dtype);
+  read_from_umap("weight_granularity", cli_params.weight_granularity);
+  read_from_umap("inplace_reorder", cli_params.inplace_reorder);
+  read_from_umap("num_groups", cli_params.num_groups);
+  read_from_umap("dim_choice", cli_params.dim_choice);
+  read_from_umap("num_embeddings", cli_params.num_embeddings);
+  read_from_umap("embedding_dim", cli_params.embedding_dim);
+  read_from_umap("num_bags", cli_params.num_bags);
+  read_from_umap("num_indices", cli_params.num_indices);
+  read_from_umap("embag_algo", cli_params.embag_algo);
+  read_from_umap("padding_index", cli_params.padding_index);
+  read_from_umap("include_last_offset", cli_params.include_last_offset);
+  read_from_umap("is_weights", cli_params.is_weights);
+  read_from_umap("indices_dtype", cli_params.indices_dtype);
+  read_from_umap("fp16_scale_bias", cli_params.fp16_scale_bias);
+  read_from_umap("strided", cli_params.strided);
+  read_from_umap("norm_type", cli_params.norm_type);
+  read_from_umap("norm_shape", cli_params.norm_shape);
+  read_from_umap("use_scale", cli_params.use_scale);
+  read_from_umap("use_shift", cli_params.use_shift);
+  read_from_umap("gamma_dt", cli_params.gamma_dt);
+  read_from_umap("beta_dt", cli_params.beta_dt);
   return;
 }
 
@@ -1296,7 +1523,8 @@ void Parser::read_from_umap(const std::string &key, int64_t &num) {
     std::string val = umap.at(key);
     if (isInteger(val)) {
       try {
-        num = static_cast<int64_t>(stol(val));
+        num = static_cast<int64_t>(stoll(val));
+        log_info("Using ", key, "=", num);
       }
       catch (const std::out_of_range &e) {
         log_info("Out-of-range argument for ", key,
@@ -1308,9 +1536,6 @@ void Parser::read_from_umap(const std::string &key, int64_t &num) {
                ", so using default value i.e. timestamp.");
     }
   }
-  else {
-    log_info("No argument for ", key, ", so using default value i.e. timestamp.");
-  }
 }
 
 void Parser::read_from_umap(const std::string &key, uint32_t &num) {
@@ -1319,29 +1544,291 @@ void Parser::read_from_umap(const std::string &key, uint32_t &num) {
     if (isInteger(val) && val[0] != '-') {
       try {
         num = static_cast<uint32_t>(stoul(val));
+        if (key == "num_threads" && num == 0) {
+          log_info("Using ", key,
+                   "=0 (treated as unset/randomized thread selection)");
+        }
+        else {
+          log_info("Using ", key, "=", num);
+        }
       }
       catch (const std::out_of_range &e) {
         log_info("Out-of-range argument for ", key,
-                 ", so using default value i.e. 1000.");
+                 ", so using default/random value");
       }
     }
     else {
-      log_info("Invalid argument for ", key, ", so using default value i.e. 1000.");
+      log_info("Invalid argument for ", key, ", so using default/random value");
     }
-  }
-  else {
-    log_info("No argument for ", key, ", so using default value i.e. 1000.");
   }
 }
 
 void Parser::read_from_umap(const std::string &key, std::string &num) {
   if (umap.count(key)) {
     num = umap.at(key);
+    log_info("Using ", key, "=", num);
   }
-  else {
-    log_info("No argument for ", key,
-             ", so using the random ", key, " from supported list.");
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<uint64_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    if (isInteger(val) && val[0] != '-') {
+      try {
+        uint64_t parsed = static_cast<uint64_t>(stoull(val));
+        if (parsed > 0) {
+          out = parsed;
+          log_info("Using ", key, "=", out.value());
+        }
+        else {
+          log_info("Invalid argument for ", key,
+                   ", expected a positive integer; ignored.");
+        }
+      }
+      catch (const std::out_of_range &e) {
+        log_info("Invalid argument for ", key,
+                 ", expected a positive integer; ignored.");
+      }
+    }
+    else {
+      log_info("Invalid argument for ", key,
+               ", expected a positive integer; ignored.");
+    }
   }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<int64_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    if (isInteger(val)) {
+      try {
+        out = static_cast<int64_t>(stoll(val));
+        log_info("Using ", key, "=", out.value());
+      }
+      catch (const std::out_of_range &) {
+        log_info("Invalid argument for ", key,
+                 ", expected a signed integer; ignored.");
+      }
+    }
+    else {
+      log_info("Invalid argument for ", key,
+               ", expected a signed integer; ignored.");
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key, std::optional<bool> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string v = umap.at(key);
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    if (v == "true" || v == "1") {
+      out = true;
+    }
+    else if (v == "false" || v == "0") {
+      out = false;
+    }
+    else {
+      log_info("Invalid boolean for ", key, " (use true/false or 1/0); ignored.");
+    }
+    if (out) {
+      log_info("Using ", key, "=", out.value());
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key, std::optional<float> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    try {
+      size_t parsed_len = 0;
+      float v = std::stof(val, &parsed_len);
+      if (parsed_len != val.size()) {
+        log_info("Invalid float for ", key, "; ignored.");
+        return;
+      }
+      out = v;
+      log_info("Using ", key, "=", out.value());
+    }
+    catch (const std::exception &) {
+      log_info("Invalid float for ", key, "; ignored.");
+      return;
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<data_type_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    try {
+      out = strToDatatype(val);
+      log_info("Using ", key, "=", dtype_info(out.value()));
+    }
+    catch (const std::exception &) {
+      log_info("Invalid datatype for ", key, "; ignored.");
+      return;
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<quant_granularity_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    if (val == "tensor" || val == "per_tensor") {
+      out = quant_granularity_t::tensor;
+    }
+    else if (val == "channel" || val == "per_channel") {
+      out = quant_granularity_t::channel;
+    }
+    else if (val == "group" || val == "per_group") {
+      out = quant_granularity_t::group;
+    }
+    else {
+      log_info("Invalid ", key, " (use tensor, channel, group); ignored.");
+    }
+    if (out) {
+      log_info("Using ", key, "=", val);
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<uint32_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    if (!isInteger(val) || val[0] == '-') {
+      log_info("Invalid positive integer for ", key, "; ignored.");
+      return;
+    }
+    try {
+      size_t parsed_len = 0;
+      unsigned long parsed = std::stoul(val, &parsed_len);
+      if (parsed_len != val.size()) {
+        log_info("Invalid positive integer for ", key, "; ignored.");
+        return;
+      }
+      if (parsed > 0 && parsed <= 3) {
+        out = static_cast<uint32_t>(parsed);
+        log_info("Using ", key, "=", out.value());
+      }
+      else {
+        log_info("Invalid positive integer for ", key,
+                 " (must be 1, 2, or 3); ignored.");
+      }
+    }
+    catch (const std::exception &) {
+      log_info("Invalid positive integer for ", key,
+               " (must be 1, 2, or 3); ignored.");
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<embag_algo_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    try {
+      out = strToEmbagAlgo(val);
+      log_info("Using ", key, "=", val);
+    }
+    catch (const std::exception &) {
+      log_info("Invalid embedding algorithm for ", key, "; ignored.");
+      return;
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<norm_type_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string s = umap.at(key);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    if (s == "layer") {
+      out = norm_type_t::LAYER_NORM;
+    }
+    else if (s == "batch") {
+      out = norm_type_t::BATCH_NORM;
+    }
+    else if (s == "rms") {
+      out = norm_type_t::RMS_NORM;
+    }
+    else if (s == "fusedaddrms") {
+      out = norm_type_t::FUSED_ADD_RMS_NORM;
+    }
+    else {
+      log_info("Invalid ", key,
+               " (use layer, batch, rms, fusedaddrms); ignored.");
+    }
+    if (out) {
+      log_info("Using ", key, "=", s);
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<std::vector<uint64_t>> &out) {
+  out.reset();
+  if (!umap.count(key)) {
+    return;
+  }
+  std::string val = umap.at(key);
+  std::vector<uint64_t> parsed;
+  for (size_t pos = 0; pos < val.size();) {
+    const size_t comma = val.find(',', pos);
+    const size_t end = comma == std::string::npos ? val.size() : comma;
+    if (pos == end) {
+      log_info("Invalid ", key,
+               " (empty component in comma-separated list); ignored.");
+      return;
+    }
+    const std::string t = val.substr(pos, end - pos);
+    if (!isInteger(t) || t[0] == '-') {
+      log_info("Invalid ", key,
+               " (comma-separated positive integers, e.g. 2,8,32); ignored.");
+      return;
+    }
+    try {
+      auto val_ = std::stoull(t);
+      if (val_ > 0) {
+        parsed.push_back(val_);
+        log_info("Using ", key, "=", val_);
+      }
+      else {
+        log_info("Invalid ", key, " (must be > 0); ignored.");
+        return;
+      }
+    }
+    catch (const std::out_of_range &) {
+      log_info("Out-of-range value in ", key, "; ignored.");
+      return;
+    }
+    pos = comma == std::string::npos ? val.size() : comma + 1;
+  }
+  if (parsed.empty()) {
+    log_info("Invalid ", key, " (no dimensions); ignored.");
+    return;
+  }
+  out = std::move(parsed);
+  log_info("Using ", key, "=", val);
 }
 
 bool Parser::isInteger(const std::string &s) {
@@ -1473,6 +1960,59 @@ void PrintTo(const SoftmaxType &value, ::std::ostream *os) {
       << ", softmin=" << value.softmin
       << ", num_threads=" << value.num_threads
       << ", seed=" << seed;
+}
+
+data_type_t strToDatatype(const std::string &str) {
+  if (str == "f32") {
+    return data_type_t::f32;
+  }
+  if (str == "f16") {
+    return data_type_t::f16;
+  }
+  if (str == "bf16") {
+    return data_type_t::bf16;
+  }
+  if (str == "s32") {
+    return data_type_t::s32;
+  }
+  if (str == "s64") {
+    return data_type_t::s64;
+  }
+  if (str == "s16") {
+    return data_type_t::s16;
+  }
+  if (str == "s8") {
+    return data_type_t::s8;
+  }
+  if (str == "s4") {
+    return data_type_t::s4;
+  }
+  if (str == "u32") {
+    return data_type_t::u32;
+  }
+  if (str == "u16") {
+    return data_type_t::u16;
+  }
+  if (str == "u8") {
+    return data_type_t::u8;
+  }
+  if (str == "u4") {
+    return data_type_t::u4;
+  }
+  EXCEPTION("Unknown data type string '" + str + "'");
+}
+
+embag_algo_t strToEmbagAlgo(std::string str) {
+  if (str == "sum") {
+    return embag_algo_t::sum;
+  }
+  if (str == "mean") {
+    return embag_algo_t::mean;
+  }
+  if (str == "max") {
+    return embag_algo_t::max;
+  }
+  EXCEPTION("Invalid embedding algorithm: " + str);
 }
 
 matmul_algo_t strToAlgo(std::string str) {
@@ -2166,7 +2706,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
               auto src_scale_size = input_tensor.get_quant_scale_size();
               params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
-                                                src_scale_size.end());
+                  src_scale_size.end());
               log_info("LOWOHA INT8: Source scale extracted");
             }
             // Extract source zero point (for asymmetric quantization)
@@ -2190,7 +2730,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
               auto wei_scale_size = weight_tensor.get_quant_scale_size();
               params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
-                                                wei_scale_size.end());
+                  wei_scale_size.end());
               log_info("LOWOHA INT8: Weight scale extracted");
             }
             // Extract weight zero point (for asymmetric quantization)
@@ -2214,7 +2754,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
               auto dst_scale_size = output_tensor.get_quant_scale_size();
               params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
-                                                dst_scale_size.end());
+                  dst_scale_size.end());
               log_info("LOWOHA INT8: Destination scale extracted");
             }
             // Extract destination zero point (for asymmetric quantization)
@@ -2438,7 +2978,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         po_index++;
       }
       matmul_operator.set_input("matmul_input", input_tensor)
-                     .set_output("matmul_output", output_tensor);
+      .set_output("matmul_output", output_tensor);
       if (algo != matmul_algo_t::none) {
         matmul_operator.set_forced_kernel(algoToStr(algo));
       }
@@ -3011,9 +3551,9 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
       //define embedding bag operator
       embag_operator_t embedding_bag_operator = embag_operator_t()
-        .set_name("embedding_bag")
-        .set_context(embedding_bag_context)
-        .create();
+          .set_name("embedding_bag")
+          .set_context(embedding_bag_context)
+          .create();
 
       if (embedding_bag_operator.is_bad_object()) {
         testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -3085,9 +3625,9 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
-      .set_name("ref_embedding_bag")
-      .set_context(embedding_bag_context)
-      .create();
+        .set_name("ref_embedding_bag")
+        .set_context(embedding_bag_context)
+        .create();
 
     if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -3605,7 +4145,7 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
       reorder_params.quant_params.scale.dt = scale_tensor.get_data_type();
       auto scale_size = scale_tensor.get_size();
       reorder_params.quant_params.scale.dims.assign(scale_size.begin(),
-                                            scale_size.end());
+          scale_size.end());
     }
 
     if (zp_tensor.get_nelem() > 0) {
@@ -4457,9 +4997,9 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
   constexpr int P  = 15;
   constexpr int sf = 4;
   const float reduction_len =
-      static_cast<float>(head_dim) + static_cast<float>(seq_len_kv);
+    static_cast<float>(head_dim) + static_cast<float>(seq_len_kv);
   const float abs_bound =
-      ((C + std::log2(reduction_len) / sf) * reduction_len + P) * epsilon;
+    ((C + std::log2(reduction_len) / sf) * reduction_len + P) * epsilon;
 
   log_verbose("SDPA abs_bound: ", abs_bound);
 

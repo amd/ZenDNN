@@ -16,6 +16,7 @@
 
 #ifndef _GTEST_UTILS_HPP_
 #define _GTEST_UTILS_HPP_
+#include <optional>
 #include <string>
 #include <vector>
 #include <random>
@@ -51,6 +52,15 @@
 #define TEST_PARTITIONS 3
 #define ENABLE_F32_RELAXATION 0
 #define POST_OPS_LIMIT 3
+
+#define EMBEDDING_SIZE_START 128
+#define EMBEDDING_SIZE_END 2048
+#define EMBEDDING_DIM_START 16
+#define EMBEDDING_DIM_END 512
+#define NUM_INDICES_START 128
+#define NUM_INDICES_END 2048
+#define NUM_BAGS_START 16
+#define NUM_BAGS_END 512
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
@@ -114,6 +124,47 @@ struct GroupQuantMatmulType {
   quant_granularity_t weight_granularity;
   int32_t num_threads;
   GroupQuantMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
+};
+
+/** Optional CLI overrides for matmul/BMM/reorder, embag/embedding, and norm tests. Unset std::optional members are ignored; set values override defaults in the corresponding *Type constructors. */
+struct CLIParams {
+  /* Matmul, BatchMatmul and Reorder CLI params*/
+  std::optional<uint64_t> batch_size;
+  std::optional<uint64_t> m;
+  std::optional<uint64_t> k;
+  std::optional<uint64_t> n;
+  std::optional<bool> transA;
+  std::optional<bool> transB;
+  std::optional<float> alpha;
+  std::optional<float> beta;
+  std::optional<data_type_t> src_dtype;
+  std::optional<data_type_t> dst_dtype;
+  std::optional<quant_granularity_t> weight_granularity;
+  std::optional<bool> inplace_reorder;
+  std::optional<uint64_t> num_groups;
+  std::optional<uint32_t> dim_choice;
+
+  /* Embag and Embedding CLI params*/
+  std::optional<uint64_t> num_embeddings;
+  std::optional<uint64_t> embedding_dim;
+  std::optional<uint64_t> num_bags;
+  std::optional<uint64_t> num_indices;
+  std::optional<embag_algo_t> embag_algo;
+  std::optional<int64_t> padding_index;
+  std::optional<bool> include_last_offset;
+  std::optional<bool> is_weights;
+  std::optional<data_type_t> indices_dtype;
+  std::optional<bool> fp16_scale_bias;
+  std::optional<bool> strided;
+
+  /* Normalization CLI params*/
+  std::optional<norm_type_t> norm_type;
+  std::optional<std::vector<uint64_t>> norm_shape;
+  std::optional<bool> use_scale;
+  std::optional<bool> use_shift;
+  std::optional<data_type_t> gamma_dt;
+  std::optional<data_type_t> beta_dt;
+
 };
 
 /** @brief BatchMatmul Op Parameters Structure */
@@ -245,8 +296,8 @@ extern int64_t seed;
 extern std::string cmd_post_op;
 extern std::string cmd_backend;
 extern std::string cmd_lowoha;
-extern std::string cmd_test_gemv_m1;
 extern uint32_t cmd_num_threads;
+extern CLIParams cli_params;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
@@ -353,6 +404,18 @@ class Parser {
   void read_from_umap(const std::string &key, int64_t &num);
   void read_from_umap(const std::string &key, uint32_t &num);
   void read_from_umap(const std::string &key, std::string &num);
+  void read_from_umap(const std::string &key, std::optional<uint64_t> &out);
+  void read_from_umap(const std::string &key, std::optional<int64_t> &out);
+  void read_from_umap(const std::string &key, std::optional<bool> &out);
+  void read_from_umap(const std::string &key, std::optional<float> &out);
+  void read_from_umap(const std::string &key, std::optional<data_type_t> &out);
+  void read_from_umap(const std::string &key,
+                      std::optional<quant_granularity_t> &out);
+  void read_from_umap(const std::string &key, std::optional<uint32_t> &out);
+  void read_from_umap(const std::string &key, std::optional<embag_algo_t> &out);
+  void read_from_umap(const std::string &key, std::optional<norm_type_t> &out);
+  void read_from_umap(const std::string &key,
+                      std::optional<std::vector<uint64_t>> &out);
  public:
   /** @brief to make object callable */
   void operator()(const int &argc,
@@ -360,7 +423,8 @@ class Parser {
                   int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
                   std::string &ai_test_mode,
                   std::string &lowoha, uint32_t &num_threads, std::string &input_file,
-                  std::string &op, uint32_t &ndims, std::string &test_gemv_m1);
+                  std::string &op, uint32_t &ndims,
+                  CLIParams &cli_params);
 };
 
 bool is_binary_postop(post_op_type_t post_op);
@@ -404,6 +468,12 @@ void PrintTo(const NormalizationType &value, ::std::ostream *os);
 void PrintTo(const SdpaType &value, ::std::ostream *os);
 /** @brief Print SoftmaxType for GTest parameterized test failure messages. */
 void PrintTo(const SoftmaxType &value, ::std::ostream *os);
+
+/** @brief Convert string representation to data type */
+data_type_t strToDatatype(const std::string &str);
+
+/** @brief Convert string representation to embedding algorithm type */
+embag_algo_t strToEmbagAlgo(std::string str);
 
 /** @fn strToAlgo
  *  @brief Convert string representation to matmul algorithm type
@@ -804,6 +874,9 @@ std::vector<size_t> get_lowoha_strided_shape(const ReorderType &params,
 
 /** @fn get_lowoha_quant_shape
  *  @brief Get quantization parameter shape based on granularity
+ *
+ *  Supports tensor/channel/group granularity and returns the corresponding
+ *  shape used for scale/zero-point tensors.
  *
  *  @param params LOWOHA reorder test parameters
  *  @return std::vector<size_t> Scale/zero-point shape vector

@@ -71,12 +71,12 @@ int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
 std::string cmd_backend {};
 std::string cmd_lowoha {};
-std::string cmd_test_gemv_m1 {};
 uint32_t cmd_num_threads = 0;
 std::string cmd_input_file {};
 std::string cmd_operator {};
 uint32_t ndims = 2;
 std::string ai_test_mode_str {};
+CLIParams cli_params {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -113,7 +113,8 @@ int main(int argc, char **argv) {
     Parser parse;
     parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, ai_test_mode_str,
           cmd_lowoha,
-          cmd_num_threads, cmd_input_file, cmd_operator, ndims, cmd_test_gemv_m1);
+          cmd_num_threads, cmd_input_file, cmd_operator, ndims,
+          cli_params);
 
     // Initialize AI test mode from command-line argument
     ai_gtests::initialize_test_mode(ai_test_mode_str);
