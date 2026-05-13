@@ -26,8 +26,19 @@ if (ZENDNNL_DEPENDS_PARLOOPER)
     get_property(PARLOOPER_INSTALL_DIR GLOBAL PROPERTY PARLOOPERROOT)
 
     list(APPEND PARLOOPER_MAKE_ARGS "AVX=2")
-    list(APPEND PARLOOPER_MAKE_ARGS "USE_Cxx_ABI=1")
+    list(APPEND PARLOOPER_MAKE_ARGS "USE_CXX_ABI=1")
     list(APPEND PARLOOPER_MAKE_ARGS "PARLOOPER_COMPILER=gcc")
+
+    # Upstream PARLOOPER's Makefile only compiles jit_compile.cpp and
+    # par_loop_generator.cpp into libparlooper.a. The global `pre_defined_loops`
+    # (referenced from threaded_loops.h whenever a consumer instantiates
+    # ThreadedLoop / LoopingScheme) is defined in src/common_loops.cpp, which
+    # upstream samples link separately. To keep libparlooper.a self-contained,
+    # we extend SRCFILES on the make command line - this reuses the Makefile's
+    # own compile rule (and CXXFLAGS / IFLAGS / ar step), so we stay in sync
+    # with upstream automatically rather than re-implementing the compile here.
+    list(APPEND PARLOOPER_MAKE_ARGS
+      "SRCFILES=jit_compile.cpp par_loop_generator.cpp common_loops.cpp")
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}LIBXSMM_MAKE_ARGS=${PARLOOPER_MAKE_ARGS}")
 
