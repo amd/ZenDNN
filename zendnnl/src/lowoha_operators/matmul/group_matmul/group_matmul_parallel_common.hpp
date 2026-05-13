@@ -81,6 +81,25 @@ inline constexpr int    kDecodeNTile  = 256;               // decode-path per-th
 inline constexpr size_t kSmallWeight  = 16UL * 1024UL * 1024UL;  // 16 MB / expert
 inline constexpr size_t kMediumWeight = 64UL * 1024UL * 1024UL;  // 64 MB / expert
 
+// Op2's K-dimension as a function of the fused activation.  Gated
+// activations (swiglu/silu/gelu_and_mul) collapse the [gate, up] pair
+// into half the columns, so Op2 sees K_down = N/2.  Without an
+// activation Op1's full output flows into Op2, so K_down = N.  The
+// caller's `down_weight[i]` must be shaped accordingly:
+//   * act != none → [N/2, N_down] row-major (or [N_down, N/2] transB).
+//   * act == none → [N,   N_down] row-major (or [N_down, N  ] transB).
+//
+// Shared between the dispatcher's Phase-F validator
+// (`group_matmul_direct.cpp::validate_group_matmul_direct_inputs`)
+// and the fused-MoE execute path (`group_matmul_fused_moe.cpp`) so
+// both apply the same `ldb_down` minimum.  Was previously a private
+// helper in `group_matmul_fused_moe.cpp`'s anonymous namespace; the
+// validator was independently using `N[i] / 2` unconditionally,
+// which under-restricted `ldb_down` for `act == none` callers.
+inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
+  return (act == grp_matmul_gated_act_t::none) ? n_op1 : (n_op1 / 2);
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Env-driven feature flags.
 // ──────────────────────────────────────────────────────────────────────
@@ -114,13 +133,22 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act) {
   return act == grp_matmul_gated_act_t::swiglu_oai_mul;
 }
 
-// ZENDNNL_GRP_MATMUL_N_ROUNDS = { 0, 1, 2, 3 } — cached, default 0 (auto).
+// ZENDNNL_GRP_MATMUL_N_ROUNDS = { 0, 1, 2, 3 } — cached, default 1.
 //   ALGO 3 ManyExperts round-mode selection.  Internal tuning knob.
 //     0 = auto: planner picks single-round / multi-round / balanced
 //               via cost-model on wall time.
 //     1 = force single-round (all experts in one round, n_thr =
 //         num_threads / num_ops).  Falls back to balanced when
-//         num_threads < num_ops.
+//         num_threads < num_ops.  CURRENT DEFAULT: production
+//         sweeps showed single-round dominates on the target MoE
+//         envelope at high thread counts; the auto cost-model
+//         occasionally picked balanced/multi-round at boundaries
+//         where single-round was within noise but had simpler
+//         cache-key behaviour.  Pin to single-round so the
+//         planner's choice is shape-independent and the AOCL DLP
+//         per-tile cache key set stays stable across decode
+//         iterations.  Set "0" to restore the original auto
+//         behaviour for A/B comparisons or shape exploration.
 //     2 = force multi-round legacy fixed-shape (batch experts × ccd_size
 //         threads each, possibly wasteful tail round).
 //     3 = force balanced (n_rounds = ceil(num_ops / target_batch),
@@ -129,7 +157,7 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act) {
 inline int get_grp_n_rounds_mode() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ROUNDS");
-    if (e == nullptr || e[0] == '\0') return 0;
+    if (e == nullptr || e[0] == '\0') return 1;
     const int parsed = std::atoi(e);
     if (parsed == 1) return 1;
     if (parsed == 2) return 2;
@@ -139,12 +167,19 @@ inline int get_grp_n_rounds_mode() {
   return v;
 }
 
-// decode_tile_ab production knob (always-on; function shape preserved
-// so a future experiment can attach an env/config without touching
-// callers).  When max_M ≤ kDecodeMaxM, FewExperts/ManyExperts use
-// kDecodeNTile (256) instead of kMinNTile (512) as the per-thread
-// N-tile bound — doubles max_n_thr for decode-shape down_proj.
-inline bool get_grp_n_decode_tile_ab() { return true; }
+// `kDecodeTileAbOn` documents the production decode-tile-AB
+// behaviour as an unconditional constant: when max_M ≤ kDecodeMaxM,
+// FewExperts/ManyExperts use kDecodeNTile (256) instead of kMinNTile
+// (512) as the per-thread N-tile bound — doubles max_n_thr for
+// decode-shape down_proj.  Was previously a getter
+// (`get_grp_n_decode_tile_ab`) preserving function shape for a
+// future experimental env knob, but it never read any env and has
+// stayed unconditionally `true` since introduction.  Replaced with
+// a `constexpr` so the compiler folds it at the call site
+// (`group_matmul_n_tile.cpp::plan_group_n_tile`); a future env knob
+// can be re-introduced cleanly by replacing this constant with the
+// getter when needed.
+inline constexpr bool kDecodeTileAbOn = true;
 
 // ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 0 (auto).
 //   Permutation of experts walked by ALGO 3 FewExperts/ManyExperts.
@@ -176,10 +211,17 @@ inline int get_grp_matmul_n_order() {
 //   Fused MoE Op1 → act → Op2 arena layout: tight [M, I] when 1,
 //   wide [M, 2I] when "0".  Tight halves Op2's src DRAM traffic and
 //   is neutral-or-positive on every measured workload.  The dispatcher
-//   only engages tight when ALL of: act=swiglu_oai_mul, internal_alloc
-//   on, ALGO 3 selected, fused-act env on — otherwise falls back to
-//   wide silently regardless of this env.  Set "0" to force wide
-//   (debug / layout-regression bisection).
+//   only engages tight when ALL of: act=swiglu_oai_mul, Op1 internal-
+//   alloc on, ALGO 3 selected (auto or env-forced), shape-adaptive
+//   picker agrees — otherwise falls back to wide silently regardless
+//   of this env.  Note: ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT is NOT a
+//   tight-engagement gate — when the fused-MoE picker hands the
+//   dispatcher a tight destination (ldc < N), the dispatcher auto-
+//   enables ALGO 3 fused activation regardless of N_TILE_FUSED_ACT
+//   (tight is a correctness constraint on the writer, not a perf
+//   toggle).  See `pick_fused_moe_want_tight` in
+//   group_matmul_fused_moe.cpp for the full predicate.  Set "0" here
+//   to force wide (debug / layout-regression bisection).
 inline int get_grp_matmul_fused_moe_tight() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT");
@@ -189,7 +231,7 @@ inline int get_grp_matmul_fused_moe_tight() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default OFF.
+// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default ON.
 //   Master switch for the hand-rolled AVX-512-BF16 microkernel
 //   (custom_kernel/).  ON: ALGO 3 flat_n_tile dispatches per-tile
 //   GEMM through VDPBF16PS, with swiglu_oai_mul applied in-register
@@ -198,18 +240,151 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   through the standard AOCL DLP / BRGEMM dispatch, fused activation
 //   runs as a separate per-tile pass.
 //
-//   Why default OFF: at high thread counts AOCL's hand-tuned assembly
-//   with explicit prefetch wins by a wide margin on MoE decode (the
-//   compiler-emitted K-loop hits ~2.0-2.5 IPC against AOCL's ~3.5,
-//   and HW prefetcher stalls under L3 contention dominate the fused-
-//   write bandwidth savings).  At single- or few-thread the picture
-//   flips and the custom kernel wins 5-15% — opt in there.  Falls
-//   back to the standard path when the dispatcher contract fails
-//   (non-bf16, transA, alpha≠1, β≠0, N % pack_nr ≠ 0, …).
+//   Why default ON: production-sweep results across the target MoE
+//   envelope showed the custom kernel a consistent win — fewer
+//   weight-reorder spikes (the pack arena is eviction-immune,
+//   unlike the AOCL DLP LRU under capacity pressure), in-register
+//   swiglu_oai_mul fusion that halves Op2 src DRAM traffic on the
+//   tight layout, and bit-identical FP32→BF16 conversion to the
+//   reference path.  The dispatcher refuses cleanly and falls
+//   back to the standard AOCL DLP path for any expert that
+//   violates the kernel's contract (non-bf16, transA, alpha≠1,
+//   β≠0, N % pack_nr ≠ 0, non-const weights, etc. — see
+//   `custom_kernel/dispatch.cpp::prepare_for_call` for the full
+//   gate cascade), so callers outside the supported envelope see
+//   no behaviour change.  Callers that want the pre-flip path
+//   (e.g. for A/B perf comparison or to side-step the CK pack
+//   arena's resident memory cost on memory-constrained hosts)
+//   set this knob to "0".
 inline bool get_grp_matmul_custom_kernel() {
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL");
-    if (e == nullptr || e[0] == '\0') return false;  // default: Off
+    if (e == nullptr || e[0] == '\0') return true;  // default: ON
+    return e[0] != '0';
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_CROSS_WARM = { "0", "1" } — cached, default ON.
+//   When ON, each `prepack_for_algo_X` opportunistically populates the
+//   cache regime that auto-select would route the OTHER phase to in the
+//   same process, so a deployment that fires only prompt during warmup
+//   still arrives at decode with both regimes warm — no first-decode-
+//   call prepack spike.
+//
+//   Cross-warm decision is `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL`-aware:
+//
+//     * `CK=1` (custom-kernel on, production decode path):
+//         - prompt → ALGO 1 (full-weight AOCL)
+//                  + cross-warm regime 3 (custom-kernel pack)
+//         - decode → ALGO 3 + custom kernel (regimes 2 + 3)
+//                  + cross-warm regime 1 (full-weight AOCL)
+//       Memory cost on many-experts MoE at high thread counts is
+//       sizeable (full-weight + custom-kernel pack).  Regime 2
+//       (per-tile AOCL) is still populated by `prepack_for_algo_3` if
+//       `STABLE_NTILE=1` — Fix B (a separate planned commit) skips
+//       it when CK is on.
+//
+//     * `CK=0` (AOCL DLP for both phases):
+//         - prompt → ALGO 1 (full-weight AOCL)
+//                  + cross-warm regime 2 (per-tile AOCL with nr_align=1)
+//         - decode → ALGO 3 + AOCL DLP (regime 2)
+//                  + cross-warm regime 1 (full-weight AOCL)
+//       Memory cost is dominated by the full-weight + per-tile sum
+//       and can be substantial on many-experts MoE at high thread
+//       counts.  The cross-warmed regime 2 uses nr_align=1 (Op2
+//       non-tight path).  Op1 tight (nr_align=2 under CK=0) still
+//       pays a one-time lazy warm on its first decode call — full
+//       coverage of both nr_align variants is a separate option
+//       (2b) not yet implemented.
+//
+//   OFF — reverts to the strict per-ALGO regime populated by
+//   `prepack_for_algo_X` itself: each ALGO only warms what it would
+//   itself use at runtime.  Use this when memory is constrained or
+//   for A/B comparison with the pre-cross-warm behaviour.
+//
+//   Independent of `ZENDNNL_GRP_MATMUL_PREPACK`: the master knob
+//   short-circuits everything to a no-op; this knob only controls
+//   the cross-regime fan-out when the master is ON.
+inline bool get_grp_matmul_cross_warm() {
+  static const bool v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CROSS_WARM");
+    if (e == nullptr || e[0] == '\0') return true;   // default: On
+    return e[0] != '0';
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_PREPACK = { "0", "1" } — cached, default ON.
+//   Master switch for the ahead-of-time weight prepack module
+//   (group_matmul/prepack/).  Single uniform semantic:
+//
+//   ON  — each scheduling-ALGO body invokes its matching
+//         `prepack_for_algo_X(...)` as the first action, which
+//         eagerly warms the inner-kernel weight cache for
+//         `p.num_ops_total` experts BEFORE the matmul kicks off.
+//         `p.num_ops_total` is resolved by
+//         `group_matmul_prepack::build_prepack_params` from the
+//         framework-hint fields, in priority order:
+//
+//           a) `params[0].total_matmul`  when set, or
+//           b) `params[0].active_matmul` when set, or
+//           c) `M.size()`                 (legacy fall-back).
+//
+//         By construction `p.num_ops_total >= M.size()` for every
+//         supported call pattern, so the warmed set covers every
+//         firing expert plus any prepack-extras tail.  Two regimes
+//         share this single code path:
+//
+//           * Framework-hint regime (`params[0].total_matmul >
+//             params[0].active_matmul`):  prepack warms the full
+//             `total` set, including the prepack-extras tail of
+//             experts that aren't firing this call but may fire on
+//             a future call (the production MoE rotating-experts
+//             use case the module was designed for).
+//
+//           * Active-only regime (`active_matmul > 0 &&
+//             total_matmul == 0`): no rotating-experts hint, so
+//             `build_prepack_params` resolves `num_ops_total` to
+//             `active_matmul`; the warmer prefills exactly the
+//             firing experts and skips the prepack-extras tail.
+//
+//           * Legacy / no-hint regime (`active=total=0` →
+//             `build_prepack_params` resolves both to `M.size()`):
+//             prepack warms exactly the firing experts up front.
+//             This is a one-time first-iter serial reorder cost
+//             paid in exchange for `do_tile()` cache hits in
+//             subsequent iterations of the same configuration
+//             (subsequent calls short-circuit via the per-thread
+//             fingerprint cache).  Steady-state throughput is
+//             identical to the lazy path; first-iter latency is
+//             measurably higher (N × reorder_per_expert vs the
+//             ~one-reorder parallel-cache-fill the lazy path
+//             achieved).  Callers that care about first-iter
+//             latency more than they care about steady-state
+//             determinism should set this knob to "0".
+//
+//   OFF — every per-ALGO function short-circuits at entry.  No
+//         warm-pack runs.  AOCL DLP / custom-kernel caches still
+//         populate lazily inside `run_dlp(...)` / `prepare_for_call`
+//         on first miss.  Behaviour is identical to a build without
+//         the prepack module compiled in (the original pre-PR
+//         library semantics).
+//
+//   Why default ON: a single coherent semantic is easier to reason
+//   about than a conditional gate.  Production deployments that
+//   integrate the framework `total_matmul` contract get the
+//   prepack-extras benefit out of the box; deployments that don't
+//   integrate (legacy / unit tests / single-shot inference) get
+//   eager warm-up of the firing experts (small one-time cost) and
+//   warm caches for everything afterwards.  Callers that need the
+//   strict "no behaviour change vs pre-PR" guarantee set this knob
+//   to "0" — that path is also covered by the env-matrix gtests in
+//   `group_matmul/test_prepack.cpp` ([26]-[28]).
+inline bool get_grp_matmul_prepack() {
+  static const bool v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_PREPACK");
+    if (e == nullptr || e[0] == '\0') return true;   // default: On
     return e[0] != '0';
   }();
   return v;
@@ -240,8 +415,8 @@ inline bool get_grp_matmul_custom_kernel() {
 // `batch_size = num_threads / stable` so every expert team has
 // exactly `stable` threads in every round.  `col_start` and
 // `n_tile` therefore stay byte-identical across calls → AOCL
-// cache hit-rate ≈ 100% post-warmup, regardless of any caller-
-// side variation.
+// cache reaches a steady hit-rate post-warmup, regardless of any
+// caller-side variation.
 //
 // Why the formula does not include an N-dependent density floor:
 // an earlier `by_density = N / kAoclBlisNc` term protected thin-N
@@ -288,9 +463,9 @@ inline constexpr int kAoclTargetConcurrentSlots = 16;   // team-budget divisor
 inline constexpr int kAoclBlisNc                = 128;  // BLIS-bf16 inner-N block
 
 // ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS = positive int — cached, default 16.
-//   Team-budget divisor.  Lower (e.g. 8) for few-expert deployments
-//   like Mixtral; raise for many-expert deployments where reducing
-//   per-expert fan-out helps.  Non-positive → default.
+//   Team-budget divisor.  Lower (e.g. 8) for few-expert deployments;
+//   raise for many-expert deployments where reducing per-expert fan-
+//   out helps.  Non-positive → default.
 inline int get_grp_matmul_aocl_target_slots() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS");
@@ -359,8 +534,8 @@ inline int get_grp_matmul_custom_kernel_nr() {
 
 // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT = { "0", "1" } — cached, default OFF.
 //   Per-expert L2-friendly subtile_cols (vs. one m_max-sized value
-//   for the whole call).  Noise-floor on GPT-OSS decode; may help on
-//   large-L2 hosts or workloads with extreme M variance.
+//   for the whole call).  Noise-floor on typical MoE decode shapes;
+//   may help on large-L2 hosts or workloads with extreme M variance.
 inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
   static const bool v = []() {
     const char *e = std::getenv(
@@ -547,8 +722,9 @@ inline void sort_indices_by_m(int *indices, int n,
 /// Caller stack-allocates a fresh `CallContext` and reads `kctx.enabled`
 /// on return.  Default OFF (env=1 to opt in).  Even with env=1, the
 /// dispatcher's contract check (bf16, no transA, α=1, β=0, N % pack_nr,
-/// supported act/bias dtypes) decides whether the path can actually
-/// run; caller falls back to its standard path when kctx.enabled=false.
+/// supported act/bias dtypes, is_weights_const = true / empty for every
+/// active expert) decides whether the path can actually run; caller
+/// falls back to its standard path when kctx.enabled=false.
 /// Supported `act`: none, swiglu_oai_mul (fused gate+up → halved out).
 inline void engage_ntile_custom_kernel(
     grp_matmul_gated_act_t act,
@@ -566,11 +742,13 @@ inline void engage_ntile_custom_kernel(
     const std::vector<float>         &alpha,
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
+    const std::vector<bool>          &is_weights_const,
     custom_kernel::CallContext       &kctx) {
   if (!get_grp_matmul_custom_kernel()) return;
   custom_kernel::prepare_for_call(
       act, src_dtype, wei_dtype, dst_dtype, act_dtype, bias_dtype,
-      transA, transB, M, N, K, ldb, alpha, beta, weight, kctx);
+      transA, transB, M, N, K, ldb, alpha, beta, weight,
+      is_weights_const, kctx);
 }
 
 /// Effective N-column alignment for the per-thread split:
@@ -599,22 +777,25 @@ inline constexpr int kNTileMaxExperts = 256;
 /// Auto-pick N_ORDER from num_ops.  Returns 3 (pair_balanced) or 0
 /// (walk input order); explicit modes 1/2/4 only reachable via env.
 ///
-/// Rule derived from the GPT-OSS MoE decode 128-thread sweep
-/// (115 shapes × 5 modes); pair_balanced vs walk-input:
-///
-///    num_ops range   |  mode 3 wins >2%  |  mode 3 losses >2%
-///    ──────────────────────────────────────────────────────────
-///    num_ops ≤ 18    |       ~58 %       |       ~12 %       ← strong win
-///    19 ≤ ops ≤ 25   |       ~26 %       |       ~35 %       ← regression band
-///    num_ops ≥ 26    |       ~42 %       |        ~0 %       ← strong win
+/// Rule was derived from an internal MoE-decode sweep across a wide
+/// num_ops × shape × mode grid.  Pair-balanced ordering improves
+/// throughput at the low- and high-num_ops ends of the range:
+///   * Few-experts (≤ ~kSmallExpertsCutoff): the bin-packing benefit
+///     of pair-balanced outweighs the walk-input alternative.
+///   * Many-experts (≥ ~kLargeExpertsCutoff): pair-balanced is again
+///     dominant and the alternative shows essentially no wins.
+///   * Mid-band: the two strategies trade wins/losses, so we default
+///     to walk-input (lower overhead and zero permutation cost).
+/// The cutoffs are calibrated against the dispatcher's stable-N-tile
+/// plan and should be re-evaluated together if that planner changes.
 inline int auto_pick_n_order(int num_ops) {
   if (num_ops <= 18) {
-    return 3;  // sweet spot: few active experts
+    return 3;  // few-experts regime — pair-balanced is the better default
   }
   if (num_ops >= 26) {
-    return 3;  // strong win + zero losses in data
+    return 3;  // many-experts regime — pair-balanced is the better default
   }
-  return 0;                      // mid-band: walk input order
+  return 0;    // mid-band — walk input order
 }
 
 /// Write `out[0..out_size)` with expert indices ordered per

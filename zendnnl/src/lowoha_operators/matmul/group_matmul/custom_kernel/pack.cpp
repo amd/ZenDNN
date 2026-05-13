@@ -148,7 +148,10 @@ status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
     bool transB,
-    const bfloat16_t **out_packed) {
+    const bfloat16_t **out_packed,
+    bool *was_hit_out) {
+
+  if (was_hit_out != nullptr) *was_hit_out = false;
 
   if (weight == nullptr || K <= 0 || N <= 0
       || (pack_nr != kNRMin && pack_nr != kNRMax)
@@ -227,15 +230,16 @@ status_t get_or_pack_weight_bf16(
 
   if (pack_cache.find_key(key)) {
     *out_packed = static_cast<const bfloat16_t *>(pack_cache.get(key));
+    if (was_hit_out != nullptr) *was_hit_out = true;
     // Include the full cache key on the HIT line so a model-level
-    // log shows exactly which (weight_ptr, K, N, pack_nr) tuple is
-    // being served.  Under the assumption "a fixed model reuses
-    // weights across calls" the weight_ptr field should stabilise to
-    // a small set of values (= num_experts × num_weights_per_expert).
-    // If an E2E run shows this pointer cycling through new values on
-    // every decode step, the framework is reallocating weights →
-    // cache churn is root-caused to weight-lifecycle, not to
-    // anything the dispatcher can fix.
+    // log shows exactly which (weight_ptr, K, N, ldb, transB,
+    // pack_nr) tuple is being served.  Under the assumption "a fixed
+    // model reuses weights across calls" the weight_ptr field
+    // should stabilise to a small set of values (= num_experts ×
+    // num_weights_per_expert).  If an E2E run shows this pointer
+    // cycling through new values on every decode step, the
+    // framework is reallocating weights → cache churn is root-caused
+    // to weight-lifecycle, not to anything the dispatcher can fix.
     if (s_pack_log) {
       apilog_info("[GRP_MATMUL Level4 pack HIT] weight=", weight,
                   " K=", K, " N=", N, " ldb=", ldb,
@@ -248,11 +252,12 @@ status_t get_or_pack_weight_bf16(
 
   // Miss — allocate, pack, insert.  64-byte aligned so the
   // microkernel's vmovdqu reads start on a cache-line boundary.
-  // Same rationale as the HIT path above — the key fields are on the
-  // line so the user can see *which* dimension is rotating.  In a
-  // stable-weight workload each unique key should appear in a MISS
-  // line exactly once; recurring MISSes for the same K/N/pack_nr
-  // with only weight_ptr cycling indicate weight-pointer churn.
+  // Same rationale as the HIT path above — the full key (weight_ptr,
+  // K, N, ldb, transB, pack_nr) is on the line so the user can see
+  // *which* dimension is rotating.  In a stable-weight workload each
+  // unique key should appear in a MISS line exactly once; recurring
+  // MISSes for the same (K, N, ldb, transB, pack_nr) with only
+  // weight_ptr cycling indicate weight-pointer churn.
   if (s_pack_log) {
     apilog_info("[GRP_MATMUL Level4 pack MISS] weight=", weight,
                 " K=", K, " N=", N, " ldb=", ldb,
@@ -302,8 +307,15 @@ status_t get_or_pack_weight_bf16(
 void clear_custom_kernel_pack_cache() {
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
   auto &pack_cache = pack_cache_singleton();
-  pack_cache.set_capacity(0);  // evict-all, free()s every pointer
-  pack_cache.set_capacity(std::numeric_limits<uint32_t>::max());
+  // Use the dedicated `clear()` method instead of
+  // `set_capacity(0)` + `set_capacity(MAX)`: the parametrised
+  // `evict(n)` invoked by `set_capacity` has a size_t underflow
+  // when `capacity_=0` (the loop condition `size > capacity_ - n`
+  // wraps to `size > UINT_MAX - n + 1` and is therefore always
+  // false), so the old form silently left every entry in place.
+  // `lru_cache_t::clear()` calls the parameterless `evict()` which
+  // walks the map and frees every pointer regardless of capacity.
+  pack_cache.clear();
   // Rare event (explicit cache clear); still gated for consistency
   // with HIT/MISS so all pack-related APILOG lines share the same
   // enable criterion.

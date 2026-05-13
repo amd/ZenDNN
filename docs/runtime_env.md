@@ -39,6 +39,51 @@ This document lists all environment variables available for configuring ZenDNNL 
 
 ---
 
+## Group MatMul Configuration
+
+User-facing knobs for `group_matmul_direct` (the grouped GEMM dispatcher used by MoE expert layers and other parallel-GEMM workloads).  See `docs/operator/lowoha_group_matmul_operator.md` for full operator semantics.
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_GRP_MATMUL_ALGO` | Selects the parallel scheduling strategy.  `0` auto-selects based on expert count, M, and N.  Re-read on every call (production deployments may flip strategy between phases without restart). | `0` (auto) | `0` (auto), `1` (sequential), `2` (flat M-tile), `3` (flat N-tile), `4` (multilevel CCD), `5` (per-expert) |
+| `ZENDNNL_GRP_MATMUL_PREPACK` | Master switch for ahead-of-time weight prepack.  When ON, the inner-kernel weight cache is eagerly populated for all expert weights on the first call that observes a given configuration, eliminating per-expert reorder spikes during steady-state inference.  Set `0` for lazy on-first-touch reorder (lower first-call latency at the cost of visible spikes when a fresh expert routes mid-stream).  Cached on first read. | `1` (ON) | `0` (lazy only), `1` (eager prepack) |
+| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | Enables the in-house BF16-only AVX-512 microkernel for ALGO 3 (N-tile).  Wins on single- and few-thread workloads; can lose to AOCL DLP at high thread counts on large MoE shapes.  Automatically bypasses to the standard backend when the contract fails (non-BF16 dtype, `transA`, `alpha != 1`, `beta != 0`, etc.).  Cached on first read. | `0` (OFF) | `0` (off), `1` (on) |
+| `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | When ON, pins ALGO 3's per-expert thread count to a `num_threads`-only formula so the AOCL DLP weight-reorder cache key stays stable across MoE routing variation (active-expert filtering, batch-size shifts, expert count drift).  Disable only for A/B comparison: the fully-relaxed planner can degrade cache hit-rate under churn.  Cached on first read. | `1` (ON) | `0` (relaxed), `1` (stable) |
+
+### Memory note for `ZENDNNL_GRP_MATMUL_PREPACK=1`
+
+Eager prepack populates the inner-kernel weight cache (AOCL DLP per-tile reorder cache and/or the custom-kernel pack arena) for every expert in the framework's `total_matmul` set.  Two distinct caches are involved with different eviction semantics:
+
+- **AOCL DLP reorder cache** — backed by the generic `lru_cache_t` layer.  By default, capacity is `UINT32_MAX`, so populated entries are held for process lifetime and the prepack guarantee holds.  Deployments that override capacity via `ZENDNNL_LRU_CACHE_CAPACITY` (env or matmul-config JSON) shrink the upper bound, in which case prepacked AOCL entries can be evicted under steady-state pressure and a subsequent runtime reorder spike can return.  Set the LRU capacity high enough to fit your full `total_matmul` working set if you want eager prepack to hold.
+- **Custom-kernel pack arena** — process-wide singleton that intentionally ignores the LRU eviction path (`pack.cpp::clear_custom_kernel_pack_cache` is the only entry that frees entries; regular operation never evicts).  `ZENDNNL_LRU_CACHE_CAPACITY` does NOT govern this cache.  Populated entries are held for process lifetime regardless of the LRU knob.
+
+For a 32-expert gpt-oss-20B-class block at K=2880, N=5760, BF16, the resident footprint of the no-eviction default is roughly 2 GB.
+
+For memory-bounded deployments (multi-tenant, container quotas), use one of:
+- `ZENDNNL_GRP_MATMUL_PREPACK=0` — disables eager warm; lazy reorder fills the cache on demand, smaller working set during cold periods.
+- `ZENDNNL_MATMUL_WEIGHT_CACHE=0` — disables the AOCL cache entirely (both lazy and eager paths for AOCL DLP).  Every call re-reorders; lowest memory, slowest steady-state.  The custom-kernel pack arena is unaffected — to bound it, call `clear_custom_kernel_pack_cache()` from a quiescent window between phases.
+- `ZENDNNL_LRU_CACHE_CAPACITY=<N>` — caps the AOCL reorder cache at `N` entries.  Smaller `N` yields lower steady-state memory but reintroduces reorder spikes when prepacked entries are evicted under capacity pressure.  No effect on the custom-kernel pack arena.
+
+### Examples
+
+```bash
+# Default: prepack ON, AOCL DLP backend, AOCL stable n-tile, custom kernel OFF.
+# Best for production MoE inference with a warm-up phase.
+./your_app
+
+# Force ALGO 3 + custom kernel for low-thread (≤ 32t) MoE decode on Zen5.
+export ZENDNNL_GRP_MATMUL_ALGO=3
+export ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1
+
+# Latency-critical first-call workload (no warm-up window).
+export ZENDNNL_GRP_MATMUL_PREPACK=0
+
+# Multi-tenant container with strict memory cap.
+export ZENDNNL_MATMUL_WEIGHT_CACHE=0
+```
+
+---
+
 ## Auto-Tuner Configuration
 
 The auto-tuner automatically selects the best-performing algorithm for matrix multiplication by benchmarking different kernels.

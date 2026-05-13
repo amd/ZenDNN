@@ -132,7 +132,52 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  * @param dst              Vector of pointers to matrix C data
  * @param ldc              Vector of leading dimensions for C
  * @param is_weights_const Vector of flags indicating if weights are constant (enables caching)
- * @param params           Vector of additional parameters including post-ops and data types
+ * @param params           Vector of additional parameters including post-ops and data types.
+ *                         For MoE workloads the caller may also set the optional
+ *                         prepack-extras hint on `params[0]`:
+ *                           - `params[0].active_matmul` = number of firing experts
+ *                             (must satisfy `active_matmul <= M.size()`).
+ *                           - `params[0].total_matmul`  = total expert weight slots
+ *                             carried in the call (`>= active_matmul`; `0` means
+ *                             "no prepack-extras tail").
+ *                         Two input-side sizing patterns are both accepted:
+ *                           (a) Compact:  `M.size() == active_matmul`  — input
+ *                               vectors carry only the firing experts.
+ *                           (b) Padded:   `M.size() == total_matmul`  with
+ *                               `M[active_matmul..total_matmul) == 0` placeholders
+ *                               — the dispatcher skips the zero-M slots.
+ *                         Weight-side sizing depends on whether the caller
+ *                         supplies a prepack-extras tail:
+ *                           (i)  No tail (`total_matmul == 0` OR
+ *                                `total_matmul == active_matmul`): all per-
+ *                                expert vectors — weight-side
+ *                                (`weight`, `K`, `N`, `ldb`, `transB`,
+ *                                `is_weights_const`) and the rest (alpha,
+ *                                bias, beta, ldc, params, ...) — need only
+ *                                be `>= active_matmul`.
+ *                           (ii) With tail (`total_matmul > active_matmul`,
+ *                                the rotating-experts MoE case): the six
+ *                                weight-side prepack vectors above must be
+ *                                `>= total_matmul` so the prepack module
+ *                                can warm every advertised expert without
+ *                                silent truncation.  All other vectors still
+ *                                need only `>= active_matmul`.  Sizes
+ *                                shorter than `total_matmul` on the six
+ *                                weight-side vectors are rejected by the
+ *                                dispatcher up front (no silent
+ *                                under-warming).
+ *                         The dispatcher always computes only the first
+ *                         `active_matmul` GEMMs.  When
+ *                         `ZENDNNL_GRP_MATMUL_PREPACK=1` (the default), it
+ *                         eagerly pre-warms the weight cache for ALL
+ *                         `total_matmul` experts so any future firing hits
+ *                         a warm cache.  Leave both fields at `0` for the
+ *                         legacy contract: every per-expert vector must be
+ *                         exactly `num_ops = M.size()` long and every
+ *                         supplied weight fires.  See
+ *                         `docs/operator/lowoha_group_matmul_operator.md`
+ *                         (Framework prepack-extras contract) for a worked
+ *                         example.
  * @param moe_postop       Optional MoE weighted-reduce over pre-gathered expert rows;
  *                         nullptr disables (default). Parallel mode only; see
  *                         group_matmul_moe_postop_params.

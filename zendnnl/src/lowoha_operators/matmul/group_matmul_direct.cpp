@@ -23,6 +23,7 @@
 #include <sstream>
 #include <vector>
 
+#include "group_matmul/detect_internal_alloc.hpp"
 #include "group_matmul/group_matmul_direct.hpp"
 #include "group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_matmul_utils.hpp"
@@ -40,23 +41,97 @@ using zendnnl::common::op_instrumentation;
 namespace {
 
 // ───────────────────────────────────────────────────────────────────────
-// Unified input validation for group_matmul_direct.
+// File-local helpers for the size + prepack-extras predicates shared
+// between the diagnostic validator and the always-on inline guard.
 //
-// This is the single source of truth for what valid inputs to
-// group_matmul_direct() look like.  The dispatch body (below) does
-// NOT redo any of these checks inline; it assumes inputs are
-// well-formed and runs straight to the kernel calls.
+// `size_check_ctx::fail(s)`:
+//   Returns true iff the vector size `s` violates the per-call sizing
+//   contract.  In legacy mode (no framework opt-in via
+//   `params[0].active_matmul > 0`) it returns `s != num_ops` —
+//   strict equality, preserves the original reject-oversized-vectors
+//   behaviour bit-for-bit.  In opt-in mode it returns `s < num_ops`,
+//   accepting the prepack-extras tail (s ≥ num_ops).
 //
-// Invocation contract:
-//   * Always called from inside `op_instrumentation::validate(...)`,
-//     so the entire body is gated on `ZENDNNL_DIAGNOSTICS_ENABLE=1`.
-//     Production runs (env unset / =0) skip every check below — the
-//     framework integrating this library is contractually responsible
-//     for passing valid inputs.
-//   * The dispatch body keeps a one-line empty-vector guard so that
-//     param[0] / src / M can be dereferenced for thread / mode
-//     resolution without segfaulting on adversarial empty inputs;
-//     everything richer than that is exclusively here.
+//   Lifted from two open-coded copies of `size_bad` /
+//   `inline_size_bad` lambdas in `validate_group_matmul_direct_inputs`
+//   (Phase A diagnostic) and `group_matmul_direct(...)` (always-on
+//   inline guard).  Behaviour is identical; this struct just gives
+//   one source of truth.
+struct size_check_ctx {
+  size_t num_ops;
+  bool   relaxed;
+  constexpr bool fail(size_t s) const noexcept {
+    return relaxed ? (s < num_ops) : (s != num_ops);
+  }
+};
+
+// `prepack_extras_metadata_undersized(...)`:
+//   Returns true iff at least one weight-side metadata vector is
+//   shorter than `total_matmul` (only checked when the framework
+//   opted in via `total_matmul > active_matmul`).  The prepack
+//   module iterates `[0, total_matmul)` over six vectors (weight,
+//   K, N, ldb, transB, is_weights_const) and silently truncates the
+//   warm to `min(total_matmul, vec.size())` if any is shorter.
+//
+//   `out_first_failure` (nullable) is populated with `{name, got,
+//   need}` for the first vector that failed so the diagnostic site
+//   can `log_error` with a precise message.  Pass nullptr from the
+//   inline always-on path; both paths return the same boolean.
+struct undersized_info { const char *name; size_t got; size_t need; };
+
+inline bool prepack_extras_metadata_undersized(
+    const std::vector<const void *> &weight,
+    const std::vector<int>          &K,
+    const std::vector<int>          &N,
+    const std::vector<int>          &ldb,
+    const std::vector<bool>         &transB,
+    const std::vector<bool>         &is_weights_const,
+    size_t                           total_matmul,
+    undersized_info                 *out_first_failure /* nullable */) {
+  auto under = [&](const char *name, size_t got) -> bool {
+    if (got < total_matmul) {
+      if (out_first_failure != nullptr) {
+        *out_first_failure = {name, got, total_matmul};
+      }
+      return true;
+    }
+    return false;
+  };
+  if (under("weight",          weight.size()))           return true;
+  if (under("K",               K.size()))                return true;
+  if (under("N",               N.size()))                return true;
+  if (under("ldb",             ldb.size()))              return true;
+  if (under("transB",          transB.size()))           return true;
+  if (under("is_weights_const",is_weights_const.size())) return true;
+  return false;
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Diagnostic-mode unified input validation for group_matmul_direct.
+//
+// Two-tier validation contract:
+//
+//   (i)  This function — `validate_group_matmul_direct_inputs` —
+//        owns the FULL Phase A-G input contract with rich
+//        `log_error` diagnostics.  Wrapped in
+//        `op_instrumentation::validate(...)`, so the body runs only
+//        when `ZENDNNL_DIAGNOSTICS_ENABLE=1` was captured at first
+//        call.  Production builds with diagnostics off skip the
+//        entire body.
+//
+//   (ii) The dispatch body (`group_matmul_direct(...)` below) carries
+//        an always-on inline guard that runs the SUBSET of Phase A
+//        rules required for production memory-safety even when
+//        diagnostics are off: empty-vector reject, parallel-only-
+//        feature reject, per-vector size consistency, prepack-extras
+//        weight-side metadata length, and gated-act `ldc` uniformity.
+//        It returns `status_t::failure` without log_error so the
+//        production CPU cost stays at ~20 O(1) checks per call.  The
+//        full per-element / fused-MoE / moe-postop contracts (Phases
+//        B-G) live ONLY here, behind the diagnostics gate.
+//
+//        See `group_matmul_direct(...)` lines around "Always-on
+//        safety guards" for the inline subset.
 //
 // Phases (each short-circuits on failure so the diagnostic message
 // is closest to the failing rule):
@@ -116,88 +191,188 @@ status_t validate_group_matmul_direct_inputs(
     return status_t::failure;
   }
 
-  const size_t num_ops = M.size();
-
-  // Fused-MoE internal-alloc + src-reuse mode detection.
+  // Active-set count.  When the framework signals via
+  // `params[0].active_matmul` we honour that as the matmul-processing
+  // count (the K fired experts are stored contiguously at the start
+  // of every per-expert vector).  Legacy callers that don't fill the
+  // field see `active_matmul == 0` and fall back to the original
+  // convention of deriving from `M.size()`, so behaviour is
+  // bit-identical for any caller that hasn't opted in.  See
+  // `matmul_params` in `lowoha_common.hpp` for the field semantics.
   //
-  // Engagement contract: the caller clears BOTH Op1 and Op2 output
-  // handles — `fused_moe->dst_down` is empty AND dst[] is either
-  // empty (size 0) or EVERY element is null.  In that state the
-  // library owns the Op1 arena and reuses src as the Op2 output
-  // buffer; `dst` and `ldc` are ignored.
-  //
-  // Mode inference is ALWAYS-ON and a full O(num_ops) sweep to
-  // reject mixed states (e.g. `dst[0]=null, dst[1]=ptr`) in
-  // production too.  A previous two-level design inferred the mode
-  // from `dst[0]` alone and ran the consistency sweep only behind
-  // ZENDNNL_DIAGNOSTICS_ENABLE; that silently routed expert 1's
-  // output back into src[1] while ignoring the caller-provided
-  // dst[1] — a contract break.  The always-on sweep costs one
-  // predicted-not-taken branch per expert (< 50 ns for 32 experts)
-  // and is far cheaper than the GEMM that follows.
-  bool fused_internal_alloc = false;
-  if (fused_moe != nullptr && fused_moe->dst_down.empty()) {
-    if (dst.empty()) {
-      fused_internal_alloc = true;
-    } else {
-      bool any_null = false, any_nonnull = false;
-      for (size_t i = 0; i < dst.size(); ++i) {
-        if (dst[i] == nullptr) any_null = true;
-        else any_nonnull = true;
-      }
-      if (any_null && any_nonnull) {
-        log_error("group_matmul_direct: fused_moe dst[] has a mixed "
-                  "null/non-null state — internal-alloc mode requires "
-                  "EVERY dst[i] to be nullptr (or dst[] to be empty); "
-                  "legacy mode requires every dst[i] to be non-null.  "
-                  "Mixing the two would silently route some experts "
-                  "to internal-alloc and others to caller-allocated, "
-                  "ignoring the non-null entries.");
-        return status_t::failure;
-      }
-      fused_internal_alloc = any_null;  // all null → internal-alloc
+  // Contract checks for opt-in callers (active_matmul > 0):
+  //   - `active_matmul <= M.size()` — the firing experts must fit
+  //     inside the supplied input-side metadata.  Two sizing
+  //     patterns are both legitimate:
+  //         M.size() == active_matmul                  (compact;
+  //                                                     benchdnn,
+  //                                                     compact-form
+  //                                                     frameworks),
+  //         M.size() == total_matmul with M[active..total)=0 placeholders
+  //                                                    (padded; gtests).
+  //     Reject `active_matmul > M.size()` to avoid silently dropping
+  //     work — that direction is unambiguously a caller bug.
+  //   - `total_matmul == 0 || total_matmul >= active_matmul` —
+  //     specifying fewer total experts than firing experts is
+  //     logically impossible.  Reject early so the size validator
+  //     and prepack module aren't asked to reconcile a contract
+  //     they cannot satisfy.
+  const bool framework_opt_in =
+      (!params.empty() && params[0].active_matmul > 0);
+  if (framework_opt_in) {
+    const uint32_t am = params[0].active_matmul;
+    const uint32_t tm = params[0].total_matmul;
+    if (am > M.size()) {
+      log_error("group_matmul_direct: params[0].active_matmul=", am,
+                " exceeds M.size()=", M.size(),
+                " (firing experts must have input-side metadata)");
+      return status_t::failure;
+    }
+    if (tm > 0 && tm < am) {
+      log_error("group_matmul_direct: params[0].total_matmul=", tm,
+                " must be >= active_matmul=", am,
+                " (total experts cannot be less than firing experts)");
+      return status_t::failure;
     }
   }
+  const size_t num_ops =
+      framework_opt_in ? static_cast<size_t>(params[0].active_matmul)
+                       : M.size();
 
-  if (N.size() != num_ops || K.size() != num_ops || weight.size() != num_ops
-      || lda.size() != num_ops || ldb.size() != num_ops
-      || layout.size() != num_ops || transA.size() != num_ops
-      || transB.size() != num_ops || alpha.size() != num_ops
-      || beta.size() != num_ops || bias.size() != num_ops
-      || is_weights_const.size() != num_ops || params.size() != num_ops
-      || (!fused_internal_alloc
-          && (dst.size() != num_ops || ldc.size() != num_ops))) {
+  // Fused-MoE internal-alloc detection — INDEPENDENT per side.
+  //
+  // Op1 (dst[])         and Op2 (fused_moe->dst_down[]) are detected
+  // SEPARATELY so all four caller patterns work:
+  //
+  //   dst[]     | dst_down[] | Op1 destination     | Op2 destination
+  //   ───────── | ────────── | ─────────────────── | ───────────────────
+  //   no        | no         | library Op1 arena   | in-place src reuse
+  //   no        | yes        | library Op1 arena   | caller's dst_down
+  //   yes       | no         | caller's dst        | in-place src reuse
+  //   yes       | yes        | caller's dst        | caller's dst_down
+  //
+  // Each side rejects the mixed-null state (some entries null,
+  // others non-null) — that's an unambiguous contract break we
+  // cannot disambiguate.  The active-range sweep skips a prepack-
+  // extras tail of trailing nullptr placeholders that is otherwise
+  // legitimate; the caller-side detection in
+  // `group_matmul_fused_moe_execute` runs the same predicate via
+  // the shared `detect_internal_alloc` helper.
+  using zendnnl::lowoha::matmul::group_matmul_internal::
+      detect_internal_alloc;
+  using zendnnl::lowoha::matmul::group_matmul_internal::
+      internal_alloc_mode;
+  auto run_detect = [&](const std::vector<void *> &v,
+                        const char *name,
+                        bool *out_internal) -> status_t {
+    const status_t st = detect_internal_alloc(
+        v, num_ops, /*fused_moe_present=*/(fused_moe != nullptr),
+        internal_alloc_mode::sweep_active, out_internal);
+    if (st != status_t::success) {
+      log_error("group_matmul_direct: fused_moe ", name, " has a mixed "
+                "null/non-null state — every active entry must be "
+                "either nullptr (library-managed) or non-null "
+                "(caller-allocated).  Mixing the two would silently "
+                "route some experts to library-managed and others "
+                "to caller-allocated, ignoring the non-null entries.");
+    }
+    return st;
+  };
+  bool fused_op1_internal = false;
+  bool fused_op2_internal = false;
+  if (run_detect(dst, "dst", &fused_op1_internal) != status_t::success)
+    return status_t::failure;
+  if (fused_moe != nullptr) {
+    if (run_detect(fused_moe->dst_down, "dst_down",
+                   &fused_op2_internal) != status_t::success)
+      return status_t::failure;
+  }
+
+  // Vector sizes — strict equality for legacy callers (preserves the
+  // original behaviour exactly, including rejection of accidentally
+  // oversized vectors), relaxed to "≥ num_ops" only when the framework
+  // opted in via `params[0].active_matmul > 0`.  In the relaxed mode
+  // the framework can pass weight-side metadata at total_matmul (full
+  // expert table for prepack) while input-side vectors stay at
+  // active_matmul (or vice-versa); the dispatch still iterates
+  // `[0, num_ops)` only.
+  const size_check_ctx size_ctx{
+      /*num_ops=*/num_ops,
+      /*relaxed=*/(!params.empty() && params[0].active_matmul > 0)};
+  auto size_bad = [&](size_t s) { return size_ctx.fail(s); };
+  if (size_bad(N.size()) || size_bad(K.size()) || size_bad(weight.size())
+      || size_bad(lda.size()) || size_bad(ldb.size())
+      || size_bad(layout.size()) || size_bad(transA.size())
+      || size_bad(transB.size()) || size_bad(alpha.size())
+      || size_bad(beta.size()) || size_bad(bias.size())
+      || size_bad(is_weights_const.size()) || size_bad(params.size())
+      || (!fused_op1_internal
+          && (size_bad(dst.size()) || size_bad(ldc.size())))) {
     log_error("group_matmul_direct: vector size mismatch, num_ops=", num_ops);
     return status_t::failure;
   }
 
-  // Internal-alloc tightening: dst and ldc must be EITHER empty (size 0,
-  // library owns both) OR sized exactly to num_ops (caller passes
-  // all-null dst placeholders / zero ldc placeholders).  Reject in-
-  // between sizes (e.g. dst.size() == 1 with num_ops == 32) which
-  // suggest a malformed caller intent rather than legitimate use.
-  if (fused_internal_alloc) {
-    if (!dst.empty() && dst.size() != num_ops) {
-      log_error("group_matmul_direct: fused_moe internal-alloc requires dst "
-                "to be empty or sized to num_ops; got dst.size()=",
+  // Prepack-extras contract (mirrors the always-on inline guard in
+  // `group_matmul_direct(...)`): when the framework opts in with
+  // `total_matmul > active_matmul` the prepack module iterates
+  // `[0, total_matmul)` over the weight-side metadata vectors.  If
+  // any of these is shorter than `total_matmul`, the warmer's
+  // `bound = std::min({total_count, weight.size(), K.size(), N.size(),
+  // ldb.size(), transB.size()})` silently truncates the warm — un-
+  // warmed experts then trigger a runtime reorder spike when they
+  // first become active, defeating eager prepack.  Reject up front
+  // with a precise diagnostic so framework integrators can tell at a
+  // glance which vector was undersized.  Diagnostic-only path
+  // (DIAGNOSTICS_ENABLE=1); the always-on inline guard returns the
+  // same failure without the log_error in production builds.
+  if (size_ctx.relaxed
+      && params[0].total_matmul > params[0].active_matmul) {
+    undersized_info first_failure{};
+    if (prepack_extras_metadata_undersized(
+            weight, K, N, ldb, transB, is_weights_const,
+            /*total_matmul=*/params[0].total_matmul, &first_failure)) {
+      log_error("group_matmul_direct: ", first_failure.name,
+                ".size()=", first_failure.got,
+                " < total_matmul=", first_failure.need,
+                " — prepack-extras contract requires every weight-side "
+                "metadata vector (weight, K, N, ldb, transB, "
+                "is_weights_const) to be sized to at least total_matmul "
+                "so the prepack module can warm every advertised "
+                "expert without silent truncation");
+      return status_t::failure;
+    }
+  }
+
+  // Internal-alloc tightening: dst / ldc / ldc_down must be EITHER
+  // empty (library owns the buffer) OR sized to at least num_ops
+  // (caller passes all-null placeholders, possibly with prepack-
+  // extras tail).  Op1 side gates on `fused_op1_internal`; Op2's
+  // ldc_down on `fused_op2_internal`.  Reject in-between sizes that
+  // suggest a malformed caller intent.
+  if (fused_op1_internal) {
+    if (!dst.empty() && size_bad(dst.size())) {
+      log_error("group_matmul_direct: fused_moe Op1 internal-alloc requires "
+                "dst to be empty or sized to num_ops; got dst.size()=",
                 dst.size(), ", num_ops=", num_ops);
       return status_t::failure;
     }
-    if (!ldc.empty() && ldc.size() != num_ops) {
-      log_error("group_matmul_direct: fused_moe internal-alloc requires ldc "
-                "to be empty or sized to num_ops; got ldc.size()=",
+    if (!ldc.empty() && size_bad(ldc.size())) {
+      log_error("group_matmul_direct: fused_moe Op1 internal-alloc requires "
+                "ldc to be empty or sized to num_ops; got ldc.size()=",
                 ldc.size(), ", num_ops=", num_ops);
       return status_t::failure;
     }
+  }
+  if (fused_op2_internal) {
     if (!fused_moe->ldc_down.empty()
-        && fused_moe->ldc_down.size() != num_ops) {
+        && size_bad(fused_moe->ldc_down.size())) {
       log_error("group_matmul_direct: fused_moe internal-alloc requires "
                 "ldc_down to be empty or sized to num_ops; got ldc_down.size()=",
                 fused_moe->ldc_down.size(), ", num_ops=", num_ops);
       return status_t::failure;
     }
   }
-  if (src.size() != 1 && src.size() != num_ops) {
+  if (src.size() != 1 && size_bad(src.size())) {
     log_error("group_matmul_direct: src.size() must be 1 or num_ops");
     return status_t::failure;
   }
@@ -272,7 +447,7 @@ status_t validate_group_matmul_direct_inputs(
                   i);
         return status_t::failure;
       }
-      if (!fused_internal_alloc && dst[i] == nullptr) {
+      if (!fused_op1_internal && dst[i] == nullptr) {
         log_error("group_matmul parallel: null dst at active operation ", i);
         return status_t::failure;
       }
@@ -322,35 +497,48 @@ status_t validate_group_matmul_direct_inputs(
     // element checks are skipped; instead we add a per-expert
     // lda[i] >= N_down[i] check (Op2 reuses src as its output).
     //
-    // Mixed-state detection: Phase A keyed on dst[0] == nullptr (O(1)).
-    // Now do a full pass over dst[] to confirm it's actually all-null
-    // when internal-alloc is engaged — and confirm it's all-non-null
-    // when legacy mode is engaged.  Catches `dst[0]=null,dst[1]=ptr`
-    // and the inverse.
-    const bool internal_alloc = fused_internal_alloc;
-    if (internal_alloc) {
-      for (size_t i = 0; i < dst.size(); ++i) {
+    // Mixed-state detection (defence-in-depth): Phase A's
+    // `detect_internal` lambda already swept the active range for
+    // each side and rejected mixed null/non-null.  This block re-
+    // confirms the per-side invariant under DIAGNOSTICS, iterating
+    // the active range only so a prepack-extras tail of trailing
+    // nullptrs doesn't false-flag the active subset.
+    if (fused_op1_internal) {
+      const size_t dst_sweep = std::min<size_t>(num_ops, dst.size());
+      for (size_t i = 0; i < dst_sweep; ++i) {
         if (dst[i] != nullptr) {
-          log_error("group_matmul_direct: fused_moe internal-alloc requires "
-                    "every dst[i] to be nullptr; dst[", i, "] is non-null "
-                    "(caller appears to have a mixed state).");
+          log_error("group_matmul_direct: fused_moe Op1 internal-alloc "
+                    "requires every active dst[i] to be nullptr; "
+                    "dst[", i, "] is non-null.");
           return status_t::failure;
         }
       }
-    } else {
-      // Legacy mode: dst_down must be present and sized to num_ops
-      // (already checked by Phase F's size block below).  No per-
-      // element dst[] check here — Phase C already required dst[i]
-      // non-null for active experts.
+    }
+    if (fused_op2_internal) {
+      const size_t dd_sweep =
+          std::min<size_t>(num_ops, fused_moe->dst_down.size());
+      for (size_t i = 0; i < dd_sweep; ++i) {
+        if (fused_moe->dst_down[i] != nullptr) {
+          log_error("group_matmul_direct: fused_moe Op2 internal-alloc "
+                    "requires every active dst_down[i] to be nullptr; "
+                    "dst_down[", i, "] is non-null.");
+          return status_t::failure;
+        }
+      }
     }
 
-    if (fused_moe->down_weight.size() != num_ops
-        || fused_moe->N_down.size() != num_ops
-        || fused_moe->ldb_down.size() != num_ops
-        || fused_moe->bias_down.size() != num_ops
-        || (!internal_alloc
-            && (fused_moe->dst_down.size() != num_ops
-                || fused_moe->ldc_down.size() != num_ops))) {
+    // fused_moe per-expert vectors — required regardless of which
+    // side is internal-alloc (the dispatcher always needs the
+    // down-side weight metadata).  Output-side vectors gated per
+    // side: dst_down/ldc_down need only reach num_ops when Op2 is
+    // caller-allocated.
+    if (size_bad(fused_moe->down_weight.size())
+        || size_bad(fused_moe->N_down.size())
+        || size_bad(fused_moe->ldb_down.size())
+        || size_bad(fused_moe->bias_down.size())
+        || (!fused_op2_internal
+            && (size_bad(fused_moe->dst_down.size())
+                || size_bad(fused_moe->ldc_down.size())))) {
       log_error("group_matmul_direct: fused_moe vector size mismatch");
       return status_t::failure;
     }
@@ -366,7 +554,7 @@ status_t validate_group_matmul_direct_inputs(
                     "] is null at active expert");
           return status_t::failure;
         }
-        if (!internal_alloc && fused_moe->dst_down[i] == nullptr) {
+        if (!fused_op2_internal && fused_moe->dst_down[i] == nullptr) {
           log_error("group_matmul_direct: fused_moe dst_down[", i,
                     "] is null at active expert");
           return status_t::failure;
@@ -377,14 +565,31 @@ status_t validate_group_matmul_direct_inputs(
                   fused_moe->N_down[i], " must be positive");
         return status_t::failure;
       }
-      const int K_down_i = N[i] / 2;
+      // `op2_k_for_act` returns N for `act == none` (full passthrough)
+      // and N/2 for any gated act (gate+up collapse).  Using the helper
+      // keeps the validator in sync with `group_matmul_fused_moe.cpp`'s
+      // execute path; the previous unconditional `N[i] / 2` here under-
+      // restricted `ldb_down` for `act == none` callers (validator
+      // accepted ldb_down = N/2 but the execute path needs ldb_down = N).
+      const grp_matmul_gated_act_t act_for_op2 =
+          run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none;
+      const int K_down_i = op2_k_for_act(N[i], act_for_op2);
       const int min_ldb = transB[i] ? K_down_i : fused_moe->N_down[i];
       if (fused_moe->ldb_down[i] < min_ldb) {
         log_error("group_matmul_direct: fused_moe ldb_down[", i, "]=",
                   fused_moe->ldb_down[i], " < required=", min_ldb);
         return status_t::failure;
       }
-      if (!internal_alloc) {
+      // Op2 output stride invariant — gated on which side owns the
+      // Op2 destination:
+      //   * caller-allocated (op2_internal == false) — ldc_down[i]
+      //     must accommodate the N_down write per row.
+      //   * library-managed (op2_internal == true) — Op2 writes
+      //     BACK into src[i] with stride lda[i], so lda[i] must
+      //     accommodate N_down[i] instead.  Typical MoE has
+      //     hidden_dim = K_input = N_down so this is naturally
+      //     satisfied; we still check.
+      if (!fused_op2_internal) {
         if (fused_moe->ldc_down[i] < fused_moe->N_down[i]) {
           log_error("group_matmul_direct: fused_moe ldc_down[", i, "]=",
                     fused_moe->ldc_down[i],
@@ -392,15 +597,10 @@ status_t validate_group_matmul_direct_inputs(
           return status_t::failure;
         }
       } else {
-        // Internal-alloc reuses src[i] as Op2 output with stride
-        // lda[i].  Each Op2 row writes N_down[i] columns; for the
-        // write to fit within the original src row stride we need
-        // lda[i] >= N_down[i].  Typical MoE has hidden_dim = K_input
-        // = N_down so this is naturally satisfied.
         if (M[i] > 0 && lda[i] < fused_moe->N_down[i]) {
-          log_error("group_matmul_direct: fused_moe internal-alloc requires "
-                    "lda[", i, "]=", lda[i], " >= N_down[", i, "]=",
-                    fused_moe->N_down[i],
+          log_error("group_matmul_direct: fused_moe Op2 internal-alloc "
+                    "requires lda[", i, "]=", lda[i],
+                    " >= N_down[", i, "]=", fused_moe->N_down[i],
                     " (Op2 reuses src as output)");
           return status_t::failure;
         }
@@ -531,7 +731,13 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // ── Always-on safety guards (O(1), production-live) ───────────────
   // The dispatch below indexes every input vector up to num_ops, so
   // an OOB on any of them in production (DIAGNOSTICS off) would be
-  // undefined behaviour.  Keep three cheap always-on checks here:
+  // undefined behaviour.  This guard runs the Phase-A subset of the
+  // diagnostic validator (`validate_group_matmul_direct_inputs`)
+  // unconditionally so production builds stay memory-safe even with
+  // diagnostics off.  Five check classes below; each returns
+  // `status_t::failure` without log_error so the production CPU
+  // cost stays at ~20 O(1) checks per call (well below 1 µs,
+  // negligible vs the GEMM):
   //
   //   (1) primary-vector emptiness — params[0] is dereferenced
   //       unconditionally for thread / dtype resolution.
@@ -540,18 +746,31 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   //       == num_ops (one src per expert).  Allowing any of them
   //       through in sequential mode (src.size() == 1) and then
   //       failing late is unsafe: e.g., fused_moe with empty dst[]
-  //       would set fused_ialloc=true, bypass the dst sizing check,
-  //       then segfault in the sequential dispatch's dst[i] writes.
-  //       Reject up front before fused_ialloc is even computed.
+  //       would mark Op1 as library-managed, bypass the dst sizing
+  //       check, then segfault in the sequential dispatch's dst[i]
+  //       writes.  Reject up front before the per-side
+  //       internal-alloc detection runs.
   //   (3) per-vector size consistency — every required vector must
   //       be sized to num_ops (with the dst / ldc exception for
-  //       fused-MoE internal-alloc, where the caller legitimately
-  //       leaves them empty and the library owns Op1 dst).
+  //       fused-MoE Op1-internal-alloc, and the dst_down / ldc_down
+  //       exception for Op2-internal-alloc, where the caller
+  //       legitimately leaves them empty and the library owns the
+  //       respective destination).
+  //   (4) prepack-extras weight-side metadata length — when the
+  //       framework opts in via `total_matmul > active_matmul`, the
+  //       six weight-side vectors (weight, K, N, ldb, transB,
+  //       is_weights_const) must be sized to at least total_matmul
+  //       so the prepack module's `min({...})` clamp cannot silently
+  //       truncate the warm.
+  //   (5) gated-act `ldc` uniformity — ALGO 3 flat_n_tile auto-
+  //       engages from `ldc[0] < N[0]` and applies the tight/wide
+  //       decision uniformly across experts; mixed states would
+  //       OOB-write or leak undefined output.
   //
-  // Per-element null / dimension / fused-MoE / moe-postop contracts
-  // remain behind ZENDNNL_DIAGNOSTICS_ENABLE and live in
-  // validate_group_matmul_direct_inputs().  Total cost here is ~20
-  // O(1) checks — well below 1 µs, negligible vs the GEMM.
+  // Phase B-G (per-element null / dimension / fused-MoE /
+  // moe-postop) plus the rich `log_error` messages remain behind
+  // `ZENDNNL_DIAGNOSTICS_ENABLE` and live in
+  // `validate_group_matmul_direct_inputs()`.
   if (M.empty() || params.empty() || src.empty())
     return status_t::failure;
 
@@ -591,25 +810,97 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   }
 
   {
-    const size_t no = M.size();
-    // fused_ialloc detection is only valid in parallel mode (the
-    // sequential rejection above already returned for src.size()==1
-    // with fused_moe set, so we never compute this in the unsafe
-    // case).
-    const bool fused_ialloc = (fused_moe != nullptr
-        && fused_moe->dst_down.empty()
-        && (dst.empty() || dst[0] == nullptr));
-    if (N.size() != no || K.size() != no || weight.size() != no
-        || lda.size() != no || ldb.size() != no
-        || layout.size() != no || transA.size() != no
-        || transB.size() != no || alpha.size() != no
-        || beta.size() != no || bias.size() != no
-        || is_weights_const.size() != no || params.size() != no)
+    // Active-set count for the inline strict guard.  Mirrors the
+    // diagnostic validator's logic so production and DIAGNOSTICS
+    // builds agree on what "size mismatch" means.  Legacy callers
+    // that don't set `active_matmul` see `no == M.size()` and the
+    // checks below use strict equality (preserves the original
+    // reject-oversized-vectors behaviour bit-for-bit).  Only when
+    // the framework opts in via `active_matmul > 0` do we relax to
+    // `≥ no`, accepting the prepack-extras tail.
+    const bool inline_relaxed =
+        (!params.empty() && params[0].active_matmul > 0);
+    const size_t no = inline_relaxed
+        ? std::min<size_t>(params[0].active_matmul, M.size())
+        : M.size();
+    const size_check_ctx inline_ctx{/*num_ops=*/no,
+                                    /*relaxed=*/inline_relaxed};
+    auto inline_size_bad = [&](size_t s) { return inline_ctx.fail(s); };
+    // Per-side internal-alloc detection — independent for Op1
+    // (dst[]) and Op2 (fused_moe->dst_down[]).  O(1) inference from
+    // [0] is sufficient for the inline guard; the diagnostic
+    // validator already runs the active-range mixed-state sweep
+    // via the same `detect_internal_alloc` helper in sweep mode.
+    // Only valid in parallel mode (the sequential rejection above
+    // already returned for src.size()==1 with fused_moe set, so we
+    // never compute these in the unsafe case).
+    using group_matmul_internal::detect_internal_alloc;
+    using group_matmul_internal::internal_alloc_mode;
+    bool inline_op1_internal = false;
+    bool inline_op2_internal = false;
+    detect_internal_alloc(
+        dst, /*num_ops=*/no, /*fused_moe_present=*/(fused_moe != nullptr),
+        internal_alloc_mode::quick_o1, &inline_op1_internal);
+    if (fused_moe != nullptr) {
+      detect_internal_alloc(
+          fused_moe->dst_down, /*num_ops=*/no,
+          /*fused_moe_present=*/true, internal_alloc_mode::quick_o1,
+          &inline_op2_internal);
+    }
+    // else: inline_op2_internal stays false (no fused-MoE, no Op2).
+    if (inline_size_bad(N.size()) || inline_size_bad(K.size())
+        || inline_size_bad(weight.size())
+        || inline_size_bad(lda.size()) || inline_size_bad(ldb.size())
+        || inline_size_bad(layout.size()) || inline_size_bad(transA.size())
+        || inline_size_bad(transB.size()) || inline_size_bad(alpha.size())
+        || inline_size_bad(beta.size()) || inline_size_bad(bias.size())
+        || inline_size_bad(is_weights_const.size())
+        || inline_size_bad(params.size()))
       return status_t::failure;
-    if (!fused_ialloc && (dst.size() != no || ldc.size() != no))
+    // dst/ldc only required (sized to >= num_ops) when Op1 is
+    // caller-allocated; same for dst_down/ldc_down vs Op2.
+    if (!inline_op1_internal
+        && (inline_size_bad(dst.size()) || inline_size_bad(ldc.size())))
       return status_t::failure;
-    if (src.size() != 1 && src.size() != no)
+    if (fused_moe != nullptr && !inline_op2_internal
+        && (inline_size_bad(fused_moe->dst_down.size())
+            || inline_size_bad(fused_moe->ldc_down.size())))
       return status_t::failure;
+    if (src.size() != 1 && inline_size_bad(src.size()))
+      return status_t::failure;
+
+    // Prepack-extras contract: when the framework opts in with
+    // `total_matmul > active_matmul`, the prepack module (see
+    // `group_matmul/prepack/prepack_aocl_dlp.cpp::warm_pack_all_aocl_
+    // dlp_experts`) iterates `[0, total_matmul)` over the weight-side
+    // metadata vectors.  If any of these vectors is shorter than
+    // `total_matmul`, the warmer's `bound = std::min({total_count,
+    // weight.size(), K.size(), N.size(), ldb.size(), transB.size()})`
+    // SILENTLY truncates the warm to the shorter length — the un-
+    // warmed experts then trigger a runtime reorder spike when they
+    // first become active, defeating the purpose of eager prepack.
+    // Reject up front so callers learn at integration time rather
+    // than discovering the latency surprise in production.
+    //
+    // Only the SIX warm-pack-iterated vectors are checked here:
+    // weight, K, N, ldb, transB, is_weights_const.  Input-side
+    // vectors (M, src, lda) and per-expert metadata (alpha, beta,
+    // bias, layout, transA, params) stay at active_matmul (compact)
+    // or total_matmul (padded) — both are legitimate per the
+    // dispatcher contract.  `lda` is also not consumed by the
+    // warmers (only `ldb` is), so we don't require it at total.
+    if (inline_relaxed
+        && params[0].total_matmul > params[0].active_matmul) {
+      // Always-on path passes nullptr for `out_first_failure` — no
+      // log_error in production builds.  The diagnostic validator
+      // populates and logs the precise undersized-vector name.
+      if (prepack_extras_metadata_undersized(
+              weight, K, N, ldb, transB, is_weights_const,
+              /*total_matmul=*/params[0].total_matmul,
+              /*out_first_failure=*/nullptr)) {
+        return status_t::failure;
+      }
+    }
 
     // (4) Cross-expert caller-layout uniformity for the gated-activation
     // path (ALGO 3 flat_n_tile auto-engage).  The planner infers the
@@ -624,11 +915,18 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // independent of which algo env the user picks.  Only relevant
     // in parallel gated_act mode; fused_moe has its own uniform
     // Op1-arena layout; sequential mode doesn't use ALGO 3.
-    // `fused_ialloc` callers also bypass this (dst/ldc empty).
-    if (!fused_ialloc && src.size() != 1 && fused_moe == nullptr
+    // Op1-internal-alloc callers also bypass this (dst/ldc empty);
+    // the gate `fused_moe == nullptr` already excludes any
+    // fused-MoE caller (which is the only path that can be
+    // op1_internal anyway), so the redundant op1 check is kept
+    // explicit here only for symmetry with the rest of the file.
+    if (!inline_op1_internal && src.size() != 1 && fused_moe == nullptr
         && gated_act != nullptr
         && gated_act->act != grp_matmul_gated_act_t::none) {
       bool seen_tight = false, seen_wide = false;
+      // Iterate the active range only; non-fired tail slots (when
+      // present) carry placeholder dimensions that wouldn't reflect
+      // the caller's ldc-vs-N invariant.
       for (size_t e = 0; e < no; ++e) {
         if (M[e] <= 0) continue;
         if (ldc[e] < N[e]) seen_tight = true;
@@ -652,7 +950,36 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   if (val != status_t::success)
     return val;
 
-  const size_t num_ops = M.size();
+  // ── Active-set + prepack accounting ───────────────────────────────
+  // Two counts drive the rest of this function:
+  //
+  //   * `num_ops`        — matmul-processing count; every dispatcher
+  //                        downstream of this point iterates `[0,
+  //                        num_ops)`.  Honours the framework's new
+  //                        `params[0].active_matmul` hint when set;
+  //                        otherwise falls back to `M.size()` so
+  //                        legacy callers see no change.
+  //
+  //   * `num_ops_total`  — prepack iteration count; consumed by the
+  //                        per-ALGO prepack functions in
+  //                        group_matmul/prepack/, NOT by this
+  //                        dispatcher.  Each scheduling ALGO body
+  //                        reads `params[0].total_matmul` itself when
+  //                        building its `PrepackParams`, so the value
+  //                        is no longer materialised here.  When the
+  //                        field is unset (legacy callers),
+  //                        `build_prepack_params` resolves
+  //                        `num_ops_total = M.size()` so the prepack
+  //                        module still warms the firing experts up
+  //                        front under the uniform-eager semantic
+  //                        (`ZENDNNL_GRP_MATMUL_PREPACK=1`, default).
+  //                        Set the env to `0` to restore the strict
+  //                        pre-PR / lazy-only behaviour.
+  const size_t num_ops_input = M.size();
+  const size_t num_ops =
+      (params[0].active_matmul > 0)
+          ? std::min<size_t>(params[0].active_matmul, num_ops_input)
+          : num_ops_input;
 
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
@@ -703,6 +1030,45 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     const data_type_t act_dtype = run_gated_act
         ? params[0].dtypes.dst : data_type_t::none;
 
+    // ── Ahead-of-time weight pre-pack ─────────────────────────────────
+    // Moved out of this dispatcher entirely: each scheduling ALGO's
+    // body in group_matmul_parallel.cpp / group_matmul_m_tile.cpp /
+    // group_matmul_n_tile.cpp now invokes its matching
+    // `group_matmul_prepack::prepack_for_algo_X(...)` as the first
+    // action.  Under the uniform-eager semantic, the per-ALGO call
+    // warms `max(M.size(), params[0].total_matmul)` experts whenever
+    // `ZENDNNL_GRP_MATMUL_PREPACK=1` (the default) — both the
+    // framework-hint regime (`total_matmul > active_matmul`,
+    // production MoE rotating-experts) and the legacy regime
+    // (`active = total = 0` → both fall back to `M.size()`,
+    // first-iter serial reorder cost).  The new module owns the
+    // env-knob (`ZENDNNL_GRP_MATMUL_PREPACK`), the thread-local
+    // fingerprint cache, the `resolve_kernel()` gate, and the AOCL /
+    // custom-kernel branch logic.  See group_matmul/prepack/prepack.hpp
+    // for the public contract.
+
+    // ── Optional M-slice for the parallel dispatch path ──────────────
+    // When `num_ops < M.size()` the framework appended prepack-extras
+    // to the tail of the per-expert vectors; the dispatchers downstream
+    // derive their iteration count from `M.size()`, so we need to
+    // present them with an M vector trimmed to the active set.  The
+    // other vectors don't need slicing — the dispatcher only indexes
+    // them at `[0, num_ops)`, which is valid for any vector that
+    // satisfied the size guard above.  When `num_ops == M.size()`
+    // (legacy callers, OR new callers whose framework happens to size
+    // M to the active count exactly), `M_eff` aliases the caller's
+    // vector with no copy.
+    std::vector<int> M_active_local;
+    const std::vector<int> *M_eff_ptr = &M;
+    if (num_ops < M.size()) {
+      M_active_local.assign(
+          M.begin(),
+          M.begin()
+              + static_cast<std::vector<int>::difference_type>(num_ops));
+      M_eff_ptr = &M_active_local;
+    }
+    const std::vector<int> &M_eff = *M_eff_ptr;
+
     if (fused_moe != nullptr) {
       // Note on act=none + fused_moe: Op2 consumes the raw first-half
       // columns of Op1's [M, 2*dim] output as its input.  This is NOT
@@ -719,7 +1085,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
           *fused_moe,
           run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
           act_dtype,
-          layout, transA, transB, M, N, K, alpha,
+          layout, transA, transB, M_eff, N, K, alpha,
           src, lda, weight, ldb, bias, beta, dst, ldc,
           is_weights_const, params, num_threads, &gemm_mode, moe_postop);
       if (fused_st != status_t::success)
@@ -728,7 +1094,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // Non-fused path: Op1 + activation (fused where possible) followed
       // by separate Op2 / moe_postop as needed.
       const bool act_fused = group_matmul_run_parallel_dispatch(
-          layout, transA, transB, M, N, K, alpha,
+          layout, transA, transB, M_eff, N, K, alpha,
           src, lda, weight, ldb, bias, beta, dst, ldc,
           is_weights_const, params, num_threads, &gemm_mode,
           run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
@@ -736,7 +1102,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
 
       if (run_gated_act && !act_fused) {
         status_t act_st = group_matmul_moe_act_execute(
-            gated_act, dst, M, N, ldc, act_dtype, num_threads);
+            gated_act, dst, M_eff, N, ldc, act_dtype, num_threads);
         if (act_st != status_t::success)
           return act_st;
       }

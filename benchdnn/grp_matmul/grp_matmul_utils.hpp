@@ -71,9 +71,18 @@ struct GrpMatmulConfig {
     int use_internal_alloc = 0;  ///< 0 = caller-allocated dst/dst_down (legacy);
                                  ///< 1 = library-allocated Op1 scratch + src-reuse
                                  ///<     for Op2 output (requires N_down > 0).
+    int total_experts = 0;       ///< Optional trailing field.  When > num_ops,
+                                 ///< exercises the framework prepack-extras
+                                 ///< contract: the dispatcher receives weight
+                                 ///< buffers for all `total_experts` slots
+                                 ///< (the first `num_ops` correspond to firing
+                                 ///< experts; the rest are extras the prepack
+                                 ///< module pre-warms).  When 0 / absent,
+                                 ///< treated as `total_experts = num_ops` and
+                                 ///< `params[i].active_matmul == total_matmul`
+                                 ///< — legacy-equivalent behaviour.
 
     int max_M() const { return *std::max_element(M_per_op.begin(), M_per_op.end()); }
-    int dim() const { return N / 2; }  ///< intermediate dim = N_gate_up / 2
     int total_M() const { return std::accumulate(M_per_op.begin(), M_per_op.end(), 0); }
     bool is_uniform_M() const {
         return std::all_of(M_per_op.begin(), M_per_op.end(),

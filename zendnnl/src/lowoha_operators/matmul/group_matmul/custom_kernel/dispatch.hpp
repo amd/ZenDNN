@@ -76,6 +76,15 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 /// `prepare_for_call`.
 bool dispatch_supported();
 
+/// Pick the pack/microkernel NR for one (K, N) shape.  Returns either
+/// `kNRMin` (32), `kNRMax` (64), or `0` when no supported NR divides N.
+/// Honours the `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR` env override
+/// (parsed via `get_grp_matmul_custom_kernel_nr()` in
+/// `group_matmul_parallel_common.hpp`).  Public so `prepack/` and any
+/// other auxiliary code can compute the same NR the dispatcher will
+/// later pack/dispatch under, ensuring the cache key matches.
+int plan_pack_nr(int K, int N);
+
 /// Per-call invariants the per-tile path needs, resolved once.
 /// The caller stack-allocates one of these and passes it to every
 /// dispatch inside its OMP region.
@@ -148,6 +157,19 @@ struct CallContext {
 /// this into `out.bias_kind` which the microkernel branches on once
 /// per tile (no specialisation explosion).
 ///
+/// `is_weights_const` is the framework's per-expert constancy hint
+/// (matches the public API contract on `group_matmul_direct`).  The
+/// custom kernel uses a process-wide pack cache keyed on the source
+/// weight pointer; if a caller flags expert `i` as variable
+/// (`is_weights_const[i] == false`) the cache may serve a stale pack
+/// when the underlying weight buffer is mutated in-place between
+/// calls.  The CK runtime has no per-expert "skip cache" branch
+/// (unlike AOCL DLP's `run_dlp(...)`), so we conservatively REFUSE
+/// the entire call when any active expert is non-const, falling
+/// back to the standard AOCL DLP path which honours the flag at
+/// runtime.  Empty `is_weights_const` means "treat every entry as
+/// const" (legacy behaviour for callers that don't pass it).
+///
 /// On failure `out.enabled` is left false and the caller takes its
 /// standard path (e.g. `execute_expert_slice` + separate activation).
 status_t prepare_for_call(
@@ -166,7 +188,14 @@ status_t prepare_for_call(
     const std::vector<float>         &alpha,
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
+    const std::vector<bool>          &is_weights_const,
     CallContext &out);
+
+// (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
+// to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the
+// dispatcher header keeps only the per-call public surface.  See
+// that header for the warm-pack contract; the per-ALGO entries in
+// `prepack/prepack.{hpp,cpp}` decide when to call it.)
 
 /// Per-tile dispatch.  Runs inside the caller's OMP region.  Trusts
 /// every input (the caller already vetted them through

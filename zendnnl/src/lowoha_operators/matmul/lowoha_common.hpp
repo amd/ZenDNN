@@ -152,8 +152,53 @@ struct matmul_params {
   std::string plugin_op;                       ///< Plugin op name
   bool dynamic_quant;                          ///< Enable dynamic quantization of source
   pack_format packing;                         ///< Weight packing format for matrix B
-  uint32_t total_matmul;                       ///< Total number of matmuls
-  uint32_t active_matmul;                      ///< Number of active matmuls
+
+  // ── group_matmul prepack-extras contract (read from params[0] only) ──
+  //
+  // Optional hint used by `group_matmul_direct` to enable ahead-of-time
+  // weight prepack for an MoE-style "all-weights, some-firing" call.
+  // When non-zero, the caller passes weight buffers for `total_matmul`
+  // experts but only the first `active_matmul` are computed in this
+  // call.  The library:
+  //
+  //   1. Validates the contract.  Three rules apply in opt-in mode
+  //      (`active_matmul > 0`):
+  //        a) `active_matmul <= total_matmul` (when `total_matmul > 0`).
+  //        b) Every per-expert vector accepted by the dispatcher
+  //           (`weight`, `K`, `N`, `ldb`, `transB`, `is_weights_const`,
+  //           plus the input-side `alpha`, `bias`, `beta`, `ldc`,
+  //           `params`, etc.) must be `>= active_matmul`.
+  //        c) When `total_matmul > active_matmul` (prepack-extras
+  //           tail present), the SIX weight-side metadata vectors
+  //           that the prepack module iterates over
+  //           (`weight`, `K`, `N`, `ldb`, `transB`,
+  //           `is_weights_const`) must additionally be
+  //           `>= total_matmul`.  This tighter requirement prevents
+  //           silent prepack truncation — without it, an undersized
+  //           `weight.size()` (etc.) would let the warmer's
+  //           `bound = std::min({total_matmul, weight.size(),
+  //           K.size(), ...})` clamp the warm to a shorter length,
+  //           leaving tail experts un-warmed.  All other vectors
+  //           still need only `>= active_matmul` (compact or padded
+  //           — both are legitimate).
+  //   2. Computes only the first `active_matmul` GEMMs.
+  //   3. Pre-warms the inner-kernel weight cache for ALL `total_matmul`
+  //      experts ahead of time, so any expert firing on a future call
+  //      hits a warm cache and avoids the on-the-fly reorder spike.
+  //
+  // The caller fills `params[0].active_matmul` and `params[0].total_matmul`
+  // exactly — the dispatcher reads them from the first entry only and
+  // ignores the same fields on `params[1..N]`.  Leave both at the
+  // default `0` for the legacy "every supplied weight fires" contract:
+  // the library then derives `num_ops = M.size()` and requires every
+  // weight-side vector to be exactly `num_ops` long.
+  //
+  // The eager prepack is gated by the `ZENDNNL_GRP_MATMUL_PREPACK`
+  // environment variable (default ON).  See
+  // `docs/operator/lowoha_group_matmul_operator.md` for the full
+  // contract and worked example.
+  uint32_t total_matmul;                       ///< Total expert weight slots present in the call (>= active_matmul).
+  uint32_t active_matmul;                      ///< Count of firing experts (the leading prefix of all weight-side vectors).
   /**
    * @brief Default constructor for matmul_params
    */

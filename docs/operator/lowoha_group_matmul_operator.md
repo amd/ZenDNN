@@ -80,7 +80,7 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | `dst` | `vector<void*>` | C pointers |
 | `ldc` | `vector<int>` | Leading dimension of C |
 | `is_weights_const` | `vector<bool>` | Weight-caching hint per op |
-| `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, etc. |
+| `params` | `vector<matmul_params>&` | dtypes, threads, post-ops, plus the optional `active_matmul / total_matmul` prepack-extras hint (see [Framework prepack-extras contract](#framework-prepack-extras-contract)) |
 | `moe_postop` | `const group_matmul_moe_postop_params*` | Optional MoE post-op; **`nullptr`** disables (default) |
 | `gated_act` | `const grp_matmul_gated_act_params*` | Optional gated activation; **`nullptr`** disables (default). Requires N even, dst dtype f32/bf16. Applied after GEMM, before `moe_postop`. |
 | `fused_moe` | `const grp_matmul_fused_moe_params*` | Optional fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one call; **`nullptr`** disables (default). See [Fused MoE](#fused-moe-op1--activation--op2). |
@@ -124,6 +124,82 @@ fallback                               → ALGO 1 (sequential)
 Tiled algos (2/3) require row-major layout, uniform dtypes, no quantization, no post-ops, and standard unpacked A and B (`mem_format_a=='n'`, `mem_format_b=='n'`, `pack_format_b==0`). If these conditions are not met, auto-select falls back to ALGO 1.
 
 Set the strategy via environment variable: `ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5`.
+
+## Framework prepack-extras contract
+
+For MoE deployments where the framework holds **all** expert weights but only a routing-decided subset is firing on any given call, set two fields on `params[0]` (the dispatcher reads them from the first entry only):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `params[0].total_matmul` | `uint32_t` | Total expert slots whose weights are present in `weight[]`, `K[]`, `N[]`, `ldb[]`, `transB[]`, `is_weights_const[]`, `bias[]`.  `0` means "no prepack-extras tail" (the dispatcher resolves it to `active_matmul`). |
+| `params[0].active_matmul` | `uint32_t` | Number of firing experts (`<= M.size()`).  These occupy the **first `active_matmul`** entries of every weight-side vector.  On the input side, only the **first `active_matmul`** entries are consumed from `M[]`, `src[]`, `lda[]`, `dst[]`, `ldc[]`, ... — see the two accepted sizing patterns below. |
+
+When `active_matmul > 0` the dispatcher accepts weight-side vectors of size `>= active_matmul` (instead of requiring `== num_ops`).  Input-side vectors must satisfy `size >= active_matmul`; two layouts are both legitimate:
+
+- **Compact (vLLM-style):** `M.size() == active_matmul`.  Input vectors carry only the firing experts.  Weight-side vectors carry `total_matmul` entries (firing experts in `[0, active_matmul)`, prepack-extras tail in `[active_matmul, total_matmul)`).
+- **Padded (gtest-style):** `M.size() == total_matmul`.  Input vectors are sized to the full pool with `M[active_matmul..total_matmul) == 0` placeholders; the dispatcher skips the zero-M slots and computes only the first `active_matmul` GEMMs.
+
+The library:
+
+1. **Computes** only the first `active_matmul` GEMMs (zero-M placeholders in the padded form are no-ops).
+2. **Pre-warms** the inner-kernel weight cache for **all** `total_matmul` slots ahead of time, so any expert that fires on a future call hits a warm cache (no on-the-fly reorder spike).
+
+Leave both fields at their default `0` to keep the legacy contract: `num_ops = M.size()`, all weight-side vectors must be exactly `num_ops` long, all of them fire.  The library still pre-warms the firing experts when `ZENDNNL_GRP_MATMUL_PREPACK=1` (default) — see [Environment variables](#environment-variables).
+
+### Example (firing 4 of 8 experts)
+
+```cpp
+const int FIRING = 4, TOTAL = 8;
+
+// Weight-side vectors carry all 8 experts; the first 4 are the
+// "firing" ones the runtime expert-selection routed to this call,
+// the last 4 are pre-pack extras whose weights are warmed but
+// not computed.
+std::vector<const void *> weight(TOTAL, /*...*/);
+std::vector<int> K(TOTAL, /*...*/), N(TOTAL, /*...*/), ldb(TOTAL, /*...*/);
+std::vector<bool> transB(TOTAL, false), is_weights_const(TOTAL, true);
+
+// Input-side vectors only carry the firing 4 (M, src, dst, ldas, etc.):
+std::vector<int> M(FIRING, /*...*/);
+std::vector<const void *> src(FIRING, /*...*/);
+std::vector<void *> dst(FIRING, /*...*/);
+// ... lda, ldc, alpha, beta, layout, transA also of size FIRING ...
+
+std::vector<matmul_params> params(FIRING);
+params[0].active_matmul = FIRING;
+params[0].total_matmul  = TOTAL;
+// (Other params[i].active_matmul / total_matmul are unused.)
+
+status_t st = group_matmul_direct(
+    layout, transA, transB, M, N, K, alpha,
+    src, lda, weight, ldb, bias, beta,
+    dst, ldc, is_weights_const, params);
+```
+
+## Environment variables
+
+User-facing knobs that affect `group_matmul_direct` behaviour.  All are read once and cached on first reference (except `ZENDNNL_GRP_MATMUL_ALGO`, intentionally re-read per call so production runs can flip ALGO between phases without restart).  Set them before the first `group_matmul_direct` call.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto) | Force a parallel strategy. `0` = auto, `1`-`5` = ALGO 1-5. See the table above. |
+| `ZENDNNL_GRP_MATMUL_PREPACK` | `1` (ON) | Master switch for ahead-of-time weight prepack. When ON the dispatcher eagerly populates the inner-kernel weight cache for `max(M.size(), total_matmul)` experts on first reference, eliminating per-expert reorder spikes during inference. Set `0` to fall back to lazy on-first-touch reorder (lower first-call latency, but cache-miss spikes are visible during steady-state when a fresh expert routes). |
+| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `0` (OFF) | Enables an in-house BF16-only AVX-512 microkernel for ALGO 3 (N-tile). Wins on single- and few-thread workloads; can lose to AOCL DLP at high thread counts on large MoE shapes. Falls back to the standard backend when the contract fails (non-BF16, transA, alpha != 1, ...). |
+| `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | `1` (ON) | Pin ALGO 3's per-expert thread count to a `num_threads`-only formula so the AOCL DLP weight-reorder cache key is stable across MoE routing variation (active-expert filtering, batch-size shifts, ...). Disable only for A/B comparison; the fully-relaxed planner can degrade cache hit-rate under churn. |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `1` (ON) | Standard weight-reorder cache for AOCL DLP / BRGEMM. Setting `0` disables both lazy and prepack populations — prepack short-circuits to a no-op rather than wasting CPU on entries that won't be cached. |
+
+### Weight caching, prepack, and memory
+
+When `ZENDNNL_GRP_MATMUL_PREPACK=1` (default), each firing call eagerly reorders weights for **all** `total_matmul` experts (or `M.size()` experts in legacy mode) on the **first** invocation that observes that configuration.  Subsequent calls short-circuit via a per-thread fingerprint cache (~100 ns overhead) and benefit from warm caches.
+
+Trade-offs by deployment scenario:
+
+| Scenario | Behaviour | Recommendation |
+|---|---|---|
+| Production MoE inference (32 experts, BF16, ALGO 3) | First call: ~325 ms one-time reorder cost. Steady state: warm caches, no per-token spikes. ~2 GB persistent weight cache (held for process lifetime). | Default `PREPACK=1` is the right choice. The first-call cost lands inside warm-up. |
+| Latency-critical first-call (interactive serving without warm-up) | The ~325 ms first-call latency is unacceptable. | Set `ZENDNNL_GRP_MATMUL_PREPACK=0`. Falls back to lazy reorder — first call ~10 ms parallel, subsequent calls add a per-fresh-expert reorder spike. |
+| Memory-bounded (multi-tenant, container quota < 4 GB) | Eager prepack populates ~2 GB of LRU per process for gpt-oss-20B-class shapes. | Either `ZENDNNL_GRP_MATMUL_PREPACK=0` (no eager warm), or `ZENDNNL_MATMUL_WEIGHT_CACHE=0` (kills both lazy and prepack — every call re-reorders, lowest memory but slowest steady-state). |
+| Single-shot inference (eg. unit tests) | First-call cost dominates; no steady-state benefit. | `PREPACK=0` is fine. Default `1` is also fine — the cost is bounded and the test path itself is dominated by gtest fixture overhead. |
 
 ## MoE post-op (parallel mode only)
 
@@ -379,12 +455,12 @@ status_t st = group_matmul_direct(
 
 ## Notes and best practices
 
-1. **Vector lengths**: All per-op vectors must have length `num_ops`; `src` length selects the mode.
+1. **Vector lengths**: By default all per-op vectors must have length `num_ops = M.size()`; `src` length selects the mode.  When the [framework prepack-extras contract](#framework-prepack-extras-contract) is engaged (`params[0].active_matmul > 0`), the dispatcher accepts weight-side vectors of size `>= active_matmul` while input-side vectors stay at `M.size()`.
 2. **Chaining**: In sequential mode `K[i+1] == N[i]`.
 3. **Parallel independence**: Each op uses its own `src[i]`, `weight[i]`, `dst[i]`.
 4. **MoE**: Pass `nullptr` when not needed. When enabled, provide `row_ptrs` (built during scatter) and `topk_weights`.
 5. **Gated activation**: Pass `nullptr` when not needed. When enabled, N must be even and dst dtype must be FP32 or BF16.  Applied after GEMM, before MoE weighted-reduce.
-6. **Weight caching**: `is_weights_const[i] == true` enables caching. N-tiling creates per-slice cache entries (O(experts × tiles) — manageable for MoE).
+6. **Weight caching and prepack**: `is_weights_const[i] == true` enables caching for op `i`.  By default (`ZENDNNL_GRP_MATMUL_PREPACK=1`) the library *eagerly* warms the cache on the first observation of a configuration; subsequent calls hit warm caches with negligible overhead.  See [Weight caching, prepack, and memory](#weight-caching-prepack-and-memory) for the trade-offs (~325 ms first-call cost vs no per-token spikes; ~2 GB persistent cache for 32-expert MoE).
 7. **Tiled algos (2/3)**: Both require row-major layout, uniform dtypes, and standard unpacked A/B. ALGO 2 (M-tile, `m_tile_safe`) additionally supports quantization and most post-ops (except softmax/pooling), but blocks dynamic_quant and packed B. ALGO 3 (N-tile, `n_tile_safe`) is stricter: only buffer-free element-wise post-ops (relu, gelu, swish, etc.) are safe under column slicing. Falls back to ALGO 1 automatically when the required safety check fails.
 8. **Errors**: On failure, check logs for dimension / dtype / MoE / gated-act validation messages.
-9. **Strategy override**: Set `ZENDNNL_GRP_MATMUL_ALGO=N` (1-5) to force a specific strategy. `0` (default) auto-selects.
+9. **Environment variables**: Strategy override (`ZENDNNL_GRP_MATMUL_ALGO`), prepack toggle (`ZENDNNL_GRP_MATMUL_PREPACK`), and other knobs are listed in the [Environment variables](#environment-variables) section above.  See `docs/runtime_env.md` for the master env-var reference.

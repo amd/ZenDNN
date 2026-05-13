@@ -17,6 +17,11 @@
 #include <gtest/gtest.h>
 #include "gtest_utils.hpp"
 #include "ai_gtests/gtest_utils_ai.hpp"
+// Group-matmul-specific declarations (`GroupQuantMatmulType`,
+// `quant_matmul_test`) live under `group_matmul/`.  This is the only
+// outside-of-the-subdir reference; the subdir's CMakeLists.txt + its
+// helper TU own everything else.
+#include "group_matmul/group_matmul_test_helpers.hpp"
 #include <ctime>
 
 using namespace std;

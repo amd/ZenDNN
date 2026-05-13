@@ -27,6 +27,7 @@
 #include <omp.h>
 
 #include "group_matmul_parallel_common.hpp"
+#include "prepack/prepack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -210,6 +211,19 @@ void flat_m_tile(
 
   const int num_ops = static_cast<int>(M.size());
   if (num_ops == 0 || num_threads <= 0) return;
+
+  // Generic ahead-of-time weight pre-pack for ALGO 2.  See
+  // sequential_experts in group_matmul_parallel.cpp for the full
+  // contract; identical short-circuits here.  `num_threads` is
+  // forwarded so cross_warm can prefill regime 2 for the upcoming
+  // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
+  // ALGO 1 call site for the full rationale).
+  group_matmul_prepack::prepack_for_algo_2(
+      group_matmul_prepack::build_prepack_params(
+          weight, K, N, ldb, transB, is_weights_const, params, M,
+          get_grp_matmul_custom_kernel(),
+          num_threads, /*nr_align=*/0,
+          fused_act, act_dtype));
 
   matmul_algo_t algo = resolve_kernel();
 

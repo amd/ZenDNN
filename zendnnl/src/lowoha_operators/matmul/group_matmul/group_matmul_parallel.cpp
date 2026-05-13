@@ -34,6 +34,7 @@
 #include <omp.h>
 
 #include "group_matmul_parallel_common.hpp"
+#include "prepack/prepack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -60,6 +61,33 @@ void sequential_experts(
   if (num_ops == 0 || num_threads <= 0) {
     return;
   }
+
+  // Generic ahead-of-time weight pre-pack for ALGO 1.  Idempotent:
+  // short-circuits when `ZENDNNL_GRP_MATMUL_PREPACK=0` or when this
+  // thread already warmed the same fingerprint (per-thread cache
+  // covers process-lifetime calls of the same model/layer).  Under
+  // the uniform-eager semantic, PREPACK=ON warms the firing experts
+  // (legacy callers, `total = active = M.size()` after
+  // `build_prepack_params`) AND the full prepack-extras pool when
+  // the framework opted into `total > active`.  The module owns its
+  // own AOCL DLP backend gating via `resolve_kernel()`.
+  //
+  // `num_threads` is forwarded so `cross_warm` inside prepack.cpp can
+  // compute `stable = aocl_stable_n_thr(num_threads, max_N)` and
+  // prefill regime 2 (per-tile AOCL with nr_align=1) for the
+  // upcoming ALGO 3 decode path when CUSTOM_KERNEL=0.  Without it,
+  // that branch silently drops to a no-op and decode pays a one-time
+  // first-call reorder cost.  `nr_align` is left at 0 because the
+  // primary warm here is the full-weight key (which is nr_align-
+  // independent); cross_warm uses its own internal nr_align for the
+  // regime-2 path.
+  group_matmul_prepack::prepack_for_algo_1(
+      group_matmul_prepack::build_prepack_params(
+          weight, K, N, ldb, transB, is_weights_const, params, M,
+          get_grp_matmul_custom_kernel(),
+          num_threads, /*nr_align=*/0,
+          fused_act, act_dtype));
+
   matmul_algo_t algo = resolve_kernel();
 
   for (size_t i = 0; i < num_ops; ++i) {
@@ -99,6 +127,20 @@ void parallel_multilevel(
   if (num_ops == 0 || num_threads <= 0) {
     return;
   }
+
+  // Generic ahead-of-time weight pre-pack for ALGO 4.
+  // See sequential_experts above for the contract; identical short-
+  // circuits, only the scheduling-algo tag differs.  `num_threads`
+  // is forwarded so cross_warm can prefill regime 2 for the upcoming
+  // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
+  // ALGO 1 call site for the full rationale).
+  group_matmul_prepack::prepack_for_algo_4(
+      group_matmul_prepack::build_prepack_params(
+          weight, K, N, ldb, transB, is_weights_const, params, M,
+          get_grp_matmul_custom_kernel(),
+          num_threads, /*nr_align=*/0,
+          fused_act, act_dtype));
+
   matmul_algo_t algo = resolve_kernel();
 
   const int ccd_size = std::min(8, num_threads);
@@ -204,6 +246,18 @@ void parallel_per_expert(
   if (num_ops == 0 || num_threads <= 0) {
     return;
   }
+
+  // Generic ahead-of-time weight pre-pack for ALGO 5.  `num_threads`
+  // is forwarded so cross_warm can prefill regime 2 for the upcoming
+  // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
+  // ALGO 1 call site for the full rationale).
+  group_matmul_prepack::prepack_for_algo_5(
+      group_matmul_prepack::build_prepack_params(
+          weight, K, N, ldb, transB, is_weights_const, params, M,
+          get_grp_matmul_custom_kernel(),
+          num_threads, /*nr_align=*/0,
+          fused_act, act_dtype));
+
   matmul_algo_t algo = resolve_kernel();
   scoped_active_levels guard(1);
 
@@ -251,8 +305,15 @@ void parallel_per_expert(
 // dtypes across experts are additionally required.
 static bool check_m_tile_safe(
   const std::vector<char> &layout,
-  const std::vector<matmul_params> &params) {
-  const int num_ops = static_cast<int>(params.size());
+  const std::vector<matmul_params> &params,
+  int num_ops) {
+  // Iterate the active range only: when the framework signals
+  // `params[0].active_matmul > 0` the caller already trimmed the
+  // matmul-processing count to the active prefix, but kept
+  // `params[]` (and `layout[]`) at the framework's original size to
+  // preserve weight-side prepack metadata at the tail.  Iterating
+  // up to `params.size()` here would scan that tail and falsely
+  // reject m-tile on a uniformity mismatch among non-fired slots.
   for (int i = 0; i < num_ops; ++i) {
     if (layout[i] != 'r' && layout[i] != 'R') {
       return false;
@@ -303,8 +364,11 @@ static bool check_m_tile_safe(
 // always calls M-tile first and only invokes this when m_tile_safe is
 // true, so a second pass would just be duplicated work.
 static bool check_n_tile_extra(
-  const std::vector<matmul_params> &params) {
-  const int num_ops = static_cast<int>(params.size());
+  const std::vector<matmul_params> &params,
+  int num_ops) {
+  // Same active-range constraint as `check_m_tile_safe` above —
+  // tail slots carry framework prepack metadata, not real per-call
+  // state, and would falsely flip n-tile-safe to false.
   for (int i = 0; i < num_ops; ++i) {
     if (params[i].quant_params.wei_scale.buff != nullptr) {
       return false;
@@ -337,9 +401,17 @@ static bool check_n_tile_extra(
 //
 // Decision rule:
 //   * num_ops > num_threads                                 → ALGO 5
-//   * Large weight + prompt + N-tile viable + ≥5 experts    → ALGO 3
+//   * Large weight + prompt + N-tile viable + ≥5 experts +
+//     (wide-N or many-experts)                              → ALGO 3
+//     (large-weight wide-N prompt carve-out; large-weight
+//      tall-N few-experts still routes to ALGO 1)
 //   * Decode (max_M ≤ kDecodeMaxM) + ≥4 experts + N-tile OK → ALGO 3
-//   * Prompt-class small/medium weight + N-tile OK          → ALGO 3
+//   * Small / medium weight (≤ kMediumWeight) +
+//     prompt (max_M > kDecodeMaxM)                          → ALGO 1
+//     (full-weight AOCL DLP cache key, no per-tile fan-out,
+//      stable across thread counts.  Callers that have
+//      validated ALGO 3 as a win on a specific shape can
+//      still force it via ZENDNNL_GRP_MATMUL_ALGO=3.)
 //   * Otherwise                                             → ALGO 1
 //
 // The four discriminators the heuristic uses:
@@ -374,9 +446,36 @@ static int auto_select_algo(
   const size_t weight_per_expert =
     static_cast<size_t>(max_K) * max_N * wei_elem;
 
-  // N-tile viability — ceiling division models partial last CCD
-  // (e.g., 126 threads → 16 CCDs, last has 6 cores) consistently
-  // with flat_m_tile's num_ccds.
+  // Small / medium weights (≤ kMediumWeight per expert)
+  // + prompt-class shape (max_M > kDecodeMaxM): unconditionally
+  // **ALGO 1**.  Short-circuit before computing N-tile arithmetic.
+  //
+  // Routing this regime to ALGO 3 would inflate the AOCL DLP LRU
+  // footprint by `stable_n_thr` × `per-tile size` (a substantial
+  // additional cache residency at high thread counts in many-expert
+  // × layered MoE block), and the per-tile cache keys rotate with
+  // thread count which forces a re-warm whenever the deployment
+  // scales OMP teams.  ALGO 1 uses the FULL-weight AOCL key which
+  // is thread-count-stable, deduplicates across prompt + decode in
+  // the same process, and gives identical or better steady-state
+  // perf on small/medium-weight prompt workloads across the typical
+  // BS × seq × topk grid we target.
+  // Callers that have validated ALGO 3 as a win on a specific
+  // small/medium-weight prompt shape can still force it explicitly
+  // via ZENDNNL_GRP_MATMUL_ALGO=3.
+  //
+  // This rule does NOT affect the large-weight (> kMediumWeight)
+  // wide-N prompt path below — that carve-out keeps its measured
+  // ALGO 3 advantage.
+  if (weight_per_expert <= kMediumWeight && max_M > kDecodeMaxM) {
+    return 1;
+  }
+
+  // N-tile viability — only the two branches below read this, so
+  // the prompt small/medium path above never pays the arithmetic.
+  // Ceiling division models partial last CCD (e.g., 126 threads →
+  // 16 CCDs, last has 6 cores) consistently with flat_m_tile's
+  // num_ccds.
   const int ccd_size_est = std::min(8, num_threads);
   const int num_ccds_est = std::max(1,
                                     (num_threads + ccd_size_est - 1) / ccd_size_est);
@@ -393,18 +492,16 @@ static int auto_select_algo(
   // ALGO 3 only when column-parallel has enough per-thread work to
   // amortise its per-thread BKC pack + round-scheduling overhead.
   //
-  // Measurements on `grp_matmul_prompt.txt` (Mixtral 8×, BS=32..512,
-  // K=14336/4096, N=4096/14336, 128 threads) showed:
-  //   * ops=8 with K > N (tall shape)  → ALGO 1 wins by 40–189%.
-  //     With 128/8=16 threads/expert, ALGO 3 splits N=4096 into 256-
-  //     col slices and each thread packs K×256×2B = 7MB — too much
-  //     per-thread memory + pack traffic vs AOCL DLP's sequential-
-  //     experts-with-full-team approach.
-  //   * ops=8 with N > K (wide shape)  → ALGO 3 wins by 30–33%.
-  //     More N to split gives the thread team better parallelism.
-  //   * ops≥16 (either orientation)    → ALGO 3 wins by 20%+.
-  //     Many experts amortise ALGO 3's round scheduling and pack
-  //     cost across experts.
+  // Internal prompt sweeps on the large-weight regime show:
+  //   * Few-experts tall shapes (K > N) — ALGO 1 is the clear win.
+  //     With a low thread-per-expert count, ALGO 3 splits N into
+  //     thin column slices and each thread packs a large K×slice
+  //     working set, paying per-thread memory + pack traffic that
+  //     AOCL DLP's sequential-experts-with-full-team avoids.
+  //   * Few-experts wide shapes (N > K) — ALGO 3 wins; more N
+  //     to split gives the per-expert team better parallelism.
+  //   * Many-experts (either orientation) — ALGO 3 wins; the
+  //     round scheduling and pack cost amortise across experts.
   //
   // Heuristic: route to ALGO 3 iff (wide-N || many-experts).
   // Otherwise fall back to ALGO 1 for tall-N few-experts shapes.
@@ -417,16 +514,13 @@ static int auto_select_algo(
     return 1;
   }
 
-  // Small / medium weights — prompt-class falls through to the
-  // ntile_ok check below; decode-class requires ≥4 experts.
-  if (max_M <= kDecodeMaxM) {
-    if (num_ops >= 4 && ntile_ok) {
-      return 3;
-    }
-    return 1;
-  }
-
-  return ntile_ok ? 3 : 1;
+  // Small / medium weights + decode (max_M ≤ kDecodeMaxM): ≥4
+  // experts + N-tile viable → ALGO 3.  This is the MoE decode
+  // hot path where the custom-kernel-enabled configuration shows
+  // a measurable advantage over ALGO 1 in our internal sweeps.
+  // Smaller expert counts fall to ALGO 1.
+  // (The prompt sibling regime is short-circuited above.)
+  return (num_ops >= 4 && ntile_ok) ? 3 : 1;
 }
 
 } // namespace
@@ -443,8 +537,15 @@ int select_grp_matmul_algo(
   const std::vector<matmul_params> &params,
   int num_threads) {
 
-  const bool m_tile_safe = check_m_tile_safe(layout, params);
-  const bool n_tile_safe = m_tile_safe && check_n_tile_extra(params);
+  // `M.size()` is the active matmul count after `group_matmul_direct`
+  // sliced the M vector to honour `params[0].active_matmul`.  Pass it
+  // explicitly so the safety helpers iterate only the active slots
+  // rather than `params.size()` (which still carries the framework's
+  // prepack-extras tail).
+  const int num_ops_eff = static_cast<int>(M.size());
+  const bool m_tile_safe = check_m_tile_safe(layout, params, num_ops_eff);
+  const bool n_tile_safe = m_tile_safe
+      && check_n_tile_extra(params, num_ops_eff);
 
   // Manual override: ZENDNNL_GRP_MATMUL_ALGO=1..5.
   //   ALGO 2 (M-tile): needs m_tile_safe (row-major, uniform dtypes).

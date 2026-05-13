@@ -96,35 +96,9 @@ struct MatmulType {
              bool is_bmm = false);
 };
 
-/** @brief Constrained Group-Matmul parameters for the quantized test suites.
- *
- *  The shared `MatmulType` random grid (alpha, beta ∈ U[0,10]; random
- *  transA/transB; arbitrary K) drives the quantized group-matmul kernels
- *  outside the regime where a meaningful tolerance can be derived for an
- *  activated comparison: `silu(g) · u`-style outputs inherit an O(α²·k²·ε)
- *  noise term that swamps any rel/abs bound for large α·β, and INT8 quant
- *  rounding on transposed inputs can deviate from the f32 reference by
- *  amounts that the standard `compare_tensor_2D_matrix` envelope (tuned for
- *  the un-quantized BF16/F32 path) cannot bound.
- *
- *  This struct pins the destabilizing knobs to safe defaults via the
- *  fixture's member constants — no transpose, alpha = 1, beta = 0, no
- *  random post-op chain — and only randomizes the shape / algo / dtype
- *  axes that produce useful coverage.  K is rounded down to a multiple of
- *  4 so INT8 K-grouping in the symmetric / dynamic-quant tests doesn't
- *  need per-test re-rounding.
- */
-struct GroupQuantMatmulType {
-  uint64_t matmul_m;
-  uint64_t matmul_k;
-  uint64_t matmul_n;
-  matmul_algo_t algo = matmul_algo_t::none;
-  data_type_t source_dtype;
-  data_type_t output_dtype;
-  quant_granularity_t weight_granularity;
-  int32_t num_threads;
-  GroupQuantMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
-};
+// `GroupQuantMatmulType` (group-matmul-quant fixture parameter) was
+// lifted into `group_matmul/group_matmul_test_helpers.hpp` during the
+// gtests folder refactor so this header stays operator-agnostic.
 
 /** Optional CLI overrides for matmul/BMM/reorder, embag/embedding, and norm tests. Unset std::optional members are ignored; set values override defaults in the corresponding *Type constructors. */
 struct CLIParams {
@@ -322,7 +296,7 @@ extern const float MATMUL_POSTOP_CLIP_LOWER;
 extern const float MATMUL_POSTOP_CLIP_UPPER;
 extern const float MATMUL_POSTOP_ELTWISE_ALPHA;
 extern std::vector<MatmulType> matmul_test;
-extern std::vector<GroupQuantMatmulType> quant_matmul_test;
+// `quant_matmul_test` was lifted into `group_matmul/group_matmul_test_helpers.hpp`.
 extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
 extern std::vector<EmbagType> embag_test;
@@ -452,8 +426,8 @@ extern std::vector<data_type_t> dtype_arr;
 
 /** @brief Print MatmulType for GTest parameterized test failure messages. */
 void PrintTo(const MatmulType &value, ::std::ostream *os);
-/** @brief Print GroupQuantMatmulType for GTest parameterized test failure messages. */
-void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
+// `PrintTo(GroupQuantMatmulType, ...)` was lifted into
+// `group_matmul/group_matmul_test_helpers.hpp`.
 /** @brief Print BatchMatmulType for GTest parameterized test failure messages. */
 void PrintTo(const BatchMatmulType &value, ::std::ostream *os);
 /** @brief Print ReorderType for GTest parameterized test failure messages. */
@@ -599,39 +573,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             float beta = 0.0f,
                             int pack_format_b = 0);
 
-/** @fn group_matmul_kernel_test
- *  @brief Run group matmul through group_matmul_direct for multiple experts.
- *
- *  Wraps vectors of (input, weight, bias, output) tensors into the
- *  group_matmul_direct API. For each expert, derives transA/transB from tensor
- *  order tags and lda/ldb from tensor strides — matching how matmul_kernel_test
- *  works for the single-op path. Automatically extracts quantization parameters
- *  (WOQ, INT8, dynamic quant) from tensor metadata.
- *
- *  @param inputs   Vector of input tensors (one per expert)
- *  @param weights  Vector of weight tensors (one per expert)
- *  @param biases   Vector of bias tensors (one per expert, empty tensor for no bias)
- *  @param outputs  Vector of output tensors (one per expert)
- *  @param algo     Matmul algorithm to use
- *  @param alpha    Scaling factor for A*B (default 1.0)
- *  @param beta     Scaling factor for existing C values (default 0.0)
- *  @param moe_postop Optional MoE post-op params (default nullptr)
- *  @param gated_act  Optional gated-activation params (default nullptr).
- *                    When provided with act != none, the kernel applies the
- *                    activation in-place to the first N/2 columns of each
- *                    expert's output (requires even N and f32/bf16 dst).
- *  @return group_matmul_direct status
- */
-status_t group_matmul_kernel_test(
-  std::vector<tensor_t> &inputs,
-  std::vector<tensor_t> &weights,
-  std::vector<tensor_t> &biases,
-  std::vector<tensor_t> &outputs,
-  matmul_algo_t algo,
-  float alpha = 1.0f,
-  float beta = 0.0f,
-  const group_matmul_moe_postop_params *moe_postop = nullptr,
-  const grp_matmul_gated_act_params *gated_act = nullptr);
+// `group_matmul_kernel_test` was lifted into
+// `group_matmul/group_matmul_test_helpers.hpp` during the gtests folder
+// refactor so this header stays operator-agnostic.
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -997,6 +941,30 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
  *  freed tensors affecting subsequent tests.
  */
 void clear_matmul_test_caches();
+
+/** @fn reset_grp_matmul_caches
+ *  @brief Clear every cache the `group_matmul` operator stack can populate.
+ *
+ *  Clears, in order:
+ *    1. Custom-kernel BF16 pack arena (`clear_custom_kernel_pack_cache()`)
+ *    2. Prepack-module fingerprint cache (`clear_fingerprint_cache_for_test()`)
+ *    3. All matmul weight caches via `clear_matmul_test_caches()`:
+ *         - AOCL DLP weight LRU (typed: float, int16_t, uint16_t, int8_t;
+ *           plus symquant + woq when enabled)
+ *         - AOCL DLP zero-point compensation cache
+ *         - oneDNN matmul weight cache (when ZENDNNL_DEPENDS_ONEDNN)
+ *         - native prepacked weight caches
+ *
+ *  Required for any `group_matmul` test running in the same process as
+ *  another test that touches the same shape (the AOCL weight LRU is
+ *  process-wide and keys on the raw weight pointer + (K, N, ldb, ...);
+ *  a stale entry can silently hit if a later test's allocator hands back
+ *  the same heap address that a previous test freed).  Call at the top
+ *  of every test in test_prepack.cpp / test_fused_moe.cpp / test_algos.cpp.
+ *
+ *  Single-threaded only; callers must be outside any OMP parallel region.
+ */
+void reset_grp_matmul_caches();
 
 /** @fn sdpa_kernel_test
  *  @brief Compute SDPA Operation using LOWOHA sdpa_direct API.

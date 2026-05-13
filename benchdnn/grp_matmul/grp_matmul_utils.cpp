@@ -85,6 +85,16 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
                 (ialloc_str == "1" || ialloc_str == "true"
                  || ialloc_str == "internal_alloc") ? 1 : 0;
         }
+        // 13th column (optional): total_experts.  Drives the framework
+        // prepack-extras contract: when > num_ops the dispatcher receives
+        // weight buffers for all `total_experts` slots (first `num_ops` =
+        // firing experts, rest = extras the prepack module pre-warms).
+        // When 0 / absent, treated as `total_experts = num_ops` (legacy
+        // contract: active == total).  See `grp_matmul_utils.hpp` for the
+        // full semantic and `params[i].active_matmul / total_matmul` in
+        // `lowoha_common.hpp` for the library-side contract.
+        std::string total_str = next();
+        if (!total_str.empty()) cfg.total_experts = std::stoi(total_str);
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) {
         return false;
@@ -109,6 +119,16 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
                       << " is not positive (reduce num_ops instead)\n";
             return false;
         }
+    }
+    // total_experts: defaulted to num_ops when absent; reject the
+    // logically-impossible "fewer total than firing".
+    if (cfg.total_experts == 0) {
+        cfg.total_experts = cfg.num_ops;
+    } else if (cfg.total_experts < cfg.num_ops) {
+        std::cerr << "parse_config: total_experts=" << cfg.total_experts
+                  << " < num_ops=" << cfg.num_ops
+                  << " is invalid (total must include all firing experts)\n";
+        return false;
     }
     return true;
 }

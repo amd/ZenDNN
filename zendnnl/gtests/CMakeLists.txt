@@ -30,7 +30,6 @@ if(ZENDNNL_BUILD_GTEST)
     gtest_main.cpp
     gtest_utils.cpp
     test_matmul.cpp
-    test_group_matmul.cpp
     test_reorder.cpp
     test_batchmatmul.cpp
     test_embag.cpp
@@ -39,6 +38,9 @@ if(ZENDNNL_BUILD_GTEST)
     test_sdpa.cpp
     test_omp_api.cpp
     test_softmax.cpp)
+  # Group-matmul-specific gtest artifacts (5 test files + 2 helper TUs +
+  # moe_test_utils.hpp + README) live in the `group_matmul/` subdirectory.
+  # Sourced via `add_subdirectory()` below after the gtests target exists.
 
   set(gtests_headers
     gtest_utils.hpp)
@@ -66,8 +68,15 @@ if(ZENDNNL_BUILD_GTEST)
 
   add_executable(gtests ${gtests_sources})
 
+  # Adds group_matmul/ test sources to the gtests target via
+  # target_sources().  Must come AFTER add_executable so the target
+  # exists.
+  add_subdirectory(group_matmul)
+
   target_include_directories(gtests
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_matmul")
 
   # Link to OpenMP and GTest
   target_link_libraries(gtests

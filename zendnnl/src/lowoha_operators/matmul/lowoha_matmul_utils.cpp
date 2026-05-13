@@ -664,8 +664,8 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
           if (M <= 8) {
             // M=1: BKC GEMV with flat kernel + CCX scheduling.
             // M=2-8: BRGEMM with MR=M (decode) or MR=8, with
-            // b_exceeds_l2 exemption. Both dominate DLP at high
-            // thread counts (up to +50% at 128t on MoE shapes).
+            // b_exceeds_l2 exemption. Both are the preferred default
+            // over DLP at high thread counts on MoE shapes.
             // transB threaded through so the M=1 narrow-N gate can
             // route transB=true shapes back to the DLP rules (the
             // narrow xmm kernel inside bf16_gemv_direct only engages

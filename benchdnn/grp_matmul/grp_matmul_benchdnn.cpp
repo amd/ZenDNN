@@ -18,31 +18,51 @@
 ///
 /// Input file format (CSV, one line per config):
 ///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup
-///        [, moe_topk[, gated_act[, N_down[, use_internal_alloc]]]]
+///       [, moe_topk[, gated_act[, N_down[, use_internal_alloc[, total_experts]]]]]
 ///
 /// M can be a single int (all experts same) or colon-separated per-expert:
-///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50                 <- plain GEMM
-///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2              <- MoE topk=2
-///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096     <- fused (caller-alloc)
-///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096, 1  <- fused (lib-alloc)
+///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50                    <- plain GEMM
+///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50, 2                 <- MoE topk=2
+///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096        <- fused (caller-alloc)
+///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096, 1     <- fused (lib-alloc)
+///   4, 32, 2880, 5760,  200, bf16:bf16:bf16, true, 50, 4, 3, 2880, 1, 32 <- prepack-extras (4/32)
 ///
 /// moe_topk (optional, default 0): 0 = no MoE post-op, >0 = fused weighted-reduce.
 /// gated_act (optional, default 0): 0 = off, 1 = silu_and_mul, 2 = gelu_and_mul,
 ///   3 = swiglu_oai_mul.  Requires N even.
 /// N_down (optional, default 0): 0 = no fused down_proj, >0 = fused
 ///   Op1(gate+up) → activation → Op2(down_proj) with this output width.
-///   K_down = N/2 (dim after activation), output = [M, N_down] per expert.
+///   K_down follows the gated_act contract (mirrors `op2_k_for_act()` in
+///   `group_matmul_parallel_common.hpp`):
+///     * gated_act > 0 (silu_and_mul / gelu_and_mul / swiglu_oai_mul):
+///         K_down = N/2 (gate × up collapses to half).  Requires N even.
+///     * gated_act = 0 (no activation):
+///         K_down = N (full Op1 output flows straight into Op2).
+///   Op2 output = [M, N_down] per expert in either case.
 /// use_internal_alloc (optional, default 0; only when N_down > 0):
 ///   0 = legacy mode (caller allocates dst[] for Op1 + dst_down[] for Op2);
 ///   1 = library mode (library allocates Op1 scratch internally, Op2
 ///       writes back into src[] in place — caller passes empty dst[] and
 ///       empty fused.dst_down).  Requires lda[i] >= N_down[i] (Op2 reuses
 ///       the original src row stride for its output writes).
+/// total_experts (optional, default 0 → defaults to num_ops):
+///   Drives the framework prepack-extras contract: when > num_ops, the
+///   driver allocates `total_experts` weight buffers, fills the first
+///   `num_ops` as the firing experts plus extras for the remainder, and
+///   propagates `params[i].active_matmul = num_ops; total_matmul = total_experts`
+///   to the dispatcher.  The library computes only the first `num_ops`
+///   GEMMs and pre-warms the cache for all `total_experts` slots.
+///   Mirrors the production MoE rotating-experts use case.  Rejected
+///   if < num_ops.
 ///
-/// Env vars:
+/// Env vars (all read by the library, not parsed by this driver):
 ///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
 ///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert
-///   ZENDNNL_MATMUL_ALGO=N         - select kernel (default: aocl_dlp_blocked)
+///   ZENDNNL_GRP_MATMUL_PREPACK=0|1      - master switch for ahead-of-time weight prepack (default 1)
+///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0|1 - in-house BF16 microkernel for ALGO 3 (default 0)
+///   ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=0|1 - stable AOCL DLP cache key under MoE churn (default 1)
+///   ZENDNNL_MATMUL_ALGO=N               - select inner kernel (default: aocl_dlp_blocked)
+///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1     - global weight-reorder cache toggle (default 1)
 
 #include "grp_matmul_benchdnn.hpp"
 #include "grp_matmul_utils.hpp"
@@ -83,6 +103,16 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         return false;
     }
     const int n = cfg.num_ops;
+    // Total expert table size for the framework prepack-extras
+    // contract.  When the input file specifies `total_experts > num_ops`,
+    // benchdnn allocates weight / K / N / ldb / transB / is_weights_const
+    // at `total` (firing experts in [0, n), extras in [n, total)) and
+    // sets `params[i].active_matmul = n`, `params[i].total_matmul =
+    // total`.  When equal (the default), behaviour is identical to
+    // the legacy single-size path.  See `grp_matmul_utils.hpp` for the
+    // input-format note and `lowoha_common.hpp` for the library-side
+    // contract.
+    const int total = cfg.total_experts;
     const size_t src_elem = size_of(cfg.src_dt);
     const size_t wei_elem = size_of(cfg.wei_dt);
     const size_t dst_elem = size_of(cfg.dst_dt);
@@ -124,7 +154,11 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
                    static_cast<size_t>(lda_val) * dst_elem)
         : static_cast<size_t>(cfg.K) * src_elem;
 
-    std::vector<AlignedBuffer> A(n), B(n), C(n);
+    // Weight buffers sized to `total` so the prepack-extras tail
+    // (experts in [n, total)) has valid pointers + dimensions for
+    // the prepack module to walk.  Activation / dst stays at `n`
+    // (only firing experts compute).
+    std::vector<AlignedBuffer> A(n), B(total), C(n);
     // Pristine copy of the initial src fill.  In internal-alloc mode
     // every library call rewrites A[i] in place with the Op2 output,
     // so subsequent iterations would otherwise benchmark a different
@@ -173,19 +207,54 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         }
     }
 
+    // Allocate + fill the prepack-extras weight tail (experts in
+    // [n, total)).  These weights are NOT consumed by the matmul
+    // (the dispatcher iterates only `[0, n)` for compute), but the
+    // prepack module DOES walk them via the weight-side metadata
+    // vectors (K / N / ldb / transB / is_weights_const sized to
+    // `total`) and warms their cache entries up front.  Production
+    // MoE inference under the framework `(active, total)` contract
+    // routes a different `n` experts on each call but always passes
+    // the full `total` weight pool — this loop replicates that
+    // pattern for benchmarking.
+    for (int i = n; i < total; ++i) {
+        B[i].alloc(static_cast<size_t>(cfg.K) * cfg.N * wei_elem);
+        fill_buffer(B[i].ptr, static_cast<size_t>(cfg.K) * cfg.N,
+                    cfg.wei_dt, 137 + i * 7);
+    }
+
     std::vector<char> layout(n, 'r');
     // transB=true matches the PyTorch / vLLM / TGI nn.Linear weight
     // convention (weight stored as [N, K] row-major; ldb = K).  This
     // is the layout real LLM frameworks pass, so benchdnn benchmarks
     // here exercise the same dispatcher / pack / kernel path as
     // production model-level callers.
-    std::vector<bool> transA(n, false), transB(n, true);
-    std::vector<int> Mv(cfg.M_per_op), Nv(n, cfg.N), Kv(n, cfg.K);
+    //
+    // Vector sizing under the (active, total) contract:
+    //
+    //   * Weight-side (read by both prepack [0, total) and matmul
+    //     [0, n)): weight, K, N, ldb, transB, is_weights_const sized
+    //     to `total`.  Extras' values mirror the firing experts'
+    //     uniform shape (cfg.K, cfg.N) so the prepack cache key is
+    //     well-formed for every entry.
+    //
+    //   * Input/output-side (read only by matmul [0, n)): M, src,
+    //     dst, bias, lda, ldc, alpha, beta, layout, transA stay
+    //     sized at `n`.  The dispatcher's relaxed-size validator
+    //     accepts any size >= num_ops when active_matmul > 0 (see
+    //     `group_matmul_direct.cpp::size_relaxed`).
+    //
+    //   * params: sized at `n`; only `params[0].active_matmul` /
+    //     `params[0].total_matmul` are read by the dispatcher to
+    //     decide the contract.  We populate every entry for
+    //     defensive symmetry.
+    std::vector<bool> transA(n, false), transB(total, true);
+    std::vector<int> Mv(cfg.M_per_op), Nv(total, cfg.N), Kv(total, cfg.K);
     std::vector<float> alpha(n, 1.0f), beta(n, 0.0f);
-    std::vector<int> lda(n, lda_val), ldb(n, cfg.K), ldc(n, cfg.N);
-    std::vector<bool> wconst(n, cfg.is_weights_const);
+    std::vector<int> lda(n, lda_val), ldb(total, cfg.K), ldc(n, cfg.N);
+    std::vector<bool> wconst(total, cfg.is_weights_const);
 
-    std::vector<const void *> src_ptrs(n), wei_ptrs(n), bias_ptrs(n, nullptr);
+    std::vector<const void *> src_ptrs(n), wei_ptrs(total), bias_ptrs(n, nullptr);
     // dst_ptrs is empty in internal-alloc mode (the library detects
     // this and runs the in-place reuse path; ldc is also unused).
     std::vector<void *> dst_ptrs;
@@ -194,8 +263,10 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     }
     for (int i = 0; i < n; ++i) {
         src_ptrs[i] = A[i].ptr;
-        wei_ptrs[i] = B[i].ptr;
         if (!internal_alloc) dst_ptrs[i] = C[i].ptr;
+    }
+    for (int i = 0; i < total; ++i) {
+        wei_ptrs[i] = B[i].ptr;
     }
 
     std::vector<matmul_params> params(n);
@@ -204,6 +275,16 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         params[i].dtypes.wei = cfg.wei_dt;
         params[i].dtypes.dst = cfg.dst_dt;
         params[i].dtypes.bias = data_type_t::none;
+        // Framework prepack-extras contract.  When `total > n`, the
+        // dispatcher takes the relaxed-size validator path and the
+        // prepack module walks the full `total` weight pool.  When
+        // `total == n` (the default for inputs without an explicit
+        // total_experts column), this still engages
+        // `params[0].active_matmul > 0`, so the dispatcher uses the
+        // active-prefix branch that's behaviourally equivalent to
+        // legacy.
+        params[i].active_matmul = static_cast<uint32_t>(n);
+        params[i].total_matmul  = static_cast<uint32_t>(total);
     }
 
     // Build MoE post-op when moe_topk > 0.
@@ -271,36 +352,75 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         (cfg.gated_act > 0) ? &act : nullptr;
 
     // Fused down_proj: when N_down > 0, build fused_moe params.
-    // The MoE-semantically correct flow is Op1 → gated activation → Op2.
-    // Running fused with gated_act=0 feeds Op2 the raw first-half of
-    // Op1's output (K_down = N/2) — a valid numerical operation but NOT
-    // equivalent to MoE.  Warn so the config author sees it, but don't
-    // reject (the grp_matmul gtests exercise this path as a reference).
+    // K_down comes from the gated_act contract — see file-header doc
+    // block and `op2_k_for_act()` in
+    // `group_matmul_parallel_common.hpp`.  Hardcoding `N/2` here used
+    // to corrupt the act=none path (Op2 expected the full N columns
+    // but got N/2 worth of weight bytes), masked only because the
+    // benchdnn library calls re-validate sizes at the dispatch layer.
     const bool fused_enabled = (cfg.N_down > 0);
-    if (fused_enabled && cfg.gated_act == 0) {
+    const bool act_halves_k  = (cfg.gated_act > 0);
+    const int  K_down        = act_halves_k ? (cfg.N / 2) : cfg.N;
+
+    // gated_act=0 + N_down>0 IS a legal numerical config (act=none
+    // path), but it's not MoE-semantic — warn the config author so a
+    // typo in the CSV doesn't silently turn off the activation.
+    if (fused_enabled && !act_halves_k) {
         std::cerr << "WARNING: N_down=" << cfg.N_down
-                  << " with gated_act=0 — Op2 will read raw first-half "
-                     "columns of Op1's output (not MoE-semantic).  "
-                     "Set gated_act>0 for Op1 → activation → Op2.\n";
+                  << " with gated_act=0 — Op2 will read the FULL N="
+                  << cfg.N << " columns of Op1's output (K_down=N, "
+                     "act=none path).  Valid numerically, but NOT "
+                     "MoE-semantic.  Set gated_act>0 for Op1 → "
+                     "activation → Op2.\n";
     }
-    if (fused_enabled && (cfg.N & 1) != 0) {
+    // The "N must be even" constraint only applies when the
+    // activation halves K (gate × up split).  For act=none, K_down=N
+    // and N can be arbitrary.
+    if (fused_enabled && act_halves_k && (cfg.N & 1) != 0) {
         std::cerr << "ERROR: N=" << cfg.N
-                  << " must be even when N_down > 0 (K_down = N/2).  "
-                     "Skipping config.\n";
+                  << " must be even when N_down > 0 and gated_act > 0 "
+                     "(K_down = N/2).  Skipping config.\n";
         return false;
     }
-    const int dim = cfg.N / 2;
 
-    std::vector<AlignedBuffer> B_down(n), C_down(n);
+    // Op2 weight buffers sized to `total` (prepack-extras tail);
+    // dst_down stays at `n` (Op2 only computes for firing experts).
+    std::vector<AlignedBuffer> B_down(total), C_down(n);
     grp_matmul_fused_moe_params fused;
     grp_matmul_fused_moe_params *fused_ptr = nullptr;
 
     if (fused_enabled) {
-        fused.down_weight.resize(n);
-        fused.N_down.resize(n, cfg.N_down);
-        fused.ldb_down.resize(n, cfg.N_down);
-        fused.bias_down.resize(n, nullptr);
-        // Op2 dst (dst_down / ldc_down) only populated in legacy mode.
+        // Weight-side metadata sized to `total` so the Pass 2 prepack
+        // module walks the full down-projection weight pool.  See the
+        // outer (Op1) sizing block above for the rationale.
+        //
+        // `ldb_down` must satisfy the library's minimum-row-stride
+        // contract (`group_matmul_fused_moe.cpp::group_matmul_fused_
+        // moe_execute` validator):
+        //   transB == false: ldb_down >= N_down  (row stride of an
+        //                                         [K_down, N_down]
+        //                                         row-major weight)
+        //   transB == true:  ldb_down >= K_down  (row stride of an
+        //                                         [N_down, K_down]
+        //                                         row-major weight,
+        //                                         i.e. the PyTorch /
+        //                                         vLLM nn.Linear
+        //                                         convention)
+        // benchdnn currently runs every Op2 expert with the same
+        // transB as Op1 (the outer `transB` vector is uniform), so
+        // pulling `transB[0]` is sufficient.  Hardcoding `cfg.N_down`
+        // for the transB=true case (the previous behaviour) silently
+        // tripped the library validator on any shape with
+        // `K_down > N_down` (e.g. Mixtral down_proj), which is a
+        // common configuration; `transB=false` callers are
+        // unaffected because `cfg.N_down == cfg.N_down`.
+        const int ldb_down_val = transB[0] ? K_down : cfg.N_down;
+        fused.down_weight.resize(total);
+        fused.N_down.resize(total, cfg.N_down);
+        fused.ldb_down.resize(total, ldb_down_val);
+        fused.bias_down.resize(total, nullptr);
+        // Op2 dst (dst_down / ldc_down) only populated in legacy mode
+        // and stays at `n` (only firing experts produce output).
         // Internal-alloc leaves them empty so the library detects the
         // mode and reuses src[] for the Op2 output.
         if (!internal_alloc) {
@@ -309,8 +429,9 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         }
 
         for (int i = 0; i < n; ++i) {
-            B_down[i].alloc(static_cast<size_t>(dim) * cfg.N_down * wei_elem);
-            fill_buffer(B_down[i].ptr, static_cast<size_t>(dim) * cfg.N_down,
+            B_down[i].alloc(static_cast<size_t>(K_down) * cfg.N_down * wei_elem);
+            fill_buffer(B_down[i].ptr,
+                        static_cast<size_t>(K_down) * cfg.N_down,
                         cfg.wei_dt, 200 + i * 11);
             fused.down_weight[i] = B_down[i].ptr;
             if (!internal_alloc) {
@@ -321,6 +442,14 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
                             * cfg.N_down * dst_elem);
                 fused.dst_down[i] = C_down[i].ptr;
             }
+        }
+        // Allocate + fill the Op2 prepack-extras weight tail.
+        for (int i = n; i < total; ++i) {
+            B_down[i].alloc(static_cast<size_t>(K_down) * cfg.N_down * wei_elem);
+            fill_buffer(B_down[i].ptr,
+                        static_cast<size_t>(K_down) * cfg.N_down,
+                        cfg.wei_dt, 200 + i * 11);
+            fused.down_weight[i] = B_down[i].ptr;
         }
         fused_ptr = &fused;
 
@@ -441,9 +570,9 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // GFLOPS denominator is approximate (dominated by GEMM compute).
     double total_flops = 0;
     for (int i = 0; i < n; ++i) {
-        total_flops += 2.0 * cfg.M_per_op[i] * cfg.K * cfg.N;       // Stage 1: Op1 gate+up GEMM
+        total_flops += 2.0 * cfg.M_per_op[i] * cfg.K * cfg.N;          // Stage 1: Op1 gate+up GEMM
         if (fused_enabled)
-            total_flops += 2.0 * cfg.M_per_op[i] * dim * cfg.N_down; // Stage 3: Op2 down_proj GEMM
+            total_flops += 2.0 * cfg.M_per_op[i] * K_down * cfg.N_down; // Stage 3: Op2 down_proj GEMM
     }
     if (moe_enabled) {
         int D_out = fused_enabled ? cfg.N_down : cfg.N;

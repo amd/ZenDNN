@@ -350,7 +350,7 @@ static void ukernel_impl(
   // pattern-matches this idiom into a single `vpbroadcastd zmm, [mem]`
   // instruction.  The alternate intrinsic sequence
   // `_mm_loadu_si32(ptr) + _mm512_broadcastd_epi32(...)` looks
-  // tempting but was measured +1.5% slower on GPT-OSS decode
+  // tempting but was measurably slower on MoE decode workloads
   // (GCC 12 failed to fuse it into the same single broadcast-load).
 
   int kp = 0;
@@ -379,8 +379,7 @@ static void ukernel_impl(
     // iteration was tried on the hypothesis that explicit prefetch
     // would close the IPC gap to AOCL DLP at high thread counts on
     // MoE decode.  Result: a consistent regression across every
-    // num_ops bucket (~3-5% slower at every bin, ~5% slower in
-    // aggregate on the same workload).
+    // num_ops bucket and in aggregate on the same workload.
     //
     // Explanation: Zen 4 / Zen 5's hardware prefetcher detects the
     // streaming (kp_stride-strided) B access pattern reliably; the
@@ -475,16 +474,17 @@ static void ukernel_impl(
   // wrote a zero in the second BF16 slot, so a 4-byte load is safe;
   // we still narrow the broadcast to a single live BF16.  Single-
   // element tail keeps the `memcpy` idiom — only runs when K is odd
-  // (never for GPT-OSS K=2880), and uses a uint16_t load that a
-  // 4-byte unaligned-load intrinsic can't express without reading
-  // past A's end.
+  // (most production MoE decode shapes use even K and skip this
+  // branch entirely), and uses a uint16_t load that a 4-byte
+  // unaligned-load intrinsic can't express without reading past A's
+  // end.
   //
   // Cold-correctness note: this branch is exercised in gtest by
   // shapes with odd K (K=1, 3, 5, ...).  It produces bit-identical
   // results to an equivalent single-K-iter reference path (same
   // VDPBF16PS instruction, same operand layout; the pack zero-fills
   // the unused BF16 slot so the high-half contribution is 0).  Not
-  // executed by the GPT-OSS fused-MoE workload (K=2880 is even) but
+  // executed by typical production MoE decode shapes (even K), but
   // validated by the ALGO 3 random-K gtest parameterization.
   if (k_odd) {
     const bfloat16_t *bp = Bpacked

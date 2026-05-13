@@ -28,31 +28,42 @@ with independent memory layouts.
 |----------|--------|-------------|
 | `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto), `1` (sequential), `2` (flat CCD M-tile), `3` (flat CCD N-tile), `4` (multilevel), `5` (per-expert) | Parallel strategy. Default `0` auto-selects. |
 | `ZENDNNL_MATMUL_ALGO` | `1`, `3`, `10`, `11`, ... | Backend GEMM kernel. Default from config. |
+| `ZENDNNL_GRP_MATMUL_PREPACK` | `0` / `1` | Ahead-of-time weight prepack.  Default `1` (ON) — eagerly warms the AOCL DLP / custom-kernel weight cache for all expert slots on the first call that observes a given configuration, so the timed iterations never pay an on-the-fly reorder cost.  Set `0` to fall back to the legacy lazy-on-first-touch behaviour (useful when comparing first-iter latency with and without prepack). |
+| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `0` / `1` | Enables the in-house BF16-only AVX-512 microkernel under ALGO 3.  Default `0` (OFF — uses AOCL DLP). |
+| `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | `0` / `1` | Pin ALGO 3's per-expert thread count to a `num_threads`-only formula so AOCL DLP cache keys stay stable under MoE routing variation (active-expert filtering, batch-size shifts).  Default `1` (ON). |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `0` / `1` | Standard weight-reorder cache for AOCL DLP / BRGEMM.  Setting `0` disables both lazy and prepack populations (every call re-reorders). |
 | `OMP_NUM_THREADS` | integer | Number of OpenMP threads. |
+
+For the full operator-side semantics of these knobs, see `docs/operator/lowoha_group_matmul_operator.md` (sections **Environment variables** and **Weight caching, prepack, and memory**) and `docs/runtime_env.md` (section **Group MatMul Configuration**).
 
 ## Input file format
 
 CSV, one configuration per line.  Lines starting with `#` are comments.
 
 ```
-num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_topk[, gated_act[, N_down]]]
+num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup
+       [, moe_topk[, gated_act[, N_down[, use_internal_alloc[, total_experts]]]]]
 ```
+
+The first nine fields are required.  The five trailing fields are optional and forward-compatible — if absent each defaults to "off / disabled" so legacy input files keep working unchanged.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `num_ops` | int | Number of parallel expert GEMMs. |
-| `M` | int or colon-separated | Rows per expert.  Single int = uniform; `126:323:80:68` = per-expert. |
-| `K` | int | Shared inner dimension. |
-| `N` | int | Output columns (hidden dim D). |
-| `iters` | int | Timed iterations. |
-| `src_dt:wei_dt:dst_dt` | string | Data types (e.g. `bf16:bf16:bf16`, `f32:f32:f32`). |
-| `is_weights_const` | bool | Weight caching hint (`true` / `false`). |
-| `warmup` | int | Warmup iterations before timing. |
-| `moe_topk` | int (optional) | MoE post-op topk.  `0` or omitted = disabled.  `>0` = enable fused weighted-reduce with that topk.  Requires `total_M % topk == 0`. |
-| `gated_act` | int (optional) | Gated activation.  `0` or omitted = disabled.  `1` = `silu_and_mul` (Mixtral/Llama/Qwen), `2` = `gelu_and_mul`, `3` = `swiglu_oai_mul` (GPT-OSS interleaved).  Requires `N` even. |
-| `N_down` | int (optional) | Fused down_proj output columns.  `0` or omitted = disabled.  `>0` = fused Op1(gate+up) → activation → Op2(down_proj) with this output width.  K_down = N/2 (dim after activation). |
+| # | Field | Type | Description |
+|---|-------|------|-------------|
+| 1 | `num_ops` | int | Number of **firing** expert GEMMs in this call. |
+| 2 | `M` | int or colon-separated | Rows per expert.  Single int = uniform across all `num_ops`; `126:323:80:68` = per-expert (length must be `num_ops`). |
+| 3 | `K` | int | Shared inner dimension. |
+| 4 | `N` | int | Output columns (hidden dim D for non-fused; gate+up width = 2 * `dim` for fused). |
+| 5 | `iters` | int | Timed iterations. |
+| 6 | `src_dt:wei_dt:dst_dt` | string | Data types (e.g. `bf16:bf16:bf16`, `f32:f32:f32`). |
+| 7 | `is_weights_const` | bool | Weight caching hint (`true` / `false`). |
+| 8 | `warmup` | int | Warmup iterations before timing. |
+| 9 | `moe_topk` | int (optional) | MoE post-op topk.  `0` or omitted = disabled.  `>0` = enable fused weighted-reduce with that topk.  Requires `total_M % topk == 0`. |
+| 10 | `gated_act` | int (optional) | Gated activation.  `0` or omitted = disabled.  `1` = `silu_and_mul` (Mixtral/Llama/Qwen), `2` = `gelu_and_mul`, `3` = `swiglu_oai_mul` (GPT-OSS interleaved).  Requires `N` even. |
+| 11 | `N_down` | int (optional) | Fused down_proj output columns.  `0` or omitted = disabled.  `>0` = fused Op1(gate+up) → activation → Op2(down_proj) with this output width.  K_down = N/2 when a gated activation is present, K_down = N otherwise. |
+| 12 | `use_internal_alloc` | int (optional) | Library-managed Op2 scratch + src reuse.  `1` = library allocates Op1 output in a thread-local arena and writes Op2 output back into the caller's `src` buffer (zero caller-side scratch).  `0` (default) or absent = caller allocates `dst_down`.  Requires `N_down > 0` and matched src/dst precision. |
+| 13 | `total_experts` | int (optional) | Drives the **framework prepack-extras contract**: the total number of expert weight slots present in the call (`>= num_ops`).  When omitted or `0`, defaults to `num_ops` (legacy: every supplied weight is firing).  When `> num_ops`, the driver allocates `total_experts` weight buffers — the first `num_ops` are the firing experts, the remaining `(total_experts - num_ops)` are pre-pack extras whose weights are warmed by the prepack module but never computed in this call (mirrors the production MoE rotating-experts use case).  Rejected if `< num_ops`. |
 
 ### Examples
 
@@ -68,6 +79,14 @@ num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup[, moe_to
 
 # Full fused MoE block: gate+up → silu → down_proj (N_down=4096)
 8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096
+
+# Same fused MoE block with library-managed Op2 scratch (use_internal_alloc=1)
+8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096, 1
+
+# Production MoE: 4 firing experts in a 32-expert pool — exercises the
+# prepack-extras contract end-to-end.  Driver allocates 32 weight buffers,
+# computes only the first 4 GEMMs, prepack module pre-warms all 32.
+4, 32, 2880, 5760, 200, bf16:bf16:bf16, true, 50, 4, 3, 2880, 1, 32
 ```
 
 ## MoE post-op
@@ -120,7 +139,15 @@ Results are printed to the console and written to a timestamped CSV file.
 
 ### CSV columns
 
-`num_ops, M, K, N, iters, warmup, dtypes, is_weights_const, moe_topk, gated_act, N_down, total_ms, avg_ms, min_ms, GFLOPS_avg, GFLOPS_peak`
+`num_ops, M, K, N, iters, warmup, dtypes, is_weights_const, moe_topk, gated_act, N_down, use_internal_alloc, wall_ms, sum_iter_ms, avg_ms, min_ms, GFLOPS_avg, GFLOPS_peak`
+
+| Column | Description |
+|--------|-------------|
+| `num_ops` | Number of firing expert GEMMs.  When the input file specifies `total_experts > num_ops`, the trailing `(total_experts - num_ops)` slots are pre-pack extras that are warmed but not computed; only `num_ops` shows up here. |
+| `wall_ms` | Outer wall time `t1 - t0` enclosing the timed loop (includes any cold-cache flush overhead between iters when `--cache_mode=cold`). |
+| `sum_iter_ms` | Cumulative per-call kernel time, excluding cache-flush overhead.  Use this for kernel-level perf analysis. |
+| `avg_ms` / `min_ms` | Mean / minimum per-iter kernel time. |
+| `GFLOPS_avg` / `GFLOPS_peak` | GFLOPS based on `avg_ms` / `min_ms`.  Includes Op1 + Op2 + MoE post-op FLOPs as applicable. |
 
 ## Sweep script
 

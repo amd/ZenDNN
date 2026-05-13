@@ -16,7 +16,8 @@
 
 /// MoE gated activation post-op for group matmul.
 ///
-/// Three variants (matching vLLM CPU MoE):
+/// Three variants (compatible with the gated-activation conventions
+/// used by major LLM serving stacks):
 ///   silu_and_mul:    output = silu(gate) * up       (split layout)
 ///   gelu_and_mul:    output = gelu(gate) * up       (split layout)
 ///   swiglu_oai_mul:  output = swiglu_oai(gate, up)  (interleaved layout)
@@ -588,13 +589,25 @@ status_t group_matmul_moe_act_execute(
       || act_params->act == grp_matmul_gated_act_t::none)
     return status_t::success;
 
-  const int num_ops = static_cast<int>(dst.size());
+  // Drive the iteration count off `M.size()` — the matmul-processing
+  // count `group_matmul_direct` derived from `params[0].active_matmul`
+  // (or `M.size()` itself for legacy callers).  When the framework
+  // signals prepack-extras, the caller passes a sliced M while keeping
+  // dst[] / N[] / ldc[] at their original size; using `dst.size()`
+  // here would walk into the prepack-extras tail and process garbage.
+  const int num_ops = static_cast<int>(M.size());
   if (num_ops == 0) return status_t::success;
 
-  if (static_cast<int>(M.size()) != num_ops
-      || static_cast<int>(N.size()) != num_ops
-      || static_cast<int>(ldc.size()) != num_ops) {
-    log_error("group_matmul_moe_act: M/N/ldc size mismatch with dst");
+  // Vector sizes must be at least `num_ops` each.  Anything past
+  // num_ops in dst[] / N[] / ldc[] is a prepack-extras placeholder
+  // that the dispatch loops below never read.  Strict equality was
+  // the legacy contract; relaxing to `<` accepts the new layout
+  // without affecting legacy callers (they pass exactly-sized
+  // vectors, so the relaxed check still matches strict for them).
+  if (static_cast<int>(dst.size()) < num_ops
+      || static_cast<int>(N.size()) < num_ops
+      || static_cast<int>(ldc.size()) < num_ops) {
+    log_error("group_matmul_moe_act: dst/N/ldc must be sized to at least M.size()");
     return status_t::failure;
   }
 

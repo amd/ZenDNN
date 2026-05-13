@@ -60,6 +60,7 @@
 
 #include "group_matmul_parallel_common.hpp"
 #include "custom_kernel/dispatch.hpp"
+#include "prepack/prepack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -665,7 +666,8 @@ inline int compute_l3_batch(const GroupNTileTopology &topo) {
 //      value (`l3_batch < num_threads/ccd_size`), AND
 //   2. We have at least that many experts (`num_threads/ccd_size <=
 //      num_ops`), AND
-//   3. The bumped working set is within 10% of aggregate L3 capacity.
+//   3. The bumped working set is within a small overshoot of
+//      aggregate L3 capacity (see `kL3OvershootDen` below).
 //
 // Check (3) is the safety net: shapes whose per-round working set
 // would massively overflow L3 (very large weights) keep the strict
@@ -674,6 +676,10 @@ inline int compute_l3_batch(const GroupNTileTopology &topo) {
 // because the small overshoot is cheaper than leaving threads idle.
 inline int compute_target_batch(const GroupNTileTopology &topo,
                                 int l3_batch) {
+  // Allow a small overshoot above L3 before refusing the bump;
+  // tuned to absorb sub-tile alignment slack without inviting
+  // victim-cache thrashing on large-weight regimes.
+  constexpr size_t kL3OvershootDen = 10;
   const int batch_team_saturating = topo.num_threads / topo.ccd_size;
   int target = std::min(topo.num_ops, std::max(1, l3_batch));
   if (l3_batch < batch_team_saturating
@@ -681,7 +687,7 @@ inline int compute_target_batch(const GroupNTileTopology &topo,
     const size_t bumped_weight =
         static_cast<size_t>(batch_team_saturating) * topo.wei_per_expert;
     const size_t kL3 = get_grp_l3_total_bytes(topo.num_ccds);
-    if (bumped_weight <= kL3 + kL3 / 10) {       // ≤ 110% of L3
+    if (bumped_weight <= kL3 + kL3 / kL3OvershootDen) {
       target = batch_team_saturating;
     }
   }
@@ -754,15 +760,15 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
 // never run materially slower than `ZENDNNL_GRP_MATMUL_ALGO=0` on
 // the shapes where ALGO 0 silently routes to Sequential.  Mirroring
 // `auto_select_algo`'s full gate (not just its decode + tiny-num_ops
-// fast paths) closes that gap on the tall-N few-experts prompt-large-
-// weight regime that `auto_select_algo` measured ALGO 1 wins by
-// 40-189% (Mixtral 8x* class — see auto_select_algo's notes block in
-// group_matmul_parallel.cpp).
+// fast paths) closes that gap on the tall-N few-experts prompt-
+// large-weight regime where Sequential is the better default (see
+// `auto_select_algo`'s notes block in group_matmul_parallel.cpp).
 //
 // (R1) Few experts (≤ 3): the per-expert matmul is large enough that
-//      one-expert-at-a-time with the full thread team beats column-
-//      parallel across 2-3 experts.  Matches ALGO 0's
-//      `if (num_ops <= 3) return 1;` gate at every weight class.
+//      one-expert-at-a-time with the full thread team is preferred
+//      over column-parallel across a handful of experts.  Matches
+//      ALGO 0's `if (num_ops <= 3) return 1;` gate at every weight
+//      class.
 //
 // (R2) Large-weight DRAM-streaming (wei_per_expert > kMediumWeight):
 //      AOCL DLP's internal panel blocking with the full thread team
@@ -779,14 +785,13 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
 //      Sequential.  This includes:
 //        - decode-class (max_M ≤ kDecodeMaxM)
 //        - very few experts (num_ops < 5)
-//        - tall-N few-experts prompt (e.g., Mixtral down_proj
-//          K=14336, N=4096, num_ops=8): ALGO 1 measured 40-189%
-//          faster than ALGO 3.
+//        - tall-N few-experts prompt shapes, where Sequential's
+//          full-team-per-expert path retains a clear advantage.
 //
-// GPT-OSS note: GPT-OSS-20B per-expert weights (≈ 33 MB Op1, 16 MB
-// Op2) sit BELOW kMediumWeight, so R2 does not fire and forced
-// ALGO 3 + GPT-OSS retains its existing N-tile path.  R2 only
-// affects models in the >64 MB/expert class (Mixtral 8x22B et al.).
+// Note: per-expert weights at or below kMediumWeight sit BELOW the
+// large-weight regime, so R2 does not fire and forced ALGO 3 on
+// those shapes retains its existing N-tile path.  R2 only affects
+// the large per-expert weight class.
 inline bool self_fallback_to_sequential(const GroupNTileTopology &topo) {
   // (R1)
   if (topo.num_ops <= 3) return true;
@@ -997,44 +1002,74 @@ inline RoundPick pick_round_strategy(const GroupNTileTopology &topo,
   if (rounds_mode == 2) return RoundPick::Multi;
   if (rounds_mode == 3) return RoundPick::Balanced;
 
-  // ── Thin-single-round correction ─────────────────────────────────
-  // The simple wall = 1/thr cost model for single-round assumes
-  // perfect linear scaling as thr_per_expert drops, which breaks
-  // below ccd_size:
-  //   * thr_per_expert < ccd_size means each expert's thread team
-  //     spans less than one CCD's worth of cores, but the DLP
-  //     kernel's NR-blocking factor is tuned for ccd_size-wide
-  //     teams.
-  //   * Cross-CCD coordination + partial-tile misalignment add
-  //     overheads the cost model doesn't capture.
+  const bool consider_balanced = (topo.num_threads <= 64);
+
+  // ── L3-spill penalty on Single (auto cost model) ─────────────────
+  // The plain `wall_single = 1 / n_thr_single` metric assumes the
+  // per-expert weight footprint is L3-resident, which is true only
+  // when the entire concurrent set of `num_ops` experts fits in
+  // aggregate L3.  In Single mode every expert dispatches at the same
+  // time (no rounds), so the live-set is `num_ops × wei_per_expert`
+  // — for fused-MoE decode with several active experts and weights
+  // in the multi-tens-of-MB range, this typically exceeds aggregate
+  // L3 and every call streams weights from DRAM.  Multi and Balanced amortise the
+  // spill across rounds whose individual working sets are sized by
+  // `compute_l3_batch` to fit, so their `wall_*` already reflect the
+  // L3-resident regime.
   //
-  // Empirically on 128-thread Zen5 (GPT-OSS decode sweep):
-  //     ops=22..24 → n_thr_single = 128/ops = 5 (below ccd_size=8);
-  //                  cost model picks single, reality measures
-  //                  multi-round 2-5% faster at n_thr_multi = 8.
-  //     ops=17..21 → n_thr_single = 6..7 (at or near ccd_size);
-  //                  cost model is correct, single wins in reality.
-  // So the cliff is at n_thr_single ∈ [ccd_size*3/4, ccd_size).
-  // Below that (< 6 on 8-wide CCD), prefer multi when feasible.
-  // The `n_rounds_multi <= 2` guard keeps the correction bounded
-  // to the small-tail regime: the cost model over-counts the
-  // light-tail round's wall (a short tail of light experts under
-  // descending / pair-balanced order costs less than the model's
-  // 1/thr), but beyond 2 rounds the tail effect dilutes and the
-  // model's prediction is sound.
+  // Penalise `wall_single` by the spill ratio so the picker treats a
+  // 2× DRAM-bound Single as twice as costly as a perfectly-fitting
+  // Single.  The factor is conservative (linear in spill) — actual
+  // DRAM bandwidth is shared across CCDs and contention isn't strictly
+  // linear, but the linear approximation is sufficient to flip the
+  // pick toward Balanced/Multi in the regime where Single's wall_*
+  // is unrealistic.
+  double wall_single_adj = c.wall_single;
+  if (c.single_eligible && topo.wei_per_expert > 0) {
+    const size_t single_concurrent =
+        static_cast<size_t>(topo.num_ops) * topo.wei_per_expert;
+    const size_t l3_total = get_grp_l3_total_bytes(topo.num_ccds);
+    if (single_concurrent > l3_total) {
+      const double spill =
+          static_cast<double>(single_concurrent)
+        / static_cast<double>(std::max<size_t>(l3_total, 1));
+      wall_single_adj = c.wall_single * spill;
+    }
+  }
+
+  // ── Thin-single-round correction ─────────────────────────────────
+  // Even with L3 fitting, Single's wall = 1/thr undercounts when
+  // `thr_per_expert < ccd_size` because the DLP kernel's NR-blocking
+  // is tuned for ccd_size-wide teams and partial-tile misalignment
+  // plus cross-CCD coordination add fixed-cost overhead the model
+  // doesn't capture.  Effect is most visible at the cliff `n_thr_single
+  // ∈ [ccd_size*3/4, ccd_size)` for many-experts MoE decode: the model
+  // picks Single while Multi/Balanced is the better choice in practice;
+  // at or near ccd_size the model is correct and Single is the winner.
+  // Trigger condition: thin Single + few rounds (Multi/Balanced fits
+  // in a 1-2 round tail).  Above 2 rounds the cost model's tail
+  // approximation is sound and we trust the wall_* values.
+  //
+  // Tie-breaker: at ≤64t Balanced is in the eligible set and is
+  // typically equal-or-better than Multi (more thr/expert per round
+  // when team_size > ccd_size on a single-CCD-shape).  At >64t
+  // Balanced is excluded (cross-CCD coord overhead dominates), so
+  // the correction lands on Multi as the original logic.
   if (c.single_eligible) {
     const int thr_single =
         std::max(1, topo.num_threads / std::max(1, topo.num_ops));
     const int ccd_floor = std::max(1, (topo.ccd_size * 3) / 4);
     const bool single_thin = (thr_single < ccd_floor);
     if (single_thin && c.n_rounds_multi > 0 && c.n_rounds_multi <= 2) {
+      if (consider_balanced && c.wall_balanced <= c.wall_multi) {
+        return RoundPick::Balanced;
+      }
       return RoundPick::Multi;
     }
   }
 
-  const bool consider_balanced = (topo.num_threads <= 64);
-  if (c.single_eligible && c.wall_single < c.wall_multi
-      && (!consider_balanced || c.wall_single <= c.wall_balanced)) {
+  if (c.single_eligible && wall_single_adj < c.wall_multi
+      && (!consider_balanced || wall_single_adj <= c.wall_balanced)) {
     return RoundPick::Single;
   }
   if (consider_balanced && c.wall_balanced < c.wall_multi) {
@@ -1079,8 +1114,8 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 //   │ `num_threads` alone; every expert team has exactly         │
 //   │ `stable = num_threads / kAoclTargetConcurrentSlots`        │
 //   │ threads.  Cache key (col_start, n_tile) is invariant       │
-//   │ across calls → AOCL reorder cache hit-rate ≈ 100%          │
-//   │ post-warmup.  Cost model (Single/Multi/Balanced) NOT       │
+//   │ across calls → AOCL reorder cache reaches a steady hit-    │
+//   │ rate post-warmup.  Cost model (Single/Multi/Balanced) NOT  │
 //   │ consulted on this path.                                    │
 //   ├────────────────────────────────────────────────────────────┤
 //   │ Custom BF16 microkernel                  (use_custom=true) │
@@ -1126,7 +1161,10 @@ inline GroupNTilePlan plan_group_n_tile(
   plan.nr_align = nr_align;
   plan.fused_epilogue = fused_epilogue;
 
-  const bool decode_tile_ab_on = get_grp_n_decode_tile_ab();
+  // `kDecodeTileAbOn` is the production constant in
+  // `group_matmul_parallel_common.hpp` — folded at compile time;
+  // documented there (used to be a `get_grp_n_decode_tile_ab()` getter).
+  constexpr bool decode_tile_ab_on = kDecodeTileAbOn;
 
   // Viability + R1/R2/R3 self-fallbacks — all route to Sequential.
   // Attribute the reason explicitly so readers can tell
@@ -1200,7 +1238,7 @@ inline GroupNTilePlan plan_group_n_tile(
   // For paths (A), (B), and the strict-stable AOCL path: when max_M is
   // small (decode-class shape), use the smaller decode-n-tile as
   // min-tile so max_n_thr is high enough to saturate all threads.
-  // See `decode_tile_ab` in group_matmul_parallel_common.hpp for the
+  // See `kDecodeTileAbOn` in group_matmul_parallel_common.hpp for the
   // rationale.  `effective_decode_n_tile()` honors the optional
   // `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` override.
   const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
@@ -1458,8 +1496,9 @@ inline void execute_decode_d(const GroupNTilePlan &plan,
 //
 //   1. L3-resident batching contract.  `compute_target_batch()` sizes
 //      `batch_size` so that `batch_size × weight_per_expert` fits in
-//      the team's aggregate L3 (with a 10 % overshoot cap).  Without
-//      a barrier between rounds, threads on small-M experts of round
+//      the team's aggregate L3 (with a small overshoot cap controlled
+//      by `kL3OvershootDen`).  Without a barrier between rounds,
+//      threads on small-M experts of round
 //      k race ahead into round k+1 while threads on large-M experts
 //      are still finishing round k.  At that point up to
 //      `2 × batch_size` experts' weights are concurrently live —
@@ -1716,7 +1755,8 @@ void flat_n_tile(
       /*dst_dtype=*/params[0].dtypes.dst,
       act_dtype,
       /*bias_dtype=*/params[0].dtypes.bias,
-      transA, transB, M, N, K, ldb, alpha, beta, weight, kctx);
+      transA, transB, M, N, K, ldb, alpha, beta, weight,
+      is_weights_const, kctx);
 
   // Custom-kernel engagement guard for the wide swiglu path.
   //
@@ -1783,6 +1823,32 @@ void flat_n_tile(
   const bool tight_pair_align = tight_fused_epilogue && !use_custom;
   nr_align = ntile_effective_nr_align(
       nr_align, kctx, /*pair_aligned=*/tight_pair_align);
+
+  // Generic ahead-of-time weight pre-pack for ALGO 3.  Warms both
+  // the AOCL DLP reorder cache and (when BF16 + custom-kernel env
+  // on) the BF16 custom-kernel pack cache, since flat_n_tile picks
+  // between the two per call.  Idempotent across calls.  Under the
+  // uniform-eager semantic, PREPACK=ON (the default) warms the
+  // firing experts even when the framework hasn't opted into the
+  // `total > active` contract — legacy callers see a one-time
+  // first-iter serial reorder cost in exchange for warm caches on
+  // every subsequent call.  Set `ZENDNNL_GRP_MATMUL_PREPACK=0` to
+  // restore the strict pre-PR / lazy-only behaviour.
+  //
+  // Placed after `nr_align` is finalised (post `kctx` engagement) so
+  // the AOCL DLP per-tile warmer can mirror `do_tile()`'s
+  // `aligned_n_split(N[e], stable, tid, nr_align)` exactly — the
+  // per-tile cache key includes `n_tile` (= sliced N), which depends
+  // on `nr_align`, so an early call (pre-kctx) would warm a key set
+  // the runtime never queries when the dispatcher widens nr_align to
+  // the custom kernel's pack_nr or the tight-pair-align floor.
+  group_matmul_prepack::prepack_for_algo_3(
+      group_matmul_prepack::build_prepack_params(
+          weight, K, N, ldb, transB, is_weights_const, params, M,
+          get_grp_matmul_custom_kernel(),
+          /*num_threads=*/num_threads,
+          /*nr_align=*/nr_align,
+          fused_act, act_dtype));
 
   // APILOG moved below after the plan is built so the log line can
   // surface both the env-selected and the auto-resolved N_ORDER

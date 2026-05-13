@@ -39,19 +39,16 @@ bool dispatch_supported() {
   return avx512bf16_available();
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Internal helpers — owned entirely by this file.  The callers never call
-// these directly; the only public entries are `prepare_for_call()`
-// and `dispatch_tile()` below.
-// ─────────────────────────────────────────────────────────────────────
-namespace {
-
 // Pick the pack/microkernel NR for one (K, N) shape.  Env override
 // (from `get_grp_matmul_custom_kernel_nr()` in parallel_common.hpp)
-// wins when it divides N; otherwise default to NR=32 (matches vLLM's
-// `2 × NSize` inner-loop step) since it gives the cleanest register
-// budget and the smallest M chunking on small-M decode shapes.
-// NR=64 stays available via env override for shapes that benefit.
+// wins when it divides N; otherwise default to NR=32 — it gives a
+// clean register budget against the 32-zmm budget on AVX-512 and
+// keeps M chunking small on small-M decode shapes.  NR=64 stays
+// available via env override for shapes that benefit.
+//
+// Now a public symbol (declared in dispatch.hpp) so the warm-pack
+// helpers in `group_matmul/prepack/` can compute the same NR the
+// dispatcher will pack under, keeping cache keys aligned.
 int plan_pack_nr(int /*K*/, int N) {
   if (N <= 0) return 0;
   const int env_nr = get_grp_matmul_custom_kernel_nr();
@@ -61,12 +58,20 @@ int plan_pack_nr(int /*K*/, int N) {
   return 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Internal helpers — owned entirely by this file.  The callers never call
+// these directly; the only public entries are `prepare_for_call()`
+// and `dispatch_tile()` below.
+// ─────────────────────────────────────────────────────────────────────
+namespace {
+
 // L2-friendly sub-tile width (in cols) for (M_max, K, pack_nr).
 // Sized so each microkernel call's working set — input + the B
 // strip this thread streams — fits in this CPU's per-core L2 with
-// 20 % headroom.  Accumulators live in zmm registers, so they
-// don't enter the budget.  Returned value is a multiple of pack_nr,
-// minimum one o-block.
+// some headroom (`l2_budget` uses a 4/5 fraction of detected L2 to
+// leave room for caller-side spills).  Accumulators live in zmm
+// registers, so they don't enter the budget.  Returned value is a
+// multiple of pack_nr, minimum one o-block.
 int pick_l2_subtile_cols(int M_max, int K, int pack_nr) {
   if (M_max <= 0 || K <= 0 || pack_nr <= 0) return pack_nr;
   static const int64_t l2_budget = []() {
@@ -125,6 +130,7 @@ status_t prepare_for_call(
     const std::vector<float>         &alpha,
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
+    const std::vector<bool>          &is_weights_const,
     CallContext &out) {
 
   out.enabled = false;
@@ -254,10 +260,15 @@ status_t prepare_for_call(
   int m_max = 0;
   int K_for_subtile = 0;
   // Per-expert ldb sanity (also catches a missized `ldb` vector
-  // before we index it inside the pack).
-  if (ldb.size() != static_cast<size_t>(num_ops))
+  // before we index it inside the pack).  Relaxed from strict
+  // equality so callers that pass a longer `ldb[]` (e.g.
+  // `group_matmul_direct` keeps ldb at the framework's prepack-
+  // extras size while M is sliced to the active count) still pass
+  // — only the first `num_ops` entries are read by the dispatch
+  // loop below.  Undersized vectors still fail.
+  if (ldb.size() < static_cast<size_t>(num_ops))
     return refuse("ldb_size_mismatch",
-                  "ldb vector size != num_ops");
+                  "ldb vector size below num_ops");
   for (int i = 0; i < num_ops; ++i) {
     if (M[i] <= 0) continue;
     if (transA[i])
@@ -280,6 +291,22 @@ status_t prepare_for_call(
     if (ldb[i] < min_ldb)
       return refuse("ldb_below_min_row_stride",
                     "an active expert's ldb is smaller than min row stride");
+    // is_weights_const = false means the caller may mutate this
+    // expert's weight buffer in-place between calls.  The CK pack
+    // cache is keyed on the source weight pointer and has no per-
+    // expert "skip cache" branch (unlike AOCL DLP's `run_dlp(...)`
+    // at aocl_kernel.cpp:1700-1702), so a cached packed copy from a
+    // previous call could silently shadow a mutated weight and
+    // produce wrong results.  Refuse the whole call so the caller
+    // falls back to the standard AOCL DLP path, which honours the
+    // flag at runtime.  Empty `is_weights_const` is treated as "all
+    // const" (legacy callers that don't pass the field).
+    if (!is_weights_const.empty()
+        && static_cast<size_t>(i) < is_weights_const.size()
+        && !is_weights_const[i])
+      return refuse("non_const_weight_in_active_expert",
+                    "custom kernel pack cache cannot honour an active "
+                    "expert's is_weights_const=false");
     if (M[i] > m_max) m_max = M[i];
     if (K_for_subtile == 0) K_for_subtile = K[i];
   }
@@ -358,6 +385,13 @@ status_t prepare_for_call(
   }
   return status_t::success;
 }
+
+// (The ahead-of-time warm-pack — `warm_pack_all_custom_kernel_experts`
+// + `PackProbeStats` — moved to
+// `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}`.  This file
+// keeps the per-call dispatcher path; `plan_pack_nr` was promoted to
+// the public dispatch.hpp surface so the prepack module can compute
+// the same NR the dispatcher will pack under.)
 
 void dispatch_tile(
     const CallContext &ctx,

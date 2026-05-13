@@ -36,9 +36,20 @@
 ///
 /// CACHE: shared `lru_cache_t<Key_matmul, void *>` (the same template
 /// the AOCL DLP / oneDNN reorder caches in `aocl_kernel.cpp` use).
-/// Keyed on (weight_ptr, K, N, pack_nr) — different NR variants of
-/// the same weight occupy distinct cache entries.  Eviction follows
-/// `ZENDNNL_LRU_CACHE_CAPACITY`.
+/// Keyed on (weight_ptr, K, N, pack_nr, ldb, transB) — different
+/// NR / layout / stride variants of the same weight occupy distinct
+/// cache entries.
+///
+/// Eviction policy: the per-process custom-kernel pack cache uses a
+/// hard-capped capacity of `UINT32_MAX` entries (effectively
+/// unbounded for any realistic workload) and DOES NOT EVICT during
+/// regular operation — `ZENDNNL_LRU_CACHE_CAPACITY` does NOT govern
+/// this cache.  The reason: raw packed-weight pointers are captured
+/// into `CallContext.packed_ptrs[]` and read by OMP workers outside
+/// the cache mutex, so any eviction during in-flight dispatch would
+/// be a use-after-free.  The cache is reset only by an explicit
+/// call to `clear_custom_kernel_pack_cache()` in a quiescent window
+/// (see safety contract on that function).
 
 #ifndef ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_PACK_HPP
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_PACK_HPP
@@ -73,10 +84,11 @@ inline constexpr int kNRMax = 64;
 ///                   * `transB == false` → row-major [K, N] with row
 ///                     stride `ldb` (typically `ldb == N`).
 ///                   * `transB == true`  → row-major [N, K] with row
-///                     stride `ldb` (typically `ldb == K`).  This is
-///                     the PyTorch / vLLM / TGI convention for
-///                     `nn.Linear` weight (`y = x @ w^T`, weight
-///                     stored as `[out_features, in_features]`).
+///                     stride `ldb` (typically `ldb == K`).  This
+///                     matches the standard `nn.Linear` weight
+///                     convention used by major LLM serving stacks
+///                     (`y = x @ w^T`, weight stored as
+///                     `[out_features, in_features]`).
 ///                 Pointer identity is part of the cache key (callers
 ///                 must keep it alive while the entry is cached).
 ///   * `K`, `N`  — logical dimensions; `N` MUST be a multiple of
@@ -102,11 +114,19 @@ inline constexpr int kNRMax = 64;
 /// `transB` is folded into the cache key so transB=true and
 /// transB=false on the same weight pointer occupy distinct entries
 /// (would otherwise alias and produce silent-wrong output).
+///
+/// `was_hit_out` (optional) — when non-null, set to `true` if this
+/// call served from the cache (no pack work) or `false` if it had
+/// to allocate + pack on a miss.  Used by the prepack-all probe
+/// helper (see `warm_pack_all_custom_kernel_experts`) to report
+/// per-call HIT/MISS counts at apilog level.  Default `nullptr`
+/// preserves the pre-existing call sites unchanged.
 status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
     bool transB,
-    const bfloat16_t **out_packed);
+    const bfloat16_t **out_packed,
+    bool *was_hit_out = nullptr);
 
 /// Release every cached packed BF16 weight and reset the cache to
 /// empty.  Intended for weight-rotating deployments (dynamic
