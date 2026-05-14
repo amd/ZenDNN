@@ -113,6 +113,8 @@ std::vector<SoftmaxType> softmax_test{};
 
 int main(int argc, char **argv) {
   try {
+    // Load global config (env/defaults) before tests read it.
+    (void)zendnnl::common::zendnnl_global_block();
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;
