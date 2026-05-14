@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
 #include <cstdlib>
@@ -192,6 +193,7 @@ void clear_aocl_matmul_weight_caches() {
   clear_aocl_typed_weight_cache_under_lock<int8_t>();
   clear_aocl_symquant_weight_cache_under_lock();
   clear_aocl_woq_weight_cache_under_lock();
+  clear_ggml_weight_unpack_cache();
   clear_zp_compensation_cache();
 }
 

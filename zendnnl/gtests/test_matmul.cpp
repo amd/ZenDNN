@@ -1083,6 +1083,9 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
                               data_type_t::s8,
                               std::make_pair(packed_size, static_cast<void *>(packed_buf.data())),
                               true, false);
+  std::vector<uint8_t> packed_before(packed_size);
+  std::memcpy(packed_before.data(), packed_weight_tensor.get_raw_handle_unsafe(),
+              packed_size);
 
   auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
                      rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
@@ -1110,6 +1113,10 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
                              rtol_bf16, epsilon_bf16, ok, false, 1.0f,
                              true);
   }
+  EXPECT_EQ(std::memcmp(packed_before.data(),
+                        packed_weight_tensor.get_raw_handle_unsafe(),
+                        packed_size), 0)
+      << "GGML packed weights should not be modified by matmul_direct";
   EXPECT_TRUE(ok);
 }
 

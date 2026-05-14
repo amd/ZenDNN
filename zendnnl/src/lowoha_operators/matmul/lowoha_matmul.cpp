@@ -262,15 +262,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     }
   }
 
-  // [in,out] Mutates params.quant_params.wei_scale: GGML weight unpacking
-  // populates the weight-scale buffer and associated metadata.
-  if (params.packing.pack_format_b == 1) {
-    status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, params);
-    if (unpack_status != status_t::success) {
-      return unpack_status;
-    }
-  }
-
   size_t src_type_size = size_of(params.dtypes.src);
   size_t weight_type_size = size_of(params.dtypes.wei);
   size_t out_type_size = size_of(params.dtypes.dst);
@@ -278,6 +269,14 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
   const int32_t omp_mt = thread_guard::max_threads();
   const int32_t num_threads = resolve_num_threads(params.num_threads, omp_mt);
+
+  status_t ggml_val_status = zendnnl::common::op_instrumentation::validate([&]() {
+    return validate_ggml_packed_inputs(params, is_weights_const,
+                                       batch_params.Batch_B, transB);
+  });
+  if (ggml_val_status != status_t::success) {
+    return ggml_val_status;
+  }
 
   // [in,out] Mutates params.dtypes.src, params.quant_params.src_scale.buff,
   // params.quant_params.src_zp.buff, and batch_params.batch_stride_src:
@@ -294,6 +293,23 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                                    params, batch_params, transA, M, K,
                                    num_threads, quant_buffers) != status_t::success) {
     return status_t::failure;
+  }
+
+  // [in,out] Mutates weight, params.mem_format_b, and
+  // params.quant_params.wei_scale: GGML weight unpacking now produces the
+  // AOCL-reordered cache entry directly, after source quantization has
+  // finalized the dtype and scale metadata used by the reorder path.
+  if (params.packing.pack_format_b == 1) {
+    if (!ggml_is_sym_quant(params)) {
+      log_error("GGML packed weights are supported only for sym-quant "
+                "per-group int8 matmul");
+      return status_t::failure;
+    }
+    status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, ldb,
+                            transB ? 't' : 'n', params);
+    if (unpack_status != status_t::success) {
+      return unpack_status;
+    }
   }
 
   matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
