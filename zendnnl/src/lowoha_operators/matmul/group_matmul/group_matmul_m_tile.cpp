@@ -37,10 +37,15 @@ namespace {
 // Row-offset src quant buffer for M-tile.
 // Handles per-token {M,1} and per-group {M,G}: offset = row_start × row_stride.
 // Per-tensor (dims empty, total elements == 1, or first dim == 1): no offset.
+//
+// `slice_M` rewrites the slice's view of dims[0] from the full per-expert M
+// down to the per-thread row count.  This is required for dynamic-quant: the
+// reorder dispatcher gates the per-group kernel on `is_per_group_col_dims`,
+// which compares `dims[0]` against `src_shape[0]` (= slice_M for the M-tile).
+// Static-quant kernels that read scales by row index also benefit.
 inline void offset_quant_by_row(
     matmul_quantization_params_t::matmul_quant_t &q,
-    int row_start) {
-  if (q.buff == nullptr) return;
+    int row_start, int slice_M) {
   if (q.dims.empty()) return;
   int64_t nelems = 1;
   for (auto dim : q.dims) {
@@ -50,10 +55,15 @@ inline void offset_quant_by_row(
   if (nelems <= 1 || q.dims[0] <= 1) return;
   const size_t rows = static_cast<size_t>(q.dims[0]);
   if (rows == 0 || (static_cast<size_t>(nelems) % rows) != 0) return;
-  const size_t row_stride = static_cast<size_t>(nelems) / rows;
-  const size_t elem = size_of(q.dt);
-  q.buff = static_cast<const uint8_t *>(q.buff)
-      + static_cast<size_t>(row_start) * row_stride * elem;
+  if (q.buff != nullptr) {
+    const size_t row_stride = static_cast<size_t>(nelems) / rows;
+    const size_t elem = size_of(q.dt);
+    q.buff = static_cast<const uint8_t *>(q.buff)
+        + static_cast<size_t>(row_start) * row_stride * elem;
+  }
+  if (slice_M > 0 && static_cast<size_t>(slice_M) <= rows) {
+    q.dims[0] = static_cast<int64_t>(slice_M);
+  }
 }
 
 inline void execute_m_tile(
@@ -106,11 +116,13 @@ inline void execute_m_tile(
     }
   }
 
-  // Row-offset per-token src quantization (dims={M,1} or similar).
-  // Per-tensor (dims empty or {1}) needs no offset.
+  // Row-offset per-token / per-group src quantization (dims={M,1} or {M,G}).
+  // Also rewrites dims[0] from the full M to slice_M so the dynamic-quant
+  // reorder dispatcher's per-group gate (is_per_group_col_dims) matches the
+  // sliced src_shape.  Per-tensor (dims empty or {1}) needs no offset.
   // Wei quant is N-dependent but M-tile keeps full N → unchanged.
-  offset_quant_by_row(slice_params.quant_params.src_scale, row_start);
-  offset_quant_by_row(slice_params.quant_params.src_zp, row_start);
+  offset_quant_by_row(slice_params.quant_params.src_scale, row_start, slice_M);
+  offset_quant_by_row(slice_params.quant_params.src_zp, row_start, slice_M);
 
   execute_expert_slice(layout[e], transA[e], transB[e],
       slice_M, N[e], K[e], alpha[e],

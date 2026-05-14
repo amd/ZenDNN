@@ -156,6 +156,9 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_S4) {
       out(num_ops), out_ref(num_ops), wei_scale(num_ops);
 
   auto out_dt = rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32;
+  // Bias dtype must be uniform across experts in a single group_matmul call
+  // Pick once per test body and reuse for every expert.
+  auto bias_dt = (rand() % 2 == 0) ? data_type_t::bf16 : data_type_t::f32;
 
   for (size_t i = 0; i < num_ops; ++i) {
     wei_scale[i] = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
@@ -163,8 +166,7 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_S4) {
                  transB, wei_scale[i]);
     inp[i]     = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::bf16, 2.0,
                  transA);
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
   }
@@ -287,6 +289,9 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_U4) {
       out(num_ops), out_ref(num_ops),
       w_scale(num_ops), w_zp(num_ops);
 
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  auto bias_dt = (rand() % 2 == 0) ? data_type_t::bf16 : data_type_t::f32;
+
   for (size_t i = 0; i < num_ops; ++i) {
     w_scale[i] = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
     w_zp[i]    = tensor_factory.uniform_dist_tensor(zp_size,
@@ -296,8 +301,7 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_U4) {
                  15.0, transB, w_scale[i], w_zp[i]);
     inp[i]     = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::bf16, 2.0,
                  transA);
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, out_dt, 2.0);
   }
@@ -366,6 +370,9 @@ TEST_P(TestGroupMatmulQuant, INT8) {
   std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
       out(num_ops), out_ref(num_ops);
 
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  auto bias_dt = (rand() % 2 == 0) ? data_type_t::bf16 : data_type_t::f32;
+
   for (size_t i = 0; i < num_ops; ++i) {
     auto wei_ref = tensor_factory.uniform_dist_tensor({k, n}, ref_dt, 25.0, transB);
     tensor_t weight_tensor, wei_scale, wei_zp;
@@ -396,8 +403,7 @@ TEST_P(TestGroupMatmulQuant, INT8) {
 
     inp[i]     = input_tensor;
     wt[i]      = weight_tensor;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, output_dtype, 2.0,
                  false, dst_scale, dst_zp);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, output_dtype, 2.0,
@@ -481,6 +487,9 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_BF16) {
   data_type_t ref_dt = data_type_t::bf16;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   uint64_t ngroups = sym_k / group_size;
   std::vector<int64_t> wei_sd = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
   std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(ngroups)};
@@ -506,8 +515,7 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_BF16) {
 
     inp[i]     = input_tensor;
     wt[i]      = weight_tensor;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
   }
@@ -582,6 +590,9 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_F32) {
   data_type_t ref_dt = data_type_t::f32;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   uint64_t ngroups = sym_k / group_size;
   std::vector<int64_t> wei_sd = {static_cast<int64_t>(ngroups), static_cast<int64_t>(n)};
   std::vector<int64_t> src_sd = {static_cast<int64_t>(m), static_cast<int64_t>(ngroups)};
@@ -607,8 +618,7 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_F32) {
 
     inp[i]     = input_tensor;
     wt[i]      = weight_tensor;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
   }
@@ -673,6 +683,9 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_BF16) {
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBF17);
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
   std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
 
@@ -697,8 +710,7 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_BF16) {
 
     inp[i]     = input_tensor;
     wt[i]      = weight_tensor;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
   }
@@ -763,6 +775,9 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_F32) {
   std::mt19937 local_rng(m ^ k ^ n ^ 0xF321);
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
                          data_type_t::bf16;
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   std::vector<int64_t> wei_sd = {1, static_cast<int64_t>(n)};
   std::vector<int64_t> src_sd = {static_cast<int64_t>(m), 1};
 
@@ -787,8 +802,7 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_F32) {
 
     inp[i]     = input_tensor;
     wt[i]      = weight_tensor;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
   }
@@ -851,6 +865,9 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
 
   data_type_t test_dt = data_type_t::bf16;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBF18);
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   bool use_per_group = (local_rng() % 2 == 0);
   uint64_t group_size = 0, ngroups = 0;
 
@@ -904,8 +921,7 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
     inp_ref[i] = inp_ref_t;
     wt_s8[i]   = wt_s8_t;
     wt_ref[i]  = wt_ref_t;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
   }
@@ -969,6 +985,9 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
 
   data_type_t test_dt = data_type_t::f32;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xF322);
+  // Bias dtype must be uniform across experts (m_tile_safe gate); pick once.
+  data_type_t bias_dt = (local_rng() % 2 == 0) ? data_type_t::bf16 :
+                        data_type_t::f32;
   bool use_per_group = (local_rng() % 2 == 0);
   uint64_t group_size = 0, ngroups = 0;
 
@@ -1022,8 +1041,7 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
     inp_ref[i] = inp_ref_t;
     wt_s8[i]   = wt_s8_t;
     wt_ref[i]  = wt_ref_t;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n},
-                 rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
     out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
     out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
   }

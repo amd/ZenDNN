@@ -274,35 +274,16 @@ void parallel_per_expert(
   }
 }
 
-// ── ALGO selection ──────────────────────────────────────────────────────
-//
-// Returns ALGO number (1-5).  Driven by:
-//   * `check_m_tile_safe` / `check_n_tile_safe` — per-expert invariant
-//     scans that decide whether the M-tile / N-tile slicers can split
-//     the inputs without corrupting quantization / packed-B /
-//     post-op buffers.
-//   * `auto_select_algo` — cost-model-free heuristic used when the
-//     caller leaves ZENDNNL_GRP_MATMUL_ALGO unset (== 0).
-//
-// `select_grp_matmul_algo` itself is the orchestrator: it reads the
-// env override, runs the safety checks, and either returns the
-// manually-forced ALGO (falling back to 1 when the safety gate fails)
-// or delegates to `auto_select_algo`.  Keeping these as three small
-// static helpers makes each decision independently testable and lets
-// future dtype tuning touch one piece at a time.
-//
-// After refactor:
-//   ALGO 2 = pure M-tile (row-parallel).
-//   ALGO 3 = pure N-tile (column-parallel), including decode paths.
-
-// M-tile (ALGO 2) slices rows only — columns (N) are unchanged.
-// B, bias, quantization scales, and binary post-op buffers work
-// as-is (binary uses row offsetting for 2D broadcasts).
-// However, dynamic_quant and packed B are blocked because
-// execute_expert_slice calls matmul_execute directly, skipping
-// the preprocessing that matmul_direct performs (dynamic source
-// quantization, GGML unpack).  Row-major layout and uniform
-// dtypes across experts are additionally required.
+// M-tile (ALGO 2) slices rows; N-indexed metadata passes through.
+// M-indexed metadata (src_scale/zp {M,1} or {M,G}; 2D binary post-ops)
+// is per-slice mutated in execute_m_tile (buff advance + dims[0]
+// rewrite to slice_M).  Dynamic-quant additionally requires the
+// source quant granularity to be row-local (dims[0] > 1, i.e.
+// {M,1} or {M,G}); per-tensor / per-column / per-channel src layouts
+// are rejected because the per-thread reorder would race on the
+// shared scale/zp buffer and use slice-local statistics.  Still
+// blocked: packed B (skipped GGML unpack), non-row-major layout,
+// and per-expert dtype mismatches.
 static bool check_m_tile_safe(
   const std::vector<char> &layout,
   const std::vector<matmul_params> &params,
@@ -336,11 +317,30 @@ static bool check_m_tile_safe(
     if (params[i].mem_format_b != 'n') {
       return false;
     }
-    if (params[i].dynamic_quant) {
-      return false;
-    }
     if (params[i].packing.pack_format_b != 0) {
       return false;
+    }
+    // Dynamic-quant under M-tile only works when the source quant
+    // granularity is row-local (M-indexed): each per-thread reorder
+    // operates on its slice's rows independently, writes to a
+    // disjoint slice of the scale/zp buffer, and produces stats
+    // that match the granularity contract.  Layouts where the first
+    // dim is not M — per-tensor (`{}` / `{1}` / `{1, 1}`), per-column
+    // (`{1, K}`), per-channel-on-src (`{1, N}`), etc. — would race
+    // on the shared scale/zp buffer AND each thread would compute
+    // slice-local statistics instead of the full-matrix statistics
+    // those granularities semantically require.  `offset_quant_by_row`
+    // silently no-ops on those layouts (no row dim to slice), so we
+    // must reject upstream.
+    if (params[i].dynamic_quant) {
+      const auto &sd = params[i].quant_params.src_scale.dims;
+      if (sd.empty() || sd[0] <= 1) {
+        return false;
+      }
+      const auto &zd = params[i].quant_params.src_zp.dims;
+      if (!zd.empty() && zd[0] <= 1) {
+        return false;
+      }
     }
     for (const auto &po : params[i].postop_) {
       if (po.po_type == post_op_type_t::softmax
@@ -525,10 +525,16 @@ static int auto_select_algo(
 
 } // namespace
 
-// Exposed through group_matmul_parallel_common.hpp so the fused-MoE
-// entry can peek at the ALGO the dispatcher would pick BEFORE it
-// commits to a tight arena.  See the forward declaration there for
-// the contract; the body below is the single source of truth.
+// ── ALGO selection ──────────────────────────────────────────────────────
+//
+// Returns ALGO number (1-5).  Driven by:
+//   * `check_m_tile_safe` / `check_n_tile_extra` — helper checks that
+//     determine whether the M-tile slicer is safe to use and whether
+//     the extra constraints required by the N-tile path are satisfied
+//     without corrupting packed-B / post-op buffers.
+//   * `auto_select_algo` — cost-model-free heuristic used when the
+//     caller leaves ZENDNNL_GRP_MATMUL_ALGO unset (== 0).
+
 int select_grp_matmul_algo(
   const std::vector<char> &layout,
   const std::vector<int> &M,
@@ -569,8 +575,10 @@ int select_grp_matmul_algo(
       if (s_log) {
         apilog_warning(
             "[GRP_MATMUL Level2 dispatch WARN] env_algo=2 (flat_m_tile) "
-            "REJECTED: m_tile unsafe (non-row-major or per-expert "
-            "dtype mismatch). FALLBACK algo=1 (sequential_experts).");
+            "REJECTED: m_tile unsafe (non-row-major, per-expert dtype "
+            "mismatch, packed B, softmax/pooling post-op, or "
+            "dynamic-quant with non-row-local src granularity). "
+            "FALLBACK algo=1 (sequential_experts).");
       }
       algo = 1;
     }

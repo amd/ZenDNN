@@ -298,9 +298,20 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
     }
 
     if (ok && enable_moe) {
+      // MoE absolute-error budget per output: bf16-src GEMM noise
+      // (∝ |alpha|*k), the `beta * C_init` rounding contribution,
+      // and a topk factor for production-vs-reference reduction-order
+      // divergence.  The relative `rtol * |acc|` term in the
+      // comparator covers ULP-scale noise relative to the result.
       const float moe_abs_bound = (src_dt == data_type_t::f32)
                                   ? std::fabs(alpha) * ((20 + std::log2((float)k) / 4) * k + 15) * eps_pref
-                                  : std::fabs(alpha) * (float)k * eps_pref;
+                                  : (std::fabs(alpha) * (float)k + std::fabs(beta)) * topk * eps_pref;
+      // Relative tolerance also widens by `topk` for bf16-src to
+      // absorb the worst-case reduction-order divergence between the
+      // production weighted-reduce and the test's reference reduce.
+      const float effective_rtol = (src_dt == data_type_t::f32)
+                                   ? rtol_pref
+                                   : rtol_pref * topk;
       const bool is_bf16_dst = (dst_dt == data_type_t::bf16);
 
       for (int t = 0; t < num_tokens && ok; ++t) {
@@ -332,7 +343,7 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
           else {
             got = reinterpret_cast<const float *>(moe_output.data())[(size_t)t * D + d];
           }
-          if (std::abs(acc - got) > moe_abs_bound + rtol_pref * std::abs(acc)) {
+          if (std::abs(acc - got) > moe_abs_bound + effective_rtol * std::abs(acc)) {
             log_error("MoE mismatch t=", t, " d=", d, " expected=", acc, " got=", got);
             ok = false;
           }
