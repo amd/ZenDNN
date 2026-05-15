@@ -130,7 +130,7 @@ void brgemm_tail_kernel(
     assert(mr_count >= 1 && mr_count <= MAX_MR);
     assert(nv >= 1 && nv <= MAX_NV);
 
-    __m512 acc[MAX_MR][MAX_NV];
+    __m512 acc[MAX_MR][MAX_NV] = {};
 
     if (beta != 0.0f) {
         __m512 bv = _mm512_set1_ps(beta);

@@ -335,7 +335,7 @@ void avx512_tail_kernel(
     const __mmask16 rem_mask = rem ? static_cast<__mmask16>((1u << rem) - 1)
                                    : static_cast<__mmask16>(0);
 
-    __m512 acc[12][4];
+    __m512 acc[12][4] = {};
     const int nv = (nr_count + 15) / 16;
     for (int m = 0; m < mr_count; ++m)
         for (int v = 0; v < nv; ++v)

@@ -23,9 +23,9 @@
 #include "common/error_status.hpp"
 #include "common/zendnnl_exceptions.hpp"
 #include "common/platform_info.hpp"
-#include "common/logging.hpp"
+#include "logging.hpp"
 #include "common/config_manager.hpp"
-#include "common/profiler.hpp"
+#include "profiler.hpp"
 #include "common/lru.hpp"
 
 namespace zendnnl {
