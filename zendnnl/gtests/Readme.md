@@ -612,6 +612,52 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_BF16/*
 ```
 
+### Group Embedding Bag Tests
+ - Group Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Each parameterized case picks a thread strategy (`batch_threaded`, `table_threaded`, `ccd_threaded`, `hybrid_threaded`) uniformly at random per test parameter and pins it for the call via `ZENDNNL_EMBAG_THREAD_ALGO` (an RAII guard in `group_embag/group_embag_test_helpers.cpp` saves and restores the env var). The dispatcher reads the pinned value back through `embag_config_t::set_env_config()`, so all four schedulers are exercised across runs.
+
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+
+1. Run all group embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbag/TestGroupEmbag.*/*
+```
+2. Run all F32 Input, F32 Output group embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbag/TestGroupEmbag.F32_F32/*
+```
+3. Run all BF16 Input, BF16 Output group embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbag/TestGroupEmbag.BF16_BF16/*
+```
+4. Run all U4 Input, BF16 Output group embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbag/TestGroupEmbag.U4_BF16/*
+```
+
+### Group Embedding Tests
+ - Group Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Exercises lookup mode (algo = none, offsets = nullptr per table) through `group_embedding_bag_direct`.
+
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+
+1. Run all group embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbedding/TestGroupEmbedding.*/*
+```
+2. Run all F32 Input, F32 Output group embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbedding/TestGroupEmbedding.F32_F32/*
+```
+3. Run all BF16 Input, BF16 Output group embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbedding/TestGroupEmbedding.BF16_BF16/*
+```
+4. Run all U4 Input, BF16 Output group embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=GroupEmbedding/TestGroupEmbedding.U4_BF16/*
+```
+
 ### Normalization Tests
  - Normalization TestSuite has four testcases (F32_F32, BF16_BF16, BF16_F32, F32_BF16)
  - Supports four normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, BatchNorm

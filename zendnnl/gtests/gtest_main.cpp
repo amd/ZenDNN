@@ -22,6 +22,11 @@
 // outside-of-the-subdir reference; the subdir's CMakeLists.txt + its
 // helper TU own everything else.
 #include "group_matmul/group_matmul_test_helpers.hpp"
+// Group-embag-specific declarations (`GroupEmbagType`,
+// `group_embag_test`) live under `group_embag/`.  Same pattern as
+// `group_matmul/`: extern in the helpers header, definition + resize
+// loop in this TU.
+#include "group_embag/group_embag_test_helpers.hpp"
 #include <ctime>
 
 using namespace std;
@@ -101,6 +106,10 @@ std::vector<EmbagType> embag_test{};
 
 /** @brief embedding_test Data Structure(vector of structures) to hold random Embedding Parameters */
 std::vector<EmbeddingType> embedding_test{};
+
+/** @brief group_embag_test holds random parameters for the
+ *  TestGroupEmbag* fixtures in `group_embag/`. */
+std::vector<GroupEmbagType> group_embag_test{};
 
 /** @brief normalization_test Data Structure(vector of structures) to hold random Normalization Parameters */
 std::vector<NormalizationType> normalization_test{};
@@ -182,6 +191,11 @@ int main(int argc, char **argv) {
     embag_test.resize(test_num);
     // Creating Random parameters for Embedding
     embedding_test.resize(test_num);
+    // Creating Random parameters for Group Embedding Bag
+    group_embag_test.resize(test_num);
+    for (uint32_t i = 0; i < test_num; ++i) {
+      group_embag_test[i] = GroupEmbagType(i, test_num);
+    }
 
     // Creating Random parameters for Normalization
     normalization_test.resize(test_num);

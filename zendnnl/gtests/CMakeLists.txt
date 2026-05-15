@@ -72,11 +72,14 @@ if(ZENDNNL_BUILD_GTEST)
   # target_sources().  Must come AFTER add_executable so the target
   # exists.
   add_subdirectory(group_matmul)
+  # Adds group_embag/ test sources to the gtests target.
+  add_subdirectory(group_embag)
 
   target_include_directories(gtests
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_matmul")
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_matmul"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_embag")
 
   # Link to OpenMP and GTest
   target_link_libraries(gtests
