@@ -34,6 +34,8 @@
 #include <cstring>
 #include <sstream>
 
+#include <omp.h>
+
 #include "gtest_utils.hpp"
 #include "group_matmul_test_helpers.hpp"
 #include "moe_test_utils.hpp"
@@ -42,6 +44,18 @@
 // [8b] (`TestGroupMatmulAutoSelectAlgo`) to assert the auto-select
 // decision matrix without spinning up the full GEMM stack.
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+
+// `GroupNTileStrategy` enum + `test_api::PhaseBSnapshot` /
+// `s_capture_phase_b` / `s_last_phase_b_snapshot` — used by
+// section [8a.1] (`TestGroupMatmulPhaseBRemainder.HeaviestFirstAssignment`)
+// to white-box assert on the planner's Phase B output.
+#include "lowoha_operators/matmul/group_matmul/group_matmul_n_tile.hpp"
+
+// `custom_kernel::dispatch_supported()` — Phase B tests check it
+// to skip cleanly on hosts without AVX512BF16 (where forcing the
+// env-cache CK override is necessary but not sufficient: the
+// runtime `prepare_for_call` would refuse CK independently).
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 
 // ???????????????????????????????????????????????????????????????????????????????
 // [7] TestFusedMoEAlgos: fused path ? ALGO 1/2/3 ? mixed precision ? bias
@@ -786,18 +800,748 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulAlgoCustom, TestGroupMatmulAlgoCustom,
                          ::testing::ValuesIn(make_algo_custom_params()), AlgoCustomParamName);
 
 // ===============================================================================
+// [8a] TestGroupMatmulPhaseBRemainder — CK Single-round + non-zero-remainder
+//
+// Targets the planner+executor path that
+// `apply_round_pick(RoundPick::Single, use_custom=true)` populates
+// when `num_threads % num_ops != 0`:
+//
+//   * `apply_round_pick` runs the heaviest-first eligibility filter,
+//     populates `stable_n_thr_per_expert[]` non-uniformly (M-heaviest
+//     experts get `base + 1` threads, the rest get `base`), and sets
+//     `plan.per_expert_remainder = true`.
+//   * `execute_rounds` reads `per_expert_remainder` and switches from
+//     the O(1) `tid / thr_per_expert` mapping to the per-round
+//     prefix-sum `tid → (expert, local_tid)` scan that consumes the
+//     non-uniform `stable_n_thr_per_expert[]`.
+//
+// Failure modes the test catches:
+//   * Drop tiles — a regression in the prefix-sum mapping that
+//     skips an N-column slice → output cells diverge from the ALGO 1
+//     reference.
+//   * Duplicate tiles — a regression that maps two threads onto the
+//     same N-column → race-corrupted cells diverge.
+//   * Eligibility filter bugs — wrong `extras` count or per-expert
+//     `n_thr` of zero → `do_tile`'s `local_tid >= n_thr` early-return
+//     leaves columns un-written → diverge from the reference.
+//
+// Strategy: run the same call twice — once with ALGO=3 (current
+// default knobs land on CK + Single, firing Phase B) and once with
+// ALGO=1 sequential (the dispatcher's gold reference: serial over
+// experts but each expert runs with the full thread team, so it
+// never enters Phase B's per-expert remainder distribution).
+// Compare BF16 outputs cell-by-cell within the standard
+// activation-free tolerance.
+//
+// Shape choice for the documented `64 threads / 18 experts` case
+// flagged in PR #461 review: `omp_set_num_threads(32)` paired with
+// `num_ops = 14` — this lands `base = 32/14 = 2`, `remainder = 4`,
+// `per_expert_cap = min(ccd_size=8, max_tiles=N/min_n_tile)`.
+// `M = 4` keeps the call small; `N = 1024` (multiple of pack_nr=32
+// for CK eligibility) gives `max_tiles = 1024/256 = 4` so
+// `(base+1) = 3 ≤ 4` and Phase B fires on every active expert
+// (uniform `N` → all 14 experts pass the eligibility filter →
+// first 4 experts get `base+1=3` threads, the other 10 get
+// `base=2`, summing to 32 threads = full team).
+//
+// 32-thread choice (rather than 64): keeps the matmul work small
+// while still triggering Phase B; avoids over-subscription on hosts
+// where the test runner already pinned a smaller team.  Restored
+// to the prior team size on test teardown.
+//
+// Note on env caching: `ZENDNNL_GRP_MATMUL_N_ROUNDS`,
+// `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL`, and the
+// `CUSTOM_KERNEL_N_TILE` getters cache their value at first call
+// (`static const`).  Earlier tests in this binary may have already
+// observed a non-default value, in which case an `EnvVarGuard`
+// here would be a no-op and the ALGO=3 pass below could silently
+// take a non-CK / non-Single path with the cell-by-cell comparison
+// still passing — losing Phase B coverage.
+//
+// Use the test-only `*Override` RAII guards (defined in
+// `moe_test_utils.hpp`) which write a `test_api::` atomic that
+// the production getters check before the cached read path.  This
+// guarantees the test sees its required configuration regardless
+// of test-suite order.  `ZENDNNL_GRP_MATMUL_ALGO` is NOT cached,
+// so `AlgoEnvGuard(3)` / `AlgoEnvGuard(1)` flip cleanly per scope.
+TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  // Force a 32-thread team for this test; restore on scope exit.
+  // Use omp_set_num_threads (process-global) since the dispatcher
+  // reads `omp_get_max_threads()` when params don't pin
+  // num_threads, which is the case for `make_uniform_params`.
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+
+  // Verify the host can actually spawn 32 worker threads.
+  // `omp_get_max_threads()` reports the requested `nthreads-var`
+  // ICV (i.e. what `omp_set_num_threads` set, capped by the host's
+  // dynamic-team policy) but NOT the actual team size that
+  // `#pragma omp parallel` will instantiate when it fires.  On
+  // hosts with `OMP_THREAD_LIMIT` or dynamic-adjustment enabled,
+  // the runtime can hand out a smaller team than requested, which
+  // would land us on a different (base, remainder) tuple and miss
+  // the 32t/14ops Phase B shape we're locking down.
+  //
+  // Use a probe parallel region to read `omp_get_num_threads()`
+  // — that value is the active team size inside the region —
+  // before committing to the test.
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Test requires >= 32 active OMP threads to land "
+                    "on the 32t/14ops Phase B remainder shape; "
+                    "probe parallel region reported "
+                 << actual_team_size << " (requested 32; host's "
+                    "dynamic-team / thread-limit policy may have "
+                    "clamped it).";
+  }
+
+  // Force the env-cached configuration the Phase B path needs,
+  // regardless of what an earlier test in this binary already
+  // cached.  The RAII guards write a `test_api::` atomic that the
+  // production getters check before their cached `static const`
+  // read; on scope exit the prior override value is restored, so
+  // tests that follow this one are unaffected.
+  CustomKernelOverride        ck_on(true);          // CUSTOM_KERNEL=ON
+  NRoundsModeOverride         single_round(1);      // N_ROUNDS=1 (Single)
+  // 0 = use default (kDecodeNTile=256).  Our shape (N=1024) was
+  // sized for ab_min_tile=256 so max_tiles=4 and (base+1)=3 ≤
+  // per_expert_cap=4, which is required for Phase B to fire.
+  CustomKernelNTileOverride   default_n_tile(0);
+
+  // Defence-in-depth: the env-cache overrides force the planner's
+  // INTENT to take the CK path, but `prepare_for_call` makes a
+  // separate runtime decision based on AVX512BF16 availability.
+  // On a host without that ISA the dispatcher refuses CK and
+  // the ALGO 3 run silently routes through the AOCL strict-stable
+  // plan — which, with this shape's `dynamic_quant=false` and
+  // null quant buffers, would ALSO produce numerically equivalent
+  // output to ALGO 1, so the comparison below would pass without
+  // exercising Phase B.  Skip when CK is structurally unavailable.
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
+                    "dispatch support; forcing the cached env "
+                    "knobs is necessary but not sufficient on this "
+                    "host.";
+  }
+
+  reset_grp_matmul_caches();
+
+  const int num_ops = 14;            // 32 % 14 = 4 → Phase B fires
+  const int N_op1   = 1024;          // % pack_nr=32 ✓; max_tiles=4
+  const int K       = 64;
+
+  // Two M distributions, both run end-to-end and compared against
+  // the ALGO 1 reference:
+  //
+  //   (a) Uniform M=4 — every expert equally weighted; the
+  //       eligibility filter passes all 14 experts (uniform N=1024).
+  //       Locks down tile coverage (no dropped / duplicated cols)
+  //       and the prefix-sum thread→expert mapping.
+  //
+  //   (b) Skewed M with the first 4 experts heaviest (16, 12, 10, 8)
+  //       and the remaining 10 light (6 then 4×9) — exercises the
+  //       same eligibility filter on a non-uniform input.  Note that
+  //       this comparison CANNOT directly assert the heaviest-first
+  //       ordering: reordering which experts get `base+1` does not
+  //       change per-cell numerics, only the per-expert thread
+  //       distribution.  That ordering is covered separately by the
+  //       white-box `HeaviestFirstAssignment` test below, which
+  //       captures `plan.stable_n_thr_per_expert[]` via the
+  //       `test_api::PhaseBSnapshot` hook in
+  //       `group_matmul_n_tile.hpp` and asserts on the per-expert
+  //       thread counts directly.
+  struct MVariant {
+    std::vector<int> Ms;
+    const char *label;
+  };
+  const std::vector<MVariant> variants = {
+    {std::vector<int>(num_ops, 4), "uniform_M=4"},
+    {{16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4},
+     "skewed_M_heaviest_first"},
+  };
+
+  for (const auto &var : variants) {
+    SCOPED_TRACE(std::string("M variant: ") + var.label);
+    const auto &Ms = var.Ms;
+    ASSERT_EQ(static_cast<int>(Ms.size()), num_ops);
+
+    // ── Prepare shared inputs sized to per-expert M ──
+    std::vector<std::vector<bfloat16_t>> src(num_ops);
+    std::vector<std::vector<bfloat16_t>> wei(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+      src[e].resize(static_cast<size_t>(Ms[e]) * K);
+      wei[e].resize(static_cast<size_t>(K) * N_op1);
+      fill_src(src[e],  e, 0.02f);
+      fill_wei1(wei[e], e, 0.005f);
+    }
+
+    // Helper to build the call vectors and run group_matmul_direct
+    // with `algo` forced.  Captures the output of expert `e` into
+    // `out_dst[e]` (sized to Ms[e] * N_op1).  No bias / no
+    // activation keeps the comparison strictly numerical.
+    auto run_one_pass =
+        [&](int algo,
+            std::vector<std::vector<bfloat16_t>> &out_dst) {
+      AlgoEnvGuard algo_guard(algo);
+
+      for (auto &v : out_dst) {
+        std::fill(v.begin(), v.end(), bfloat16_t(0.0f));
+      }
+      std::vector<const void *> srcs(num_ops), weis(num_ops),
+          biases(num_ops, nullptr);
+      std::vector<void *> dsts(num_ops);
+      for (int e = 0; e < num_ops; ++e) {
+        srcs[e] = src[e].data();
+        weis[e] = wei[e].data();
+        dsts[e] = out_dst[e].data();
+      }
+
+      // Build with M=0 then override per-expert Ms (rest of the
+      // wrapper vectors stay uniform — N, K, lda, ldb, ldc all
+      // shape-independent of M for tA=tB=false).
+      //
+      // `wc=true` is REQUIRED for the CK path to engage on the
+      // ALGO 3 run.  `custom_kernel::prepare_for_call` refuses CK
+      // for any active expert flagged `is_weights_const=false`
+      // (dispatch.cpp:304-308) — without this, the ALGO 3 pass
+      // would silently fall back to the standard AOCL DLP per-tile
+      // path and bypass Phase B entirely, defeating the test.
+      auto gv = GemmVecs::uniform(num_ops, /*M=*/0, N_op1, K,
+                                  /*alpha=*/1.0f, /*beta=*/0.0f,
+                                  /*wc=*/true, /*tA=*/false,
+                                  /*tB=*/false);
+      gv.Ms = Ms;
+      auto params = make_uniform_params(num_ops, data_type_t::bf16);
+      // Pin num_threads via the params struct.  `omp_set_num_threads`
+      // alone does NOT propagate to the dispatcher because
+      // `thread_guard::max_threads()`
+      // (lowoha_operators/common/omp_thread_control.hpp:90-93)
+      // caches `omp_get_max_threads()` on first invocation —
+      // process-wide, for the binary's lifetime.  Setting
+      // `params[i].num_threads = 32` forces
+      // `resolve_num_threads(32, cached) = 32` and `thread_guard`
+      // then flips the ICV to 32 for the scope of this call.
+      // Required for the planner to land on the (base=2, remainder=4)
+      // tuple Phase B is sized for; without it the dispatcher uses
+      // the cached top-level OMP value and the planner picks
+      // (base=4, remainder=8) which fails the
+      // `(base+1) <= per_expert_cap=4` gate and never enters
+      // Phase B.
+      for (int e = 0; e < num_ops; ++e) {
+        params[e].num_threads = 32;
+      }
+
+      ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                    gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                    srcs, gv.lda, weis, gv.ldb,
+                                    biases, gv.beta, dsts, gv.ldc,
+                                    gv.is_wc, params,
+                                    /*moe_postop=*/nullptr,
+                                    /*gated_act=*/nullptr),
+                status_t::success) << "algo=" << algo;
+    };
+
+    // ── Reference: ALGO 1 sequential (gold) ──
+    std::vector<std::vector<bfloat16_t>> dst_ref(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+      dst_ref[e].assign(static_cast<size_t>(Ms[e]) * N_op1,
+                        bfloat16_t(0.0f));
+    }
+    ASSERT_NO_FATAL_FAILURE(run_one_pass(/*algo=*/1, dst_ref));
+
+    // ── Test: ALGO 3 (Phase B fires on CK Single + remainder) ──
+    // Wrap in a `PhaseBCaptureGuard` so we can ASSERT_TRUE after
+    // the call that the snapshot was actually populated AND that
+    // `per_expert_remainder` is set — otherwise a future change
+    // that bypasses Phase B (e.g. plan strategy changed, gate
+    // moved) would silently produce equivalent output and the
+    // comparison below would pass while Phase B coverage is lost.
+    // The guard also disarms the capture flag on scope exit, so a
+    // failed `group_matmul_direct` cannot leak the flag into a
+    // later test.
+    reset_grp_matmul_caches();
+    std::vector<std::vector<bfloat16_t>> dst_test(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+      dst_test[e].assign(static_cast<size_t>(Ms[e]) * N_op1,
+                         bfloat16_t(0.0f));
+    }
+    {
+      PhaseBCaptureGuard cap;
+      ASSERT_NO_FATAL_FAILURE(run_one_pass(/*algo=*/3, dst_test));
+
+      const auto &snap =
+          zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+      ASSERT_TRUE(snap.valid)
+          << "PhaseBSnapshot was not captured during the ALGO 3 "
+             "run — flat_n_tile may not have been reached (variant: "
+          << var.label << ")";
+      ASSERT_TRUE(snap.per_expert_remainder)
+          << "Phase B did not fire on the ALGO 3 run.  The "
+             "numerical comparison below would still pass on a "
+             "fallback path but the test would lose Phase B "
+             "coverage.  variant=" << var.label
+          << "  strategy=" << static_cast<int>(snap.strategy)
+          << "  n_thr_fixed=" << snap.n_thr_fixed;
+    }
+
+    // ── Compare cell-by-cell within BF16 tolerance ──
+    // Per-cell BF16 rounding of the final `_mm512_cvtneps_pbh`
+    // against AOCL DLP's accumulator differs by at most a relative
+    // epsilon at this magnitude.  `tol_act(/*is_bf16=*/true)` is the
+    // same tolerance pair the existing TestGroupMatmulAlgoCustom
+    // uses.
+    const auto tol = tol_act(true);
+    for (int e = 0; e < num_ops; ++e) {
+      for (int m = 0; m < Ms[e]; ++m) {
+        for (int n = 0; n < N_op1; ++n) {
+          const size_t idx = static_cast<size_t>(m) * N_op1 + n;
+          const float ref_v  = static_cast<float>(dst_ref[e][idx]);
+          const float test_v = static_cast<float>(dst_test[e][idx]);
+          ASSERT_NEAR(test_v, ref_v,
+                      std::abs(ref_v) * tol.rel + tol.abs)
+              << "Phase B remainder regression: variant=" << var.label
+              << " e=" << e << " m=" << m << " n=" << n
+              << " ref=" << ref_v << " test=" << test_v;
+        }
+      }
+    }
+  }
+}
+
+// ===============================================================================
+// [8a.1] TestGroupMatmulPhaseBRemainder — heaviest-first white-box
+//
+// The end-to-end correctness test above cannot directly observe the
+// heaviest-first comparator: reordering which experts get `base+1`
+// does NOT change the per-cell GEMM output, only the per-expert
+// thread distribution.  A regression that reversed the comparator
+// (lightest-first), or assigned `base+1` independently of M, would
+// pass the cell-by-cell comparison and slip past silently.
+//
+// Use the planner's test-only `PhaseBSnapshot` (defined in
+// `group_matmul_n_tile.hpp::test_api`) to read out the per-expert
+// thread counts the planner committed for the next `flat_n_tile`
+// call.  Assert that:
+//
+//   * `per_expert_remainder` is true (Phase B fired).
+//   * `n_thr_fixed == base`.
+//   * Exactly `remainder` experts received `base+1`, all others
+//     received `base`, and the recipients are the M-heaviest
+//     eligible experts (here all eligible because N is uniform).
+//
+// Shape: same 32t / 14ops / N=1024 setup as the correctness test
+// above, but with skewed M = {16,12,10,8,6,4×9} so only the FIRST
+// FOUR experts (M ∈ {16,12,10,8}) qualify as the heaviest.
+// ===============================================================================
+
+TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::GroupNTileStrategy;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+
+  // Real team-size probe (same reasoning as the correctness test).
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 active OMP threads; have "
+                 << actual_team_size;
+  }
+
+  // Force the env-cached config Phase B needs (RAII, restored on
+  // scope exit).
+  CustomKernelOverride        ck_on(true);
+  NRoundsModeOverride         single_round(1);
+  CustomKernelNTileOverride   default_n_tile(0);
+
+  // Defence-in-depth: env overrides force the PLANNER's intent to
+  // take the CK path, but `prepare_for_call` separately refuses CK
+  // on hosts without AVX512BF16.  Without this skip the test would
+  // run, fail to capture per_expert_remainder, and report a noisy
+  // failure on a structural ISA limitation.
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
+                    "dispatch support; cannot exercise Phase B "
+                    "without CK engagement.";
+  }
+
+  reset_grp_matmul_caches();
+
+  const int num_ops = 14;
+  const int N_op1   = 1024;
+  const int K       = 64;
+  const std::vector<int> Ms =
+      {16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+  ASSERT_EQ(static_cast<int>(Ms.size()), num_ops);
+
+  // Build inputs sized to per-expert M.
+  std::vector<std::vector<bfloat16_t>> src(num_ops);
+  std::vector<std::vector<bfloat16_t>> wei(num_ops);
+  std::vector<std::vector<bfloat16_t>> dst(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(Ms[e]) * K);
+    wei[e].resize(static_cast<size_t>(K) * N_op1);
+    dst[e].assign(static_cast<size_t>(Ms[e]) * N_op1,
+                  bfloat16_t(0.0f));
+    fill_src(src[e],  e, 0.02f);
+    fill_wei1(wei[e], e, 0.005f);
+  }
+
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  std::vector<void *> dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+    dsts[e] = dst[e].data();
+  }
+
+  auto gv = GemmVecs::uniform(num_ops, /*M=*/0, N_op1, K,
+                              /*alpha=*/1.0f, /*beta=*/0.0f,
+                              /*wc=*/true, /*tA=*/false,
+                              /*tB=*/false);
+  gv.Ms = Ms;
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  // Pin num_threads=32 via params so the dispatcher honours the
+  // intended team size regardless of `thread_guard::max_threads`'s
+  // process-wide cache.  See the matching comment in
+  // `CkSingleRoundRemainderCorrectness` above for the full
+  // rationale; without this the planner lands on (base=4,
+  // remainder=8) which fails Phase B's outer
+  // `(base+1) <= per_expert_cap` gate.
+  for (int e = 0; e < num_ops; ++e) {
+    params[e].num_threads = 32;
+  }
+
+  // Arm the snapshot capture via RAII so the flag is always
+  // disarmed on scope exit (including on test failure / early
+  // ASSERT abort).  `flat_n_tile` will exchange the flag back to
+  // false and copy `plan.stable_n_thr_per_expert[]` +
+  // `plan.per_expert_remainder` into `s_last_phase_b_snapshot`.
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+
+  ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                srcs, gv.lda, weis, gv.ldb,
+                                biases, gv.beta, dsts, gv.ldc,
+                                gv.is_wc, params,
+                                /*moe_postop=*/nullptr,
+                                /*gated_act=*/nullptr),
+            status_t::success);
+
+  // Read the snapshot.  `flat_n_tile`'s exchange should have
+  // cleared the flag; the snapshot holds the planner's output.
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+
+  ASSERT_TRUE(snap.valid)
+      << "PhaseBSnapshot was not captured — flat_n_tile may not "
+         "have been reached.";
+  EXPECT_TRUE(snap.per_expert_remainder)
+      << "Phase B did not fire; planner may have routed to a "
+         "non-Single strategy or the eligibility filter rejected "
+         "every expert.  Check `strategy` / `n_thr_fixed` below.";
+  EXPECT_EQ(static_cast<int>(snap.strategy),
+            static_cast<int>(GroupNTileStrategy::ManyExperts))
+      << "Phase B is only populated on the ManyExperts strategy "
+         "(Single round picked by N_ROUNDS=1 + use_custom).";
+  EXPECT_EQ(snap.num_ops_active, num_ops);
+
+  // 32 threads / 14 ops → base = 2, remainder = 4.
+  // All 14 experts have N=1024 so all are eligible
+  // (`N / ab_min_tile = 1024/256 = 4 ≥ base+1 = 3`).
+  // After heaviest-first sort, the first 4 sorted experts are
+  // e=0(M=16), e=1(M=12), e=2(M=10), e=3(M=8) — these get base+1=3.
+  // The remaining 10 experts get base=2.
+  const int base      = 2;
+  const int remainder = 4;
+  EXPECT_EQ(snap.n_thr_fixed, base)
+      << "n_thr_fixed should be the integer-division base.";
+
+  int got_base_plus_one = 0;
+  int got_base          = 0;
+  for (int e = 0; e < num_ops; ++e) {
+    const int n =
+        static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    if (e < remainder) {
+      // First `remainder` experts (M-heaviest) MUST get base+1.
+      EXPECT_EQ(n, base + 1)
+          << "expected M-heaviest expert e=" << e
+          << " (M=" << Ms[e] << ") to receive base+1=" << (base + 1)
+          << " threads under heaviest-first; got " << n;
+      ++got_base_plus_one;
+    } else {
+      EXPECT_EQ(n, base)
+          << "expected non-heaviest expert e=" << e
+          << " (M=" << Ms[e] << ") to receive base=" << base
+          << " threads; got " << n;
+      ++got_base;
+    }
+  }
+  EXPECT_EQ(got_base_plus_one, remainder);
+  EXPECT_EQ(got_base, num_ops - remainder);
+
+  // Total threads must equal the OMP team size.
+  int sum = 0;
+  for (int e = 0; e < num_ops; ++e) {
+    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+  }
+  EXPECT_EQ(sum, 32)
+      << "Phase B should saturate the full thread team; "
+         "sum(stable_n_thr_per_expert) = " << sum;
+}
+
+// ===============================================================================
+// [8a.2] TestGroupMatmulPhaseBRemainder — eligibility filter, non-uniform N
+//
+// Companion to `HeaviestFirstAssignment`: that test uses uniform N
+// = 1024 so every expert is eligible (`N[e] / ab_min_tile = 4 ≥
+// base + 1 = 3`).  Without a non-uniform-N case a regression that
+// removed the per-expert eligibility check would still pass —
+// every expert qualifies in the uniform fixture.
+//
+// This test pins the eligibility filter explicitly: same 32t /
+// 14ops / K=64 setup, same skewed M = {16,12,10,8,6,4×9}, but with
+// the M-heaviest expert (e=0, M=16) given N=512 instead of 1024.
+// Its tile capacity becomes `512 / 256 = 2 < base+1 = 3`, so it
+// MUST NOT receive `base+1` even though it is M-heaviest.  The
+// expected slot-by-slot distribution is:
+//
+//   * e=0 (M=16, N=512, INELIGIBLE)            → base    = 2
+//   * e=1..4 (M=12,10,8,6, N=1024) heaviest of → base+1  = 3
+//     the eligible set; receive all `remainder=4` extras
+//   * e=5..13 (M=4, N=1024)                    → base    = 2
+//
+// Sum = 2 + 4×3 + 9×2 = 32 (full team utilisation).
+//
+// A regression that ignores `pairs[e].eligible` would route the
+// extra to e=0 (highest M, sorted first), leaving e=4 at base —
+// the assertion below would catch that immediately because e=0's
+// `stable_n_thr_per_expert` would read 3 instead of 2.
+// ===============================================================================
+
+TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::GroupNTileStrategy;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 active OMP threads; have "
+                 << actual_team_size;
+  }
+
+  CustomKernelOverride        ck_on(true);
+  NRoundsModeOverride         single_round(1);
+  CustomKernelNTileOverride   default_n_tile(0);
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
+                    "dispatch support; cannot exercise Phase B "
+                    "without CK engagement.";
+  }
+
+  reset_grp_matmul_caches();
+
+  const int num_ops      = 14;
+  const int K            = 64;
+  const int N_eligible   = 1024;   // 1024 / 256 = 4 ≥ base+1
+  const int N_ineligible = 512;    //  512 / 256 = 2 < base+1
+  const std::vector<int> Ms =
+      {16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+  // Heaviest expert (e=0, M=16) gets the narrow N — sorts first
+  // by M descending but is filtered out by the eligibility check.
+  std::vector<int> Ns(num_ops, N_eligible);
+  Ns[0] = N_ineligible;
+  ASSERT_EQ(static_cast<int>(Ms.size()), num_ops);
+
+  std::vector<std::vector<bfloat16_t>> src(num_ops);
+  std::vector<std::vector<bfloat16_t>> wei(num_ops);
+  std::vector<std::vector<bfloat16_t>> dst(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(Ms[e]) * K);
+    wei[e].resize(static_cast<size_t>(K) * Ns[e]);
+    dst[e].assign(static_cast<size_t>(Ms[e]) * Ns[e],
+                  bfloat16_t(0.0f));
+    fill_src(src[e],  e, 0.02f);
+    fill_wei1(wei[e], e, 0.005f);
+  }
+
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  std::vector<void *> dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+    dsts[e] = dst[e].data();
+  }
+
+  // Build with a uniform "max" N then patch per-expert N / ldb /
+  // ldc.  `lda` is M-independent (transA=false → lda=K), `ldb`
+  // and `ldc` track the per-expert N column count.
+  auto gv = GemmVecs::uniform(num_ops, /*M=*/0, /*N=*/N_eligible, K,
+                              /*alpha=*/1.0f, /*beta=*/0.0f,
+                              /*wc=*/true, /*tA=*/false,
+                              /*tB=*/false);
+  gv.Ms = Ms;
+  gv.Ns = Ns;
+  for (int e = 0; e < num_ops; ++e) {
+    gv.ldb[e] = Ns[e];
+    gv.ldc[e] = Ns[e];
+  }
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (int e = 0; e < num_ops; ++e) {
+    params[e].num_threads = 32;
+  }
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+
+  ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                srcs, gv.lda, weis, gv.ldb,
+                                biases, gv.beta, dsts, gv.ldc,
+                                gv.is_wc, params,
+                                /*moe_postop=*/nullptr,
+                                /*gated_act=*/nullptr),
+            status_t::success);
+
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+
+  ASSERT_TRUE(snap.valid)
+      << "PhaseBSnapshot was not captured.";
+  EXPECT_TRUE(snap.per_expert_remainder)
+      << "Phase B did not fire — eligibility filter may have "
+         "rejected EVERY expert (eligible_count == 0 short-"
+         "circuits with `per_expert_remainder = false`).  "
+         "strategy=" << static_cast<int>(snap.strategy);
+  EXPECT_EQ(static_cast<int>(snap.strategy),
+            static_cast<int>(GroupNTileStrategy::ManyExperts));
+  EXPECT_EQ(snap.num_ops_active, num_ops);
+
+  // 32 threads / 14 ops → base=2, remainder=4.  e=0 is INELIGIBLE
+  // (M=16 but N=512), so the 4 extras go to the M-heaviest of the
+  // 13 eligible experts: e=1 (M=12), e=2 (M=10), e=3 (M=8), e=4
+  // (M=6).
+  const int base      = 2;
+  const int remainder = 4;
+  EXPECT_EQ(snap.n_thr_fixed, base);
+
+  // Slot-by-slot expectation.  Recipients are exactly e=1..4
+  // (heaviest eligible); everyone else (including e=0 the
+  // M-heaviest but ineligible expert) gets `base`.
+  const std::array<int, 14> expected_n_thr =
+      {2, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+  for (int e = 0; e < num_ops; ++e) {
+    const int got =
+        static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    EXPECT_EQ(got, expected_n_thr[e])
+        << "expert e=" << e
+        << " (M=" << Ms[e] << ", N=" << Ns[e] << ") "
+        << "expected " << expected_n_thr[e]
+        << " threads, got " << got
+        << ((e == 0)
+            ? "  — INELIGIBLE expert MUST NOT receive base+1 "
+              "even though it sorts first by M; check the "
+              "`pairs[e].eligible` branch in apply_round_pick()"
+            : "");
+  }
+
+  int sum = 0;
+  for (int e = 0; e < num_ops; ++e) {
+    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+  }
+  EXPECT_EQ(sum, 32)
+      << "Phase B should saturate the full thread team even when "
+         "one heavy expert is ineligible; sum=" << sum;
+
+  // Sanity bound — `extras = min(remainder, eligible_count)` should
+  // give exactly `remainder` recipients here (eligible_count = 13,
+  // remainder = 4 → extras = 4).
+  int got_base_plus_one = 0;
+  for (int e = 0; e < num_ops; ++e) {
+    if (snap.stable_n_thr_per_expert[e] == base + 1)
+      ++got_base_plus_one;
+  }
+  EXPECT_EQ(got_base_plus_one, remainder)
+      << "Exactly `remainder` experts should receive base+1.";
+}
+
+// ===============================================================================
 // [8b] TestGroupMatmulAutoSelectAlgo — pin down `select_grp_matmul_algo`'s
-//      decisions on the (max_M, num_threads, weight_class) grid.
+//      decisions on the (max_M, num_threads, num_ops) grid.
 //
-// Two invariants this section locks in:
+// Auto-select is a top-level capacity carve-out (rule 0) plus three
+// policy rules, evaluated in priority order:
 //
-//   1. Small / medium weight (≤ kMediumWeight = 64 MB / expert) +
-//      prompt (max_M > kDecodeMaxM = 32) → ALGO 1, at every thread
-//      count we care about {32, 48, 64, 80, 96, 128}.  Covers
-//      gpt-oss-20B-class prompt at BS ∈ {8, 16, 32}, seq=128.
+//   0. num_ops > kNTilePlanMaxExperts (=256) → ALGO 5   (capacity carve-out)
+//   1. num_ops ≥ num_threads                 → ALGO 3   (Qwen-style)
+//   2. num_ops ≤ kFewExpertsAlgo1 (= 8)      → ALGO 1   (Mixtral-style)
+//   3. otherwise — M-driven:
+//        prompt (max_M > kDecodeMaxM=32)     → ALGO 1
+//        decode (max_M ≤ kDecodeMaxM)        → ALGO 3   (gpt-oss-style)
 //
-//   2. Large weight (> 64 MB) + prompt + wide-N / many-experts +
-//      N-tile viable → ALGO 3 (Mixtral 8×-class carve-out preserved).
+// The matrix below covers each arrow explicitly with at least one
+// canonical workload (Qwen3-30B-A3B for rule 1, Mixtral 8x7B for
+// rule 2, gpt-oss-20B for rule 3, and synthetic E257/E512 shapes for
+// rule 0) plus thread-count sweeps to lock the rules across {32,
+// 48, 64, 80, 96, 128, 192} threads where applicable.  A future
+// heuristic edit that flips any row should produce a deterministic
+// test failure pointing at the offending label.
+//
+// SCOPE NOTE — what this matrix tests.
+//   These cases assert auto-select's ROUTING DECISION only — i.e.,
+//   which top-level ALGO the dispatcher picks for the given inputs.
+//   They do NOT verify the downstream N-tile planner's strategy
+//   choice (`ManyExperts` vs `Sequential` vs `FewExperts` etc.) for
+//   the ALGO 3 rows.  For shapes where ALGO 3 is selected but the
+//   N-tile planner's `ntile_viable` returns false (e.g., Qwen
+//   prompt at N=1536 → only 3 tiles, below the ManyExperts minimum
+//   of ccd_size/2 = 4), the planner falls back to Sequential and
+//   executes a path equivalent to ALGO 1 plus one-time ALGO 3
+//   prepack overhead.  That fallback is the user-visible behaviour
+//   for "Qwen prompt" today; it is documented in the rule-1 SCOPE
+//   NOTE in `group_matmul_parallel.cpp::auto_select_algo` and
+//   accepted as a trade-off for the simpler 3-rule selector.
+//   Verifying which strategy fires at execute time would require
+//   either a gemm_mode assertion or the white-box planner snapshot
+//   (`PhaseBSnapshot`) — currently used only for Phase B coverage.
 //
 // The test pokes `select_grp_matmul_algo` directly so we don't need to
 // build the full dispatcher stack just to read out the decision.  It
@@ -868,33 +1612,41 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
       << "  [" << p.label << "]";
 }
 
-// Grid: enumerate the cases the user cares about plus key
-// regression-pins.  `make_*` helpers compose the label so a future
-// failure points straight at the offending row.
+// Grid: enumerate at least one canonical workload per rule plus
+// thread-count sweeps where they exercise the rule, and a few
+// edge-case rows to lock the rule precedence.  The label composes
+// `<arch>_<phase>_E<num_ops>_t<num_threads>` so a failure points
+// straight at the offending case.
 static std::vector<AutoSelectParam> make_auto_select_params() {
   std::vector<AutoSelectParam> out;
 
-  // gpt-oss-20B-class shape (Op1, gate+up).  weight_per_expert =
-  // 2880 × 5760 × 2 = ~31.6 MB → medium class.
+  // ── Rule 3 (gpt-oss-20B): ops 9..32, decode → ALGO 3, prompt → ALGO 1 ──
+  // gpt-oss-20B-class shape (Op1, gate+up).  K=2880, N=5760, BF16.
   const int K_GO = 2880, N_GO = 5760;
 
-  // ── Invariant 1 — small/medium prompt → ALGO 1 across threads ──
-  // BS={8,16,32}, seq=128, topk=4 → M_per_expert ≈ {128, 256, 512}.
-  // num_threads sweep covers the user's request (32, 64, 128) plus
-  // in-between values (48, 80, 96) and the cap above 128.
+  // Prompt: BS={8,16,32}, seq=128, topk=4 → M_per_expert ≈ {128, 256, 512}.
+  // num_ops=32, max_M > kDecodeMaxM → rule 3 (M-driven) → ALGO 1,
+  // EXCEPT at num_threads=32 where rule 1 fires first (num_ops ==
+  // num_threads → ALGO 3).  The 32t case isn't part of the
+  // gpt-oss-20B benchmark grid (which targets 64t / 128t) so the
+  // rule-1 routing there is a documented boundary not a regression;
+  // pinning both branches here catches any future drift in the
+  // priority order.
   for (int M_val : {128, 256, 512}) {
     for (int nt : {32, 48, 64, 80, 96, 128, 192}) {
+      const int expected_algo = (32 == nt) ? 3 : 1;  // rule 1 vs rule 3
       out.push_back({
         /*M=*/M_val, /*K=*/K_GO, /*N=*/N_GO,
         /*num_ops=*/32, /*num_threads=*/nt,
-        /*expected_algo=*/1,
+        expected_algo,
         "prompt_gptoss_M" + std::to_string(M_val)
           + "_t" + std::to_string(nt)});
     }
   }
 
-  // ── Decode regression-pin — gpt-oss-20B decode keeps ALGO 3 ──
-  // max_M ≤ 32 and ≥4 experts and ntile_ok.
+  // Decode: max_M ≤ kDecodeMaxM=32, num_ops=32 in (8, num_threads),
+  // rule 3 → ALGO 3.  At num_threads=32 the row hits rule 1 instead
+  // (num_ops == num_threads → ALGO 3) — same outcome, different rule.
   for (int M_val : {4, 16, 32}) {
     for (int nt : {64, 128}) {
       out.push_back({
@@ -905,34 +1657,121 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     }
   }
 
-  // ── Invariant 2 — Mixtral large-weight wide-N prompt → ALGO 3 ──
-  // Mixtral 8× decode-prompt shape: K=4096, N=14336, BF16 →
-  // weight_per_expert = 4096 × 14336 × 2 = ~112 MB → large class.
-  // wide-N (N > K), many-experts (16+).  PR carve-out preserved.
-  for (int num_ops : {16, 32}) {
-    for (int nt : {64, 128}) {
+  // ── Rule 2 (Mixtral 8x*): num_ops ≤ 8 → ALGO 1 (prompt + decode) ──
+  // Mixtral 8x7B / 8x22B decoder block shape: K=4096, N=14336, BF16
+  // (~112 MB / expert).  Real Mixtral has exactly 8 experts; the
+  // few-experts gate triggers regardless of M / weight class.
+  // Prompt at every host size we care about.
+  for (int M_val : {128, 256, 512}) {
+    for (int nt : {32, 48, 64, 80, 96, 128, 192}) {
       out.push_back({
-        /*M=*/256, /*K=*/4096, /*N=*/14336,
-        num_ops, nt, /*expected_algo=*/3,
-        "mixtral_wideN_E" + std::to_string(num_ops)
+        /*M=*/M_val, /*K=*/4096, /*N=*/14336,
+        /*num_ops=*/8, /*num_threads=*/nt,
+        /*expected_algo=*/1,
+        "mixtral_8x7B_prompt_M" + std::to_string(M_val)
           + "_t" + std::to_string(nt)});
     }
   }
-
-  // ── Invariant 2.b — Mixtral large-weight TALL-N prompt → ALGO 1 ──
-  // Mirror shape (K=14336, N=4096): tall-N few-experts → ALGO 1
-  // (existing behaviour, sanity-pinning so future heuristic edits
-  // don't accidentally flip it to ALGO 3).
+  // Decode: same Mixtral shape, decode-class M, rule 2 still wins
+  // (num_ops=8 ≤ 8) and routes to ALGO 1.
+  for (int M_val : {4, 16, 32}) {
+    for (int nt : {64, 128}) {
+      out.push_back({
+        M_val, /*K=*/4096, /*N=*/14336,
+        /*num_ops=*/8, nt, /*expected_algo=*/1,
+        "mixtral_8x7B_decode_M" + std::to_string(M_val)
+          + "_t" + std::to_string(nt)});
+    }
+  }
+  // Mirror shape (K=14336, N=4096) — tall-N variant, still 8 experts
+  // → still rule 2 → ALGO 1.  Pinned because today's heuristic also
+  // routed this to ALGO 1 via a different code path; the new rule
+  // gives the same outcome via a simpler reason.
   out.push_back({
     /*M=*/256, /*K=*/14336, /*N=*/4096,
     /*num_ops=*/8, /*num_threads=*/128, /*expected_algo=*/1,
     "mixtral_tallN_E8_t128"});
 
-  // ── Edge: many experts > num_threads → ALGO 5 (per-expert) ──
+  // ── Rule 1 (Qwen3-30B-A3B): num_ops ≥ num_threads → ALGO 3 ──
+  // Qwen3-30B-A3B Op1 (gate+up) shape: K=2048, N=1536 (768×2 for
+  // gate+up), BF16.  128 experts, top-k=8.  Pin both prompt and
+  // decode at the two host sizes the deployment targets (64t, 128t)
+  // — at both, num_ops=128 ≥ num_threads so rule 1 fires
+  // unconditionally and ALGO 3 wins both phases at SELECTION TIME.
+  //
+  // EXECUTION TIME — known fallback for the prompt rows.
+  //   At N=1536, `kMinNTile=512` → `1536 / 512 = 3` tiles per expert,
+  //   below the ManyExperts minimum (ccd_size/2 = 4 on 8-core CCDs).
+  //   The N-tile planner's `ntile_viable` therefore returns false for
+  //   the prompt-class rows here (max_M ∈ {128, 256, 512}) and the
+  //   call falls back to Sequential — behaving like ALGO 1 plus one
+  //   ALGO 3 prepack pass per process.  Decode-class rows
+  //   (max_M ∈ {4, 16, 32}) take the decode tile (256), get 6 tiles
+  //   per expert, clear `ntile_viable`, and run via ManyExperts (the
+  //   path Phase B is sized for).  Both behaviours are intentional
+  //   under the simplified 3-rule selector; see the rule-1 SCOPE
+  //   NOTE in `group_matmul_parallel.cpp::auto_select_algo` for the
+  //   trade-off discussion.  These rows pin the SELECTION result;
+  //   the planner's execute-time fallback for prompt is verified by
+  //   `plan_group_n_tile`'s own self-fallback tests (R1/R2/R3 in
+  //   `group_matmul_n_tile.cpp`).
+  const int K_QW = 2048, N_QW = 1536;
+  for (int M_val : {4, 16, 32, 128, 256, 512}) {
+    for (int nt : {64, 128}) {
+      const char *phase =
+          (M_val <= zendnnl::lowoha::matmul::kDecodeMaxM)
+              ? "decode" : "prompt";
+      out.push_back({
+        M_val, K_QW, N_QW, /*num_ops=*/128, nt,
+        /*expected_algo=*/3,
+        std::string("qwen3_30B_") + phase
+          + "_E128_M" + std::to_string(M_val)
+          + "_t" + std::to_string(nt)});
+    }
+  }
+
+  // ── Rule 1 + capacity carve-out (1.a): num_ops vs kNTilePlanMaxExperts ──
+  // Rule 1 routes num_ops ≥ num_threads → ALGO 3, BUT the N-tile
+  // planner's fixed-size stack arrays cap at
+  // `GroupNTilePlan::kMaxExperts == kNTilePlanMaxExperts == 256`.
+  // Sub-gate 1.a routes num_ops > kNTilePlanMaxExperts → ALGO 5 to
+  // avoid the N-tile planner's R3 silent fallback to its Sequential
+  // strategy (one expert at a time, full team each), which is
+  // materially slower than ALGO 5's per-expert OMP-parallel schedule
+  // on many-experts decode-class shapes.
+  //
+  // Three pins cover this boundary:
+  //   * E256 — exactly at capacity, still ALGO 3 (ManyExperts strategy
+  //     with multi-round scheduling handles 256 experts fine).
+  //   * E257 — first value above capacity, must flip to ALGO 5.
+  //   * E512 — well above capacity, must stay on ALGO 5.
   out.push_back({
     /*M=*/4, /*K=*/2880, /*N=*/5760,
-    /*num_ops=*/256, /*num_threads=*/128, /*expected_algo=*/5,
-    "many_experts_E256_t128"});
+    /*num_ops=*/zendnnl::lowoha::matmul::kNTilePlanMaxExperts,
+    /*num_threads=*/128, /*expected_algo=*/3,
+    "many_experts_E256_t128_at_capacity"});
+  out.push_back({
+    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*num_ops=*/zendnnl::lowoha::matmul::kNTilePlanMaxExperts + 1,
+    /*num_threads=*/128, /*expected_algo=*/5,
+    "many_experts_E257_t128_above_capacity"});
+  out.push_back({
+    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*num_ops=*/512, /*num_threads=*/128, /*expected_algo=*/5,
+    "many_experts_E512_t128_above_capacity"});
+
+  // ── Rule 1 boundary: num_ops == num_threads → ALGO 3 ──
+  // The "≥" in rule 1 is intentional; this row pins it.  Without
+  // it a future change to "num_ops > num_threads" would silently
+  // flip the boundary case to rule 3 (M-based).
+  out.push_back({
+    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*num_ops=*/64, /*num_threads=*/64, /*expected_algo=*/3,
+    "rule1_boundary_E64_t64_decode"});
+  out.push_back({
+    /*M=*/256, /*K=*/2880, /*N=*/5760,
+    /*num_ops=*/64, /*num_threads=*/64, /*expected_algo=*/3,
+    "rule1_boundary_E64_t64_prompt"});
 
   return out;
 }
@@ -940,4 +1779,85 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
 INSTANTIATE_TEST_SUITE_P(GroupMatmulAutoSelect, TestGroupMatmulAutoSelectAlgo,
                          ::testing::ValuesIn(make_auto_select_params()),
                          AutoSelectParamName);
+
+// ===============================================================================
+// [8c] TestGroupMatmulAutoSelectAlgo_DynamicQuant — explicit
+//      dynamic_quant rejection in `check_n_tile_extra` falls back
+//      to ALGO 1.
+//
+// `check_n_tile_extra` was extended in PR #461 with an explicit
+// `params[i].dynamic_quant` rejection: previously this case was
+// rejected indirectly via `wei_scale.buff != nullptr` (any quant
+// flow with a caller-provided weight scale).  The indirect chain
+// holds for every quant deployment we have today, but a future
+// quant variant that nullifies `wei_scale.buff` would slip past
+// without the explicit gate and let the source-side
+// `reorder_quantization_wrapper` fire per-thread inside N-tile's
+// `execute_expert_slice` (with potential data races on caller-
+// shared scale buffers + N_threads × redundant quant work).
+//
+// This test pins the explicit guard.  It builds a shape the
+// auto-selector picks ALGO 3 for (decode-class, wide-N, many
+// experts, ntile-viable), confirms ALGO 3 first with
+// `dynamic_quant = false`, then flips `dynamic_quant = true` on
+// every expert (with `src_scale.dims = {M, 1}` so
+// `check_m_tile_safe` doesn't reject earlier — m_tile_safe is a
+// precondition for n_tile_extra) and asserts the auto-selector
+// flips the decision to ALGO 1.
+// ===============================================================================
+
+TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, RejectsAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);   // auto-select
+
+  const int N_ops       = 32;
+  const int M_val       = 16;     // decode-class (≤ kDecodeMaxM)
+  const int K_GO        = 2880;
+  const int N_GO        = 5760;   // wide-N decode shape
+  const int num_threads = 64;
+
+  std::vector<char> layout(N_ops, 'r');
+  std::vector<int>  M(N_ops, M_val);
+  std::vector<int>  N(N_ops, N_GO);
+  std::vector<int>  K(N_ops, K_GO);
+  std::vector<matmul_params> params(N_ops);
+  for (int i = 0; i < N_ops; ++i) {
+    params[i].dtypes.src           = data_type_t::bf16;
+    params[i].dtypes.wei           = data_type_t::bf16;
+    params[i].dtypes.dst           = data_type_t::bf16;
+    params[i].dtypes.bias          = data_type_t::bf16;
+    params[i].mem_format_a         = 'n';
+    params[i].mem_format_b         = 'n';
+    params[i].dynamic_quant        = false;
+    params[i].packing.pack_format_b = 0;
+  }
+
+  // Sanity: same shape WITHOUT dynamic_quant lands on ALGO 3
+  // (decode-class + many experts + wide-N + ntile_viable).
+  ASSERT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 3)
+      << "baseline shape must select ALGO 3 — otherwise the test "
+         "below cannot prove that dynamic_quant alone flipped the "
+         "decision";
+
+  // Flip dynamic_quant on every expert with a row-local src
+  // granularity ({M, 1}) so check_m_tile_safe still passes (its
+  // dynamic-quant gate accepts dims[0] > 1).  All other quant
+  // metadata stays unset (`wei_scale.buff == nullptr`, etc.) so
+  // the OLD indirect rejection path would NOT fire on this case
+  // — the new explicit `dynamic_quant` rejection is the only
+  // thing keeping it out of ALGO 3.
+  for (int i = 0; i < N_ops; ++i) {
+    params[i].dynamic_quant                  = true;
+    params[i].quant_params.src_scale.dims    = {M_val, 1};
+    params[i].quant_params.src_scale.dt      = data_type_t::f32;
+  }
+
+  EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 1)
+      << "dynamic_quant=true with otherwise N-tile-viable inputs "
+         "should fall back to ALGO 1; got something else (regression "
+         "in `check_n_tile_extra` dynamic_quant gate?)";
+}
 

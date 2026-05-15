@@ -358,6 +358,65 @@ static bool check_m_tile_safe(
 // them can be column-sliced without a dims update we don't do here.
 // Only buffer-free element-wise post-ops (gelu, relu, swish, …) pass.
 //
+// SCOPE NOTE — what `n_tile_safe = false` actually does to a
+// quantised workload's routing.
+//
+//   This helper only computes `n_tile_safe`; it does NOT make the
+//   final ALGO decision.  `select_grp_matmul_algo` consults
+//   `n_tile_safe` ONLY at the ALGO 3 decision points:
+//
+//     * Forced `env_algo == 3`: rejected → falls back to ALGO 1.
+//     * Auto-select (`env_algo == 0`) on a shape that would
+//       otherwise pick ALGO 3: redirected to ALGO 1.  The current
+//       auto-select rule (see `auto_select_algo` below) picks
+//       ALGO 3 in two cases — `num_ops >= num_threads` (Qwen-style)
+//       and the M-driven decode arrow (`max_M <= kDecodeMaxM`).
+//       Both honour `n_tile_safe`; on quantised inputs both arrows
+//       collapse to ALGO 1.  (Rule 0's capacity carve-out routes
+//       `num_ops > kNTilePlanMaxExperts` to ALGO 5 before either
+//       ALGO 3 arrow can fire, so it is unaffected by n_tile_safe.)
+//
+//   Other ALGOs are unaffected by this helper:
+//     * Forced `env_algo ∈ {1, 2, 4, 5}` is respected as-is
+//       (m_tile_safe is checked separately for ALGO 2; ALGO 1/4/5
+//       have no tile-safety gate).
+//
+//   So the `*_buff != nullptr` checks below reject ALL quantised
+//   workloads (static int8 A8W8, weight-only-quant s8/s4 + bf16
+//   src, dynamic-quant s8 + bf16/f32 src driving the source-side
+//   `reorder_quantization_wrapper`) FROM the ALGO 3 candidate set
+//   only — those callers reach ALGO 1 via the auto-select redirect
+//   (any rule that would have picked ALGO 3 falls back to ALGO 1
+//   when `n_tile_safe == false`) or via the forced env=3 rejection
+//   path, OR ALGO 4 / ALGO 2 / ALGO 5 if the framework forced one
+//   of those (m_tile_safe is the gate for ALGO 2; ALGO 4 / ALGO 5
+//   have no quant guard today).
+//
+//   The rejection is **conservative** — per-tensor and per-token
+//   (M-axis) quant cases are actually safe under N-tile column
+//   slicing, but the executor (`do_tile` in
+//   group_matmul_n_tile.cpp) does not yet column-slice per-channel
+//   wei_scale / wei_zp by `[col_start, col_end)`, so we err on the
+//   safe side and reject the whole class.  Opening up the safe
+//   sub-set on N-tile is tracked as a separate feature item — it
+//   mirrors the M-tile work in #458 (dynamic-quant on `{M,...}`
+//   src_scale layouts) but on the column axis.  The custom BF16
+//   microkernel is bf16×bf16→bf16 only and refuses every non-bf16
+//   combo at `prepare_for_call`, so even if a future change
+//   relaxed this gate, int8 N-tile would route through AOCL DLP
+//   int8, never through the custom kernel.
+//
+//   `params[i].dynamic_quant` is rejected explicitly even though
+//   today's typical dynamic-quant deployments also carry a non-null
+//   `wei_scale.buff` (the s8 matmul kernel needs it for
+//   dequantisation) and so are rejected indirectly.  Documenting
+//   the intent at the gate keeps a future caller / dtype combo that
+//   nullifies wei_scale (e.g. a self-derived weight-scale path)
+//   from silently letting `reorder_quantization_wrapper` fire
+//   per-thread inside `execute_expert_slice` — that wrapper takes
+//   full (M, K) and would run redundantly N_threads times per call,
+//   with potential data races on any caller-shared scale buffer.
+//
 // PRECONDITION: the caller has already run `check_m_tile_safe` and
 // confirmed it returned true.  This helper intentionally does NOT
 // re-run those checks — the orchestrator `select_grp_matmul_algo`
@@ -370,6 +429,8 @@ static bool check_n_tile_extra(
   // tail slots carry framework prepack metadata, not real per-call
   // state, and would falsely flip n-tile-safe to false.
   for (int i = 0; i < num_ops; ++i) {
+    // Static / WoQ: caller-provided scales / zero-points on either
+    // src or wei side.  See SCOPE NOTE above.
     if (params[i].quant_params.wei_scale.buff != nullptr) {
       return false;
     }
@@ -382,6 +443,15 @@ static bool check_n_tile_extra(
     if (params[i].quant_params.src_zp   .buff != nullptr) {
       return false;
     }
+    // Dynamic quant: the source-side `reorder_quantization_wrapper`
+    // would fire inside every per-thread `execute_expert_slice` and
+    // operate on the full (M, K) (since N-tile shares src across
+    // column threads).  Even if all `*_buff` were null today, the
+    // wrapper would still race on caller-shared output buffers and
+    // duplicate work N_threads times.  Reject explicitly.
+    if (params[i].dynamic_quant) {
+      return false;
+    }
     for (const auto &po : params[i].postop_) {
       if (po.buff != nullptr) {
         return false;
@@ -392,33 +462,63 @@ static bool check_n_tile_extra(
 }
 
 // Auto-select (ALGO 0) heuristic — used when the caller leaves
-// ZENDNNL_GRP_MATMUL_ALGO unset.  Picks among {ALGO 1, 3, 5} only;
-// ALGO 2 (M-tile) and ALGO 4 (multilevel nested OMP) are reachable
-// only via the env override because:
-//   * ALGO 3 (N-tile) covers the same prompt-class shapes as ALGO 2.
-//   * ALGO 4's nested OMP regions interact poorly with framework-
-//     side OMP teams, so we prefer the flat strategies by default.
+// ZENDNNL_GRP_MATMUL_ALGO unset.  Picks between {ALGO 1, ALGO 3,
+// ALGO 5}; ALGO 2 (M-tile) and ALGO 4 (multilevel nested OMP) are
+// reachable only via the env override because:
+//   * ALGO 2 covers the same prompt shapes as ALGO 3 with no measured
+//     win on the workloads we target.
+//   * ALGO 4's nested OMP regions interact poorly with framework-side
+//     OMP teams.
 //
-// Decision rule:
-//   * num_ops > num_threads                                 → ALGO 5
-//   * Large weight + prompt + N-tile viable + ≥5 experts +
-//     (wide-N or many-experts)                              → ALGO 3
-//     (large-weight wide-N prompt carve-out; large-weight
-//      tall-N few-experts still routes to ALGO 1)
-//   * Decode (max_M ≤ kDecodeMaxM) + ≥4 experts + N-tile OK → ALGO 3
-//   * Small / medium weight (≤ kMediumWeight) +
-//     prompt (max_M > kDecodeMaxM)                          → ALGO 1
-//     (full-weight AOCL DLP cache key, no per-tile fan-out,
-//      stable across thread counts.  Callers that have
-//      validated ALGO 3 as a win on a specific shape can
-//      still force it via ZENDNNL_GRP_MATMUL_ALGO=3.)
-//   * Otherwise                                             → ALGO 1
+// Decision rule (three lines + one capacity carve-out, in priority
+// order):
 //
-// The four discriminators the heuristic uses:
-//   1. num_ops vs num_threads — does each expert deserve a thread team?
-//   2. weight_per_expert      — DRAM-streaming vs L3-resident?
-//   3. max_M vs kDecodeMaxM   — decode-class vs prompt-class?
-//   4. n_tile_safe + tiles_per_expert ≥ min_ntiles — N-tile viable?
+//   0. num_ops > kNTilePlanMaxExperts (=256)  → ALGO 5
+//      Capacity carve-out: the N-tile planner's R3 gate rejects
+//      calls beyond `GroupNTilePlan::kMaxExperts` and silently
+//      falls back to its Sequential strategy (one expert at a
+//      time, full thread team each).  Sequential is materially
+//      slower than ALGO 5 (per-expert parallel, dynamic OMP
+//      schedule) on every num_ops > 256 shape we have measured —
+//      e.g., a hypothetical 300-expert MoE on 128 threads would
+//      run ~300 serial full-team matmuls instead of ~3 waves of
+//      128 parallel per-expert tasks.  Gate is placed BEFORE the
+//      three rules so it catches both `num_ops >= num_threads`
+//      (rule 1 territory) and the rare `kNTilePlanMaxExperts <
+//      num_ops < num_threads` case (rule 3 decode territory, e.g.,
+//      300 experts on a 512-thread host).  ALGO 5 has no quant
+//      guard so it covers n_tile_safe = false too — the value of
+//      n_tile_safe is irrelevant here.
+//
+//   1. num_ops ≥ num_threads               → ALGO 3
+//      (Qwen3-30B-A3B-class: 128 experts on 64-128t hosts.  At this
+//       expert/thread ratio every expert sees a thin per-expert team
+//       and N-tile's round-based scheduling consistently outperforms
+//       ALGO 1's serial-experts-with-full-team approach.  Honors
+//       n_tile_safe — quantised paths fall back to ALGO 1.)
+//
+//   2. num_ops ≤ kFewExpertsAlgo1 (=8)     → ALGO 1
+//      (Mixtral-8x*-class: 8 experts.  Per-expert weight footprint is
+//       large enough that the full-weight AOCL DLP cache key + serial
+//       expert iteration amortises DRAM traffic better than N-tile's
+//       per-thread column slices on a thin per-expert team.)
+//
+//   3. otherwise (9 ≤ num_ops < num_threads) — M-driven:
+//        prompt (max_M >  kDecodeMaxM)     → ALGO 1
+//        decode (max_M ≤  kDecodeMaxM)     → ALGO 3
+//      (gpt-oss-20B-class: ops typically 9..32 on 64-128t hosts.
+//       Prompt uses ALGO 1's thread-count-stable full-weight cache
+//       key; decode uses ALGO 3's custom-kernel + per-tile path which
+//       is the measured win on the MoE decode hot path.  N-tile's
+//       internal Sequential-strategy fallback handles narrow-N shapes
+//       where the planner can't satisfy `tiles_per_expert ≥ min`.)
+//
+// The historical large-weight wide-N prompt carve-out and weight-class
+// branching are intentionally dropped — the simpler M-driven default
+// preserves gpt-oss prompt routing, gives Mixtral and Qwen explicit
+// per-arch arrows, and the auto-selector now reads as a 3-rule table.
+// Callers that need a non-default decision on a specific deployment
+// can still pin via ZENDNNL_GRP_MATMUL_ALGO.
 static int auto_select_algo(
   const std::vector<int> &M,
   const std::vector<int> &N,
@@ -426,101 +526,65 @@ static int auto_select_algo(
   const std::vector<matmul_params> &params,
   int num_threads,
   bool n_tile_safe) {
+  (void)N;        // Kept in the signature for symmetry with the M-tile
+  (void)K;        // / N-tile safety helpers and to ease future heuristic
+  (void)params;   // refinements that re-introduce shape/dtype tests.
 
   const int num_ops = static_cast<int>(M.size());
   if (num_threads <= 1 || num_ops == 0) {
     return 1;
   }
 
-  // num_ops > num_threads → per-expert is the only way to cover every
-  // expert in one wave; ALGO 1 would run them serially.
-  if (num_ops > num_threads) {
+  // Rule 0 — Capacity carve-out: num_ops > kNTilePlanMaxExperts.
+  // Placed before the three policy rules so it catches every shape
+  // that would otherwise reach the N-tile planner's R3 Sequential
+  // fallback.  See the doc-block above (rule 0) for full rationale.
+  if (num_ops > kNTilePlanMaxExperts) {
     return 5;
   }
 
+  // Rule 1 — num_ops ≥ num_threads (Qwen-style).  Highest of the
+  // three policy rules so an 8-expert deployment on a ≤ 8-thread
+  // host (rare but possible for local dev / single-CCD profiling)
+  // routes here, not to rule 2.
+  //
+  // SCOPE NOTE — N-tile viability NOT consulted by design.
+  //   The previous heuristic gated rule-1-like cases on
+  //   `tiles_per_expert ≥ min_ntiles`.  The new rule deliberately
+  //   skips that check: the N-tile planner's `ntile_viable` runs
+  //   anyway as part of `plan_group_n_tile` and silently routes
+  //   non-viable shapes (e.g., Qwen prompt at N=1536: 1536/512 = 3
+  //   tiles < ManyExperts minimum) to its Sequential strategy,
+  //   which behaves like ALGO 1 (serial experts with full thread
+  //   team each).  The cost of this routing is the ALGO 3 planning
+  //   overhead (~µs, dwarfed by the GEMM work that follows) and
+  //   one extra warm-pack call for the per-tile cache (one-time per
+  //   process — amortised across all subsequent decode iterations).
+  //   Acceptable trade-off vs the simplicity of a 3-rule table.
+  //   Callers that have measured ALGO 1 as a win on a specific
+  //   shape can pin via `ZENDNNL_GRP_MATMUL_ALGO=1`.
+  if (num_ops >= num_threads) {
+    return n_tile_safe ? 3 : 1;
+  }
+
+  // Rule 2 — num_ops ≤ kFewExpertsAlgo1 (Mixtral-style).
+  if (num_ops <= kFewExpertsAlgo1) {
+    return 1;
+  }
+
+  // Rule 3 — M-driven default (prompt → ALGO 1, decode → ALGO 3).
+  // The decode arrow does NOT consult N-tile viability for the same
+  // reason rule 1 doesn't — see the SCOPE NOTE on rule 1 above.  For
+  // narrow-N decode shapes (e.g. `max_N < 4 × kDecodeNTile` on an
+  // 8-core CCD), `plan_group_n_tile` will route to Sequential after
+  // the ALGO 3 planning + warm-pack pass, behaving like ALGO 1.
+  // The cost is small (one-time prepack per process) and acceptable
+  // for the simplicity of the M-driven default.
   const int max_M = *std::max_element(M.begin(), M.end());
-  const int max_N = *std::max_element(N.begin(), N.end());
-  const int max_K = *std::max_element(K.begin(), K.end());
-
-  const size_t wei_elem = size_of(params[0].dtypes.wei);
-  const size_t weight_per_expert =
-    static_cast<size_t>(max_K) * max_N * wei_elem;
-
-  // Small / medium weights (≤ kMediumWeight per expert)
-  // + prompt-class shape (max_M > kDecodeMaxM): unconditionally
-  // **ALGO 1**.  Short-circuit before computing N-tile arithmetic.
-  //
-  // Routing this regime to ALGO 3 would inflate the AOCL DLP LRU
-  // footprint by `stable_n_thr` × `per-tile size` (a substantial
-  // additional cache residency at high thread counts in many-expert
-  // × layered MoE block), and the per-tile cache keys rotate with
-  // thread count which forces a re-warm whenever the deployment
-  // scales OMP teams.  ALGO 1 uses the FULL-weight AOCL key which
-  // is thread-count-stable, deduplicates across prompt + decode in
-  // the same process, and gives identical or better steady-state
-  // perf on small/medium-weight prompt workloads across the typical
-  // BS × seq × topk grid we target.
-  // Callers that have validated ALGO 3 as a win on a specific
-  // small/medium-weight prompt shape can still force it explicitly
-  // via ZENDNNL_GRP_MATMUL_ALGO=3.
-  //
-  // This rule does NOT affect the large-weight (> kMediumWeight)
-  // wide-N prompt path below — that carve-out keeps its measured
-  // ALGO 3 advantage.
-  if (weight_per_expert <= kMediumWeight && max_M > kDecodeMaxM) {
+  if (max_M > kDecodeMaxM) {
     return 1;
   }
-
-  // N-tile viability — only the two branches below read this, so
-  // the prompt small/medium path above never pays the arithmetic.
-  // Ceiling division models partial last CCD (e.g., 126 threads →
-  // 16 CCDs, last has 6 cores) consistently with flat_m_tile's
-  // num_ccds.
-  const int ccd_size_est = std::min(8, num_threads);
-  const int num_ccds_est = std::max(1,
-                                    (num_threads + ccd_size_est - 1) / ccd_size_est);
-  const int eff_tile = (max_M <= kDecodeMaxM) ? kDecodeNTile : kMinNTile;
-  const int tiles_per_expert = max_N / eff_tile;
-  const int team_est = num_threads / std::max(1, num_ops);
-  const int min_ntiles = (num_ops > num_ccds_est)
-                         ? std::max(2, ccd_size_est / 2)
-                         : std::max(2, team_est / 2);
-  const bool ntile_ok =
-    n_tile_safe && (tiles_per_expert >= min_ntiles);
-
-  // Large weights (DRAM-streaming): ALGO 1 by default.  Escape to
-  // ALGO 3 only when column-parallel has enough per-thread work to
-  // amortise its per-thread BKC pack + round-scheduling overhead.
-  //
-  // Internal prompt sweeps on the large-weight regime show:
-  //   * Few-experts tall shapes (K > N) — ALGO 1 is the clear win.
-  //     With a low thread-per-expert count, ALGO 3 splits N into
-  //     thin column slices and each thread packs a large K×slice
-  //     working set, paying per-thread memory + pack traffic that
-  //     AOCL DLP's sequential-experts-with-full-team avoids.
-  //   * Few-experts wide shapes (N > K) — ALGO 3 wins; more N
-  //     to split gives the per-expert team better parallelism.
-  //   * Many-experts (either orientation) — ALGO 3 wins; the
-  //     round scheduling and pack cost amortise across experts.
-  //
-  // Heuristic: route to ALGO 3 iff (wide-N || many-experts).
-  // Otherwise fall back to ALGO 1 for tall-N few-experts shapes.
-  if (weight_per_expert > kMediumWeight) {
-    const bool wide_N        = (max_N > max_K);
-    const bool many_experts  = (num_ops >= 16);
-    if (num_ops >= 5 && ntile_ok && max_M > kDecodeMaxM
-        && (wide_N || many_experts))
-      return 3;
-    return 1;
-  }
-
-  // Small / medium weights + decode (max_M ≤ kDecodeMaxM): ≥4
-  // experts + N-tile viable → ALGO 3.  This is the MoE decode
-  // hot path where the custom-kernel-enabled configuration shows
-  // a measurable advantage over ALGO 1 in our internal sweeps.
-  // Smaller expert counts fall to ALGO 1.
-  // (The prompt sibling regime is short-circuited above.)
-  return (num_ops >= 4 && ntile_ok) ? 3 : 1;
+  return n_tile_safe ? 3 : 1;
 }
 
 } // namespace
@@ -588,8 +652,11 @@ int select_grp_matmul_algo(
         apilog_warning(
             "[GRP_MATMUL Level2 dispatch WARN] env_algo=3 (flat_n_tile) "
             "REJECTED: n_tile unsafe (non-row-major, dtype mismatch, "
-            "quantised weights, or buffer post-op). FALLBACK algo=1 "
-            "(sequential_experts).");
+            "quantised weights or src scales, dynamic source "
+            "quantisation, or buffer post-op).  See "
+            "`check_n_tile_extra` SCOPE NOTE for why all quantised "
+            "paths today fall back to ALGO 1.  "
+            "FALLBACK algo=1 (sequential_experts).");
       }
       algo = 1;
     }

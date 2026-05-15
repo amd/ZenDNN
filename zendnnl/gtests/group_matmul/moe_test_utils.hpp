@@ -57,6 +57,8 @@
 #include "common/bfloat16.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_n_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 namespace moe_test_utils {
@@ -494,6 +496,118 @@ struct EnvVarGuard {
       unsetenv(name);
     }
   }
+};
+
+// ───────────────────────────────────────────────────────────────────
+// [1.f.1] Test-only overrides for cached env getters
+//
+// A handful of `ZENDNNL_GRP_MATMUL_*` getters cache their value at
+// first call (see the `test_api` block in
+// `group_matmul_parallel_common.hpp`).  An `EnvVarGuard` cannot
+// flip those once cached — the getter returns the snapshot from
+// the first call regardless of subsequent `setenv`.  These RAII
+// guards write the override atomic on construction and restore it
+// on scope exit, including on test failure / fixture teardown.
+//
+// Use these in any test that MUST observe a specific value of the
+// cached env (e.g. Phase B remainder tests, which must see
+// CUSTOM_KERNEL=ON and N_ROUNDS=1 to actually exercise the path).
+// ───────────────────────────────────────────────────────────────────
+
+// Each override guard owns the restoration of a single global atomic
+// on scope exit.  Copying would call the destructor twice (or worse,
+// after the original has already restored its `prev` snapshot) and
+// silently restore a stale value — delete copy + assign so the
+// compiler catches accidental copies (e.g., returning a guard by
+// value, structured-binding patterns).  Move is also deleted to keep
+// the lifetime exactly scope-bound; no test needs to transfer
+// ownership.
+
+struct CustomKernelOverride {
+  int prev;
+  explicit CustomKernelOverride(bool value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_override.exchange(
+            value ? 1 : 0, std::memory_order_relaxed);
+  }
+  ~CustomKernelOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  CustomKernelOverride(const CustomKernelOverride &) = delete;
+  CustomKernelOverride &operator=(const CustomKernelOverride &) = delete;
+  CustomKernelOverride(CustomKernelOverride &&) = delete;
+  CustomKernelOverride &operator=(CustomKernelOverride &&) = delete;
+};
+
+struct NRoundsModeOverride {
+  int prev;
+  explicit NRoundsModeOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_n_rounds_mode_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~NRoundsModeOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_n_rounds_mode_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  NRoundsModeOverride(const NRoundsModeOverride &) = delete;
+  NRoundsModeOverride &operator=(const NRoundsModeOverride &) = delete;
+  NRoundsModeOverride(NRoundsModeOverride &&) = delete;
+  NRoundsModeOverride &operator=(NRoundsModeOverride &&) = delete;
+};
+
+struct CustomKernelNTileOverride {
+  int prev;
+  explicit CustomKernelNTileOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_n_tile_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~CustomKernelNTileOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_n_tile_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  CustomKernelNTileOverride(
+      const CustomKernelNTileOverride &) = delete;
+  CustomKernelNTileOverride &operator=(
+      const CustomKernelNTileOverride &) = delete;
+  CustomKernelNTileOverride(CustomKernelNTileOverride &&) = delete;
+  CustomKernelNTileOverride &operator=(
+      CustomKernelNTileOverride &&) = delete;
+};
+
+// RAII guard for the planner's `PhaseBSnapshot` capture hook.
+// Resets `s_last_phase_b_snapshot` to its default-constructed
+// state and arms `s_capture_phase_b` on construction.  On scope
+// exit (including on test failure / `ASSERT_*` early-out)
+// disarms the capture flag — without this, a `group_matmul_direct`
+// call that fails or routes away before reaching `flat_n_tile`'s
+// exchange would leak `s_capture_phase_b == true` into a later
+// test, where an unrelated `flat_n_tile` invocation would
+// overwrite the snapshot.
+//
+// Note: the destructor does NOT clear `s_last_phase_b_snapshot`
+// itself — tests typically read the snapshot AFTER scope exit
+// would also work, but in practice tests read it before the
+// guard goes out of scope.  The flag-clear is the only safety
+// requirement.
+struct PhaseBCaptureGuard {
+  PhaseBCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot
+        = zendnnl::lowoha::matmul::test_api::PhaseBSnapshot{};
+    zendnnl::lowoha::matmul::test_api::s_capture_phase_b.store(
+        true, std::memory_order_release);
+  }
+  ~PhaseBCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api::s_capture_phase_b.store(
+        false, std::memory_order_release);
+  }
+  PhaseBCaptureGuard(const PhaseBCaptureGuard &) = delete;
+  PhaseBCaptureGuard &operator=(const PhaseBCaptureGuard &) = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────

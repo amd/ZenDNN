@@ -1580,10 +1580,11 @@ TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
 //          regression (e.g., capacity off-by-one) that would surface
 //          at a model with 32-64 experts after a few decode tokens.
 //
-//        * E=256 single-iteration: stress the kNTileMaxExperts
+//        * E=256 single-iteration: stress the kNTilePlanMaxExperts
 //          boundary.  256 is the planner's hardcoded max and the
-//          stable_n_thr_per_expert array's upper bound (defined in
-//          group_matmul_n_tile.cpp::GroupNTilePlan::kMaxExperts).
+//          stable_n_thr_per_expert array's upper bound (defined as
+//          kNTilePlanMaxExperts in group_matmul_parallel_common.hpp,
+//          aliased on GroupNTilePlan::kMaxExperts).
 //          A regression that off-by-ones the boundary check would
 //          truncate prepack to 255 entries; the post-call probe
 //          would see 1 MISS at e=255.
@@ -1743,10 +1744,12 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
   AlgoEnvGuard algo_guard(3);
   EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
 
-  // 256 experts is `kNTileMaxExperts` — the planner's hardcoded
-  // upper bound for `stable_n_thr_per_expert`.  A regression that
-  // off-by-ones the boundary check would truncate prepack to 255
-  // entries; the probe at e=255 catches that.
+  // 256 experts is `kNTilePlanMaxExperts` — the planner's hardcoded
+  // upper bound for `stable_n_thr_per_expert` (single source of
+  // truth in `group_matmul_parallel_common.hpp`, aliased on
+  // `GroupNTilePlan::kMaxExperts`).  A regression that off-by-ones
+  // the boundary check would truncate prepack to 255 entries; the
+  // probe at e=255 catches that.
   constexpr int E      = 256;
   constexpr int active = 8;
   auto h = build_stress_harness(E, active);
@@ -1764,7 +1767,7 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
       /*is_weights_const=*/std::vector<bool>{},
       /*total_count=*/E, probe_op1);
   EXPECT_EQ(probe_op1.cache_hits, E)
-      << "all 256 (kNTileMaxExperts) Op1 entries must be warmed "
+      << "all 256 (kNTilePlanMaxExperts) Op1 entries must be warmed "
          "post-call; an off-by-one on the upper bound truncates "
          "prepack to 255 and leaves entry 255 cold.";
 

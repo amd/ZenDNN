@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -78,8 +79,56 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 inline constexpr int    kDecodeMaxM   = 32;                // per-expert M ≤ this → "decode"
 inline constexpr int    kMinNTile     = 512;               // prompt-path per-thread N
 inline constexpr int    kDecodeNTile  = 256;               // decode-path per-thread N
-inline constexpr size_t kSmallWeight  = 16UL * 1024UL * 1024UL;  // 16 MB / expert
-inline constexpr size_t kMediumWeight = 64UL * 1024UL * 1024UL;  // 64 MB / expert
+inline constexpr size_t kMediumWeight = 64UL * 1024UL * 1024UL;  // 64 MB / expert (referenced by N-tile planner)
+
+/// Few-experts threshold for ALGO 0 auto-select rule 2.  Workloads
+/// with `num_ops ≤ kFewExpertsAlgo1` AND `num_ops < num_threads`
+/// (rule 1's strict `>=` would otherwise win on a ≤ 8-thread host)
+/// pin to ALGO 1 (sequential experts with full-team AOCL DLP) for
+/// prompt AND decode.  Targets Mixtral-8x*-class deployments (8
+/// experts), where per-expert weight footprint is large enough that
+/// the full-team sequential path beats N-tile's column slices on a
+/// thin per-expert thread budget.  Bump only with a measured perf
+/// justification — most few-expert MoEs in the wild stay at exactly 8.
+///
+/// The `num_ops < num_threads` precondition is satisfied for every
+/// realistic Mixtral deployment (8 experts on 32–128t hosts always
+/// hits rule 2).  An 8-expert workload on a ≤ 8-thread host (rare —
+/// only seen on local dev / single-CCD profiling) instead falls to
+/// rule 1 and routes to ALGO 3.  Documented in `auto_select_algo`'s
+/// rule precedence comment in `group_matmul_parallel.cpp`.
+inline constexpr int    kFewExpertsAlgo1 = 8;
+
+/// Maximum number of experts the ALGO 3 (N-tile) planner can
+/// represent.  Mirrored on `GroupNTilePlan::kMaxExperts` so the
+/// planner's stack-allocated fixed-size arrays (`expert_order`,
+/// `stable_n_thr_per_expert`) stay heap-free on the hot path.  Also
+/// used to size the heap-free temporaries in the expert-ordering
+/// helpers (`fill_ntile_expert_order`) below and the round-info
+/// stack array in `execute_rounds` (group_matmul_n_tile.cpp).
+///
+/// Auto-select uses this constant in **rule 0** — the top-level
+/// capacity carve-out applied BEFORE the three policy rules.  Any
+/// shape with `num_ops > kNTilePlanMaxExperts` (regardless of how it
+/// would otherwise be routed by rules 1-3) goes to ALGO 5 (per-expert
+/// parallel) because the N-tile planner's R3 gate would silently
+/// fall back to its Sequential strategy (one expert at a time, full
+/// team each).  Sequential is materially slower than ALGO 5 for
+/// many-experts decode-class shapes — ALGO 5 fans `num_ops` over the
+/// OMP team and lets each thread own a slice of experts serially,
+/// with no fixed-size lookup arrays of its own.
+///
+/// The carve-out catches both rule-1-territory shapes
+/// (`num_ops >= num_threads`, e.g., 300 experts on 128 threads) and
+/// the rare rule-3-decode-territory shape
+/// (`kNTilePlanMaxExperts < num_ops < num_threads`, e.g., 300
+/// experts on a 512-thread host).
+///
+/// Bump only if `GroupNTilePlan` switches to heap-allocated arrays
+/// (or callers start shipping > 256-expert deployments where the
+/// N-tile planner outperforms ALGO 5 — neither situation exists
+/// today).
+inline constexpr int    kNTilePlanMaxExperts = 256;
 
 // Op2's K-dimension as a function of the fused activation.  Gated
 // activations (swiglu/silu/gelu_and_mul) collapse the [gate, up] pair
@@ -154,7 +203,33 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act) {
 //     3 = force balanced (n_rounds = ceil(num_ops / target_batch),
 //         experts evenly redistributed across rounds).
 //   Mid-process env changes have no effect; relaunch for A/B.
+// ── Test-only overrides for cached env getters ─────────────────────
+//
+// The N_ROUNDS / CUSTOM_KERNEL / CUSTOM_KERNEL_N_TILE getters cache
+// their value at first call (`static const`) so production reads are
+// branch-predictor-friendly.  That precludes a unit test that runs
+// AFTER another test has already cached a non-default value from
+// flipping the cached value back via `setenv` — the getter returns
+// the cached snapshot regardless.
+//
+// The atomics below let a test override the cached value on the
+// production read path (one relaxed-load + branch per getter call,
+// negligible vs the surrounding planner / OMP work).  Sentinel `-1`
+// means "use the cached env path" (production default).  Tests
+// should set the override via the RAII helpers in
+// `gtests/group_matmul/moe_test_utils.hpp` to guarantee the override
+// is cleared on scope exit, including on test failure / fixture
+// teardown.
+namespace test_api {
+inline std::atomic<int> s_grp_n_rounds_mode_override{-1};
+inline std::atomic<int> s_grp_matmul_custom_kernel_override{-1};
+inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override{-1};
+}  // namespace test_api
+
 inline int get_grp_n_rounds_mode() {
+  const int ovr = test_api::s_grp_n_rounds_mode_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return ovr;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ROUNDS");
     if (e == nullptr || e[0] == '\0') return 1;
@@ -181,13 +256,29 @@ inline int get_grp_n_rounds_mode() {
 // getter when needed.
 inline constexpr bool kDecodeTileAbOn = true;
 
-// ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 0 (auto).
+// ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 1 (ascending).
 //   Permutation of experts walked by ALGO 3 FewExperts/ManyExperts.
 //     0 = auto: shape-aware picker (auto_pick_n_order); resolved
 //         sub-mode is logged in [Level3 flat_n_tile] APILOG.
-//     1 = ascending  — by M, lightest first.
+//     1 = ascending  — by M, lightest first.  CURRENT DEFAULT:
+//         pins the per-expert thread-id mapping to a stable
+//         shape-independent order so the AOCL DLP per-tile cache
+//         keys stay consistent across decode iterations.  Auto-mode
+//         (was the default until this commit) resolves to mode 3
+//         (pair-balanced) for most num_ops bands and mode 0 (walk-
+//         input) in the 19..23 band — the bouncing between modes
+//         can shuffle thread-id → expert assignment across calls
+//         that share an OMP team, causing per-tile cache misses
+//         when the scheduler rebinds threads to different experts.
+//         Ascending is shape-deterministic regardless of num_ops.
+//         Under the default `N_ROUNDS=1` (Single-round) wall time
+//         is dominated by max(M_e) and not the round permutation,
+//         so the conventional "descending wins on round-based
+//         schedulers" argument does not apply.
 //     2 = descending — by M, heaviest first; minimises
 //                      Σ max_M_per_round under fixed-batch rounds.
+//                      Preferred for multi-round configurations
+//                      (`N_ROUNDS=2` or `=3`).
 //     3 = pair-balanced — desc, then interleave largest with smallest
 //                         (heavy/light alternation).  Caveat: long-
 //                         tailed M still 2-bucket sum-imbalanced;
@@ -199,10 +290,10 @@ inline constexpr bool kDecodeTileAbOn = true;
 inline int get_grp_matmul_n_order() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ORDER");
-    if (e == nullptr || e[0] == '\0') return 0;
+    if (e == nullptr || e[0] == '\0') return 1;  // default: ascending
     const int parsed = std::atoi(e);
     if (parsed >= 0 && parsed <= 4) return parsed;
-    return 0;
+    return 1;  // invalid env value → fall back to the default
   }();
   return v;
 }
@@ -257,6 +348,9 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   arena's resident memory cost on memory-constrained hosts)
 //   set this knob to "0".
 inline bool get_grp_matmul_custom_kernel() {
+  const int ovr = test_api::s_grp_matmul_custom_kernel_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return ovr != 0;
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL");
     if (e == nullptr || e[0] == '\0') return true;  // default: ON
@@ -552,6 +646,25 @@ inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
 //   for prompt-class (wider tiles amortise kernel-call overhead).
 //   Non-multiples of 32 → ignored (silently safe vs typos).
 inline int get_grp_matmul_custom_kernel_n_tile() {
+  const int ovr =
+      test_api::s_grp_matmul_custom_kernel_n_tile_override.load(
+          std::memory_order_relaxed);
+  // Override semantics:
+  //   * `-1`  — sentinel, no test override; fall through to the
+  //             cached env / default path below.
+  //   * `0`   — explicit "no custom N-tile" override; the planner
+  //             reads 0 here and `effective_decode_n_tile()` falls
+  //             back to `kDecodeNTile` — same as an unset env.
+  //   * `> 0` AND multiple of 32 — adopted as the override value.
+  //   * any other positive value — treated as "no override" (mirrors
+  //             the `parsed > 0 && parsed % 32 == 0` validation the
+  //             env-cached path applies below; keeps the test API
+  //             noise-free against typos).
+  //
+  // The `ovr >= 0` branch covers all three "test has spoken" cases
+  // (0 and any positive value, valid or not); only `-1` falls
+  // through to the env path.
+  if (ovr >= 0) return (ovr > 0 && (ovr % 32) == 0) ? ovr : 0;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE");
     if (e == nullptr || e[0] == '\0') return 0;
@@ -770,9 +883,13 @@ inline int ntile_effective_nr_align(
   return a;
 }
 
-// Heap-free upper bound on num_ops for N-tile expert ordering.
-// Matches GroupNTilePlan::kMaxExperts.
-inline constexpr int kNTileMaxExperts = 256;
+// `kNTileMaxExperts` previously duplicated `kNTilePlanMaxExperts` as
+// a separate `= 256` constant for the expert-ordering helpers below.
+// Removed to keep `kNTilePlanMaxExperts` (defined at the top of this
+// header) as the SINGLE source of truth for the N-tile expert
+// capacity.  Callers below now reference `kNTilePlanMaxExperts`
+// directly so a future bump cannot leave the order helpers out of
+// sync with the auto-selector and the planner's stack-array sizing.
 
 /// Auto-pick N_ORDER from num_ops.  Returns 3 (pair_balanced) or 0
 /// (walk input order); explicit modes 1/2/4 only reachable via env.
@@ -802,8 +919,8 @@ inline int auto_pick_n_order(int num_ops) {
 /// `get_grp_matmul_n_order()`.  `out_size = 0` signals "walk input
 /// order, ignore out" (auto-mode resolved to no permutation).
 ///
-/// Heap-free: stack array of kNTileMaxExperts for the desc-sort temp;
-/// beyond that the ordering is skipped (correct, just unsorted).
+/// Heap-free: stack array of kNTilePlanMaxExperts for the desc-sort
+/// temp; beyond that the ordering is skipped (correct, just unsorted).
 /// Mode 4 is O(num_ops²) ≤ 64K comparisons — well under 10 µs.
 ///
 /// `auto_resolved_out` (optional): when env mode = 0, the resolved
@@ -814,7 +931,7 @@ inline void fill_ntile_expert_order(
   int *auto_resolved_out = nullptr) {
 
   if (num_ops <= 0 || num_ops > max_size
-      || num_ops > kNTileMaxExperts) {
+      || num_ops > kNTilePlanMaxExperts) {
     out_size = 0;
     return;
   }
@@ -846,7 +963,7 @@ inline void fill_ntile_expert_order(
   // (largest, smallest, 2nd-largest, 2nd-smallest, …) so each round
   // sees a mix of heavy and light experts.
   if (order == 3) {
-    std::array<int, kNTileMaxExperts> sorted_desc{};
+    std::array<int, kNTilePlanMaxExperts> sorted_desc{};
     sort_indices_by_m(sorted_desc.data(), num_ops, M,
                       /*ascending=*/false);
     int lo = 0, hi = num_ops - 1, o = 0;
@@ -870,7 +987,7 @@ inline void fill_ntile_expert_order(
   // round scheduler sees at most ONE heavy expert per CCX slot for
   // typical (batch_size, ccd_size) choices.
   {
-    std::array<int, kNTileMaxExperts> sorted_desc{};
+    std::array<int, kNTilePlanMaxExperts> sorted_desc{};
     sort_indices_by_m(sorted_desc.data(), num_ops, M,
                       /*ascending=*/false);
 
@@ -879,7 +996,7 @@ inline void fill_ntile_expert_order(
       total += M[i];
     }
 
-    std::array<bool, kNTileMaxExperts> used{};  // zero-init
+    std::array<bool, kNTilePlanMaxExperts> used{};  // zero-init
     int64_t cum = 0;
     for (int p = 0; p < num_ops; ++p) {
       // Error metric: |target_scaled − num_ops × new_cum| where
