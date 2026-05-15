@@ -88,7 +88,7 @@ void reset_grp_matmul_caches() {
   // returning stale reordered weights (silent wrong-answer bite).
   zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache();
   zendnnl::lowoha::matmul::group_matmul_prepack::
-      clear_fingerprint_cache_for_test();
+  clear_fingerprint_cache_for_test();
   clear_matmul_test_caches();
 }
 
@@ -3397,7 +3397,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
       if (status != status_t::success) {
         if (status != status_t::isa_unsupported) {
-          log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+          log_error("operator ", embedding_bag_operator.get_name(), " execution failed.");
         }
         return status;
       }
@@ -3474,8 +3474,10 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
     }
 
     if (status != status_t::success) {
-      log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
-      return status_t::failure;
+      if (status != status_t::isa_unsupported) {
+        log_error("operator ", embedding_bag_operator.get_name(), " execution failed.");
+      }
+      return status;
     }
   }
   catch (const exception_t &ex) {
@@ -3553,8 +3555,10 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                    params);
 
         if (status != status_t::success) {
-          log_error("LOWOHA embedding_direct execution failed.");
-          return status_t::failure;
+          if (status != status_t::isa_unsupported) {
+            log_error("LOWOHA embedding_direct execution failed.");
+          }
+          return status;
         }
       }
       catch (const std::exception &e) {
@@ -3610,8 +3614,10 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
       }
 
       if (status != status_t::success) {
-        log_info("operator ", embedding_operator.get_name(), " execution failed.");
-        return status_t::failure;
+        if (status != status_t::isa_unsupported) {
+          log_error("operator ", embedding_operator.get_name(), " execution failed.");
+        }
+        return status;
       }
     }
   }
@@ -3678,8 +3684,10 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     }
 
     if (status != status_t::success) {
-      log_info("operator ", embedding_operator.get_name(), " execution failed.");
-      return status_t::failure;
+      if (status != status_t::isa_unsupported) {
+        log_error("operator ", embedding_operator.get_name(), " execution failed.");
+      }
+      return status;
     }
   }
   catch (const exception_t &ex) {
