@@ -249,9 +249,13 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     if (!cli_params.beta || (beta != 0.0f && beta != 1.0f)) {
       beta = rand() % 2;
     }
-    //ToDo: Need to support silu, gelu_tanh, clip.
+    // gelu_tanh and clip are not supported for LIBXSMM
+    // binary_mul and binary_add dropped for accuracy issues
     for (uint32_t i = 0; i < po_types.size(); ++i) {
       if (po_types[i] == post_op_type_t::gelu_tanh ||
+        po_types[i] == post_op_type_t::binary_mul ||
+        po_types[i] == post_op_type_t::binary_add ||
+        po_types[i] == post_op_type_t::swish ||
           po_types[i] == post_op_type_t::clip) {
         po_types[i] = post_op_type_t::none;
       }
@@ -2280,6 +2284,9 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
             cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
           for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
             if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
+              cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
+              cfg.mat.po_types[i] == post_op_type_t::binary_add ||
+              cfg.mat.po_types[i] == post_op_type_t::swish ||
                 cfg.mat.po_types[i] == post_op_type_t::clip) {
               cfg.mat.po_types[i] = post_op_type_t::none;
             }
@@ -2433,6 +2440,9 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
             cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
           for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
             if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
+              cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
+              cfg.mat.po_types[i] == post_op_type_t::binary_add ||
+              cfg.mat.po_types[i] == post_op_type_t::swish ||
                 cfg.mat.po_types[i] == post_op_type_t::clip) {
               cfg.mat.po_types[i] = post_op_type_t::none;
             }
