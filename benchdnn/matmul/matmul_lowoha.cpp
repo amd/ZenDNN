@@ -52,80 +52,113 @@ void set_woq_params(matmul_params &params, const tensor_t &weight_tensor) {
   }
 }
 
+// Pull src scale (and src zp for asymmetric) from a quantized input tensor
+// into params. No-op when the tensor is not quantized.
+static void set_src_int8_params(matmul_params &params,
+                                const tensor_t &input_tensor) {
+  if (!input_tensor.is_quantized()) {
+    return;
+  }
+  const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
+  if (src_scale_buff) {
+    params.quant_params.src_scale.buff = src_scale_buff;
+    params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
+    auto src_scale_size = input_tensor.get_quant_scale_size();
+    params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
+        src_scale_size.end());
+    log_info("LOWOHA INT8: Source scale extracted");
+  }
+  if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+    const void *src_zp_buff = input_tensor.get_quant_zero_raw_handle_const();
+    if (src_zp_buff) {
+      params.quant_params.src_zp.buff = src_zp_buff;
+      params.quant_params.src_zp.dt = input_tensor.get_quant_zero_data_type();
+      auto src_zp_size = input_tensor.get_quant_zero_size();
+      params.quant_params.src_zp.dims.assign(src_zp_size.begin(), src_zp_size.end());
+      log_info("LOWOHA INT8: Source zero-point extracted");
+    }
+  }
+}
+
+// Pull weight scale (and weight zp for asymmetric) from a quantized weight
+// tensor into params. No-op when the tensor is not quantized.
+static void set_wei_int8_params(matmul_params &params,
+                                const tensor_t &weight_tensor) {
+  if (!weight_tensor.is_quantized()) {
+    return;
+  }
+  const void *wei_scale_buff =
+    weight_tensor.get_quant_scale_raw_handle_const();
+  if (wei_scale_buff) {
+    params.quant_params.wei_scale.buff = wei_scale_buff;
+    params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
+    auto wei_scale_size = weight_tensor.get_quant_scale_size();
+    params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
+        wei_scale_size.end());
+    log_info("LOWOHA INT8: Weight scale extracted");
+  }
+  if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+    const void *wei_zp_buff = weight_tensor.get_quant_zero_raw_handle_const();
+    if (wei_zp_buff) {
+      params.quant_params.wei_zp.buff = wei_zp_buff;
+      params.quant_params.wei_zp.dt = weight_tensor.get_quant_zero_data_type();
+      auto wei_zp_size = weight_tensor.get_quant_zero_size();
+      params.quant_params.wei_zp.dims.assign(wei_zp_size.begin(), wei_zp_size.end());
+      log_info("LOWOHA INT8: Weight zero-point extracted");
+    }
+  }
+}
+
+// Pull destination scale (and dst zp for asymmetric) from a quantized output
+// tensor into params. No-op when the tensor is not quantized.
+static void set_dst_int8_params(matmul_params &params,
+                                const tensor_t &output_tensor) {
+  if (!output_tensor.is_quantized()) {
+    return;
+  }
+  const void *dst_scale_buff =
+    output_tensor.get_quant_scale_raw_handle_const();
+  if (dst_scale_buff) {
+    params.quant_params.dst_scale.buff = dst_scale_buff;
+    params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
+    auto dst_scale_size = output_tensor.get_quant_scale_size();
+    params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
+        dst_scale_size.end());
+    log_info("LOWOHA INT8: Destination scale extracted");
+  }
+  if (output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+    const void *dst_zp_buff = output_tensor.get_quant_zero_raw_handle_const();
+    if (dst_zp_buff) {
+      params.quant_params.dst_zp.buff = dst_zp_buff;
+      params.quant_params.dst_zp.dt = output_tensor.get_quant_zero_data_type();
+      auto dst_zp_size = output_tensor.get_quant_zero_size();
+      params.quant_params.dst_zp.dims.assign(dst_zp_size.begin(), dst_zp_size.end());
+      log_info("LOWOHA INT8: Destination zero-point extracted");
+    }
+  }
+}
+
 void set_int8_params(matmul_params &params, const tensor_t &input_tensor,
                      const tensor_t &weight_tensor, const tensor_t &output_tensor) {
-  if (input_tensor.is_quantized()) {
-    const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
-    if (src_scale_buff) {
-      params.quant_params.src_scale.buff = src_scale_buff;
-      params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
-      auto src_scale_size = input_tensor.get_quant_scale_size();
-      params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
-          src_scale_size.end());
-      log_info("LOWOHA INT8: Source scale extracted");
-    }
-    // Extract source zero point (for asymmetric quantization)
-    if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
-      const void *src_zp_buff = input_tensor.get_quant_zero_raw_handle_const();
-      if (src_zp_buff) {
-        params.quant_params.src_zp.buff = src_zp_buff;
-        params.quant_params.src_zp.dt = input_tensor.get_quant_zero_data_type();
-        auto src_zp_size = input_tensor.get_quant_zero_size();
-        params.quant_params.src_zp.dims.assign(src_zp_size.begin(), src_zp_size.end());
-        log_info("LOWOHA INT8: Source zero-point extracted");
-      }
-    }
-  }
+  set_src_int8_params(params, input_tensor);
+  set_wei_int8_params(params, weight_tensor);
+  set_dst_int8_params(params, output_tensor);
+}
 
-  // Extract weight scale
-  if (weight_tensor.is_quantized()) {
-    const void *wei_scale_buff =
-      weight_tensor.get_quant_scale_raw_handle_const();
-    if (wei_scale_buff) {
-      params.quant_params.wei_scale.buff = wei_scale_buff;
-      params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
-      auto wei_scale_size = weight_tensor.get_quant_scale_size();
-      params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
-          wei_scale_size.end());
-      log_info("LOWOHA INT8: Weight scale extracted");
-    }
-    // Extract weight zero point (for asymmetric quantization)
-    if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
-      const void *wei_zp_buff = weight_tensor.get_quant_zero_raw_handle_const();
-      if (wei_zp_buff) {
-        params.quant_params.wei_zp.buff = wei_zp_buff;
-        params.quant_params.wei_zp.dt = weight_tensor.get_quant_zero_data_type();
-        auto wei_zp_size = weight_tensor.get_quant_zero_size();
-        params.quant_params.wei_zp.dims.assign(wei_zp_size.begin(), wei_zp_size.end());
-        log_info("LOWOHA INT8: Weight zero-point extracted");
-      }
-    }
-  }
-
-  // Extract destination scale and zero-point
-  if (output_tensor.is_quantized()) {
-    const void *dst_scale_buff =
-      output_tensor.get_quant_scale_raw_handle_const();
-    if (dst_scale_buff) {
-      params.quant_params.dst_scale.buff = dst_scale_buff;
-      params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
-      auto dst_scale_size = output_tensor.get_quant_scale_size();
-      params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
-          dst_scale_size.end());
-      log_info("LOWOHA INT8: Destination scale extracted");
-    }
-    // Extract destination zero point (for asymmetric quantization)
-    if (output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
-      const void *dst_zp_buff = output_tensor.get_quant_zero_raw_handle_const();
-      if (dst_zp_buff) {
-        params.quant_params.dst_zp.buff = dst_zp_buff;
-        params.quant_params.dst_zp.dt = output_tensor.get_quant_zero_data_type();
-        auto dst_zp_size = output_tensor.get_quant_zero_size();
-        params.quant_params.dst_zp.dims.assign(dst_zp_size.begin(), dst_zp_size.end());
-        log_info("LOWOHA INT8: Destination zero-point extracted");
-      }
-    }
-  }
+// Configure dynamic source quantization for the (src in {bf16,f32}, wei=s8 ->
+// s8 compute) path. The src tensor must already carry a properly-shaped scale
+// tensor (created by create_input_tensor); the runtime fills the scale buffer
+// during the dynamic-quant pass.
+void set_dyn_quant_src_params(matmul_params &params,
+                              const tensor_t &input_tensor,
+                              const tensor_t &weight_tensor) {
+  params.dynamic_quant = true;
+  params.dtypes.compute = data_type_t::s8;
+  set_src_int8_params(params, input_tensor);
+  set_wei_int8_params(params, weight_tensor);
+  log_info("LOWOHA dyn-quant: enabled (src=",
+           datatypeToStr(input_tensor.get_data_type()),
+           ", wei=s8, compute=s8)");
 }
 
 void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
@@ -166,6 +199,40 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
   bool is_woq = (input_tensor.get_data_type() == data_type_t::bf16 &&
                  (weight_tensor.get_data_type() == data_type_t::s4 ||
                   weight_tensor.get_data_type() == data_type_t::u4));
+
+  // Dynamic source quantization (W8A8, symmetric): src in {bf16,f32} + wei=s8.
+  // Mirrors the runtime gate in reorder_quantization.cpp. Mutually exclusive
+  // with the static int8 (s8/u8 src) path above. We additionally require the
+  // source tensor to (a) be 2D and (b) carry an attached src-scale buffer.
+  // Pipeline layers (i > 0) feed the previous layer's bf16 output as input;
+  // those tensors have no src-scale, so without this gate
+  // set_dyn_quant_src_params() would leave params.quant_params.src_scale.buff
+  // unset and crash at runtime.
+  const bool dyn_quant_src_dtype_match =
+    weight_tensor.get_data_type() == data_type_t::s8 &&
+    (input_tensor.get_data_type() == data_type_t::bf16 ||
+     input_tensor.get_data_type() == data_type_t::f32);
+  const bool dyn_quant_src_is_2d = input_tensor.get_dim() == 2;
+  // Guard the scale-buffer probe with is_quantized() first; otherwise the
+  // tensor API logs an apilog_error every time we ask a non-quantized input
+  // (e.g. plain bf16/f32 src) for its scale handle.
+  const bool dyn_quant_src_has_scale =
+    input_tensor.is_quantized() &&
+    input_tensor.get_quant_scale_raw_handle_const() != nullptr;
+  bool is_dyn_quant_src =
+    cfg.src_dynamic_quant &&
+    dyn_quant_src_dtype_match &&
+    dyn_quant_src_is_2d &&
+    dyn_quant_src_has_scale;
+
+  if (cfg.src_dynamic_quant && dyn_quant_src_dtype_match && !is_dyn_quant_src) {
+    commonlog_warning(
+      "LOWOHA: disabling dynamic source quantization for this layer; "
+      "source tensor is missing quant-scale metadata or has unsupported "
+      "shape (ndims=", input_tensor.get_dim(),
+      ", has_src_scale=", dyn_quant_src_has_scale ? 1 : 0, ").");
+  }
+
   if (is_woq) {
     set_woq_params(params, weight_tensor);
   }
@@ -173,6 +240,10 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
   // For INT8: Extract quantization parameters from all tensors
   if (is_int8) {
     set_int8_params(params, input_tensor, weight_tensor, output_tensor);
+  }
+
+  if (is_dyn_quant_src) {
+    set_dyn_quant_src_params(params, input_tensor, weight_tensor);
   }
 
   const auto &binary_post_op = binary_post_ops_tensors;
@@ -205,7 +276,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                            size_t cache_size) {
 
   bool skip;
-  for (const auto &cfg:configs) {
+  for (auto &cfg:configs) {
     try {
       skip = false;
 
@@ -283,7 +354,8 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      ret = create_input_tensor(tensor_factory, cfg, input_tensor, options);
+      ret = create_input_tensor(tensor_factory, cfg, input_tensor, options,
+                                /* isLOWOHA = */ true);
       if (ret != OK) {
         testlog_error("create_input_tensor failed");
         log_benchmark_failure(cfg);

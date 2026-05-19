@@ -30,22 +30,40 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       continue;
     }
 
-    // Split the line into fields and validate
+    // Split the line into fields and validate.
+    //
+    // Field layout:
+    //   mandatory: ndims-prefix (bs?, m, k) + 1 (n) + MATMUL_EXTRA_INPUT_FIELD_COUNT (15)
+    //   optional positional, in order:
+    //     warmup_iters,                                                        (1 field)
+    //     src_dynamic_quant, src_scale_granularity, src_group_size, src_scale_dt (4 fields)
+    //
+    // Older inputs without the 4 dyn-quant fields keep working unchanged.
+    // The optional tail is bounded; anything past it is unknown to the parser
+    // and likely indicates a malformed line (e.g. a results CSV mistakenly
+    // fed back in as input). We warn rather than fail so existing well-formed
+    // inputs with stray trailing commas keep parsing.
+    constexpr int MATMUL_OPTIONAL_INPUT_FIELD_COUNT = 5;
     auto fields = split(line, ',');
-    int fields_size = fields.size();
-    // If last field starts with a digit, decrease fields_size
-    if (!fields.empty() && std::isdigit(fields.back()[0])) {
-      fields_size--;
-    }
-    int expected_fields_cnt = options.ndims + 1 + MATMUL_EXTRA_INPUT_FIELD_COUNT;
-    if (fields_size != expected_fields_cnt) {
+    const int mandatory_cnt = options.ndims + 1 + MATMUL_EXTRA_INPUT_FIELD_COUNT;
+    const int max_cnt = mandatory_cnt + MATMUL_OPTIONAL_INPUT_FIELD_COUNT;
+    if (static_cast<int>(fields.size()) < mandatory_cnt) {
       commonlog_error(
-        "Invalid line (expected ", expected_fields_cnt, " fields): [",
+        "Invalid line (expected at least ", mandatory_cnt, " fields): [",
         (options.ndims > 2) ? "bs, " : "",
         "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, postOp_dtype, ",
         "kernel name, isWeightsConst, isTransA, isTransB, alpha, beta, ",
-        "weight_scale_granularity, weight_group_size, weight_scale_dt, warmup iterations (optional)]");
+        "weight_scale_granularity, weight_group_size, weight_scale_dt, warmup_iters (optional), ",
+        "src_dynamic_quant (optional), src_scale_granularity (optional), src_group_size (optional), src_scale_dt (optional)]");
       continue;
+    }
+    if (static_cast<int>(fields.size()) > max_cnt) {
+      commonlog_warning(
+        "Line has ", fields.size(), " fields but parser understands at most ",
+        max_cnt, " (", mandatory_cnt, " mandatory + ",
+        MATMUL_OPTIONAL_INPUT_FIELD_COUNT,
+        " optional). Extra trailing fields will be ignored; verify the input "
+        "is not a results CSV or otherwise malformed.");
     }
     MatmulConfig cfg;
     try {
@@ -290,12 +308,104 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         cfg.scale_dt = zendnnl::common::data_type_t::f32;
         id += 3;
       }
-      // Parse warmup iterations if provided, otherwise use 20% of main iterations
-      if (id < fields.size() && !(fields[id].empty())) {
+      // Parse warmup iterations if the next field is empty (explicit
+      // placeholder) or looks numeric. If it's non-empty and non-numeric
+      // (e.g. "true"), the user likely skipped the warmup placeholder and
+      // went straight to src_dynamic_quant; in that case default warmup and
+      // leave id alone so the dyn-quant parser picks the field up.
+      auto looks_signed_int = [](const std::string &s) -> bool {
+        if (s.empty()) {
+          return false;
+        }
+        size_t i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
+        if (i == s.size()) {
+          return false;
+        }
+        return std::all_of(s.begin() + i, s.end(), ::isdigit);
+      };
+      if (id < fields.size() && fields[id].empty()) {
+        cfg.warmup_iters = 0.2 * cfg.iters;
+        id++;
+      }
+      else if (id < fields.size() && looks_signed_int(fields[id])) {
         cfg.warmup_iters = std::stoi(fields[id]);
+        id++;
       }
       else {
         cfg.warmup_iters = 0.2 * cfg.iters;
+        // Do not advance id: the field (if any) is not a warmup value; let
+        // src_dynamic_quant parsing below consume it.
+      }
+
+      // Optional dynamic-source-quant fields:
+      //   [src_dynamic_quant, src_scale_granularity, src_group_size, src_scale_dt]
+      cfg.src_dynamic_quant = false;
+      cfg.src_scale_granularity = "per-tensor";
+      cfg.src_group_size = 0;
+      cfg.src_scale_dt = zendnnl::common::data_type_t::f32;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        std::string dq = fields[id];
+        std::transform(dq.begin(), dq.end(), dq.begin(), ::tolower);
+        if (dq == "true" || dq == "1") {
+          cfg.src_dynamic_quant = true;
+        }
+        else if (dq == "false" || dq == "0") {
+          cfg.src_dynamic_quant = false;
+        }
+        else {
+          commonlog_warning(
+            "Invalid value for src_dynamic_quant. Defaulting to 'false'.");
+        }
+      }
+      id++;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        std::string gran = fields[id];
+        std::transform(gran.begin(), gran.end(), gran.begin(), ::tolower);
+        if (gran == "per-tensor" || gran == "tensor") {
+          cfg.src_scale_granularity = "per-tensor";
+        }
+        else if (gran == "per-token" || gran == "token") {
+          cfg.src_scale_granularity = "per-token";
+        }
+        else if (gran == "per-group" || gran == "group") {
+          cfg.src_scale_granularity = "per-group";
+        }
+        else {
+          cfg.src_scale_granularity = "per-tensor";
+          commonlog_warning(
+            "Invalid src_scale_granularity '", fields[id],
+            "'. Defaulting to 'per-tensor'.");
+        }
+      }
+      id++;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        cfg.src_group_size = std::stoul(fields[id]);
+      }
+      id++;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        cfg.src_scale_dt = strToDatatype(fields[id]);
+      }
+
+      // Source and weight group sizes are always kept in sync. If only one
+      // was specified in the input row, mirror it onto the other.
+      if (cfg.src_group_size != cfg.group_size) {
+        if (cfg.src_group_size == 0) {
+          cfg.src_group_size = cfg.group_size;
+        }
+        else if (cfg.group_size == 0) {
+          cfg.group_size = cfg.src_group_size;
+        }
+        else {
+          commonlog_warning(
+            "src_group_size=", cfg.src_group_size,
+            " differs from weight group_size=", cfg.group_size,
+            ". Forcing both to ", cfg.group_size, ".");
+          cfg.src_group_size = cfg.group_size;
+        }
       }
 
       configs.push_back(cfg);
@@ -513,6 +623,10 @@ void inputModelFileParser(std::ifstream &infile,
       cfg.scale_dt = options.scale_dt;
       cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
                          options.warmup_iters;
+      cfg.src_dynamic_quant = options.src_dynamic_quant;
+      cfg.src_scale_granularity = options.src_scale_granularity;
+      cfg.src_group_size = options.src_group_size;
+      cfg.src_scale_dt = options.src_scale_dt;
 
       configs.push_back(cfg);
     }
@@ -597,6 +711,10 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     cfg.scale_dt = options.scale_dt;
     cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
                        options.warmup_iters;
+    cfg.src_dynamic_quant = options.src_dynamic_quant;
+    cfg.src_scale_granularity = options.src_scale_granularity;
+    cfg.src_group_size = options.src_group_size;
+    cfg.src_scale_dt = options.src_scale_dt;
 
     configs.push_back(cfg);
   }
@@ -625,7 +743,9 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
                   ", ", cfg.kernel_name, ", ", cfg.is_weights_const,
                   ", ", cfg.isTransA, ", ", cfg.isTransB,
                   ", ", cfg.alpha, ", ", cfg.beta, ", ", cfg.scale_granularity, ", ",
-                  cfg.group_size, ", ", datatypeToStr(cfg.scale_dt), ", ", cfg.warmup_iters);
+                  cfg.group_size, ", ", datatypeToStr(cfg.scale_dt), ", ", cfg.warmup_iters,
+                  ", ", cfg.src_dynamic_quant, ", ", cfg.src_scale_granularity,
+                  ", ", cfg.src_group_size, ", ", datatypeToStr(cfg.src_scale_dt));
 }
 
 void print_matmul_execution_summary(const MatmulConfig &cfg,
@@ -664,6 +784,10 @@ void print_matmul_execution_summary(const MatmulConfig &cfg,
             << cfg.group_size << ", "
             << datatypeToStr(cfg.scale_dt) << ", "
             << cfg.warmup_iters << ", "
+            << cfg.src_dynamic_quant << ", "
+            << cfg.src_scale_granularity << ", "
+            << cfg.src_group_size << ", "
+            << datatypeToStr(cfg.src_scale_dt) << ", "
             << total_time << std::endl;
 }
 
@@ -707,7 +831,12 @@ void write_each_config_result(const MatmulConfig &config,
           << config.scale_granularity << ", "
           << config.group_size << ", "
           << datatypeToStr(config.scale_dt) << ", "
-          << config.warmup_iters << ", " << stat[layer_num].total_time_ms
+          << config.warmup_iters << ", "
+          << config.src_dynamic_quant << ", "
+          << config.src_scale_granularity << ", "
+          << config.src_group_size << ", "
+          << datatypeToStr(config.src_scale_dt) << ", "
+          << stat[layer_num].total_time_ms
           << ", " << (stat[layer_num].total_time_ms / config.iters)
           << ", " << gflops_val;
   if (isPipeline) {
@@ -790,6 +919,14 @@ void cal_column_width(const MatmulConfig &config,
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.warmup_iters).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.src_dynamic_quant).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               config.src_scale_granularity.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.src_group_size).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               datatypeToStr(config.src_scale_dt).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
                                std::to_string((int)stat[0].total_time_ms).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string((int)(stat[0].total_time_ms / config.iters)).size() + 2);
@@ -863,6 +1000,10 @@ void fill_row(const MatmulConfig &config,
   row.push_back(std::to_string(config.group_size));
   row.push_back(datatypeToStr(config.scale_dt));
   row.push_back(std::to_string(config.warmup_iters));
+  row.push_back(std::to_string(config.src_dynamic_quant));
+  row.push_back(config.src_scale_granularity);
+  row.push_back(std::to_string(config.src_group_size));
+  row.push_back(datatypeToStr(config.src_scale_dt));
   std::ostringstream total_time_ss;
   total_time_ss << std::fixed << std::setprecision(2) <<
                 stat[layer_num].total_time_ms;
@@ -921,6 +1062,7 @@ void log_pipeline_results(
           << "Post Operation, PostOp Data type, "
           << "Kernel name, isWeightsConst, isTransA, isTransB, "
           << "Alpha, Beta, Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, "
+          << "Src Dynamic Quant, Src Scale Granularity, Src Group Size, Src Scale Data type, "
           << "Total time (ms) (all iters), Avg time (ms), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
@@ -978,7 +1120,12 @@ void log_pipeline_results(
             << config.scale_granularity << ", "
             << config.group_size << ", "
             << datatypeToStr(config.scale_dt) << ", "
-            << config.warmup_iters << ", " << total_time;
+            << config.warmup_iters << ", "
+            << config.src_dynamic_quant << ", "
+            << config.src_scale_granularity << ", "
+            << config.src_group_size << ", "
+            << datatypeToStr(config.src_scale_dt) << ", "
+            << total_time;
     outfile << std::endl;
 
     for (auto i = 0; i < stat.size(); i++) {
@@ -1011,7 +1158,8 @@ void print_pipeline_results(
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "PostOp_dt", "Kernel_Name",
     "isWeightsConst", "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
-    "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS", "%_of_Total"
+    "Warmup_iters", "Src_Dynamic_Quant", "Src_Scale_Granularity", "Src_Group_Size", "Src_Scale_dt",
+    "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS", "%_of_Total"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
   headers.push_back("Ctx_Creation(ms_%)");
@@ -1096,6 +1244,14 @@ void print_pipeline_results(
                                  datatypeToStr(config.scale_dt).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.warmup_iters).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.src_dynamic_quant).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 config.src_scale_granularity.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.src_group_size).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 datatypeToStr(config.src_scale_dt).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string((int)total_time).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
@@ -1201,6 +1357,10 @@ void print_pipeline_results(
     summary_row.push_back(std::to_string(config.group_size));
     summary_row.push_back(datatypeToStr(config.scale_dt));
     summary_row.push_back(std::to_string(config.warmup_iters));
+    summary_row.push_back(std::to_string(config.src_dynamic_quant));
+    summary_row.push_back(config.src_scale_granularity);
+    summary_row.push_back(std::to_string(config.src_group_size));
+    summary_row.push_back(datatypeToStr(config.src_scale_dt));
     std::ostringstream total_time_oss;
     total_time_oss << std::fixed << std::setprecision(2) << total_time;
     summary_row.push_back(total_time_oss.str());
@@ -1249,6 +1409,7 @@ void log_results(
   outfile << "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, "
           << "Post Operation, PostOp Data type, Kernel name, isWeightsConst, isTransA, isTransB, Alpha, Beta, "
           << "Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, "
+          << "Src Dynamic Quant, Src Scale Granularity, Src Group Size, Src Scale Data type, "
           << "Total time (ms) (all iters),  Avg time (ms), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {
@@ -1288,7 +1449,8 @@ void print_results(
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "PostOp_dt", "Kernel_Name",
     "isWeightsConst", "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
-    "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS"
+    "Warmup_iters", "Src_Dynamic_Quant", "Src_Scale_Granularity", "Src_Group_Size", "Src_Scale_dt",
+    "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {

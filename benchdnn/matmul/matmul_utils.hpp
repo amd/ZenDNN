@@ -85,6 +85,30 @@ struct MatmulConfig {
                                          for scaling factors (e.g., f32, bf16). */
   bool is_weights_const; /**< Flag indicating if weights are constant. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
+
+  /**
+   * Dynamic source quantization (W8A8, symmetric).
+   *
+   * When `src_dynamic_quant` is true and the dtype combination is
+   * (src=bf16/f32, wei=s8), benchdnn drives the runtime's dynamic
+   * source-quantization path: source activations are quantized to s8 at
+   * runtime against the configured src-scale granularity. Compute target is
+   * always s8 (symmetric); src zero-points are not used.
+   *
+   * Granularity is encoded as the shape of the attached src-scale tensor:
+   *   per-tensor -> {1, 1}
+   *   per-token  -> {M, 1}
+   *   per-group  -> {M, K / src_group_size}
+   * If `src_group_size` is 0 or does not divide K, per-group falls back to
+   * per-token with a warning.
+   *
+   * Currently supported only for the LOWOHA path (`--lowoha=true`) with
+   * `--ndims=2`. Ignored otherwise.
+   */
+  bool src_dynamic_quant; /**< Master toggle for dynamic source quantization. */
+  std::string src_scale_granularity; /**< per-tensor | per-token | per-group. */
+  uint64_t src_group_size; /**< K-direction group size for per-group; 0 -> per-token. */
+  zendnnl::common::data_type_t src_scale_dt; /**< Source scale dtype (f32 | bf16). */
 };
 
 /**

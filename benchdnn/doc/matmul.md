@@ -39,10 +39,14 @@ Provide a file with one configuration per line. Each line should contain:
 - `isTransB` (Transpose flag for weights)
 - `alpha` (Alpha parameter for the matmul operation)
 - `beta` (Beta parameter for the matmul operation)
-- `scale_granularity` (Scale granularity: `per-channel`/`channel`, `per-group`/`group`, `per-tensor`/`tensor`; defaults to per-channel)
-- `group_size` (Group size for per-group scaling; ignored otherwise. If empty or 0, defaults to K. Must be even; odd values fall back to per-channel.)
-- `scale_dt` (Data type for scale tensor, e.g., `f32` or `bf16`; defaults to `f32`)
+- `weight_scale_granularity` (Weight scale granularity: `per-channel`/`channel`, `per-group`/`group`, `per-tensor`/`tensor`; defaults to per-channel)
+- `weight_group_size` (Group size for per-group weight scaling; ignored otherwise. If empty or 0, defaults to K. Must be even; odd values fall back to per-channel.)
+- `weight_scale_dt` (Data type for the weight scale tensor, e.g., `f32` or `bf16`; defaults to `f32`)
 - `warmup_iters` (optional)
+- `src_dynamic_quant` (optional; `true`/`false` or `1`/`0`. Enables dynamic source quantization on the LOWOHA path. Defaults to `false`.)
+- `src_scale_granularity` (optional; `per-tensor` / `per-token` / `per-group`. Defaults to `per-tensor`.)
+- `src_group_size` (optional; K-direction group size for `per-group`. Falls back to per-token if `K % src_group_size != 0`. Defaults to `0`.)
+- `src_scale_dt` (optional; data type of the source scale tensor, `f32` or `bf16`. Defaults to `f32`.)
 
 **Example usage:**
 ```sh
@@ -60,6 +64,14 @@ Provide a file with one configuration per line. Each line should contain:
   ```
   768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, , aocl_dlp_blocked, true, false, false, 1.0, 0.0, per-channel, , f32, 30
   4096, 768, 256:3072:512, 100, bf16:s4:f32, true, f32, gelu_erf, , aocl_dlp_blocked, true, false, false, 1.5, 0.0, per-group, 128, f32, 30
+  ```
+- INT8 dynamic source quantization (W8A8, symmetric):
+  ```
+  # Per-token activation scales, bf16 src, s8 weights
+  4096, 4096, 4096, 100, bf16:s8:bf16, false, f32, , , aocl_dlp, true, false, false, 1.0, 0.0, per-channel, , f32, 30, true, per-token, 0, f32
+
+  # Per-group activation scales (group of 128 along K), bf16 scale dtype
+  4096, 4096, 4096, 100, bf16:s8:bf16, false, f32, , , aocl_dlp, true, false, false, 1.0, 0.0, per-channel, , f32, 30, true, per-group, 128, bf16
   ```
 - Batched matmul (BMM):
   ```
@@ -97,9 +109,38 @@ All configuration parameters can be provided directly via command-line options.
 
 **Example usage:**
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --post_op_dt=f32 --kernel_name=aocl_dlp --is_weights_const=true --isTransA=false --isTransB=false --alpha=1.0 --beta=0.0 --scale_granularity=per-group --group_size=256 --scale_dt=bf16 --warmup_iters=30 --ndims=3
+./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --post_op_dt=f32 --kernel_name=aocl_dlp --is_weights_const=true --isTransA=false --isTransB=false --alpha=1.0 --beta=0.0 --weight_scale_granularity=per-group --weight_group_size=256 --weight_scale_dt=bf16 --warmup_iters=30 --ndims=3
 ```
 > **Note:** For BMM benchmarking, always specify `--ndims=3` and provide `bs`.
+
+**Dynamic source quantization (W8A8, symmetric)** can be enabled with these additional flags (LOWOHA, 2D only):
+
+- `--dynamic_quant=true|false`
+- `--src_scale_granularity=per-tensor|per-token|per-group`
+- `--src_group_size=<int>` (only used with `per-group`; falls back to per-token if K is not divisible).
+  The source and weight group sizes are always kept in sync: setting `--src_group_size` also sets
+  `--weight_group_size` (and vice versa), so you only need to specify one. If both are given on the
+  CLI, the last one wins; if both appear in an input-file row and differ, a warning is printed and
+  both are forced to the weight value.
+- `--src_scale_dt=f32|bf16`
+
+```sh
+# Per-token W8A8
+./install/benchdnn/bin/benchdnn --op=matmul --m=4096 --k=4096 --n=4096 --iters=100 \
+  --sdt=bf16 --wdt=s8 --ddt=bf16 --kernel_name=aocl_dlp \
+  --dynamic_quant=true --src_scale_granularity=per-token --src_scale_dt=f32
+
+# Per-group W8A8 (K=4096, group=128 -> 32 groups along K)
+./install/benchdnn/bin/benchdnn --op=matmul --m=4096 --k=4096 --n=4096 --iters=100 \
+  --sdt=bf16 --wdt=s8 --ddt=bf16 --kernel_name=aocl_dlp \
+  --dynamic_quant=true --src_scale_granularity=per-group --src_group_size=128 --src_scale_dt=bf16
+```
+
+Constraints:
+- LOWOHA path only (`--lowoha=true`, the default).
+- 2D only (`--ndims=2`); BMM and grp_matmul are not supported in this mode.
+- `src` must be `bf16` or `f32`; `wei` must be `s8`. Compute target is fixed to `s8` (symmetric).
+- Source zero-points are not used.
 
 ---
 

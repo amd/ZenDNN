@@ -37,6 +37,8 @@ set -euo pipefail
 #   fp32             -> benchmark_sweep/fp32_generative_models_eval.txt
 #   bf16_pytorch     -> benchmark_sweep/bf16_pytorch_models_eval.txt
 #   fp32_pytorch     -> benchmark_sweep/fp32_pytorch_models_eval.txt
+#   s8s8_per_token   -> benchmark_sweep/s8s8_per_token_generative_models_eval.txt
+#   s8s8_per_group   -> benchmark_sweep/s8s8_per_group_generative_models_eval.txt
 #
 # Input shortcuts (bmm):
 #   sdpa             -> input/bmm/sdpa_bmm_inputs.txt
@@ -141,6 +143,8 @@ else
         fp32|FP32)                     INPUT_FILE="$SWEEP_DIR/fp32_generative_models_eval.txt"; TAG="fp32" ;;
         bf16_pytorch|BF16_PYTORCH)     INPUT_FILE="$SWEEP_DIR/bf16_pytorch_models_eval.txt";    TAG="bf16_pytorch" ;;
         fp32_pytorch|FP32_PYTORCH)     INPUT_FILE="$SWEEP_DIR/fp32_pytorch_models_eval.txt";    TAG="fp32_pytorch" ;;
+        s8s8_per_token|S8S8_PER_TOKEN) INPUT_FILE="$SWEEP_DIR/s8s8_per_token_generative_models_eval.txt"; TAG="s8s8_per_token" ;;
+        s8s8_per_group|S8S8_PER_GROUP) INPUT_FILE="$SWEEP_DIR/s8s8_per_group_generative_models_eval.txt"; TAG="s8s8_per_group" ;;
         *)                             INPUT_FILE="$INPUT_ARG"; TAG="$(basename "${INPUT_FILE%.*}")" ;;
     esac
 fi

@@ -66,9 +66,9 @@ struct global_options {
   bool isTransA; /**< Transpose flag for input matrix */
   bool isTransB; /**< Transpose flag for weight matrix */
   float alpha, beta; /**< Scaling factors for matmul operation. */
-  std::string scale_granularity; /**< Scale granularity for quantization. */
-  uint64_t group_size; /**< Group size for quantization. */
-  data_type_t scale_dt; /**< Datatype of scale. */
+  std::string scale_granularity; /**< Scale granularity for weight quantization. */
+  uint64_t group_size; /**< Group size for weight quantization. */
+  data_type_t scale_dt; /**< Datatype of weight scale. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
   bool perf_counters; /**< Enable per-shape HW perf counter collection (AMD Zen 4/5 PMU). */
   std::string perf_profile_str; /**< Perf counter profile:
@@ -76,6 +76,12 @@ struct global_options {
   /**< Cache: cold, warm, or hot. Warm is matmul-only; main rejects warm for other --op. */
   CacheMode cache_mode;
   int num_weight_buffers; /**< Number of weight buffers to use. */
+  bool src_dynamic_quant; /**< Enable dynamic source quantization
+                          (matmul, src=bf16/f32 + wei=s8 -> s8 compute). */
+  std::string src_scale_granularity; /**< Source scale granularity:
+                                     per-tensor | per-token | per-group. */
+  uint64_t src_group_size; /**< K-direction group size for per-group source scales. */
+  data_type_t src_scale_dt; /**< Datatype of source scale (f32 | bf16). */
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
     ddt(data_type_t::f32), is_weights_const(-1), bias_dt(data_type_t::f32),
@@ -83,7 +89,9 @@ struct global_options {
     isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
     scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32),
     perf_counters(false), perf_profile_str("cache"), cache_mode(CacheMode::HOT),
-    num_weight_buffers(-1) {}
+    num_weight_buffers(-1),
+    src_dynamic_quant(false), src_scale_granularity("per-tensor"),
+    src_group_size(0), src_scale_dt(data_type_t::f32) {}
 };
 
 /**

@@ -182,7 +182,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
                     size_t cache_size) {
 
   bool skip;
-  for (const auto &cfg:configs) {
+  for (auto &cfg:configs) {
     try {
       skip = false;
       // Check if weight data type is u8, which is not supported

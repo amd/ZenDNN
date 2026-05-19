@@ -59,11 +59,35 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
       }
     }
     else if (dt == data_type_t::s8) {
+      // s8 weight supports per-tensor, per-channel, and per-group (along K)
+      // scales. One common pairing with per-group dynamic source quantization
+      // is matched group sizes (for example, gtest INT8_DYNAMIC_GEMM_* uses
+      //   wei {G, N} + src {M, G}
+      // with matched G), but other src granularities (per-channel weight +
+      // per-token / per-group src) are valid and documented in matmul.md.
+      // This factory only configures weight scales; any cross-tensor
+      // (src vs. wei) granularity compatibility must be enforced by the
+      // caller or a higher-level validation path.
+      cfg.group_size = cfg.group_size ? cfg.group_size : k;
       std::string scale_granularity = cfg.scale_granularity;
       if (scale_granularity == "tensor") {
         scale_size = {1, 1};
       }
+      else if (scale_granularity == "group") {
+        if (cfg.group_size == 0 || k % cfg.group_size != 0) {
+          commonlog_warning(
+            "weight group_size=", cfg.group_size, " does not divide K=", k,
+            "; falling back to per-channel for s8 weights.");
+          scale_size = {1, n};
+        }
+        else {
+          group_size = cfg.group_size;
+          num_groups = k / group_size;
+          scale_size = {num_groups, n};
+        }
+      }
       else {
+        // per-channel (default)
         scale_size = {1, n};
       }
     }
@@ -182,18 +206,102 @@ int create_bias_tensor(tensor_factory_t tensor_factory, const MatmulConfig &cfg,
 }
 
 int create_input_tensor(tensor_factory_t &tensor_factory,
-                        const MatmulConfig &cfg, tensor_t &input, const global_options &options) {
+                        MatmulConfig &cfg, tensor_t &input, const global_options &options,
+                        bool isLOWOHA) {
+  // Dynamic source quantization is a LOWOHA-only feature. On the regular
+  // matmul API the operator validates/consumes quantization metadata, so
+  // silently attaching a src-scale tensor to a bf16/f32 input would change
+  // behavior or fail. Disable the flag here so no scale is attached and the
+  // downstream gates also short-circuit.
+  if (cfg.src_dynamic_quant && !isLOWOHA) {
+    commonlog_warning(
+      "src_dynamic_quant is supported only on the LOWOHA path "
+      "(--lowoha=true). Disabling for this non-LOWOHA run.");
+    cfg.src_dynamic_quant = false;
+  }
   if (options.ndims > 2) {
+    if (cfg.src_dynamic_quant) {
+      commonlog_warning(
+        "src_dynamic_quant is not supported for BMM (ndims > 2). Disabling.");
+      // Disable so downstream gates (e.g. set_lowoha_matmul_params) don't
+      // attempt dyn-quant without a src-scale tensor for 3D inputs.
+      cfg.src_dynamic_quant = false;
+    }
     input = tensor_factory.uniform_dist_tensor({cfg.bs, cfg.m, cfg.k},
             cfg.dt[0],
             1.0, "matmul_input", cfg.isTransA);
   }
   else {
-    auto src_scale = (cfg.dt[0] == data_type_t::s8 ||
-                      cfg.dt[0] == data_type_t::u8) ? tensor_factory.uniform_dist_tensor({1, 1},
-                          data_type_t::f32, 0.3) : tensor_t();
-    auto src_zp = cfg.dt[0] == data_type_t::u8 ? tensor_factory.uniform_tensor({1, 1},
-                  data_type_t::u8, 16) : tensor_t();
+    tensor_t src_scale;
+    tensor_t src_zp;
+
+    // Dynamic source quantization (W8A8, symmetric). Only fires when the
+    // dtype combo matches the runtime gate in reorder_quantization.cpp:
+    // src in {bf16, f32} and wei == s8. The scale tensor is zero-initialized;
+    // the runtime fills it during the dynamic-quant pass. Compute target
+    // is fixed to s8 in set_lowoha_matmul_params.
+    if (cfg.src_dynamic_quant) {
+      const bool src_ok = (cfg.dt[0] == data_type_t::bf16 ||
+                           cfg.dt[0] == data_type_t::f32);
+      const bool wei_ok = (cfg.dt[1] == data_type_t::s8);
+      if (src_ok && wei_ok) {
+        const uint64_t M = cfg.m;
+        const uint64_t K = cfg.k;
+        std::vector<uint64_t> src_scale_dims;
+        const std::string &gran = cfg.src_scale_granularity;
+        if (gran == "per-tensor") {
+          src_scale_dims = {1, 1};
+        }
+        else if (gran == "per-token") {
+          src_scale_dims = {M, 1};
+        }
+        else if (gran == "per-group") {
+          const uint64_t gs = cfg.src_group_size;
+          if (gs == 0) {
+            commonlog_warning(
+              "src_group_size=0 is not valid for per-group src-scale "
+              "granularity; falling back to per-token.");
+            src_scale_dims = {M, 1};
+          }
+          else if (K % gs != 0) {
+            commonlog_warning(
+              "src_group_size=", gs, " does not divide K=", K,
+              "; falling back to per-token src-scale granularity.");
+            src_scale_dims = {M, 1};
+          }
+          else {
+            src_scale_dims = {M, K / gs};
+          }
+        }
+        else {
+          commonlog_warning(
+            "Unknown src_scale_granularity '", gran,
+            "'. Falling back to per-tensor.");
+          src_scale_dims = {1, 1};
+        }
+        src_scale = tensor_factory.uniform_tensor(src_scale_dims,
+                                                  cfg.src_scale_dt,
+                                                  0.0f, "matmul_src_scale");
+      }
+      else {
+        commonlog_warning(
+          "src_dynamic_quant=true requires src in {bf16, f32} and wei=s8. "
+          "Got src=", datatypeToStr(cfg.dt[0]),
+          ", wei=", datatypeToStr(cfg.dt[1]),
+          ". Ignoring src_dynamic_quant.");
+      }
+    }
+
+    // Existing static int8 source path (s8/u8 src). Mutually exclusive with
+    // the dynamic-quant branch above at the dtype level.
+    if (cfg.dt[0] == data_type_t::s8 || cfg.dt[0] == data_type_t::u8) {
+      src_scale = tensor_factory.uniform_dist_tensor({1, 1},
+                  data_type_t::f32, 0.3);
+      if (cfg.dt[0] == data_type_t::u8) {
+        src_zp = tensor_factory.uniform_tensor({1, 1}, data_type_t::u8, 16);
+      }
+    }
+
     input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
             cfg.dt[0],
             1.0, "matmul_input", cfg.isTransA, src_scale, src_zp);

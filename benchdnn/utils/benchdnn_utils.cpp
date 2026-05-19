@@ -507,12 +507,18 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
     }
     options.beta = std::stof(arg.substr(7));
   }
-  else if (arg.find("--scale_granularity=") == 0) {
-    if (arg.substr(20).empty()) {
-      commonlog_error("Scale granularity value cannot be empty. Please provide a valid value.");
+  // The "--weight_*" forms are the preferred names and pair symmetrically
+  // with the "--src_*" dynamic-quant flags. The legacy "--scale_granularity",
+  // "--group_size", and "--scale_dt" forms remain accepted for backward
+  // compatibility with existing scripts.
+  else if (arg.find("--scale_granularity=") == 0 ||
+           arg.find("--weight_scale_granularity=") == 0) {
+    const std::string value = arg.substr(arg.find('=') + 1);
+    if (value.empty()) {
+      commonlog_error("Weight scale granularity value cannot be empty. Please provide a valid value.");
       return NOT_OK;
     }
-    std::string scale_gran = arg.substr(20);
+    std::string scale_gran = value;
     std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),
                    ::tolower);
     if (scale_gran == "per-channel" || scale_gran == "channel") {
@@ -527,22 +533,35 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
     else {
       options.scale_granularity = "channel";
       commonlog_warning(
-        "Invalid value for scale granularity. Defaulting to 'per-channel'.");
+        "Invalid value for weight scale granularity. Defaulting to 'per-channel'.");
     }
   }
-  else if (arg.find("--group_size=") == 0) {
-    if (arg.substr(13).empty()) {
-      commonlog_error("Group size value cannot be empty. Please provide a valid number.");
+  else if (arg.find("--group_size=") == 0 ||
+           arg.find("--weight_group_size=") == 0) {
+    const std::string value = arg.substr(arg.find('=') + 1);
+    if (value.empty()) {
+      commonlog_error("Weight group size value cannot be empty. Please provide a valid number.");
       return NOT_OK;
     }
-    options.group_size = std::stoul(arg.substr(13));
+    options.group_size = std::stoul(value);
+    // Source and weight group sizes are always kept in sync.
+    options.src_group_size = options.group_size;
   }
-  else if (arg.find("--scale_dt=") == 0) {
-    if (arg.substr(11).empty()) {
-      commonlog_error("Scale data type cannot be empty. Please provide a valid data type.");
+  else if (arg.find("--scale_dt=") == 0 ||
+           arg.find("--weight_scale_dt=") == 0) {
+    const std::string value = arg.substr(arg.find('=') + 1);
+    if (value.empty()) {
+      commonlog_error("Weight scale data type cannot be empty. Please provide a valid data type.");
       return NOT_OK;
     }
-    options.scale_dt = strToDatatype(arg.substr(11));
+    const data_type_t scale_dt = strToDatatype(value);
+    if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16) {
+      commonlog_error(
+        "Invalid value for weight scale_dt='", value,
+        "'. Weight scales must be f32 or bf16.");
+      return NOT_OK;
+    }
+    options.scale_dt = scale_dt;
   }
   else if (arg.find("--warmup_iters=") == 0) {
     if (arg.substr(15).empty()) {
@@ -582,6 +601,70 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.num_weight_buffers = std::stoi(arg.substr(21));
+  }
+  else if (arg.find("--dynamic_quant=") == 0) {
+    if (arg.substr(16).empty()) {
+      commonlog_error("dynamic_quant value cannot be empty. Please provide true/false or 1/0.");
+      return NOT_OK;
+    }
+    std::string val = arg.substr(16);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "true" || val == "1") {
+      options.src_dynamic_quant = true;
+    }
+    else if (val == "false" || val == "0") {
+      options.src_dynamic_quant = false;
+    }
+    else {
+      commonlog_error("Invalid value for dynamic_quant. Use true/false or 1/0.");
+      return NOT_OK;
+    }
+  }
+  else if (arg.find("--src_scale_granularity=") == 0) {
+    if (arg.substr(24).empty()) {
+      commonlog_error("Source scale granularity cannot be empty. "
+                      "Use per-tensor, per-token, or per-group.");
+      return NOT_OK;
+    }
+    std::string gran = arg.substr(24);
+    std::transform(gran.begin(), gran.end(), gran.begin(), ::tolower);
+    if (gran == "per-tensor" || gran == "tensor") {
+      options.src_scale_granularity = "per-tensor";
+    }
+    else if (gran == "per-token" || gran == "token") {
+      options.src_scale_granularity = "per-token";
+    }
+    else if (gran == "per-group" || gran == "group") {
+      options.src_scale_granularity = "per-group";
+    }
+    else {
+      options.src_scale_granularity = "per-tensor";
+      commonlog_warning(
+        "Invalid value for src_scale_granularity. Defaulting to 'per-tensor'.");
+    }
+  }
+  else if (arg.find("--src_group_size=") == 0) {
+    if (arg.substr(17).empty()) {
+      commonlog_error("src_group_size value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.src_group_size = std::stoul(arg.substr(17));
+    // Source and weight group sizes are always kept in sync.
+    options.group_size = options.src_group_size;
+  }
+  else if (arg.find("--src_scale_dt=") == 0) {
+    if (arg.substr(15).empty()) {
+      commonlog_error("src_scale_dt cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    const data_type_t src_scale_dt = strToDatatype(arg.substr(15));
+    if (src_scale_dt != data_type_t::f32 && src_scale_dt != data_type_t::bf16) {
+      commonlog_error(
+        "Invalid value for src_scale_dt='", arg.substr(15),
+        "'. Dynamic source quantization only supports f32 or bf16 scale buffers.");
+      return NOT_OK;
+    }
+    options.src_scale_dt = src_scale_dt;
   }
   else {
     commonlog_error("Unknown argument: ", arg);

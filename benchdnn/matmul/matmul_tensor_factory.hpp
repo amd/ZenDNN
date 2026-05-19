@@ -60,15 +60,21 @@ int create_bias_tensor(tensor_factory_t tensor_factory, const MatmulConfig &cfg,
  * @brief Creates the input tensor for the matmul benchmark.
  *
  * Populates the input tensor with random or uniform values as specified.
+ * May disable cfg.src_dynamic_quant when it is not supported for the
+ * current shape/dtype combo (e.g. BMM, ndims > 2) or when running on the
+ * regular (non-LOWOHA) API path.
  *
  * @param tensor_factory Factory object for tensor creation.
  * @param cfg MatmulConfig structure specifying tensor dimensions and data types.
  * @param input Reference to input tensor to be created.
  * @param options Global options for command-line configuration.
+ * @param isLOWOHA Flag to indicate LOWOHA mode (true) or regular API mode (false).
+ *                 Dynamic source quantization is gated on this flag.
  * @return int OK (0) on success, NOT_OK (1) on failure.
  */
 int create_input_tensor(tensor_factory_t &tensor_factory,
-                        const MatmulConfig &cfg, tensor_t &input, const global_options &options);
+                        MatmulConfig &cfg, tensor_t &input, const global_options &options,
+                        bool isLOWOHA = false);
 
 /**
  * @brief Creates output tensors for each layer in the matmul benchmark.
