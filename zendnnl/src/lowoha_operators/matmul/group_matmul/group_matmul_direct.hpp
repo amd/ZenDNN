@@ -317,6 +317,72 @@ struct grp_matmul_fused_moe_params {
   std::vector<const void *> bias_down;    ///< Per-expert bias for down_proj (nullptr OK).
   data_type_t bias_dt_down = data_type_t::none;  ///< Bias dtype for Op2 (none = no bias).
 
+  // ─── Op2 (down_proj) weight quantization (optional) ──────────────────
+  //
+  // The fused-MoE dispatcher inherits every quant *scheme* knob from
+  // the caller's `params[i]` for Op2 (so Op1 and Op2 always use the
+  // same scheme — same `dtypes.wei`, same `dynamic_quant` flag, same
+  // `dtypes.compute`, same per-token `src_scale.dims`).  The ONLY
+  // thing that has to be carried separately is the down_weight scale
+  // (and optional zero-point) tensor itself, because `down_weight[i]`
+  // is a different tensor from Op1's `weight[i]` and therefore has
+  // its own per-channel / per-group / per-tensor scale buffer.
+  //
+  // The two fields below carry exactly that:
+  //   * `down_scale[i]` — per-expert weight scale for `down_weight[i]`.
+  //   * `down_zp[i]`    — per-expert weight zero-point (asymmetric only;
+  //                     leave default-constructed / `dims.empty()`
+  //                     for symmetric quant).
+  //
+  // Both vectors are OPTIONAL and default-empty.  Behaviour matrix:
+  //
+  //   `params[i].dynamic_quant` | `params[i].dtypes.wei` | `down_scale` | Op2 scheme
+  //   ─────────────────────────── ───────────────────────  ─────────── ────────────
+  //   false                     | bf16 / f32             | empty      | Un-quantized (legacy default)
+  //   false                     | s4 / u4                | populated  | WOQ S4 / U4 on Op2
+  //   false                     | s8                     | populated  | (limited — see note below)
+  //   true                      | s8                     | populated  | Dynamic INT8 on Op2 (runtime BF16→S8 reorder)
+  //
+  // The Op2-side runtime reorder for dynamic INT8 inherits its
+  // `src_scale.dims` (and `dt`) from `params[i].quant_params.src_scale`
+  // and lets the kernel allocate the runtime scratch internally —
+  // the caller never sees nor manages an Op2-side `src_scale.buff`.
+  //
+  // **Per-token source granularity ONLY**: dynamic source quant in
+  // the fused MoE path supports `src_scale.dims = {M, 1}` (and the
+  // trivial per-tensor `{1, 1}` / `{1}` forms).  Per-group
+  // (`{M, ngroups}` with `ngroups > 1`) is rejected up front by
+  // the dispatcher because Op1 reduces over `K[i]` (= K_in) and
+  // Op2 reduces over `op2_k_for_act(N[i], act)` (= K_down), and
+  // K_in != K_down in general — so Op1's ngroups cannot transfer
+  // to Op2 verbatim (the documented invariant at
+  // `docs/operator/lowoha_matmul_operator.md:227` requires
+  // source-side and weight-side ngroups to match along K *per
+  // pass*).  Use per-token granularity instead — it is K-
+  // independent and works on both passes.
+  //
+  // Note on pure WOQ-S8: AOCL DLP's WOQ fast path is gated to s4/u4
+  // only (see `aocl_postop.cpp::is_woq`); a bf16-src + s8-wei combo
+  // without a caller-provided src_scale falls into the BF16-INT8
+  // pre-quant path and is rejected.  Prefer S4 for WOQ or pair S8
+  // weights with `dynamic_quant = true` on `params[i]`.
+  //
+  // Each per-expert quantization vector is validated independently:
+  // if `down_scale` is non-empty it MUST hold at least `num_ops`
+  // entries, and if `down_zp` is non-empty it MUST likewise hold at
+  // least `num_ops` entries. Partial vectors are rejected up front to
+  // avoid silently leaving tail experts un-quantized.
+  struct down_weight_quant_t {
+    const void *buff;              ///< Pointer to quantization data buffer
+    data_type_t dt;                ///< Data type of the buffer
+    std::vector<int64_t> dims;     ///< Dimensions of the quantization tensor
+
+    down_weight_quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
+  };
+
+  std::vector<down_weight_quant_t> down_scale;  ///< Per-expert Op2 weight scale (down_weight[i]'s scale tensor).
+  std::vector<down_weight_quant_t> down_zp;     ///< Per-expert Op2 weight zero-point (asymmetric quant only; empty for sym).
+
   // ─── Op2 output mode selection (dst_down behaviour) ──────────────────
   //
   // The fused MoE op supports TWO modes for the down_proj output:

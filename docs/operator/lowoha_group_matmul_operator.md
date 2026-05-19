@@ -389,12 +389,27 @@ struct grp_matmul_fused_moe_params {
   std::vector<int> ldb_down;              // Leading dimension of down_weight per expert.
   std::vector<const void *> bias_down;    // Per-expert bias for down_proj (nullptr OK).
   data_type_t bias_dt_down = data_type_t::none;  // Bias dtype for Op2 (none = no bias).
+
+  // ── Optional Op2 (down_proj) weight quantization ─────────────────────
+  // Nested helper, same shape as `matmul_quantization_params_t::matmul_quant_t` —
+  // kept separate to keep the fused-MoE public API self-contained.
+  struct down_weight_quant_t {
+    const void *buff;
+    data_type_t dt;
+    std::vector<int64_t> dims;
+    down_weight_quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
+  };
+  std::vector<down_weight_quant_t> down_scale;  // Per-expert weight scale for down_weight[i].
+  std::vector<down_weight_quant_t> down_zp;     // Per-expert weight zero-point (asymmetric only).
+
   std::vector<void *> dst_down;           // Per-expert down_proj output [M, N_down[i]].
   std::vector<int> ldc_down;              // Leading dimension of dst_down per expert.
 };
 ```
 
-All vectors must have size `num_ops` (matching the main Op1 vectors).
+> Field order above matches the actual declaration in `zendnnl/src/lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp` — relevant only if you ever do brace / aggregate initialisation against this struct.  The recommended caller pattern is `grp_matmul_fused_moe_params fused;` followed by named-field assignment, which is order-independent.
+
+All required vectors must have size `num_ops` (matching the main Op1 vectors).  `down_scale` / `down_zp` (the quant pair sandwiched between the weight-side metadata and `dst_down`) are **optional**: leave them empty for an un-quantized down_proj (legacy behaviour, fully backward compatible).
 
 | Field | Description |
 |-------|-------------|
@@ -403,20 +418,65 @@ All vectors must have size `num_ops` (matching the main Op1 vectors).
 | `ldb_down` | Leading dimension of each `down_weight[i]` (>= `N_down[i]`). |
 | `bias_down` | Per-expert bias (each entry can be `nullptr` for no bias). |
 | `bias_dt_down` | Bias data type for Op2 (`none` = no bias; must match actual bias buffer dtype). |
+| `down_scale` | **Optional** per-expert weight scale tensor for `down_weight[i]` (the only Op2-specific quant artefact — every other quant knob is inherited from `params[i]`).  Each entry holds `{buff, dt, dims}`.  Empty vector ⇒ Op2 weight un-quantized.  When populated, must hold ≥ `num_ops` entries; size-validated against partial-vector hazards.  See [Op2 quantization](#op2-quantization-optional) below. |
+| `down_zp`    | **Optional** per-expert weight zero-point for `down_weight[i]` (asymmetric quant only).  Same shape as `down_scale`.  Leave empty (or each entry's `dims` empty) for symmetric quant.  Size-validated independently of `down_scale`. |
 | `dst_down` | Per-expert output buffers for down_proj results. |
 | `ldc_down` | Leading dimension of each `dst_down[i]` (>= `N_down[i]`). |
+
+### Op2 quantization (optional)
+
+The fused-MoE dispatcher enforces **one quant scheme for both passes**: every quantization *knob* on Op1 (`params[i].dynamic_quant`, `params[i].dtypes.compute`, `params[i].quant_params.src_scale.dims`, `params[i].dtypes.wei`, etc.) is inherited verbatim by Op2's internal `params_down[i]` inside `group_matmul_fused_moe.cpp`.  The ONE thing that must be carried separately is the weight scale (and optional zero-point) of `down_weight[i]`, because `down_weight[i]` is a different tensor from Op1's `weight[i]` and therefore has its own per-channel / per-group / per-tensor scale buffer.
+
+> **Note**: dynamic *source* quant in the fused path supports **per-token (`{M, 1}`) only** — per-group `{M, ngroups}` with `ngroups > 1` is rejected with `status_t::failure` because Op1 and Op2 reduce over different K and Op1's `ngroups` cannot transfer to Op2 verbatim.  See "Per-token-only constraint on dynamic source quant" below.
+
+That's the entire purpose of `fused.down_scale` and `fused.down_zp` — nothing more.  Behaviour matrix:
+
+| Scheme on Op2 (inherited from Op1) | `params[i].dynamic_quant` | `params[i].dtypes.wei` | `fused.down_scale` | `fused.down_zp` | Notes |
+|---|---|---|---|---|---|
+| Un-quantized (default) | `false` | bf16 / f32 | empty | empty | Legacy behaviour — no source changes for existing callers. |
+| WOQ-S4 | `false` | `s4` | populated, per-channel `{1, N_down}` or per-group `{G, N_down}` | usually empty (symmetric) | AOCL DLP's pure WOQ fast path (`is_woq` gate at `aocl_postop.cpp:178`). |
+| WOQ-U4 (asymmetric) | `false` | `u4` | populated | populated | Same as S4 but asymmetric — `down_zp[i]` provides the zero-points. |
+| **Dynamic INT8 (recommended for Op2 INT8)** | `true` | `s8` | populated, per-channel `{1, N_down}` | usually empty (symmetric s8) | Op2 inherits `dtypes.compute = s8` + `src_scale.dims` (typically per-token `{M[i], 1}`) from `params[i]`; kernel allocates the runtime BF16→S8 reorder scratch internally for the Op2 source (= activated Op1 intermediate). |
+
+Note on pure WOQ-S8: AOCL DLP's WOQ fast path is gated to `s4 || u4` only — a `bf16 src + s8 wei` combination without a caller-provided `src_scale` falls into the BF16-INT8 pre-quant path and is rejected.  Prefer S4 for WOQ, or pair S8 weights with `dynamic_quant = true` on `params[i]` (the dynamic INT8 row above).
+
+Cross-cutting constraints:
+
+* The dispatcher resets `params_down[i].quant_params` per call from the new fields — a stale scale-buffer pointer from a previous call cannot leak into the persistent thread-local Op2 scratch.
+* Any non-null `down_scale[i].buff` / `down_zp[i].buff` disables Op2 ALGO 3 (N-tile) via the existing `check_n_tile_extra` gate — the down_proj will run through ALGO 1 / 2 / 4 / 5 instead.
+* When `params[i].dynamic_quant = true`, Op2's `src_scale.dims` is inherited from `params[i].quant_params.src_scale.dims`, but **only per-token (`{M, 1}`) granularity is allowed** — see below.
+
+#### Per-token-only constraint on dynamic source quant
+
+Op1 reduces over `K[i]` (= `K_in`); Op2 reduces over `K_down = op2_k_for_act(N[i], act)` (= `N[i]/2` for gated activations, `N[i]` for `act=none`).  The two K values are typically different, so a per-group `src_scale.dims = {M, ngroups_op1}` on `params[i]` does **not** transfer to Op2 verbatim — the documented contract (`docs/operator/lowoha_matmul_operator.md:227`: *"the number of groups (G) must match between source and weight"*) is K-dependent and applies independently per pass.
+
+The fused-MoE dispatcher therefore **rejects** any per-group dynamic source quant up front with a clear `log_error` and `status_t::failure`, before any kernel work is done.  The same check is applied to `src_zp.dims` when asymmetric source quant is enabled.
+
+Allowed source-side `params[i].quant_params.src_scale.dims` when `dynamic_quant = true`:
+
+| Dims | Granularity | Result |
+|---|---|---|
+| `{1}` or `{1, 1}` | per-tensor | Accepted; copied verbatim to Op2. |
+| `{M, 1}` | **per-token** (recommended) | Accepted; copied verbatim to Op2 (K-independent). |
+| `{M, ngroups}` with `ngroups > 1` | per-group | **Rejected** with `log_error` directing the caller to use per-token. |
+
+If you need per-group activation quantization, do the matmul at the single-matmul layer (`group_matmul_direct` per pass) where `K` is one value and per-group dims are well-defined — the fused-MoE wrapper deliberately stays narrower than that to keep the same-scheme-on-both-passes contract clean.
+
+The weight side is unaffected by this restriction.  `fused.down_scale[i]` / `fused.down_zp[i]` are caller-provided per-pass for Op2's `down_weight[i]` directly, so the WOQ-S4 / U4 row above can still use per-group weight scales (`{G_down, N_down}` where `G_down = K_down / group_size`) — only the *dynamic source* path is restricted.
 
 ### Constraints
 
 | Constraint | Requirement |
 |------------|-------------|
-| `down_weight.size()` | `== num_ops` (all fused vectors must match) |
+| `down_weight.size()` | `== num_ops` (all required fused vectors must match) |
 | `N` | Must be even (`N = 2 * dim`) for all experts |
 | `K_down` | `= N_gate_up / 2` (the `dim` after gated activation) |
 | `dst_down[i]` | Must hold at least `[M[i], N_down[i]]` elements |
 | `layout` | Must be row-major (`'r'` / `'R'`) for all experts |
 | Mode | Parallel only (`src.size() > 1`) |
-| `fused_moe` | Must be `nullptr` to disable; non-null requires all vectors populated |
+| `fused_moe` | Must be `nullptr` to disable; non-null requires all required vectors populated |
+| `down_scale` | **Optional**.  Either empty (un-quantized Op2 weight) or size `>= num_ops`.  A non-empty undersized vector is rejected up front — a partial vector would silently leave the tail experts un-quantized and produce wrong numerics. |
+| `down_zp`    | **Optional**.  Same size rule as `down_scale`; empty for symmetric quant (sym S4 / s8). |
 
 ### C++ fused MoE example
 
@@ -453,6 +513,257 @@ status_t st = group_matmul_direct(
 // fused.dst_down now contains the down_proj output per expert
 ```
 
+### C++ fused MoE example — Op2 weight-only INT4 (WOQ-S4)
+
+Builds on the example above by quantising `down_weight` to S4 with a per-channel F32 scale and plumbing the scale through `fused.down_scale`.  Op1 carries its own wei_scale on `params[i].quant_params.wei_scale` (same as a stand-alone WOQ-S4 matmul); only the down_weight scale needs the new field because that tensor is per-pass.
+
+```cpp
+// Per-expert s4 down_weights with attached per-channel f32 scale.
+// (See test_quant.cpp::WOQ_BF16_S4 for the same pattern at the
+// single-matmul level.)
+std::vector<tensor_t> down_scale(num_ops), w2_s4(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  down_scale[i] = factory.uniform_dist_tensor({1, hidden_size},
+                                            data_type_t::f32, 2.0);
+  w2_s4[i]    = factory.uniform_dist_tensor({dim, hidden_size},
+                                            data_type_t::s4, 7.0,
+                                            /*transposed=*/false,
+                                            down_scale[i]);
+}
+
+std::vector<const void *> down_weight_raw(num_ops);
+for (int i = 0; i < num_ops; ++i)
+  down_weight_raw[i] = w2_s4[i].get_raw_handle_unsafe();
+
+fused.down_weight = down_weight_raw;       // s4-packed buffers
+fused.N_down      = std::vector<int>(num_ops, hidden_size);
+fused.ldb_down    = std::vector<int>(num_ops, hidden_size);
+fused.bias_down   = std::vector<const void *>(num_ops, nullptr);
+
+// Plumb only the Op2 weight scale through the new field — every
+// other quant knob (dtypes.wei = s4, dynamic_quant = false, etc.)
+// is inherited from `params[i]` by the fused-MoE setup loop.
+fused.down_scale.resize(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  auto &q = fused.down_scale[i];
+  q.buff = w2_s4[i].get_quant_scale_raw_handle_const();
+  q.dt   = w2_s4[i].get_quant_scale_data_type();
+  auto sz = w2_s4[i].get_quant_scale_size();
+  q.dims.assign(sz.begin(), sz.end());
+}
+// (Symmetric S4 → leave fused.down_zp empty.  For asymmetric WOQ-U4
+//  populate fused.down_zp[i] the same way using
+//  `w2_u4[i].get_quant_zero_*()`.)
+
+// `params[i].dtypes.wei = s4` and `params[i].quant_params.wei_scale`
+// set the same way on Op1.  The dispatcher routes both passes
+// through AOCL DLP's WOQ fast path (`is_woq = true`).
+```
+
+### C++ fused MoE example — full dynamic INT8 (Op1 + Op2)
+
+Self-contained example showing **dynamic INT8 on BOTH Op1 and Op2** through a single `group_matmul_direct` call.
+
+| Layer | Dtypes | Quant scheme | Carries scales via |
+|---|---|---|---|
+| Op1 (gate+up) | BF16 src + S8 wei → BF16 dst | dynamic INT8 (runtime BF16→S8 reorder of the source) | `params[i].dynamic_quant = true` + `params[i].quant_params.{src_scale, wei_scale}` |
+| swiglu_oai_mul | BF16 in / BF16 out (gate+up halved to `dim`) | — | `gated_act` param |
+| Op2 (down_proj) | BF16 src (activated Op1 dst) + S8 wei → BF16 dst | dynamic INT8 on Op2 (runtime BF16→S8 reorder of the intermediate) | Op2 inherits `dynamic_quant`, `dtypes.compute`, `src_scale.dims` from `params[i]`.  Only the down_weight scale is per-pass — carried via `fused.down_scale[i]` (and optional `fused.down_zp[i]`). |
+
+Pre-conditions:
+- `M[i] >= 16` per expert.  Per-token `{M, 1}` src_scale dims are rejected for very small M by the BF16-INT8 reorder kernel — see [test_quant.cpp::INT8_DYNAMIC_GEMM_BF16](../../zendnnl/gtests/group_matmul/test_quant.cpp) for the same constraint at the single-matmul level.
+- `K_in` (= `H`) and `N_gate_up` (= `2 * dim`) multiples of 4 for clean S8 K-blocking.
+- All experts share the same dtype tuple (BF16 src, S8 wei, BF16 dst).
+
+```cpp
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "examples/example_utils.hpp"   // tensor_factory_t, quant_params_compute
+
+using namespace zendnnl::lowoha::matmul;
+using zendnnl::common::data_type_t;
+
+const int num_ops    = 4;          // experts
+const int dim        = 32;         // Op1 cols halved (N_gate_up = 2*dim)
+const int N_gate_up  = 2 * dim;    // Op1 cols
+const int H          = 32;         // hidden_size (= K_in = N_down)
+const int K_in       = H;
+const int K_down     = dim;        // Op2 K (gated activation halves Op1 output)
+const int M          = 16;         // tokens per expert (>= 16 for dynamic quant)
+
+tensor_factory_t factory;
+
+// ─────────────────────────────────────────────────────────────────────
+// (1) Op1 source — BF16 with a per-token F32 src_scale attached.
+//     The scale tensor is zero-allocated; the dispatcher fills it at
+//     runtime when it reorders the BF16 source to S8.
+// ─────────────────────────────────────────────────────────────────────
+std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  src_scale_t[i] = factory.zero_tensor(
+      {static_cast<uint64_t>(M), static_cast<uint64_t>(1)},  // per-token {M, 1}
+      data_type_t::f32);
+  src_t[i] = factory.uniform_dist_tensor(
+      {static_cast<uint64_t>(M), static_cast<uint64_t>(K_in)},
+      data_type_t::bf16, 2.0, /*transposed=*/false,
+      src_scale_t[i], tensor_t{});
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// (2) Op1 + Op2 weights — pre-quantize a BF16 reference to S8 with a
+//     per-channel F32 scale via `quant_params_compute`.
+// ─────────────────────────────────────────────────────────────────────
+std::vector<tensor_t> w1_s8(num_ops), w1_scale(num_ops), w1_zp(num_ops);
+std::vector<tensor_t> w2_s8(num_ops), down_scale(num_ops), down_zp(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  // Op1 weight: [K_in, N_gate_up], per-channel scale {1, N_gate_up}.
+  auto w1_ref = factory.uniform_dist_tensor(
+      {static_cast<uint64_t>(K_in), static_cast<uint64_t>(N_gate_up)},
+      data_type_t::bf16, 2.0);
+  quant_params_compute(factory, w1_ref,
+                       data_type_t::bf16, data_type_t::s8,
+                       /*scale_dims=*/{1, N_gate_up},
+                       data_type_t::f32,
+                       w1_scale[i], w1_zp[i], &w1_s8[i]);
+
+  // Op2 weight: [K_down, H], per-channel scale {1, H}.
+  auto w2_ref = factory.uniform_dist_tensor(
+      {static_cast<uint64_t>(K_down), static_cast<uint64_t>(H)},
+      data_type_t::bf16, 2.0);
+  quant_params_compute(factory, w2_ref,
+                       data_type_t::bf16, data_type_t::s8,
+                       /*scale_dims=*/{1, H},
+                       data_type_t::f32,
+                       down_scale[i], down_zp[i], &w2_s8[i]);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// (3) Pull raw pointers + per-call vectors for the dispatcher.
+// ─────────────────────────────────────────────────────────────────────
+std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  srcs[i]   = src_t[i] .get_raw_handle_unsafe();   // bf16 source
+  wei1_p[i] = w1_s8[i] .get_raw_handle_unsafe();   // s8 gate+up
+  wei2_p[i] = w2_s8[i] .get_raw_handle_unsafe();   // s8 down_proj
+}
+
+std::vector<bfloat16_t> d1_dst_buf(num_ops * M * N_gate_up);
+std::vector<bfloat16_t> d2_dst_buf(num_ops * M * H);
+std::vector<void *> dst1_p(num_ops), dst2_p(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  dst1_p[i] = d1_dst_buf.data() + i * M * N_gate_up;
+  dst2_p[i] = d2_dst_buf.data() + i * M * H;
+}
+
+const std::vector<char>  layout(num_ops, 'r');
+const std::vector<bool>  transA(num_ops, false),  transB(num_ops, false);
+const std::vector<int>   Ms(num_ops, M), Ns(num_ops, N_gate_up), Ks(num_ops, K_in);
+const std::vector<float> alpha(num_ops, 1.0f),    beta(num_ops, 0.0f);
+const std::vector<int>   lda(num_ops, K_in), ldb(num_ops, N_gate_up),
+                         ldc(num_ops, N_gate_up);
+const std::vector<bool>  is_wc(num_ops, true);    // WOQ requires const weights
+const std::vector<const void *> no_bias(num_ops, nullptr);
+
+// ─────────────────────────────────────────────────────────────────────
+// (4) Op1 matmul_params — dynamic INT8 contract.
+//     `dtypes.compute = s8` arms `reorder_quantization_wrapper`'s
+//     BF16→S8 reorder; the kernel writes per-token scales into
+//     `src_scale.buff` (which we attached in step (1)) at runtime.
+// ─────────────────────────────────────────────────────────────────────
+std::vector<matmul_params> params(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  auto &p = params[i];
+  p.dtypes.src     = data_type_t::bf16;
+  p.dtypes.wei     = data_type_t::s8;
+  p.dtypes.dst     = data_type_t::bf16;
+  p.dtypes.compute = data_type_t::s8;
+  p.dynamic_quant  = true;
+  // Pull src_scale.{buff, dt, dims} from the bf16 source tensor's
+  // attached quant metadata (set by `uniform_dist_tensor(..., scale, …)`).
+  p.quant_params.src_scale.buff = src_t[i].get_quant_scale_raw_handle_const();
+  p.quant_params.src_scale.dt   = src_t[i].get_quant_scale_data_type();
+  auto src_sz = src_t[i].get_quant_scale_size();
+  p.quant_params.src_scale.dims.assign(src_sz.begin(), src_sz.end());
+  // Pull wei_scale from the s8 weight tensor.
+  p.quant_params.wei_scale.buff = w1_s8[i].get_quant_scale_raw_handle_const();
+  p.quant_params.wei_scale.dt   = w1_s8[i].get_quant_scale_data_type();
+  auto wei_sz = w1_s8[i].get_quant_scale_size();
+  p.quant_params.wei_scale.dims.assign(wei_sz.begin(), wei_sz.end());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// (5) Gated activation between Op1 and Op2 (swiglu_oai_mul halves the
+//     N_gate_up columns down to `dim`, so K_down = dim for Op2).
+// ─────────────────────────────────────────────────────────────────────
+grp_matmul_gated_act_params act{};
+act.act = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+// ─────────────────────────────────────────────────────────────────────
+// (6) Op2 quant — only the down_weight scale is per-pass and needs
+//     a dedicated carrier on `fused`.  Op2's `dynamic_quant`,
+//     `dtypes.compute = s8`, and per-token `src_scale.dims = {M, 1}`
+//     are inherited from `params[i]` by the fused-MoE setup loop
+//     in `group_matmul_fused_moe.cpp` — same scheme on both passes
+//     by construction.  Op2's source is the activated Op1 output
+//     (BF16 intermediate), so the dispatcher leaves the inherited
+//     `src_scale.buff = nullptr` and the kernel allocates the
+//     per-token F32 reorder scratch internally.
+// ─────────────────────────────────────────────────────────────────────
+grp_matmul_fused_moe_params fused;
+fused.down_weight = wei2_p;
+fused.N_down      = std::vector<int>(num_ops, H);
+fused.ldb_down    = std::vector<int>(num_ops, H);
+fused.bias_down   = no_bias;
+fused.dst_down    = dst2_p;
+fused.ldc_down    = std::vector<int>(num_ops, H);
+
+fused.down_scale.resize(num_ops);
+for (int i = 0; i < num_ops; ++i) {
+  auto &q = fused.down_scale[i];
+  // Per-channel F32 wei_scale attached to the S8 down_weight tensor.
+  q.buff = w2_s8[i].get_quant_scale_raw_handle_const();
+  q.dt   = w2_s8[i].get_quant_scale_data_type();
+  auto sz = w2_s8[i].get_quant_scale_size();
+  q.dims.assign(sz.begin(), sz.end());
+}
+// (Symmetric S8 → leave fused.down_zp empty.)
+
+// ─────────────────────────────────────────────────────────────────────
+// (7) Single fused-MoE call.
+// ─────────────────────────────────────────────────────────────────────
+status_t st = group_matmul_direct(
+    layout, transA, transB, Ms, Ns, Ks, alpha,
+    srcs, lda, wei1_p, ldb, no_bias, beta,
+    dst1_p, ldc, is_wc, params,
+    /*moe_postop=*/nullptr,
+    &act,        // swiglu_oai_mul between Op1 and Op2
+    &fused);     // dynamic INT8 on Op2 via the new fields
+
+// After the call:
+//   * `dst1_p[i]` holds the activated [M, dim] intermediate
+//     (first `dim` cols are the gated output; cols [dim, 2*dim) are
+//     left-over raw matmul state — caller should not read those).
+//   * `dst2_p[i]` (= fused.dst_down[i]) holds the final
+//     [M, H] down_proj output per expert.
+//   * `src_scale_t[i].get_raw_handle_unsafe()` holds the Op1 runtime
+//     per-token scales the kernel computed during the BF16→S8 reorder
+//     (useful for diagnostics / activation-aware calibration).
+```
+
+What the dispatcher actually does under the hood for this call:
+1. Validates all per-vector sizes + the new `down_scale` / `down_zp` size guards in `group_matmul_fused_moe.cpp`.
+2. **Pass 1** — runs `group_matmul_run_parallel_dispatch` for Op1.  N-tile (ALGO 3) is auto-rejected because `params[i].quant_params.wei_scale.buff` is non-null; routes to ALGO 1 (`sequential_experts`).  `execute_expert_slice` → `reorder_quantization_wrapper` reorders BF16 src to S8 using runtime per-token scales → S8×S8 GEMM → BF16 dst.  Activation is fused inline (`swiglu_oai_mul` on the BF16 epilogue).
+3. **Pass 2** — Op2 setup builds `scratch.params_down[i]` by **inheriting** `dynamic_quant`, `dtypes.compute`, and `quant_params.src_scale.{dt, dims}` from `params[i]`, then copying `fused.down_scale[i]` into `params_down[i].quant_params.wei_scale` (and `fused.down_zp[i]` into `wei_zp` if present).  `src_scale.buff` is left `nullptr` so `reorder_quantization_wrapper` allocates the per-call F32 scratch sized from the `{M, 1}` dims, reorders the activated BF16 intermediate to S8, then runs the S8×S8 down_proj.  Same dispatch path as Op1.
+4. Returns `status_t::success`; `dst2_p` holds the final BF16 output.
+
+Set `ZENDNNL_API_LOG_LEVEL=3` to see the dispatch trail; the per-call summary will read:
+
+```
+[GRP_MATMUL Level1] num_ops=4 mode=fused_moe_2pass(op1=sequential_experts,op2=sequential_experts)
+                    threads=… dtype=bf16>s8>bf16 layout=r transA=N transB=N alpha[0]=1 beta[0]=0
+                    wconst[0]=1 lda[0]=32 ldb[0]=64 ldc[0]=64 N[0]=64 K[0]=32 M=[16,16,16,16](sum=64)
+                    fused=[act=swiglu_oai_mul,down_proj=N_down[0]=32] sequential_chain=0 …
+```
+
 ## Notes and best practices
 
 1. **Vector lengths**: By default all per-op vectors must have length `num_ops = M.size()`; `src` length selects the mode.  When the [framework prepack-extras contract](#framework-prepack-extras-contract) is engaged (`params[0].active_matmul > 0`), the dispatcher accepts weight-side vectors of size `>= active_matmul` while input-side vectors stay at `M.size()`.
@@ -461,6 +772,7 @@ status_t st = group_matmul_direct(
 4. **MoE**: Pass `nullptr` when not needed. When enabled, provide `row_ptrs` (built during scatter) and `topk_weights`.
 5. **Gated activation**: Pass `nullptr` when not needed. When enabled, N must be even and dst dtype must be FP32 or BF16.  Applied after GEMM, before MoE weighted-reduce.
 6. **Weight caching and prepack**: `is_weights_const[i] == true` enables caching for op `i`.  By default (`ZENDNNL_GRP_MATMUL_PREPACK=1`) the library *eagerly* warms the cache on the first observation of a configuration; subsequent calls hit warm caches with negligible overhead.  See [Weight caching, prepack, and memory](#weight-caching-prepack-and-memory) for the trade-offs (~325 ms first-call cost vs no per-token spikes; ~2 GB persistent cache for 32-expert MoE).
-7. **Tiled algos (2/3)**: Both require row-major layout, uniform per-expert dtypes, and standard unpacked A/B. ALGO 2 (M-tile, `m_tile_safe`) additionally supports the full quantization stack — weight-only (S4 sym, U4 asym), static W8A8 (per-tensor / per-channel / per-group / per-token), and **dynamic INT8** (BF16/F32 source quantised at runtime; per-token `{M, 1}` and per-group `{M, G}` activation scales only) — and most post-ops. It blocks: packed B (GGML Q8_0), softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor `{}` / `{1}` / `{1, 1}`, per-column `{1, K}`, per-channel-on-src `{1, N}`) because the per-thread reorder would race on the shared scale/zp buffer and use slice-local statistics. M-indexed source-quant metadata (`src_scale` / `src_zp`) is row-offset and dim-sliced per thread inside `group_matmul_m_tile.cpp::offset_quant_by_row` so the dynamic-quant per-group reorder dispatch sees a slice-shaped `src_shape × dims`. ALGO 3 (N-tile, `n_tile_safe`) is stricter: only buffer-free element-wise post-ops (relu, gelu, swish, etc.) are safe under column slicing, and any non-null quant scale/zero-point buffer disables it. Falls back to ALGO 1 automatically when the required safety check fails.
-8. **Errors**: On failure, check logs for dimension / dtype / MoE / gated-act validation messages.
-9. **Environment variables**: Strategy override (`ZENDNNL_GRP_MATMUL_ALGO`), prepack toggle (`ZENDNNL_GRP_MATMUL_PREPACK`), and other knobs are listed in the [Environment variables](#environment-variables) section above.  See `docs/runtime_env.md` for the master env-var reference.
+7. **Fused-MoE Op2 quantization**: Op2 (down_proj) uses the **same** quant scheme as Op1 by construction — the dispatcher inherits `dynamic_quant`, `dtypes.compute`, and `quant_params.src_scale.{dt, dims}` from `params[i]` into Op2's internal `params_down[i]`.  The only Op2-specific quant artefact is the down_weight scale (because `down_weight[i]` is a different tensor from Op1's `weight[i]`), carried via the new optional `fused.down_scale` and `fused.down_zp` vectors (see [Op2 quantization](#op2-quantization-optional)).  Both default to empty for backward compatibility.  Use WOQ-S4 or dynamic INT8 on Op2 — pure WOQ-S8 (BF16 src + S8 wei + only `wei_scale`) is rejected by AOCL DLP's `is_woq` gate (s4 / u4 only).
+8. **Tiled algos (2/3)**: Both require row-major layout, uniform per-expert dtypes, and standard unpacked A/B. ALGO 2 (M-tile, `m_tile_safe`) additionally supports the full quantization stack — weight-only (S4 sym, U4 asym), static W8A8 (per-tensor / per-channel / per-group / per-token), and **dynamic INT8** (BF16/F32 source quantised at runtime; per-token `{M, 1}` and per-group `{M, G}` activation scales only) — and most post-ops. It blocks: packed B (GGML Q8_0), softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor `{}` / `{1}` / `{1, 1}`, per-column `{1, K}`, per-channel-on-src `{1, N}`) because the per-thread reorder would race on the shared scale/zp buffer and use slice-local statistics. M-indexed source-quant metadata (`src_scale` / `src_zp`) is row-offset and dim-sliced per thread inside `group_matmul_m_tile.cpp::offset_quant_by_row` so the dynamic-quant per-group reorder dispatch sees a slice-shaped `src_shape × dims`. ALGO 3 (N-tile, `n_tile_safe`) is stricter: only buffer-free element-wise post-ops (relu, gelu, swish, etc.) are safe under column slicing, and any non-null quant scale/zero-point buffer disables it. Falls back to ALGO 1 automatically when the required safety check fails.
+9. **Errors**: On failure, check logs for dimension / dtype / MoE / gated-act validation messages.
+10. **Environment variables**: Strategy override (`ZENDNNL_GRP_MATMUL_ALGO`), prepack toggle (`ZENDNNL_GRP_MATMUL_PREPACK`), and other knobs are listed in the [Environment variables](#environment-variables) section above.  See `docs/runtime_env.md` for the master env-var reference.

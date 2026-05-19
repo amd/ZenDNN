@@ -1989,6 +1989,673 @@ TEST_F(TestDispatcherActiveTotalNegative, RejectsFusedMoEActNoneLdbBelowN) {
 }
 
 
+// ===============================================================================
+// [16.d] / [16.e] Op1 + Op2 quantization
+//
+//        [16.d] WOQ_S4_BothPasses — weight-only INT4 (WOQ-S4) on
+//          BOTH Op1 and Op2.  Each pass uses BF16 source + S4
+//          weights + per-channel F32 wei_scale; no source-side
+//          quant on either side.  Op1 carries its wei_scale via
+//          `params[i].quant_params.wei_scale`; Op2 carries the
+//          *same shape* of wei_scale (for its own down_weight) via
+//          the new `fused.down_scale[i]` vector.  Both `dynamic_quant`
+//          flags stay at the default `false`.
+//
+//          NOTE: S4 (not S8) on purpose.  AOCL DLP's WOQ fast path
+//          is gated to `s4 || u4` only (see
+//          `aocl_postop.cpp::is_woq` at line 178).  A `bf16 src +
+//          s8 wei` combination without a caller-provided
+//          `src_scale.buff` falls through `is_non_quant_src_int8`
+//          and AOCL's BF16-INT8 pre-quant validator at
+//          `aocl_postop.cpp:369` rejects it — both the reference
+//          and the fused-test paths then produce all-zero output
+//          and the comparison trivially passes on `0 == 0`.  A
+//          sanity-sum guard at the bottom of this test catches that
+//          failure mode regardless of which sub-byte INT type the
+//          caller picks.
+//
+//        [16.e] Dynamic_INT8_BothPasses — runtime BF16→S8 reorder
+//          on the source of BOTH Op1 and Op2.  Each pass carries
+//          per-token src_scale shape `{M, 1}` with `buff = nullptr`
+//          (kernel-allocated scratch) plus per-channel wei_scale.
+//          The caller sets `dynamic_quant = true`,
+//          `dtypes.compute = s8`, and `src_scale.{dt, dims}` on
+//          `params[i]` — the fused-MoE dispatcher inherits those
+//          three knobs verbatim into Op2's `params_down[i]`.  The
+//          only per-pass Op2 artefact the caller supplies is the
+//          down_weight scale via `fused.down_scale[i]`.  Both passes
+//          run through the same INT8-dynamic kernel path.
+//
+//      Reference for both is a manual 2-call legacy path with the
+//      SAME quant data wired onto `params_ref_op1[i].quant_params`
+//      and `params_ref_op2[i].quant_params` so every dispatch
+//      decision matches the fused single-call path.  Both routes
+//      drive the same kernels — outputs are compared to BF16
+//      precision.
+// ===============================================================================
+
+namespace {
+
+// Shared helper: copy a tensor's attached scale into a quant slot.
+// The tensor must have been built with an attached scale (via
+// `factory.uniform_dist_tensor({k,n}, s8/u8/s4/u4, ..., transB, scale)`
+// or via `quant_params_compute(..., &dst_out)`), otherwise
+// `get_quant_scale_raw_handle_const()` returns nullptr and the
+// kernel would silently treat the field as un-quantized.
+// Templated so the same helper accepts either
+// `matmul_quantization_params_t::matmul_quant_t` (used on
+// `matmul_params.quant_params.{wei_scale,src_scale,…}`) or
+// `grp_matmul_fused_moe_params::down_weight_quant_t` (used on
+// `fused.down_scale[i]` / `fused.down_zp[i]`).  Both have the same
+// `buff` / `dt` / `dims` interface — duck-typed via the template
+// parameter rather than wired through an inheritance hierarchy.
+template <class Quant>
+inline void copy_attached_scale(const tensor_t &t, Quant &q) {
+  q.buff = t.get_quant_scale_raw_handle_const();
+  q.dt   = t.get_quant_scale_data_type();
+  auto sz = t.get_quant_scale_size();
+  q.dims.assign(sz.begin(), sz.end());
+}
+
+// Shared helper: copy a tensor's attached zero-point into the
+// quant slot (asymmetric-quant variant — symmetric tensors have
+// no zp attached and this is a no-op via the empty-dims check
+// below, leaving `q` at its default-constructed state).  Same
+// duck-typed template as `copy_attached_scale` above.
+template <class Quant>
+inline void copy_attached_zp(const tensor_t &t, Quant &q) {
+  if (t.get_quant_subtype() != quant_subtype_t::asymmetric) return;
+  q.buff = t.get_quant_zero_raw_handle_const();
+  q.dt   = t.get_quant_zero_data_type();
+  auto sz = t.get_quant_zero_size();
+  q.dims.assign(sz.begin(), sz.end());
+}
+
+} // namespace
+
+// ===============================================================================
+// [16] TestFusedMoEQuant — fused-MoE quantization gtest section.
+//
+// Layered after `TestGroupMatmulQuant` in test_quant.cpp, with one
+// deliberate divergence: each quant scheme owns its own fixture
+// subclass with a kernel-supported parameter grid.  We pushed the
+// previous per-tuple `GTEST_SKIP()` constraint up to the parameter
+// source so the suite stops enumerating tuples the AOCL kernel
+// layer is known to reject — every test that runs is one the
+// kernel layer is contractually obligated to handle.
+//
+//   * `TestFusedMoEQuantBase` — shared fixture (shape config,
+//     ALGO 1 pin via `AlgoEnvGuard`).  Holds no scheme state; both
+//     subclasses inherit verbatim.
+//
+//   * `TestFusedMoEQuantWOQ` — weight-only INT4 (S4) on BOTH Op1
+//     and Op2.  AOCL DLP's WOQ fast path (s4/u4) is M-agnostic, so
+//     the grid carries the full M ∈ {1, 4, 16, 32} sweep.
+//
+//   * `TestFusedMoEQuantDynINT8` — runtime BF16→S8 reorder on the
+//     source of BOTH Op1 and Op2.  The AOCL BF16→S8 reorder kernel
+//     refuses per-token `src_scale = {M, 1}` for M < 16 (same
+//     constraint that drives test_quant.cpp::INT8_DYNAMIC_GEMM_BF16
+//     to skip those tuples).  We trim the grid to M ∈ {16, 32}
+//     instead of skipping at run time — same coverage, no
+//     `[ SKIPPED ]` noise in the test report.
+//
+// Owned tests (alphabetised on test name):
+//   * `TestFusedMoEQuantDynINT8.BothPasses` — runtime BF16→S8
+//     reorder on the source of BOTH Op1 and Op2.  Per-token
+//     `{M, 1}` src_scale and per-channel `{1, N}` wei_scale on each
+//     pass.  Op1 carries `dynamic_quant = true` +
+//     `dtypes.compute = s8` + `quant_params.src_scale.{dt, dims}`
+//     on `params[i]`; the fused-MoE dispatcher inherits those into
+//     Op2's `params_down[i]` and copies `fused.down_scale[i]` into
+//     the Op2 weight-scale slot.
+//
+//   * `TestFusedMoEQuantWOQ.BothPasses` — weight-only INT4 (S4) on
+//     BOTH Op1 and Op2.  BF16 source + S4 weights + per-channel
+//     F32 wei_scale on each pass.  Op1 carries its wei_scale via
+//     `params[i].quant_params.wei_scale`; Op2 carries the
+//     down_proj wei_scale via `fused.down_scale[i]`.
+//     S4 (not S8) on purpose — AOCL DLP's pure WOQ fast path is
+//     gated to `s4 || u4` (see aocl_postop.cpp::is_woq at line 178);
+//     `bf16 src + s8 wei + no src_scale` falls through
+//     `is_non_quant_src_int8` and produces all-zero output on both
+//     legs, which would let the per-element comparison pass
+//     vacuously.  A sanity-sum guard at the bottom of every test
+//     body catches that failure mode regardless.
+//
+// Test design contract (enforced by every TEST_P below):
+//   Op1 and Op2 use the SAME quant scheme.  Mixed schemes (e.g.
+//   static-INT8 Op1 + WOQ-S8 Op2) leave the Op1/Op2 dispatch
+//   divergent and make every comparison failure ambiguous between
+//   "Op1 path bug", "Op2 path bug", and "scheme-mismatch contract
+//   bug".  Constraining both passes to the same scheme keeps the
+//   fault domain small.
+// ===============================================================================
+
+struct FusedMoEQuantType {
+  int dim;          ///< Op1 output cols halved (N_gate_up = 2 * dim, K_down = dim).
+  int hidden_size;  ///< Op2 output cols / Op1 input cols (K_in = H).
+  int M;            ///< Tokens per active expert.
+  int num_ops;      ///< Expert count.
+  int act_int;      ///< 1=silu_and_mul, 2=gelu_and_mul, 3=swiglu_oai_mul.
+};
+
+static std::string FusedMoEQuantParamName(
+    const ::testing::TestParamInfo<FusedMoEQuantType> &info) {
+  static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
+  const auto &p = info.param;
+  return std::string(act_names[p.act_int])
+       + "_d" + std::to_string(p.dim)
+       + "_h" + std::to_string(p.hidden_size)
+       + "_M" + std::to_string(p.M)
+       + "_E" + std::to_string(p.num_ops);
+}
+
+// Scheme-specific parameter grids.  Each grid only enumerates
+// tuples the underlying AOCL kernel path is known to accept, so
+// no `TEST_P` body needs a runtime `GTEST_SKIP()` guard — every
+// instantiated test is one we expect to run end-to-end.
+//
+// WOQ-S4 grid — AOCL DLP's WOQ fast path is M-agnostic, so all
+// four M values exercise the same dispatch tile.
+//
+//   3 acts × 2 dims × 4 M-values × 2 num_ops = 48 cases.
+static std::vector<FusedMoEQuantType> make_woq_quant_params() {
+  std::vector<FusedMoEQuantType> out;
+  for (int act : {1, 2, 3}) {
+    for (int d : {16, 32}) {
+      for (int m : {1, 4, 16, 32}) {
+        for (int e : {2, 4}) {
+          out.push_back({d, d, m, e, act});
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// Dynamic-INT8 grid — AOCL's BF16→S8 reorder kernel rejects
+// per-token `src_scale.dims = {M, 1}` for M < 16 (same constraint
+// that drives test_quant.cpp::INT8_DYNAMIC_GEMM_BF16 to skip those
+// tuples).  We trim at the parameter source instead.
+//
+//   3 acts × 2 dims × 2 M-values × 2 num_ops = 24 cases.
+static std::vector<FusedMoEQuantType> make_dyn_int8_quant_params() {
+  std::vector<FusedMoEQuantType> out;
+  for (int act : {1, 2, 3}) {
+    for (int d : {16, 32}) {
+      for (int m : {16, 32}) {
+        for (int e : {2, 4}) {
+          out.push_back({d, d, m, e, act});
+        }
+      }
+    }
+  }
+  return out;
+}
+
+class TestFusedMoEQuantBase
+    : public ::testing::TestWithParam<FusedMoEQuantType> {
+ protected:
+  void SetUp() override {
+    const auto &p = GetParam();
+    dim         = p.dim;
+    hidden_size = p.hidden_size;
+    M           = p.M;
+    num_ops     = p.num_ops;
+    act_int     = p.act_int;
+    is_bf16     = true;            // pinned — bf16-only Op2 quant for now.
+
+    N_gate_up = 2 * dim;
+    H         = hidden_size;
+    K_in      = H;
+    K_down    = dim;                // gated activation halves Op1 output.
+    act_type  = static_cast<grp_matmul_gated_act_t>(act_int);
+
+    reset_grp_matmul_caches();
+    // Honour any externally-set `ZENDNNL_GRP_MATMUL_ALGO`; otherwise
+    // pin ALGO 1 for deterministic baseline.  Lets developers force
+    // ALGO 2 (M-tile) etc. via `export ZENDNNL_GRP_MATMUL_ALGO=2`
+    // when investigating algo-specific behaviour.  Note: any non-null
+    // wei_scale auto-rejects ALGO 3 (`check_n_tile_extra`), so an
+    // ALGO 3 export silently falls back to ALGO 1 on these tests.
+    if (const char *env_algo = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
+        !env_algo || env_algo[0] == '\0') {
+      algo_guard =
+          std::make_unique<moe_test_utils::AlgoEnvGuard>(1);
+    }
+  }
+
+  void TearDown() override {
+    algo_guard.reset();  // restores ZENDNNL_GRP_MATMUL_ALGO env.
+  }
+
+  // Shape / config members — populated from `GetParam()` in SetUp.
+  int dim{};
+  int hidden_size{};
+  int N_gate_up{};
+  int H{};
+  int M{};
+  int K_in{};
+  int num_ops{};
+  int K_down{};
+  int act_int{};
+  zendnnl::lowoha::matmul::grp_matmul_gated_act_t act_type{};
+  bool is_bf16{};
+
+  tensor_factory_t factory{};
+  std::unique_ptr<moe_test_utils::AlgoEnvGuard> algo_guard;
+};
+
+// Per-scheme subclasses.  The base supplies all state and lifecycle
+// — these only exist so `INSTANTIATE_TEST_SUITE_P` can attach a
+// different parameter grid per scheme without forcing the bodies
+// to share one grid plus runtime `GTEST_SKIP()` guards.
+class TestFusedMoEQuantWOQ      : public TestFusedMoEQuantBase {};
+class TestFusedMoEQuantDynINT8  : public TestFusedMoEQuantBase {};
+
+TEST_P(TestFusedMoEQuantWOQ, BothPasses) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+
+  // ── Op1 + Op2 weights: BOTH S4 + per-channel F32 wei_scale ───────
+  // S4 (not S8) — AOCL DLP's pure WOQ path is gated to s4/u4 (see
+  // aocl_postop.cpp::is_woq at line 178).  S8 weights with a BF16
+  // source without a caller-provided src_scale fall through
+  // `is_non_quant_src_int8` and trigger the kernel's "src_scale
+  // buffer is null" rejection at line 369; both the reference and
+  // the fused-test paths then leave their dst buffers at all-zero
+  // and the comparison vacuously passes.
+  //
+  // Build pattern mirrors TestGroupMatmulQuant.WOQ_BF16_S4 in
+  // test_quant.cpp: `uniform_dist_tensor({k, n}, s4, ..., scale)`
+  // returns an s4-packed tensor with the supplied per-channel
+  // scale attached as quant metadata, ready for `copy_attached_*`.
+  std::vector<tensor_t> w1_scale_t(num_ops), w1_s4_t(num_ops);
+  std::vector<tensor_t> down_scale_t(num_ops), w2_s4_t(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    w1_scale_t[i] = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(1), static_cast<uint64_t>(N_gate_up)},
+        data_type_t::f32, 2.0);
+    w1_s4_t[i] = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_in), static_cast<uint64_t>(N_gate_up)},
+        data_type_t::s4, 7.0, /*transposed=*/false, w1_scale_t[i]);
+    down_scale_t[i] = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(1), static_cast<uint64_t>(H)},
+        data_type_t::f32, 2.0);
+    w2_s4_t[i] = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_down), static_cast<uint64_t>(H)},
+        data_type_t::s4, 7.0, /*transposed=*/false, down_scale_t[i]);
+  }
+
+  // ── BF16 sources + per-expert raw pointers ───────────────────────
+  TypedBuffers src, d1_ref, d2_ref, d2_test, d1_unused;
+  src      .alloc(num_ops, (size_t)M * K_in,      is_bf16);
+  d1_ref   .alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
+  d2_ref   .alloc(num_ops, (size_t)M * H,         is_bf16);
+  d2_test  .alloc(num_ops, (size_t)M * H,         is_bf16);
+  d1_unused.alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
+  fill_moe_tensors(num_ops, is_bf16, &src, nullptr, nullptr);
+
+  std::vector<const void *> wei1_p(num_ops), wei2_p(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    wei1_p[i] = w1_s4_t[i].get_raw_handle_unsafe();
+    wei2_p[i] = w2_s4_t[i].get_raw_handle_unsafe();
+  }
+  auto srcs        = src.cptrs(is_bf16);
+  auto d1_ref_p    = d1_ref.ptrs(is_bf16);
+  auto d2_ref_p    = d2_ref.ptrs(is_bf16);
+  auto d2_test_p   = d2_test.ptrs(is_bf16);
+  auto d1_unused_p = d1_unused.ptrs(is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+
+  // ── Dispatch vectors.  WOQ requires is_weights_const=true. ───────
+  auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H, K_down);
+  gv_op2.lda.assign(num_ops, N_gate_up);  // Op2 reads d1_ref at N_gate_up stride.
+  gv_op1.is_wc.assign(num_ops, true);
+  gv_op2.is_wc.assign(num_ops, true);
+
+  // Build per-pass matmul_params reusable for ref and test paths.
+  // Op1 and Op2 share the same WOQ-S4 scheme — only the weight
+  // tensor whose scale is extracted differs.
+  auto build_params_woq_s4 =
+      [&](const std::vector<tensor_t> &wei_quant_tensors) {
+    auto p = make_uniform_params(num_ops, data_type_t::bf16);
+    for (int i = 0; i < num_ops; ++i) {
+      p[i].dtypes.src = data_type_t::bf16;
+      p[i].dtypes.wei = data_type_t::s4;
+      p[i].dtypes.dst = data_type_t::bf16;
+      copy_attached_scale(wei_quant_tensors[i],
+                          p[i].quant_params.wei_scale);
+      copy_attached_zp   (wei_quant_tensors[i],
+                          p[i].quant_params.wei_zp);
+    }
+    return p;
+  };
+
+  // ── Reference: legacy 2-call with WOQ-S4 on both Op1 and Op2 ─────
+  {
+    auto p_ref_op1 = build_params_woq_s4(w1_s4_t);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_ref_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_ref_op1),
+              status_t::success) << "ref Op1 (WOQ-S4)";
+
+    for (int e = 0; e < num_ops; ++e) {
+      apply_ref_gated_act(d1_ref.bf16[e], M, N_gate_up, N_gate_up, act_type);
+    }
+
+    auto p_ref_op2 = build_params_woq_s4(w2_s4_t);
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs2[e] = d1_ref_p[e];
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+                                  gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha,
+                                  srcs2, gv_op2.lda, wei2_p, gv_op2.ldb, no_bias,
+                                  gv_op2.beta, d2_ref_p, gv_op2.ldc,
+                                  gv_op2.is_wc, p_ref_op2),
+              status_t::success) << "ref Op2 (WOQ-S4)";
+  }
+
+  // ── Test: single fused call with WOQ-S4 on Op1 (params) and
+  //   WOQ-S4 on Op2 (fused.down_scale / fused.down_zp) ─────────────────
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+
+  auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+  fused.dst_down = d2_test_p;
+  fused.ldc_down = std::vector<int>(num_ops, H);
+  // Carry the down_weight scale through the new `down_scale` field.
+  // Op2 inherits the rest of the quant scheme (dynamic_quant=false,
+  // dtypes.wei=s4) automatically from `params[i]` via the fused-MoE
+  // dispatcher's setup loop.
+
+  fused.down_scale.resize(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    copy_attached_scale(w2_s4_t[i], fused.down_scale[i]);
+  }
+
+  {
+    auto p_test = build_params_woq_s4(w1_s4_t);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_unused_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_test, nullptr, &act, &fused),
+              status_t::success)
+        << "fused (WOQ-S4 on both Op1 and Op2 via fused.down_scale)";
+  }
+
+  // Sanity: confirm both the reference and the fused-test paths
+  // actually computed a GEMM (vs silently bailing out and leaving
+  // the dst buffer at the post-alloc all-zero state).  Without this
+  // guard a kernel-setup failure that bails on the same code path
+  // for both routes (e.g. AOCL DLP's BF16-INT8 pre-quant validator
+  // rejecting an unsupported quant combo) would let the
+  // `verify_per_expert_2d` below trivially pass on 0 == 0.
+  double ref_abs_sum = 0.0, test_abs_sum = 0.0;
+  for (int e = 0; e < num_ops; ++e) {
+    for (size_t k = 0; k < d2_ref.bf16[e].size(); ++k) {
+      ref_abs_sum  += std::abs(static_cast<float>(d2_ref .bf16[e][k]));
+      test_abs_sum += std::abs(static_cast<float>(d2_test.bf16[e][k]));
+    }
+  }
+  ASSERT_GT(ref_abs_sum,  1e-3)
+      << "[16.d] reference 2-call path produced all-zero d2_ref "
+         "(sum=" << ref_abs_sum << ") — WOQ-S4 dispatch likely "
+         "short-circuited; check the kernel error log for the "
+         "root cause and confirm `is_woq` at aocl_postop.cpp:178 "
+         "is still gated to s4/u4.";
+  ASSERT_GT(test_abs_sum, 1e-3)
+      << "[16.d] fused-test path produced all-zero d2_test "
+         "(sum=" << test_abs_sum << ").";
+
+  std::ostringstream lbl;
+  lbl << "[16] WOQ_S4_BothPasses"
+      << " act=" << act_int
+      << " d="   << dim
+      << " h="   << H
+      << " M="   << M
+      << " E="   << num_ops;
+  verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
+                       tol_fused(is_bf16), lbl.str());
+}
+
+TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+
+  // Param grid is trimmed to M ∈ {16, 32} at the source
+  // (`make_dyn_int8_quant_params`) — AOCL's BF16→S8 reorder kernel
+  // rejects per-token `src_scale = {M, 1}` for M < 16, so we never
+  // enumerate those tuples here.  No runtime SKIP needed.
+
+  // ── Op1 source tensor: BF16 with per-token F32 src_scale ─────────
+  // The scale tensor is a zero-allocated F32 buffer attached to
+  // src_t via `uniform_dist_tensor(..., scale, zp=empty)` — the
+  // dispatcher fills its contents at runtime when it reorders the
+  // BF16 source to S8.  `{M, 1}` per-token granularity is what
+  // `reorder_quantization_wrapper` supports (per-tensor `{1, 1}`
+  // and per-column `{1, K}` are rejected).
+  std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    src_scale_t[i] = factory.zero_tensor(
+        {static_cast<uint64_t>(M), static_cast<uint64_t>(1)},
+        data_type_t::f32);
+    src_t[i] = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(M), static_cast<uint64_t>(K_in)},
+        data_type_t::bf16, 2.0, /*transposed=*/false,
+        src_scale_t[i], tensor_t{});
+  }
+
+  // ── Op1 + Op2 weights: S8 + per-channel F32 scale ────────────────
+  std::vector<tensor_t> w1_s8_t(num_ops), w1_scale_t(num_ops), w1_zp_t(num_ops);
+  std::vector<tensor_t> w2_s8_t(num_ops), down_scale_t(num_ops), down_zp_t(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    auto w1_ref = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_in), static_cast<uint64_t>(N_gate_up)},
+        data_type_t::bf16, 2.0, /*transposed=*/false);
+    ASSERT_EQ(quant_params_compute(factory, w1_ref,
+                                   data_type_t::bf16, data_type_t::s8,
+                                   /*scale_dims=*/{1, N_gate_up},
+                                   data_type_t::f32,
+                                   w1_scale_t[i], w1_zp_t[i], &w1_s8_t[i]),
+              status_t::success);
+
+    auto w2_ref = factory.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_down), static_cast<uint64_t>(H)},
+        data_type_t::bf16, 2.0, /*transposed=*/false);
+    ASSERT_EQ(quant_params_compute(factory, w2_ref,
+                                   data_type_t::bf16, data_type_t::s8,
+                                   /*scale_dims=*/{1, H},
+                                   data_type_t::f32,
+                                   down_scale_t[i], down_zp_t[i], &w2_s8_t[i]),
+              status_t::success);
+  }
+
+  // ── Raw pointers + BF16 dst / intermediate buffers ───────────────
+  std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    srcs  [i] = src_t  [i].get_raw_handle_unsafe();
+    wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+    wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+  }
+
+  TypedBuffers d1_ref, d2_ref, d2_test, d1_unused;
+  d1_ref   .alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
+  d2_ref   .alloc(num_ops, (size_t)M * H,         is_bf16);
+  d2_test  .alloc(num_ops, (size_t)M * H,         is_bf16);
+  d1_unused.alloc(num_ops, (size_t)M * N_gate_up, is_bf16);
+  auto d1_ref_p    = d1_ref.ptrs(is_bf16);
+  auto d2_ref_p    = d2_ref.ptrs(is_bf16);
+  auto d2_test_p   = d2_test.ptrs(is_bf16);
+  auto d1_unused_p = d1_unused.ptrs(is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+
+  // Dispatch vectors.  WOQ + dynamic INT8 require is_weights_const=true.
+  auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+  auto gv_op2 = GemmVecs::uniform(num_ops, M, H, K_down);
+  gv_op2.lda.assign(num_ops, N_gate_up);
+  gv_op1.is_wc.assign(num_ops, true);
+  gv_op2.is_wc.assign(num_ops, true);
+
+  // Build per-pass matmul_params reusable for ref and test paths.
+  // Op1 and Op2 share the same dynamic INT8 scheme: BF16 source +
+  // S8 weights + per-token src_scale + per-channel wei_scale,
+  // `dtypes.compute = s8` + `dynamic_quant = true` so
+  // `reorder_quantization_wrapper` engages at runtime.
+  auto build_params_dynamic_int8 =
+      [&](const tensor_t &src_tensor, const tensor_t &wei_tensor) {
+    auto p_slot = make_uniform_params(1, data_type_t::bf16)[0];
+    p_slot.dtypes.src     = data_type_t::bf16;
+    p_slot.dtypes.wei     = data_type_t::s8;
+    p_slot.dtypes.dst     = data_type_t::bf16;
+    p_slot.dtypes.compute = data_type_t::s8;
+    p_slot.dynamic_quant  = true;
+    copy_attached_scale(src_tensor, p_slot.quant_params.src_scale);
+    copy_attached_scale(wei_tensor, p_slot.quant_params.wei_scale);
+    copy_attached_zp   (wei_tensor, p_slot.quant_params.wei_zp);
+    return p_slot;
+  };
+
+  // ── Reference: legacy 2-call with dynamic INT8 on BOTH passes ────
+  {
+    // Op1: dynamic INT8 from the caller's BF16 source.
+    std::vector<matmul_params> p_ref_op1(num_ops);
+    for (int i = 0; i < num_ops; ++i)
+      p_ref_op1[i] = build_params_dynamic_int8(src_t[i], w1_s8_t[i]);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_ref_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_ref_op1),
+              status_t::success) << "ref Op1 (dynamic INT8)";
+
+    for (int e = 0; e < num_ops; ++e) {
+      apply_ref_gated_act(d1_ref.bf16[e], M, N_gate_up, N_gate_up, act_type);
+    }
+
+    // Op2: dynamic INT8 from the activated BF16 intermediate.  The
+    // intermediate has no `tensor_t` wrapper, so we set up the
+    // per-token src_scale.dims directly on the params (the kernel
+    // allocates the runtime scale buffer internally when buff is
+    // null — same path the fused dispatcher takes for Op2 by
+    // inheriting `params[i].dynamic_quant` + `dtypes.compute=s8`
+    // and copying `fused.down_scale[i]` into the Op2 weight slot).
+    std::vector<matmul_params> p_ref_op2(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      p_ref_op2[i] = make_uniform_params(1, data_type_t::bf16)[0];
+      p_ref_op2[i].dtypes.src     = data_type_t::bf16;
+      p_ref_op2[i].dtypes.wei     = data_type_t::s8;
+      p_ref_op2[i].dtypes.dst     = data_type_t::bf16;
+      p_ref_op2[i].dtypes.compute = data_type_t::s8;
+      p_ref_op2[i].dynamic_quant  = true;
+      // Per-token src_scale for Op2 (buff = nullptr → kernel
+      // allocates the runtime scratch).
+      p_ref_op2[i].quant_params.src_scale.buff = nullptr;
+      p_ref_op2[i].quant_params.src_scale.dt   = data_type_t::f32;
+      p_ref_op2[i].quant_params.src_scale.dims = {M, 1};
+      copy_attached_scale(w2_s8_t[i], p_ref_op2[i].quant_params.wei_scale);
+      copy_attached_zp   (w2_s8_t[i], p_ref_op2[i].quant_params.wei_zp);
+    }
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs2[e] = d1_ref_p[e];
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+                                  gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha,
+                                  srcs2, gv_op2.lda, wei2_p, gv_op2.ldb, no_bias,
+                                  gv_op2.beta, d2_ref_p, gv_op2.ldc,
+                                  gv_op2.is_wc, p_ref_op2),
+              status_t::success) << "ref Op2 (dynamic INT8)";
+  }
+
+  // ── Test: single fused call.  Dynamic INT8 on Op1 carried via
+  //   `params[i]`; Op2 inherits the same scheme — only the down_weight
+  //   scale needs a dedicated carrier (`fused.down_scale`). ────────────
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+
+  auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+  fused.dst_down = d2_test_p;
+  fused.ldc_down = std::vector<int>(num_ops, H);
+
+  // Only Op2's weight scale is plumbed through the fused struct.
+  // Everything else (dynamic_quant flag, dtypes.compute=s8, per-token
+  // src_scale.dims) is inherited from `params[i]` by the dispatcher's
+  // setup loop in group_matmul_fused_moe.cpp — same scheme on both
+  // passes by construction.
+  fused.down_scale.resize(num_ops);
+  fused.down_zp   .resize(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    copy_attached_scale(w2_s8_t[i], fused.down_scale[i]);
+    copy_attached_zp   (w2_s8_t[i], fused.down_zp[i]);
+  }
+
+  {
+    std::vector<matmul_params> p_test(num_ops);
+    for (int i = 0; i < num_ops; ++i)
+      p_test[i] = build_params_dynamic_int8(src_t[i], w1_s8_t[i]);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_unused_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_test, nullptr, &act, &fused),
+              status_t::success)
+        << "fused (dynamic INT8 — Op1 quant via params[i], Op2 weight "
+           "scale via fused.down_scale, rest inherited)";
+  }
+
+  // Sanity: same defensive guard as [16.d] — confirm both routes
+  // actually executed the runtime-reorder + INT8 matmul instead of
+  // bailing out and leaving the dst buffers at the post-alloc zero
+  // state.  A consistent kernel-setup failure on both paths would
+  // otherwise let the verify_per_expert_2d below trivially pass.
+  double ref_abs_sum = 0.0, test_abs_sum = 0.0;
+  for (int e = 0; e < num_ops; ++e) {
+    for (size_t k = 0; k < d2_ref.bf16[e].size(); ++k) {
+      ref_abs_sum  += std::abs(static_cast<float>(d2_ref .bf16[e][k]));
+      test_abs_sum += std::abs(static_cast<float>(d2_test.bf16[e][k]));
+    }
+  }
+  ASSERT_GT(ref_abs_sum,  1e-3)
+      << "[16.e] reference 2-call path produced all-zero d2_ref "
+         "(sum=" << ref_abs_sum << ") — dynamic-INT8 dispatch "
+         "likely short-circuited; check the kernel error log for "
+         "the BF16→S8 reorder eligibility gate in "
+         "reorder_quantization.cpp::reorder_quantization_wrapper.";
+  ASSERT_GT(test_abs_sum, 1e-3)
+      << "[16.e] fused-test path produced all-zero d2_test "
+         "(sum=" << test_abs_sum << ").";
+
+  std::ostringstream lbl;
+  lbl << "[16] Dynamic_INT8_BothPasses"
+      << " act=" << act_int
+      << " d="   << dim
+      << " h="   << H
+      << " M="   << M
+      << " E="   << num_ops;
+  verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
+                       tol_fused(is_bf16), lbl.str());
+}
+
+// One INSTANTIATE_TEST_SUITE_P per fixture subclass, each binding
+// the scheme to its kernel-supported grid (`make_woq_quant_params`
+// covers all four M values; `make_dyn_int8_quant_params` drops
+// M < 16 since the AOCL BF16→S8 reorder rejects those at the
+// single-matmul layer).  Same shared prefix
+// `GroupMatmulFusedMoEQuant` keeps both groups discoverable via
+// `--gtest_filter=*FusedMoEQuant*`.
+INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEQuant, TestFusedMoEQuantWOQ,
+                         ::testing::ValuesIn(make_woq_quant_params()),
+                         FusedMoEQuantParamName);
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEQuant, TestFusedMoEQuantDynINT8,
+                         ::testing::ValuesIn(make_dyn_int8_quant_params()),
+                         FusedMoEQuantParamName);
+
 // See gtests/group_matmul/README.md for the cross-file test layout —
 // TestGroupMatmul and TestGroupMatmulQuant live in test_basic.cpp /
 // test_quant.cpp respectively.

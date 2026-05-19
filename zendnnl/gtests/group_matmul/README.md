@@ -47,7 +47,16 @@ zendnnl/gtests/group_matmul/
                                     [12] TestFusedMoEWarmPackPipeline,
                                     [13] TestFusedMoEArchGrid,
                                     [14] TestFusedMoEActiveTotalEdge,
-                                    [15] TestDispatcherActiveTotalNegative
+                                    [15] TestDispatcherActiveTotalNegative,
+                                    [16] TestFusedMoEQuant (fused-MoE quant suite:
+                                         TestFusedMoEQuantWOQ.BothPasses (48 tuples)
+                                         + TestFusedMoEQuantDynINT8.BothPasses
+                                         (24 tuples, M >= 16 only — AOCL BF16->S8
+                                         reorder floor).  Shared base
+                                         TestFusedMoEQuantBase holds setup/teardown;
+                                         each scheme gets its own subclass + grid
+                                         + INSTANTIATE_TEST_SUITE_P so no test is
+                                         GTEST_SKIP()'d at run time)
   test_algos.cpp                    [7] TestFusedMoEAlgos,
                                     [7b] TestFusedMoEAlgoCustom,
                                     [8] TestGroupMatmulAlgoCustom,
@@ -110,9 +119,10 @@ Lives in `zendnnl/src/lowoha_operators/matmul/group_matmul/group_matmul_direct.h
 |---|---|
 | `matmul_params`                       | per-expert dtype + (post-PR) `active_matmul / total_matmul` prepack-extras contract |
 | `grp_matmul_gated_act_params`         | gated activation kind (`silu_and_mul`, `gelu_and_mul`, `swiglu_oai_mul`, `none`) |
-| `grp_matmul_fused_moe_params`         | Op2 down-projection weights + bias + N_down/ldb_down/dst_down/ldc_down |
+| `grp_matmul_fused_moe_params`         | Op2 down-projection weights + bias + N_down/ldb_down/dst_down/ldc_down + **Op2 weight quant** (`down_scale`, `down_zp`) |
 | `group_matmul_moe_postop_params`      | weighted-reduce post-op (e.g. `topk`-routed sum after Op2) |
-| `quant_params` (in `matmul_params`)   | per-tensor scale/zp for WOQ / INT8 paths |
+| `quant_params` (in `matmul_params`)   | per-tensor scale/zp for WOQ / INT8 paths on Op1; **the same scheme** (dynamic_quant flag, dtypes.compute, src_scale.dims) is inherited by Op2's internal params_down |
+| `down_scale` / `down_zp` (in `grp_matmul_fused_moe_params`) | per-expert **weight** scale + zero-point for `down_weight[i]` (the only Op2-specific quant artefact — every other knob is inherited from `params[i]`).  Empty ⇒ Op2 weight un-quantized (default). |
 
 ### 3.3 Prepack module
 
@@ -207,6 +217,9 @@ env-getter paths.
 - Wide-swiglu correctness guard     — `test_prepack.cpp` `[28]` `algo3_wide_layout`
 
 ### 4.7 Quantization
+
+Single-call (non-fused MoE) coverage in `test_quant.cpp` (`[9] TestGroupMatmulQuant`):
+
 | Variant | Test |
 |---|---|
 | `WOQ_BF16_S4`                            | `test_quant.cpp` |
@@ -215,6 +228,33 @@ env-getter paths.
 | `INT8_SYM_QUANT_PER_GROUP_BF16`/`F32`    | `test_quant.cpp` |
 | `INT8_SYM_QUANT_PER_TOKEN_BF16`/`F32`    | `test_quant.cpp` |
 | `INT8_DYNAMIC_GEMM_BF16`/`F32`           | `test_quant.cpp` |
+
+Fused MoE (Op1 + activation + Op2) coverage in `test_fused_moe.cpp`
+(`[16] TestFusedMoEQuant`).  Layered after `TestGroupMatmulQuant`
+but with one deliberate twist: each scheme owns its own fixture
+subclass and parameter grid, so every enumerated tuple is one the
+AOCL kernel layer is contractually obligated to handle.  No
+runtime `GTEST_SKIP()` is needed — the previous `M < 16` skips
+have been pushed up to the parameter source.
+
+| Fixture | Param grid | Tuples | What it covers |
+|---|---|---|---|
+| `TestFusedMoEQuantBase` | — (abstract) | — | shared setup/teardown (shape config, ALGO 1 pin via `AlgoEnvGuard`) |
+| `TestFusedMoEQuantWOQ` | 3 acts × 2 dims × **M ∈ {1, 4, 16, 32}** × 2 num_ops | **48** | AOCL DLP's WOQ fast path is M-agnostic, so all M values run. |
+| `TestFusedMoEQuantDynINT8` | 3 acts × 2 dims × **M ∈ {16, 32}** × 2 num_ops | **24** | M trimmed at the source — AOCL BF16→S8 reorder rejects per-token `{M, 1}` for M < 16 (same constraint as `test_quant.cpp::INT8_DYNAMIC_GEMM_BF16`). |
+
+| Variant | Op1 quant | Op2 quant carrier | Test (in `[16]`) |
+|---|---|---|---|
+| WOQ S4 on both passes | `params[i].quant_params.wei_scale` | `fused.down_scale[i]` | `TestFusedMoEQuantWOQ.BothPasses` |
+| Dynamic INT8 on both passes (runtime BF16→S8 reorder) | `params[i].dynamic_quant=true` + `params[i].quant_params.src_scale` (drives both passes) | `fused.down_scale[i]` (down_weight only — every other knob inherited) | `TestFusedMoEQuantDynINT8.BothPasses` |
+
+Both fused-MoE quant tests carry a non-zero sanity guard (sum of
+absolute values of the reference + test outputs MUST exceed
+`1e-3`) at the bottom of the body — this catches the failure mode
+where AOCL DLP rejects an unsupported quant combo and leaves the
+dst buffer at the post-alloc all-zero state.  Without the guard a
+silent kernel bail-out on **both** routes would trivially pass the
+per-element comparison on `0 == 0`.
 
 ### 4.8 Prepack module
 | Surface | Test |

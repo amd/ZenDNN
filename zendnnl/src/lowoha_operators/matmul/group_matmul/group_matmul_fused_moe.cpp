@@ -357,6 +357,18 @@ status_t group_matmul_fused_moe_execute(
       || fused.ldb_down.size() < num_ops
       || fused.bias_down.size() < num_ops)
     return status_t::failure;
+  // Op2 weight quant is optional: empty `down_scale` / `down_zp` means
+  // "Op2 weight un-quantized" (legacy backward-compatible behaviour).
+  // When non-empty, each MUST cover every active expert — a partial
+  // vector would silently leave the tail experts un-quantized and
+  // produce wrong numerics.  `down_zp` may be empty independently of
+  // `down_scale` for the symmetric-quant case.
+  if (!fused.down_scale.empty()
+      && fused.down_scale.size() < num_ops)
+    return status_t::failure;
+  if (!fused.down_zp.empty()
+      && fused.down_zp.size() < num_ops)
+    return status_t::failure;
   // Op1 dst/ldc — when caller-allocated must reach `num_ops`; when
   // library-managed (op1_internal) the vectors may be empty (library
   // owns) or sized to at least `num_ops` (caller passed all-null
@@ -778,12 +790,36 @@ status_t group_matmul_fused_moe_execute(
     //     earlier call does not force the same kernel on the next.
     //   * `dtypes` / `num_threads` vary per-call with caller's Op1
     //     params + fused.bias_dt_down.
-    //   * `mem_format_a / mem_format_b / dynamic_quant / postop_`
+    //   * Op2 inherits the caller's quant *scheme* knobs from Op1's
+    //     `params[i]` so the down_proj runs through the same
+    //     dispatch path as the gate+up GEMM:
+    //       - `dynamic_quant`       (false / true)
+    //       - `dtypes.compute`      (none / s8 / u8)
+    //       - `quant_params.src_scale.{dt, dims}` (per-tensor `{1}` /
+    //         `{1, 1}` or per-token `{M, 1}` only; per-group
+    //         `{M, ngroups>1}` is rejected up front below because
+    //         Op1.K != Op2.K — see the guard inside the
+    //         `if (p.dynamic_quant)` block)
+    //     The matching `buff` is left `nullptr` on Op2's src_scale
+    //     because Op2's source is the activated Op1 intermediate
+    //     (library-managed) — the kernel allocates the runtime
+    //     scratch internally from the inherited `dims`.
+    //   * The ONLY Op2-side-specific quant fields the caller provides
+    //     are `fused.down_scale[i]` (weight scale) and `fused.down_zp[i]`
+    //     (optional weight zero-point for asymmetric quant).  These
+    //     are copied straight into `params_down[i].quant_params.
+    //     wei_scale` / `wei_zp`.  Both vectors are size-validated above
+    //     to be either empty (un-quantized weight) or >= num_ops.
+    //   * Every quant field is reset per call because the persistent
+    //     thread-local `scratch.params_down` retains whatever was
+    //     written on the previous call — a stale buffer pointer from
+    //     a freed caller-side scale tensor would crash the next call.
+    //   * `mem_format_a / mem_format_b / postop_`
     //     are NEVER mutated by the Op2 dispatch path on this scratch
     //     (verified by grep across lowoha_operators); the slot's
-    //     default-constructed values (`'n'` / `'n'` / `false` / empty)
-    //     match the required dispatch contract, so no per-call reset
-    //     is issued here — `resize()`-grown slots are already correct
+    //     default-constructed values (`'n'` / `'n'` / empty) match
+    //     the required dispatch contract, so no per-call reset is
+    //     issued here — `resize()`-grown slots are already correct
     //     and existing slots are never dirtied.
     matmul_params &p = scratch.params_down[i];
     p.lowoha_algo  = matmul_algo_t::none;
@@ -792,6 +828,59 @@ status_t group_matmul_fused_moe_execute(
     p.dtypes.dst   = params[i].dtypes.dst;
     p.dtypes.bias  = fused.bias_dt_down;
     p.num_threads  = params[i].num_threads;
+    // Inherit the quant scheme knobs from Op1's params: dynamic_quant
+    // flag and dtypes.compute carry over unchanged so the
+    // reorder_quantization_wrapper eligibility gate sees the same
+    // values on Op2 as on Op1.
+    p.dynamic_quant  = params[i].dynamic_quant;
+    p.dtypes.compute = params[i].dtypes.compute;
+    // Op2 quant params: reset everything first, then fill in just
+    // the wei_scale / wei_zp (from the new caller-facing fields)
+    // and the inherited src_scale dims (when dynamic_quant is on).
+    p.quant_params = matmul_quantization_params_t{};
+    if (!fused.down_scale.empty()) {
+      p.quant_params.wei_scale.buff = fused.down_scale[i].buff;
+      p.quant_params.wei_scale.dt   = fused.down_scale[i].dt;
+      p.quant_params.wei_scale.dims = fused.down_scale[i].dims;
+    }
+    if (!fused.down_zp.empty()) {
+      p.quant_params.wei_zp.buff = fused.down_zp[i].buff;
+      p.quant_params.wei_zp.dt   = fused.down_zp[i].dt;
+      p.quant_params.wei_zp.dims = fused.down_zp[i].dims;
+    }
+    // Inherit dynamic-quant source granularity for Op2 (buff stays
+    // null — kernel allocates per-call scratch).  Per-token only:
+    // per-group (dims = {M, ngroups>1}) is rejected because Op1.K
+    // != Op2.K means Op1's ngroups can't transfer.  See struct doc.
+    if (p.dynamic_quant) {
+      const auto &scale_dims = params[i].quant_params.src_scale.dims;
+      if (scale_dims.size() == 2 && scale_dims[1] > 1) {
+        log_error("group_matmul_fused_moe: per-group src_scale on "
+                  "params[", i, "] (dims={", scale_dims[0], ",",
+                  scale_dims[1], "}) unsupported; use per-token "
+                  "({M, 1}).");
+        return status_t::failure;
+      }
+      if (params[i].quant_params.src_zp.dt != data_type_t::none) {
+        const auto &zp_dims = params[i].quant_params.src_zp.dims;
+        if (zp_dims.size() == 2 && zp_dims[1] > 1) {
+          log_error("group_matmul_fused_moe: per-group src_zp on "
+                    "params[", i, "] (dims={", zp_dims[0], ",",
+                    zp_dims[1], "}) unsupported; use per-token "
+                    "({M, 1}).");
+          return status_t::failure;
+        }
+      }
+
+      p.quant_params.src_scale.buff = nullptr;
+      p.quant_params.src_scale.dt   = params[i].quant_params.src_scale.dt;
+      p.quant_params.src_scale.dims = params[i].quant_params.src_scale.dims;
+      if (params[i].quant_params.src_zp.dt != data_type_t::none) {
+        p.quant_params.src_zp.buff = nullptr;
+        p.quant_params.src_zp.dt   = params[i].quant_params.src_zp.dt;
+        p.quant_params.src_zp.dims = params[i].quant_params.src_zp.dims;
+      }
+    }
     // active_matmul / total_matmul propagate from the outer params
     // so the Pass-2 per-ALGO prepack inside `group_matmul_run_parallel_dispatch`
     // sees the full active/total contract.  Without this, the
