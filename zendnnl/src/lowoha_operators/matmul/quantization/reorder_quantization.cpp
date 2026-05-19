@@ -183,7 +183,7 @@ status_t reorder_quantization_wrapper(
     if (transA && params.quant_params.src_scale.dims.size() == 2) {
       const int64_t M_dim = params.quant_params.src_scale.dims[0];
       const int64_t G_dim = params.quant_params.src_scale.dims[1];
-      if (M_dim != G_dim && M_dim > 1 && G_dim > 1) {
+      if (M_dim > 1 && G_dim > 1) {
         const size_t nelems = static_cast<size_t>(M_dim * G_dim);
         const size_t elem_size = size_of(params.quant_params.src_scale.dt);
         std::vector<uint8_t> tmp(nelems * elem_size);
