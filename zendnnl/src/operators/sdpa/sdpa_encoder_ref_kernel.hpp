@@ -30,9 +30,16 @@ namespace ops {
  *   - @c data_type_t::f32  (mask, if present, must be FP32)
  *   - @c data_type_t::bf16 (mask, if present, may be FP32 or BF16; converted
  *                           to FP32 element-wise at add time)
+ *   - @c data_type_t::f16  (mask, if present, may be FP32 or F16; converted
+ *                           to FP32 element-wise at add time)
  * Storage is at the QKV dtype on input and output; all arithmetic
  * (Q@K^T, scaling, optional masking, softmax, scores@V) is performed in FP32
  * internally so that softmax is numerically stable for low-precision inputs.
+ *
+ * Because every reduced-precision element is widened to FP32 at the I/O
+ * boundary using the dtype's float conversion operators, the F16 reference
+ * kernel does not require an F16-capable ISA (AVX512-FP16 / AVX-NE-CONVERT)
+ * and runs on every CPU the rest of the operator framework supports.
  *
  * The supported-dtype list is owned by @c sdpa_encoder_impl_t::kernel_factory();
  * @c execute() rejects anything outside that list defensively.

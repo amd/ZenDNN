@@ -18,6 +18,8 @@
 
 #include <immintrin.h>
 
+#include "common/float16.hpp"
+
 namespace zendnnl {
 namespace lowoha {
 namespace simd {
@@ -115,10 +117,23 @@ struct SimdOps<scalar_tag> {
     uint32_t rounding_bias = ((u >> 16) & 1) + 0x7FFF;
     dst[0] = static_cast<uint16_t>((u + rounding_bias) >> 16);
   }
+
+  // ── FP16 (IEEE 754 half) ────────────────────────────────────────────
+  static inline VecF32 vec_mask_f16_loadu(const uint16_t *p) {
+    return VecF32{ zendnnl::common::float16_t::f16_to_f32_val(p[0]) };
+  }
+
+  static inline void vec_f16_storeu(uint16_t *dst, VecF32 v) {
+    dst[0] = zendnnl::common::float16_t::f32_to_f16_val(v.v);
+  }
 };
 
 // ===========================================================================
 // AVX-512 specialization — 16 float lanes, enabled via target attribute.
+//
+// Note on FP16 conversion: the 512-bit forms _mm512_cvtph_ps and
+// _mm512_cvtps_ph live in <avx512fintrin.h> and only require the avx512f
+// target attribute.
 // ===========================================================================
 
 #define LOWOHA_SIMD_AVX512_ATTR __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
@@ -330,6 +345,25 @@ struct SimdOps<avx512_tag> {
     __m512i rounded = _mm512_srli_epi32(_mm512_add_epi32(u, rounding_bias), 16);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
                         _mm512_cvtepi32_epi16(rounded));
+  }
+
+  // ── FP16 (IEEE 754 half) ────────────────────────────────────────────
+  // Loads 16 × uint16_t storing IEEE half-precision values and widens to
+  // 16 × FP32 lanes via the 512-bit form of VCVTPH2PS, which is part of
+  // AVX-512F instruction set.
+  LOWOHA_SIMD_AVX512_ATTR
+  static inline VecF32 vec_mask_f16_loadu(const uint16_t *p) {
+    __m256i u = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+    return _mm512_cvtph_ps(u);
+  }
+
+  // FP32 → FP16 store with round-to-nearest-even via vcvtps2ph
+  // (AVX-512F intrinsic). Packs 16 × FP32 into 16 × IEEE half.
+  LOWOHA_SIMD_AVX512_ATTR
+  static inline void vec_f16_storeu(uint16_t *dst, VecF32 v) {
+    __m256i h = _mm512_cvtps_ph(v,
+                                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), h);
   }
 };
 

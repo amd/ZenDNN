@@ -23,6 +23,7 @@ namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
 using zendnnl::common::bfloat16_t;
+using zendnnl::common::float16_t;
 
 namespace {
 
@@ -66,6 +67,7 @@ status_t execute_typed(
   // restricts the supported combinations):
   //   - FP32 QKV  -> mask must be FP32
   //   - BF16 QKV  -> mask may be FP32 or BF16
+  //   - F16  QKV  -> mask may be FP32 or F16
   // Softmax always runs in FP32, so each mask element is converted to float
   // at add time inside apply_attention_mask<mask_t>.
   void *mask_base_void = nullptr;
@@ -169,13 +171,20 @@ status_t execute_typed(
     return run_per_head_loop(float{});
   }
 
-  // BF16 mask is only valid when QKV is BF16 (enforced by validate()). The
-  // `if constexpr` keeps the bf16 mask instantiation out of the FP32 build
-  // and lets the compiler prove the FP32 specialisation never reaches the
-  // unsupported-mask error path with a BF16 mask.
+  // Reduced-precision mask is only valid when the mask dtype matches the
+  // QKV dtype (enforced by validate()): bf16 mask with bf16 QKV, f16 mask
+  // with f16 QKV. The `if constexpr` blocks keep each reduced-precision
+  // mask instantiation out of the QKV specialisations that don't accept it,
+  // so the compiler can prove the FP32 specialisation never reaches the
+  // unsupported-mask error path with a reduced-precision mask.
   if constexpr(std::is_same_v<qkv_t, bfloat16_t>) {
     if (mask_dtype == data_type_t::bf16) {
       return run_per_head_loop(bfloat16_t{});
+    }
+  }
+  if constexpr(std::is_same_v<qkv_t, float16_t>) {
+    if (mask_dtype == data_type_t::f16) {
+      return run_per_head_loop(float16_t{});
     }
   }
 
@@ -210,10 +219,13 @@ status_t sdpa_encoder_ref_kernel_t::execute(const context_type &context_,
   if (query_dtype == data_type_t::bf16) {
     return execute_typed<bfloat16_t>(context_, outputs_);
   }
+  if (query_dtype == data_type_t::f16) {
+    return execute_typed<float16_t>(context_, outputs_);
+  }
 
   apilog_error("SDPA ref kernel: unsupported QKV data_type = ",
                static_cast<int>(query_dtype),
-               " (expected f32 or bf16)");
+               " (expected f32, bf16, or f16)");
   return status_t::failure;
 }
 

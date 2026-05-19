@@ -22,6 +22,8 @@
 #include <omp.h>
 
 #include "common/logging.hpp"
+#include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 
@@ -42,6 +44,14 @@ namespace sdpa {
 static_assert(simd::SimdOps<simd::avx512_tag>::kFloatLanes >= 1 &&
               simd::SimdOps<simd::scalar_tag>::kFloatLanes >= 1,
               "simd_ops.hpp must provide at least 1 float lane per tag");
+
+// Canonical reduced-precision numeric types from the common library.
+// These are wrapper types rather than plain `uint16_t` aliases, so code in
+// this file should follow the access conventions used by the common types and
+// the helper routines below when reading or writing raw 16-bit payloads,
+// instead of assuming generic interchangeability in unrelated contexts.
+using bfloat16_t = zendnnl::common::bfloat16_t;
+using float16_t  = zendnnl::common::float16_t;
 
 struct scratch_buffer {
   void  *ptr = nullptr;
@@ -74,25 +84,12 @@ inline void *flash_scratch_acquire(size_t bytes) {
   } while (0)
 
 template <typename T> struct is_reduced_fp : std::false_type {};
-template <> struct is_reduced_fp<bf16_elem> : std::true_type {};
+template <> struct is_reduced_fp<bfloat16_t> : std::true_type {};
+template <> struct is_reduced_fp<float16_t>  : std::true_type {};
 template <typename T>
 inline constexpr bool is_reduced_fp_v = is_reduced_fp<T>::value;
 
 using accum_t = float;
-
-inline float bf16_bits_to_float(uint16_t bits) {
-  uint32_t u = static_cast<uint32_t>(bits) << 16;
-  float f;
-  std::memcpy(&f, &u, sizeof(f));
-  return f;
-}
-
-inline uint16_t float_to_bf16_bits(float f) {
-  uint32_t u;
-  std::memcpy(&u, &f, sizeof(u));
-  uint32_t rounding_bias = ((u >> 16) & 1) + 0x7FFF;
-  return static_cast<uint16_t>((u + rounding_bias) >> 16);
-}
 
 template <typename T2>
 inline float mask_elem_at(T2 const *b, int i) {
@@ -100,16 +97,7 @@ inline float mask_elem_at(T2 const *b, int i) {
     return b[i];
   }
   else {
-    return bf16_bits_to_float(b[i].x);
-  }
-}
-
-template <typename scalar_t> inline float scalar_to_float(scalar_t v) {
-  if constexpr(std::is_same_v<scalar_t, float>) {
-    return v;
-  }
-  else {
-    return bf16_bits_to_float(v.x);
+    return static_cast<float>(b[i]);
   }
 }
 
@@ -118,9 +106,7 @@ template <typename scalar_t> inline scalar_t float_to_scalar(float f) {
     return f;
   }
   else {
-    bf16_elem r;
-    r.x = float_to_bf16_bits(f);
-    return r;
+    return scalar_t(f);
   }
 }
 
@@ -134,23 +120,33 @@ inline void sdpa_data_index_init(int64_t linear_idx, int64_t &i, int64_t dim_i,
   k = rem % dim_k;
 }
 
-template <typename T>
+// All supported Tin variants (f32 / bf16 / f16) write an F32 output through
+// the corresponding AOCL kernel (f32f32f32of32 / bf16bf16f32of32 /
+// f16f16f32of32), so the output buffer is always `float *`.
+template <typename Tin>
 inline void zendnn_gemm(int64_t m, int64_t n, int64_t k, float alpha,
-                        const T *a, int64_t lda, const T *b, int64_t ldb,
+                        const Tin *a, int64_t lda, const Tin *b, int64_t ldb,
                         float beta, float *c, int64_t ldc, bool TransA,
                         bool TransB) {
-  constexpr bool is_input_float = std::is_same_v<T, float>;
   zendnnl::lowoha::matmul::matmul_params params;
   zendnnl::lowoha::matmul::matmul_data_types matmul_dtype;
-  matmul_dtype.bias = zendnnl::common::data_type_t::none;
+  matmul_dtype.bias    = zendnnl::common::data_type_t::none;
   matmul_dtype.compute = zendnnl::common::data_type_t::none;
-  matmul_dtype.src =
-    is_input_float ? zendnnl::common::data_type_t::f32 :
-    zendnnl::common::data_type_t::bf16;
-  matmul_dtype.wei =
-    is_input_float ? zendnnl::common::data_type_t::f32 :
-    zendnnl::common::data_type_t::bf16;
-  matmul_dtype.dst = zendnnl::common::data_type_t::f32;
+  matmul_dtype.dst     = zendnnl::common::data_type_t::f32;
+  if constexpr(std::is_same_v<Tin, float>) {
+    matmul_dtype.src = zendnnl::common::data_type_t::f32;
+    matmul_dtype.wei = zendnnl::common::data_type_t::f32;
+  }
+  else if constexpr(std::is_same_v<Tin, bfloat16_t>) {
+    matmul_dtype.src = zendnnl::common::data_type_t::bf16;
+    matmul_dtype.wei = zendnnl::common::data_type_t::bf16;
+  }
+  else {
+    static_assert(std::is_same_v<Tin, float16_t>,
+                  "zendnn_gemm: only float / bfloat16_t / float16_t input supported");
+    matmul_dtype.src = zendnnl::common::data_type_t::f16;
+    matmul_dtype.wei = zendnnl::common::data_type_t::f16;
+  }
   params.dtypes = matmul_dtype;
   params.lowoha_algo = zendnnl::ops::matmul_algo_t::aocl_dlp;
 
@@ -171,6 +167,13 @@ inline void zendnn_gemm(int64_t m, int64_t n, int64_t k, float alpha,
 // avx512_tag instantiation use the correct ABI (zmm registers, 64-byte
 // alignment).  The scalar_tag instantiation never touches __m512 types
 // (VecF32 = struct{float}), so the target is harmless there.
+//
+// The target string intentionally omits "f16c": the only FP16 conversions
+// used here are _mm512_cvtph_ps / _mm512_cvtps_ph, which live in
+// <avx512fintrin.h> and require avx512f only. F16C covers the older
+// 128/256-bit VCVTPH2PS variants and would over-tighten the compile-time
+// ISA relative to the runtime gate (get_avx512f_status), risking SIGILL
+// on AVX-512F CPUs without F16C even on the pure FP32/BF16 paths.
 //
 // #pragma GCC optimize("no-tree-vectorize") prevents the compiler from
 // auto-vectorising scalar-path loops with AVX-512 instructions, which
@@ -198,12 +201,22 @@ inline void scale_attn_mask_fusion(T1 *a, T2 const *b, int size, T1 *out,
     }
   }
   else if constexpr(std::is_same_v<T1, float> &&
-                    std::is_same_v<T2, bf16_elem>) {
+                    std::is_same_v<T2, bfloat16_t>) {
     const VecF32 vs = Ops::vec_set1(val);
     const auto *bp = reinterpret_cast<const uint16_t *>(b);
     for (; i + L <= size; i += L) {
       const VecF32 va = Ops::vec_loadu(a + i);
       const VecF32 vb = Ops::vec_mask_bf16_loadu(bp + i);
+      Ops::vec_storeu(out + i, Ops::vec_fmadd(va, vs, vb));
+    }
+  }
+  else if constexpr(std::is_same_v<T1, float> &&
+                    std::is_same_v<T2, float16_t>) {
+    const VecF32 vs = Ops::vec_set1(val);
+    const auto *bp = reinterpret_cast<const uint16_t *>(b);
+    for (; i + L <= size; i += L) {
+      const VecF32 va = Ops::vec_loadu(a + i);
+      const VecF32 vb = Ops::vec_mask_f16_loadu(bp + i);
       Ops::vec_storeu(out + i, Ops::vec_fmadd(va, vs, vb));
     }
   }
@@ -252,8 +265,11 @@ inline void exp_reduce_sum_fusion_to(const accum_t *a, int size, T2 *out,
     const VecF32 d = Ops::vec_sub(x, vmb);
     const VecF32 e = Ops::vec_fexp_u20(d);
     vsum = Ops::vec_add(vsum, e);
-    if constexpr(std::is_same_v<T2, bf16_elem>) {
-      Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&out[i].x), e);
+    if constexpr(std::is_same_v<T2, bfloat16_t>) {
+      Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
+    }
+    else if constexpr(std::is_same_v<T2, float16_t>) {
+      Ops::vec_f16_storeu(reinterpret_cast<uint16_t *>(&out[i]), e);
     }
     else {
       Ops::vec_storeu(reinterpret_cast<float *>(out + i), e);
@@ -291,13 +307,6 @@ inline void mul_reduce_max_fusion(const accum_t *a, accum_t scale, int size,
   }
 }
 
-template <typename scalar_t>
-inline void fill_stub(scalar_t *data, scalar_t val, int64_t size) {
-  for (int64_t d = 0; d < size; ++d) {
-    data[d] = val;
-  }
-}
-
 template <typename SimdTag>
 inline void fill_stub_f32(float *data, float val, int64_t size) {
   using Ops = simd::SimdOps<SimdTag>;
@@ -313,9 +322,13 @@ inline void fill_stub_f32(float *data, float val, int64_t size) {
   }
 }
 
+// Returns the pointer the next GEMM should consume as its A operand:
+//   * F32 path: the FP32 softmax tile in `ptr` (no reduced buffer exists).
+//   * BF16 / F16 path: the reduced-precision softmax tile in `ptr2`.
 template <typename scalar_t>
 inline scalar_t *conditional_data_ptr(scalar_t *ptr, scalar_t *ptr2) {
-  SDPA_SA_CHECK(ptr2 == nullptr, "conditional_data_ptr: unexpected bf16 qk buf");
+  SDPA_SA_CHECK(ptr2 == nullptr,
+                "conditional_data_ptr: unexpected reduced-fp qk buf");
   return ptr;
 }
 
@@ -360,7 +373,7 @@ inline void scale_dst_row(accum_t *row, int64_t len, accum_t exp_tmp) {
 }
 
 template <typename SimdTag>
-inline void vec_f32_scaled_bf16_store(bf16_elem *dst, const accum_t *src,
+inline void vec_f32_scaled_bf16_store(bfloat16_t *dst, const accum_t *src,
                                       int64_t len, accum_t scale) {
   using Ops = simd::SimdOps<SimdTag>;
   using VecF32 = typename Ops::VecF32;
@@ -369,11 +382,29 @@ inline void vec_f32_scaled_bf16_store(bf16_elem *dst, const accum_t *src,
   int64_t c = 0;
   for (; c + L <= len; c += L) {
     const VecF32 x = Ops::vec_loadu(src + c);
-    Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&dst[c].x),
+    Ops::vec_bf16_storeu(reinterpret_cast<uint16_t *>(&dst[c]),
                          Ops::vec_mul(x, vs));
   }
   for (; c < len; ++c) {
-    dst[c].x = float_to_bf16_bits(src[c] * scale);
+    dst[c] = bfloat16_t(src[c] * scale);
+  }
+}
+
+template <typename SimdTag>
+inline void vec_f32_scaled_f16_store(float16_t *dst, const accum_t *src,
+                                     int64_t len, accum_t scale) {
+  using Ops = simd::SimdOps<SimdTag>;
+  using VecF32 = typename Ops::VecF32;
+  const int L = Ops::kFloatLanes;
+  const VecF32 vs = Ops::vec_set1(scale);
+  int64_t c = 0;
+  for (; c + L <= len; c += L) {
+    const VecF32 x = Ops::vec_loadu(src + c);
+    Ops::vec_f16_storeu(reinterpret_cast<uint16_t *>(&dst[c]),
+                        Ops::vec_mul(x, vs));
+  }
+  for (; c < len; ++c) {
+    dst[c] = float16_t(src[c] * scale);
   }
 }
 
@@ -397,9 +428,14 @@ inline void write_scaled_output_row(scalar_t *out_base, int64_t out_stride_d,
       }
       return;
     }
-    else if constexpr(std::is_same_v<scalar_t, bf16_elem>) {
+    else if constexpr(std::is_same_v<scalar_t, bfloat16_t>) {
       vec_f32_scaled_bf16_store<SimdTag>(out_base, dst_row, headSize,
                                          sum_reciprocal);
+      return;
+    }
+    else if constexpr(std::is_same_v<scalar_t, float16_t>) {
+      vec_f32_scaled_f16_store<SimdTag>(out_base, dst_row, headSize,
+                                        sum_reciprocal);
       return;
     }
   }
@@ -584,10 +620,18 @@ void cpu_flash_attention_sa(
   int64_t size_per_thread = qSplitSize * kvSplitSize + qSplitSize + qSplitSize +
                             qSplitSize * headSize;
 
+  // Reduced-precision per-thread scratch layout (in elements of scalar_t):
+  //   [qk_reduced_data : qSplitSize*kvSplitSize ]                     (bf16/f16)
+  // Holds the reduced-precision softmax probabilities that feed the P*V GEMM.
+  int64_t reduced_per_thread = 0;
+  if constexpr(is_reduced_type) {
+    reduced_per_thread = qSplitSize * kvSplitSize;
+  }
+
   const size_t buf_bytes = static_cast<size_t>(num_thread * size_per_thread)
                            * sizeof(accum_t);
   const size_t buf_reduced_bytes = is_reduced_type
-                                   ? static_cast<size_t>(num_thread * qSplitSize * kvSplitSize)
+                                   ? static_cast<size_t>(num_thread * reduced_per_thread)
                                    * sizeof(scalar_t)
                                    : 0;
   void *scratch = flash_scratch_acquire(buf_bytes + buf_reduced_bytes);
@@ -617,7 +661,7 @@ void cpu_flash_attention_sa(
     accum_t *dst_data = qk_sum_data + qSplitSize;
     scalar_t *qk_reduced_data =
       is_reduced_type
-      ? buf_reduced_data + ompIdx * qSplitSize * kvSplitSize
+      ? buf_reduced_data + ompIdx * reduced_per_thread
       : nullptr;
 
     int64_t m = k * qSplitSize;
@@ -630,7 +674,7 @@ void cpu_flash_attention_sa(
 
     for (int64_t n = 0; n < num_keys; n += kvSplitSize) {
       int64_t kvBlockSize = std::min(kvSplitSize, kvSize - n);
-      // GEMM: Q_block @ K_block^T -> qk_data.
+      // GEMM: Q_block @ K_block^T -> qk_data (FP32 accumulator).
       //   alpha=1: softmax scale (1/sqrt(d) or user scale) is fused into
       //            mul_reduce_max_fusion / scale_attn_mask_fusion below.
       //   beta =0: qk_data is reused per kv-tile, no prior contents to keep.
@@ -703,8 +747,8 @@ void cpu_flash_attention_sa(
       // GEMM: softmax_block @ V_block -> dst_data (online-softmax accumulator).
       //   alpha=1: prior dst rows already rescaled by exp(prev_max - new_max)
       //            via scale_dst_row above.
-      //   beta = n==0 ? 0 : 1: first kv-tile initialises dst_data, subsequent
-      //            tiles accumulate (this is the flash-attention update rule).
+      //   beta = n==0 ? 0 : 1 lets the GEMM accumulate into the FP32
+      //            dst_data scratch directly.
       zendnn_gemm<scalar_t>(
         qBlockSize, headSize, kvBlockSize, 1.0f,
         conditional_data_ptr(qk_data, qk_reduced_data), kvBlockSize,
@@ -787,6 +831,15 @@ status_t sdpa_flash_cpu_run_internal(
       return status_t::failure;
     }
 
+    // FP16 requires AVX512-FP16, matching the matmul ISA gate in
+    // lowoha_matmul.cpp. Reject early so callers get a stable
+    // status_t::isa_unsupported instead of a silent precision regression.
+    if (qkv_dt == data_type_t::f16 &&
+        !zendnnl::common::zendnnl_platform_info().get_avx512_f16_status()) {
+      log_error("sdpa_flash_cpu: FP16 requires AVX512-FP16");
+      return status_t::isa_unsupported;
+    }
+
     // Runtime SIMD dispatch: AVX-512 when available, scalar fallback otherwise.
     auto run = [&](auto simd_tag) {
       using Tag = decltype(simd_tag);
@@ -799,12 +852,24 @@ status_t sdpa_flash_cpu_run_internal(
       }
       else if (qkv_dt == data_type_t::bf16) {
         if (!mopt.has_value() || mask_dtype == data_type_t::f32) {
-          flash_attention_kernel_sa_dispatch<Tag, bf16_elem, float>(
+          flash_attention_kernel_sa_dispatch<Tag, bfloat16_t, float>(
             output, query, key, value, dropout_p, is_causal, mopt, scale,
             num_threads);
         }
         else {
-          flash_attention_kernel_sa_dispatch<Tag, bf16_elem, bf16_elem>(
+          flash_attention_kernel_sa_dispatch<Tag, bfloat16_t, bfloat16_t>(
+            output, query, key, value, dropout_p, is_causal, mopt, scale,
+            num_threads);
+        }
+      }
+      else if (qkv_dt == data_type_t::f16) {
+        if (!mopt.has_value() || mask_dtype == data_type_t::f32) {
+          flash_attention_kernel_sa_dispatch<Tag, float16_t, float>(
+            output, query, key, value, dropout_p, is_causal, mopt, scale,
+            num_threads);
+        }
+        else {
+          flash_attention_kernel_sa_dispatch<Tag, float16_t, float16_t>(
             output, query, key, value, dropout_p, is_causal, mopt, scale,
             num_threads);
         }

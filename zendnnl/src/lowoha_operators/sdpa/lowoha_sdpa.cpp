@@ -42,6 +42,7 @@ status_t sdpa_direct(
 
   status_t st = flash_sdpa(query, key, value, attn_mask,
                            output, params);
+
   if (st != status_t::success) {
     return st;
   }

@@ -116,8 +116,9 @@ status_t validate_flash_sdpa_inputs(
   }
 
   // --- data type checks ---
-  if (params.qkv_dt != data_type_t::f32 && params.qkv_dt != data_type_t::bf16) {
-    log_error("sdpa_flash_cpu: qkv_dt must be f32 or bf16");
+  if (params.qkv_dt != data_type_t::f32 && params.qkv_dt != data_type_t::bf16
+      && params.qkv_dt != data_type_t::f16) {
+    log_error("sdpa_flash_cpu: qkv_dt must be f32, bf16, or f16");
     return status_t::failure;
   }
 
@@ -147,6 +148,13 @@ status_t validate_flash_sdpa_inputs(
     if (params.qkv_dt == data_type_t::bf16 && params.mask_dt != data_type_t::f32
         && params.mask_dt != data_type_t::bf16) {
       log_error("sdpa_flash_cpu: mask_dt must be f32 or bf16 when qkv_dt is bf16 and mask is "
+                "provided");
+      return status_t::failure;
+    }
+    else if (params.qkv_dt == data_type_t::f16 &&
+             params.mask_dt != data_type_t::f32 &&
+             params.mask_dt != data_type_t::f16) {
+      log_error("sdpa_flash_cpu: mask_dt must be f32 or f16 when qkv_dt is f16 and mask is "
                 "provided");
       return status_t::failure;
     }

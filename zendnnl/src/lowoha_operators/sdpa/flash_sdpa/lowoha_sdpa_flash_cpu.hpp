@@ -16,11 +16,6 @@ namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
 
-/// BF16 lane for flash CPU kernel (matches uint16 storage used by lowoha matmul).
-struct bf16_elem {
-  uint16_t x;
-};
-
 /// Layout [Batch, Head, Seq, Dim] (PyTorch-style BHSD).
 struct sdpa_flash_cpu_tensor_view {
   const void *data;

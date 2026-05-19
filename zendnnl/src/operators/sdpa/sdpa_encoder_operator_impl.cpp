@@ -125,7 +125,7 @@ status_t sdpa_encoder_impl_t::validate() {
   // misinterpret memory and could read past the allocation. We only enforce
   // the consistency property here; kernel_factory() remains the single
   // source of truth for the supported-dtype list (rejecting anything other
-  // than f32 / bf16 with status_t::unimplemented).
+  // than f32 / bf16 / f16 with status_t::unimplemented).
   auto qkv_dtype = query->get_data_type();
   if (key->get_data_type() != qkv_dtype ||
       value->get_data_type() != qkv_dtype) {
@@ -226,6 +226,9 @@ status_t sdpa_encoder_impl_t::validate() {
     //   - BF16 QKV  -> mask may be FP32 or BF16; the BF16 kernel dispatches
     //                  on the mask dtype at execute() time and converts
     //                  per-element to FP32 before adding to the score buffer.
+    //   - F16  QKV  -> mask may be FP32 or F16; same dispatch pattern as the
+    //                  BF16 path (per-element widening to FP32 inside
+    //                  apply_attention_mask<mask_t>).
     // Both kernels reinterpret the mask buffer as the validated dtype, so a
     // mismatched dtype would silently misinterpret memory and could read
     // past the tensor's allocation.
@@ -233,11 +236,14 @@ status_t sdpa_encoder_impl_t::validate() {
     const bool mask_dt_ok =
       (qkv_dtype == data_type_t::f32  && mask_dt == data_type_t::f32) ||
       (qkv_dtype == data_type_t::bf16 && (mask_dt == data_type_t::f32 ||
-                                          mask_dt == data_type_t::bf16));
+                                          mask_dt == data_type_t::bf16)) ||
+      (qkv_dtype == data_type_t::f16  && (mask_dt == data_type_t::f32 ||
+                                          mask_dt == data_type_t::f16));
     if (!mask_dt_ok) {
       apilog_error("SDPA mask tensor dtype is not supported for the given "
-                   "Q/K/V dtype. Allowed: f32 mask with f32 QKV, or f32/bf16 "
-                   "mask with bf16 QKV. Got QKV=", static_cast<int>(qkv_dtype),
+                   "Q/K/V dtype. Allowed: f32 mask with f32 QKV, f32/bf16 "
+                   "mask with bf16 QKV, or f32/f16 mask with f16 QKV. Got "
+                   "QKV=", static_cast<int>(qkv_dtype),
                    " mask=", static_cast<int>(mask_dt));
       return status_t::failure;
     }
@@ -363,8 +369,14 @@ status_t sdpa_encoder_impl_t::kernel_factory() {
   // internally; kernel_factory() remains the single source of truth for the
   // supported-dtype list so the caller (operator_impl_t::create()) gets the
   // canonical status_t::unimplemented for unsupported dtypes before the
-  // kernel itself is exercised.
-  if (input_dtype != data_type_t::f32 && input_dtype != data_type_t::bf16) {
+  // kernel itself is exercised. The reference kernel performs all arithmetic
+  // in FP32 internally (using each dtype's float-conversion operators at
+  // load/store), so F16 is supported here without requiring an F16-capable
+  // ISA -- unlike the LOWOHA flash backend, which gates F16 on AVX512-FP16 /
+  // AVX-NE-CONVERT availability.
+  if (input_dtype != data_type_t::f32 &&
+      input_dtype != data_type_t::bf16 &&
+      input_dtype != data_type_t::f16) {
     apilog_error("Unsupported data type for SDPA encoder: ",
                  static_cast<int>(input_dtype));
     return status_t::unimplemented;

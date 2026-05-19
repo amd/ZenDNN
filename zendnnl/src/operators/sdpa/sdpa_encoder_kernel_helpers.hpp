@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
@@ -80,13 +81,20 @@ inline mask_layout compute_mask_strides(
 
 /**
  * @file
- * @brief Templated reference helpers shared by the FP32/BF16 SDPA encoder
+ * @brief Templated reference helpers shared by the FP32/BF16/F16 SDPA encoder
  *        kernels.
  *
  * The reference kernels keep the same numerical recipe regardless of the
  * input dtype: typed loads/stores at the I/O boundary, all arithmetic in
  * float (so softmax is numerically stable for every input dtype). These
  * helpers express that recipe once, parametrised on the Q/K/V/output type.
+ *
+ * The reference kernels never use any reduced-precision ISA: every typed
+ * element is widened to FP32 via @c to_float() / @c from_float() at the I/O
+ * boundary using the dtype's float conversion operators
+ * (@c bfloat16_t::operator float, @c float16_t::operator float, etc.). This
+ * makes the F16 reference kernel portable to every CPU, regardless of
+ * whether AVX512-FP16 / AVX-NE-CONVERT is available.
  */
 
 /** @brief Convert any element type to float (used at load time). */
@@ -106,7 +114,7 @@ inline T from_float(float f) {
  *
  * scores[i, j] = (sum_k q[i, k] * k[j, k]) * scale
  *
- * Q/K are typed (FP32 or BF16); the score buffer is always FP32 to keep
+ * Q/K are typed (FP32 / BF16 / F16); the score buffer is always FP32 to keep
  * softmax numerically stable for low-precision inputs.
  *
  * Layout (per (batch, head) slice; the head_dim axis must be physically
@@ -223,11 +231,13 @@ inline void apply_causal_mask(float *attention_scores,
  *
  * scores += mask. Mask values are typically 0 (attend) or -inf (ignore).
  *
- * The mask buffer's element type @p mask_t may differ from FP32 (e.g. BF16);
- * each loaded element is converted to float via @c to_float<mask_t> before
- * being added so the score buffer stays in FP32 for numerical stability.
+ * The mask buffer's element type @p mask_t may differ from FP32 (e.g. BF16
+ * or F16); each loaded element is converted to float via @c to_float<mask_t>
+ * before being added so the score buffer stays in FP32 for numerical
+ * stability.
  *
- * @tparam mask_t           Mask element type (float or bfloat16_t).
+ * @tparam mask_t           Mask element type (float, bfloat16_t, or
+ *                          float16_t).
  * @param attention_scores  FP32 [seq_len_q, seq_len_kv] score buffer (in/out).
  * @param mask_ptr          Pointer to the contiguous [seq_len_q, seq_len_kv]
  *                          mask slab for the current (batch, head) — caller
@@ -262,11 +272,13 @@ inline void apply_attention_mask(float *attention_scores,
  * and the innermost stride is dead, matching the operator validator's
  * size-1 relaxation.
  *
- * @tparam qkv_t        Q/K/V/output element type (float or bfloat16_t).
- * @tparam mask_t       Mask element type (float or bfloat16_t). Independent of
- *                      @p qkv_t — bf16 QKV may be combined with either an
- *                      f32 or a bf16 mask; f32 QKV always pairs with f32 mask
- *                      (enforced by the operator's validate()).
+ * @tparam qkv_t        Q/K/V/output element type (float, bfloat16_t, or
+ *                      float16_t).
+ * @tparam mask_t       Mask element type (float, bfloat16_t, or float16_t).
+ *                      Independent of @p qkv_t — reduced-precision QKV
+ *                      (bf16 / f16) may be combined with either an f32 or a
+ *                      same-precision mask; f32 QKV always pairs with f32
+ *                      mask (enforced by the operator's validate()).
  * @param q_new         Q slice [seq_len_q,  head_dim]
  * @param k_new         K slice [seq_len_kv, head_dim]
  * @param v_new         V slice [seq_len_kv, head_dim]

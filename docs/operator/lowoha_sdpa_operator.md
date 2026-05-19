@@ -77,9 +77,9 @@ struct sdpa_params {
   int64_t mask_strides[4];
 
   // Data types
-  data_type_t qkv_dt;     // Q/K/V data type (f32 or bf16)
-  data_type_t out_dt;      // Output data type
-  data_type_t mask_dt;     // Mask data type (f32 or bf16)
+  data_type_t qkv_dt;      // Q/K/V data type (f32, bf16, or f16)
+  data_type_t out_dt;      // Output data type (must equal qkv_dt, or none)
+  data_type_t mask_dt;     // Mask data type (f32 for any supported qkv_dt; bf16 only with bf16 Q/K/V; f16 only with f16 Q/K/V)
 
   // Computation parameters
   double scale;            // Attention scale (0 = auto: 1/sqrt(head_dim))
@@ -122,8 +122,15 @@ The flash backend uses per-tensor BHSD strides to support non-contiguous memory 
 | BF16 | FP32 | BF16 | Mixed-precision BFloat16 |
 | BF16 | BF16 | BF16 | Full BF16 pipeline |
 | BF16 | None | BF16 | No attention mask |
+| FP16 | FP32 | FP16 | Mixed-precision IEEE half (requires AVX512-FP16, see below) |
+| FP16 | FP16 | FP16 | Full FP16 pipeline (requires AVX512-FP16, see below) |
+| FP16 | None | FP16 | No attention mask (requires AVX512-FP16, see below) |
 
-> **Note:** All internal accumulation is performed in FP32 regardless of the input data type.
+> **Note:** Internal precision is FP32 across all paths. Both the Q×K^T and softmax×V matmuls write FP32 outputs into the per-thread accumulators (`aocl_gemm_bf16bf16f32of32` for BF16 inputs, `aocl_gemm_f16f16f32of32` for FP16 inputs, `aocl_gemm_f32f32f32of32` for FP32 inputs). Online-softmax max/sum reductions and the running output accumulator stay in FP32. `out_dt` must either equal `qkv_dt` or be `data_type_t::none`.
+
+#### ISA requirement for FP16
+
+The FP16 paths require **AVX512-FP16** at runtime (CPUID leaf 7, subleaf 0, EDX bit 23; available on Zen 5 / Sapphire Rapids and later). The operator probes this via `zendnnl_platform_info().get_avx512_f16_status()` and rejects FP16 calls early with `status_t::isa_unsupported` when the ISA is absent, mirroring the gate enforced by the matmul backend (`lowoha_matmul.cpp`).
 
 
 ### Attention Mask
@@ -145,7 +152,7 @@ sdpa_direct()
   │  Profiling / logging wrapper
   │
   ▼
-sdpa_flash_cpu_standalone()
+flash_sdpa()
   │  1. Validate inputs (null checks, dimensions, strides, dtypes)
   │  2. Build lightweight tensor views from sdpa_params
   │  3. Build mask view (if mask provided)
@@ -224,7 +231,7 @@ The `SimdTag` template parameter propagates through all helper functions, so the
 | Exp + Sum | `exp_reduce_sum_fusion` | Fused `exp(x - max)` and reduction sum |
 | Row Max | `row_max` | SIMD row-wise maximum |
 | Row Scale | `scale_dst_row` | SIMD element-wise multiply |
-| Output Write | `write_scaled_output_row` | SIMD scaled store (FP32 or BF16 conversion) |
+| Output Write | `write_scaled_output_row` | SIMD scaled store (FP32 / BF16 / FP16 conversion) |
 | Fast Exp | `vec_exp_u20` / `vec_fexp_u20` | ~20 ULP polynomial exp approximation |
 
 
@@ -352,7 +359,70 @@ int lowoha_sdpa_bf16_causal_example() {
 }
 ```
 
-### Example 3: FP32 SDPA with 4-D Attention Mask
+### Example 3: FP16 SDPA with FP16 Attention Mask
+
+The setup mirrors the BF16 example; only `qkv_dt`/`out_dt`/`mask_dt` change.
+The call returns `status_t::isa_unsupported` if the host lacks **AVX512-FP16** — see
+[ISA requirement for FP16](#isa-requirement-for-fp16).
+
+```cpp
+int lowoha_sdpa_fp16_example() {
+  using namespace zendnnl::lowoha::sdpa;
+
+  int64_t B = 2, H = 12, S = 512, D = 64;
+
+  // FP16 stored as uint16_t (IEEE 754 half).
+  std::vector<uint16_t> query(B * H * S * D);
+  std::vector<uint16_t> key(B * H * S * D);
+  std::vector<uint16_t> value(B * H * S * D);
+  std::vector<uint16_t> output(B * H * S * D, 0);
+
+  // FP16 mask, broadcast across batch and heads ([S_q, S_kv]).
+  std::vector<uint16_t> mask(S * S, 0);
+
+  sdpa_params params;
+  params.batch      = B;
+  params.num_heads  = H;
+  params.seq_len    = S;
+  params.kv_seq_len = S;
+  params.head_dim   = D;
+
+  // Contiguous BHSD strides
+  params.q_stride_b = H * S * D;  params.q_stride_h = S * D;
+  params.q_stride_s = D;          params.q_stride_d = 1;
+  params.k_stride_b = H * S * D;  params.k_stride_h = S * D;
+  params.k_stride_s = D;          params.k_stride_d = 1;
+  params.v_stride_b = H * S * D;  params.v_stride_h = S * D;
+  params.v_stride_s = D;          params.v_stride_d = 1;
+  params.o_stride_b = H * S * D;  params.o_stride_h = S * D;
+  params.o_stride_s = D;          params.o_stride_d = 1;
+
+  params.qkv_dt    = data_type_t::f16;
+  params.out_dt    = data_type_t::f16;   // must match qkv_dt
+  params.mask_dt   = data_type_t::f16;   // f32 is also valid with FP16 Q/K/V
+  params.scale     = 1.0 / std::sqrt(static_cast<double>(D));
+  params.is_causal = false;
+  params.dropout_p = 0.0;
+
+  // 2-D mask metadata [S_q, S_kv]
+  params.mask_ndims      = 2;
+  params.mask_sizes[0]   = S;   params.mask_strides[0] = S;
+  params.mask_sizes[1]   = S;   params.mask_strides[1] = 1;
+
+  status_t status = sdpa_direct(
+    query.data(), key.data(), value.data(),
+    mask.data(),
+    output.data(),
+    params
+  );
+
+  // status == status_t::isa_unsupported if the runtime CPU lacks
+  // AVX512-FP16.
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 4: FP32 SDPA with 4-D Attention Mask
 
 ```cpp
 int lowoha_sdpa_with_mask_example() {
@@ -410,7 +480,7 @@ int lowoha_sdpa_with_mask_example() {
 }
 ```
 
-### Example 4: SDPA with Broadcast 2-D Mask
+### Example 5: SDPA with Broadcast 2-D Mask
 
 ```cpp
 int lowoha_sdpa_broadcast_mask_example() {
@@ -467,7 +537,7 @@ int lowoha_sdpa_broadcast_mask_example() {
 ```
 
 
-### Example 5: Cross-Attention (Encoder-Decoder)
+### Example 6: Cross-Attention (Encoder-Decoder)
 
 Cross-attention is used in encoder-decoder models (T5, MT5) where the decoder query attends to encoder key/value with a different sequence length.
 
@@ -560,7 +630,7 @@ Each thread uses a private scratch buffer for intermediate results:
 | `qk_max_data` | `q_split` | Running row-wise max for online softmax |
 | `qk_sum_data` | `q_split` | Running row-wise sum for online softmax |
 | `dst_data` | `q_split × head_dim` | Running output accumulator (FP32) |
-| `qk_reduced_data` | `q_split × kv_split` | BF16 softmax weights (BF16 path only) |
+| `qk_reduced_data` | `q_split × kv_split` | Reduced-precision softmax weights/tile that feeds the softmax×V GEMM (BF16 or FP16 path) |
 
 Scratch buffers are managed via a `thread_local` allocator (`flash_scratch_acquire`) that grows-only and reuses memory across calls. Call `sdpa_flash_cpu_free_scratch()` to eagerly release.
 
