@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 
@@ -38,6 +39,39 @@ using zendnnl::error_handling::apilog_info_enabled;
 bool dispatch_supported() {
   return avx512bf16_available();
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Variant resolution — pure switch over the (src, wei, dst) dtype
+// tuple.  No I/O, no allocation, no logging — `prepare_for_call()`
+// owns the logging (this helper is also called from gtests that
+// want to assert the routing without any side effect).
+//
+// The BF16-BF16-BF16 and BF16-BF16-F32 rows are wired up.  Any other
+// tuple falls through to `kUnsupported`, which the caller routes to
+// DLP.
+// ────────────────────────────────────────────────────────────────────
+KernelVariant resolve_variant(data_type_t src, data_type_t wei,
+                              data_type_t dst) noexcept {
+  if (src == data_type_t::bf16 && wei == data_type_t::bf16) {
+    if (dst == data_type_t::bf16) return KernelVariant::kBF16_BF16_BF16;
+    if (dst == data_type_t::f32 ) return KernelVariant::kBF16_BF16_F32;
+  }
+  return KernelVariant::kUnsupported;
+}
+
+// Helper to pick the kernel-store dtype (DstDt) from a resolved
+// variant.  Lives in this TU so dispatch.cpp's `fill_kfn_table` and
+// `dispatch_tile` agree with `resolve_variant` on the variant→DstDt
+// mapping (single source of truth: the table here).
+namespace {
+DstDt dst_dt_for_variant(KernelVariant v) noexcept {
+  switch (v) {
+    case KernelVariant::kBF16_BF16_BF16: return DstDt::kBf16;
+    case KernelVariant::kBF16_BF16_F32:  return DstDt::kF32;
+    default: return DstDt::kBf16;  // unreachable on the success path
+  }
+}
+}  // namespace
 
 // Pick the pack/microkernel NR for one (K, N) shape.  Env override
 // (from `get_grp_matmul_custom_kernel_nr()` in parallel_common.hpp)
@@ -96,13 +130,14 @@ int pick_l2_subtile_cols(int M_max, int K, int pack_nr) {
 }
 
 // Resolve the per-MR microkernel function-pointer table for one
-// (NV, act_kind) pair.  Called once by `prepare_for_call()`.  Per-
-// tile lookup is then a direct `kfn_table[mr_now]` — no switch.
+// (NV, act_kind, dst_dt) tuple.  Called once by `prepare_for_call()`.
+// Per-tile lookup is then a direct `kfn_table[mr_now]` — no switch.
 status_t fill_kfn_table(
-    int NV, ActKind act_kind, ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+    int NV, ActKind act_kind, DstDt dst_dt,
+    ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
   const int max_mr = max_mr_for_nv(NV);
   for (int mr = 1; mr <= max_mr; ++mr) {
-    kfn_table[mr] = select_ukernel(mr, NV, act_kind);
+    kfn_table[mr] = select_ukernel(mr, NV, act_kind, dst_dt);
     if (kfn_table[mr] == nullptr) return status_t::failure;
   }
   return status_t::success;
@@ -133,7 +168,24 @@ status_t prepare_for_call(
     const std::vector<bool>          &is_weights_const,
     CallContext &out) {
 
-  out.enabled = false;
+  // Reset the full CallContext to defaults on entry.  Callers may
+  // reuse a single context across calls (e.g. an OMP region that
+  // dispatches multiple group_matmul_direct calls back-to-back), so
+  // we cannot rely on the destructor to clear stale state from a
+  // previous successful prepare.  If we only cleared `enabled` and
+  // a refusal exited before assigning `variant` / `pack_nr` /
+  // `kfn_table[...]` / `packed_ptrs[...]` / `subtile_cols_per_expert[...]`,
+  // those fields would carry over from the prior call — making any
+  // future read that bypasses the `enabled` gate (a debug assert,
+  // an APILOG line, or a refactor that misses the gate) silently
+  // observe a stale-but-plausible config.  `out = {}` value-init's
+  // every field via the in-class defaults declared in
+  // `CallContext` (dispatch.hpp): `enabled = false`, `variant =
+  // kUnsupported`, scalar fields = 0 / sentinel, fn-pointer table
+  // and the two `std::array` members zero-filled.  Cost: ~2 KB of
+  // zeroing once per call on the cold prep path, negligible vs
+  // the surrounding kernel work.
+  out = CallContext{};
 
   // ── Refusal logging helper ───────────────────────────────────────
   // Every early return below represents a concrete dispatch-contract
@@ -184,29 +236,64 @@ status_t prepare_for_call(
   // ── Run-once invariants (CPU + dtypes + activation) ──────────────
   if (!dispatch_supported())
     return refuse("avx512bf16_not_available");
-  // A / B / C dtype gate: the custom microkernel implements only the
-  // bf16 × bf16 → bf16 VDPBF16PS math path.  Accepting any dtype other
-  // than bf16 for src / wei / dst would cause the microkernel to
-  // reinterpret the caller's buffers as bf16 and produce corrupt
-  // output (no runtime type conversion inside the kernel).  Callers
-  // on mixed-precision paths (e.g. fp32 weights + bf16 dst) fall back
-  // to the standard path on dispatcher refusal.
-  if (src_dtype != data_type_t::bf16
-      || wei_dtype != data_type_t::bf16
-      || dst_dtype != data_type_t::bf16) {
+  // A / B / C dtype gate: route through `resolve_variant()` which is
+  // the single source of truth for "which (src, wei, dst) tuples the
+  // custom kernel can serve".  `kUnsupported` here means the caller
+  // falls back to DLP.  Routing through the variant keeps the
+  // dispatcher's gate aligned with the gtest matrix in
+  // `gtests/group_matmul/custom_kernel/`, which calls
+  // `resolve_variant()` directly to assert the table.
+  const KernelVariant variant =
+      resolve_variant(src_dtype, wei_dtype, dst_dtype);
+  if (variant == KernelVariant::kUnsupported) {
     if (s_refuse_log) {
       apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason="
                   "unsupported_dtype (src=", dt_name(src_dtype),
                   " wei=", dt_name(wei_dtype),
                   " dst=", dt_name(dst_dtype),
-                  " — custom kernel is bf16×bf16→bf16 only)");
+                  " — see resolve_variant() in custom_kernel/dispatch.cpp"
+                  " for the supported table)");
     }
     return status_t::failure;
   }
+  // Cache the variant on the per-call context so `dispatch_tile()`
+  // can route to the right kernel instantiation without re-running
+  // the dtype switch per tile.
+  out.variant = variant;
+  // Activation gate.
+  //
+  // The kernel handles two activation states inline:
+  //
+  //   * `none` — plain matmul; the epilogue stores the wide output.
+  //   * `swiglu_oai_mul` — fused-in-kernel activation.  The
+  //     interleaved `[g0, u0, g1, u1, ...]` layout puts gate / up
+  //     pairs on every 32-col tile, so the pair-pack store helper
+  //     can deinterleave and apply the activation in registers (one
+  //     fused matmul + activation pass, halved-width output).
+  //
+  // `silu_and_mul` and `gelu_and_mul` are NOT accepted here even
+  // though the kernel could serve them via the matmul-only path.
+  // Their split-halves layout `[gate_cols | up_cols]` puts gate /
+  // up of the same output position in DIFFERENT N-tiles, so the
+  // per-tile microkernel cannot deinterleave them — the activation
+  // must run as a separate post-pass on the wide [M, N] output.
+  // Because the dispatcher cannot enforce that a direct caller
+  // actually runs that post-pass, accepting these activations here
+  // would silently leave a caller with only matmul output and no
+  // activation applied.  Production callers translate silu/gelu →
+  // act = none BEFORE invoking `prepare_for_call` and run the
+  // activation themselves; `flat_n_tile` does this for the
+  // group_matmul_direct path (it passes `custom_act = none` for any
+  // act other than swiglu_oai_mul) and `group_matmul_direct` then
+  // invokes `group_matmul_moe_act_execute` on the wide output.
   if (act != grp_matmul_gated_act_t::swiglu_oai_mul
       && act != grp_matmul_gated_act_t::none) {
     return refuse("unsupported_activation",
-                  "custom kernel fuses only swiglu_oai_mul or none");
+                  "custom kernel admits only none / swiglu_oai_mul "
+                  "(fused).  Split-halves activations "
+                  "(silu_and_mul, gelu_and_mul) require the caller "
+                  "to translate to act=none and apply the "
+                  "activation as a separate post-pass.");
   }
   // `act_dtype` only matters when an activation is actually applied —
   // for `act = none` (plain GEMM) we accept any act_dtype (including
@@ -329,10 +416,18 @@ status_t prepare_for_call(
   // debug.  Dispatch reads per-expert values below.
   out.subtile_cols = pick_l2_subtile_cols(m_max, K_for_subtile, pack_nr);
 
-  if (fill_kfn_table(out.NV, out.act_kind, out.kfn_table)
+  // Resolve the dst dtype for kernel-table fill from the cached
+  // variant (single source of truth — keeps fill_kfn_table aligned
+  // with `resolve_variant`).  `select_ukernel` rejects the
+  // structurally-impossible (swiglu, FP32) combination by returning
+  // nullptr, which `fill_kfn_table` then surfaces as failure.
+  const DstDt dst_dt = dst_dt_for_variant(out.variant);
+  if (fill_kfn_table(out.NV, out.act_kind, dst_dt, out.kfn_table)
       != status_t::success) {
     return refuse("kfn_table_fill_failed",
-                  "no microkernel for this (NV, act_kind) pair");
+                  "no microkernel for this (NV, act_kind, dst_dt) tuple "
+                  "— note swiglu_oai_mul + FP32-dst is intentionally "
+                  "rejected (BF16 dst only)");
   }
 
   // ── Pre-pack every active expert's weight (single-threaded; the
@@ -402,25 +497,46 @@ void dispatch_tile(
     const void *bias,
     void       *tight_dst, int tight_ldc) {
 
-  // Tile-shape contract for the custom microkernel: every per-thread
-  // tile produced by `aligned_n_split` must be a multiple of
-  // `pack_nr` (the kernel processes B in `pack_nr`-wide blocks via
-  // truncating `n_blocks = sub_n / pack_nr`; any non-multiple tail
-  // would be SILENTLY DROPPED, leaving dst columns uninitialised).
+  // ── Per-tile contract assertions (debug-only) ────────────────────
   //
-  // This holds for the current production envelope because:
-  //   1. `prepare_for_call` refuses (N % pack_nr != 0);
-  //   2. for any `n_thr ≤ N / pack_nr`, `aligned_n_split` always
-  //      finds an aligned candidate that satisfies the 2× imbalance
-  //      bound, never falling back to its unaligned even-split path;
-  //   3. `participating_n_thr` upstream caps `n_thr` by
-  //      `N / min_n_tile` (= `N / kDecodeNTile` = `N / 256`), and
-  //      `min_n_tile >= pack_nr`, so condition 2 holds.
+  // Every assert below mirrors a contract that `prepare_for_call`
+  // already validated.  Caller bug = call `dispatch_tile` without a
+  // successful `prepare_for_call` first; these asserts turn silent
+  // wrong output (zeros / garbage) into a loud debug-build failure.
   //
-  // Asserts are debug-only; in release the contract is upheld by the
-  // upstream gates above.  If a future change introduces a per-tile
-  // shape that violates either contract, this assert turns the
-  // silent drop into a loud debug failure rather than wrong output.
+  // Asserts are debug-only; in release the contracts are upheld by
+  // the upstream gates documented next to each assert.
+  //
+  // 1. ctx.enabled — set true by `prepare_for_call` on success only.
+  //    A `dispatch_tile` call with `ctx.enabled == false` means the
+  //    caller skipped the post-prepare check and is asking the
+  //    dispatcher to use a CallContext that was either never
+  //    populated (default-constructed) or rejected.
+  assert(ctx.enabled
+         && "dispatch_tile: ctx.enabled is false — caller must check "
+            "prepare_for_call's status (or kctx.enabled) and route to "
+            "DLP on failure");
+  // 2. ctx.variant — set by `prepare_for_call` via `resolve_variant`.
+  //    `kUnsupported` would mean the routing table couldn't classify
+  //    the (src, wei, dst) tuple but the caller proceeded anyway.
+  assert(ctx.variant != KernelVariant::kUnsupported
+         && "dispatch_tile: ctx.variant is kUnsupported — "
+            "prepare_for_call should have returned failure on this "
+            "dtype tuple and the caller should have routed to DLP");
+  // 3. Tile-shape contract: every per-thread tile produced by
+  //    `aligned_n_split` must be a multiple of `pack_nr` (the kernel
+  //    processes B in `pack_nr`-wide blocks via truncating
+  //    `n_blocks = sub_n / pack_nr`; any non-multiple tail would be
+  //    SILENTLY DROPPED, leaving dst columns uninitialised).
+  //
+  //    This holds for the current production envelope because:
+  //      a. `prepare_for_call` refuses (N % pack_nr != 0);
+  //      b. for any `n_thr ≤ N / pack_nr`, `aligned_n_split` always
+  //         finds an aligned candidate that satisfies the 2× imbalance
+  //         bound, never falling back to its unaligned even-split path;
+  //      c. `participating_n_thr` upstream caps `n_thr` by
+  //         `N / min_n_tile` (= `N / kDecodeNTile` = `N / 256`), and
+  //         `min_n_tile >= pack_nr`, so condition (b) holds.
   assert(ctx.pack_nr > 0
          && "dispatch_tile: pack_nr is zero — call prepare_for_call");
   assert((n_tile % ctx.pack_nr) == 0
@@ -432,7 +548,14 @@ void dispatch_tile(
 
   const bfloat16_t *Bpacked_full = ctx.packed_ptrs[expert_idx];
   const auto       *A            = static_cast<const bfloat16_t *>(src);
-  auto             *Tight        = static_cast<bfloat16_t *>(tight_dst);
+  // Use byte-arithmetic for the dst since the element width depends on
+  // the kernel variant (BF16=2B for kBF16_BF16_BF16; FP32=4B for
+  // kBF16_BF16_F32).  The kernel internally re-casts the void* to its
+  // template `DstT`; ldc / ldc_tight stay in element units (not bytes).
+  std::byte *Tight_bytes        = static_cast<std::byte *>(tight_dst);
+  const size_t dst_elem_bytes   =
+      (ctx.variant == KernelVariant::kBF16_BF16_F32)
+          ? sizeof(float) : sizeof(bfloat16_t);
 
   // Per-tile constants (hoisted once outside the sub-tile / m-chunk /
   // n-block loops below).
@@ -498,8 +621,12 @@ void dispatch_tile(
 
         const bfloat16_t *A_chunk =
             A + static_cast<size_t>(m_off) * lda;
-        bfloat16_t *Tight_row_base = Tight
-            + static_cast<size_t>(m_off) * tight_ldc + (sub_col_base / 2);
+        // swiglu epilogue is BF16-dst-only (gated by select_ukernel),
+        // so the half-width tight arena's element stride is fixed at
+        // `sizeof(bfloat16_t)` here regardless of `dst_elem_bytes`.
+        std::byte *Tight_row_base = Tight_bytes
+            + (static_cast<size_t>(m_off) * tight_ldc
+               + (sub_col_base / 2)) * sizeof(bfloat16_t);
 
         for (int b = 0; b < n_blocks; ++b) {
           const bfloat16_t *Bpacked_blk =
@@ -509,7 +636,8 @@ void dispatch_tile(
                   + static_cast<size_t>(b) * ctx.pack_nr * bias_elem_bytes)
               : nullptr;
           // 16 cols per (g, u) pair × NV/2 pairs per kernel call.
-          bfloat16_t *Tight_row = Tight_row_base + b * (ctx.pack_nr / 2);
+          std::byte *Tight_row = Tight_row_base
+              + static_cast<size_t>(b) * (ctx.pack_nr / 2) * sizeof(bfloat16_t);
 
           kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
               /*Cout=*/nullptr, /*ldc=*/0,
@@ -542,8 +670,13 @@ void dispatch_tile(
 
       const bfloat16_t *A_chunk =
           A + static_cast<size_t>(m_off) * lda;
-      bfloat16_t *Wide_row_base = Tight
-          + static_cast<size_t>(m_off) * tight_ldc + sub_col_base;
+      // Wide / act=none path: dst element width depends on the
+      // resolved variant (BF16=2B, FP32=4B).  Use byte arithmetic
+      // here so the same loop body serves both store epilogues; the
+      // kernel re-casts the void* row to its template `DstT`.
+      std::byte *Wide_row_base = Tight_bytes
+          + (static_cast<size_t>(m_off) * tight_ldc
+             + sub_col_base) * dst_elem_bytes;
 
       for (int b = 0; b < n_blocks; ++b) {
         const bfloat16_t *Bpacked_blk =
@@ -552,7 +685,8 @@ void dispatch_tile(
             ? static_cast<const void *>(bias_blk_base
                 + static_cast<size_t>(b) * ctx.pack_nr * bias_elem_bytes)
             : nullptr;
-        bfloat16_t *Wide_row = Wide_row_base + b * ctx.pack_nr;
+        std::byte *Wide_row = Wide_row_base
+            + static_cast<size_t>(b) * ctx.pack_nr * dst_elem_bytes;
 
         kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
             Wide_row, tight_ldc,

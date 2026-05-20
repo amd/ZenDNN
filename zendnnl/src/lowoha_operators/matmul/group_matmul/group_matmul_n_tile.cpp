@@ -591,6 +591,51 @@ inline int effective_decode_n_tile() {
   return (ov > 0) ? ov : kDecodeNTile;
 }
 
+// ── Auto-select mirror ───────────────────────────────────────────────
+// Returns true when ALGO 0's auto-selector (`auto_select_algo` in
+// `group_matmul_parallel.cpp`) would have picked ALGO 1
+// (sequential_experts) for this shape rather than ALGO 3.  The
+// planner uses this to route to `execute_sequential` so that calls
+// pinned with `ZENDNNL_GRP_MATMUL_ALGO=3` behave identically to
+// auto-pick (env=0) on shapes where ALGO 1 is the better choice —
+// only the gemm_mode label distinguishes the two paths
+// (`flat_n_tile_sequential` vs `sequential_experts`) for telemetry.
+//
+// Mirror of `auto_select_algo`'s decision tree, simplified to the
+// portions reachable here (we know we're already in flat_n_tile, so
+// `n_tile_safe` is implicitly true and Rule 0 is handled by the
+// R3 capacity gate that runs alongside this check):
+//
+//   Rule 1  num_ops ≥ num_threads        → ALGO 3 (Qwen-class)
+//   Rule 2  num_ops ≤ kFewExpertsAlgo1   → ALGO 1 (Mixtral-class)
+//   Rule 3  9 ≤ num_ops < num_threads,
+//           prompt-class (max_M > kDecodeMaxM)  → ALGO 1
+//           decode-class (max_M ≤ kDecodeMaxM)  → ALGO 3
+//
+// Critically: Rule 1 takes precedence over Rule 3's M-driven check,
+// so Qwen-style prompt (128 experts × max_M=2048 on 64-128 thread
+// hosts) stays on ALGO 3 — the prompt → ALGO 1 routing only fires
+// when num_ops < num_threads.  This is the same priority order
+// `auto_select_algo` applies; mirroring it preserves the explicit
+// Qwen-prompt win without any per-shape carve-outs here.
+//
+// Replaces the legacy R1 (`num_ops ≤ 3`) and R2 (large-weight
+// regime) ad-hoc perf gates: those tried to identify shapes where
+// ALGO 3's column-parallel approach was specifically poor, but
+// since the auto-selector ALREADY routes those shapes to ALGO 1
+// upstream, the gates only ever fired under forced env=3.  The new
+// mirror replaces them with a faithful replay of auto-select's
+// decision so env=3 = env=0 for the strategy choice.
+inline bool auto_select_would_pick_algo1(
+    const GroupNTileTopology &topo) {
+  // Rule 1: num_ops ≥ num_threads → ALGO 3 (Qwen-class).
+  if (topo.num_ops >= topo.num_threads) return false;
+  // Rule 2: num_ops ≤ 8 → ALGO 1 (Mixtral-class).
+  if (topo.num_ops <= kFewExpertsAlgo1) return true;
+  // Rule 3 (M-driven): prompt → ALGO 1, decode → ALGO 3.
+  return (topo.max_M > kDecodeMaxM);
+}
+
 // ── Viability check ──────────────────────────────────────────────────
 // N-tiling only helps when N is large enough to create useful tiles.
 // For few-expert path (A): need tiles ≥ team_size / 2.
@@ -639,6 +684,40 @@ inline bool try_decode_d_plan(const GroupNTileTopology &topo,
   const int max_tiles = topo.max_N / decode_n_tile;
   const int thr_per_expert = std::max(1,
       std::min(topo.num_threads / topo.num_ops, max_tiles));
+  plan.strategy = GroupNTileStrategy::DecodeD;
+  plan.min_n_tile = decode_n_tile;
+  plan.decode_thr_per_expert = thr_per_expert;
+  plan.decode_total_threads = topo.num_ops * thr_per_expert;
+  return true;
+}
+
+// Force-DecodeD path — used when the user pins
+// `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` and explicitly asks the
+// planner to bypass the perf-eligibility heuristics
+// (`try_decode_d_plan`'s `max_M ≤ 32`, `num_ops ∈ [6, num_ccds]`,
+// `min_M_active ≥ 3`, `skew_ratio ≤ 4`, `max_N / decode_n_tile ≤
+// team_size_est`).  Useful for benchmarking DecodeD on shapes the
+// auto-heuristic would normally route to Rounds or to ALGO 1
+// (e.g. Qwen-style prompt with `num_ops > num_ccds`, where the
+// eligibility's `num_ops ≤ num_ccds` gate refuses).
+//
+// One structural floor remains: `num_threads >= num_ops`.  DecodeD's
+// executor opens `#pragma omp parallel num_threads(num_ops ×
+// thr_per_expert)` and maps `tid / thr_per_expert → expert`.  If the
+// team is smaller than `num_ops` we'd over-subscribe the OMP team
+// and the integer-division mapping would collide on the wrap, so
+// return false here and let the caller fall through to Rounds.
+//
+// `thr_per_expert` for the force path is `max(1, num_threads/num_ops)`
+// — the eligibility-path's additional `max_tiles` cap is dropped so
+// per-thread N slices can go below `decode_n_tile` (the user is
+// asking us to ignore that perf threshold).
+inline bool force_decode_d_plan(const GroupNTileTopology &topo,
+                                GroupNTilePlan &plan) {
+  if (topo.num_threads < topo.num_ops) return false;
+  const int decode_n_tile = effective_decode_n_tile();
+  const int thr_per_expert = std::max(1,
+      topo.num_threads / std::max(1, topo.num_ops));
   plan.strategy = GroupNTileStrategy::DecodeD;
   plan.min_n_tile = decode_n_tile;
   plan.decode_thr_per_expert = thr_per_expert;
@@ -1032,33 +1111,79 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 //   │ tile-level cache stability is not required.                │
 //   └────────────────────────────────────────────────────────────┘
 //
-// Both paths share the up-front fail-fast checks (viability + R1/R2
-// self-fallback to Sequential) and the narrow-N escape: in either
-// path, very narrow N falls through to Sequential which uses the
-// full thread team per expert and bypasses tile-level concerns
-// entirely.
+// Both paths share the up-front fail-fast checks (viability, R3
+// capacity, optional auto-select mirror) and the narrow-N escape:
+// in either path, shapes that cannot run an N-tile plan OR that
+// auto-select would have routed to ALGO 1 (when the user hasn't
+// explicitly forced ntile via the strategy knob) fall through to
+// Sequential.
+//
+// Sequential is reached for three reasons:
+//
+//   1. STRUCTURAL — `!ntile_viable` (N too small to split usefully)
+//      OR R3 (num_ops exceeds the plan's fixed-size per-expert
+//      arrays).  Memory safety / kernel correctness; non-negotiable
+//      regardless of the strategy knob.
+//
+//   2. AUTO-MIRROR — `auto_select_algo` (the env=0 selector in
+//      `group_matmul_parallel.cpp`) would have picked ALGO 1 for
+//      this shape rather than ALGO 3.  We mirror that decision so
+//      forced `ZENDNNL_GRP_MATMUL_ALGO=3` runs the same strategy
+//      auto-pick would have.  ONLY consulted under
+//      `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0 (auto)`; values 1 and 2
+//      are explicit user intent to run ntile and skip this gate
+//      (useful for benchmarking ntile vs ALGO 1 on shapes auto-
+//      select would otherwise route away).  Replaces the legacy R1
+//      (`num_ops ≤ 3`) and R2 (large-weight) ad-hoc perf gates with
+//      a faithful replay of auto-select's three-rule tree (Rules 1,
+//      2, 3 — see `auto_select_would_pick_algo1` for the mirror).
+//
+//   3. F3 NARROW-N ESCAPE — only on the AOCL strict-stable path,
+//      when `stable > max_N / nr_align` would force aligned_n_split
+//      to fall back to its unaligned even-split, breaking the
+//      kernel's nr-alignment contract.
 //
 // Helper map (in execution order):
-//   1. ntile_viable             — Sequential if false (N too small to
-//                                 split usefully across threads).
-//   2. R1 / R2 gates (inline)   — Sequential when forced ALGO 3 should
-//                                 mirror ALGO 0's Sequential pick:
-//                                 (R1) num_ops≤3, or
-//                                 (R2) large-weight regimes where
-//                                 ALGO 0 itself picks ALGO 1 (decode-
-//                                 class, very few experts, or tall-N
-//                                 few-experts prompt).  See doc-block
-//                                 immediately above the gate body.
-//   3. R3 capacity guard        — Sequential if num_ops exceeds the
-//                                 plan's fixed-size kMaxExperts arrays
-//                                 (defence against OOB on the
-//                                 strict-stable per-expert table).
-//   4. strict-stable AOCL plan  — non-custom path, when stable env on.
-//   5. try_decode_d_plan        — custom path, decode-class.
-//   6. build_few_experts_plan   — custom path, (A) num_ops ≤ num_ccds.
-//   7. build_round_candidates
+//   0. n_tile_strategy read            — `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY`
+//                                        snapshot.  Drives the
+//                                        auto-mirror gate (skipped
+//                                        under values 1/2), the
+//                                        force-DecodeD attempt
+//                                        (value 1 only), and the
+//                                        DecodeD heuristic attempt
+//                                        on the CK path (value 0
+//                                        only).
+//   1. ntile_viable                    — Sequential if false (1).
+//   2. R3 capacity guard               — Sequential if true (1).
+//   3. auto_select_would_pick_algo1    — Sequential if true AND
+//                                        n_tile_strategy == 0 (2).
+//                                        Skipped under values 1/2:
+//                                        explicit user intent runs
+//                                        ntile even on Mixtral-class
+//                                        / prompt-class shapes.
+//   4. force_decode_d_plan             — value 1 ONLY.  Attempted
+//                                        BEFORE the AOCL strict-
+//                                        stable branch and the CK
+//                                        cost-model branch so the
+//                                        force semantics actually
+//                                        win on both `use_custom`
+//                                        and `!use_custom` paths.
+//                                        Falls through to the
+//                                        regular planner only when
+//                                        structurally infeasible
+//                                        (`num_threads < num_ops`).
+//   5. strict-stable AOCL plan         — non-custom path; has its own
+//                                        F3 narrow-N escape (3).
+//   6. try_decode_d_plan               — value 0 ONLY (heuristic).
+//                                        Custom path, decode-class.
+//                                        Skipped under values 1/2
+//                                        (1 already tried force
+//                                        above; 2 skips DecodeD
+//                                        outright).
+//   7. build_few_experts_plan          — custom path, (A) num_ops ≤ num_ccds.
+//   8. build_round_candidates
 //      + pick_round_strategy
-//      + apply_round_pick       — custom path, (B) many-experts.
+//      + apply_round_pick              — custom path, (B) many-experts.
 inline GroupNTilePlan plan_group_n_tile(
     const GroupNTileTopology &topo,
     matmul_algo_t algo, int nr_align, bool fused_epilogue,
@@ -1078,111 +1203,100 @@ inline GroupNTilePlan plan_group_n_tile(
   // zero runtime cost.
   constexpr bool decode_tile_ab_on = kDecodeTileAbOn;
 
-  // Viability + R1/R2/R3 self-fallbacks — all route to Sequential.
-  // Attribute the reason explicitly so readers can tell
-  // "no-tile" (tiny N) from "large-weight + tall-N few-experts" or
-  // "too-many-experts-for-fixed-arrays" at a glance; otherwise every
-  // flat_n_tile Sequential line looks the same in the log regardless
-  // of root cause.
+  // Sequential fallback gates.  Three reasons can land here:
   //
-  // Scope of these gates: structural / measured-large-weight cases
-  // where ALGO 3's column-parallel approach is intrinsically poor
-  // OR the planner cannot represent the call (R3 capacity).  These
-  // gates are NOT a complete mirror of `auto_select_algo`'s routing
-  // — auto-select routes additional shapes to ALGO 1 by policy
-  // (e.g., the `num_ops <= kFewExpertsAlgo1=8` Mixtral arrow and
-  // the 9..num_threads-1 prompt arrow).  Forced ALGO 3 (env=3)
-  // honours the user's explicit choice on those shapes and goes
-  // through the N-tile path, which may run slower than the
-  // auto-selected ALGO 1 — that asymmetry is intentional: the env
-  // override exists to sidestep auto-select.  Self-fallback is for
-  // shapes where N-tile would actively misbehave or hurt itself,
-  // not for shapes where auto-select happens to prefer ALGO 1.
+  //   * ntile_viable — STRUCTURAL.  N is too small to split usefully
+  //     across the thread team (`tiles_available < min_useful` per
+  //     `ntile_viable()` above).  Per-thread BKC pack overhead with
+  //     <0.5 tiles of work per thread is materially worse than AOCL
+  //     DLP packing the full row once and saturating the team.  This
+  //     is a structural floor on the column-parallel approach.
   //
-  // R1 — Few experts (≤ 3): the per-expert matmul is large enough
-  //      that one-expert-at-a-time with the full thread team is
-  //      preferred over column-parallel across a handful of experts.
-  //      Triggered by both AOCL and CK paths because the column-
-  //      slice arithmetic doesn't have enough N to absorb a thin
-  //      per-expert team.
+  //   * R3 — STRUCTURAL.  Capacity guard: GroupNTilePlan carries
+  //     fixed-size stack arrays sized to `kMaxExperts =
+  //     kNTilePlanMaxExperts = 256` (currently `expert_order` and
+  //     `stable_n_thr_per_expert`).  When `num_ops > kMaxExperts`
+  //     the strict-stable populator would only write the first 256
+  //     entries, leaving executors that index `[0, num_ops)`
+  //     reading either zeros (silently disabling the stable path
+  //     for late experts) or — if the read site forgets to bounds-
+  //     check — accessing memory past the array.  Both are fragile,
+  //     so route the call to Sequential.  Sequential walks experts
+  //     via `for (e=0; e<num_ops; ++e)` with no fixed-size lookup
+  //     arrays, so it is safe at any num_ops.  Auto-select's rule 0
+  //     capacity carve-out already routes `num_ops > kMaxExperts`
+  //     shapes to ALGO 5 upstream; R3 here is the second-line
+  //     defence for forced env=3 with `num_ops > kMaxExperts`.
   //
-  // R2 — Large-weight DRAM-streaming (wei_per_expert > kMediumWeight):
-  //      AOCL DLP's internal panel blocking with the full thread team
-  //      is near-optimal.  ALGO 3 only beats it when column-parallel
-  //      has enough per-thread work to amortise the per-thread BKC
-  //      pack + round-scheduling overhead.  Anything in the large-
-  //      weight class that does NOT clear all three of
-  //        * prompt-class           (max_M  > kDecodeMaxM)
-  //        * enough experts         (num_ops ≥ 5)
-  //        * (wide_N || many_experts)
-  //          where wide_N      = (max_N  > max_K)   — more N to split
-  //                many_experts = (num_ops ≥ 16)    — amortise overhead
-  //      falls back to Sequential.  Per-expert weights at or below
-  //      kMediumWeight sit BELOW the large-weight regime, so R2
-  //      does not fire and forced ALGO 3 on those shapes retains
-  //      its N-tile path.
+  //   * AUTO-MIRROR — PERF.  The auto-selector
+  //     (`auto_select_algo` in `group_matmul_parallel.cpp`) would
+  //     have picked ALGO 1 for this shape if env were 0.  We mirror
+  //     that decision so forced `ZENDNNL_GRP_MATMUL_ALGO=3` runs
+  //     the same strategy auto-pick would have, with the
+  //     gemm_mode label (`flat_n_tile_sequential` vs
+  //     `sequential_experts`) distinguishing the two paths for
+  //     telemetry.  Replaces the legacy R1 (`num_ops ≤ 3`) and R2
+  //     (large-weight regime) ad-hoc gates: those targeted shapes
+  //     where ALGO 3 was specifically poor, but since auto-select
+  //     ALREADY routes those shapes to ALGO 1, the gates only
+  //     fired under forced env=3 — better to mirror auto-select
+  //     faithfully than maintain a parallel set of perf criteria.
+  //     See `auto_select_would_pick_algo1` above for the
+  //     three-rule mirror.
   //
-  // R3 — Capacity guard: GroupNTilePlan carries fixed-size stack
-  //      arrays sized to `kMaxExperts = kNTilePlanMaxExperts = 256`
-  //      (currently `expert_order` and `stable_n_thr_per_expert`).
-  //      When `num_ops > kMaxExperts` the strict-stable populator
-  //      only writes the first 256 entries, which would leave
-  //      executors that index `[0, num_ops)` reading either zeros
-  //      (silently disabling the stable path for late experts) or —
-  //      if the read site forgets to bounds-check — accessing memory
-  //      past the array.  Both are fragile, so we route the entire
-  //      call to Sequential at planning time.  Sequential walks
-  //      experts via `for (e=0; e<num_ops; ++e)` with no fixed-size
-  //      lookup arrays, so it is safe at any num_ops.
-  //
-  //      This guard is a SECOND-LINE defence: auto-select's rule 0
-  //      capacity carve-out routes every `num_ops > kNTilePlanMaxExperts`
-  //      shape to ALGO 5 (per-expert parallel, materially faster than
-  //      this Sequential fallback for many-experts decode-class
-  //      shapes) — so auto-select callers never reach R3.  R3 still
-  //      fires for forced env=3 with `num_ops > kMaxExperts` — the
-  //      user has explicitly asked for ALGO 3, so the planner honours
-  //      it via Sequential rather than rejecting the call.  Useful
-  //      for A/B comparisons against ALGO 5 on huge-experts shapes.
+  //     Critically: Rule 1 (num_ops ≥ num_threads → ALGO 3) takes
+  //     precedence over the prompt M check, so Qwen-class prompt
+  //     (128 experts × max_M=2048 on 64-128 thread hosts) stays
+  //     on ALGO 3.  See `auto_select_algo`'s rule precedence
+  //     comment for the rationale; the mirror replays it exactly.
+  // Read the strategy knob up front: values 1 (decode) and 2 (rounds)
+  // explicitly request an N-tile strategy and therefore SKIP the
+  // auto-mirror gate.  The user is asking "run ntile here even though
+  // auto-select would have picked ALGO 1" — useful for benchmarking
+  // (e.g. confirming that gpt-oss decode really is faster on ALGO 1
+  // by A/B'ing it against forced DecodeD) or for working around
+  // measured perf inversions on a specific deployment without
+  // shipping a new build.  Structural gates still fire below — those
+  // are memory safety / kernel correctness, not perf preference.
+  const int n_tile_strategy = get_grp_n_tile_strategy();
+  const bool force_ntile = (n_tile_strategy != 0);
+
   const bool viable = ntile_viable(topo);
-  const bool r1     = (topo.num_ops <= 3);
-  bool r2 = false;
-  const char *r2_subreason = nullptr;
-  if (topo.wei_per_expert > kMediumWeight) {
-    const bool wide_N       = (topo.max_N > topo.max_K);
-    const bool many_experts = (topo.num_ops >= 16);
-    if (topo.num_ops < 5) {
-      r2 = true;  r2_subreason = "num_ops<5";
-    } else if (topo.max_M <= kDecodeMaxM) {
-      r2 = true;  r2_subreason = "decode_M";
-    } else if (!(wide_N || many_experts)) {
-      r2 = true;  r2_subreason = "tall_N_few_experts";
-    }
-  }
   const bool r3 = (topo.num_ops > GroupNTilePlan::kMaxExperts);
-  if (!viable || r1 || r2 || r3) {
+  // Auto-mirror only consulted under auto (`n_tile_strategy == 0`).
+  // Values 1 and 2 are explicit user intent to run ntile, so we
+  // honour that over auto-select's preference for ALGO 1.
+  const bool auto_mirror = !force_ntile
+                           && auto_select_would_pick_algo1(topo);
+  if (!viable || r3 || auto_mirror) {
     plan.strategy = GroupNTileStrategy::Sequential;
     static const bool s_fb_log = apilog_info_enabled();
     if (s_fb_log) {
       const char *reason =
-          !viable ? "ntile_unviable(N_too_small_for_team_split)"
-        : r1      ? "R1_num_ops<=3"
-        : r2      ? "R2_large_weight"
-        :           "R3_num_ops_exceeds_plan_capacity";
+          !viable     ? "ntile_unviable(N_too_small_for_team_split)"
+        : r3          ? "R3_num_ops_exceeds_plan_capacity"
+                      : "auto_mirror_picks_algo1";
+      // Sub-reason for auto_mirror: which rule of the auto-selector
+      // fired.  Helps readers tell "Mixtral path" (Rule 2) from
+      // "gpt-oss prompt" (Rule 3) at a glance in the L3 log.
+      const char *auto_sub = auto_mirror
+          ? (topo.num_ops <= kFewExpertsAlgo1
+                 ? "rule2_few_experts"
+                 : "rule3_prompt_M")
+          : "";
       apilog_info("[GRP_MATMUL Level3 flat_n_tile FALLBACK] strategy=Sequential "
                   "reason=", reason,
-                  (r2 && r2_subreason ? " r2_sub=" : ""),
-                  (r2 && r2_subreason ? r2_subreason : ""),
+                  (auto_mirror ? " auto_sub=" : ""),
+                  (auto_mirror ? auto_sub      : ""),
                   " num_ops=", topo.num_ops,
                   " plan_capacity=", GroupNTilePlan::kMaxExperts,
                   " max_M=", topo.max_M,
                   " max_N=", topo.max_N,
                   " max_K=", topo.max_K,
-                  " wide_N=", (topo.max_N > topo.max_K),
-                  " many_experts=", (topo.num_ops >= 16),
                   " wei_per_expert_MB=", (topo.wei_per_expert >> 20),
                   " num_threads=", topo.num_threads,
-                  " num_ccds=", topo.num_ccds);
+                  " num_ccds=", topo.num_ccds,
+                  " n_tile_strategy=", n_tile_strategy);
     }
     return plan;
   }
@@ -1195,6 +1309,47 @@ inline GroupNTilePlan plan_group_n_tile(
   // `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` override.
   const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
       ? effective_decode_n_tile() : kMinNTile;
+
+  // ── Force-DecodeD path (knob value 1) ──────────────────────────────
+  // When the user explicitly forces DecodeD, attempt it BEFORE any
+  // other strategy could run — including the AOCL strict-stable plan
+  // below, which would otherwise pick ManyExperts on the non-custom
+  // path and silently override the user's request.  The user
+  // accepted the consequence of cache-key thrash by setting env=1
+  // on a non-CK workload.  Structural floor: `num_threads >= num_ops`;
+  // if false we fall through to the regular planner branches below
+  // (closest-equivalent Rounds strategy).
+  if (n_tile_strategy == 1) {
+    if (force_decode_d_plan(topo, plan)) {
+      static const bool s_log_force = apilog_info_enabled();
+      if (s_log_force) {
+        apilog_info(
+            "[GRP_MATMUL Level3 flat_n_tile HINT] "
+            "n_tile_strategy=decode_d FORCED — bypassed perf-"
+            "eligibility heuristic and AOCL strict-stable.  "
+            "num_ops=", topo.num_ops,
+            " num_threads=", topo.num_threads,
+            " thr_per_expert=", plan.decode_thr_per_expert,
+            " max_M=", topo.max_M,
+            " max_N=", topo.max_N,
+            " decode_n_tile=", effective_decode_n_tile());
+      }
+      return plan;
+    }
+    // Structural infeasibility: num_threads < num_ops.  Fall through
+    // to the regular planner branches below (AOCL strict-stable
+    // ManyExperts when !use_custom, or the CK cost-model path).
+    static const bool s_log_fb = apilog_info_enabled();
+    if (s_log_fb) {
+      apilog_info(
+          "[GRP_MATMUL Level3 flat_n_tile HINT] "
+          "n_tile_strategy=decode_d requested but num_threads < num_ops "
+          "(structurally infeasible — DecodeD would over-subscribe the "
+          "OMP team).  Falling through to Rounds.  "
+          "num_ops=", topo.num_ops,
+          " num_threads=", topo.num_threads);
+    }
+  }
 
   // ── AOCL strict-stable plan (path 1 of 2; see header above) ────────
   // Forces `team_size == stable` for every expert in every round,
@@ -1264,8 +1419,12 @@ inline GroupNTilePlan plan_group_n_tile(
   // cost model is free to optimise wall time without cache-key
   // constraints.
 
-  // Decode-class shapes may take the DecodeD fast path.
-  if (try_decode_d_plan(topo, plan)) return plan;
+  // Heuristic DecodeD attempt (knob value 0).  Bypassed under values
+  // 1 (force-DecodeD already attempted upfront above) and 2 (skip
+  // DecodeD entirely — go straight to Rounds).
+  if (n_tile_strategy == 0) {
+    if (try_decode_d_plan(topo, plan)) return plan;
+  }
 
   if (topo.num_ops <= topo.num_ccds) {
     // (A) Few experts: L3-aware adaptive batching, proportional

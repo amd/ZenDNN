@@ -919,6 +919,16 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
   // sized for ab_min_tile=256 so max_tiles=4 and (base+1)=3 ≤
   // per_expert_cap=4, which is required for Phase B to fire.
   CustomKernelNTileOverride   default_n_tile(0);
+  // Pin the N-tile strategy knob to 0 (auto / heuristic) so this
+  // test is insulated from a process-level
+  // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` (force DecodeD) or `=2`
+  // (force Rounds) that some surrounding benchmark / sweep might
+  // have set.  Phase B's per-expert remainder distribution only
+  // populates inside ManyExperts Single-round; values 1/2 would
+  // override the auto-mirror gate and the heuristic DecodeD
+  // attempt, taking different planner branches that bypass Phase B
+  // and leave `snap.per_expert_remainder = false`.
+  NTileStrategyOverride       auto_strategy(0);
 
   // Defence-in-depth: the env-cache overrides force the planner's
   // INTENT to take the CK path, but `prepare_for_call` makes a
@@ -1171,10 +1181,14 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
   }
 
   // Force the env-cached config Phase B needs (RAII, restored on
-  // scope exit).
+  // scope exit).  `NTileStrategyOverride(0)` insulates the test
+  // from a process-level `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1/2`
+  // that would otherwise bypass ManyExperts and skip Phase B —
+  // see `CkSingleRoundRemainderCorrectness` for the full rationale.
   CustomKernelOverride        ck_on(true);
   NRoundsModeOverride         single_round(1);
   CustomKernelNTileOverride   default_n_tile(0);
+  NTileStrategyOverride       auto_strategy(0);
 
   // Defence-in-depth: env overrides force the PLANNER's intent to
   // take the CK path, but `prepare_for_call` separately refuses CK
@@ -1369,6 +1383,11 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
   CustomKernelOverride        ck_on(true);
   NRoundsModeOverride         single_round(1);
   CustomKernelNTileOverride   default_n_tile(0);
+  // Insulate from a process-level
+  // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1/2` that would bypass
+  // ManyExperts and skip Phase B — see
+  // `CkSingleRoundRemainderCorrectness` for the full rationale.
+  NTileStrategyOverride       auto_strategy(0);
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "

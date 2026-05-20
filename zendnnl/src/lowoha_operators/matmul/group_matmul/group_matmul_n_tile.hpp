@@ -132,26 +132,70 @@ inline bool grow_scratch(PerThreadScratch &s, size_t need) {
 // Section A.1 — Strategy enum + planner-shaped types
 // =====================================================================
 
-// Execution patterns the planner can pick.  When N-tile is not
-// viable we run experts sequentially with the full thread team per
-// kernel (equivalent to ALGO 1's behaviour), which is the safest
-// fallback for shapes where N is too small to split usefully across
-// threads.
+// Execution patterns the planner can pick.  Only DecodeD, FewExperts,
+// and ManyExperts run the actual N-tile per-tile dispatch (and route
+// through the BF16 custom kernel when its gate accepts the call) —
+// those are the strategies callers running ALGO 3 are typically here
+// for.  Sequential is the fallback for shapes where the N-tile path
+// is either inapplicable (structural) or not the right choice (perf):
+//   * `!ntile_viable`  — N too narrow to split usefully.
+//   * R3 capacity      — num_ops > kNTilePlanMaxExperts; safety guard
+//                        on the fixed-size per-expert arrays.
+//   * F3 alignment     — AOCL strict-stable narrow-N escape.
+//   * AUTO-MIRROR      — `auto_select_algo` (env=0) would have picked
+//                        ALGO 1 for this shape.  Forced env=3 mirrors
+//                        that decision so the strategy choice matches
+//                        what auto-pick does, with the gemm_mode
+//                        label distinguishing the path for telemetry
+//                        (`flat_n_tile_sequential` vs
+//                        `sequential_experts`).  Skipped when the
+//                        user explicitly forces ntile via
+//                        `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` or
+//                        `=2` (benchmarking or override).
+//
+// The auto-mirror replays auto-select's three-rule tree faithfully,
+// so Rule 1 (`num_ops ≥ num_threads → ALGO 3`) protects Qwen-class
+// prompt — those calls run the actual ntile path even though
+// `max_M > kDecodeMaxM` would otherwise mark them as prompt.
+//
+// `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` (auto / decode / rounds) drives
+// three things:
+//   (1) whether the auto-mirror gate fires (only under value 0);
+//   (2) whether DecodeD's perf-eligibility heuristic is consulted
+//       (only under value 0) or bypassed in favour of a structural-
+//       floor-only force path (under value 1);
+//   (3) whether DecodeD is attempted at all (under values 0 and 1)
+//       or skipped entirely (under value 2 → straight to Rounds).
+// Structural gates (`!ntile_viable`, R3, F3) always fire regardless
+// of the knob.  See `get_grp_n_tile_strategy()` in
+// `group_matmul_parallel_common.hpp` for the full env-knob contract.
 enum class GroupNTileStrategy {
-  // (F)  N-tile not viable.  Run experts sequentially with
-  //      `num_threads` per kernel.
+  // (F)  Sequential fallback.  Runs experts serially with the full
+  //      thread team per kernel via `execute_expert_slice` — the
+  //      same mechanics ALGO 1 uses — plus a tight-arena fused-
+  //      swiglu OOP branch for fused-MoE callers with `ldc < N`.
+  //      Bypasses the per-tile dispatch and the BF16 custom kernel
+  //      entirely.  Reached when the N-tile path is inapplicable
+  //      (`!ntile_viable`, R3 capacity, F3 alignment) or when the
+  //      auto-selector would have picked ALGO 1 (AUTO-MIRROR) — see
+  //      the enum's doc-block above for the four reasons.
   Sequential,
 
   // (D)  Decode parallel — small max_M, balanced M, num_ops ≤ num_ccds.
-  //      Each expert gets an equal CCD-sized team.
+  //      One flat OMP region with `num_ops × thr_per_expert` threads;
+  //      each expert gets an equal CCD-sized team and all experts
+  //      run concurrently with no internal barriers.  Skipped when
+  //      the env knob is set to "rounds".
   DecodeD,
 
   // (A)  Few experts (num_ops ≤ num_ccds, non-decode):
   //      L3-aware batches, proportional thr_per_expert per round.
+  //      Routes through `execute_rounds`.
   FewExperts,
 
   // (B)  Many experts (num_ops > num_ccds):
   //      L3-aware barrier-synchronized rounds, fixed n_thr/expert.
+  //      Routes through `execute_rounds`.
   ManyExperts,
 };
 
@@ -168,9 +212,10 @@ struct GroupNTileTopology {
   int min_M_active;      // smallest positive M, or max_M if all empty
   size_t wei_elem;       // weight bytes per element
   size_t wei_per_expert; // = max_N * max_K * wei_elem, precomputed once
-                         // so compute_l3_batch / compute_target_batch /
-                         // the R2 weight-class gate don't each re-derive
-                         // it from the three inputs.
+                         // so compute_l3_batch / compute_target_batch
+                         // (round batch sizing under the L3 budget)
+                         // don't each re-derive it from the three
+                         // inputs.
 };
 
 // Knobs the strategy executors consume.  Most fields are filled only

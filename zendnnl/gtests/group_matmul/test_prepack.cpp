@@ -2712,6 +2712,10 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
 //        * activation in {swiglu_oai_mul, none}
 //        * act_dtype = bf16 when act != none
 //        * bias_dtype in {none, bf16, f32}
+//        * dst_dtype in {bf16, f32} — the kernel serves both
+//          `kBF16_BF16_BF16` and `kBF16_BF16_F32` runtime variants;
+//          (swiglu_oai_mul, f32 dst) is structurally refused (the
+//          fused swiglu store helper writes BF16 only).
 //        * pack_nr in {32, 64} divides representative N
 //
 //      Each TEST_F drives `prepack_for_algo_3` with one gate flipped
@@ -2887,6 +2891,68 @@ TEST_F(TestPrepackCkGateSymmetry, BiasDtypeBf16AndF32Accepted) {
         << "bias_dtype " << static_cast<int>(bias_dt) << " is accepted by "
            "runtime CK; prepack must engage CK warm";
   }
+}
+
+// ── dst_dtype gate: BF16/BF16/{BF16,F32} accepted; (swiglu, F32) refused ─
+
+TEST_F(TestPrepackCkGateSymmetry, DstF32ActNoneEnablesCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // The runtime CK kernel serves `kBF16_BF16_F32` for plain matmul
+  // (act = none) — pack work itself is dst-agnostic, so the same
+  // packed weight arena warms both runtime variants.  Prepack must
+  // mirror -> CK pack cache populated when dst_dtype = f32 + act = none.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.420f);
+  h.pp.act       = grp_matmul_gated_act_t::none;
+  h.pp.dst_dtype = data_type_t::f32;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_GT(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "dst_dtype=f32 + act=none is accepted by runtime CK "
+         "(`kBF16_BF16_F32` variant); prepack must engage CK warm "
+         "or AOCL DLP per-tile gets warmed instead and the runtime "
+         "pays first-call lazy CK pack latency";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, DstF32SwigluRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // (swiglu_oai_mul, f32 dst) is structurally rejected by runtime CK:
+  // the fused swiglu store helper writes BF16 only, so
+  // `select_ukernel(MR, NV, swiglu_oai_mul, kF32)` returns nullptr
+  // and `prepare_for_call` refuses with `kfn_table_fill_failed`.
+  // Prepack mirrors via the (swiglu, dst != bf16) cross-check in
+  // `ck_eligible`; without that mirror, prepack would warm the CK
+  // arena while the runtime falls back to AOCL DLP + a separate
+  // FP32 swiglu pass — wasted memory + a skipped per-tile AOCL warm
+  // (Fix-B `!ck_eligible` guard) that the runtime needs.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.421f);
+  h.pp.act       = grp_matmul_gated_act_t::swiglu_oai_mul;
+  h.pp.act_dtype = data_type_t::bf16;
+  h.pp.dst_dtype = data_type_t::f32;  // refused under swiglu
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "(swiglu_oai_mul, f32 dst) is refused by runtime CK; "
+         "prepack must NOT warm CK pack arena";
 }
 
 TEST_F(TestPrepackCkGateSymmetry, NNotMultipleOfPackNrRefusedNoCkWarm) {

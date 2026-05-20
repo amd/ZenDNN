@@ -41,10 +41,11 @@
 ///   the tight destination.  The epilogue runs NV/2 times per row,
 ///   producing NV*8 BF16 outputs in total (NV=2 → 16; NV=4 → 32).
 
-#include "ukernel.hpp"
+#include "bf16_microkernel.hpp"
 
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 #include <immintrin.h>
 
@@ -225,19 +226,38 @@ static inline void swiglu_oai_store_pair(
 // MR×NV register footprint; `noinline` prevents the compiler from
 // duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
-template <int MR, int NV, ActKind Act>
+template <int MR, int NV, ActKind Act, typename DstT>
 __attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"), noinline))
 static void ukernel_impl(
     const bfloat16_t *__restrict__ A, int lda,
     const bfloat16_t *__restrict__ Bpacked,
     const void *__restrict__ bias, BiasKind bias_kind,
-    bfloat16_t *__restrict__ Cout, int ldc,
-    bfloat16_t *__restrict__ Cout_tight, int ldc_tight,
+    void *__restrict__ Cout_void, int ldc,
+    void *__restrict__ Cout_tight_void, int ldc_tight,
     int K) {
 
   static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
   static_assert(Act == ActKind::none || (NV % 2 == 0),
                 "swiglu epilogue requires even NV");
+  static_assert(std::is_same<DstT, bfloat16_t>::value
+                    || std::is_same<DstT, float>::value,
+                "ukernel_impl: DstT must be bfloat16_t or float");
+  // The swiglu fused epilogue's pair-pack store helper writes 16 BF16
+  // lanes per (gate, up) pair via `_mm256_storeu_si256` — no FP32
+  // counterpart today, and the downstream consumer (Op2 src in fused
+  // MoE) reads BF16.  Refusing the (swiglu, FP32) tuple at compile
+  // time keeps `select_ukernel` from accidentally returning a
+  // mis-typed instantiation; runtime dispatch refuses earlier still
+  // (see `select_ukernel` in this file + the prepare_for_call gate).
+  static_assert(Act != ActKind::swiglu_oai_mul
+                    || std::is_same<DstT, bfloat16_t>::value,
+                "ActKind::swiglu_oai_mul is BF16-dst only");
+
+  // Reinterpret the dispatcher's `void *` outputs as the templated
+  // dst type.  ldc / ldc_tight stay in element units (not bytes) —
+  // pointer arithmetic below uses them with implicit DstT scaling.
+  DstT *__restrict__ Cout       = static_cast<DstT *>(Cout_void);
+  DstT *__restrict__ Cout_tight = static_cast<DstT *>(Cout_tight_void);
 
   // ── Accumulator-register budget ──────────────────────────────────
   // Base single-buffer footprint per row is `NV` FP32 zmms.  Small-MR
@@ -350,8 +370,8 @@ static void ukernel_impl(
   // pattern-matches this idiom into a single `vpbroadcastd zmm, [mem]`
   // instruction.  The alternate intrinsic sequence
   // `_mm_loadu_si32(ptr) + _mm512_broadcastd_epi32(...)` looks
-  // tempting but was measurably slower on MoE decode workloads
-  // (GCC 12 failed to fuse it into the same single broadcast-load).
+  // tempting but did not collapse to the same single broadcast-load
+  // on the compilers we tested, so the `memcpy` idiom is preferred.
 
   int kp = 0;
   if (kp + 1 < K_pair) {
@@ -376,21 +396,14 @@ static void ukernel_impl(
 
     // ── No software prefetch in the K-loop (intentional) ────────────
     // A `_mm_prefetch(B + N K-pairs ahead, _MM_HINT_T0)` per outer
-    // iteration was tried on the hypothesis that explicit prefetch
-    // would close the IPC gap to AOCL DLP at high thread counts on
-    // MoE decode.  Result: a consistent regression across every
-    // num_ops bucket and in aggregate on the same workload.
-    //
-    // Explanation: Zen 4 / Zen 5's hardware prefetcher detects the
-    // streaming (kp_stride-strided) B access pattern reliably; the
-    // K-loop is not memory-latency bound at the shapes that reach
-    // this kernel.  Adding software prefetch consumed load-port
-    // issue slots and polluted L1 with addresses the HW unit was
-    // already streaming, hurting FMA dispatch.  The remaining IPC
-    // gap vs AOCL is in instruction scheduling (compiler-emitted vs
-    // hand-tuned asm), not memory hiding — closing it would require
-    // an asm rewrite rather than prefetch hints.  Note kept here so
-    // a future optimiser does not re-attempt the same fix.
+    // iteration was tried.  It regressed throughput because the Zen
+    // 4 / Zen 5 hardware prefetcher already detects the streaming
+    // (kp_stride-strided) B access pattern reliably and the K-loop
+    // is not memory-latency bound at the shapes that reach this
+    // kernel.  Adding software prefetch consumed load-port issue
+    // slots and polluted L1 with addresses the hardware unit was
+    // already streaming, which hurt FMA dispatch.  Note kept here
+    // so a future contributor does not re-attempt the same fix.
 
     for (; kp + 1 < K_pair; kp += 2) {
       // ── Stage 1: load bv_next = B[kp+1], overlaps FMAs for kp ──
@@ -474,18 +487,17 @@ static void ukernel_impl(
   // wrote a zero in the second BF16 slot, so a 4-byte load is safe;
   // we still narrow the broadcast to a single live BF16.  Single-
   // element tail keeps the `memcpy` idiom — only runs when K is odd
-  // (most production MoE decode shapes use even K and skip this
-  // branch entirely), and uses a uint16_t load that a 4-byte
-  // unaligned-load intrinsic can't express without reading past A's
-  // end.
+  // (typical MoE decode shapes use even K and skip this branch
+  // entirely), and uses a uint16_t load that a 4-byte unaligned-
+  // load intrinsic can't express without reading past A's end.
   //
   // Cold-correctness note: this branch is exercised in gtest by
   // shapes with odd K (K=1, 3, 5, ...).  It produces bit-identical
   // results to an equivalent single-K-iter reference path (same
   // VDPBF16PS instruction, same operand layout; the pack zero-fills
   // the unused BF16 slot so the high-half contribution is 0).  Not
-  // executed by typical production MoE decode shapes (even K), but
-  // validated by the ALGO 3 random-K gtest parameterization.
+  // executed by typical even-K shapes, but validated by the ALGO 3
+  // random-K gtest parameterization.
   if (k_odd) {
     const bfloat16_t *bp = Bpacked
         + static_cast<size_t>(kp) * kp_stride_bf16;
@@ -524,6 +536,8 @@ static void ukernel_impl(
 
   // ── Epilogue ─────────────────────────────────────────────────────
   if constexpr (Act == ActKind::swiglu_oai_mul) {
+    // Static_assert above guarantees DstT == bfloat16_t here, so the
+    // pair-pack store helper's BF16 output type matches `Cout_tight`.
     constexpr int n_pairs = NV / 2;  // 1 for NV=2, 2 for NV=4
     #pragma GCC unroll 8
     for (int m = 0; m < MR; ++m) {
@@ -534,21 +548,36 @@ static void ukernel_impl(
         swiglu_oai_store_pair(acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
       }
     }
-  } else {
+  } else if constexpr (std::is_same<DstT, bfloat16_t>::value) {
+    // Act = none, BF16 dst — manual RNE FP32→BF16 and a 256-bit
+    // store per (m, v) tile.  Bit-identical to the standard
+    // reference path's `f32_to_bf16x16` (see policy block above).
     #pragma GCC unroll 8
     for (int m = 0; m < MR; ++m) {
       #pragma GCC unroll 4
       for (int v = 0; v < NV; ++v) {
         bfloat16_t *dst = Cout
             + static_cast<size_t>(m) * ldc + v * 16;
-        // Manual RNE FP32→BF16 (see fp32_to_bf16x16_rne policy block
-        // above).  Bit-identical to the standard reference path's
-        // f32_to_bf16x16, so the act=none custom kernel produces the
-        // same BF16 output as the reference — Op2 (in fused MoE)
-        // reads the same bytes whether or not the custom kernel was
-        // engaged.
         __m256i out = fp32_to_bf16x16_rne(acc[0][m][v]);
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), out);
+      }
+    }
+  } else {
+    // Act = none, FP32 dst — store the FP32 accumulator lanes
+    // directly with `_mm512_storeu_ps`.  No conversion, no
+    // rounding, so the output is bit-exact w.r.t. the FP32
+    // accumulator that produced it (modulo BF16-input quantisation
+    // upstream).  Useful for callers that need FP32 dst (e.g.,
+    // Op2 of a fused MoE chain that wants FP32 reduce-input).
+    static_assert(std::is_same<DstT, float>::value,
+                  "Act=none non-bf16 dst path requires DstT == float");
+    #pragma GCC unroll 8
+    for (int m = 0; m < MR; ++m) {
+      #pragma GCC unroll 4
+      for (int v = 0; v < NV; ++v) {
+        float *dst = Cout
+            + static_cast<size_t>(m) * ldc + v * 16;
+        _mm512_storeu_ps(dst, acc[0][m][v]);
       }
     }
   }
@@ -558,56 +587,92 @@ static void ukernel_impl(
 
 // ── Function-pointer table dispatch (mirrors select_bf16_brgemm_kernel) ─
 //
-// One entry per supported (MR, NV, Act) triple.  Instantiation set:
-//   NV=2 (NR=32): MR ∈ {1..8} × Act ∈ {none, swiglu_oai_mul}
-//   NV=4 (NR=64): MR ∈ {1..6} × Act ∈ {none, swiglu_oai_mul}
-// Total: 28 specializations, all `noinline`.
-ukernel_fn_t select_ukernel(int MR, int NV, ActKind act) {
+// One entry per supported (MR, NV, Act, DstDt) tuple.  Instantiation set:
+//   NV=2 (NR=32): MR ∈ {1..8} × {(none, BF16), (none, F32), (swiglu, BF16)}
+//   NV=4 (NR=64): MR ∈ {1..6} × {(none, BF16), (none, F32), (swiglu, BF16)}
+// Total: 8×3 + 6×3 = 42 specializations, all `noinline`.
+//
+// (swiglu_oai_mul, FP32) is intentionally NOT instantiated — the swiglu
+// fused store helper writes BF16 only, and downstream Op2 in fused MoE
+// reads BF16.  The dispatcher refuses that tuple at `prepare_for_call`
+// time (see `select_ukernel` returning nullptr below for that case).
+ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
+  // Refuse the structurally-impossible (swiglu, FP32) combination
+  // before the per-(MR, NV) switch so callers see a clean nullptr.
+  if (act == ActKind::swiglu_oai_mul && dst_dt != DstDt::kBf16) {
+    return nullptr;
+  }
   if (NV == 2) {
     if (act == ActKind::swiglu_oai_mul) {
       switch (MR) {
-        case 1: return ukernel_impl<1, 2, ActKind::swiglu_oai_mul>;
-        case 2: return ukernel_impl<2, 2, ActKind::swiglu_oai_mul>;
-        case 3: return ukernel_impl<3, 2, ActKind::swiglu_oai_mul>;
-        case 4: return ukernel_impl<4, 2, ActKind::swiglu_oai_mul>;
-        case 5: return ukernel_impl<5, 2, ActKind::swiglu_oai_mul>;
-        case 6: return ukernel_impl<6, 2, ActKind::swiglu_oai_mul>;
-        case 7: return ukernel_impl<7, 2, ActKind::swiglu_oai_mul>;
-        case 8: return ukernel_impl<8, 2, ActKind::swiglu_oai_mul>;
+        case 1: return ukernel_impl<1, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 7: return ukernel_impl<7, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 8: return ukernel_impl<8, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    // act == ActKind::none — branch on DstDt for the store epilogue.
+    if (dst_dt == DstDt::kF32) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 2, ActKind::none, float>;
+        case 2: return ukernel_impl<2, 2, ActKind::none, float>;
+        case 3: return ukernel_impl<3, 2, ActKind::none, float>;
+        case 4: return ukernel_impl<4, 2, ActKind::none, float>;
+        case 5: return ukernel_impl<5, 2, ActKind::none, float>;
+        case 6: return ukernel_impl<6, 2, ActKind::none, float>;
+        case 7: return ukernel_impl<7, 2, ActKind::none, float>;
+        case 8: return ukernel_impl<8, 2, ActKind::none, float>;
         default: return nullptr;
       }
     }
     switch (MR) {
-      case 1: return ukernel_impl<1, 2, ActKind::none>;
-      case 2: return ukernel_impl<2, 2, ActKind::none>;
-      case 3: return ukernel_impl<3, 2, ActKind::none>;
-      case 4: return ukernel_impl<4, 2, ActKind::none>;
-      case 5: return ukernel_impl<5, 2, ActKind::none>;
-      case 6: return ukernel_impl<6, 2, ActKind::none>;
-      case 7: return ukernel_impl<7, 2, ActKind::none>;
-      case 8: return ukernel_impl<8, 2, ActKind::none>;
+      case 1: return ukernel_impl<1, 2, ActKind::none, bfloat16_t>;
+      case 2: return ukernel_impl<2, 2, ActKind::none, bfloat16_t>;
+      case 3: return ukernel_impl<3, 2, ActKind::none, bfloat16_t>;
+      case 4: return ukernel_impl<4, 2, ActKind::none, bfloat16_t>;
+      case 5: return ukernel_impl<5, 2, ActKind::none, bfloat16_t>;
+      case 6: return ukernel_impl<6, 2, ActKind::none, bfloat16_t>;
+      case 7: return ukernel_impl<7, 2, ActKind::none, bfloat16_t>;
+      case 8: return ukernel_impl<8, 2, ActKind::none, bfloat16_t>;
       default: return nullptr;
     }
   }
   if (NV == 4) {
     if (act == ActKind::swiglu_oai_mul) {
       switch (MR) {
-        case 1: return ukernel_impl<1, 4, ActKind::swiglu_oai_mul>;
-        case 2: return ukernel_impl<2, 4, ActKind::swiglu_oai_mul>;
-        case 3: return ukernel_impl<3, 4, ActKind::swiglu_oai_mul>;
-        case 4: return ukernel_impl<4, 4, ActKind::swiglu_oai_mul>;
-        case 5: return ukernel_impl<5, 4, ActKind::swiglu_oai_mul>;
-        case 6: return ukernel_impl<6, 4, ActKind::swiglu_oai_mul>;
+        case 1: return ukernel_impl<1, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    // act == ActKind::none — branch on DstDt for the store epilogue.
+    if (dst_dt == DstDt::kF32) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 4, ActKind::none, float>;
+        case 2: return ukernel_impl<2, 4, ActKind::none, float>;
+        case 3: return ukernel_impl<3, 4, ActKind::none, float>;
+        case 4: return ukernel_impl<4, 4, ActKind::none, float>;
+        case 5: return ukernel_impl<5, 4, ActKind::none, float>;
+        case 6: return ukernel_impl<6, 4, ActKind::none, float>;
         default: return nullptr;
       }
     }
     switch (MR) {
-      case 1: return ukernel_impl<1, 4, ActKind::none>;
-      case 2: return ukernel_impl<2, 4, ActKind::none>;
-      case 3: return ukernel_impl<3, 4, ActKind::none>;
-      case 4: return ukernel_impl<4, 4, ActKind::none>;
-      case 5: return ukernel_impl<5, 4, ActKind::none>;
-      case 6: return ukernel_impl<6, 4, ActKind::none>;
+      case 1: return ukernel_impl<1, 4, ActKind::none, bfloat16_t>;
+      case 2: return ukernel_impl<2, 4, ActKind::none, bfloat16_t>;
+      case 3: return ukernel_impl<3, 4, ActKind::none, bfloat16_t>;
+      case 4: return ukernel_impl<4, 4, ActKind::none, bfloat16_t>;
+      case 5: return ukernel_impl<5, 4, ActKind::none, bfloat16_t>;
+      case 6: return ukernel_impl<6, 4, ActKind::none, bfloat16_t>;
       default: return nullptr;
     }
   }

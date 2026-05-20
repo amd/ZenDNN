@@ -1191,6 +1191,30 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                          profiler.get_res_str());
   }
 
+  // Test-only inspection hook: publish the resolved `gemm_mode`
+  // (a static literal owned by `flat_n_tile`'s `gemm_mode_label`
+  // or one of the per-algo executors) so gtests can assert which
+  // executor path actually ran without a public-API change.
+  //
+  // Gated on `s_capture_gemm_mode`:
+  //   * Production builds never arm it → branch-not-taken on a
+  //     relaxed atomic load whose cache line is in Shared state
+  //     across cores.  No coherence traffic, ~1 cycle total.
+  //   * Tests arm via `GemmModeCaptureGuard` (RAII in
+  //     `moe_test_utils.hpp`) for the scope of the assertion.
+  // Without the gate the unconditional store marks its cache
+  // line Modified on every dispatcher call, ping-ponging the
+  // line across cores under concurrent traffic — a hidden tax
+  // for multi-rank serving deployments that have no use for
+  // the hook.  See the doc-block on `s_capture_gemm_mode` in
+  // `group_matmul/group_matmul_parallel_common.hpp`.
+  if (zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.load(
+          std::memory_order_relaxed)) {
+    zendnnl::lowoha::matmul::test_api
+        ::s_last_group_matmul_direct_gemm_mode.store(
+            gemm_mode, std::memory_order_relaxed);
+  }
+
   return status_t::success;
 }
 

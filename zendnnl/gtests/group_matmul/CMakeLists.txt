@@ -28,4 +28,17 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_algos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_quant.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_prepack.cpp
+    # Custom-kernel direct-surface tests — see gtests/group_matmul/
+    # custom_kernel/ck_test_helpers.hpp for scope (unit-level on
+    # `dispatch_supported`, `resolve_variant`, `prepare_for_call`,
+    # `plan_pack_nr`, end-to-end correctness for both BF16 and FP32
+    # dst, feature-integration on resolved CallContext fields, and
+    # CK -> DLP fallback chain).
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_supported.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_resolve_variant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_prepare_for_call.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_bf16.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_bf16.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
 )

@@ -14,6 +14,18 @@
  * limitations under the License.
  *******************************************************************************/
 
+// Note: the `[b0, b1, b2, b3, ...]` interleaved-pair pack format
+// implemented below is BF16-specific.  It assumes 16-bit elements and
+// the AVX-512-BF16 VDPBF16PS instruction's expectation of a pair-
+// interleaved K layout.  Adding int8 support in the future will
+// require a different K-interleave stride (4 int8 elements per
+// VPDPBUSD lane vs the BF16 pair) and additional packed state
+// (per-tensor / per-row / per-group scales and optional zero-points);
+// when that lands, this file can either grow a per-dtype packer
+// family or be paired with a sibling `pack_int8.cpp`.  The file
+// currently stays at `custom_kernel/pack.cpp` because BF16 is the
+// only dtype variant.
+
 #include "pack.hpp"
 
 #include <cstdlib>

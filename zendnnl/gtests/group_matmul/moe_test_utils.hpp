@@ -559,6 +559,92 @@ struct NRoundsModeOverride {
   NRoundsModeOverride &operator=(NRoundsModeOverride &&) = delete;
 };
 
+// RAII guard for the ALGO 3 N-tile strategy knob (the test-only
+// path over `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY`).  Use this — not
+// an `EnvVarGuard` — when a test asserts behaviour that depends on
+// `get_grp_n_tile_strategy()`'s decision, because the env getter
+// caches its value via a `static const` lambda on first read and
+// will ignore an env change made later in the same process.
+//
+// Accepted values: 0 (auto), 1 (decode-prefer), 2 (rounds-only).
+// Other values are treated as 0 by the getter.
+struct NTileStrategyOverride {
+  int prev;
+  explicit NTileStrategyOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_n_tile_strategy_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~NTileStrategyOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_n_tile_strategy_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  NTileStrategyOverride(const NTileStrategyOverride &) = delete;
+  NTileStrategyOverride &operator=(const NTileStrategyOverride &) = delete;
+  NTileStrategyOverride(NTileStrategyOverride &&) = delete;
+  NTileStrategyOverride &operator=(NTileStrategyOverride &&) = delete;
+};
+
+// RAII guard for the per-expert subtile_cols knob (the test-only
+// path over `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT`).
+// Same rationale as the other overrides — the env getter caches
+// its value via `static const` on first read, so a test that runs
+// after another test has already snapshotted the env cannot use
+// `EnvVarGuard` to flip the knob; this RAII bypasses the cache via
+// the test-API atomic.
+//
+// Accepted values: 0 (per-expert subtile OFF), 1 (ON).  Negative
+// values reset to "no override" via the getter's sentinel branch.
+struct CustomKernelSubtilePerExpertOverride {
+  int prev;
+  explicit CustomKernelSubtilePerExpertOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_subtile_per_expert_override
+        .exchange(value, std::memory_order_relaxed);
+  }
+  ~CustomKernelSubtilePerExpertOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_subtile_per_expert_override
+        .store(prev, std::memory_order_relaxed);
+  }
+  CustomKernelSubtilePerExpertOverride(
+      const CustomKernelSubtilePerExpertOverride &) = delete;
+  CustomKernelSubtilePerExpertOverride &operator=(
+      const CustomKernelSubtilePerExpertOverride &) = delete;
+  CustomKernelSubtilePerExpertOverride(
+      CustomKernelSubtilePerExpertOverride &&) = delete;
+  CustomKernelSubtilePerExpertOverride &operator=(
+      CustomKernelSubtilePerExpertOverride &&) = delete;
+};
+
+// RAII guard for the pack/microkernel NR knob (the test-only path
+// over `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR`).  Use this — not an
+// `EnvVarGuard` — when a test asserts behaviour that depends on
+// `plan_pack_nr()`'s default truth-table, because the env getter
+// caches its value via a `static const` lambda on first read and
+// will ignore an env change made later in the same process.
+//
+// Accepted values: 0 (auto / unset), 32, 64.  Other values are
+// clamped to 0 by the getter, matching env-parse behaviour.
+struct CustomKernelNROverride {
+  int prev;
+  explicit CustomKernelNROverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_nr_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~CustomKernelNROverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_nr_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  CustomKernelNROverride(const CustomKernelNROverride &) = delete;
+  CustomKernelNROverride &operator=(const CustomKernelNROverride &) = delete;
+  CustomKernelNROverride(CustomKernelNROverride &&) = delete;
+  CustomKernelNROverride &operator=(CustomKernelNROverride &&) = delete;
+};
+
 struct CustomKernelNTileOverride {
   int prev;
   explicit CustomKernelNTileOverride(int value) {
@@ -608,6 +694,50 @@ struct PhaseBCaptureGuard {
   }
   PhaseBCaptureGuard(const PhaseBCaptureGuard &) = delete;
   PhaseBCaptureGuard &operator=(const PhaseBCaptureGuard &) = delete;
+};
+
+// RAII guard for the `s_last_group_matmul_direct_gemm_mode` test
+// hook.  Resets the published-string atomic to `nullptr` (so a
+// previous test's value cannot leak into the new assertion) and
+// arms the `s_capture_gemm_mode` flag on construction; disarms on
+// scope exit (including `ASSERT_*` early-out) so that subsequent
+// `group_matmul_direct` calls do NOT keep paying the relaxed
+// store + cache-line-Modified penalty.
+//
+// Use this around every block that reads
+// `s_last_group_matmul_direct_gemm_mode` after a dispatcher
+// invocation.  Construct BEFORE the call, read AFTER it, let the
+// guard fall out of scope:
+//
+//   {
+//     moe_test_utils::GemmModeCaptureGuard guard;
+//     group_matmul_direct(...);
+//     const char *mode = test_api::s_last_group_matmul_direct_gemm_mode
+//         .load(std::memory_order_relaxed);
+//     ASSERT_NE(mode, nullptr);
+//     // ...
+//   }
+//
+// The reset-on-construct semantic matches what tests previously
+// did by hand via `s_last_group_matmul_direct_gemm_mode.store(
+// nullptr, relaxed)`; replacing those manual resets with the
+// guard collapses the test boilerplate AND gives the production
+// store path its cache-line short-circuit (see the doc-block on
+// `s_capture_gemm_mode` in `group_matmul_parallel_common.hpp`).
+struct GemmModeCaptureGuard {
+  GemmModeCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_last_group_matmul_direct_gemm_mode.store(
+            nullptr, std::memory_order_relaxed);
+    zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
+        true, std::memory_order_release);
+  }
+  ~GemmModeCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
+        false, std::memory_order_release);
+  }
+  GemmModeCaptureGuard(const GemmModeCaptureGuard &) = delete;
+  GemmModeCaptureGuard &operator=(const GemmModeCaptureGuard &) = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────

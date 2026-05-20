@@ -224,6 +224,64 @@ namespace test_api {
 inline std::atomic<int> s_grp_n_rounds_mode_override{-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_override{-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override{-1};
+// Sentinel `-1` = no override.  Settable values: 0 (auto / unset),
+// 32 (NR=32), 64 (NR=64).  Override semantics in
+// `get_grp_matmul_custom_kernel_nr()`:
+//   * any negative value (including the `-1` sentinel and any other
+//     negative typo) → fall through to the cached env path, so test
+//     code never accidentally pins NR via a bogus negative.
+//   * any non-negative value other than 32 / 64 → clamped to 0 by
+//     the getter, matching the env-parse "validate or treat as
+//     unset" behaviour.
+inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override{-1};
+// Sentinel `-1` = no override.  Settable values: 0 (auto, default —
+// try DecodeD if eligible, fall through to Rounds), 1 (decode —
+// prefer DecodeD when its eligibility passes; same behaviour as auto
+// today, kept distinct for explicit user intent + apilog hint), 2
+// (rounds — skip DecodeD attempt entirely, always run Rounds-based
+// FewExperts/ManyExperts).  See `get_grp_n_tile_strategy()` for the
+// production env path.
+inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
+
+// Sentinel `-1` = no override.  Settable values: 0 (per-expert
+// subtile sizing OFF — use one m_max-sized `subtile_cols` for every
+// active expert), 1 (ON — populate `subtile_cols_per_expert[e]`
+// individually).  Override semantics in
+// `get_grp_matmul_custom_kernel_subtile_per_expert()`:
+//   * any negative value (including the `-1` sentinel) → fall
+//     through to the cached env path.
+//   * 0 → ON returns false; 1 (or any other positive value) → ON
+//     returns true.  Mirrors the env-parse "0 means off, anything
+//     else means on" convention of `get_grp_n_tile_fused_act()`.
+inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override{-1};
+
+// Last `gemm_mode` string set by `group_matmul_direct` on a
+// successful return.  Read-only inspection hook for tests that need
+// to verify which executor path actually ran (e.g. asserting the
+// custom BF16 microkernel engaged vs the call falling back to AOCL
+// DLP or the Sequential strategy that bypasses CK entirely).
+//
+// Strings come from `flat_n_tile`'s `gemm_mode_label` (defined in
+// `group_matmul_n_tile.cpp`) or the per-algo executor labels.  They
+// are static literals — never freed — so the atomic stores a stable
+// pointer that test code can read after the call returns.
+//
+// CAPTURE GATE — `s_capture_gemm_mode` (atomic bool, default false):
+//   Production builds never set this flag, so the store path in
+//   `group_matmul_direct` short-circuits on a single relaxed load
+//   of a cache-line-shared `false` value (no coherence traffic).
+//   Tests arm the flag (via `GemmModeCaptureGuard` in
+//   `moe_test_utils.hpp`) for the test's scope, in which case the
+//   gated store DOES fire and writes through to the atomic below.
+//   Without this gate the unconditional store would mark its
+//   cache line Modified on every successful dispatcher call,
+//   forcing a coherence ping-pong across any cores running
+//   concurrent `group_matmul_direct` invocations — a measurable
+//   tax on multi-rank serving deployments that have no use for
+//   the test hook.  Same pattern as `s_capture_phase_b` (see
+//   `group_matmul_n_tile.hpp`).
+inline std::atomic<bool>         s_capture_gemm_mode{false};
+inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode{nullptr};
 }  // namespace test_api
 
 inline int get_grp_n_rounds_mode() {
@@ -238,6 +296,83 @@ inline int get_grp_n_rounds_mode() {
     if (parsed == 2) return 2;
     if (parsed == 3) return 3;
     return 0;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2 } — cached, default 0.
+//
+// Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
+// controls whether the planner's auto-mirror perf gate fires.
+// Three values with distinct semantics:
+//
+//     0 = auto (default).  Honour the planner's auto-mirror gate
+//         (route to Sequential when `auto_select_algo` would have
+//         picked ALGO 1 for this shape — Mixtral-class with
+//         num_ops ≤ 8, or prompt-class with num_ops < num_threads).
+//         If the call survives auto-mirror, try DecodeD WITH its
+//         perf-eligibility heuristic (decode-class max_M ≤ 32,
+//         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
+//         max_N / decode_n_tile ≤ team_size_est); fall through to
+//         Rounds (FewExperts / ManyExperts) when the heuristic
+//         refuses.  This is the production default and matches what
+//         env=0 (ALGO 0 auto-pick) does on shapes auto-select
+//         routes to ALGO 3.
+//
+//     1 = decode (FORCE).  SKIP the auto-mirror gate AND skip the
+//         perf-eligibility heuristic — run DecodeD on every shape
+//         where it is STRUCTURALLY feasible (`num_threads >=
+//         num_ops`; smaller teams would over-subscribe DecodeD's
+//         OMP region and collide the `tid → expert` mapping).
+//         Useful for benchmarking DecodeD on shapes the heuristic
+//         would normally route away (e.g. Qwen-30B-A3B decode with
+//         active experts > num_ccds, where eligibility's `num_ops
+//         ≤ num_ccds` gate refuses but DecodeD's executor still
+//         runs correctly with thin per-expert teams of size
+//         `num_threads / num_ops`).  Logs an apilog L3 line
+//         describing the resulting allocation, OR a fallback line
+//         if num_threads < num_ops forces a Rounds fall-through.
+//
+//     2 = rounds (FORCE).  SKIP the auto-mirror gate (same as 1).
+//         Skip the DecodeD attempt entirely; always run the Rounds
+//         path (FewExperts / ManyExperts).  Useful for benchmarking
+//         Rounds parity vs DecodeD on decode-class shapes, or for
+//         working around a hypothetical DecodeD-specific regression
+//         without rebuilding.
+//
+// STRUCTURAL gates (`!ntile_viable`, R3 capacity-overflow,
+// F3 narrow-N alignment escape) ALWAYS fire regardless of the knob
+// — those are memory safety / kernel correctness, not perf
+// preference.  When any of those routes the call to Sequential, the
+// knob is irrelevant.  See `plan_group_n_tile` in
+// `group_matmul_n_tile.cpp` for the precedence diagram.
+//
+// Mid-process env changes have no effect (cached static const);
+// tests should use `s_grp_n_tile_strategy_override` via the RAII
+// helper `NTileStrategyOverride` in `gtests/group_matmul/
+// moe_test_utils.hpp` to flip it deterministically inside the same
+// process.
+//
+// Validation paths differ slightly between the env and the override:
+//   * Env path  — invalid values (< 0 OR > 2) parse to 0 (auto),
+//                 matching the env-parse "validate or treat as
+//                 unset" convention used by the other knobs in this
+//                 header.
+//   * Override path — `-1` is the sentinel for "no override" and
+//                 falls through to the cached env path; any other
+//                 negative value also falls through (so a bogus
+//                 negative typo cannot accidentally pin a strategy).
+//                 Non-negative override values > 2 clamp to 0
+//                 (auto), mirroring the env path on the upper end.
+inline int get_grp_n_tile_strategy() {
+  const int ovr = test_api::s_grp_n_tile_strategy_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return (ovr <= 2) ? ovr : 0;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY");
+    if (e == nullptr || e[0] == '\0') return 0;
+    const int parsed = std::atoi(e);
+    return (parsed >= 0 && parsed <= 2) ? parsed : 0;
   }();
   return v;
 }
@@ -613,7 +748,18 @@ inline int aocl_stable_n_thr(int num_threads, int /*N*/) {
 //   Pack/microkernel NR override.  Auto (unset) → 32 (cleanest
 //   register budget, MR=8 on NV=2).  64 doubles N-lanes per zmm at
 //   MR cap 6 — worth trying on prompt shapes.  Other values → auto.
+//
+// Tests can pin the value via `s_grp_matmul_custom_kernel_nr_override`
+// (sentinel -1 = no override).  Without the override the env value is
+// captured once on first call; later env mutations are invisible —
+// the override is the only deterministic way to flip this knob in
+// the same process.
 inline int get_grp_matmul_custom_kernel_nr() {
+  const int ovr = test_api::s_grp_matmul_custom_kernel_nr_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) {
+    return (ovr == 32 || ovr == 64) ? ovr : 0;
+  }
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR");
     if (e == nullptr || e[0] == '\0') {
@@ -630,7 +776,18 @@ inline int get_grp_matmul_custom_kernel_nr() {
 //   Per-expert L2-friendly subtile_cols (vs. one m_max-sized value
 //   for the whole call).  Noise-floor on typical MoE decode shapes;
 //   may help on large-L2 hosts or workloads with extreme M variance.
+//
+// Tests can pin the value via
+// `s_grp_matmul_custom_kernel_subtile_per_expert_override`; sentinel
+// `-1` falls through to the cached env path.  Without the override
+// the env value is captured once on first call (`static const`
+// lambda) and later env mutations are invisible — the override is
+// the only deterministic way to flip this knob in the same process.
 inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
+  const int ovr =
+      test_api::s_grp_matmul_custom_kernel_subtile_per_expert_override
+          .load(std::memory_order_relaxed);
+  if (ovr >= 0) return (ovr != 0);
   static const bool v = []() {
     const char *e = std::getenv(
                       "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT");

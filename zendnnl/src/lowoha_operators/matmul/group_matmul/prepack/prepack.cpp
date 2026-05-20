@@ -122,25 +122,60 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
         std::min<size_t>(static_cast<size_t>(p.num_ops_total),
                          p.weight->size());
     uintptr_t ptr_xor    = 0;
+    uintptr_t ptr_sum    = 0;
     size_t    k_xor      = 0;
+    size_t    k_sum      = 0;
     size_t    n_xor      = 0;
+    size_t    n_sum      = 0;
     size_t    ldb_xor    = 0;
+    size_t    ldb_sum    = 0;
     size_t    transb_xor = 0;
     for (size_t i = 0; i < bound; ++i) {
-      ptr_xor ^= reinterpret_cast<uintptr_t>((*p.weight)[i]);
-      if (p.K  && i < p.K->size())
-        k_xor ^= static_cast<size_t>((*p.K)[i]);
-      if (p.N  && i < p.N->size())
-        n_xor ^= static_cast<size_t>((*p.N)[i]);
-      if (p.ldb && i < p.ldb->size())
-        ldb_xor ^= static_cast<size_t>((*p.ldb)[i]);
+      const uintptr_t pi = reinterpret_cast<uintptr_t>((*p.weight)[i]);
+      ptr_xor ^= pi;
+      ptr_sum += pi;
+      if (p.K  && i < p.K->size()) {
+        const size_t v = static_cast<size_t>((*p.K)[i]);
+        k_xor ^= v; k_sum += v;
+      }
+      if (p.N  && i < p.N->size()) {
+        const size_t v = static_cast<size_t>((*p.N)[i]);
+        n_xor ^= v; n_sum += v;
+      }
+      if (p.ldb && i < p.ldb->size()) {
+        const size_t v = static_cast<size_t>((*p.ldb)[i]);
+        ldb_xor ^= v; ldb_sum += v;
+      }
       if (p.transB && i < p.transB->size())
         transb_xor ^= static_cast<size_t>((*p.transB)[i] ? 1u : 0u);
     }
+    // XOR is permutation-invariant (the rotation-immunity we want for
+    // compact-form active-subset rotations) but loses information on
+    // uniform-shape pools: `K^K=0`, and two pointer pairs `(A,B)` and
+    // `(A+d, B+d)` give the same XOR `A^B` because the addend `d`
+    // cancels.  That collision matters for fused-MoE callers: within
+    // a single `group_matmul_direct` invocation the Op1 and Op2
+    // dispatchers each call `prepack_for_algo_3` with their own
+    // (weight_pool, K_vec, N_vec) — uniform shape, same num_ops_total,
+    // same num_threads / nr_align — and the *only* signal that
+    // distinguishes their fingerprints is the weight pool's pointer
+    // pattern.  Same-size-allocation pools placed in sequence by
+    // malloc produce identical pair-wise XORs, so the second pass's
+    // `already_warmed` returns true on a stale Op1 entry and Op2's
+    // warmer is silently skipped — the failure mode the
+    // `TestPrepackKDownSynthesis.BothPassesWarmAllExperts/act_none_E2_N1_64`
+    // case surfaced.  Fold the COMMUTATIVE SUM alongside the XOR for
+    // every per-expert field so the joint signature requires BOTH
+    // the XOR AND the sum to collide — preserving rotation immunity
+    // while catching the uniform-shape malloc-aliased-pool case.
     s = mix_hash(s, static_cast<size_t>(ptr_xor));
+    s = mix_hash(s, static_cast<size_t>(ptr_sum));
     s = mix_hash(s, k_xor);
+    s = mix_hash(s, k_sum);
     s = mix_hash(s, n_xor);
+    s = mix_hash(s, n_sum);
     s = mix_hash(s, ldb_xor);
+    s = mix_hash(s, ldb_sum);
     s = mix_hash(s, transb_xor);
     // Fold the iteration count in too so an empty-vs-non-empty or
     // size-mismatch case cannot collide with all-zero XORs (e.g.
@@ -387,8 +422,28 @@ inline void log_pack_probe(int scheduling_algo,
 // and pay a first-call latency hit.
 //
 // Mirrored gates (each refusal in `prepare_for_call` is matched here):
-//   * src/wei/dst all bf16 (refusal: `unsupported_dtype`)
+//   * src = bf16, wei = bf16 (refusal: `unsupported_dtype`)
+//   * dst ∈ {bf16, f32} — both runtime variants (`kBF16_BF16_BF16`
+//     and `kBF16_BF16_F32`) are accepted; pack work is dst-agnostic
+//     (the pack format is fixed by NR + kernel layout, dst only
+//     affects the post-K epilogue), so a single warm covers both.
+//     (refusal: `unsupported_dtype` from `resolve_variant`)
 //   * act in {swiglu_oai_mul, none} (refusal: `unsupported_activation`)
+//     Split-halves activations (silu_and_mul / gelu_and_mul) are
+//     also refused here, mirroring `prepare_for_call`'s refusal.
+//     The production parallel dispatcher pre-translates these to
+//     `act = none` before calling `flat_n_tile` (and hence before
+//     reaching this prepack module), so silu/gelu calls in
+//     production are warmed correctly under the `act = none`
+//     branch.  Direct prepack callers passing silu/gelu — e.g.
+//     ALGO 1/4/5 cross-warm — take a one-time first-call lazy CK
+//     pack instead of a divergent prepack-vs-runtime gate (the
+//     full rationale is in `ck_eligible` below).
+//   * (swiglu_oai_mul, f32 dst) refused — the fused swiglu store helper
+//     writes BF16 only, so `select_ukernel` returns nullptr for that
+//     (Act, DstDt) tuple and `prepare_for_call` refuses with
+//     `kfn_table_fill_failed`.  The caller takes the AOCL DLP +
+//     separate FP32 swiglu pass instead.
 //   * act_dtype = bf16 when act != none (refusal: `unsupported_act_dtype`)
 //   * bias_dtype in {none, bf16, f32} (refusal: `unsupported_bias_dtype`)
 //   * pack_nr ∈ {32, 64} divides N (refusal: `N_not_multiple_of_pack_nr`)
@@ -406,9 +461,50 @@ inline bool ck_eligible(const PrepackParams &p) {
   if (!p.custom_kernel_on) return false;
   if (p.src_dtype != data_type_t::bf16) return false;
   if (p.wei_dtype != data_type_t::bf16) return false;
-  if (p.dst_dtype != data_type_t::bf16) return false;
+  // dst ∈ {bf16, f32} — mirrors `resolve_variant`'s acceptance of
+  // both `kBF16_BF16_BF16` and `kBF16_BF16_F32`.  Pack work itself
+  // does not depend on dst dtype (the pack format is set by
+  // `pack_nr` + the kernel's K-pair layout), so the same packed
+  // arena warms both runtime variants.
+  if (p.dst_dtype != data_type_t::bf16
+      && p.dst_dtype != data_type_t::f32) return false;
+  // Why split-halves activations (silu_and_mul / gelu_and_mul) are
+  // refused here even though the runtime CK kernel CAN compute the
+  // matmul portion for those calls:
+  //
+  // The production parallel dispatcher
+  // (`group_matmul_run_parallel_dispatch`) already translates
+  // silu/gelu → `none` BEFORE invoking `flat_n_tile`
+  // (group_matmul_parallel.cpp:789, `a3_fuses ? fused_act : none`).
+  // `flat_n_tile` then forwards that translated `none` to BOTH the
+  // prepack call site (group_matmul_n_tile.cpp:1929) and the runtime
+  // `prepare_for_call` — so prepack and the runtime CK gate see the
+  // same `none` for silu/gelu calls in production, and CK is warmed
+  // / engaged identically.
+  //
+  // This refusal therefore only fires for direct prepack callers
+  // (e.g. unit tests, or hypothetical future callers that bypass
+  // the parallel dispatcher).  Refusing them here keeps prepack
+  // symmetric with `prepare_for_call`'s own silu/gelu refusal in
+  // `dispatch.cpp`, which is the safer contract for direct callers
+  // — translating silently here would mask the fact that the
+  // runtime gate refuses these activations.  Cross-warm callers
+  // (ALGO 1/4/5 prepack invoked with the original silu/gelu act)
+  // accept a one-time first-call lazy CK pack on the subsequent
+  // ALGO 3 call rather than a divergent gate semantics.
   if (p.act != grp_matmul_gated_act_t::swiglu_oai_mul
       && p.act != grp_matmul_gated_act_t::none) {
+    return false;
+  }
+  // (swiglu_oai_mul, f32 dst) is structurally rejected at runtime
+  // (`select_ukernel` returns nullptr for that DstDt) — `prepare_for_call`
+  // refuses with `kfn_table_fill_failed`, and the caller falls back to
+  // AOCL DLP + a separate FP32 swiglu pass.  Mirror that refusal here
+  // so prepack does not warm a CK arena for a runtime path that will
+  // never engage (and so the `!ck_eligible(p)` branch above runs the
+  // AOCL per-tile warm instead).
+  if (p.act == grp_matmul_gated_act_t::swiglu_oai_mul
+      && p.dst_dtype != data_type_t::bf16) {
     return false;
   }
   if (p.act != grp_matmul_gated_act_t::none
@@ -652,9 +748,9 @@ void prepack_for_algo_3(const PrepackParams &p) {
   //     direct prepack invocations from tests / future internal
   //     callers; the `flat_n_tile` production call site always
   //     supplies both num_threads and nr_align.
-  //   * `ck_eligible(p)` is true (BF16/BF16/BF16 + `CUSTOM_KERNEL=1`)
-  //     — custom kernel will handle compute, AOCL DLP cache is
-  //     wasted memory (see the multi-line note immediately above).
+  //   * `ck_eligible(p)` is true (BF16/BF16/{BF16,F32} +
+  //     `CUSTOM_KERNEL=1`) — custom kernel will handle compute, AOCL
+  //     DLP cache is wasted memory (see the multi-line note above).
 
   const bool primary_did_custom = ck_eligible(p);
   if (primary_did_custom) {

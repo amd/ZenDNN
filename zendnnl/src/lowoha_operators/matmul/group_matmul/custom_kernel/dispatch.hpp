@@ -48,6 +48,56 @@
 /// Callers only read `ctx.enabled` and `ctx.pack_nr` from the context
 /// (the latter for column-split alignment); everything else is owned
 /// by the dispatcher and the microkernel.
+///
+/// The dispatcher surface is intentionally narrow so the underlying
+/// kernel implementation (MR/NV specialisations, pack format, ISA
+/// targeting) can evolve without breaking callers.
+///
+/// ── Support matrix (act × dst_dtype) ───────────────────────────────
+/// `prepare_for_call` accepts only two activation values directly:
+/// `none` and `swiglu_oai_mul`.  Split-halves activations
+/// (`silu_and_mul`, `gelu_and_mul`) are NOT accepted at this gate —
+/// they require a caller-side post-activation pass over the wide
+/// `[M, N]` output and the dispatcher cannot enforce that.  Callers
+/// translate them to `act = none` before invoking
+/// `prepare_for_call` (this is what `flat_n_tile` does), then run
+/// the activation themselves on the matmul output.
+///
+/// For BF16 src + BF16 wei (the only src/wei tuple the kernel serves
+/// today; see `resolve_variant` for the full truth table) the
+/// directly-served cells are:
+///
+///   * (act = none,           dst = bf16) — CK serves via
+///       `kBF16_BF16_BF16` matmul-only; epilogue stores BF16.
+///   * (act = none,           dst = f32 ) — CK serves via
+///       `kBF16_BF16_F32` matmul-only; epilogue stores FP32.
+///   * (act = swiglu_oai_mul, dst = bf16) — CK serves via
+///       `kBF16_BF16_BF16` with the activation fused in the per-tile
+///       epilogue.  Output is the half-width [M, N/2] BF16 tile.
+///   * (act = swiglu_oai_mul, dst = f32 ) — CK refuses (the fused
+///       swiglu store helper writes BF16 only).  Caller falls back
+///       to AOCL DLP + a separate FP32 swiglu pass.
+///
+/// For split-halves activations the production call sequence is:
+///
+///   * (act = silu_and_mul,   dst = {bf16, f32}) — caller passes
+///       `act = none` to `prepare_for_call` (CK serves the matmul
+///       via `kBF16_BF16_BF16` or `kBF16_BF16_F32`), then runs
+///       `group_matmul_moe_act_execute` over the wide
+///       `[gate_cols | up_cols]` output.
+///   * (act = gelu_and_mul,   dst = {bf16, f32}) — same as
+///       `silu_and_mul`.
+///
+/// Cells the kernel does not serve fall back to AOCL DLP via the
+/// caller's standard path (`execute_expert_slice` for non-fused,
+/// the two-pass route for fused MoE).  The fallback is always
+/// behaviourally equivalent — the distinction is only which
+/// implementation runs the matmul and (for swiglu+f32) the
+/// activation.
+///
+/// `bias_dtype` ∈ {none, bf16, f32} and `act_dtype` (when
+/// `act != none`) must equal `bf16` for fused activation; the
+/// non-fused activation pass handles its own dtype routing.
 
 #ifndef ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_DISPATCH_HPP
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_DISPATCH_HPP
@@ -59,7 +109,7 @@
 #include "common/data_types.hpp"
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
-#include "ukernel.hpp"
+#include "ukernel/bf16_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -75,6 +125,38 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 /// use this to early-out before building any inputs to
 /// `prepare_for_call`.
 bool dispatch_supported();
+
+// ────────────────────────────────────────────────────────────────────
+// Kernel variant — which (src, wei, dst) tuple the dispatcher routes to
+// ────────────────────────────────────────────────────────────────────
+//
+// Single per-call discriminator that selects the concrete microkernel
+// instantiation `dispatch_tile()` calls.  Set by `prepare_for_call()`
+// from the dtype tuple via `resolve_variant()`; read by
+// `dispatch_tile()` to switch between kernel paths.
+//
+// `kBF16_BF16_BF16` and `kBF16_BF16_F32` are the variants the kernel
+// currently serves.  Any tuple outside that set resolves to
+// `kUnsupported` and the caller falls back to DLP.
+enum class KernelVariant : uint8_t {
+  kUnsupported     = 0,  ///< Not supported by the custom kernel; caller falls back to DLP.
+  kBF16_BF16_BF16  = 1,  ///< `bf16:bf16:bf16`.
+  kBF16_BF16_F32   = 2,  ///< `bf16:bf16:f32`.
+};
+
+/// Map a (src, wei, dst) dtype tuple to a `KernelVariant`.  Returns
+/// `kUnsupported` for any combination the custom kernel cannot
+/// handle (caller then falls back to DLP).
+///
+/// Truth table:
+///   `(bf16, bf16, bf16)`  → `kBF16_BF16_BF16`
+///   `(bf16, bf16, f32 )`  → `kBF16_BF16_F32`
+///   any other tuple       → `kUnsupported`
+///
+/// `noexcept` because it's a pure switch over POD enums — no
+/// allocation, no I/O.
+KernelVariant resolve_variant(data_type_t src, data_type_t wei,
+                              data_type_t dst) noexcept;
 
 /// Pick the pack/microkernel NR for one (K, N) shape.  Returns either
 /// `kNRMin` (32), `kNRMax` (64), or `0` when no supported NR divides N.
@@ -92,6 +174,13 @@ struct CallContext {
   /// True only if `prepare_for_call()` succeeded — the caller reads
   /// this to decide whether to call `dispatch_tile()` or fall back.
   bool enabled = false;
+
+  /// Resolved kernel variant for this call.  Set by
+  /// `prepare_for_call()` via `resolve_variant()`.  On the success
+  /// path it is `kBF16_BF16_BF16` or `kBF16_BF16_F32`.
+  /// `dispatch_tile()` reads this to route to the correct kernel
+  /// instantiation.
+  KernelVariant variant = KernelVariant::kUnsupported;
 
   /// Pack/microkernel NR (32 or 64).  The caller reads this for the
   /// `aligned_n_split()` column-split alignment so each per-thread
@@ -111,8 +200,8 @@ struct CallContext {
   BiasKind       bias_kind     = BiasKind::none;  // resolved from bias_dtype
   // Per-MR microkernel function pointers.  Slot 0 is unused (MR=0
   // would be a no-op); slots 1..kMaxMR hold the selected specializations.
-  // Sized via `kMaxMR` so future max_mr bumps (e.g. int8 wider register
-  // budget) only need a constant update in ukernel.hpp.
+  // Sized via `kMaxMR` so any future max_mr bump only needs a constant
+  // update in `ukernel/bf16_microkernel.hpp`.
   ukernel_fn_t   kfn_table[kMaxMR + 1] = {};
 
   /// Maximum experts per call we cache packed pointers for.  Must
@@ -134,16 +223,31 @@ struct CallContext {
 /// this function owns.  Caller passes the per-expert vectors it
 /// already has on hand; the dispatcher reads what it needs.
 ///
-/// `src_dtype` / `wei_dtype` / `dst_dtype` are the matmul A / B / C
-/// dtypes (typically read from `params[0].dtypes.{src,wei,dst}`).  The
-/// caller is expected to have already validated cross-expert uniformity;
-/// the dispatcher trusts that.  The custom microkernel only implements
-/// the `bf16 x bf16 -> bf16` math path (VDPBF16PS), so ALL THREE must be
-/// bf16 for `out.enabled` to become true.  If any of them differs (e.g.
-/// fp32 weights with bf16 dst on a mixed-precision call), the dispatcher
-/// refuses and the caller falls back to its standard execution path —
-/// without this gate the microkernel would silently reinterpret the
-/// buffers as bf16 and produce corrupt output.
+/// SCOPE NOTE — the dtype contract (single source of truth).
+///   `src_dtype` / `wei_dtype` / `dst_dtype` are the matmul A / B / C
+///   dtypes (typically read from `params[0].dtypes.{src,wei,dst}`).
+///   The dispatcher trusts the caller has already validated cross-
+///   expert uniformity (every expert in the call shares these dtypes).
+///
+///   The (src, wei, dst) tuple is routed through `resolve_variant()`,
+///   which is the SINGLE source of truth for what the custom kernel
+///   can serve.  Its current truth table:
+///
+///     SUPPORTED (returns `out.enabled = true`):
+///       (bf16, bf16, bf16)  -> kBF16_BF16_BF16
+///       (bf16, bf16, f32 )  -> kBF16_BF16_F32
+///
+///     REJECTED (returns failure -> caller falls back to DLP):
+///       Anything else, including:
+///         (f32 , f32 , *   )  -- no FP32 GEMM in this kernel
+///         (f32 , bf16, *   )  -- mixed-precision src
+///         (bf16, bf16, f16 )  -- F16 dst not implemented
+///         any tuple involving `data_type_t::u8` / `f16` / `s8`
+///
+///   On a rejected tuple the caller is expected to take its standard
+///   path (e.g., AOCL DLP via `execute_expert_slice`) — failure to
+///   do so will trip the `ctx.variant != kUnsupported` debug assert
+///   in `dispatch_tile()`.
 ///
 /// `act_dtype` is consulted only when `act != ActKind::none`; for
 /// `act = none` the dispatcher skips the bf16 check so callers that
@@ -156,6 +260,24 @@ struct CallContext {
 /// caller falls back to its standard path.  The dispatcher resolves
 /// this into `out.bias_kind` which the microkernel branches on once
 /// per tile (no specialisation explosion).
+///
+/// Activation contract:
+///   * `swiglu_oai_mul` — fused in the per-tile epilogue (interleaved
+///     [g0,u0,g1,u1,...] layout puts (gate, up) pairs on every 32-col
+///     tile).  Halved output width.  `dst_dtype = bf16` ONLY (the
+///     swiglu store helper writes BF16; (swiglu, f32-dst) is rejected
+///     inside `select_ukernel`).
+///   * `silu_and_mul` / `gelu_and_mul` — REFUSED here.  The kernel
+///     could compute the matmul portion via the same path as
+///     `act = none`, but the split-halves [gate_cols|up_cols]
+///     layout requires a separate post-activation pass at the
+///     caller, and the dispatcher cannot enforce that.  Production
+///     callers translate these activations to `act = none` BEFORE
+///     calling `prepare_for_call` and run
+///     `group_matmul_moe_act_execute` on the wide matmul output;
+///     `flat_n_tile` does this automatically for the
+///     `group_matmul_direct` path.
+///   * `none` — plain matmul.  Both BF16 and F32 dst admitted.
 ///
 /// `is_weights_const` is the framework's per-expert constancy hint
 /// (matches the public API contract on `group_matmul_direct`).  The
