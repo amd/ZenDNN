@@ -17,11 +17,11 @@
 /// @file test_group_embag.cpp
 /// @brief Bag-mode tests for group_embedding_bag_direct.
 ///
-///   TestGroupEmbag - F32/BF16/F16 + INT8/S4/U4 (sum/mean/max),
-///                    compared against the per-table forced-reference
-///                    kernel.  thread_algo is randomized via
-///                    GroupEmbagType so all four schedulers are
-///                    exercised across runs.
+///   TestGroupEmbag - F32/BF16/F16 + INT8/S4/U4 with F32/BF16/F16
+///                    outputs (sum/mean/max), compared against the
+///                    per-table forced-reference kernel.  thread_algo
+///                    is randomized via GroupEmbagType so all four
+///                    schedulers are exercised across runs.
 
 #include <gtest/gtest.h>
 
@@ -72,10 +72,10 @@ class TestGroupEmbag : public ::testing::TestWithParam<GroupEmbagType> {
   int32_t num_threads;
   tensor_factory_t tensor_factory{};
 
-  // Float-table body.  allow_isa_skip lets F16 cases skip cleanly on
-  // hosts without AVX-512 FP16.
+  // Float-table body.  F16 cases skip cleanly on hosts without
+  // AVX-512 FP16 via the kernel's isa_unsupported status.
   void run_float_group_test(data_type_t table_dt, data_type_t output_dt,
-                            float tol, bool allow_isa_skip = false) {
+                            float tol) {
     GroupTensors g = build_group_embag_tensors(
                        tensor_factory, group_size, num_embeddings, embedding_dim,
                        num_indices, num_bags, algo, padding_index,
@@ -87,7 +87,7 @@ class TestGroupEmbag : public ::testing::TestWithParam<GroupEmbagType> {
                         g.algos, g.padding_idxs, g.include_last_offsets,
                         g.fp16_scale_bias, thread_algo);
 
-    if (allow_isa_skip && status == status_t::isa_unsupported) {
+    if (status == status_t::isa_unsupported) {
       GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
 
@@ -105,7 +105,9 @@ class TestGroupEmbag : public ::testing::TestWithParam<GroupEmbagType> {
 
   // Quantized-table body.  free()'s heap-allocated table buffers
   // before return; `quantized_embedding_tensor_random` returns a
-  // buffer the tensor_t does not own.
+  // buffer the tensor_t does not own.  F16-output cases skip cleanly
+  // on hosts without AVX-512 FP16 via the kernel's isa_unsupported
+  // status.
   void run_quant_group_test(data_type_t table_dt, data_type_t output_dt,
                             float tol) {
     GroupTensors g = build_group_embag_quant_tensors(
@@ -119,6 +121,11 @@ class TestGroupEmbag : public ::testing::TestWithParam<GroupEmbagType> {
                         g.tables, g.indices, g.offsets, g.weights, g.outputs,
                         g.algos, g.padding_idxs, g.include_last_offsets,
                         g.fp16_scale_bias, thread_algo);
+
+    if (status == status_t::isa_unsupported) {
+      free_quant_tables(g);
+      GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+    }
 
     status_t ref_status = group_embag_forced_ref_kernel_test(
                             g.tables, g.indices, g.offsets, g.weights,
@@ -147,16 +154,13 @@ TEST_P(TestGroupEmbag, BF16_BF16) {
   run_float_group_test(data_type_t::bf16, data_type_t::bf16, EMBAG_BF16_TOL);
 }
 TEST_P(TestGroupEmbag, F32_F16) {
-  run_float_group_test(data_type_t::f32, data_type_t::f16, EMBAG_F16_TOL,
-                       /*allow_isa_skip=*/true);
+  run_float_group_test(data_type_t::f32, data_type_t::f16, EMBAG_F16_TOL);
 }
 TEST_P(TestGroupEmbag, F16_F32) {
-  run_float_group_test(data_type_t::f16, data_type_t::f32, EMBAG_F16_TOL,
-                       /*allow_isa_skip=*/true);
+  run_float_group_test(data_type_t::f16, data_type_t::f32, EMBAG_F16_TOL);
 }
 TEST_P(TestGroupEmbag, F16_F16) {
-  run_float_group_test(data_type_t::f16, data_type_t::f16, EMBAG_F16_TOL,
-                       /*allow_isa_skip=*/true);
+  run_float_group_test(data_type_t::f16, data_type_t::f16, EMBAG_F16_TOL);
 }
 TEST_P(TestGroupEmbag, INT8_F32) {
   run_quant_group_test(data_type_t::s8, data_type_t::f32, EMBAG_INT4_TOL);
@@ -164,17 +168,26 @@ TEST_P(TestGroupEmbag, INT8_F32) {
 TEST_P(TestGroupEmbag, INT8_BF16) {
   run_quant_group_test(data_type_t::s8, data_type_t::bf16, EMBAG_INT4_TOL);
 }
+TEST_P(TestGroupEmbag, INT8_F16) {
+  run_quant_group_test(data_type_t::s8, data_type_t::f16, EMBAG_INT4_TOL);
+}
 TEST_P(TestGroupEmbag, S4_F32) {
   run_quant_group_test(data_type_t::s4, data_type_t::f32, EMBAG_INT4_TOL);
 }
 TEST_P(TestGroupEmbag, S4_BF16) {
   run_quant_group_test(data_type_t::s4, data_type_t::bf16, EMBAG_INT4_TOL);
 }
+TEST_P(TestGroupEmbag, S4_F16) {
+  run_quant_group_test(data_type_t::s4, data_type_t::f16, EMBAG_INT4_TOL);
+}
 TEST_P(TestGroupEmbag, U4_F32) {
   run_quant_group_test(data_type_t::u4, data_type_t::f32, EMBAG_INT4_TOL);
 }
 TEST_P(TestGroupEmbag, U4_BF16) {
   run_quant_group_test(data_type_t::u4, data_type_t::bf16, EMBAG_INT4_TOL);
+}
+TEST_P(TestGroupEmbag, U4_F16) {
+  run_quant_group_test(data_type_t::u4, data_type_t::f16, EMBAG_INT4_TOL);
 }
 
 INSTANTIATE_TEST_SUITE_P(GroupEmbag, TestGroupEmbag,

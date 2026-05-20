@@ -460,6 +460,74 @@ int embedding_bag_u4_ref_kernel_example() {
   return OK;
 }
 
+int embedding_bag_s8_f16_kernel_example() {
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+
+    auto table = tensor_factory.quantized_embedding_tensor_random({EMB_ROW, EMB_DIM},
+                 data_type_t::s8, "table", true);
+
+    auto embedding_bag_context = embag_context_t()
+                                 .set_param("table", table)
+                                 .set_algo(embag_algo_t::sum)
+                                 .set_fp16_scale_bias(true)
+                                 .create();
+
+    if (! embedding_bag_context.check()) {
+      testlog_error("embedding bag context creation failed");
+      return NOT_OK;
+    }
+
+    auto embedding_bag_operator = embag_operator_t()
+                                  .set_name("embedding_bag_s8_f16_operator")
+                                  .set_context(embedding_bag_context)
+                                  .create();
+
+    if (embedding_bag_operator.is_bad_object()) {
+      testlog_error(" operator ", embedding_bag_operator.get_name(),
+                    " creation failed.");
+      return NOT_OK;
+    }
+
+    auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
+                          data_type_t::s64, indices, "indices");
+
+    auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
+                          data_type_t::s64, offsets, "offsets");
+
+    auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
+                         data_type_t::f16, "output");
+
+    output_tensor.set_stride({EMB_DIM, 1});
+
+    status = embedding_bag_operator
+             .set_input("indices", indices_tensor)
+             .set_input("offsets", offsets_tensor)
+             .set_output("output", output_tensor)
+             .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<",embedding_bag_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",embedding_bag_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+    //free this table pointer after use
+    free(table.get_raw_handle_unsafe());
+    table.reset();
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
 // This example demonstrates the group_embedding_bag_direct API which
 // performs multiple embedding bag operations in a single call.
 // Each operation has its own embedding table, indices, offsets, and output.

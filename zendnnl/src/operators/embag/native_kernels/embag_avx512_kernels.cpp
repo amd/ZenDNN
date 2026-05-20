@@ -650,6 +650,65 @@ status_t embag_int8_int4_avx512_kernel_t::execute(const context_type &context_,
       return status_t::unimplemented;
     }
   }
+  else if (table_dtype == data_type_t::s8 && dst_dtype == data_type_t::f16) {
+    // INT8 input -> F16 output
+    const int8_t *input_s8 = reinterpret_cast<const int8_t *>(input);
+    float16_t *dst_f16 = reinterpret_cast<float16_t *>(dst);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        embag_config_t::instance().set_accum_type(data_type_t::f16);
+        embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int64_t, int64_t, float16_t>
+        (
+          input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        embag_config_t::instance().set_accum_type(data_type_t::f32);
+        embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t, float16_t>(
+          input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        embag_config_t::instance().set_accum_type(data_type_t::f16);
+        embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int32_t, int32_t, float16_t>
+        (
+          input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        embag_config_t::instance().set_accum_type(data_type_t::f32);
+        embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, float16_t>(
+          input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+      return status_t::unimplemented;
+    }
+  }
   else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
            dst_dtype == data_type_t::f32) {
     // INT4 input -> FP32 output
@@ -708,6 +767,66 @@ status_t embag_int8_int4_avx512_kernel_t::execute(const context_type &context_,
         input_s4, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset, table_dtype,
         fp16_scale_bias);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+      return status_t::unimplemented;
+    }
+  }
+  else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+           dst_dtype == data_type_t::f16) {
+    // INT4 input -> F16 output
+    const uint8_t *input_s4 = reinterpret_cast<const uint8_t *>(input);
+    float16_t *dst_f16 = reinterpret_cast<float16_t *>(dst);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        embag_config_t::instance().set_accum_type(data_type_t::f16);
+        embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int64_t, int64_t, float16_t>
+        (
+          input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        embag_config_t::instance().set_accum_type(data_type_t::f32);
+        embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t, float16_t>(
+          input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        embag_config_t::instance().set_accum_type(data_type_t::f16);
+        embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int32_t, int32_t, float16_t>
+        (
+          input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        embag_config_t::instance().set_accum_type(data_type_t::f32);
+        embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t, float16_t>(
+          input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
+          padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+          fp16_scale_bias);
+      }
     }
     else {
       apilog_error("Unsupported data type for indices and offsets");
@@ -826,6 +945,64 @@ embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, uint16_t>(
   const int8_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
   data_type_t, bool);
+
+// INT4 -> F16 output
+template void
+embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t, float16_t>(
+  const uint8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t, float16_t>(
+  const uint8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+// INT8 -> F16 output
+template void
+embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t, float16_t>(
+  const int8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, float16_t>(
+  const int8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+// F16 FMA kernel instantiations (INT4 -> F16 output)
+#if __GNUC__ >= 12
+template void
+embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int64_t, int64_t, float16_t>
+(
+  const uint8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int32_t, int32_t, float16_t>
+(
+  const uint8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+// F16 FMA kernel instantiations (INT8 -> F16 output)
+template void
+embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int64_t, int64_t, float16_t>
+(
+  const int8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int32_t, int32_t, float16_t>
+(
+  const int8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+#endif
 
 extern "C" {
   embag_f32_avx512_kernel_t *get_embag_f32_avx512_kernel() {

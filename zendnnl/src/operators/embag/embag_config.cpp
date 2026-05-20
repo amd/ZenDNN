@@ -47,6 +47,8 @@ status_t embag_config_t::set_user_config(json config_json) {
   }
 
   set_kernel(embag_kernel);
+  // TODO: Add support for user flexibility to set accumulation type.
+  set_accum_type(data_type_t::f32);
   return status_t::success;
 }
 
@@ -117,6 +119,9 @@ void embag_config_t::set_env_config() {
     }
   }
   set_thread_algo(thread_val);
+
+  // TODO: Add support for user flexibility to set accumulation type.
+  set_accum_type(data_type_t::f32);
 }
 
 void embag_config_t::set_kernel(int32_t kernel) {

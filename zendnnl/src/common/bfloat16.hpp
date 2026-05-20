@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -72,7 +72,7 @@ class bfloat16_t {
    */
   template<typename integer_type,
            typename SFINAE = std::enable_if_t<std::is_integral_v<integer_type>>>
-             bfloat16_t(integer_type i): bfloat16_t{float(i)} {
+               bfloat16_t(integer_type i): bfloat16_t{float(i)} {
   }
 
   /** @brief Convertion assignment from an integer type to bfloat16.
@@ -95,6 +95,24 @@ class bfloat16_t {
   /** @brief Conversion from bfloat16 to int. */
   operator int()   const;
   /**@}*/
+
+  /** @brief Construct a bfloat16_t directly from its raw 16-bit
+   *         bit pattern.
+   *
+   *  This is a zero-cost factory: no arithmetic conversion is performed,
+   *  the 16 bits are simply reinterpreted as a bfloat16 value. Use this
+   *  when you already have the BF16 bit pattern in a @c uint16_t (e.g.
+   *  as the output of @ref f32_to_bf16_val) and want to construct a
+   *  typed @ref bfloat16_t without round-tripping through float.
+   *
+   * @param bits The raw 16-bit bfloat16 pattern.
+   * @return A bfloat16_t whose underlying bits equal @p bits.
+   */
+  static bfloat16_t from_bits(uint16_t bits) {
+    bfloat16_t v;
+    v.raw_bits_ = bits;
+    return v;
+  }
 
   /**
    * @brief Convert BF16 value to float32 value using rounding to nearest-even.
@@ -123,8 +141,30 @@ class bfloat16_t {
    * @param output Pointer to the output array of BF16 values.
    * @param count Number of elements to convert.
    */
-  static void f32_to_bf16(const float *input, int16_t *output,
-                               size_t count);
+  static void f32_to_bf16_vec(const float *input, int16_t *output,
+                              size_t count);
+
+  /**
+   * @brief Convert an array of float32 values to a bfloat16_t buffer.
+   *
+   * Type-safe scalar overload that writes directly into a @ref bfloat16_t
+   * destination, avoiding the strict-aliasing UB that would result
+   * from casting a @c bfloat16_t* to @c int16_t* at the call site.
+   * Each element is constructed via @ref from_bits from the converted
+   * raw 16-bit pattern, so the store is a normal class assignment to
+   * the member rather than a type-punning write.
+   *
+   * This overload is intentionally a simple scalar loop intended for
+   * reference-kernel paths. Performance-critical callers that already
+   * own an @c int16_t* destination buffer should use the vectorized
+   * @c int16_t* overload above.
+   *
+   * @param input  Pointer to the input array of float32 values.
+   * @param output Pointer to the output bfloat16_t buffer.
+   * @param count  Number of elements to convert.
+   */
+  static void f32_to_bf16(const float *input, bfloat16_t *output,
+                          size_t count);
 
   /**
    * @brief Convert a BF16 buffer to float32.

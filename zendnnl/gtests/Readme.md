@@ -497,9 +497,9 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```
 
 ### Embedding Bag Tests
- - Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, INT8_F16, S4_F32, S4_BF16, S4_F16, U4_F32, U4_BF16, U4_F16
 
-> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16, INT8_F16, S4_F16, U4_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
 
 1. Run all F32 Input, F32 Output embedding bag tests:
 ``` bash
@@ -537,27 +537,39 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_BF16/*
 ```
-10. Run all S4 Input, F32 Output embedding bag tests:
+10. Run all INT8 Input, F16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_F16/*
+```
+11. Run all S4 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_F32/*
 ```
-11. Run all S4 Input, BF16 Output embedding bag tests:
+12. Run all S4 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_BF16/*
 ```
-12. Run all U4 Input, F32 Output embedding bag tests:
+13. Run all S4 Input, F16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_F16/*
+```
+14. Run all U4 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_F32/*
 ```
-13. Run all U4 Input, BF16 Output embedding bag tests:
+15. Run all U4 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_BF16/*
 ```
+16. Run all U4 Input, F16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_F16/*
+```
 
 ### Embedding Tests
- - Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, INT8_F16, S4_F32, S4_BF16, S4_F16, U4_F32, U4_BF16, U4_F16
 
-> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16, INT8_F16, S4_F16, U4_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
 
 1. Run all F32 Input, F32 Output embedding tests:
 ``` bash
@@ -595,28 +607,40 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_BF16/*
 ```
-10. Run all S4 Input, F32 Output embedding tests:
+10. Run all INT8 Input, F16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_F16/*
+```
+11. Run all S4 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_F32/*
 ```
-11. Run all S4 Input, BF16 Output embedding tests:
+12. Run all S4 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_BF16/*
 ```
-12. Run all U4 Input, F32 Output embedding tests:
+13. Run all S4 Input, F16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_F16/*
+```
+14. Run all U4 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_F32/*
 ```
-13. Run all U4 Input, BF16 Output embedding tests:
+15. Run all U4 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_BF16/*
 ```
+16. Run all U4 Input, F16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_F16/*
+```
 
 ### Group Embedding Bag Tests
- - Group Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Group Embedding Bag TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, INT8_F16, S4_F32, S4_BF16, S4_F16, U4_F32, U4_BF16, U4_F16
  - Each parameterized case picks a thread strategy (`batch_threaded`, `table_threaded`, `ccd_threaded`, `hybrid_threaded`) uniformly at random per test parameter and pins it for the call via `ZENDNNL_EMBAG_THREAD_ALGO` (an RAII guard in `group_embag/group_embag_test_helpers.cpp` saves and restores the env var). The dispatcher reads the pinned value back through `embag_config_t::set_env_config()`, so all four schedulers are exercised across runs.
 
-> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16, INT8_F16, S4_F16, U4_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
 
 1. Run all group embedding bag tests:
 ``` bash
@@ -636,10 +660,10 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```
 
 ### Group Embedding Tests
- - Group Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16
+ - Group Embedding TestSuite has the following testcases: F32_F32, F32_BF16, F32_F16, BF16_F32, BF16_BF16, F16_F32, F16_F16, INT8_F32, INT8_BF16, INT8_F16, S4_F32, S4_BF16, S4_F16, U4_F32, U4_BF16, U4_F16
  - Exercises lookup mode (algo = none, offsets = nullptr per table) through `group_embedding_bag_direct`.
 
-> **Note:** F16 tests (F32_F16, F16_F32, F16_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
+> **Note:** F16 tests (F32_F16, F16_F32, F16_F16, INT8_F16, S4_F16, U4_F16) require **AVX512-FP16** support. On platforms without AVX512-FP16, these tests are automatically skipped (`GTEST_SKIP`).
 
 1. Run all group embedding tests:
 ``` bash

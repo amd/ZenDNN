@@ -905,14 +905,16 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else if (dtypes.src == data_type_t::f16 && dtypes.dst == data_type_t::f16) {
+    const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);
+    const uint16_t beta_f16  = common::float16_t::f32_to_f16_val(beta);
     apilog_info("executing aocl_batch_gemm_f16f16f16of16");
     aocl_batch_gemm_f16f16f16of16(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
-      &alpha,
+      &alpha_f16,
       reinterpret_cast<const float16 **>(a_ptrs.data()), &lda_,
       reinterpret_cast<const float16 **>(b_ptrs.data()), &ldb_,
-      &beta,
+      &beta_f16,
       reinterpret_cast<float16 **>(c_ptrs.data()), &ldc_,
       1, // single group
       &group_size,

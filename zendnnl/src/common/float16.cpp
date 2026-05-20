@@ -219,6 +219,13 @@ void float16_t::f32_to_f16(const float *f32_buf, uint16_t *f16_buf,
   }
 }
 
+void float16_t::f32_to_f16(const float *f32_buf, float16_t *f16_buf,
+                           int64_t size_) {
+  for (int64_t j = 0; j < size_; ++j) {
+    f16_buf[j] = float16_t::from_bits(f32_to_f16_val(f32_buf[j]));
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // SIMD vector conversions
 //===----------------------------------------------------------------------===//

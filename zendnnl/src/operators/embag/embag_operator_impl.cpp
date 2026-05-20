@@ -16,7 +16,6 @@
 
 #include "embag_operator_impl.hpp"
 #include "embag_kernel_list.hpp"
-#include "embag_config.hpp"
 #include "common/platform_info.hpp"
 
 namespace zendnnl {
@@ -94,14 +93,15 @@ status_t embag_impl_t::validate() {
              table_data_type == data_type_t::s4 ||
              table_data_type == data_type_t::u4) {
       valid_pair = (output_data_type == data_type_t::f32 ||
-                    output_data_type == data_type_t::bf16);
+                    output_data_type == data_type_t::bf16 ||
+                    output_data_type == data_type_t::f16);
     }
 
     if (!valid_pair) {
       apilog_error(obj_name,
                    ": unsupported table/output dtype combination. "
                    "Supported: f32->{f32,bf16,f16}, bf16->{f32,bf16}, "
-                   "f16->{f32,f16}, s8/s4/u4->{f32,bf16}");
+                   "f16->{f32,f16}, s8/s4/u4->{f32,bf16,f16}");
       return status_t::failure;
     }
   }
@@ -222,14 +222,15 @@ status_t embag_impl_t::validate_forced_kernel() {
                table_data_type == data_type_t::s4 ||
                table_data_type == data_type_t::u4) {
         valid_pair = (output_data_type == data_type_t::f32 ||
-                      output_data_type == data_type_t::bf16);
+                      output_data_type == data_type_t::bf16 ||
+                      output_data_type == data_type_t::f16);
       }
 
       if (!valid_pair) {
         apilog_error(obj_name,
                      ": unsupported table/output dtype combination. "
                      "Supported: f32->{f32,bf16,f16}, bf16->{f32,bf16}, "
-                     "f16->{f32,f16}, s8/s4/u4->{f32,bf16}");
+                     "f16->{f32,f16}, s8/s4/u4->{f32,bf16,f16}");
         return status_t::failure;
       }
     }

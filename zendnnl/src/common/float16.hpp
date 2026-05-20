@@ -116,6 +116,25 @@ class float16_t {
     return raw_bits_;
   }
 
+  /** @brief Construct a float16_t directly from its raw IEEE 754
+   *         half-precision bit pattern.
+   *
+   *  This is a zero-cost factory: no arithmetic conversion is performed,
+   *  the 16 bits are simply reinterpreted as a half-precision value.
+   *  Use this when you already have the FP16 bit pattern in a uint16_t
+   *  (e.g. read from a byte buffer via memcpy) and want to avoid the
+   *  FP16 → FP32 → FP16 round-trip that the value-based constructor
+   *  would incur.
+   *
+   * @param bits The raw 16-bit IEEE 754 half-precision pattern.
+   * @return A float16_t whose raw() equals @p bits.
+   */
+  static float16_t from_bits(uint16_t bits) {
+    float16_t v;
+    v.raw_bits_ = bits;
+    return v;
+  }
+
   /**
    * @brief Convert float16 raw value to float32 value.
    * @param f16_val The float16 value (as uint16_t) to be converted.
@@ -147,6 +166,23 @@ class float16_t {
    * @param size_ Size of the buffer.
    */
   static void f32_to_f16(const float *f32_buf, uint16_t *f16_buf,
+                         int64_t size_);
+
+  /**
+   * @brief Convert a float32 buffer to a float16_t buffer.
+   *
+   * Type-safe overload that writes directly into a @ref float16_t
+   * destination, avoiding the strict-aliasing UB that would result
+   * from casting a @c float16_t* to @c uint16_t* at the call site.
+   * Each element is constructed via @ref from_bits from the converted
+   * raw 16-bit pattern, so the store is a normal class assignment to
+   * the member rather than a type-punning write.
+   *
+   * @param f32_buf Pointer to the float32 buffer.
+   * @param f16_buf Pointer to the output float16_t buffer.
+   * @param size_   Number of elements to convert.
+   */
+  static void f32_to_f16(const float *f32_buf, float16_t *f16_buf,
                          int64_t size_);
 
 #if defined(__GNUC__) && (__GNUC__ >= 12)

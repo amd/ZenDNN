@@ -161,9 +161,10 @@ This table provides a detailed overview of supported configurations for embeddin
 |FP16	               |INT32/INT64           |FP32	(Only Sum)       |FP16	                |Sum, Mean, Max	            |
 |INT8	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
 |INT8	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            |
+|INT8	               |INT32/INT64           |FP32	(Only Sum)       |FP16	                |Sum, Mean, Max	            |
 |INT4	               |INT32/INT64           |FP32	(Only Sum)       |FP32	                |Sum, Mean, Max	            |
-|INT4	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            | 
-
+|INT4	               |INT32/INT64           |FP32	(Only Sum)       |BF16	                |Sum, Mean, Max	            |
+|INT4	               |INT32/INT64           |FP32	(Only Sum)       |FP16	                |Sum, Mean, Max	            |
 
 ## Tensor
 A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D), matrices (2D) to higher dimensions (3D, etc.), Tensors are a fundamental building block for neural network computations, facilitating efficient data manipulation and mathematical operations.
@@ -482,17 +483,24 @@ FP16 embedding bag requires **AVX512-FP16** and **GCC >= 12**. On hardware witho
 
 **F32 FMA mode** — Enabled by passing `-DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON` to CMake at configure time. The same identifier serves as both the CMake cache variable and the C++ preprocessor macro the kernels read, so a single name is enough to remember. FP16 inputs are widened to FP32 on load, all arithmetic is performed in FP32 using `__m512` registers, and results are narrowed back to FP16 on store. Slower but more accurate and useful for numerical reproducibility studies.
 
-**Precision implications:** F16 FMA mode accumulates in half-precision, so results may differ slightly from the F32 FMA mode due to intermediate FP16 rounding at each accumulation step. The reference kernel mirrors whichever mode is selected at build time so that the gtest tolerance bounds remain consistent.
+**Quantized (INT8/INT4) FP16 output** — The same two-path mechanism applies when quantized tables (s8, s4, u4) produce FP16 output. The F16 FMA path uses `embag_avx512_int8_int4_f16_fma_kernel` with the conversion chain `INT8/INT4 → INT16 → FP16` (via `_mm512_cvtepi8_epi16` / `_mm512_cvtepu8_epi16` + `_mm512_cvtepi16_ph`) followed by `_mm512_fmadd_ph` for dequantization and accumulation. The F32 FMA fallback uses `embag_avx512_int8_int4_kernel` with the existing `INT8/INT4 → INT32 → FP32` conversion chain. Path selection is controlled by the same `ZENDNNL_EMBAG_NATIVE_F32_ACCUM` macro and `can_use_f16_fma_kernel()` runtime check.
 
-**Compiler matrix:**
+**ISA requirements for the quantized INT8/INT4 path:**
 
-| Compiler | F16 path on AVX-512-FP16 hardware | F16 path elsewhere |
-|---|---|---|
-| GCC ≥ 12 (default build) | Native F16 FMA (`_mm512_fmadd_ph`), F16 accumulation | Rejected at validate/dispatch with `status_t::isa_unsupported` |
-| GCC ≥ 12 with `ZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON` | F32 FMA, F32 accumulation | Rejected at validate/dispatch with `status_t::isa_unsupported` |
-| GCC < 12 | F32 FMA fallback (FP16 intrinsics unavailable) | Rejected at validate/dispatch with `status_t::isa_unsupported` |
+| Path | Kernel | Required ISA |
+|------|--------|--------------|
+| F16 FMA | `embag_avx512_int8_int4_f16_fma_kernel` | AVX-512F + AVX-512BW + AVX-512-FP16 (gated by `can_use_f16_fma_kernel()` at runtime) |
+| F32 FMA fallback | `embag_avx512_int8_int4_kernel` | AVX-512F + AVX-512_BF16 + F16C |
+| F32 FMA fallback, INT4 width=128 SUM specialization | `embag_int4_w128_sum_specialized` | AVX-512F + AVX-512_BF16 + F16C |
 
-On AVX-512-FP16 hardware built with GCC < 12 the native FP16 intrinsics (`_mm512_fmadd_ph`, `_mm512_loadu_ph`, etc.) are not provided by the compiler, so the library transparently routes F16 through the FP32 path; behaviour and accuracy are identical to a GCC ≥ 12 build with `-DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON`. On hardware without AVX-512-FP16 the operator returns `status_t::isa_unsupported` regardless of compiler version.
+The F32 FMA fallback's `target` attribute includes `avx512bf16` and `f16c` because the same kernel template is also instantiated for BF16 output (the BF16 store path uses `_mm512_cvtneps_pbh`) and for FP16 scale/bias dequantization (which uses `_mm_cvtph_ps` in the width=128 specialization). For FP16 output the BF16 store branch is excluded at compile time via `if constexpr`, but the function-level ISA contract still applies to the whole function.
+
+On AMD hardware this contract is satisfied automatically: every AMD CPU that supports AVX-512F (Zen 4 and later) also supports AVX-512_BF16, and every AMD CPU shipped in the last decade supports F16C. So in practice the F32 FMA fallback runs anywhere AVX-512F is available on AMD.
+
+**Precision implications:** F16 FMA mode accumulates in half-precision, so results may differ slightly from the F32 FMA mode due to intermediate FP16 rounding at each accumulation step. The reference kernel switches its accumulator width at runtime to follow whichever native mode is selected (for example, via `embag_config_t::accum_type`), but the parity it offers against the two native paths is not symmetric:
+
+- **F32-accumulation mode:** The reference path also accumulates in FP32, narrowing to FP16 only at the storage boundary. Intermediates match the native `embag_avx512_int8_int4_kernel` step-for-step, so the two are expected to agree to within `EMBAG_F32_TOL`.
+- **F16-accumulation mode:** The reference path computes each dequantization, weighted accumulation, and mean division with `std::fmaf` (FP32 intermediates), and only rounds the *final* per-step result to FP16. The native `embag_avx512_int8_int4_f16_fma_kernel` keeps intermediates in FP16 throughout (`_mm512_fmadd_ph`, `_mm512_mul_ph`, `_mm512_div_ph`), so the reference matches the native kernel **only at the storage boundary**, not at every intermediate FMA. The two paths agree within the gtest tolerance `EMBAG_F16_TOL` / `EMBAG_INT4_TOL` (`0.01`); bit-exact parity is intentionally not claimed.
 
 ### 3. embedding_bag_u4_kernel_example
 

@@ -707,14 +707,6 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
  *  @brief Test to validate batchmatmul F16
  */
 TEST_P(TestBatchMatmul, F16_3D) {
-  bool disable_bias = false;
-  if (algo == matmul_algo_t::aocl_dlp ||
-      algo == matmul_algo_t::aocl_dlp_blocked) {
-    log_info("Post-ops/bias are not supported for F16 with AOCL-DLP kernel; "
-             "disabling post-ops and bias (po_type=none)");
-    po_types = {post_op_type_t::none};
-    disable_bias = true;
-  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   //INPUT {MB,M,K}
@@ -723,9 +715,8 @@ TEST_P(TestBatchMatmul, F16_3D) {
   //WEI {MB,K,N}
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
                             data_type_t::f16, 2.0, transB);
-  auto bias_tensor        = disable_bias ? tensor_t() :
-                            tensor_factory.uniform_dist_tensor({1, 1, n},
-                                bias_dtype, 2.0);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
+                            bias_dtype, 2.0);
   //Binary Tensor {}
   auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
                         binary_dtype);
@@ -761,10 +752,6 @@ TEST_P(TestBatchMatmul, F16_3D) {
  *  @brief Test to validate batchmatmul F16 input/weight with F32 output
  */
 TEST_P(TestBatchMatmul, F16_F32_3D) {
-  if (algo == matmul_algo_t::aocl_dlp ||
-      algo == matmul_algo_t::aocl_dlp_blocked) {
-    GTEST_SKIP() << "F16_F32_3D is not supported with AOCL-DLP kernel";
-  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   //INPUT {MB,M,K}
@@ -797,8 +784,12 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
                              ref_status == status_t::success);
 
   if (is_test_successful) {
+    const float rtol = (algo == matmul_algo_t::onednn ||
+                        algo == matmul_algo_t::onednn_blocked) ? rtol_f32 : rtol_bf16;
+    const float epsilon = (algo == matmul_algo_t::onednn ||
+                           algo == matmul_algo_t::onednn_blocked) ? epsilon_f32 : epsilon_bf16;
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
-                             m, n, k, rtol_f32, epsilon_f32,
+                             m, n, k, rtol, epsilon,
                              is_test_successful, false, alpha);
   }
   EXPECT_TRUE(is_test_successful);

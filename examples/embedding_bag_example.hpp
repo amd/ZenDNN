@@ -101,6 +101,18 @@ int embedding_bag_u4_ref_kernel_example();
  */
 int embedding_bag_u4_kernel_example();
 
+/** @fn embedding_bag_s8_f16_kernel_example
+ *  @brief Demonstrates embedding bag operator on s8 inputs with f16 output.
+ *
+ * embedding bag operator performs efficient lookups and aggregations
+ * (such as sum or mean) over a set of quantized INT8 embedding vectors
+ * selected by indices, with FP16 output.
+ *
+ *  This example demonstrates embedding bag operator creation and execution of
+ *  its INT8->FP16 computation kernel with FP16 scale/bias.
+ */
+int embedding_bag_s8_f16_kernel_example();
+
 /** @fn group_embedding_bag_direct_example
  *  @brief Demonstrates group embedding bag direct API for batched operations.
  *

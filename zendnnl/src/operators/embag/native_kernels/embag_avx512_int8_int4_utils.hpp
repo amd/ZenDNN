@@ -27,6 +27,8 @@
 #include <type_traits>
 
 #include "embag_avx512_kernels.hpp"
+#include "common/float16.hpp"
+
 #define ENABLE_PREFETCH
 #ifdef ENABLE_PREFETCH
   #include <xmmintrin.h>
@@ -34,6 +36,8 @@
 
 namespace zendnnl {
 namespace ops {
+
+using common::float16_t;
 
 // Convert float16 (stored as uint16_t) to float32
 inline float half_to_float(uint16_t h) {
@@ -80,7 +84,7 @@ inline float half_to_float(uint16_t h) {
  * Processes a single row of INT8 quantized data and accumulates results.
 */
 template <typename InType>
-__attribute__((target("avx512f,avx512vl,avx512bf16")))
+__attribute__((target("avx512f")))
 inline void process_int8_row(
   const InType *row,
   __m512 *acc,
@@ -163,7 +167,7 @@ inline void process_int8_row(
  * Uses vectorized unpacking of packed INT4 nibbles.
 */
 template <typename InType>
-__attribute__((target("avx512f,avx512vl,avx512bf16")))
+__attribute__((target("avx512f")))
 inline void process_int4_row(
   const InType *row,
   __m512 *acc,
@@ -287,7 +291,7 @@ constexpr int MAX_ACC_BLOCKS = 256;
  *   - No weights
  */
 template <typename IndexType, typename OffsetType, typename OutType>
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512bf16,f16c")))
+__attribute__((target("avx512f,avx512bf16,f16c")))
 __attribute__((hot))
 __attribute__((flatten))
 void embag_int4_w128_sum_specialized(
@@ -328,7 +332,7 @@ void embag_int4_w128_sum_specialized(
   for (int oi = 0; oi < outer_loop; ++oi) {
     const int64_t start = is_embedding ? oi : offsets[oi];
     const int64_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi +
-                        1] :
+                           1] :
                         (oi < offsz - 1 ? offsets[oi + 1] : indsz));
 
     // Stack-allocated accumulators - fully unrolled for 8 blocks
@@ -455,6 +459,33 @@ void embag_int4_w128_sum_specialized(
       _mm512_storeu_ps(dst_ptr + 96, acc6);
       _mm512_storeu_ps(dst_ptr + 112, acc7);
     }
+    else if constexpr(std::is_same_v<OutType, float16_t>) {
+      // FP16 output path
+      __m256i f16_0 = _mm512_cvtps_ph(acc0,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_1 = _mm512_cvtps_ph(acc1,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_2 = _mm512_cvtps_ph(acc2,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_3 = _mm512_cvtps_ph(acc3,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_4 = _mm512_cvtps_ph(acc4,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_5 = _mm512_cvtps_ph(acc5,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_6 = _mm512_cvtps_ph(acc6,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      __m256i f16_7 = _mm512_cvtps_ph(acc7,
+                                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr), f16_0);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 16), f16_1);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 32), f16_2);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 48), f16_3);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 64), f16_4);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 80), f16_5);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 96), f16_6);
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_ptr + 112), f16_7);
+    }
     else {
       // BF16 output path
       __m256bh bf0 = _mm512_cvtneps_pbh(acc0);
@@ -498,7 +529,7 @@ template <
   typename IndexType,
   typename OffsetType,
   typename OutType>
-__attribute__((target("avx512f,avx512vl,avx512bf16,f16c")))
+__attribute__((target("avx512f,avx512bf16,f16c")))
 __attribute__((hot))
 void embag_avx512_int8_int4_kernel(
   const InType *__restrict__ input,
@@ -556,7 +587,7 @@ void embag_avx512_int8_int4_kernel(
   for (int oi = 0; oi < outer_loop; ++oi) {
     const int64_t start = is_embedding ? oi : offsets[oi];
     const int64_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi +
-                        1] :
+                           1] :
                         (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     const int64_t dst_offset = oi * dst_stride;
     bool first_valid_index = true;
@@ -568,15 +599,10 @@ void embag_avx512_int8_int4_kernel(
     }
 
     for (int64_t i = start; i < end; ++i) {
-      // Prefetch future rows
+      // Prefetch future rows using the actual row_stride
       int64_t pf_i = i + prefetch_distance;
       int64_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
-      if (fp16_scale_bias) {
-        maybe_prefetch_input(input, pf_idx, width + 4, padidx);
-      }
-      else {
-        maybe_prefetch_input(input, pf_idx, width + 8, padidx);
-      }
+      maybe_prefetch_input(input, pf_idx, row_stride, padidx);
       if (is_weights) {
         maybe_prefetch_weight(weights, pf_i, end);
       }
@@ -635,10 +661,16 @@ void embag_avx512_int8_int4_kernel(
       if constexpr(std::is_same_v<OutType, float>) {
         _mm512_storeu_ps(&dst[dst_offset + b * simd_width], acc[b]);
       }
+      else if constexpr(std::is_same_v<OutType, float16_t>) {
+        __m256i f16_vec = _mm512_cvtps_ph(acc[b], _MM_FROUND_TO_NEAREST_INT |
+                                          _MM_FROUND_NO_EXC);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
+                                       simd_width]), f16_vec);
+      }
       else {
         __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[b]);
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
-                            simd_width]), (__m256i)bf16_vec);
+                                       simd_width]), (__m256i)bf16_vec);
       }
     }
     if (tail > 0) {
@@ -646,6 +678,15 @@ void embag_avx512_int8_int4_kernel(
         __mmask16 tail_mask = (1 << tail) - 1;
         _mm512_mask_storeu_ps(&dst[dst_offset + full_blocks * simd_width], tail_mask,
                               acc[full_blocks]);
+      }
+      else if constexpr(std::is_same_v<OutType, float16_t>) {
+        __m256i f16_vec = _mm512_cvtps_ph(acc[full_blocks],
+                                          _MM_FROUND_TO_NEAREST_INT |
+                                          _MM_FROUND_NO_EXC);
+        uint16_t tmp_store[simd_width];
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(tmp_store), f16_vec);
+        std::memcpy(&dst[dst_offset + full_blocks * simd_width], tmp_store,
+                    tail * sizeof(uint16_t));
       }
       else {
         __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[full_blocks]);
@@ -657,6 +698,321 @@ void embag_avx512_int8_int4_kernel(
     }
   }
 }
+
+// =========================================================================
+// F16 FMA kernels for quantized (INT8/INT4) embedding bag
+//
+// These kernels accumulate in __m512h (32 x FP16) for 2x SIMD throughput
+// over the F32 path. Conversion chain:
+//   INT8:  _mm512_cvtepi8_epi16 -> _mm512_cvtepi16_ph -> fmadd_ph
+//   INT4:  nibble unpack -> cvte[pu|pi]8_epi16 -> cvtepi16_ph -> fmadd_ph
+//
+// Requires GCC >= 12 and AVX512-FP16 ISA at runtime.
+// Controlled by the same ZENDNNL_EMBAG_NATIVE_F32_ACCUM macro and
+// can_use_f16_fma_kernel() runtime check used for F16 table types.
+// =========================================================================
+#if __GNUC__ >= 12
+
+template <typename InType>
+__attribute__((target("avx512f,avx512bw,avx512fp16")))
+inline void process_int8_row_f16_fma(
+  const InType *row,
+  __m512h *acc,
+  int full_blocks,
+  int tail,
+  _Float16 scale,
+  _Float16 bias,
+  __m512h wt_vec,
+  bool is_embedding,
+  embag_algo_t algo,
+  bool first_valid_index
+) {
+  constexpr int simd_width = 32;
+  __m512h scale_vec = _mm512_set1_ph(scale);
+  __m512h bias_vec = _mm512_set1_ph(bias);
+
+  for (int b = 0; b < full_blocks; ++b) {
+    __m256i qvals_i8 = _mm256_loadu_si256(
+                         reinterpret_cast<const __m256i *>(row + b * simd_width));
+    __m512i qvals_i16 = _mm512_cvtepi8_epi16(qvals_i8);
+    __m512h qvals_f16 = _mm512_cvtepi16_ph(qvals_i16);
+    __m512h val = _mm512_fmadd_ph(qvals_f16, scale_vec, bias_vec);
+
+    if (is_embedding) {
+      acc[b] = _mm512_mul_ph(val, wt_vec);
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        __m512h weighted = _mm512_mul_ph(val, wt_vec);
+        acc[b] = first_valid_index ? weighted
+                 : _mm512_max_ph(acc[b], weighted);
+      }
+      else {
+        acc[b] = _mm512_fmadd_ph(val, wt_vec, acc[b]);
+      }
+    }
+  }
+
+  if (tail > 0) {
+    alignas(32) int8_t tmp[32] = {0};
+    std::memcpy(tmp, row + full_blocks * simd_width, tail);
+    __m256i qvals_i8 = _mm256_loadu_si256(
+                         reinterpret_cast<const __m256i *>(tmp));
+    __m512i qvals_i16 = _mm512_cvtepi8_epi16(qvals_i8);
+    __m512h qvals_f16 = _mm512_cvtepi16_ph(qvals_i16);
+    __m512h val = _mm512_fmadd_ph(qvals_f16, scale_vec, bias_vec);
+
+    if (is_embedding) {
+      acc[full_blocks] = _mm512_mul_ph(val, wt_vec);
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        __m512h weighted = _mm512_mul_ph(val, wt_vec);
+        acc[full_blocks] = first_valid_index ? weighted
+                           : _mm512_max_ph(acc[full_blocks], weighted);
+      }
+      else {
+        acc[full_blocks] = _mm512_fmadd_ph(val, wt_vec, acc[full_blocks]);
+      }
+    }
+  }
+}
+
+template <typename InType>
+__attribute__((target("avx512f,avx512bw,avx512fp16")))
+inline void process_int4_row_f16_fma(
+  const InType *row,
+  __m512h *acc,
+  int full_blocks,
+  int tail,
+  _Float16 scale,
+  _Float16 bias,
+  __m512h wt_vec,
+  bool is_embedding,
+  embag_algo_t algo,
+  bool first_valid_index,
+  data_type_t table_dtype
+) {
+  __m512h scale_vec = _mm512_set1_ph(scale);
+  __m512h bias_vec = _mm512_set1_ph(bias);
+  const __m128i lo_mask = _mm_set1_epi8(0x0F);
+
+  for (int b = 0; b < full_blocks; ++b) {
+    // Load 16 packed bytes = 32 INT4 values
+    __m128i packed = _mm_loadu_si128(
+                       reinterpret_cast<const __m128i *>(row + b * 16));
+    __m128i lo_nibbles = _mm_and_si128(packed, lo_mask);
+    __m128i hi_nibbles = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
+    __m128i interleaved_lo = _mm_unpacklo_epi8(lo_nibbles, hi_nibbles);
+    __m128i interleaved_hi = _mm_unpackhi_epi8(lo_nibbles, hi_nibbles);
+    __m256i combined = _mm256_inserti128_si256(
+                         _mm256_castsi128_si256(interleaved_lo), interleaved_hi, 1);
+
+    __m512i qvals_i16;
+    if (table_dtype == data_type_t::s4) {
+      __m256i sign_bit = _mm256_and_si256(combined, _mm256_set1_epi8(0x08));
+      __m256i needs_extend = _mm256_cmpeq_epi8(sign_bit,
+                             _mm256_set1_epi8(0x08));
+      combined = _mm256_or_si256(combined,
+                                 _mm256_and_si256(needs_extend,
+                                     _mm256_set1_epi8(static_cast<char>(0xF0))));
+      qvals_i16 = _mm512_cvtepi8_epi16(combined);
+    }
+    else {
+      qvals_i16 = _mm512_cvtepu8_epi16(combined);
+    }
+
+    __m512h qvals_f16 = _mm512_cvtepi16_ph(qvals_i16);
+    __m512h val = _mm512_fmadd_ph(qvals_f16, scale_vec, bias_vec);
+
+    if (is_embedding) {
+      acc[b] = _mm512_mul_ph(val, wt_vec);
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        __m512h weighted = _mm512_mul_ph(val, wt_vec);
+        acc[b] = first_valid_index ? weighted
+                 : _mm512_max_ph(acc[b], weighted);
+      }
+      else {
+        acc[b] = _mm512_fmadd_ph(val, wt_vec, acc[b]);
+      }
+    }
+  }
+
+  if (tail > 0) {
+    alignas(16) int8_t tmp[16] = {0};
+    std::memcpy(tmp, row + full_blocks * 16, (tail + 1) / 2);
+    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i *>(tmp));
+    __m128i lo_nibbles = _mm_and_si128(packed, lo_mask);
+    __m128i hi_nibbles = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
+    __m128i interleaved_lo = _mm_unpacklo_epi8(lo_nibbles, hi_nibbles);
+    __m128i interleaved_hi = _mm_unpackhi_epi8(lo_nibbles, hi_nibbles);
+    __m256i combined = _mm256_inserti128_si256(
+                         _mm256_castsi128_si256(interleaved_lo), interleaved_hi, 1);
+
+    __m512i qvals_i16;
+    if (table_dtype == data_type_t::s4) {
+      __m256i sign_bit = _mm256_and_si256(combined, _mm256_set1_epi8(0x08));
+      __m256i needs_extend = _mm256_cmpeq_epi8(sign_bit,
+                             _mm256_set1_epi8(0x08));
+      combined = _mm256_or_si256(combined,
+                                 _mm256_and_si256(needs_extend,
+                                     _mm256_set1_epi8(static_cast<char>(0xF0))));
+      qvals_i16 = _mm512_cvtepi8_epi16(combined);
+    }
+    else {
+      qvals_i16 = _mm512_cvtepu8_epi16(combined);
+    }
+
+    __m512h qvals_f16 = _mm512_cvtepi16_ph(qvals_i16);
+    __m512h val = _mm512_fmadd_ph(qvals_f16, scale_vec, bias_vec);
+
+    if (is_embedding) {
+      acc[full_blocks] = _mm512_mul_ph(val, wt_vec);
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        __m512h weighted = _mm512_mul_ph(val, wt_vec);
+        acc[full_blocks] = first_valid_index ? weighted
+                           : _mm512_max_ph(acc[full_blocks], weighted);
+      }
+      else {
+        acc[full_blocks] = _mm512_fmadd_ph(val, wt_vec, acc[full_blocks]);
+      }
+    }
+  }
+}
+
+template <
+  bool IsInt4,
+  typename InType,
+  typename IndexType,
+  typename OffsetType,
+  typename OutType>
+__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
+__attribute__((hot))
+void embag_avx512_int8_int4_f16_fma_kernel(
+  const InType *__restrict__ input,
+  const float *__restrict__ weights,
+  const IndexType *__restrict__ indices,
+  const OffsetType *__restrict__ offsets,
+  OutType *__restrict__ dst,
+  int64_t width,
+  int64_t indsz,
+  int64_t offsz,
+  int64_t padidx,
+  bool is_weights,
+  embag_algo_t algo,
+  int64_t dst_stride,
+  bool include_last_offset,
+  data_type_t table_dtype,
+  bool fp16_scale_bias
+) {
+  constexpr int simd_width = 32;
+  const int full_blocks = width / simd_width;
+  const int tail = width % simd_width;
+  const int acc_size = full_blocks + (tail > 0 ? 1 : 0);
+  constexpr int prefetch_distance = 4;
+  const bool is_embedding = (offsets == nullptr);
+  const int outer_loop = is_embedding ? indsz : offsz;
+
+  const int quantized_size = IsInt4 ? (width + 1) / 2 : width;
+  const int scale_bias_offset = fp16_scale_bias ? 4 : 8;
+  const int64_t row_stride = quantized_size + scale_bias_offset;
+
+  assert(acc_size <= MAX_ACC_BLOCKS && "Width exceeds maximum supported size");
+
+  #pragma omp parallel for schedule(static)
+  for (int oi = 0; oi < outer_loop; ++oi) {
+    const int64_t start = is_embedding ? oi : offsets[oi];
+    const int64_t end = is_embedding ? oi + 1 : (include_last_offset
+                        ? offsets[oi + 1]
+                        : (oi < offsz - 1 ? offsets[oi + 1] : indsz));
+    const int64_t dst_offset = oi * dst_stride;
+    bool first_valid_index = true;
+    float wt_sum = 0.0f;
+
+    alignas(64) __m512h acc[MAX_ACC_BLOCKS];
+    for (int i = 0; i < acc_size; ++i) {
+      acc[i] = _mm512_setzero_ph();
+    }
+
+    for (int64_t i = start; i < end; ++i) {
+      // Prefetch future rows using the actual row_stride
+      int64_t pf_i = i + prefetch_distance;
+      int64_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
+      maybe_prefetch_input(input, pf_idx, row_stride, padidx);
+      if (is_weights) {
+        maybe_prefetch_weight(weights, pf_i, end);
+      }
+
+      const int64_t idx = indices[i];
+      [[unlikely]] if (idx == padidx) {
+        continue;
+      }
+
+      const float wt_f32 = is_weights ? weights[i] : 1.0f;
+      wt_sum += wt_f32;
+
+      const auto *row = input + idx * row_stride;
+      _Float16 scale_f16, bias_f16;
+
+      if (fp16_scale_bias) {
+        // _Float16 is a compiler primitive whose layout matches the raw
+        // IEEE-754 binary16 bit pattern, so we can copy the bytes directly
+        // without going through a uint16_t intermediate.
+        std::memcpy(&scale_f16, row + quantized_size, sizeof(_Float16));
+        std::memcpy(&bias_f16, row + quantized_size + sizeof(_Float16),
+                    sizeof(_Float16));
+      }
+      else {
+        float s_f32, b_f32;
+        std::memcpy(&s_f32, row + quantized_size, sizeof(float));
+        std::memcpy(&b_f32, row + quantized_size + sizeof(float),
+                    sizeof(float));
+        scale_f16 = (_Float16)s_f32;
+        bias_f16 = (_Float16)b_f32;
+      }
+
+      __m512h wt_vec = _mm512_set1_ph((_Float16)wt_f32);
+
+      if constexpr(!IsInt4) {
+        process_int8_row_f16_fma(row, acc, full_blocks, tail,
+                                 scale_f16, bias_f16, wt_vec, is_embedding, algo,
+                                 first_valid_index);
+      }
+      else {
+        process_int4_row_f16_fma(row, acc, full_blocks, tail,
+                                 scale_f16, bias_f16, wt_vec, is_embedding, algo,
+                                 first_valid_index, table_dtype);
+      }
+      first_valid_index = false;
+    }
+
+    if (!is_embedding) {
+      if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
+        __m512h div_vec = _mm512_set1_ph((_Float16)wt_sum);
+        for (int b = 0; b < full_blocks; ++b) {
+          acc[b] = _mm512_div_ph(acc[b], div_vec);
+        }
+        if (tail > 0) {
+          acc[full_blocks] = _mm512_div_ph(acc[full_blocks], div_vec);
+        }
+      }
+    }
+
+    for (int b = 0; b < full_blocks; ++b) {
+      f16_store_full<OutType>(&dst[dst_offset + b * simd_width], acc[b]);
+    }
+    if (tail > 0) {
+      f16_store_tail<OutType>(
+        &dst[dst_offset + full_blocks * simd_width], acc[full_blocks], tail);
+    }
+  }
+}
+
+#endif // __GNUC__ >= 12
 
 } //namespace ops
 } //namespace zendnnl

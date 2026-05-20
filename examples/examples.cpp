@@ -267,6 +267,7 @@ int main() {
     embedding_bag_f16_kernel_example();
     embedding_bag_u4_kernel_example();
     embedding_bag_u4_ref_kernel_example();
+    embedding_bag_s8_f16_kernel_example();
     group_embedding_bag_direct_example();
 
     /** Sample functionality examples.

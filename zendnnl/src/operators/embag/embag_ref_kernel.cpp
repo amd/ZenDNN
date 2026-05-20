@@ -49,7 +49,7 @@ void embag_ref_kernel(
   // Determine if we need type conversions
   constexpr bool input_is_bf16 = std::is_same_v<InType, uint16_t>;
   constexpr bool input_is_f16 = std::is_same_v<InType, float16_t>;
-  constexpr bool output_is_bf16 = std::is_same_v<OutType, uint16_t>;
+  constexpr bool output_is_bf16 = std::is_same_v<OutType, bfloat16_t>;
   constexpr bool output_is_f16 = std::is_same_v<OutType, float16_t>;
 
   // Read accumulation precision the actual backend used (FBGEMM, native
@@ -272,12 +272,12 @@ void embag_ref_kernel(
 
       // Convert output back to BF16/F16 if needed
       if constexpr(output_is_f16) {
-        uint16_t *f16_dst = reinterpret_cast<uint16_t *>(&dst[dst_offset]);
-        float16_t::f32_to_f16(temp_output_row.data(), f16_dst, width);
+        float16_t::f32_to_f16(temp_output_row.data(),
+                              &dst[dst_offset], width);
       }
       else if constexpr(output_is_bf16) {
-        int16_t *bf16_dst = reinterpret_cast<int16_t *>(&dst[dst_offset]);
-        bfloat16_t::f32_to_bf16(temp_output_row.data(), bf16_dst, width);
+        bfloat16_t::f32_to_bf16(temp_output_row.data(),
+                                &dst[dst_offset], width);
       }
     }
   }
@@ -327,16 +327,39 @@ void embag_int8_int4_ref_kernel(
 ) {
 
   // Determine if we need type conversions
-  constexpr bool output_is_bf16 = std::is_same_v<OutType, uint16_t>;
+  constexpr bool output_is_bf16 = std::is_same_v<OutType, bfloat16_t>;
+  constexpr bool output_is_f16 = std::is_same_v<OutType, float16_t>;
 
-  // Temporary buffers for type conversion
+  // Read accumulation precision the actual backend used (FBGEMM, native
+  // AVX512 F16 FMA, native AVX512 F32, AVX2, etc.). The actual kernel writes
+  // this on the embag_config_t singleton just before invoking its compute
+  // path; the reference kernel reads it here to bit-match.
+  //
+  // The producers already gate F16 on __GNUC__ >= 12 and
+  // can_use_f16_fma_kernel() (which itself returns false when
+  // ZENDNNL_EMBAG_NATIVE_F32_ACCUM is defined), so the singleton can only
+  // ever hold f16 when the F16 FMA path was actually used - no extra
+  // build-time check is needed here. For quantized inputs, F16 accumulation
+  // only makes sense when the output is F16, so we additionally guard on
+  // output_is_f16.
+  const data_type_t reported_accum =
+    embag_config_t::instance().get_accum_type();
+  const bool use_f16_accum = (reported_accum == data_type_t::f16) &&
+                             output_is_f16;
+
   std::vector<float> temp_output_row;
+  std::vector<float16_t> f16_accum_row;
 
-  if constexpr(output_is_bf16) {
+  if constexpr(output_is_bf16 || output_is_f16) {
     temp_output_row.resize(static_cast<size_t>(width));
   }
+  if (use_f16_accum) {
+    f16_accum_row.resize(static_cast<size_t>(width));
+  }
+
   bool is_embedding = (offsets == nullptr) ? true : false;
   int outer_loop = is_embedding ? indsz : offsz;
+  int quantized_size = IsInt4 ? (width + 1) / 2 : width;
 
   // Iterate over the offsets
   for (int oi = 0; oi < outer_loop; ++oi) {
@@ -347,88 +370,183 @@ void embag_int8_int4_ref_kernel(
     float wt_sum = 0;
     bool first_valid_index = true;
 
-    // Get output row pointer (use temp buffer for BF16 output)
-    float *output_row;
-    if constexpr(output_is_bf16) {
-      output_row = temp_output_row.data();
-      // Initialize temp output row to zero
-      std::fill(output_row, output_row + width, 0.0f);
-    }
-    else {
-      output_row = reinterpret_cast<float *>(&dst[dst_offset]);
-      // Initialize output row to zero
-      std::fill(output_row, output_row + width, 0.0f);
-    }
+    if (use_f16_accum) {
+      // use_f16_accum being true implies OutType == float16_t (see declaration
+      // above); the inner if constexpr is a compile-time guard so that the
+      // f16-specific body is not instantiated for non-f16 OutType. No else is
+      // needed: for non-f16 OutType this branch is never entered at runtime.
+      if constexpr(output_is_f16) {
+        // ── F16 FMA accumulation path ──
+        // Mirrors the native _mm512_fmadd_ph kernel: each FMA result is
+        // rounded to FP16 before the next accumulation step.
+        std::fill(f16_accum_row.begin(), f16_accum_row.end(), float16_t(0.0f));
 
-    // Process all indices in the current bag
-    for (int i = start; i < end; ++i) {
-      int32_t idx = indices[i];
-      if (idx == padidx) {
-        continue;
-      }
+        for (int i = start; i < end; ++i) {
+          const IndexType idx = indices[i];
+          const IndexType padidx_value = static_cast<IndexType>(padidx);
+          if (idx == padidx_value) {
+            continue;
+          }
 
-      float wt = is_weights ? weights[i] : 1.0f;
-      wt_sum += wt;
+          float wt_f32 = is_weights ? weights[i] : 1.0f;
+          float16_t wt_f16 = float16_t(wt_f32);
+          wt_sum += wt_f32;
 
-      int quantized_size = IsInt4 ? (width + 1) / 2 : width;
-      const auto *row = input + idx * (quantized_size + (fp16_scale_bias ? 4 : 8));
-
-      float scale, bias;
-      if (fp16_scale_bias) {
-        uint16_t scale_fp16, bias_fp16;
-        std::memcpy(&scale_fp16, row + quantized_size, sizeof(uint16_t));
-        std::memcpy(&bias_fp16, row + quantized_size + 2, sizeof(uint16_t));
-        scale = half_to_float(scale_fp16);
-        bias = half_to_float(bias_fp16);
-      }
-      else {
-        std::memcpy(&scale, row + quantized_size, sizeof(float));
-        std::memcpy(&bias, row + quantized_size + 4, sizeof(float));
-      }
-
-      for (int j = 0; j < width; ++j) {
-        int8_t qval;
-        if constexpr(IsInt4) {
-          int8_t packed = row[j / 2];
-          qval = extract_int4(packed, j % 2, table_dtype);
-        }
-        else {
-          qval = row[j];
-        }
-        float val = dequantize(qval, scale, bias) * wt;
-
-        if (is_embedding) {
-          output_row[j] = val;
-        }
-        else {
-          if (algo == embag_algo_t::max) {
-            if (first_valid_index) {
-              output_row[j] = val;
-            }
-            else {
-              output_row[j] = std::max(output_row[j], val);
-            }
+          const auto *row = input + idx * (quantized_size +
+                                           (fp16_scale_bias ? 4 : 8));
+          float16_t scale_f16, bias_f16;
+          if (fp16_scale_bias) {
+            uint16_t s_bits, b_bits;
+            std::memcpy(&s_bits, row + quantized_size, sizeof(uint16_t));
+            std::memcpy(&b_bits, row + quantized_size + 2, sizeof(uint16_t));
+            scale_f16 = float16_t::from_bits(s_bits);
+            bias_f16 = float16_t::from_bits(b_bits);
           }
           else {
-            output_row[j] += val;
+            float scale_f32, bias_f32;
+            std::memcpy(&scale_f32, row + quantized_size, sizeof(float));
+            std::memcpy(&bias_f32, row + quantized_size + 4, sizeof(float));
+            scale_f16 = float16_t(scale_f32);
+            bias_f16 = float16_t(bias_f32);
+          }
+
+          for (int j = 0; j < width; ++j) {
+            int8_t qval;
+            if constexpr(IsInt4) {
+              int8_t packed = row[j / 2];
+              qval = extract_int4(packed, j % 2, table_dtype);
+            }
+            else {
+              qval = row[j];
+            }
+            float16_t qval_f16 = float16_t(static_cast<float>(qval));
+            float16_t dequant = float16_t(std::fmaf(
+                                            static_cast<float>(qval_f16),
+                                            static_cast<float>(scale_f16),
+                                            static_cast<float>(bias_f16)));
+
+            if (is_embedding) {
+              f16_accum_row[j] = float16_t(
+                                   static_cast<float>(dequant) * static_cast<float>(wt_f16));
+            }
+            else {
+              if (algo == embag_algo_t::max) {
+                float16_t weighted = float16_t(
+                                       static_cast<float>(dequant) * static_cast<float>(wt_f16));
+                f16_accum_row[j] = first_valid_index ? weighted
+                                   : float16_t(std::max(
+                                                 static_cast<float>(f16_accum_row[j]),
+                                                 static_cast<float>(weighted)));
+              }
+              else {
+                f16_accum_row[j] = float16_t(std::fmaf(
+                                               static_cast<float>(dequant),
+                                               static_cast<float>(wt_f16),
+                                               static_cast<float>(f16_accum_row[j])));
+              }
+            }
+          }
+          first_valid_index = false;
+        }
+
+        if (!is_embedding && algo == embag_algo_t::mean && wt_sum > 0) {
+          float16_t div = float16_t(wt_sum);
+          for (int j = 0; j < width; ++j) {
+            f16_accum_row[j] = float16_t(
+                                 static_cast<float>(f16_accum_row[j]) /
+                                 static_cast<float>(div));
+          }
+        }
+
+        for (int j = 0; j < width; ++j) {
+          dst[dst_offset + j] = f16_accum_row[j];
+        }
+      }
+    }
+    else {
+      // ── F32 accumulation path (default) ──
+      float *output_row;
+      if constexpr(output_is_bf16 || output_is_f16) {
+        output_row = temp_output_row.data();
+        std::fill(output_row, output_row + width, 0.0f);
+      }
+      else {
+        output_row = reinterpret_cast<float *>(&dst[dst_offset]);
+        std::fill(output_row, output_row + width, 0.0f);
+      }
+
+      for (int i = start; i < end; ++i) {
+        const IndexType idx = indices[i];
+        const IndexType padidx_value = static_cast<IndexType>(padidx);
+        if (idx == padidx_value) {
+          continue;
+        }
+
+        float wt = is_weights ? weights[i] : 1.0f;
+        wt_sum += wt;
+
+        const auto *row = input + idx * (quantized_size +
+                                         (fp16_scale_bias ? 4 : 8));
+        float scale, bias;
+        if (fp16_scale_bias) {
+          uint16_t scale_fp16, bias_fp16;
+          std::memcpy(&scale_fp16, row + quantized_size, sizeof(uint16_t));
+          std::memcpy(&bias_fp16, row + quantized_size + 2, sizeof(uint16_t));
+          scale = half_to_float(scale_fp16);
+          bias = half_to_float(bias_fp16);
+        }
+        else {
+          std::memcpy(&scale, row + quantized_size, sizeof(float));
+          std::memcpy(&bias, row + quantized_size + 4, sizeof(float));
+        }
+
+        for (int j = 0; j < width; ++j) {
+          int8_t qval;
+          if constexpr(IsInt4) {
+            int8_t packed = row[j / 2];
+            qval = extract_int4(packed, j % 2, table_dtype);
+          }
+          else {
+            qval = row[j];
+          }
+          float val = dequantize(qval, scale, bias) * wt;
+
+          if (is_embedding) {
+            output_row[j] = val;
+          }
+          else {
+            if (algo == embag_algo_t::max) {
+              if (first_valid_index) {
+                output_row[j] = val;
+              }
+              else {
+                output_row[j] = std::max(output_row[j], val);
+              }
+            }
+            else {
+              output_row[j] += val;
+            }
+          }
+        }
+        first_valid_index = false;
+      }
+
+      if (!is_embedding) {
+        if (algo == embag_algo_t::mean && wt_sum > 0) {
+          for (auto j = 0; j < width; ++j) {
+            output_row[j] /= wt_sum;
           }
         }
       }
-      first_valid_index = false;
-    }
-    // Apply mean normalization if required
-    if (!is_embedding) {
-      if (algo == embag_algo_t::mean && wt_sum > 0) {
-        for (auto j = 0; j < width; ++j) {
-          output_row[j] /= wt_sum;
-        }
-      }
-    }
 
-    // Convert output to BF16 if needed
-    if constexpr(output_is_bf16) {
-      int16_t *bf16_dst = reinterpret_cast<int16_t *>(&dst[dst_offset]);
-      bfloat16_t::f32_to_bf16(temp_output_row.data(), bf16_dst, width);
+      if constexpr(output_is_f16) {
+        float16_t::f32_to_f16(temp_output_row.data(),
+                              &dst[dst_offset], width);
+      }
+      else if constexpr(output_is_bf16) {
+        bfloat16_t::f32_to_bf16(temp_output_row.data(),
+                                &dst[dst_offset], width);
+      }
     }
   }
 }
@@ -533,14 +651,14 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   else if (table_dtype == data_type_t::f32 && dst_dtype == data_type_t::bf16) {
     // FP32 input -> BF16 output
     const float *input_f32 = reinterpret_cast<const float *>(input);
-    uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
+    bfloat16_t *dst_bf16 = reinterpret_cast<bfloat16_t *>(dst);
     if (indices_data_type == data_type_t::s64) {
       int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
       int64_t *offsets = nullptr;
       if (is_offsets && offsets_data_type == data_type_t::s64) {
         offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_ref_kernel<float, int64_t, int64_t, uint16_t>(
+      embag_ref_kernel<float, int64_t, int64_t, bfloat16_t>(
         input_f32, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset);
     }
@@ -550,7 +668,7 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
       if (is_offsets && offsets_data_type == data_type_t::s32) {
         offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_ref_kernel<float, int32_t, int32_t, uint16_t>(
+      embag_ref_kernel<float, int32_t, int32_t, bfloat16_t>(
         input_f32, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset);
     }
@@ -589,14 +707,14 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   else if (table_dtype == data_type_t::bf16 && dst_dtype == data_type_t::bf16) {
     // BF16 input -> BF16 output
     const uint16_t *input_bf16 = reinterpret_cast<const uint16_t *>(input);
-    uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
+    bfloat16_t *dst_bf16 = reinterpret_cast<bfloat16_t *>(dst);
     if (indices_data_type == data_type_t::s64) {
       int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
       int64_t *offsets = nullptr;
       if (is_offsets && offsets_data_type == data_type_t::s64) {
         offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_ref_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+      embag_ref_kernel<uint16_t, int64_t, int64_t, bfloat16_t>(
         input_bf16, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset);
     }
@@ -606,7 +724,7 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
       if (is_offsets && offsets_data_type == data_type_t::s32) {
         offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_ref_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+      embag_ref_kernel<uint16_t, int32_t, int32_t, bfloat16_t>(
         input_bf16, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset);
     }
@@ -810,14 +928,14 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
   else if (table_dtype == data_type_t::s8 && dst_dtype == data_type_t::bf16) {
     // INT8 input -> BF16 output
     const int8_t *input_s8 = reinterpret_cast<const int8_t *>(input);
-    uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
+    bfloat16_t *dst_bf16 = reinterpret_cast<bfloat16_t *>(dst);
     if (indices_data_type == data_type_t::s64) {
       int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
       int64_t *offsets = nullptr;
       if (is_offsets && offsets_data_type == data_type_t::s64) {
         offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, uint16_t>(
+      embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, bfloat16_t>(
         input_s8, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset, table_dtype,
         fp16_scale_bias);
@@ -828,8 +946,38 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       if (is_offsets && offsets_data_type == data_type_t::s32) {
         offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, uint16_t>(
+      embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, bfloat16_t>(
         input_s8, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
+  }
+  else if (table_dtype == data_type_t::s8 && dst_dtype == data_type_t::f16) {
+    // INT8 input -> F16 output
+    const int8_t *input_s8 = reinterpret_cast<const int8_t *>(input);
+    float16_t *dst_f16 = reinterpret_cast<float16_t *>(dst);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, float16_t>(
+        input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float16_t>(
+        input_s8, weights, indices, offsets, dst_f16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset, table_dtype,
         fp16_scale_bias);
     }
@@ -872,14 +1020,14 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
            dst_dtype == data_type_t::bf16) {
     // INT4 input -> BF16 output
     const uint8_t *input_s4 = reinterpret_cast<const uint8_t *>(input);
-    uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
+    bfloat16_t *dst_bf16 = reinterpret_cast<bfloat16_t *>(dst);
     if (indices_data_type == data_type_t::s64) {
       int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
       int64_t *offsets = nullptr;
       if (is_offsets && offsets_data_type == data_type_t::s64) {
         offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
+      embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, bfloat16_t>(
         input_s4, weights, indices, offsets, dst_bf16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset, table_dtype,
         fp16_scale_bias);
@@ -890,8 +1038,39 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       if (is_offsets && offsets_data_type == data_type_t::s32) {
         offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
       }
-      embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
+      embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, bfloat16_t>(
         input_s4, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
+  }
+  else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+           dst_dtype == data_type_t::f16) {
+    // INT4 input -> F16 output
+    const uint8_t *input_s4 = reinterpret_cast<const uint8_t *>(input);
+    float16_t *dst_f16 = reinterpret_cast<float16_t *>(dst);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, float16_t>(
+        input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float16_t>(
+        input_s4, weights, indices, offsets, dst_f16, width, indsz, offsz,
         padidx, is_weights, algo, stride, include_last_offset, table_dtype,
         fp16_scale_bias);
     }
@@ -915,20 +1094,20 @@ template void embag_ref_kernel<float, int32_t, int32_t, float>(
   const float *, const float *, const int32_t *, const int32_t *, float *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<float, int64_t, int64_t, uint16_t>(
-  const float *, const float *, const int64_t *, const int64_t *, uint16_t *,
+template void embag_ref_kernel<float, int64_t, int64_t, bfloat16_t>(
+  const float *, const float *, const int64_t *, const int64_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<float, int32_t, int32_t, uint16_t>(
-  const float *, const float *, const int32_t *, const int32_t *, uint16_t *,
+template void embag_ref_kernel<float, int32_t, int32_t, bfloat16_t>(
+  const float *, const float *, const int32_t *, const int32_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<uint16_t, int64_t, int64_t, uint16_t>(
-  const uint16_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
+template void embag_ref_kernel<uint16_t, int64_t, int64_t, bfloat16_t>(
+  const uint16_t *, const float *, const int64_t *, const int64_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<uint16_t, int32_t, int32_t, uint16_t>(
-  const uint16_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
+template void embag_ref_kernel<uint16_t, int32_t, int32_t, bfloat16_t>(
+  const uint16_t *, const float *, const int32_t *, const int32_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
 template void embag_ref_kernel<uint16_t, int64_t, int64_t, float>(
@@ -952,14 +1131,14 @@ embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float>(
   data_type_t, bool);
 
 template void
-embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
-  const uint8_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
+embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, bfloat16_t>(
+  const uint8_t *, const float *, const int64_t *, const int64_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
   data_type_t, bool);
 
 template void
-embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
-  const uint8_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
+embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, bfloat16_t>(
+  const uint8_t *, const float *, const int32_t *, const int32_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
   data_type_t, bool);
 
@@ -976,14 +1155,40 @@ embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float>(
   data_type_t, bool);
 
 template void
-embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, uint16_t>(
-  const int8_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
+embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, bfloat16_t>(
+  const int8_t *, const float *, const int64_t *, const int64_t *, bfloat16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
   data_type_t, bool);
 
 template void
-embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, uint16_t>(
-  const int8_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
+embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, bfloat16_t>(
+  const int8_t *, const float *, const int32_t *, const int32_t *, bfloat16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+// INT4 -> F16 output
+template void
+embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, float16_t>(
+  const uint8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float16_t>(
+  const uint8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+// INT8 -> F16 output
+template void
+embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, float16_t>(
+  const int8_t *, const float *, const int64_t *, const int64_t *, float16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
+
+template void
+embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float16_t>(
+  const int8_t *, const float *, const int32_t *, const int32_t *, float16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
   data_type_t, bool);
 

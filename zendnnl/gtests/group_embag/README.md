@@ -30,10 +30,12 @@ zendnnl/gtests/group_embag/
                                   group_embag_kernel_test / forced_ref shim, PrintTo
   group_embag_test_helpers.cpp    implementations of the above
   test_group_embag.cpp            TestGroupEmbag               - F32/BF16/F16 + INT8/S4/U4
+                                                                 with F32/BF16/F16 outputs,
                                                                  bag-mode correctness
                                                                  (per-test ZENDNNL_EMBAG_
                                                                  THREAD_ALGO override)
   test_group_embedding.cpp        TestGroupEmbedding           - F32/BF16/F16 + INT8/S4/U4
+                                                                 with F32/BF16/F16 outputs,
                                                                  lookup-mode correctness
 ```
 
@@ -79,10 +81,12 @@ DUT side calls `group_embedding_bag_direct`. Reference side loops the existing s
 | Axis | File / class |
 |---|---|
 | F32/BF16/F16 bag-mode dtype combos (sum/mean/max) | `test_group_embag.cpp::TestGroupEmbag` |
-| INT8 / S4 / U4 bag-mode + `fp16_scale_bias` toggle | `test_group_embag.cpp::TestGroupEmbag` |
+| INT8 / S4 / U4 bag-mode with F32/BF16/F16 outputs + `fp16_scale_bias` toggle | `test_group_embag.cpp::TestGroupEmbag` |
 | F32/BF16/F16 lookup-mode dtype combos | `test_group_embedding.cpp::TestGroupEmbedding` |
-| INT8 / S4 / U4 lookup-mode + `fp16_scale_bias` toggle | `test_group_embedding.cpp::TestGroupEmbedding` |
+| INT8 / S4 / U4 lookup-mode with F32/BF16/F16 outputs + `fp16_scale_bias` toggle | `test_group_embedding.cpp::TestGroupEmbedding` |
 | `eb_thread_algo_t` ∈ {batch, table, ccd, hybrid} | random axis in `GroupEmbagType`, applied by the `scoped_thread_algo` env-var guard in `group_embag_test_helpers.cpp` |
+
+> **Note:** All F16-output cases (float-table `F32_F16` / `F16_F32` / `F16_F16` and quant-table `INT8_F16` / `S4_F16` / `U4_F16` in both fixtures) require **AVX512-FP16** support. On platforms without AVX512-FP16, the kernel returns `status_t::isa_unsupported` and the affected cases are automatically skipped (`GTEST_SKIP`).
 
 ---
 

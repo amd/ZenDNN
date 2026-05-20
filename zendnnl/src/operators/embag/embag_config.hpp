@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <string>
+#include "common/data_types.hpp"
 #include "operators/common/operator_config.hpp"
 #include "common/zendnnl_global.hpp"
 

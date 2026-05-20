@@ -273,6 +273,65 @@ static void embag_native_kernel(
         is_weights, algo, dst_stride, include_last_offset,
         table_dtype, fp16_scale_bias);
     }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::f16) {
+      using zendnnl::common::float16_t;
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int64_t, int64_t, float16_t>
+        (
+          static_cast<const int8_t *>(table), weights,
+          static_cast<const int64_t *>(indices),
+          static_cast<const int64_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t, float16_t>
+        (
+          static_cast<const int8_t *>(table), weights,
+          static_cast<const int64_t *>(indices),
+          static_cast<const int64_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::f16) {
+      using zendnnl::common::float16_t;
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int64_t, int64_t, float16_t>
+        (
+          static_cast<const uint8_t *>(table), weights,
+          static_cast<const int64_t *>(indices),
+          static_cast<const int64_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t, float16_t>
+        (
+          static_cast<const uint8_t *>(table), weights,
+          static_cast<const int64_t *>(indices),
+          static_cast<const int64_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+    }
     else {
       log_error("embedding_bag_direct: unsupported table and output data types");
     }
@@ -462,6 +521,65 @@ static void embag_native_kernel(
         is_weights, algo, dst_stride, include_last_offset,
         table_dtype, fp16_scale_bias);
     }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::f16) {
+      using zendnnl::common::float16_t;
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int32_t, int32_t, float16_t>
+        (
+          static_cast<const int8_t *>(table), weights,
+          static_cast<const int32_t *>(indices),
+          static_cast<const int32_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, float16_t>
+        (
+          static_cast<const int8_t *>(table), weights,
+          static_cast<const int32_t *>(indices),
+          static_cast<const int32_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::f16) {
+      using zendnnl::common::float16_t;
+#if __GNUC__ >= 12
+      if (can_use_f16_fma_kernel()) {
+        zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int32_t, int32_t, float16_t>
+        (
+          static_cast<const uint8_t *>(table), weights,
+          static_cast<const int32_t *>(indices),
+          static_cast<const int32_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+      else
+#endif
+      {
+        zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t, float16_t>
+        (
+          static_cast<const uint8_t *>(table), weights,
+          static_cast<const int32_t *>(indices),
+          static_cast<const int32_t *>(offsets),
+          static_cast<float16_t *>(dst),
+          embedding_dim, num_indices, num_bags, padding_idx,
+          is_weights, algo, dst_stride, include_last_offset,
+          table_dtype, fp16_scale_bias);
+      }
+    }
     else {
       log_error("embedding_bag_direct: unsupported table and output data types");
     }
@@ -528,21 +646,25 @@ static void embag_fbgemm_kernel(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
-    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
-    // For now, we use the native kernel for S4 data type.
-    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+    // TODO: Explore the feasibility of using FBGEMM for s4/s8 quantized types.
+    // s4 and s8 are handled by the native kernel.
+    else if (table_dtype == data_type_t::u4 &&
              output_dtype == data_type_t::f32) {
       invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, float>(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
-    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
-    // For now, we use the native kernel for S4 data type.
-    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+    else if (table_dtype == data_type_t::u4 &&
              output_dtype == data_type_t::bf16) {
       invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    else if (table_dtype == data_type_t::u4 &&
+             output_dtype == data_type_t::f16) {
+      invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
     else {
       log_error("embedding_bag_direct: unsupported table/output data types for FBGEMM backend");
@@ -586,21 +708,23 @@ static void embag_fbgemm_kernel(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
-    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
-    // For now, we use the native kernel for S4 data type.
-    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+    else if (table_dtype == data_type_t::u4 &&
              output_dtype == data_type_t::f32) {
       invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, float>(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
-    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
-    // For now, we use the native kernel for S4 data type.
-    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+    else if (table_dtype == data_type_t::u4 &&
              output_dtype == data_type_t::bf16) {
       invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
         table, indices, offsets, weights, dst, params,
         /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    else if (table_dtype == data_type_t::u4 &&
+             output_dtype == data_type_t::f16) {
+      invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
     }
     else {
       log_error("embedding_bag_direct: unsupported table/output data types for FBGEMM backend");
