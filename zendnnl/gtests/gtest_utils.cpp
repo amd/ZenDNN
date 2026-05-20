@@ -278,13 +278,14 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   if (cli_params.dst_dtype && (*cli_params.dst_dtype == data_type_t::s8 ||
                                *cli_params.dst_dtype == data_type_t::u8 ||
                                *cli_params.dst_dtype == data_type_t::f32 ||
-                               *cli_params.dst_dtype == data_type_t::bf16)) {
+                               *cli_params.dst_dtype == data_type_t::bf16 ||
+                               *cli_params.dst_dtype == data_type_t::f16)) {
     output_dtype = *cli_params.dst_dtype;
   }
   else {
     if (cli_params.dst_dtype) {
       log_info("Unsupported dst_dtype: ", dtype_info(*cli_params.dst_dtype),
-               " (use s8, u8, f32, bf16); using random dst_dtype.");
+               " (use s8, u8, f32, bf16, f16); using random dst_dtype.");
     }
     output_dtype = dtype_arr[rand() % dtype_size];
   }
@@ -2547,14 +2548,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         void *C_data = output_tensor.get_raw_handle_unsafe();
 
         //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
-        //TODO: Bias is not supported for F16 with AOCL-DLP kernel
-        const bool is_aocl_kernel = (algo == matmul_algo_t::aocl_dlp ||
-                                     algo == matmul_algo_t::aocl_dlp_blocked);
         const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                         algo == matmul_algo_t::libxsmm_blocked);
         const bool skip_bias =
-          (is_libxsmm_kernel && output_tensor.get_data_type() == data_type_t::bf16) ||
-          (is_aocl_kernel && output_tensor.get_data_type() == data_type_t::f16);
+          (is_libxsmm_kernel && output_tensor.get_data_type() == data_type_t::bf16);
         void *bias_data = skip_bias ? nullptr :
                           bias_tensor.get_raw_handle_unsafe();
 
@@ -2858,14 +2855,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       //define matmul context
       matmul_context_t matmul_context = matmul_context_t()
                                         .set_param("weights", weight_tensor)
+                                        .set_param("bias", bias_tensor)
                                         .set_alpha(alpha)
                                         .set_beta(beta);
-      //TODO: For AOCL-DLP matmul, bias is not supported for F16
-      if (!((algo == matmul_algo_t::aocl_dlp ||
-             algo == matmul_algo_t::aocl_dlp_blocked) &&
-            output_tensor.get_data_type() == data_type_t::f16)) {
-        matmul_context = matmul_context.set_param("bias", bias_tensor);
-      }
       for (const auto &po : po_types) {
         auto post_op = post_op_t{po};
         if (po  != post_op_type_t::none) {
@@ -2985,16 +2977,11 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                       .set_beta(beta);
 
     //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
-    //TODO: For AOCL-DLP matmul, bias is not supported for F16
     if (!((algo == matmul_algo_t::libxsmm ||
            algo == matmul_algo_t::libxsmm_blocked) &&
-          output_tensor.get_data_type() == data_type_t::bf16) &&
-        !((algo == matmul_algo_t::aocl_dlp ||
-           algo == matmul_algo_t::aocl_dlp_blocked) &&
-          output_tensor.get_data_type() == data_type_t::f16)) {
+          output_tensor.get_data_type() == data_type_t::bf16)) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);
     }
-
 
     for (const auto &po : po_types) {
       auto post_op = post_op_t{po};

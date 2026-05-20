@@ -39,12 +39,26 @@ status_t reorder_impl_t::validate() {
     return status_t::failure;
   }
 
+  // The AOCL reorder is a pure layout transformation (contiguous <-> blocked).
+  // It does not perform any data-type conversion: the kernel selects the
+  // element type from the input dtype only and copies element-wise into the
+  // output buffer. A dtype mismatch would therefore either reinterpret bits
+  // (same-size types) or overrun the output buffer (different-size types).
+  // Any dtype change must go through the LOWOHA reorder path instead.
+  if (input->get_data_type() != output->get_data_type()) {
+    apilog_error("Reorder requires input and output to have the same data type "
+                 "(input=", dtype_info(input->get_data_type()),
+                 ", output=", dtype_info(output->get_data_type()),
+                 "). Use LOWOHA reorder for data-type conversion.");
+    return status_t::failure;
+  }
+
   if (input->get_data_type() == data_type_t::f16 ||
       output->get_data_type() == data_type_t::f16) {
-    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+    // F16 requires AVX512-FP16 ISA support
     if (!platform_info.get_avx512_f16_status()) {
       apilog_error("F16 data type is not supported on this platform "
-                   "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+                   "(requires AVX512-FP16 ISA).");
       reorder_status = status_t::isa_unsupported;
       return reorder_status;
     }
@@ -186,11 +200,11 @@ size_t reorder_impl_t::get_reorder_size() {
       return reorder_size;
     }
 
-    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+    // F16 requires AVX512-FP16 ISA support
     if (input_tensor->get_data_type() == data_type_t::f16) {
       if (!platform_info.get_avx512_f16_status()) {
         apilog_error("F16 data type is not supported on this platform "
-                     "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+                     "(requires AVX512-FP16 ISA).");
         reorder_status = status_t::isa_unsupported;
         return reorder_size;
       }

@@ -671,7 +671,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             // narrow xmm kernel inside bf16_gemv_direct only engages
             // when !transB).
             kernel =
-                native::bf16_gemv_best_algo(M, N, K, num_threads, transB);
+              native::bf16_gemv_best_algo(M, N, K, num_threads, transB);
           }
           else {
             kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
@@ -748,18 +748,14 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   }
 
   // F16 kernel selection
-  // oneDNN supports: src=f16, wei=f16, dst=f16 or f32
-  // aocl supports: src=f16, wei=f16, dst=f16
   if (is_f16) {
     bool is_onednn_algo = (kernel == matmul_algo_t::onednn ||
                            kernel == matmul_algo_t::onednn_blocked);
     bool is_aocl_algo = (kernel == matmul_algo_t::aocl_dlp ||
                          kernel == matmul_algo_t::aocl_dlp_blocked);
-    bool aocl_compatible = is_aocl_algo && params.dtypes.dst == data_type_t::f16 &&
-                           bias == nullptr && params.postop_.empty();
-    if (!is_onednn_algo && !aocl_compatible) {
-      log_info("Switching to onednn_blocked kernel for F16 GEMM");
-      kernel = matmul_algo_t::onednn_blocked;
+    if (!is_onednn_algo && !is_aocl_algo) {
+      log_info("Switching to aocl_dlp_blocked kernel for F16 GEMM");
+      kernel = matmul_algo_t::aocl_dlp_blocked;
     }
   }
 

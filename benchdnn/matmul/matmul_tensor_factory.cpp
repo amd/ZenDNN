@@ -170,11 +170,12 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                           dt == data_type_t::u4) ?
                          tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 0.2) :
                          tensor_t();
-        auto wei_zp = dt == data_type_t::u4 ? tensor_factory.uniform_dist_tensor(scale_size, data_type_t::bf16,
-                      0.2) : tensor_t();
+        auto wei_zp = dt == data_type_t::u4 ? tensor_factory.uniform_dist_tensor(
+                        scale_size, data_type_t::bf16,
+                        0.2) : tensor_t();
         weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
-                          dt,
-                          1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale, wei_zp);
+                         dt,
+                         1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale, wei_zp);
       }
     }
     weights.push_back(weights_tensor);
@@ -317,7 +318,8 @@ int create_output_tensor(tensor_factory_t &tensor_factory,
   size_t m = cfg.m;
   zendnnl::common::data_type_t dt = cfg.dt[2];
   auto dst_scale = !(dt == data_type_t::f32 ||
-                     dt == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
+                     dt == data_type_t::bf16 ||
+                     dt == data_type_t::f16) ? tensor_factory.uniform_dist_tensor({1, 1},
                          data_type_t::f32, 1.2) : tensor_t();
   auto dst_zp  = dt == data_type_t::u8 ? tensor_factory.uniform_tensor({1, 1},
                  data_type_t::u8, 53) : tensor_t();

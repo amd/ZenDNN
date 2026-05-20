@@ -20,6 +20,26 @@
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
+// Helper function to convert zendnnl data_type_t to the AOCL DLP storage-type
+// enum used by post-op slots (bias, scale/zp, matrix add/mul, etc.).
+static DLP_TYPE to_dlp_type(data_type_t dt) {
+  switch (dt) {
+  case data_type_t::f32:
+    return DLP_F32;
+  case data_type_t::bf16:
+    return DLP_BF16;
+  case data_type_t::f16:
+    return DLP_F16;
+  case data_type_t::s32:
+    return DLP_S32;
+  case data_type_t::s8:
+    return DLP_S8;
+  case data_type_t::u8:
+    return DLP_U8;
+  default:
+    return DLP_F32;
+  }
+}
 
 // Fill DLP post-op slots (eltwise, binary_add, binary_mul) for one matmul.
 //
@@ -34,7 +54,7 @@ static void setup_dlp_postops(dlp_metadata_t *md,
   // when the op carries neither, leave the field at its calloc-zero default
   // (DLP_INVALID) so behavior matches the pre-refactor code byte-for-byte.
   auto put_eltwise = [&](DLP_ELT_ALGO_TYPE algo,
-                         void *alpha = nullptr, void *beta = nullptr) {
+  void *alpha = nullptr, void *beta = nullptr) {
     auto &e = md->eltwise[eltwise_index++];
     md->seq_vector[op_index++] = ELTWISE;
     e.algo.algo_type = algo;
@@ -48,12 +68,12 @@ static void setup_dlp_postops(dlp_metadata_t *md,
 
   // Write one MATRIX_{ADD,MUL} slot.
   auto put_matrix = [&](auto *arr, int &idx, DLP_POST_OP_TYPE tag,
-                        const matmul_post_op &po) {
+  const matmul_post_op &po) {
     auto &m = arr[idx++];
     md->seq_vector[op_index++] = tag;
     m.matrix    = po.buff;
     m.ldm       = po.leading_dim;
-    m.stor_type = (po.dtype == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
+    m.stor_type = to_dlp_type(po.dtype);
     // sf is pre-allocated by the caller; matrix add/mul operands have no
     // per-element scale, so point at the shared ONE_F32 constant.
     m.sf->scale_factor     = get_void_ptr(ONE_F32);
@@ -283,24 +303,6 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       break;
     }
   }
-
-  // Helper lambda to convert data_type_t to DLP_TYPE
-  auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
-    switch (dt) {
-    case data_type_t::f32:
-      return DLP_F32;
-    case data_type_t::bf16:
-      return DLP_BF16;
-    case data_type_t::s32:
-      return DLP_S32;
-    case data_type_t::s8:
-      return DLP_S8;
-    case data_type_t::u8:
-      return DLP_U8;
-    default:
-      return DLP_F32;
-    }
-  };
 
   // Allocate seq_vector first (only if we have post-ops)
   if (total_ops > 0) {

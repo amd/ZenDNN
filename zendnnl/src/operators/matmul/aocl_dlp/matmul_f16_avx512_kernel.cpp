@@ -27,8 +27,7 @@ status_t matmul_f16_avx512_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_f16_avx512 kernel");
   log_info("Executing matmul_f16_avx512 kernel");
 
-  // TODO: Enable post-ops support for F16 when AOCL DLP adds support
-  // auto     aocl_dlp_po_ptr   = context_.get_aocl_dlp_post_op_ptr_unsafe();
+  auto     aocl_dlp_po_ptr   = context_.get_aocl_dlp_post_op_ptr_unsafe();
 
   auto input_iter = inputs_.find("matmul_input");
   auto output_iter = outputs_.find("matmul_output");
@@ -102,16 +101,31 @@ status_t matmul_f16_avx512_kernel_t::execute(const context_type &context_,
   unsigned int offset_out     = (output_dim == 3) ? output_tensor.get_stride(
                                   output_dim-3) : 0;
 
-  for (auto bs=0; bs<batch_size; ++bs) {
-    aocl_gemm_f16f16f16of16(order, trans_input, trans_weight,
-                            m,n,k,
-                            alpha,
-                            input_raw_handle + bs * offset_src, lda, input_format,
-                            (is_reordered_weights && weight_dim==2) ?
-                            reorder_weights : weights_raw_handle + bs * offset_wei,
-                            ldb, weight_format, beta,
-                            (uint16_t *)output_raw_handle + bs * offset_out, ldc,
-                            nullptr); // post-ops are not supported for f16
+  if (output_tensor.get_data_type() == data_type_t::f16) {
+    for (auto bs=0; bs<batch_size; ++bs) {
+      aocl_gemm_f16f16f16of16(order, trans_input, trans_weight,
+                              m,n,k,
+                              alpha,
+                              input_raw_handle + bs * offset_src, lda, input_format,
+                              (is_reordered_weights && weight_dim==2) ?
+                              reorder_weights : weights_raw_handle + bs * offset_wei,
+                              ldb, weight_format, beta,
+                              (uint16_t *)output_raw_handle + bs * offset_out, ldc,
+                              aocl_dlp_po_ptr);
+    }
+  }
+  else if (output_tensor.get_data_type() == data_type_t::f32) {
+    for (auto bs=0; bs<batch_size; ++bs) {
+      aocl_gemm_f16f16f16of32(order, trans_input, trans_weight,
+                              m,n,k,
+                              alpha,
+                              input_raw_handle + bs * offset_src, lda, input_format,
+                              (is_reordered_weights && weight_dim==2) ?
+                              reorder_weights : weights_raw_handle + bs * offset_wei,
+                              ldb, weight_format, beta,
+                              (float *)output_raw_handle + bs * offset_out, ldc,
+                              aocl_dlp_po_ptr);
+    }
   }
   return status_t::success;
 }

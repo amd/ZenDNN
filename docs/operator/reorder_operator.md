@@ -53,7 +53,7 @@ This table outlines the support for Reorder operations with various data types, 
 | S8                 |        Blocked        | S8                  |   Contiguous  | AOCL    | Out-of-Place, In-Place |
 
 **Note:**
-- **F16 data type:** Reorder operations with `F16` require an F16-capable ISA (`AVX512-FP16` or `AVX-NE-CONVERT`). On unsupported platforms, the operator returns `isa_unsupported`.
+- **F16 data type:** Reorder operations with `F16` require an F16-capable ISA `AVX512-FP16`. On unsupported platforms, the operator returns `isa_unsupported`.
 - **S8 data type:** Reorder operations with `S8` input depend on the source matrix data type of the AOCL-backend matmul operation. Supported source data types: `S8`, `U8`.
 
 ## Examples

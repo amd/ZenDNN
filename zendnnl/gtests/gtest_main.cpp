@@ -33,7 +33,7 @@ using namespace std;
 
 const uint32_t po_size = 9; //Supported postops
 
-const uint32_t dtype_size = 4; //Supported dtypes
+const uint32_t dtype_size = 5; //Supported dtypes
 vector<data_type_t> dtype_arr(dtype_size);
 
 
@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
   try {
     // Load global config (env/defaults) before tests read it.
     (void)zendnnl::common::zendnnl_global_block();
-    dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
+    dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8, data_type_t::f16};
     // Command line argument parser
     Parser parse;
     parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, ai_test_mode_str,

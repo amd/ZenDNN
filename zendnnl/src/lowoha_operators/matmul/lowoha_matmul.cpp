@@ -49,8 +49,9 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     log_info("Using libxsmm kernel");
-    if (run_libxsmm_std(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
-                    lowoha_param, bias)) {
+    if (run_libxsmm_std(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C,
+                        dtypes,
+                        lowoha_param, bias)) {
       return;
     }
   }
@@ -220,9 +221,13 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
   // F16 ISA check must always run — not gated behind diagnostics.
   // Prevents undefined behavior on platforms without AVX512-FP16 support.
+  // Covers every F16-bearing operand: src / wei / dst, bias, and any binary
+  // post-op buffer. Anything else slips through to a kernel that touches
+  // F16 storage and produces wrong results on non-FP16 hardware.
   const bool is_f16 = (params.dtypes.src == data_type_t::f16 ||
                        params.dtypes.wei == data_type_t::f16 ||
-                       params.dtypes.dst == data_type_t::f16);
+                       params.dtypes.dst == data_type_t::f16 ||
+                       params.dtypes.bias == data_type_t::f16);
   if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
     log_error("F16 data type is not supported on this platform "
               "(requires AVX512-FP16).");
@@ -250,6 +255,12 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         po.po_type == post_op_type_t::binary_mul) {
       if (po.leading_dim == -1) {
         po.leading_dim = N;
+      }
+      if (po.dtype == data_type_t::f16 &&
+          !zendnnl_platform_info().get_avx512_f16_status()) {
+        log_error("F16 binary post-op tensor is not supported on this platform "
+                  "(requires AVX512-FP16).");
+        return status_t::isa_unsupported;
       }
     }
     else if (po.po_type == post_op_type_t::clip) {
@@ -306,7 +317,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
       return status_t::failure;
     }
     status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, ldb,
-                            transB ? 't' : 'n', params);
+                             transB ? 't' : 'n', params);
     if (unpack_status != status_t::success) {
       return unpack_status;
     }

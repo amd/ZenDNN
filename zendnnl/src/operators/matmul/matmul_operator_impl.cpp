@@ -36,6 +36,17 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
                        op.binary_add_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
+        // F16 binary post-op tensor requires AVX512-FP16 just like an F16
+        // src/wei/dst would. Reject early with isa_unsupported so callers
+        // (gtests, examples) can skip gracefully on non-FP16 hardware.
+        if (add_tensor_obj->second.get_data_type() == data_type_t::f16 &&
+            !platform_info.get_avx512_f16_status()) {
+          apilog_error("Binary post-op tensor '",
+                       op.binary_add_params.tensor_name,
+                       "' is F16 but platform lacks AVX512-FP16 "
+                       "(F16 data type is not supported on this platform).");
+          return status_t::isa_unsupported;
+        }
         auto tensor_size = add_tensor_obj->second.get_size();
         if (add_tensor_obj->second.get_order() == "ba") {
           apilog_error("Invalid post-op: ",
@@ -81,6 +92,17 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
           apilog_error("Invalid post-op: ",
                        op.binary_mul_params.tensor_name, " buffer not passed.");
           return status_t::failure;
+        }
+        // F16 binary post-op tensor requires AVX512-FP16 just like an F16
+        // src/wei/dst would. Reject early with isa_unsupported so callers
+        // (gtests, examples) can skip gracefully on non-FP16 hardware.
+        if (mul_tensor_obj->second.get_data_type() == data_type_t::f16 &&
+            !platform_info.get_avx512_f16_status()) {
+          apilog_error("Binary post-op tensor '",
+                       op.binary_mul_params.tensor_name,
+                       "' is F16 but platform lacks AVX512-FP16 "
+                       "(F16 data type is not supported on this platform).");
+          return status_t::isa_unsupported;
         }
         auto tensor_size = mul_tensor_obj->second.get_size();
         if (mul_tensor_obj->second.get_order() == "ba") {
@@ -194,8 +216,6 @@ status_t matmul_impl_t::validate() {
   bool is_broadcast_bmm_sizes = ((input_size.size() == 3 &&
                                   weights_size.size() == 2) || (input_size.size() == 2 &&
                                       weights_size.size() == 3)) && (output_size.size() == 3);
-  bool is_onednn_kernel = (forced_kernel == "onednn" ||
-                           forced_kernel == "onednn_blocked");
 
   is_bmm =  is_bmm_sizes || is_bmm;
 
@@ -251,6 +271,8 @@ status_t matmul_impl_t::validate() {
       return status_t::failure;
     }
   }
+  bool is_onednn_kernel = (forced_kernel == "onednn" ||
+                           forced_kernel == "onednn_blocked");
 
   // Input and Output Size Check
   // OneDNN doesn't support broadcasted inputs or weights
@@ -391,27 +413,37 @@ status_t matmul_impl_t::validate() {
   }
   auto post_ops = context.get_post_op();
 
-  if (input->get_data_type() == data_type_t::f16 ||
-      weights->get_data_type() == data_type_t::f16 ||
-      output->get_data_type() == data_type_t::f16) {
+  // Detect F16 dtype on src / wei / dst or bias. Any of these would otherwise
+  // reach a kernel that touches F16 storage and produce wrong results / UB
+  // on platforms without AVX512-FP16, so they all gate dispatch the same way.
+  // F16 on binary post-op tensors is checked separately in
+  // validate_buffer_post_op() where the post-op tensor lookups already live.
+  bool is_f16_core = (input->get_data_type()   == data_type_t::f16 ||
+                      weights->get_data_type() == data_type_t::f16 ||
+                      output->get_data_type()  == data_type_t::f16);
+  bool is_f16_bias = (bias &&
+                      bias->get_data_type() == data_type_t::f16);
+
+  if (is_f16_core || is_f16_bias) {
     // F16 requires AVX512-FP16
     if (!platform_info.get_avx512_f16_status()) {
-      apilog_error("F16 data type is not supported on this platform "
-                   "(requires AVX512-FP16).");
+      if (is_f16_bias && !is_f16_core) {
+        apilog_error("Bias tensor is F16 but platform lacks AVX512-FP16 "
+                     "(F16 data type is not supported on this platform).");
+      }
+      else {
+        apilog_error("F16 data type is not supported on this platform "
+                     "(requires AVX512-FP16).");
+      }
       return status_t::isa_unsupported;
     }
 
     bool is_aocl_kernel = (forced_kernel == "aocl_dlp" ||
                            forced_kernel == "aocl_dlp_blocked");
-    // AOCL supports F16 only when dst is also F16 (src=f16, wei=f16, dst=f16)
-    bool aocl_compatible = is_aocl_kernel &&
-                           input->get_data_type() == data_type_t::f16 &&
-                           weights->get_data_type() == data_type_t::f16 &&
-                           output->get_data_type() == data_type_t::f16 && !bias && post_ops.empty();
 
-    if (forced_kernel != "reference" && !is_onednn_kernel && !aocl_compatible) {
-      forced_kernel = "onednn_blocked";
-      log_info("Switching to onednn_blocked kernel for F16 GEMM");
+    if (forced_kernel != "reference" && !is_onednn_kernel && !is_aocl_kernel) {
+      forced_kernel = "aocl_dlp_blocked";
+      log_info("Switching to aocl_dlp_blocked kernel for F16 GEMM");
     }
   }
 
@@ -465,9 +497,9 @@ status_t matmul_impl_t::validate_forced_kernel() {
             (in_dtype == data_type_t::bf16) || (in_dtype == data_type_t::f32)) ||
           !((out_dtype == data_type_t::s8) || (out_dtype == data_type_t::u8) ||
             (out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16) ||
-            (out_dtype == data_type_t::s32))) {
+            (out_dtype == data_type_t::s32) || (out_dtype == data_type_t::f16))) {
         log_error("<", get_name(),
-                  "> forced reference kernel needs s8/u8/bf16/f32 input and output tensors.");
+                  "> forced reference kernel needs s8/u8/bf16/f32/f16 input and output tensors.");
         return status_t::failure;
       }
     }
@@ -679,7 +711,8 @@ status_t matmul_impl_t::kernel_factory() {
     }
     else if ((weight_dtype == data_type_t::f16) &&
              (input_dtype  == data_type_t::f16) &&
-             (output_dtype == data_type_t::f16)) {
+             (output_dtype == data_type_t::f16 ||
+              output_dtype == data_type_t::f32)) {
       kernel = std::shared_ptr<matmul_f16_avx512_kernel_t>
                (get_matmul_f16_avx512_kernel());
     }
@@ -690,7 +723,8 @@ status_t matmul_impl_t::kernel_factory() {
               output_dtype == data_type_t::bf16 ||
               output_dtype == data_type_t::s8 ||
               output_dtype == data_type_t::u8 ||
-              output_dtype == data_type_t::s32)) {
+              output_dtype == data_type_t::s32 ||
+              output_dtype == data_type_t::f16)) {
       kernel = get_matmul_int8_avx512_kernel();
     }
     else if ((weight_dtype == data_type_t::s4 ||

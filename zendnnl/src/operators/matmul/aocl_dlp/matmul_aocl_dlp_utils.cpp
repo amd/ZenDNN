@@ -33,6 +33,9 @@ DLP_TYPE get_aocl_store_type(data_type_t dt) {
   case data_type_t::bf16:
     return DLP_TYPE::DLP_BF16 ;
     break;
+  case data_type_t::f16:
+    return DLP_TYPE::DLP_F16 ;
+    break;
   case data_type_t::s32:
     return DLP_TYPE::DLP_S32 ;
     break;

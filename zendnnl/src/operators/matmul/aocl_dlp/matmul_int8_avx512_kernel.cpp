@@ -139,6 +139,17 @@ status_t matmul_int8_avx512_kernel_t::execute(const context_type &context_,
                               ldb, weight_format, beta, (float *)output_raw_handle + bs * offset_out, ldc,
                               aocl_dlp_po_ptr);
         break;
+      case data_type_t::f16:
+        LOG_DEBUG_INFO("Selected algorithm: u8 -> f16");
+        // Call the appropriate algorithm for u8 -> f16
+        aocl_gemm_u8s8s32of16(order, trans_input, trans_weight,
+                              m, n, k, alpha, (uint8_t *)input_raw_handle + bs * offset_src, lda,
+                              input_format,
+                              (is_reordered_weights &&
+                               weight_dim == 2) ? reorder_weights : weights_raw_handle + bs * offset_wei,
+                              ldb, weight_format, beta, (uint16_t *)output_raw_handle + bs * offset_out, ldc,
+                              aocl_dlp_po_ptr);
+        break;
       default:
         apilog_error("Unsupported output data type for input u8");
         return status_t::unimplemented;
@@ -195,6 +206,16 @@ status_t matmul_int8_avx512_kernel_t::execute(const context_type &context_,
                               (is_reordered_weights &&
                                weight_dim == 2) ? reorder_weights : weights_raw_handle + bs * offset_wei,
                               ldb, weight_format, beta, (float *)output_raw_handle + bs * offset_out, ldc,
+                              aocl_dlp_po_ptr);
+        break;
+      case data_type_t::f16:
+        LOG_DEBUG_INFO("Selected algorithm: s8 -> f16");
+        // Call the appropriate algorithm for s8 -> f16
+        aocl_gemm_s8s8s32of16(order, trans_input, trans_weight,
+                              m, n, k, alpha, (int8_t *)input_raw_handle + bs * offset_src, lda, input_format,
+                              (is_reordered_weights &&
+                               weight_dim == 2) ? reorder_weights : weights_raw_handle + bs * offset_wei,
+                              ldb, weight_format, beta, (uint16_t *)output_raw_handle + bs * offset_out, ldc,
                               aocl_dlp_po_ptr);
         break;
       default:

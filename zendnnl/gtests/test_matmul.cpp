@@ -459,22 +459,14 @@ TEST_P(TestMatmul, BF16_BF16) {
  *  @brief Test to validate matmul F16 input/weight/output
  */
 TEST_P(TestMatmul, F16_F16) {
-  bool disable_bias = false;
-  if (algo == matmul_algo_t::aocl_dlp ||
-      algo == matmul_algo_t::aocl_dlp_blocked) {
-    log_info("Post-ops/bias are not supported for F16_F16 with AOCL-DLP kernel; disabling all post-ops and bias (po_types={none})");
-    po_types = {post_op_type_t::none};
-    disable_bias = true;
-  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::f16, 2.0, transA);
-  auto bias_tensor        = disable_bias ? tensor_t() :
-                            tensor_factory.uniform_dist_tensor({1, n},
-                                bias_dtype, 2.0);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            bias_dtype, 2.0);
   auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
                         binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
@@ -507,10 +499,6 @@ TEST_P(TestMatmul, F16_F16) {
  *  @brief Test to validate matmul F16 input/weight with F32 output
  */
 TEST_P(TestMatmul, F16_F32) {
-  if (algo == matmul_algo_t::aocl_dlp ||
-      algo == matmul_algo_t::aocl_dlp_blocked) {
-    GTEST_SKIP() << "F16_F32 is not supported with AOCL-DLP kernel";
-  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
@@ -538,8 +526,12 @@ TEST_P(TestMatmul, F16_F32) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_f32,
-                             epsilon_f32, is_test_successful, false, alpha);
+    const float rtol = (algo == matmul_algo_t::onednn ||
+                        algo == matmul_algo_t::onednn_blocked) ? rtol_f32 : rtol_bf16;
+    const float epsilon = (algo == matmul_algo_t::onednn ||
+                           algo == matmul_algo_t::onednn_blocked) ? epsilon_f32 : epsilon_bf16;
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol,
+                             epsilon, is_test_successful, false, alpha);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -737,13 +729,6 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *
  */
 TEST_P(TestMatmul, F16_F16_Stride) {
-  bool disable_bias = false;
-  if (algo == matmul_algo_t::aocl_dlp ||
-      algo == matmul_algo_t::aocl_dlp_blocked) {
-    log_info("Post-ops/bias are not supported for F16_F16_Stride with AOCL-DLP kernel; disabling post-ops and bias (po_type=none)");
-    po_types = {post_op_type_t::none};
-    disable_bias = true;
-  }
   size_t stride_in_inc           = rand() % 50;
   size_t stride_wt_inc           = rand() % 50;
   size_t stride_dst_inc          = rand() % 50;
@@ -768,9 +753,8 @@ TEST_P(TestMatmul, F16_F16_Stride) {
                             stride_wt, data_type_t::f16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
                             stride_in, data_type_t::f16, 2.0, transA);
-  auto bias_tensor        = disable_bias ? tensor_t() :
-                            tensor_factory.uniform_dist_tensor({1, n},
-                                bias_dtype, 2.0);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            bias_dtype, 2.0);
   auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
                         binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -835,7 +819,10 @@ TEST_P(TestMatmul, INT8) {
     FAIL() << "source dynamic quantization failed";
   }
   tensor_t dst_scale, dst_zp;
-  if (output_dtype != data_type_t::f32 && output_dtype != data_type_t::bf16) {
+  // Destination scale/zp are only meaningful when the output is quantized
+  // to an integer type (s8/u8). For floating-point outputs (f32/bf16/f16)
+  // the matmul writes raw values and no dst-quant params are needed.
+  if (output_dtype == data_type_t::s8 || output_dtype == data_type_t::u8) {
     auto dst_ref = tensor_factory.uniform_dist_tensor({m, n}, ref_dt, 2.0);
     if (quant_params_compute(tensor_factory, dst_ref,
                              ref_dt, output_dtype,
@@ -853,6 +840,9 @@ TEST_P(TestMatmul, INT8) {
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_types, binary_tensors,
                             use_LOWOHA, algo, 1.0, 0.0);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_types,
                             binary_tensors, use_LOWOHA, algo, 1.0, 0.0);

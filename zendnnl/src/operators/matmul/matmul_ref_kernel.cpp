@@ -802,7 +802,7 @@ void matmul_ref_kernel_t::compute_matmul(int batch_size, int M, int N, int K,
   data_type_t accum_type = matmul_config.get_accum_type();
   const bool use_f16_accum = (accum_type == data_type_t::f16 &&
                               input_dtype == data_type_t::f16 && weight_dtype == data_type_t::f16 &&
-                              output_dtype == data_type_t::f16);
+                              (output_dtype == data_type_t::f16 || output_dtype == data_type_t::f32));
 
   #pragma omp parallel for collapse(3)
   for (auto bs = 0; bs < batch_size; ++bs) {

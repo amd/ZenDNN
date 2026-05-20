@@ -225,7 +225,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
     size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
                             (alignment - 1);
     reorder_weights       = (T *)aligned_alloc(alignment, reorder_size);
-    reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb, nullptr);
+    reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb,
+                 nullptr);
   }
   // Out-of-place reordering
   else if (weight_cache_type == 1) {
@@ -233,12 +234,14 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
       apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
-      size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B', k, n,nullptr);
+      size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B', k, n,
+                                     nullptr);
       size_t alignment      = 64;
       size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
                               (alignment - 1);
       reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
-      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb, nullptr);
+      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb,
+                   nullptr);
       // Create new entry
       matmul_weight_cache.add(key, reorder_weights);
     }
@@ -692,6 +695,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                              weight_ptr, ldb, mem_format_b, beta,
                              static_cast<int16_t *>(C), ldc, aocl_po);
       break;
+    case data_type_t::f16:
+      aocl_gemm_u8s8s32of16(layout, transA, transB, M, N, K, alpha,
+                            static_cast<const uint8_t *>(A), lda, mem_format_a,
+                            weight_ptr, ldb, mem_format_b, beta,
+                            static_cast<uint16_t *>(C), ldc, aocl_po);
+      break;
     default:
       log_error("Unsupported output data type for u8 source");
       break;
@@ -752,6 +761,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                                weight_ptr, ldb, mem_format_b, beta,
                                static_cast<int16_t *>(C), ldc, aocl_po);
         break;
+      case data_type_t::f16:
+        aocl_gemm_s8s8s32of16(layout, transA, transB, M, N, K, alpha,
+                              static_cast<const int8_t *>(A), lda, mem_format_a,
+                              weight_ptr, ldb, mem_format_b, beta,
+                              static_cast<uint16_t *>(C), ldc, aocl_po);
+        break;
       default:
         log_error("Unsupported output data type for s8 source");
         break;
@@ -759,17 +774,23 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     }
   }
   else if (dtypes.src == data_type_t::f16 && dtypes.wei == data_type_t::f16) {
+    const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);
+    const uint16_t beta_f16  = common::float16_t::f32_to_f16_val(beta);
     switch (dtypes.dst) {
-    case data_type_t::f16: {
-      const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);
-      const uint16_t beta_f16  = common::float16_t::f32_to_f16_val(beta);
+    case data_type_t::f16:
       aocl_gemm_f16f16f16of16(layout, transA, transB, M, N, K, alpha_f16,
                               static_cast<const uint16_t *>(A), lda, mem_format_a,
                               is_weight_blocked ? (uint16_t *)reordered_mem : static_cast<const uint16_t *>
                               (B), ldb, mem_format_b, beta_f16, static_cast<uint16_t *>(C), ldc,
-                              nullptr);  // post-ops are not supported for f16
+                              aocl_po);
       break;
-    }
+    case data_type_t::f32:
+      aocl_gemm_f16f16f16of32(layout, transA, transB, M, N, K, alpha_f16,
+                              static_cast<const uint16_t *>(A), lda, mem_format_a,
+                              is_weight_blocked ? (uint16_t *)reordered_mem : static_cast<const uint16_t *>
+                              (B), ldb, mem_format_b, beta_f16, static_cast<float *>(C), ldc,
+                              aocl_po);
+      break;
     default:
       log_error("Unsupported output data type for f16 source");
       break;
@@ -878,6 +899,21 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       reinterpret_cast<const bfloat16 **>(b_ptrs.data()), &ldb_,
       &beta,
       reinterpret_cast<bfloat16 **>(c_ptrs.data()), &ldc_,
+      1, // single group
+      &group_size,
+      &mem_format_a, &mem_format_b,
+      &metadata_array);
+  }
+  else if (dtypes.src == data_type_t::f16 && dtypes.dst == data_type_t::f16) {
+    apilog_info("executing aocl_batch_gemm_f16f16f16of16");
+    aocl_batch_gemm_f16f16f16of16(
+      &layout, &transA, &transB,
+      &m_, &n_, &k_,
+      &alpha,
+      reinterpret_cast<const float16 **>(a_ptrs.data()), &lda_,
+      reinterpret_cast<const float16 **>(b_ptrs.data()), &ldb_,
+      &beta,
+      reinterpret_cast<float16 **>(c_ptrs.data()), &ldc_,
       1, // single group
       &group_size,
       &mem_format_a, &mem_format_b,
