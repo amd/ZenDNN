@@ -145,7 +145,18 @@ struct matmul_params {
   std::vector<matmul_post_op> postop_;         ///< Post-operation chain
   matmul_quantization_params_t quant_params;   ///< Quantization parameters
   char mem_format_a;                           ///< Memory format for matrix A
-  char mem_format_b;                           ///< Memory format for matrix B
+  ///< Memory format for matrix B.
+  ///< - 'n' (default): standard row-major weights; matmul backend
+  ///<                   runs its own reorder/blocking step.
+  ///< - 'r' : weights are already in the AOCL DLP blocked layout
+  ///<         (produced by a prior @c reorder_direct() prepack call).
+  ///<         Matmul backend skips its internal weight-reorder /
+  ///<         cache-blocking step and uses the buffer as-is. Requires
+  ///<         @c lowoha_algo == matmul_algo_t::aocl_dlp_blocked and
+  ///<         the prepack to have used matching
+  ///<         K / N / ldb / dtypes / transposed / sym_group_size --
+  ///<         a mismatch produces silently wrong results.
+  char mem_format_b;
   matmul_algo_t lowoha_algo;                   ///< Selected algorithm
   //num_threads is int32_t to match the type used by OpenMP APIs
   int32_t num_threads;                        ///< Number of threads

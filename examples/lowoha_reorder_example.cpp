@@ -59,10 +59,10 @@ int run_lowoha_reorder_bf16_to_int8_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input values (float32): ");
     for (size_t i = 0; i < nelems; ++i) {
@@ -78,14 +78,14 @@ int run_lowoha_reorder_bf16_to_int8_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("Quantization parameters: scale=", scale, ", zero_point=", zero_point);
     log_info("Formula: int8_val = clamp(round(bf16_val / scale) + zero_point, -128, 127)");
@@ -109,7 +109,8 @@ int run_lowoha_reorder_bf16_to_int8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale)
+                                              + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -120,12 +121,14 @@ int run_lowoha_reorder_bf16_to_int8_test() {
 
     if (all_correct) {
       log_info("BF16 to INT8 quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 to INT8 quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -147,10 +150,10 @@ int run_lowoha_reorder_int8_to_bf16_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -4, -3, -2, -1,
-       0,  1,  2,  3,
-       4,  5,  6,  7,
-       8,  9, 10, 11
-    };
+        0,  1,  2,  3,
+        4,  5,  6,  7,
+        8,  9, 10, 11
+      };
 
     // log_info("Input INT8 values: ");
     // for (size_t i = 0; i < nelems; ++i) {
@@ -165,16 +168,17 @@ int run_lowoha_reorder_int8_to_bf16_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
-    log_info("Dequantization parameters: scale=", scale, ", zero_point=", zero_point);
+    log_info("Dequantization parameters: scale=", scale, ", zero_point=",
+             zero_point);
     log_info("Formula: bf16_val = (int8_val - zero_point) * scale");
 
     // Execute reorder
@@ -208,12 +212,14 @@ int run_lowoha_reorder_int8_to_bf16_test() {
 
     if (all_correct) {
       log_info("INT8 to BF16 dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("INT8 to BF16 dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -236,10 +242,10 @@ int run_lowoha_reorder_bf16_to_uint8_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input values (float32): ");
     for (size_t i = 0; i < nelems; ++i) {
@@ -253,20 +259,21 @@ int run_lowoha_reorder_bf16_to_uint8_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::u8;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("Quantization parameters: scale=", scale, ", zero_point=", zero_point);
     log_info("Formula: uint8_val = clamp(round(bf16_val / scale) + zero_point, 0, 255)");
 
     // Execute reorder
-    status_t status = reorder_direct(input_bf16.data(), output_uint8.data(), params);
+    status_t status = reorder_direct(input_bf16.data(), output_uint8.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -277,7 +284,8 @@ int run_lowoha_reorder_bf16_to_uint8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale)
+                                              + zero_point);
       expected = std::max(0, std::min(255, expected));
       if (output_uint8[i] != static_cast<uint8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -288,12 +296,14 @@ int run_lowoha_reorder_bf16_to_uint8_test() {
 
     if (all_correct) {
       log_info("BF16 to UINT8 quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 to UINT8 quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -327,20 +337,22 @@ int run_lowoha_reorder_uint8_to_bf16_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::u8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
-    log_info("Dequantization parameters: scale=", scale, ", zero_point=", zero_point);
+    log_info("Dequantization parameters: scale=", scale, ", zero_point=",
+             zero_point);
     log_info("Formula: bf16_val = (uint8_val - zero_point) * scale");
 
     // Execute reorder
-    status_t status = reorder_direct(input_uint8.data(), output_bf16.data(), params);
+    status_t status = reorder_direct(input_uint8.data(), output_bf16.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -368,12 +380,14 @@ int run_lowoha_reorder_uint8_to_bf16_test() {
 
     if (all_correct) {
       log_info("UINT8 to BF16 dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("UINT8 to BF16 dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -403,10 +417,10 @@ int run_lowoha_reorder_bf16_to_s8_per_tensor_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     for (size_t i = 0; i < nelems; ++i) {
@@ -420,8 +434,8 @@ int run_lowoha_reorder_bf16_to_s8_per_tensor_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-tensor: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
@@ -448,7 +462,8 @@ int run_lowoha_reorder_bf16_to_s8_per_tensor_test() {
     log_info("Verification:");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale)
+                                              + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -459,12 +474,14 @@ int run_lowoha_reorder_bf16_to_s8_per_tensor_test() {
 
     if (all_correct) {
       log_info("Per-Tensor quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Tensor quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -495,14 +512,16 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -515,19 +534,20 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-channel: dims = {1, N} for 2D (N values, one per column)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
-    log_info("Granularity: per-channel (scale.dims={1,", N, "}, zero_point.dims={1,", N, "})");
+    log_info("Granularity: per-channel (scale.dims={1,", N,
+             "}, zero_point.dims={1,", N, "})");
 
     // Execute reorder
     status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
@@ -545,7 +565,8 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_test() {
         size_t idx = i * N + j;
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_j) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale_j) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -558,12 +579,14 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_test() {
 
     if (all_correct) {
       log_info("Per-Channel quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -606,19 +629,20 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test() {
     std::vector<float> input_f32_ref = {
       // Group 0 (rows 0-3)
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,
-      // Group 1 (rows 4-7)
-       1.0f,  1.5f,  2.0f,  2.5f,
-       3.0f,  3.5f,  4.0f,  4.5f,
-       0.5f,  1.0f,  1.5f,  2.0f,
-       2.5f,  3.0f,  3.5f,  4.0f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,
+        // Group 1 (rows 4-7)
+        1.0f,  1.5f,  2.0f,  2.5f,
+        3.0f,  3.5f,  4.0f,  4.5f,
+        0.5f,  1.0f,  1.5f,  2.0f,
+        2.5f,  3.0f,  3.5f,  4.0f
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Groups: G=", G, " groups of ", group_size, " rows each");
-    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N, " total scale/zp values");
+    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N,
+             " total scale/zp values");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -631,17 +655,17 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-group: dims = {G, N} for 2D (G*N total values)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{G, N};  // G groups × N columns
+    params.quant_params.scale.dims = std::vector<int64_t> {G, N}; // G groups × N columns
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};  // G groups × N columns
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N}; // G groups × N columns
 
     log_info("Granularity: per-group (dims={", G, ", ", N, "})");
 
@@ -664,10 +688,12 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test() {
         size_t scale_zp_idx = group_idx * N + j;  // Index: group_idx * N + col
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
-          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ",
+                    expected,
                     ", got ", static_cast<int>(output_int8[idx]),
                     " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
@@ -677,12 +703,14 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test() {
 
     if (all_correct) {
       log_info("Per-Group quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -714,14 +742,16 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_row_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,  // Row 0: scale=0.25, zp=0
-       0.0f,  0.5f,  1.0f,  1.5f,  // Row 1: scale=0.5, zp=10
-       2.0f,  2.5f,  3.0f,  3.5f,  // Row 2: scale=0.75, zp=-10
-       4.0f,  4.5f,  5.0f,  5.5f   // Row 3: scale=1.0, zp=5
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,  // Row 1: scale=0.5, zp=10
+        2.0f,  2.5f,  3.0f,  3.5f,  // Row 2: scale=0.75, zp=-10
+        4.0f,  4.5f,  5.0f,  5.5f   // Row 3: scale=1.0, zp=5
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ",
+             scales[2], ", ", scales[3], "]");
+    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -734,19 +764,20 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_row_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row: dims = {M, 1} for 2D (M values, one per row)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
-    log_info("Granularity: per-channel-row (scale.dims={", M, ",1}, zero_point.dims={", M, ",1})");
+    log_info("Granularity: per-channel-row (scale.dims={", M,
+             ",1}, zero_point.dims={", M, ",1})");
     log_info("Each row uses the same scale/zp for all columns");
 
     // Execute reorder
@@ -765,7 +796,8 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_row_test() {
         size_t idx = i * N + j;
         float scale_i = scales[i];  // Index by row
         int32_t zp_i = zero_points[i];  // Index by row
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_i) + zp_i);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale_i) + zp_i);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -778,12 +810,14 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_row_test() {
 
     if (all_correct) {
       log_info("Per-Channel-Row quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel-Row quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -830,17 +864,18 @@ int run_lowoha_reorder_bf16_to_s8_per_group_col_test() {
     std::vector<float> input_f32_ref = {
       // Row 0: cols 0-3 use group0, cols 4-7 use group1
       -2.0f, -1.5f, -1.0f, -0.5f,  0.5f, 1.0f, 1.5f, 2.0f,
-      // Row 1
-       0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 2.5f, 3.0f, 3.5f,
-      // Row 2
-       2.0f,  2.5f,  3.0f,  3.5f,  4.0f, 4.5f, 5.0f, 5.5f,
-      // Row 3
-       4.0f,  4.5f,  5.0f,  5.5f,  6.0f, 6.5f, 7.0f, 7.5f
-    };
+        // Row 1
+        0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 2.5f, 3.0f, 3.5f,
+        // Row 2
+        2.0f,  2.5f,  3.0f,  3.5f,  4.0f, 4.5f, 5.0f, 5.5f,
+        // Row 3
+        4.0f,  4.5f,  5.0f,  5.5f,  6.0f, 6.5f, 7.0f, 7.5f
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Column groups: G=", G, " groups of ", group_size, " columns each");
-    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G, " total scale/zp values");
+    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G,
+             " total scale/zp values");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -853,17 +888,17 @@ int run_lowoha_reorder_bf16_to_s8_per_group_col_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-group-col: dims = {M, G} for 2D (M*G total values)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.scale.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     log_info("Granularity: per-group-col (dims={", M, ", ", G, "})");
     log_info("Each row has ", G, " scale/zp values, columns are grouped");
@@ -887,10 +922,12 @@ int run_lowoha_reorder_bf16_to_s8_per_group_col_test() {
         size_t scale_zp_idx = i * G + group_col_idx;  // Index: row * G + group_col_idx
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
-          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx,
+                    "): expected ", expected,
                     ", got ", static_cast<int>(output_int8[idx]),
                     " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
@@ -900,12 +937,14 @@ int run_lowoha_reorder_bf16_to_s8_per_group_col_test() {
 
     if (all_correct) {
       log_info("Per-Group-Col quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group-Col quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -936,14 +975,15 @@ int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test() {
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("Per-tensor scale: ", scale);
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -956,20 +996,21 @@ int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-tensor scale: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     // Per-channel zero_point: dims = {1, N} for 2D
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
-    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,", N, "} per-channel)");
+    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,",
+             N, "} per-channel)");
 
     // Execute reorder
     status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
@@ -986,7 +1027,8 @@ int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test() {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
         int32_t zp_j = zero_points[j];  // per-channel zp
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -999,12 +1041,14 @@ int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test() {
 
     if (all_correct) {
       log_info("Mixed Granularity quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Mixed Granularity quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1073,18 +1117,18 @@ int run_lowoha_reorder_bf16_to_s8_mixed_row_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row scale: dims = {M, 1}
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1};
 
     // Per-group-row zero-point: dims = {G, N}
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     // Execute reorder
     status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
@@ -1105,7 +1149,8 @@ int run_lowoha_reorder_bf16_to_s8_mixed_row_group_test() {
         size_t zp_idx = group_idx * N + col;  // per-group-row: group*N + col
         int32_t zp = zero_points[zp_idx];
 
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zp);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                scale) + zp);
         expected = std::max(-128, std::min(127, expected));
 
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
@@ -1119,12 +1164,14 @@ int run_lowoha_reorder_bf16_to_s8_mixed_row_group_test() {
 
     if (all_correct) {
       log_info("Mixed Row/Group quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Mixed Row/Group quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1156,20 +1203,22 @@ int run_lowoha_reorder_bf16_to_s8_batched_test() {
     std::vector<float> input_f32_ref = {
       // Batch 0
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-      // Batch 1
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,
-      // Batch 2
-      -1.0f, -0.5f,  0.0f,  0.5f,
-       1.0f,  1.5f,  2.0f,  2.5f,
-      // Batch 3
-       3.0f,  3.5f,  4.0f,  4.5f,
-       5.0f,  5.5f,  6.0f,  6.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        // Batch 1
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,
+        // Batch 2
+        -1.0f, -0.5f,  0.0f,  0.5f,
+        1.0f,  1.5f,  2.0f,  2.5f,
+        // Batch 3
+        3.0f,  3.5f,  4.0f,  4.5f,
+        5.0f,  5.5f,  6.0f,  6.5f
+      };
 
-    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Single scale=", scale, " and zero_point=", zero_point, " for ALL batches");
+    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
+    log_info("Single scale=", scale, " and zero_point=", zero_point,
+             " for ALL batches");
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -1182,19 +1231,20 @@ int run_lowoha_reorder_bf16_to_s8_batched_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{batch, M, N};  // 3D batched matrix
-    params.dst_shape = std::vector<int64_t>{batch, M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {batch, M, N}; // 3D batched matrix
+    params.dst_shape = std::vector<int64_t> {batch, M, N}; // Must match src_shape
 
     // Per-tensor: dims = {1, 1, 1} for 3D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};  // per-tensor for 3D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1, 1}; // per-tensor for 3D
 
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};  // per-tensor for 3D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1, 1}; // per-tensor for 3D
 
-    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch, " batches)");
+    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch,
+             " batches)");
 
     // Execute reorder
     status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
@@ -1211,7 +1261,8 @@ int run_lowoha_reorder_bf16_to_s8_batched_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] /
+                                                  scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -1225,12 +1276,14 @@ int run_lowoha_reorder_bf16_to_s8_batched_test() {
     if (all_correct) {
       log_info("Batched quantization test PASSED!");
       log_info("Successfully applied single scale/zp to all ", batch, " batches");
-    } else {
+    }
+    else {
       log_error("Batched quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1263,10 +1316,10 @@ int run_lowoha_reorder_s8_to_bf16_per_tensor_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -4, -3, -2, -1,
-       0,  1,  2,  3,
-       4,  5,  6,  7,
-       8,  9, 10, 11
-    };
+        0,  1,  2,  3,
+        4,  5,  6,  7,
+        8,  9, 10, 11
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
 
@@ -1277,8 +1330,8 @@ int run_lowoha_reorder_s8_to_bf16_per_tensor_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-tensor: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
@@ -1315,12 +1368,14 @@ int run_lowoha_reorder_s8_to_bf16_per_tensor_test() {
 
     if (all_correct) {
       log_info("Per-Tensor dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Tensor dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1349,14 +1404,16 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -8, -3,  0,  5,
-       0,  1, -2,  6,
-       4,  5,  4,  7,
-       8, 15, 10, 10
-    };
+        0,  1, -2,  6,
+        4,  5,  4,  7,
+        8, 15, 10, 10
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1365,19 +1422,20 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-channel: dims = {1, N} for 2D (N values, one per column)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
-    log_info("Granularity: per-channel (scale.dims={1,", N, "}, zero_point.dims={1,", N, "})");
+    log_info("Granularity: per-channel (scale.dims={1,", N,
+             "}, zero_point.dims={1,", N, "})");
 
     // Execute reorder
     status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
@@ -1407,12 +1465,14 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_test() {
 
     if (all_correct) {
       log_info("Per-Channel dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1454,19 +1514,20 @@ int run_lowoha_reorder_s8_to_bf16_per_group_test() {
     std::vector<int8_t> input_int8 = {
       // Group 0 (rows 0-3)
       -4, -3, -2, -1,
-       4,  5,  6,  7,
-       2,  3,  4,  5,
-       1,  2,  3,  4,
-      // Group 1 (rows 4-7)
-      10, 11, 12, 13,
-      14, 15, 16, 17,
-      13, 14, 15, 16,
-      12, 13, 14, 15
-    };
+        4,  5,  6,  7,
+        2,  3,  4,  5,
+        1,  2,  3,  4,
+        // Group 1 (rows 4-7)
+        10, 11, 12, 13,
+        14, 15, 16, 17,
+        13, 14, 15, 16,
+        12, 13, 14, 15
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Groups: G=", G, " groups of ", group_size, " rows each");
-    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N, " total scale/zp values");
+    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N,
+             " total scale/zp values");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1475,17 +1536,17 @@ int run_lowoha_reorder_s8_to_bf16_per_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-group: dims = {G, N} for 2D (G*N total values)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{G, N};  // G groups × N columns
+    params.quant_params.scale.dims = std::vector<int64_t> {G, N}; // G groups × N columns
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};  // G groups × N columns
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N}; // G groups × N columns
 
     log_info("Granularity: per-group (dims={", G, ", ", N, "})");
 
@@ -1511,7 +1572,8 @@ int run_lowoha_reorder_s8_to_bf16_per_group_test() {
         float expected = (static_cast<float>(input_int8[idx]) - zp_g) * scale_g;
         float actual = bf16_to_float(output_bf16[idx]);
         if (std::abs(actual - expected) > 0.01f) {
-          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ",
+                    expected,
                     ", got ", actual, " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
         }
@@ -1520,12 +1582,14 @@ int run_lowoha_reorder_s8_to_bf16_per_group_test() {
 
     if (all_correct) {
       log_info("Per-Group dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1554,14 +1618,16 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_row_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -8, -6, -4, -2,   // Row 0: scale=0.25, zp=0
-       0,  1,  2,  3,   // Row 1: scale=0.5, zp=10
-       4,  5,  6,  7,   // Row 2: scale=0.75, zp=-10
-       8,  9, 10, 11    // Row 3: scale=1.0, zp=5
-    };
+        0,  1,  2,  3,   // Row 1: scale=0.5, zp=10
+        4,  5,  6,  7,   // Row 2: scale=0.75, zp=-10
+        8,  9, 10, 11    // Row 3: scale=1.0, zp=5
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ",
+             scales[2], ", ", scales[3], "]");
+    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1570,19 +1636,20 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_row_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row: dims = {M, 1} for 2D (M values, one per row)
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
-    log_info("Granularity: per-channel-row (scale.dims={", M, ",1}, zero_point.dims={", M, ",1})");
+    log_info("Granularity: per-channel-row (scale.dims={", M,
+             ",1}, zero_point.dims={", M, ",1})");
 
     // Execute reorder
     status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
@@ -1612,12 +1679,14 @@ int run_lowoha_reorder_s8_to_bf16_per_channel_row_test() {
 
     if (all_correct) {
       log_info("Per-Channel-Row dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel-Row dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1660,17 +1729,18 @@ int run_lowoha_reorder_s8_to_bf16_per_group_col_test() {
     std::vector<int8_t> input_int8 = {
       // Row 0
       -8, -6, -4, -2,  4, 6, 8, 10,
-      // Row 1
-       0,  1,  2,  3,  8, 9, 10, 11,
-      // Row 2
-       4,  5,  6,  7,  12, 13, 14, 15,
-      // Row 3
-       8,  9, 10, 11,  16, 17, 18, 19
-    };
+        // Row 1
+        0,  1,  2,  3,  8, 9, 10, 11,
+        // Row 2
+        4,  5,  6,  7,  12, 13, 14, 15,
+        // Row 3
+        8,  9, 10, 11,  16, 17, 18, 19
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Column groups: G=", G, " groups of ", group_size, " columns each");
-    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G, " total scale/zp values");
+    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G,
+             " total scale/zp values");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1679,17 +1749,17 @@ int run_lowoha_reorder_s8_to_bf16_per_group_col_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-group-col: dims = {M, G} for 2D
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.scale.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     log_info("Granularity: per-group-col (dims={", M, ", ", G, "})");
 
@@ -1714,7 +1784,8 @@ int run_lowoha_reorder_s8_to_bf16_per_group_col_test() {
         float expected = (static_cast<float>(input_int8[idx]) - zp_g) * scale_g;
         float actual = bf16_to_float(output_bf16[idx]);
         if (std::abs(actual - expected) > 0.01f) {
-          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx,
+                    "): expected ", expected,
                     ", got ", actual, " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
         }
@@ -1723,12 +1794,14 @@ int run_lowoha_reorder_s8_to_bf16_per_group_col_test() {
 
     if (all_correct) {
       log_info("Per-Group-Col dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group-Col dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1758,14 +1831,15 @@ int run_lowoha_reorder_s8_to_bf16_mixed_granularity_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -4,  2, -7,  9,
-       0,  6, -3, 13,
-       4, 10,  1, 17,
-       8, 14,  5, 21
-    };
+        0,  6, -3, 13,
+        4, 10,  1, 17,
+        8, 14,  5, 21
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("Per-tensor scale: ", scale);
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1774,20 +1848,21 @@ int run_lowoha_reorder_s8_to_bf16_mixed_granularity_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};  // 2D matrix
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {M, N}; // 2D matrix
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
 
     // Per-tensor scale: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     // Per-channel zero_point: dims = {1, N} for 2D
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};  // per-channel for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N}; // per-channel for 2D
 
-    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,", N, "} per-channel)");
+    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,",
+             N, "} per-channel)");
 
     // Execute reorder
     status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
@@ -1816,12 +1891,14 @@ int run_lowoha_reorder_s8_to_bf16_mixed_granularity_test() {
 
     if (all_correct) {
       log_info("Mixed Granularity dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Mixed Granularity dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1881,18 +1958,18 @@ int run_lowoha_reorder_s8_to_bf16_mixed_row_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row scale: dims = {M, 1}
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1};
 
     // Per-group-row zero-point: dims = {G, N}
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     // Execute reorder
     status_t status = reorder_direct(input_s8.data(), output_bf16.data(), params);
@@ -1928,12 +2005,14 @@ int run_lowoha_reorder_s8_to_bf16_mixed_row_group_test() {
 
     if (all_correct) {
       log_info("Mixed Row/Group dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("Mixed Row/Group dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -1964,20 +2043,22 @@ int run_lowoha_reorder_s8_to_bf16_batched_test() {
     std::vector<int8_t> input_int8 = {
       // Batch 0
       -4, -3, -2, -1,
-       0,  1,  2,  3,
-      // Batch 1
-       4,  5,  6,  7,
-       8,  9, 10, 11,
-      // Batch 2
-      -2, -1,  0,  1,
-       2,  3,  4,  5,
-      // Batch 3
-       6,  7,  8,  9,
-      10, 11, 12, 13
-    };
+        0,  1,  2,  3,
+        // Batch 1
+        4,  5,  6,  7,
+        8,  9, 10, 11,
+        // Batch 2
+        -2, -1,  0,  1,
+        2,  3,  4,  5,
+        // Batch 3
+        6,  7,  8,  9,
+        10, 11, 12, 13
+      };
 
-    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Single scale=", scale, " and zero_point=", zero_point, " for ALL batches");
+    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
+    log_info("Single scale=", scale, " and zero_point=", zero_point,
+             " for ALL batches");
 
     // Output buffer
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -1986,19 +2067,20 @@ int run_lowoha_reorder_s8_to_bf16_batched_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{batch, M, N};  // 3D batched matrix
-    params.dst_shape = std::vector<int64_t>{batch, M, N};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {batch, M, N}; // 3D batched matrix
+    params.dst_shape = std::vector<int64_t> {batch, M, N}; // Must match src_shape
 
     // Per-tensor: dims = {1, 1, 1} for 3D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};  // per-tensor for 3D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1, 1}; // per-tensor for 3D
 
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};  // per-tensor for 3D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1, 1}; // per-tensor for 3D
 
-    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch, " batches)");
+    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch,
+             " batches)");
 
     // Execute reorder
     status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
@@ -2029,12 +2111,14 @@ int run_lowoha_reorder_s8_to_bf16_batched_test() {
     if (all_correct) {
       log_info("Batched dequantization test PASSED!");
       log_info("Successfully applied single scale/zp to all ", batch, " batches");
-    } else {
+    }
+    else {
       log_error("Batched dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2071,30 +2155,31 @@ int run_lowoha_reorder_bf16_to_s8_strided_2d_test() {
     // Create source BF16 data in strided layout (4x8 matrix)
     // We'll read columns 0, 2, 4, 6 from each row
     std::vector<uint16_t> src_bf16(src_total_size);
-    
+
     // Fill entire source buffer with recognizable pattern
     std::vector<float> src_f32_full = {
       // Row 0: cols 0,1,2,3,4,5,6,7 (we extract 0,2,4,6)
       -2.0f, 99.0f, -1.5f, 99.0f, -1.0f, 99.0f, -0.5f, 99.0f,
-      // Row 1
-       0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
-      // Row 2
-       2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
-      // Row 3
-       4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
-    };
+        // Row 1
+        0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
+        // Row 2
+        2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
+        // Row 3
+        4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
+      };
 
     // Expected values (extracted columns: 0, 2, 4, 6 from each row)
     std::vector<float> expected_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Source layout: [4, 8] (contiguous)");
     log_info("Logical shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Strides: [", src_row_stride, ", ", src_col_stride, "] (extract every 2nd column)");
+    log_info("Strides: [", src_row_stride, ", ", src_col_stride,
+             "] (extract every 2nd column)");
 
     for (size_t i = 0; i < src_total_size; ++i) {
       src_bf16[i] = float_to_bf16(src_f32_full[i]);
@@ -2107,17 +2192,17 @@ int run_lowoha_reorder_bf16_to_s8_strided_2d_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // Logical shape
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
-    params.src_strides = std::vector<int64_t>{src_row_stride, src_col_stride};  // Strided access
+    params.src_shape = std::vector<int64_t> {M, N}; // Logical shape
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
+    params.src_strides = std::vector<int64_t> {src_row_stride, src_col_stride}; // Strided access
 
     // Per-tensor quantization: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("scale=", scale, ", zero_point=", zero_point);
 
@@ -2135,7 +2220,8 @@ int run_lowoha_reorder_bf16_to_s8_strided_2d_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2147,14 +2233,16 @@ int run_lowoha_reorder_bf16_to_s8_strided_2d_test() {
 
     if (all_correct) {
       log_info("Strided 2D quantization test PASSED!");
-      log_info("Successfully read strided data [stride_M=", src_row_stride, 
+      log_info("Successfully read strided data [stride_M=", src_row_stride,
                ", stride_N=", src_col_stride, "]");
-    } else {
+    }
+    else {
       log_error("Strided 2D quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2176,7 +2264,8 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
     constexpr int64_t batch = 2;
     constexpr int64_t M = 2;
     constexpr int64_t N = 3;
-    constexpr int64_t src_batch_stride = 32;  // Each batch separated by 32 elements (skip a batch)
+    constexpr int64_t src_batch_stride =
+      32;  // Each batch separated by 32 elements (skip a batch)
     constexpr int64_t src_row_stride = 4;     // Each row has 4 elements
     constexpr int64_t src_col_stride = 1;     // Contiguous within row
     constexpr size_t nelems = batch * M * N;
@@ -2189,7 +2278,7 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
     // Create source BF16 data in strided layout
     // We'll read batches 0 and 2 (skip batch 1 and 3), rows 0-1, cols 0-2
     std::vector<float> src_f32_full(src_total_size);
-    
+
     // Fill with recognizable pattern
     for (size_t i = 0; i < src_total_size; ++i) {
       src_f32_full[i] = static_cast<float>(i) * 0.1f;
@@ -2207,8 +2296,10 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
     };
 
     log_info("Source layout: [4, 4, 4] (contiguous, 64 elements)");
-    log_info("Logical shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Strides: [", src_batch_stride, ", ", src_row_stride, ", ", src_col_stride, "]");
+    log_info("Logical shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
+    log_info("Strides: [", src_batch_stride, ", ", src_row_stride, ", ",
+             src_col_stride, "]");
     log_info("(Extracting batches 0,2 skipping 1,3; rows 0-1; cols 0-2)");
 
     std::vector<uint16_t> src_bf16(src_total_size);
@@ -2223,9 +2314,9 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{batch, M, N};  // Logical shape
-    params.dst_shape = std::vector<int64_t>{batch, M, N};  // Must match src_shape
-    params.src_strides = std::vector<int64_t>{src_batch_stride, src_row_stride, src_col_stride};  // Strided access
+    params.src_shape = std::vector<int64_t> {batch, M, N}; // Logical shape
+    params.dst_shape = std::vector<int64_t> {batch, M, N}; // Must match src_shape
+    params.src_strides = std::vector<int64_t> {src_batch_stride, src_row_stride, src_col_stride}; // Strided access
 
     // Per-tensor quantization: dims = {1, 1, 1} for 3D
     params.quant_params.scale.buff = &scale;
@@ -2252,7 +2343,8 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                  scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -2268,12 +2360,14 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
       log_info("Strided 3D quantization test PASSED!");
       log_info("Successfully read strided data [stride_batch=", src_batch_stride,
                ", stride_M=", src_row_stride, ", stride_N=", src_col_stride, "]");
-    } else {
+    }
+    else {
       log_error("Strided 3D quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2312,9 +2406,12 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
     std::vector<float> src_f32_physical(physical_size);
     std::vector<float> expected_f32(logical_nelems);
 
-    log_info("Logical shape: [M=", M, ", N=", N, "] = ", logical_nelems, " elements");
-    log_info("Physical layout: [", M, " rows × ", padded_row_size, " cols] = ", physical_size, " elements");
-    log_info("Strides: [", stride_M, ", ", stride_N, "] (row padding for alignment)");
+    log_info("Logical shape: [M=", M, ", N=", N, "] = ", logical_nelems,
+             " elements");
+    log_info("Physical layout: [", M, " rows × ", padded_row_size, " cols] = ",
+             physical_size, " elements");
+    log_info("Strides: [", stride_M, ", ", stride_N,
+             "] (row padding for alignment)");
     log_info("");
     log_info("Memory Layout Visualization:");
     log_info("┌────────────────────────────────────────────────┐");
@@ -2332,7 +2429,8 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
           expected_f32[expected_idx++] = val;
           row_str += std::to_string(static_cast<int>(val)) + " ";
           val += 1.0f;
-        } else {
+        }
+        else {
           // Padding (will be skipped by strided access)
           src_f32_physical[physical_idx] = 99.0f;  // Padding value
           row_str += "[P] ";
@@ -2357,17 +2455,17 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};  // Logical shape (without padding)
-    params.dst_shape = std::vector<int64_t>{M, N};  // Must match src_shape
-    params.src_strides = std::vector<int64_t>{stride_M, stride_N};  // Strided access to skip padding
+    params.src_shape = std::vector<int64_t> {M, N}; // Logical shape (without padding)
+    params.dst_shape = std::vector<int64_t> {M, N}; // Must match src_shape
+    params.src_strides = std::vector<int64_t> {stride_M, stride_N}; // Strided access to skip padding
 
     // Per-tensor quantization: dims = {1, 1} for 2D
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("Quantization: scale=", scale, ", zero_point=", zero_point);
 
@@ -2385,7 +2483,8 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;  // Contiguous output index
-        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2397,15 +2496,17 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
 
     if (all_correct) {
       log_info("Row-Padded strided quantization test PASSED!");
-      log_info("Successfully extracted [", M, "×", N, "] logical matrix from [", 
+      log_info("Successfully extracted [", M, "×", N, "] logical matrix from [",
                M, "×", padded_row_size, "] physical layout");
       log_info("Output is contiguous: ", logical_nelems, " elements without padding");
-    } else {
+    }
+    else {
       log_error("Row-Padded strided quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2431,10 +2532,10 @@ int run_lowoha_reorder_f32_to_int8_test() {
     // Create FP32 input data
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input values (float32): ");
 
@@ -2445,14 +2546,14 @@ int run_lowoha_reorder_f32_to_int8_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("Quantization parameters: scale=", scale, ", zero_point=", zero_point);
     log_info("Formula: int8_val = clamp(round(f32_val / scale) + zero_point, -128, 127)");
@@ -2469,7 +2570,8 @@ int run_lowoha_reorder_f32_to_int8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) +
+                                              zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2480,12 +2582,14 @@ int run_lowoha_reorder_f32_to_int8_test() {
 
     if (all_correct) {
       log_info("FP32 to INT8 quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to INT8 quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2507,10 +2611,10 @@ int run_lowoha_reorder_int8_to_f32_test() {
     // Create INT8 input data
     std::vector<int8_t> input_int8 = {
       -4, -3, -2, -1,
-       0,  1,  2,  3,
-       4,  5,  6,  7,
-       8,  9, 10, 11
-    };
+        0,  1,  2,  3,
+        4,  5,  6,  7,
+        8,  9, 10, 11
+      };
 
     // Output buffer
     std::vector<float> output_f32(nelems, 0.0f);
@@ -2519,16 +2623,17 @@ int run_lowoha_reorder_int8_to_f32_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
-    log_info("Dequantization parameters: scale=", scale, ", zero_point=", zero_point);
+    log_info("Dequantization parameters: scale=", scale, ", zero_point=",
+             zero_point);
     log_info("Formula: f32_val = (int8_val - zero_point) * scale");
 
     // Execute reorder
@@ -2545,19 +2650,22 @@ int run_lowoha_reorder_int8_to_f32_test() {
     for (size_t i = 0; i < nelems; ++i) {
       float expected = (static_cast<float>(input_int8[i]) - zero_point) * scale;
       if (std::abs(output_f32[i] - expected) > 0.0001f) {
-        log_error("Mismatch at index ", i, ": expected ", expected, ", got ", output_f32[i]);
+        log_error("Mismatch at index ", i, ": expected ", expected, ", got ",
+                  output_f32[i]);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("INT8 to FP32 dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("INT8 to FP32 dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2579,10 +2687,10 @@ int run_lowoha_reorder_f32_to_uint8_test() {
     // Create FP32 input data
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input values (float32): ");
 
@@ -2593,14 +2701,14 @@ int run_lowoha_reorder_f32_to_uint8_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::u8;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
     log_info("Quantization parameters: scale=", scale, ", zero_point=", zero_point);
     log_info("Formula: uint8_val = clamp(round(f32_val / scale) + zero_point, 0, 255)");
@@ -2617,7 +2725,8 @@ int run_lowoha_reorder_f32_to_uint8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) +
+                                              zero_point);
       expected = std::max(0, std::min(255, expected));
       if (output_uint8[i] != static_cast<uint8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2628,12 +2737,14 @@ int run_lowoha_reorder_f32_to_uint8_test() {
 
     if (all_correct) {
       log_info("FP32 to UINT8 quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to UINT8 quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2667,16 +2778,17 @@ int run_lowoha_reorder_uint8_to_f32_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::u8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{4, 4};  // 4x4 matrix = 16 elements
-    params.dst_shape = std::vector<int64_t>{4, 4};  // Must match src_shape
+    params.src_shape = std::vector<int64_t> {4, 4}; // 4x4 matrix = 16 elements
+    params.dst_shape = std::vector<int64_t> {4, 4}; // Must match src_shape
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};  // per-tensor for 2D
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1}; // per-tensor for 2D
 
-    log_info("Dequantization parameters: scale=", scale, ", zero_point=", zero_point);
+    log_info("Dequantization parameters: scale=", scale, ", zero_point=",
+             zero_point);
     log_info("Formula: f32_val = (uint8_val - zero_point) * scale");
 
     // Execute reorder
@@ -2693,19 +2805,22 @@ int run_lowoha_reorder_uint8_to_f32_test() {
     for (size_t i = 0; i < nelems; ++i) {
       float expected = (static_cast<float>(input_uint8[i]) - zero_point) * scale;
       if (std::abs(output_f32[i] - expected) > 0.0001f) {
-        log_error("Mismatch at index ", i, ": expected ", expected, ", got ", output_f32[i]);
+        log_error("Mismatch at index ", i, ": expected ", expected, ", got ",
+                  output_f32[i]);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("UINT8 to FP32 dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("UINT8 to FP32 dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2732,10 +2847,10 @@ int run_lowoha_reorder_f32_to_s8_per_tensor_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
 
@@ -2744,14 +2859,14 @@ int run_lowoha_reorder_f32_to_s8_per_tensor_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     log_info("Granularity: per-tensor (scale.dims={1,1}, zero_point.dims={1,1})");
     log_info("scale=", scale, ", zero_point=", zero_point);
@@ -2765,7 +2880,8 @@ int run_lowoha_reorder_f32_to_s8_per_tensor_test() {
 
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) +
+                                              zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2776,12 +2892,14 @@ int run_lowoha_reorder_f32_to_s8_per_tensor_test() {
 
     if (all_correct) {
       log_info("FP32 Per-Tensor quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Per-Tensor quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2804,30 +2922,33 @@ int run_lowoha_reorder_f32_to_s8_per_channel_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
-    log_info("Granularity: per-channel (scale.dims={1,", N, "}, zero_point.dims={1,", N, "})");
+    log_info("Granularity: per-channel (scale.dims={1,", N,
+             "}, zero_point.dims={1,", N, "})");
 
     status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
 
@@ -2842,7 +2963,8 @@ int run_lowoha_reorder_f32_to_s8_per_channel_test() {
         size_t idx = i * N + j;
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_j) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_j)
+                                                + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2855,12 +2977,14 @@ int run_lowoha_reorder_f32_to_s8_per_channel_test() {
 
     if (all_correct) {
       log_info("FP32 Per-Channel quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Per-Channel quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2891,32 +3015,33 @@ int run_lowoha_reorder_f32_to_s8_per_group_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,
-       1.0f,  1.5f,  2.0f,  2.5f,
-       3.0f,  3.5f,  4.0f,  4.5f,
-       0.5f,  1.0f,  1.5f,  2.0f,
-       2.5f,  3.0f,  3.5f,  4.0f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,
+        1.0f,  1.5f,  2.0f,  2.5f,
+        3.0f,  3.5f,  4.0f,  4.5f,
+        0.5f,  1.0f,  1.5f,  2.0f,
+        2.5f,  3.0f,  3.5f,  4.0f
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Groups: G=", G, " groups of ", group_size, " rows each");
-    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N, " total scale/zp values");
+    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N,
+             " total scale/zp values");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{G, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {G, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     log_info("Granularity: per-group (dims={", G, ", ", N, "})");
 
@@ -2935,10 +3060,12 @@ int run_lowoha_reorder_f32_to_s8_per_group_test() {
         size_t scale_zp_idx = group_idx * N + j;
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g)
+                                                + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
-          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ",
+                    expected,
                     ", got ", static_cast<int>(output_int8[idx]),
                     " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
@@ -2948,12 +3075,14 @@ int run_lowoha_reorder_f32_to_s8_per_group_test() {
 
     if (all_correct) {
       log_info("FP32 Per-Group quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Per-Group quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -2977,30 +3106,33 @@ int run_lowoha_reorder_f32_to_s8_per_channel_row_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,  // Row 0: scale=0.25, zp=0
-       0.0f,  0.5f,  1.0f,  1.5f,  // Row 1: scale=0.5, zp=10
-       2.0f,  2.5f,  3.0f,  3.5f,  // Row 2: scale=0.75, zp=-10
-       4.0f,  4.5f,  5.0f,  5.5f   // Row 3: scale=1.0, zp=5
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,  // Row 1: scale=0.5, zp=10
+        2.0f,  2.5f,  3.0f,  3.5f,  // Row 2: scale=0.75, zp=-10
+        4.0f,  4.5f,  5.0f,  5.5f   // Row 3: scale=1.0, zp=5
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ",
+             scales[2], ", ", scales[3], "]");
+    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1}; // per-channel-row
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
-    log_info("Granularity: per-channel-row (scale.dims={", M, ",1}, zero_point.dims={", M, ",1})");
+    log_info("Granularity: per-channel-row (scale.dims={", M,
+             ",1}, zero_point.dims={", M, ",1})");
 
     status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
 
@@ -3015,7 +3147,8 @@ int run_lowoha_reorder_f32_to_s8_per_channel_row_test() {
         size_t idx = i * N + j;
         float scale_i = scales[i];
         int32_t zp_i = zero_points[i];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_i) + zp_i);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_i)
+                                                + zp_i);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -3028,12 +3161,14 @@ int run_lowoha_reorder_f32_to_s8_per_channel_row_test() {
 
     if (all_correct) {
       log_info("FP32 Per-Channel-Row quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Per-Channel-Row quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3069,28 +3204,29 @@ int run_lowoha_reorder_f32_to_s8_per_group_col_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,  0.5f, 1.0f, 1.5f, 2.0f,
-       0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 2.5f, 3.0f, 3.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,  4.0f, 4.5f, 5.0f, 5.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,  6.0f, 6.5f, 7.0f, 7.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,  2.0f, 2.5f, 3.0f, 3.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,  4.0f, 4.5f, 5.0f, 5.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,  6.0f, 6.5f, 7.0f, 7.5f
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Column groups: G=", G, " groups of ", group_size, " columns each");
-    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G, " total scale/zp values");
+    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G,
+             " total scale/zp values");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.scale.dims = std::vector<int64_t> {M, G}; // per-group-col
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     log_info("Granularity: per-group-col (dims={", M, ", ", G, "})");
 
@@ -3109,10 +3245,12 @@ int run_lowoha_reorder_f32_to_s8_per_group_col_test() {
         size_t scale_zp_idx = i * G + group_col_idx;
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g)
+                                                + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
-          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx,
+                    "): expected ", expected,
                     ", got ", static_cast<int>(output_int8[idx]),
                     " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
@@ -3122,12 +3260,14 @@ int run_lowoha_reorder_f32_to_s8_per_group_col_test() {
 
     if (all_correct) {
       log_info("FP32 Per-Group-Col quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Per-Group-Col quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3151,30 +3291,32 @@ int run_lowoha_reorder_f32_to_s8_mixed_granularity_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("Per-tensor scale: ", scale);
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
-    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,", N, "} per-channel)");
+    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,",
+             N, "} per-channel)");
 
     status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
 
@@ -3188,7 +3330,8 @@ int run_lowoha_reorder_f32_to_s8_mixed_granularity_test() {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) +
+                                                zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -3201,12 +3344,14 @@ int run_lowoha_reorder_f32_to_s8_mixed_granularity_test() {
 
     if (all_correct) {
       log_info("FP32 Mixed Granularity quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Mixed Granularity quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3263,18 +3408,18 @@ int run_lowoha_reorder_f32_to_s8_mixed_row_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row scale: dims = {M, 1}
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1};
 
     // Per-group-row zero-point: dims = {G, N}
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     // Execute reorder
     status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
@@ -3295,7 +3440,8 @@ int run_lowoha_reorder_f32_to_s8_mixed_row_group_test() {
         size_t zp_idx = group_idx * N + col;
         int32_t zp = zero_points[zp_idx];
 
-        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zp);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) +
+                                                zp);
         expected = std::max(-128, std::min(127, expected));
 
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
@@ -3309,12 +3455,14 @@ int run_lowoha_reorder_f32_to_s8_mixed_row_group_test() {
 
     if (all_correct) {
       log_info("FP32 Mixed Row/Group quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Mixed Row/Group quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3338,33 +3486,36 @@ int run_lowoha_reorder_f32_to_s8_batched_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,
-      -1.0f, -0.5f,  0.0f,  0.5f,
-       1.0f,  1.5f,  2.0f,  2.5f,
-       3.0f,  3.5f,  4.0f,  4.5f,
-       5.0f,  5.5f,  6.0f,  6.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,
+        -1.0f, -0.5f,  0.0f,  0.5f,
+        1.0f,  1.5f,  2.0f,  2.5f,
+        3.0f,  3.5f,  4.0f,  4.5f,
+        5.0f,  5.5f,  6.0f,  6.5f
+      };
 
-    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Single scale=", scale, " and zero_point=", zero_point, " for ALL batches");
+    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
+    log_info("Single scale=", scale, " and zero_point=", zero_point,
+             " for ALL batches");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{batch, M, N};
-    params.dst_shape = std::vector<int64_t>{batch, M, N};
+    params.src_shape = std::vector<int64_t> {batch, M, N};
+    params.dst_shape = std::vector<int64_t> {batch, M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1, 1};
 
-    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch, " batches)");
+    log_info("Granularity: per-tensor (dims={1,1,1}, shared across all ", batch,
+             " batches)");
 
     status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
 
@@ -3378,7 +3529,8 @@ int run_lowoha_reorder_f32_to_s8_batched_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) +
+                                                  zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -3392,12 +3544,14 @@ int run_lowoha_reorder_f32_to_s8_batched_test() {
     if (all_correct) {
       log_info("FP32 Batched quantization test PASSED!");
       log_info("Successfully applied single scale/zp to all ", batch, " batches");
-    } else {
+    }
+    else {
       log_error("FP32 Batched quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3424,10 +3578,10 @@ int run_lowoha_reorder_s8_to_f32_per_tensor_test() {
 
     std::vector<int8_t> input_int8 = {
       -4, -3, -2, -1,
-       0,  1,  2,  3,
-       4,  5,  6,  7,
-       8,  9, 10, 11
-    };
+        0,  1,  2,  3,
+        4,  5,  6,  7,
+        8,  9, 10, 11
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
 
@@ -3436,14 +3590,14 @@ int run_lowoha_reorder_s8_to_f32_per_tensor_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     log_info("Granularity: per-tensor (scale.dims={1,1}, zero_point.dims={1,1})");
     log_info("scale=", scale, ", zero_point=", zero_point);
@@ -3460,19 +3614,22 @@ int run_lowoha_reorder_s8_to_f32_per_tensor_test() {
     for (size_t i = 0; i < nelems; ++i) {
       float expected = (static_cast<float>(input_int8[i]) - zero_point) * scale;
       if (std::abs(output_f32[i] - expected) > 0.0001f) {
-        log_error("Mismatch at index ", i, ": expected ", expected, ", got ", output_f32[i]);
+        log_error("Mismatch at index ", i, ": expected ", expected, ", got ",
+                  output_f32[i]);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("Per-Tensor dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Tensor dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3495,30 +3652,33 @@ int run_lowoha_reorder_s8_to_f32_per_channel_test() {
 
     std::vector<int8_t> input_int8 = {
       -8, -3,  0,  5,
-       0,  1, -2,  6,
-       4,  5,  4,  7,
-       8, 15, 10, 10
-    };
+        0,  1, -2,  6,
+        4,  5,  4,  7,
+        8, 15, 10, 10
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
-    log_info("Granularity: per-channel (scale.dims={1,", N, "}, zero_point.dims={1,", N, "})");
+    log_info("Granularity: per-channel (scale.dims={1,", N,
+             "}, zero_point.dims={1,", N, "})");
 
     status_t status = reorder_direct(input_int8.data(), output_f32.data(), params);
 
@@ -3544,12 +3704,14 @@ int run_lowoha_reorder_s8_to_f32_per_channel_test() {
 
     if (all_correct) {
       log_info("Per-Channel dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3580,32 +3742,33 @@ int run_lowoha_reorder_s8_to_f32_per_group_test() {
 
     std::vector<int8_t> input_int8 = {
       -4, -3, -2, -1,
-       4,  5,  6,  7,
-       2,  3,  4,  5,
-       1,  2,  3,  4,
-      10, 11, 12, 13,
-      14, 15, 16, 17,
-      13, 14, 15, 16,
-      12, 13, 14, 15
-    };
+        4,  5,  6,  7,
+        2,  3,  4,  5,
+        1,  2,  3,  4,
+        10, 11, 12, 13,
+        14, 15, 16, 17,
+        13, 14, 15, 16,
+        12, 13, 14, 15
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Groups: G=", G, " groups of ", group_size, " rows each");
-    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N, " total scale/zp values");
+    log_info("Per-group dims: {", G, ", ", N, "} = ", G * N,
+             " total scale/zp values");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{G, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {G, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     log_info("Granularity: per-group (dims={", G, ", ", N, "})");
 
@@ -3626,7 +3789,8 @@ int run_lowoha_reorder_s8_to_f32_per_group_test() {
         int32_t zp_g = zero_points[scale_zp_idx];
         float expected = (static_cast<float>(input_int8[idx]) - zp_g) * scale_g;
         if (std::abs(output_f32[idx] - expected) > 0.0001f) {
-          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ",
+                    expected,
                     ", got ", output_f32[idx], " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
         }
@@ -3635,12 +3799,14 @@ int run_lowoha_reorder_s8_to_f32_per_group_test() {
 
     if (all_correct) {
       log_info("Per-Group dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3663,30 +3829,33 @@ int run_lowoha_reorder_s8_to_f32_per_channel_row_test() {
 
     std::vector<int8_t> input_int8 = {
       -8, -6, -4, -2,
-       0,  1,  2,  3,
-       4,  5,  6,  7,
-       8,  9, 10, 11
-    };
+        0,  1,  2,  3,
+        4,  5,  6,  7,
+        8,  9, 10, 11
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel-row scales: [", scales[0], ", ", scales[1], ", ",
+             scales[2], ", ", scales[3], "]");
+    log_info("Per-channel-row zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1}; // per-channel-row
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, 1};  // per-channel-row
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, 1}; // per-channel-row
 
-    log_info("Granularity: per-channel-row (scale.dims={", M, ",1}, zero_point.dims={", M, ",1})");
+    log_info("Granularity: per-channel-row (scale.dims={", M,
+             ",1}, zero_point.dims={", M, ",1})");
 
     status_t status = reorder_direct(input_int8.data(), output_f32.data(), params);
 
@@ -3712,12 +3881,14 @@ int run_lowoha_reorder_s8_to_f32_per_channel_row_test() {
 
     if (all_correct) {
       log_info("Per-Channel-Row dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Channel-Row dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3752,28 +3923,29 @@ int run_lowoha_reorder_s8_to_f32_per_group_col_test() {
 
     std::vector<int8_t> input_int8 = {
       -8, -6, -4, -2,  4, 6, 8, 10,
-       0,  1,  2,  3,  8, 9, 10, 11,
-       4,  5,  6,  7,  12, 13, 14, 15,
-       8,  9, 10, 11,  16, 17, 18, 19
-    };
+        0,  1,  2,  3,  8, 9, 10, 11,
+        4,  5,  6,  7,  12, 13, 14, 15,
+        8,  9, 10, 11,  16, 17, 18, 19
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Column groups: G=", G, " groups of ", group_size, " columns each");
-    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G, " total scale/zp values");
+    log_info("Per-group-col dims: {", M, ", ", G, "} = ", M * G,
+             " total scale/zp values");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.scale.dims = std::vector<int64_t> {M, G}; // per-group-col
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{M, G};  // per-group-col
+    params.quant_params.zero_point.dims = std::vector<int64_t> {M, G}; // per-group-col
 
     log_info("Granularity: per-group-col (dims={", M, ", ", G, "})");
 
@@ -3794,7 +3966,8 @@ int run_lowoha_reorder_s8_to_f32_per_group_col_test() {
         int32_t zp_g = zero_points[scale_zp_idx];
         float expected = (static_cast<float>(input_int8[idx]) - zp_g) * scale_g;
         if (std::abs(output_f32[idx] - expected) > 0.0001f) {
-          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
+          log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx,
+                    "): expected ", expected,
                     ", got ", output_f32[idx], " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
         }
@@ -3803,12 +3976,14 @@ int run_lowoha_reorder_s8_to_f32_per_group_col_test() {
 
     if (all_correct) {
       log_info("Per-Group-Col dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Per-Group-Col dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3832,30 +4007,32 @@ int run_lowoha_reorder_s8_to_f32_mixed_granularity_test() {
 
     std::vector<int8_t> input_int8 = {
       -4,  2, -7,  9,
-       0,  6, -3, 13,
-       4, 10,  1, 17,
-       8, 14,  5, 21
-    };
+        0,  6, -3, 13,
+        4, 10,  1, 17,
+        8, 14,  5, 21
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("Per-tensor scale: ", scale);
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
-    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,", N, "} per-channel)");
+    log_info("Granularity: mixed (scale.dims={1,1} per-tensor, zero_point.dims={1,",
+             N, "} per-channel)");
 
     status_t status = reorder_direct(input_int8.data(), output_f32.data(), params);
 
@@ -3880,12 +4057,14 @@ int run_lowoha_reorder_s8_to_f32_mixed_granularity_test() {
 
     if (all_correct) {
       log_info("Mixed Granularity dequantization (S8->FP32) test PASSED!");
-    } else {
+    }
+    else {
       log_error("Mixed Granularity dequantization (S8->FP32) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -3942,18 +4121,18 @@ int run_lowoha_reorder_s8_to_f32_mixed_row_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::s8;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
 
     // Per-channel-row scale: dims = {M, 1}
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{M, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {M, 1};
 
     // Per-group-row zero-point: dims = {G, N}
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     // Execute reorder
     status_t status = reorder_direct(input_s8.data(), output_f32.data(), params);
@@ -3989,12 +4168,14 @@ int run_lowoha_reorder_s8_to_f32_mixed_row_group_test() {
 
     if (all_correct) {
       log_info("FP32 Mixed Row/Group dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 Mixed Row/Group dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4024,40 +4205,42 @@ int run_lowoha_reorder_f32_to_s8_strided_2d_test() {
     // Source data in strided layout (4x8 matrix, we extract columns 0,2,4,6)
     std::vector<float> src_f32_full = {
       -2.0f, 99.0f, -1.5f, 99.0f, -1.0f, 99.0f, -0.5f, 99.0f,
-       0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
-       2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
-       4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
-    };
+        0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
+        2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
+        4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
+      };
 
     std::vector<float> expected_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Source layout: [4, 8] (contiguous)");
     log_info("Logical shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Strides: [", src_row_stride, ", ", src_col_stride, "] (extract every 2nd column)");
+    log_info("Strides: [", src_row_stride, ", ", src_col_stride,
+             "] (extract every 2nd column)");
 
     std::vector<int8_t> output_int8(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
-    params.src_strides = std::vector<int64_t>{src_row_stride, src_col_stride};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
+    params.src_strides = std::vector<int64_t> {src_row_stride, src_col_stride};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     log_info("scale=", scale, ", zero_point=", zero_point);
 
-    status_t status = reorder_direct(src_f32_full.data(), output_int8.data(), params);
+    status_t status = reorder_direct(src_f32_full.data(), output_int8.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -4068,7 +4251,8 @@ int run_lowoha_reorder_f32_to_s8_strided_2d_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -4080,14 +4264,16 @@ int run_lowoha_reorder_f32_to_s8_strided_2d_test() {
 
     if (all_correct) {
       log_info("Strided 2D quantization (FP32->S8) test PASSED!");
-      log_info("Successfully read strided data [stride_M=", src_row_stride, 
+      log_info("Successfully read strided data [stride_M=", src_row_stride,
                ", stride_N=", src_col_stride, "]");
-    } else {
+    }
+    else {
       log_error("Strided 2D quantization (FP32->S8) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4126,8 +4312,10 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test() {
     };
 
     log_info("Source layout: [4, 4, 4] (contiguous, 64 elements)");
-    log_info("Logical shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Strides: [", src_batch_stride, ", ", src_row_stride, ", ", src_col_stride, "]");
+    log_info("Logical shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
+    log_info("Strides: [", src_batch_stride, ", ", src_row_stride, ", ",
+             src_col_stride, "]");
     log_info("(Extracting batches 0,2 skipping 1,3; rows 0-1; cols 0-2)");
 
     std::vector<int8_t> output_int8(nelems, 0);
@@ -4135,19 +4323,20 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{batch, M, N};
-    params.dst_shape = std::vector<int64_t>{batch, M, N};
-    params.src_strides = std::vector<int64_t>{src_batch_stride, src_row_stride, src_col_stride};
+    params.src_shape = std::vector<int64_t> {batch, M, N};
+    params.dst_shape = std::vector<int64_t> {batch, M, N};
+    params.src_strides = std::vector<int64_t> {src_batch_stride, src_row_stride, src_col_stride};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1, 1};
 
     log_info("scale=", scale, ", zero_point=", zero_point);
 
-    status_t status = reorder_direct(src_f32_full.data(), output_int8.data(), params);
+    status_t status = reorder_direct(src_f32_full.data(), output_int8.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -4159,7 +4348,8 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                  scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -4175,12 +4365,14 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test() {
       log_info("Strided 3D quantization (FP32->S8) test PASSED!");
       log_info("Successfully read strided data [stride_batch=", src_batch_stride,
                ", stride_M=", src_row_stride, ", stride_N=", src_col_stride, "]");
-    } else {
+    }
+    else {
       log_error("Strided 3D quantization (FP32->S8) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4208,9 +4400,12 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
     std::vector<float> src_f32_physical(physical_size);
     std::vector<float> expected_f32(logical_nelems);
 
-    log_info("Logical shape: [M=", M, ", N=", N, "] = ", logical_nelems, " elements");
-    log_info("Physical layout: [", M, " rows x ", padded_row_size, " cols] = ", physical_size, " elements");
-    log_info("Strides: [", stride_M, ", ", stride_N, "] (row padding for alignment)");
+    log_info("Logical shape: [M=", M, ", N=", N, "] = ", logical_nelems,
+             " elements");
+    log_info("Physical layout: [", M, " rows x ", padded_row_size, " cols] = ",
+             physical_size, " elements");
+    log_info("Strides: [", stride_M, ", ", stride_N,
+             "] (row padding for alignment)");
 
     float val = 0.0f;
     size_t expected_idx = 0;
@@ -4221,7 +4416,8 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
           src_f32_physical[physical_idx] = val;
           expected_f32[expected_idx++] = val;
           val += 1.0f;
-        } else {
+        }
+        else {
           src_f32_physical[physical_idx] = 99.0f;
         }
       }
@@ -4232,19 +4428,20 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::s8;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
-    params.src_strides = std::vector<int64_t>{stride_M, stride_N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
+    params.src_strides = std::vector<int64_t> {stride_M, stride_N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     log_info("Quantization: scale=", scale, ", zero_point=", zero_point);
 
-    status_t status = reorder_direct(src_f32_physical.data(), output_int8.data(), params);
+    status_t status = reorder_direct(src_f32_physical.data(), output_int8.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -4255,7 +4452,8 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] /
+                                                scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -4267,15 +4465,17 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
 
     if (all_correct) {
       log_info("Row-Padded strided quantization (FP32->S8) test PASSED!");
-      log_info("Successfully extracted [", M, "x", N, "] logical matrix from [", 
+      log_info("Successfully extracted [", M, "x", N, "] logical matrix from [",
                M, "x", padded_row_size, "] physical layout");
       log_info("Output is contiguous: ", logical_nelems, " elements without padding");
-    } else {
+    }
+    else {
       log_error("Row-Padded strided quantization (FP32->S8) test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4299,10 +4499,10 @@ int run_lowoha_reorder_f32_to_bf16_simple_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("No scale/zero-point - simple type conversion");
@@ -4312,8 +4512,8 @@ int run_lowoha_reorder_f32_to_bf16_simple_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     // No scale/zp - leave as nullptr for simple type conversion
 
     status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
@@ -4330,7 +4530,7 @@ int run_lowoha_reorder_f32_to_bf16_simple_test() {
       uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
       float result;
       std::memcpy(&result, &bits, sizeof(result));
-      
+
       // BF16 has limited precision, allow small error
       float expected = input_f32[i];
       float rel_error = std::abs(result - expected) / (std::abs(expected) + 1e-6f);
@@ -4342,12 +4542,14 @@ int run_lowoha_reorder_f32_to_bf16_simple_test() {
 
     if (all_correct) {
       log_info("FP32 to BF16 simple conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 simple conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4370,10 +4572,10 @@ int run_lowoha_reorder_f32_to_bf16_with_scale_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
     log_info("Formula: bf16_val = bf16(f32_val / scale + zero_point)");
@@ -4384,14 +4586,14 @@ int run_lowoha_reorder_f32_to_bf16_with_scale_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
 
@@ -4404,27 +4606,31 @@ int run_lowoha_reorder_f32_to_bf16_with_scale_test() {
     for (size_t i = 0; i < nelems; ++i) {
       // Expected: bf16(f32_val / scale + zp)
       float expected_f32 = input_f32[i] / scale + static_cast<float>(zero_point);
-      
+
       // Convert output bf16 back to float
       uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
       float result;
       std::memcpy(&result, &bits, sizeof(result));
-      
-      float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+
+      float rel_error = std::abs(result - expected_f32) / (std::abs(
+                          expected_f32) + 1e-6f);
       if (rel_error > 0.01f) {
-        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ", result);
+        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ",
+                  result);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("FP32 to BF16 with scale/zp test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 with scale/zp test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4445,17 +4651,18 @@ int run_lowoha_reorder_bf16_to_f32_simple_test() {
     // Create BF16 values from known floats
     std::vector<float> reference_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
-    
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       // Convert f32 to bf16
       uint32_t bits;
       std::memcpy(&bits, &reference_f32[i], sizeof(bits));
-      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((
+          bits >> 16) & 1)) >> 16);
     }
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
@@ -4466,8 +4673,8 @@ int run_lowoha_reorder_bf16_to_f32_simple_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     // No scale/zp - leave as nullptr for simple type conversion
 
     status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
@@ -4479,21 +4686,25 @@ int run_lowoha_reorder_bf16_to_f32_simple_test() {
 
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      float rel_error = std::abs(output_f32[i] - reference_f32[i]) / (std::abs(reference_f32[i]) + 1e-6f);
+      float rel_error = std::abs(output_f32[i] - reference_f32[i]) / (std::abs(
+                          reference_f32[i]) + 1e-6f);
       if (rel_error > 0.01f) {
-        log_error("Mismatch at index ", i, ": expected ~", reference_f32[i], ", got ", output_f32[i]);
+        log_error("Mismatch at index ", i, ": expected ~", reference_f32[i], ", got ",
+                  output_f32[i]);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("BF16 to FP32 simple conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 to FP32 simple conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4517,16 +4728,17 @@ int run_lowoha_reorder_bf16_to_f32_with_scale_test() {
     // Create BF16 values
     std::vector<float> bf16_as_f32 = {
       -2.0f,  0.0f,  2.0f,  4.0f,
-       6.0f,  8.0f, 10.0f, 12.0f,
-      -1.0f,  1.0f,  3.0f,  5.0f,
-       7.0f,  9.0f, 11.0f, 13.0f
-    };
-    
+        6.0f,  8.0f, 10.0f, 12.0f,
+        -1.0f,  1.0f,  3.0f,  5.0f,
+        7.0f,  9.0f, 11.0f, 13.0f
+      };
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       uint32_t bits;
       std::memcpy(&bits, &bf16_as_f32[i], sizeof(bits));
-      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((
+          bits >> 16) & 1)) >> 16);
     }
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
@@ -4538,14 +4750,14 @@ int run_lowoha_reorder_bf16_to_f32_with_scale_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1};
 
     status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
 
@@ -4558,21 +4770,25 @@ int run_lowoha_reorder_bf16_to_f32_with_scale_test() {
     for (size_t i = 0; i < nelems; ++i) {
       // Expected: (bf16_val - zp) * scale
       float expected = (bf16_as_f32[i] - static_cast<float>(zero_point)) * scale;
-      float rel_error = std::abs(output_f32[i] - expected) / (std::abs(expected) + 1e-6f);
+      float rel_error = std::abs(output_f32[i] - expected) / (std::abs(
+                          expected) + 1e-6f);
       if (rel_error > 0.01f) {
-        log_error("Mismatch at index ", i, ": expected ", expected, ", got ", output_f32[i]);
+        log_error("Mismatch at index ", i, ": expected ", expected, ", got ",
+                  output_f32[i]);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("BF16 to FP32 with scale/zp test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 to FP32 with scale/zp test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4595,28 +4811,30 @@ int run_lowoha_reorder_f32_to_bf16_per_channel_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<uint16_t> output_bf16(nelems, 0);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
     status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
 
@@ -4632,12 +4850,13 @@ int run_lowoha_reorder_f32_to_bf16_per_channel_test() {
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
         float expected_f32 = input_f32[idx] / scale_j + static_cast<float>(zp_j);
-        
+
         uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
         float result;
         std::memcpy(&result, &bits, sizeof(result));
-        
-        float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+
+        float rel_error = std::abs(result - expected_f32) / (std::abs(
+                            expected_f32) + 1e-6f);
         if (rel_error > 0.02f) {
           log_error("Mismatch at [", i, ",", j, "]: expected ~", expected_f32,
                     ", got ", result, " (scale=", scale_j, ", zp=", zp_j, ")");
@@ -4648,12 +4867,14 @@ int run_lowoha_reorder_f32_to_bf16_per_channel_test() {
 
     if (all_correct) {
       log_info("FP32 to BF16 per-channel conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 per-channel conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4684,14 +4905,14 @@ int run_lowoha_reorder_f32_to_bf16_per_group_test() {
 
     std::vector<float> input_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f,
-       1.0f,  1.5f,  2.0f,  2.5f,
-       3.0f,  3.5f,  4.0f,  4.5f,
-       0.5f,  1.0f,  1.5f,  2.0f,
-       2.5f,  3.0f,  3.5f,  4.0f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f,
+        1.0f,  1.5f,  2.0f,  2.5f,
+        3.0f,  3.5f,  4.0f,  4.5f,
+        0.5f,  1.0f,  1.5f,  2.0f,
+        2.5f,  3.0f,  3.5f,  4.0f
+      };
 
     log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
     log_info("Groups: G=", G, " groups of ", group_size, " rows each");
@@ -4701,14 +4922,14 @@ int run_lowoha_reorder_f32_to_bf16_per_group_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{G, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {G, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {G, N};
 
     status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
 
@@ -4726,14 +4947,16 @@ int run_lowoha_reorder_f32_to_bf16_per_group_test() {
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
         float expected_f32 = input_f32[idx] / scale_g + static_cast<float>(zp_g);
-        
+
         uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
         float result;
         std::memcpy(&result, &bits, sizeof(result));
-        
-        float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+
+        float rel_error = std::abs(result - expected_f32) / (std::abs(
+                            expected_f32) + 1e-6f);
         if (rel_error > 0.02f) {
-          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ~", expected_f32,
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ~",
+                    expected_f32,
                     ", got ", result, " (scale=", scale_g, ", zp=", zp_g, ")");
           all_correct = false;
         }
@@ -4742,12 +4965,14 @@ int run_lowoha_reorder_f32_to_bf16_per_group_test() {
 
     if (all_correct) {
       log_info("FP32 to BF16 per-group conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 per-group conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4771,35 +4996,38 @@ int run_lowoha_reorder_bf16_to_f32_per_channel_test() {
     // Create BF16 input values
     std::vector<float> bf16_as_f32 = {
       -4.0f,  6.0f, -2.0f,  8.0f,
-       0.0f,  4.0f,  2.0f,  7.0f,
-       4.0f,  5.0f,  4.0f, 10.0f,
-       8.0f, 10.0f,  6.0f, 12.0f
-    };
-    
+        0.0f,  4.0f,  2.0f,  7.0f,
+        4.0f,  5.0f,  4.0f, 10.0f,
+        8.0f, 10.0f,  6.0f, 12.0f
+      };
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       uint32_t bits;
       std::memcpy(&bits, &bf16_as_f32[i], sizeof(bits));
-      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((
+          bits >> 16) & 1)) >> 16);
     }
 
     log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
-    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2],
+             ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1],
+             ", ", zero_points[2], ", ", zero_points[3], "]");
 
     std::vector<float> output_f32(nelems, 0.0f);
 
     reorder_params_t params;
     params.src_dtype = data_type_t::bf16;
     params.dst_dtype = data_type_t::f32;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
     params.quant_params.scale.buff = scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, N};
     params.quant_params.zero_point.buff = zero_points.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, N};
 
     status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
 
@@ -4815,8 +5043,9 @@ int run_lowoha_reorder_bf16_to_f32_per_channel_test() {
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
         float expected = (bf16_as_f32[idx] - static_cast<float>(zp_j)) * scale_j;
-        
-        float rel_error = std::abs(output_f32[idx] - expected) / (std::abs(expected) + 1e-6f);
+
+        float rel_error = std::abs(output_f32[idx] - expected) / (std::abs(
+                            expected) + 1e-6f);
         if (rel_error > 0.02f) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
                     ", got ", output_f32[idx], " (scale=", scale_j, ", zp=", zp_j, ")");
@@ -4827,12 +5056,14 @@ int run_lowoha_reorder_bf16_to_f32_per_channel_test() {
 
     if (all_correct) {
       log_info("BF16 to FP32 per-channel conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 to FP32 per-channel conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4855,21 +5086,22 @@ int run_lowoha_reorder_f32_to_bf16_strided_2d_test() {
     // Source data in strided layout (4x8 matrix, we extract columns 0,2,4,6)
     std::vector<float> src_f32_full = {
       -2.0f, 99.0f, -1.5f, 99.0f, -1.0f, 99.0f, -0.5f, 99.0f,
-       0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
-       2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
-       4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
-    };
+        0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
+        2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
+        4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
+      };
 
     std::vector<float> expected_f32 = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     log_info("Source layout: [4, 8] (contiguous)");
     log_info("Logical shape: [", M, ", ", N, "] = ", nelems, " elements");
-    log_info("Strides: [", src_row_stride, ", ", src_col_stride, "] (extract every 2nd column)");
+    log_info("Strides: [", src_row_stride, ", ", src_col_stride,
+             "] (extract every 2nd column)");
     log_info("No scale/zp - simple type conversion");
 
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -4877,12 +5109,13 @@ int run_lowoha_reorder_f32_to_bf16_strided_2d_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{M, N};
-    params.dst_shape = std::vector<int64_t>{M, N};
-    params.src_strides = std::vector<int64_t>{src_row_stride, src_col_stride};
+    params.src_shape = std::vector<int64_t> {M, N};
+    params.dst_shape = std::vector<int64_t> {M, N};
+    params.src_strides = std::vector<int64_t> {src_row_stride, src_col_stride};
     // No scale/zp - simple type conversion
 
-    status_t status = reorder_direct(src_f32_full.data(), output_bf16.data(), params);
+    status_t status = reorder_direct(src_f32_full.data(), output_bf16.data(),
+                                     params);
 
     if (status != status_t::success) {
       log_error("LOWOHA reorder failed!");
@@ -4893,14 +5126,16 @@ int run_lowoha_reorder_f32_to_bf16_strided_2d_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        
+
         uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
         float result;
         std::memcpy(&result, &bits, sizeof(result));
-        
-        float rel_error = std::abs(result - expected_f32[idx]) / (std::abs(expected_f32[idx]) + 1e-6f);
+
+        float rel_error = std::abs(result - expected_f32[idx]) / (std::abs(
+                            expected_f32[idx]) + 1e-6f);
         if (rel_error > 0.01f) {
-          log_error("Mismatch at [", i, ",", j, "]: expected ~", expected_f32[idx], ", got ", result);
+          log_error("Mismatch at [", i, ",", j, "]: expected ~", expected_f32[idx],
+                    ", got ", result);
           all_correct = false;
         }
       }
@@ -4908,12 +5143,14 @@ int run_lowoha_reorder_f32_to_bf16_strided_2d_test() {
 
     if (all_correct) {
       log_info("FP32 to BF16 strided 2D conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 strided 2D conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -4938,13 +5175,14 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
     std::vector<float> input_f32 = {
       // Batch 0
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-      // Batch 1
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        // Batch 1
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
-    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems,
+             " elements");
     log_info("Per-tensor scale=", scale, ", zero_point=", zero_point);
 
     std::vector<uint16_t> output_bf16(nelems, 0);
@@ -4952,14 +5190,14 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
     reorder_params_t params;
     params.src_dtype = data_type_t::f32;
     params.dst_dtype = data_type_t::bf16;
-    params.src_shape = std::vector<int64_t>{batch, M, N};
-    params.dst_shape = std::vector<int64_t>{batch, M, N};
+    params.src_shape = std::vector<int64_t> {batch, M, N};
+    params.dst_shape = std::vector<int64_t> {batch, M, N};
     params.quant_params.scale.buff = &scale;
     params.quant_params.scale.dt = data_type_t::f32;
-    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.scale.dims = std::vector<int64_t> {1, 1, 1};
     params.quant_params.zero_point.buff = &zero_point;
     params.quant_params.zero_point.dt = data_type_t::s32;
-    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.zero_point.dims = std::vector<int64_t> {1, 1, 1};
 
     status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
 
@@ -4971,26 +5209,30 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
       float expected_f32 = input_f32[i] / scale + static_cast<float>(zero_point);
-      
+
       uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
       float result;
       std::memcpy(&result, &bits, sizeof(result));
-      
-      float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+
+      float rel_error = std::abs(result - expected_f32) / (std::abs(
+                          expected_f32) + 1e-6f);
       if (rel_error > 0.02f) {
-        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ", result);
+        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ",
+                  result);
         all_correct = false;
       }
     }
 
     if (all_correct) {
       log_info("FP32 to BF16 batched 3D conversion test PASSED!");
-    } else {
+    }
+    else {
       log_error("FP32 to BF16 batched 3D conversion test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5000,7 +5242,7 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
 
 //==============================================================================
 // Dynamic Quantization Examples
-// 
+//
 // Validation Strategy: Quantize -> Dequantize -> Compare with original
 // If dequantized values are close to original, quantization is correct.
 //
@@ -5029,11 +5271,11 @@ int run_lowoha_reorder_dynamic_quant_per_tensor_test() {
     // Input data with mixed positive/negative values
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
-    
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5051,7 +5293,7 @@ int run_lowoha_reorder_dynamic_quant_per_tensor_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = &computed_scale;
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, 1};
@@ -5078,13 +5320,17 @@ int run_lowoha_reorder_dynamic_quant_per_tensor_test() {
     // Quantization error should be within scale/2 (half a quantization step)
     float tolerance = computed_scale / 2.0f + 0.01f;
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5108,14 +5354,14 @@ int run_lowoha_reorder_dynamic_quant_per_channel_row_test() {
     std::vector<float> input_f32_ref = {
       // Row 0: range [-1, 1]
       -1.0f, -0.5f, 0.0f, 0.25f, 0.5f, 0.75f, 0.9f, 1.0f,
-      // Row 1: range [-5, 5]  
-      -5.0f, -3.0f, -1.0f, 0.0f, 1.0f, 3.0f, 4.0f, 5.0f,
-      // Row 2: range [0, 10]
-      0.0f, 1.0f, 2.0f, 3.5f, 5.0f, 7.0f, 8.5f, 10.0f,
-      // Row 3: range [-2, 2]
-      -2.0f, -1.5f, -1.0f, -0.5f, 0.5f, 1.0f, 1.5f, 2.0f
-    };
-    
+        // Row 1: range [-5, 5]
+        -5.0f, -3.0f, -1.0f, 0.0f, 1.0f, 3.0f, 4.0f, 5.0f,
+        // Row 2: range [0, 10]
+        0.0f, 1.0f, 2.0f, 3.5f, 5.0f, 7.0f, 8.5f, 10.0f,
+        // Row 3: range [-2, 2]
+        -2.0f, -1.5f, -1.0f, -0.5f, 0.5f, 1.0f, 1.5f, 2.0f
+      };
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5133,7 +5379,7 @@ int run_lowoha_reorder_dynamic_quant_per_channel_row_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {M, 1};  // Per-row
@@ -5144,7 +5390,7 @@ int run_lowoha_reorder_dynamic_quant_per_channel_row_test() {
       return NOT_OK;
     }
 
-    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
 
     // VALIDATION: Dequantize per-row and compare
@@ -5161,17 +5407,22 @@ int run_lowoha_reorder_dynamic_quant_per_channel_row_test() {
     }
 
     // Max scale determines worst case tolerance
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
     float tolerance = max_scale / 2.0f + 0.01f;
-    
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5195,10 +5446,10 @@ int run_lowoha_reorder_dynamic_quant_per_channel_col_test() {
     std::vector<float> input_f32 = {
       // Col 0: [-2, 8], Col 1: [-1, 4], Col 2: [0, 6], Col 3: [-4, 2]
       -2.0f, -1.0f,  0.0f, -4.0f,
-       0.0f,  1.0f,  2.0f, -2.0f,
-       4.0f,  2.0f,  4.0f,  0.0f,
-       8.0f,  4.0f,  6.0f,  2.0f
-    };
+        0.0f,  1.0f,  2.0f, -2.0f,
+        4.0f,  2.0f,  4.0f,  0.0f,
+        8.0f,  4.0f,  6.0f,  2.0f
+      };
 
     log_info("Source: F32, Dest: S8 (symmetric per-col)");
     log_info("Shape: [", M, ", ", N, "]");
@@ -5212,7 +5463,7 @@ int run_lowoha_reorder_dynamic_quant_per_channel_col_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, N};  // Per-column
@@ -5223,7 +5474,7 @@ int run_lowoha_reorder_dynamic_quant_per_channel_col_test() {
       return NOT_OK;
     }
 
-    log_info("Per-column scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Per-column scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
 
     // VALIDATION: Dequantize per-column and compare
@@ -5238,17 +5489,22 @@ int run_lowoha_reorder_dynamic_quant_per_channel_col_test() {
       }
     }
 
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
     float tolerance = max_scale / 2.0f + 0.01f;
-    
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5273,15 +5529,15 @@ int run_lowoha_reorder_dynamic_quant_per_group_row_test() {
     std::vector<float> input_f32 = {
       // Group 0 (rows 0-3)
       -2.0f, -1.0f, 0.0f, 1.0f,
-      -1.0f,  0.0f, 1.0f, 2.0f,
-       0.0f,  1.0f, 2.0f, 3.0f,
-       1.0f,  2.0f, 3.0f, 4.0f,
-      // Group 1 (rows 4-7): larger values
-      -8.0f, -4.0f, 0.0f, 4.0f,
-      -6.0f, -2.0f, 2.0f, 6.0f,
-      -4.0f,  0.0f, 4.0f, 8.0f,
-      -2.0f,  2.0f, 6.0f, 10.0f
-    };
+        -1.0f,  0.0f, 1.0f, 2.0f,
+        0.0f,  1.0f, 2.0f, 3.0f,
+        1.0f,  2.0f, 3.0f, 4.0f,
+        // Group 1 (rows 4-7): larger values
+        -8.0f, -4.0f, 0.0f, 4.0f,
+        -6.0f, -2.0f, 2.0f, 6.0f,
+        -4.0f,  0.0f, 4.0f, 8.0f,
+        -2.0f,  2.0f, 6.0f, 10.0f
+      };
 
     log_info("Source: F32, Dest: S8 (symmetric per-group)");
     log_info("Shape: [", M, ", ", N, "], Groups: ", G);
@@ -5295,7 +5551,7 @@ int run_lowoha_reorder_dynamic_quant_per_group_row_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {G, N};  // Per-group-row
@@ -5306,9 +5562,9 @@ int run_lowoha_reorder_dynamic_quant_per_group_row_test() {
       return NOT_OK;
     }
 
-    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
-    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5], 
+    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5],
              ", ", computed_scales[6], ", ", computed_scales[7], "]");
 
     // VALIDATION: Dequantize per-group and compare
@@ -5327,17 +5583,22 @@ int run_lowoha_reorder_dynamic_quant_per_group_row_test() {
       }
     }
 
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
     float tolerance = max_scale / 2.0f + 0.01f;
-    
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5358,10 +5619,10 @@ int run_lowoha_reorder_dynamic_quant_compute_only_test() {
 
     std::vector<float> input_f32 = {
       -3.0f, -2.0f, -1.0f, 0.0f,
-       1.0f,  2.0f,  3.0f, 4.0f,
-       5.0f,  6.0f,  7.0f, 8.0f,
-       9.0f, 10.0f, 11.0f, 12.0f
-    };
+        1.0f,  2.0f,  3.0f, 4.0f,
+        5.0f,  6.0f,  7.0f, 8.0f,
+        9.0f, 10.0f, 11.0f, 12.0f
+      };
 
     log_info("Source: F32, Dest: S8 (compute scale only, no quantization)");
 
@@ -5373,7 +5634,7 @@ int run_lowoha_reorder_dynamic_quant_compute_only_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = &computed_scale;
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, 1};
@@ -5387,18 +5648,20 @@ int run_lowoha_reorder_dynamic_quant_compute_only_test() {
 
     // Expected: scale = max(|-3|, |12|) / 127 = 12/127
     float expected_scale = 12.0f / 127.0f;
-    
+
     log_info("Computed scale: ", computed_scale);
     log_info("Expected scale: ", expected_scale);
 
     if (std::abs(computed_scale - expected_scale) < 0.001f) {
       log_info("PASSED! Scale computed correctly without quantization.");
-    } else {
+    }
+    else {
       log_error("FAILED! Scale mismatch.");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5421,10 +5684,10 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_test() {
     // Asymmetric data (not centered around 0)
     std::vector<float> input_f32 = {
       -4.0f, -3.0f, -2.0f, -1.0f,
-       0.0f,  1.0f,  2.0f,  3.0f,
-       4.0f,  5.0f,  6.0f,  7.0f,
-       8.0f,  9.0f, 10.0f, 11.0f
-    };
+        0.0f,  1.0f,  2.0f,  3.0f,
+        4.0f,  5.0f,  6.0f,  7.0f,
+        8.0f,  9.0f, 10.0f, 11.0f
+      };
 
     log_info("Source: F32, Dest: U8 (asymmetric)");
     log_info("Shape: [", M, ", ", N, "], Range: [-4.0, 11.0]");
@@ -5439,11 +5702,11 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = &computed_scale;
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, 1};
-    
+
     // MUST provide zp buffer for asymmetric u8
     params.quant_params.zero_point.buff = &computed_zp;
     params.quant_params.zero_point.dt = data_type_t::s32;
@@ -5461,20 +5724,25 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_test() {
     // Dequantize: A' = (Q - zp) * scale
     float max_error = 0.0f;
     for (size_t i = 0; i < nelems; ++i) {
-      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) * computed_scale;
+      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) *
+                      computed_scale;
       float error = std::abs(dequant - input_f32[i]);
       max_error = std::max(max_error, error);
     }
 
     float tolerance = computed_scale / 2.0f + 0.01f;
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5505,7 +5773,7 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
       // Row 3: range [-1, 3]
       -1.0f, 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f
     };
-    
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5524,11 +5792,11 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {M, 1};
-    
+
     params.quant_params.zero_point.buff = computed_zps.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
     params.quant_params.zero_point.dims = {M, 1};
@@ -5539,9 +5807,9 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
       return NOT_OK;
     }
 
-    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
-    log_info("Per-token zps: [", computed_zps[0], ", ", computed_zps[1], 
+    log_info("Per-token zps: [", computed_zps[0], ", ", computed_zps[1],
              ", ", computed_zps[2], ", ", computed_zps[3], "]");
 
     // VALIDATION: Dequantize per-token and compare
@@ -5558,17 +5826,23 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
       }
     }
 
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
-    float tolerance = max_scale / 2.0f + 0.05f;  // Slightly larger for BF16 rounding
-    
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
+    float tolerance = max_scale / 2.0f +
+                      0.05f;  // Slightly larger for BF16 rounding
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5576,7 +5850,7 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
 }
 
 //------------------------------------------------------------------------------
-// F32 -> U8 Asymmetric Dynamic Quantization (Per-Column)  
+// F32 -> U8 Asymmetric Dynamic Quantization (Per-Column)
 //------------------------------------------------------------------------------
 int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
   try {
@@ -5591,10 +5865,10 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
     // Each column has different range
     std::vector<float> input_f32 = {
       // Col 0: [0, 3], Col 1: [2, 8], Col 2: [1, 5], Col 3: [0, 10]
-       0.0f,  2.0f,  1.0f,  0.0f,
-       1.0f,  4.0f,  2.0f,  3.0f,
-       2.0f,  6.0f,  3.5f,  6.0f,
-       3.0f,  8.0f,  5.0f, 10.0f
+      0.0f,  2.0f,  1.0f,  0.0f,
+      1.0f,  4.0f,  2.0f,  3.0f,
+      2.0f,  6.0f,  3.5f,  6.0f,
+      3.0f,  8.0f,  5.0f, 10.0f
     };
 
     log_info("Source: F32, Dest: U8 (asymmetric per-col)");
@@ -5610,11 +5884,11 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, N};
-    
+
     params.quant_params.zero_point.buff = computed_zps.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
     params.quant_params.zero_point.dims = {1, N};
@@ -5625,9 +5899,9 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
       return NOT_OK;
     }
 
-    log_info("Per-col scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Per-col scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
-    log_info("Per-col zps: [", computed_zps[0], ", ", computed_zps[1], 
+    log_info("Per-col zps: [", computed_zps[0], ", ", computed_zps[1],
              ", ", computed_zps[2], ", ", computed_zps[3], "]");
 
     // VALIDATION: Dequantize per-column and compare
@@ -5643,17 +5917,22 @@ int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
       }
     }
 
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
     float tolerance = max_scale / 2.0f + 0.01f;
-    
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5684,10 +5963,10 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test() {
       // Group 1 (rows 4-7): range [-2, 10]
       -2.0f, 0.0f, 2.0f, 4.0f,
       -1.0f, 2.0f, 5.0f, 7.0f,
-       0.0f, 3.0f, 6.0f, 8.0f,
-       1.0f, 4.0f, 8.0f, 10.0f
+      0.0f, 3.0f, 6.0f, 8.0f,
+      1.0f, 4.0f, 8.0f, 10.0f
     };
-    
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5706,11 +5985,11 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = computed_scales.data();
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {G, N};
-    
+
     params.quant_params.zero_point.buff = computed_zps.data();
     params.quant_params.zero_point.dt = data_type_t::s32;
     params.quant_params.zero_point.dims = {G, N};
@@ -5721,9 +6000,9 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test() {
       return NOT_OK;
     }
 
-    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1], 
+    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1],
              ", ", computed_scales[2], ", ", computed_scales[3], "]");
-    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5], 
+    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5],
              ", ", computed_scales[6], ", ", computed_scales[7], "]");
 
     // VALIDATION: Dequantize per-group and compare
@@ -5745,17 +6024,22 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test() {
       }
     }
 
-    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float max_scale = *std::max_element(computed_scales.begin(),
+                                        computed_scales.end());
     float tolerance = max_scale / 2.0f + 0.05f;
-    
+
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5777,10 +6061,10 @@ int run_lowoha_reorder_dynamic_quant_f32_to_s8_test() {
 
     std::vector<float> input_f32 = {
       -5.0f, -3.0f, -1.0f, 0.0f,
-       1.0f,  2.0f,  3.0f, 4.0f,
-       5.0f,  6.0f,  7.0f, 8.0f,
-      -8.0f, -6.0f, -4.0f, -2.0f
-    };
+        1.0f,  2.0f,  3.0f, 4.0f,
+        5.0f,  6.0f,  7.0f, 8.0f,
+        -8.0f, -6.0f, -4.0f, -2.0f
+      };
 
     log_info("Source: F32, Dest: S8 (symmetric)");
     log_info("Shape: [", M, ", ", N, "], Range: [-8, 8]");
@@ -5794,7 +6078,7 @@ int run_lowoha_reorder_dynamic_quant_f32_to_s8_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = &computed_scale;
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, 1};
@@ -5817,13 +6101,17 @@ int run_lowoha_reorder_dynamic_quant_f32_to_s8_test() {
 
     float tolerance = computed_scale / 2.0f + 0.01f;
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5850,7 +6138,7 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test() {
       7.0f, 7.5f, 8.0f, 8.5f,
       9.0f, 9.5f, 10.0f, 10.5f
     };
-    
+
     std::vector<uint16_t> input_bf16(nelems);
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5869,11 +6157,11 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test() {
     params.src_shape = {M, N};
     params.dst_shape = {M, N};
     params.dynamic_quant = true;
-    
+
     params.quant_params.scale.buff = &computed_scale;
     params.quant_params.scale.dt = data_type_t::f32;
     params.quant_params.scale.dims = {1, 1};
-    
+
     params.quant_params.zero_point.buff = &computed_zp;
     params.quant_params.zero_point.dt = data_type_t::s32;
     params.quant_params.zero_point.dims = {1, 1};
@@ -5889,7 +6177,8 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test() {
     // VALIDATION: Dequantize and compare
     float max_error = 0.0f;
     for (size_t i = 0; i < nelems; ++i) {
-      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) * computed_scale;
+      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) *
+                      computed_scale;
       float original = bf16_to_float(input_bf16[i]);
       float error = std::abs(dequant - original);
       max_error = std::max(max_error, error);
@@ -5897,13 +6186,17 @@ int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test() {
 
     float tolerance = computed_scale / 2.0f + 0.05f;
     if (max_error <= tolerance) {
-      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
-    } else {
-      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ",
+               tolerance);
+    }
+    else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ",
+                tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -5929,16 +6222,17 @@ int run_lowoha_reorder_bf16_scale_per_tensor_quant_test() {
 
     // Scale stored as bf16 (0.5f converted to bf16)
     uint16_t scale_bf16 = float_to_bf16(0.5f);
-    float scale_f32_ref = bf16_to_float(scale_bf16);  // back-convert for verification
+    float scale_f32_ref = bf16_to_float(
+                            scale_bf16);  // back-convert for verification
     int32_t zero_point = 0;
 
     std::vector<uint16_t> input_bf16(nelems);
     std::vector<float> input_f32_ref = {
       -2.0f, -1.5f, -1.0f, -0.5f,
-       0.0f,  0.5f,  1.0f,  1.5f,
-       2.0f,  2.5f,  3.0f,  3.5f,
-       4.0f,  4.5f,  5.0f,  5.5f
-    };
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  2.5f,  3.0f,  3.5f,
+        4.0f,  4.5f,  5.0f,  5.5f
+      };
 
     for (size_t i = 0; i < nelems; ++i) {
       input_bf16[i] = float_to_bf16(input_f32_ref[i]);
@@ -5970,7 +6264,7 @@ int run_lowoha_reorder_bf16_scale_per_tensor_quant_test() {
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
       int32_t expected = static_cast<int32_t>(
-          std::nearbyint(input_f32_ref[i] / scale_f32_ref) + zero_point);
+                           std::nearbyint(input_f32_ref[i] / scale_f32_ref) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -5981,12 +6275,14 @@ int run_lowoha_reorder_bf16_scale_per_tensor_quant_test() {
 
     if (all_correct) {
       log_info("BF16 scale per-tensor quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 scale per-tensor quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -6019,10 +6315,10 @@ int run_lowoha_reorder_bf16_scale_per_channel_dequant_test() {
 
     std::vector<int8_t> input_int8 = {
       -8, -3,  0,  5,
-       0,  1, -2,  6,
-       4,  5,  4,  7,
-       8, 15, 10, 10
-    };
+        0,  1, -2,  6,
+        4,  5,  4,  7,
+        8, 15, 10, 10
+      };
 
     log_info("Per-channel bf16 scales: [", scales_f32_ref[0], ", ",
              scales_f32_ref[1], ", ", scales_f32_ref[2], ", ",
@@ -6065,12 +6361,14 @@ int run_lowoha_reorder_bf16_scale_per_channel_dequant_test() {
 
     if (all_correct) {
       log_info("BF16 scale per-channel dequantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 scale per-channel dequantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -6096,10 +6394,10 @@ int run_lowoha_reorder_bf16_scale_f32_to_s8_test() {
 
     std::vector<float> input_f32 = {
       -3.0f, -2.0f, -1.0f,  0.0f,
-       1.0f,  2.0f,  3.0f,  4.0f,
-       5.0f,  6.0f,  7.0f,  8.0f,
-      -4.0f, -5.0f, -6.0f, -7.0f
-    };
+        1.0f,  2.0f,  3.0f,  4.0f,
+        5.0f,  6.0f,  7.0f,  8.0f,
+        -4.0f, -5.0f, -6.0f, -7.0f
+      };
 
     log_info("Scale as bf16: ≈", scale_f32_ref, ", zero_point=", zero_point);
 
@@ -6126,7 +6424,7 @@ int run_lowoha_reorder_bf16_scale_f32_to_s8_test() {
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
       int32_t expected = static_cast<int32_t>(
-          std::nearbyint(input_f32[i] / scale_f32_ref) + zero_point);
+                           std::nearbyint(input_f32[i] / scale_f32_ref) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -6137,12 +6435,14 @@ int run_lowoha_reorder_bf16_scale_f32_to_s8_test() {
 
     if (all_correct) {
       log_info("BF16 scale FP32->S8 quantization test PASSED!");
-    } else {
+    }
+    else {
       log_error("BF16 scale FP32->S8 quantization test FAILED!");
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }
@@ -6164,10 +6464,10 @@ int run_lowoha_reorder_bf16_scale_dynamic_quant_test() {
 
     std::vector<float> input_f32 = {
       -5.0f, -3.0f, -1.0f, 0.0f,
-       1.0f,  2.0f,  3.0f, 4.0f,
-       5.0f,  6.0f,  7.0f, 8.0f,
-      -8.0f, -6.0f, -4.0f, -2.0f
-    };
+        1.0f,  2.0f,  3.0f, 4.0f,
+        5.0f,  6.0f,  7.0f, 8.0f,
+        -8.0f, -6.0f, -4.0f, -2.0f
+      };
 
     log_info("Source: F32, Dest: S8 (symmetric), Scale output: bf16");
     log_info("Shape: [", M, ", ", N, "], Range: [-8, 8]");
@@ -6206,7 +6506,8 @@ int run_lowoha_reorder_bf16_scale_dynamic_quant_test() {
     // Validate scale was computed and stored correctly as bf16
     if (std::abs(computed_scale_f32 - expected_scale_bf16) < 0.01f) {
       log_info("Scale value correct.");
-    } else {
+    }
+    else {
       log_error("Scale mismatch: expected ≈", expected_scale_bf16,
                 ", got ", computed_scale_f32);
       return NOT_OK;
@@ -6225,13 +6526,284 @@ int run_lowoha_reorder_bf16_scale_dynamic_quant_test() {
     if (max_error <= tolerance) {
       log_info("PASSED! Max dequant error: ", max_error,
                " <= tolerance: ", tolerance);
-    } else {
+    }
+    else {
       log_error("FAILED! Max dequant error: ", max_error,
                 " > tolerance: ", tolerance);
       return NOT_OK;
     }
 
-  } catch (const exception_t &ex) {
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//==============================================================================
+// Weight Prepack Examples
+//
+// One example per weight dtype. Each function is self-contained — the
+// algo / shape are exposed as plain local variables at the top of the
+// function so a reader can swap them in-place to try other backends or
+// matrix sizes.
+//
+// Buffer-ownership patterns demonstrated:
+//   f32  : out-of-place — separate weight_buf / prepacked_buf vectors.
+//   bf16 : IN-PLACE     — single buffer sized for the prepacked output;
+//                         row-major weight written to the head, then
+//                         reorder_direct called with src == dst so the
+//                         buffer is overwritten in place.
+//   s8   : out-of-place — separate weight_buf / prepacked_buf vectors.
+//==============================================================================
+
+int run_lowoha_weight_prepack_f32_test() {
+  using zendnnl::ops::matmul_algo_t;
+  using zendnnl::lowoha::matmul::kernel_to_string;
+  using zendnnl::common::size_of;
+
+  // Tunable knobs. Only supported algo is aocl_dlp_blocked
+  // (libxsmm_blocked / onednn_blocked are not supported by the prepack
+  // API -- see lowoha_prepack.hpp).
+  const matmul_algo_t algo      = matmul_algo_t::aocl_dlp_blocked;
+  const data_type_t   wei_dtype = data_type_t::f32;
+  constexpr int64_t   K         = 8;
+  constexpr int64_t   N         = 16;
+
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Weight Prepack (two-step): algo=", kernel_to_string(algo));
+    log_info("========================================");
+
+    const uint32_t elem_size = size_of(wei_dtype);
+    if (elem_size == 0) {
+      log_error("unsupported wei_dtype (size_of returned 0)");
+      return NOT_OK;
+    }
+    std::vector<uint8_t> weight_buf(static_cast<size_t>(K * N) * elem_size);
+    for (size_t i = 0; i < weight_buf.size(); ++i) {
+      weight_buf[i] = static_cast<uint8_t>(i & 0xff);
+    }
+    log_info("Input weight: K=", K, ", N=", N,
+             ", elem_size=", elem_size, " bytes (row-major)");
+
+    // Fill the prepack-specific fields directly on reorder_params_t.
+    // Setting rp.is_prepack = true switches reorder_direct into prepack
+    // mode; the other reorder_params_t fields are ignored.
+    reorder_params_t rp;
+    rp.is_prepack         = true;
+    rp.prepack.algo       = algo;
+    rp.prepack.wei_dtype  = wei_dtype;
+    rp.prepack.src_dtype  = wei_dtype;
+    rp.prepack.K          = K;
+    rp.prepack.N          = N;
+    rp.prepack.ldb        = N;
+    rp.prepack.transposed = false;
+
+    // Step 1: query the required prepacked-buffer size.
+    const size_t prepack_size = weight_prepack_size(rp);
+    if (prepack_size == 0) {
+      log_error("weight_prepack_size failed!");
+      return NOT_OK;
+    }
+    log_info("weight_prepack_size: required=", prepack_size, " bytes");
+
+    // Step 2: allocate the destination buffer (caller-owned, no special
+    // alignment required).
+    std::vector<uint8_t> prepacked_buf(prepack_size);
+
+    // Step 3: prepack into the caller-owned buffer via reorder_direct.
+    log_info("Calling reorder_direct (prepack): algo=", kernel_to_string(algo),
+             ", K=", K, ", N=", N, ", ldb=", rp.prepack.ldb,
+             ", transposed=false, dst_size=", prepack_size);
+
+    status_t status = reorder_direct(weight_buf.data(),
+                                     prepacked_buf.data(), rp);
+    if (status != status_t::success) {
+      log_error("reorder_direct (prepack) failed!");
+      return NOT_OK;
+    }
+
+    log_info("Prepack done: dst=", static_cast<void *>(prepacked_buf.data()),
+             ", bytes_used=", prepack_size);
+    log_info("Weight prepack example PASSED!");
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+int run_lowoha_weight_prepack_bf16_test() {
+  using zendnnl::ops::matmul_algo_t;
+  using zendnnl::lowoha::matmul::kernel_to_string;
+  using zendnnl::common::size_of;
+
+  // Tunable knobs. Only supported algo is aocl_dlp_blocked
+  // (libxsmm_blocked / onednn_blocked are not supported by the prepack
+  // API -- see lowoha_prepack.hpp).
+  const matmul_algo_t algo      = matmul_algo_t::aocl_dlp_blocked;
+  const data_type_t   wei_dtype = data_type_t::bf16;
+  constexpr int64_t   K         = 8;
+  constexpr int64_t   N         = 16;
+
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Weight Prepack (in-place): algo=",
+             kernel_to_string(algo));
+    log_info("========================================");
+
+    const uint32_t elem_size = size_of(wei_dtype);
+    if (elem_size == 0) {
+      log_error("unsupported wei_dtype (size_of returned 0)");
+      return NOT_OK;
+    }
+
+    // Fill the prepack-specific fields directly on reorder_params_t.
+    reorder_params_t rp;
+    rp.is_prepack         = true;
+    rp.prepack.algo       = algo;
+    rp.prepack.wei_dtype  = wei_dtype;
+    rp.prepack.src_dtype  = wei_dtype;
+    rp.prepack.K          = K;
+    rp.prepack.N          = N;
+    rp.prepack.ldb        = N;
+    rp.prepack.transposed = false;
+
+    // Step 1: query the required prepacked-buffer size.
+    const size_t prepack_size = weight_prepack_size(rp);
+    if (prepack_size == 0) {
+      log_error("weight_prepack_size failed!");
+      return NOT_OK;
+    }
+    log_info("weight_prepack_size: required=", prepack_size, " bytes");
+
+    // Step 2: allocate ONE buffer sized for the prepacked output.
+    // Note: prepack_size >= K * N * elem_size after AOCL's 64-byte
+    // alignment + blocking padding, so the row-major weight fits at
+    // the head of this buffer with bytes [K * N * elem_size,
+    // prepack_size) reserved for AOCL's reorder scratch.
+    std::vector<uint8_t> buf(prepack_size);
+
+    // Step 3: write the row-major input weight to the head of the
+    // same buffer that will receive the prepacked output.
+    const size_t row_major_bytes =
+        static_cast<size_t>(K * N) * elem_size;
+    for (size_t i = 0; i < row_major_bytes; ++i) {
+      buf[i] = static_cast<uint8_t>(i & 0xff);
+    }
+    log_info("Input weight: K=", K, ", N=", N,
+             ", elem_size=", elem_size,
+             " bytes (row-major, occupies first ", row_major_bytes,
+             " of ", prepack_size, " bytes)");
+
+    // Step 4: prepack in place -- same pointer for src and dst.
+    // reorder_direct overwrites the buffer with the prepacked layout;
+    // the original row-major weight is no longer accessible afterwards.
+    log_info("Calling reorder_direct (prepack, in-place): algo=",
+             kernel_to_string(algo),
+             ", K=", K, ", N=", N, ", ldb=", rp.prepack.ldb,
+             ", transposed=false, buf_size=", prepack_size,
+             ", src==dst=", static_cast<void *>(buf.data()));
+
+    status_t status = reorder_direct(buf.data(), buf.data(), rp);
+    if (status != status_t::success) {
+      log_error("reorder_direct (prepack, in-place) failed!");
+      return NOT_OK;
+    }
+
+    log_info("In-place prepack done: buf=",
+             static_cast<void *>(buf.data()),
+             ", bytes_used=", prepack_size,
+             " (now holds prepacked layout, row-major weight overwritten)");
+    log_info("Weight prepack example PASSED!");
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+int run_lowoha_weight_prepack_s8_test() {
+  using zendnnl::ops::matmul_algo_t;
+  using zendnnl::lowoha::matmul::kernel_to_string;
+  using zendnnl::common::size_of;
+
+  // Tunable knobs. Only supported algo is aocl_dlp_blocked
+  // (libxsmm_blocked / onednn_blocked are not supported by the prepack
+  // API -- see lowoha_prepack.hpp).
+  //   src_dtype:      s8 / bf16 / f32 -> s8s8 reorder; u8 -> u8s8 reorder.
+  //   sym_group_size: > 0 selects the AOCL DLP s8s8 sym-quant variant;
+  //                   0   selects the plain s8s8 reorder.
+  const matmul_algo_t algo            = matmul_algo_t::aocl_dlp_blocked;
+  const data_type_t   wei_dtype       = data_type_t::s8;
+  const data_type_t   src_dtype       = data_type_t::s8;
+  const int           sym_group_size  = 0;
+  constexpr int64_t   K               = 64;
+  constexpr int64_t   N               = 64;
+
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Weight Prepack (two-step): algo=", kernel_to_string(algo));
+    log_info("========================================");
+
+    const uint32_t elem_size = size_of(wei_dtype);
+    if (elem_size == 0) {
+      log_error("unsupported wei_dtype (size_of returned 0)");
+      return NOT_OK;
+    }
+    std::vector<uint8_t> weight_buf(static_cast<size_t>(K * N) * elem_size);
+    for (size_t i = 0; i < weight_buf.size(); ++i) {
+      weight_buf[i] = static_cast<uint8_t>(i & 0xff);
+    }
+    log_info("Input weight: K=", K, ", N=", N,
+             ", elem_size=", elem_size, " bytes (row-major)");
+
+    // Fill the prepack-specific fields directly on reorder_params_t.
+    reorder_params_t rp;
+    rp.is_prepack              = true;
+    rp.prepack.algo            = algo;
+    rp.prepack.wei_dtype       = wei_dtype;
+    rp.prepack.src_dtype       = src_dtype;
+    rp.prepack.K               = K;
+    rp.prepack.N               = N;
+    rp.prepack.ldb             = N;
+    rp.prepack.transposed      = false;
+    rp.prepack.sym_group_size  = sym_group_size;
+
+    // Step 1: query the required prepacked-buffer size.
+    const size_t prepack_size = weight_prepack_size(rp);
+    if (prepack_size == 0) {
+      log_error("weight_prepack_size failed!");
+      return NOT_OK;
+    }
+    log_info("weight_prepack_size: required=", prepack_size, " bytes");
+
+    // Step 2: allocate the destination buffer (caller-owned, no special
+    // alignment required).
+    std::vector<uint8_t> prepacked_buf(prepack_size);
+
+    // Step 3: prepack into the caller-owned buffer via reorder_direct.
+    log_info("Calling reorder_direct (prepack): algo=", kernel_to_string(algo),
+             ", K=", K, ", N=", N, ", ldb=", rp.prepack.ldb,
+             ", transposed=false, sym_group_size=", sym_group_size,
+             ", dst_size=", prepack_size);
+
+    status_t status = reorder_direct(weight_buf.data(),
+                                     prepacked_buf.data(), rp);
+    if (status != status_t::success) {
+      log_error("reorder_direct (prepack) failed!");
+      return NOT_OK;
+    }
+
+    log_info("Prepack done: dst=", static_cast<void *>(prepacked_buf.data()),
+             ", bytes_used=", prepack_size);
+    log_info("Weight prepack example PASSED!");
+  }
+  catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
   }

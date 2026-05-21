@@ -20,6 +20,7 @@
 #define LOWOHA_REORDER_GRAIN_SIZE 1024
 
 #include "memory/memory_utils.hpp"
+#include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
 #include <vector>
 #include <cstdint>
 #include <cstdlib>
@@ -101,7 +102,8 @@ struct reorder_quant_params_t {
    */
   struct quant_t {
     void *buff;                    ///< Pointer to quantization data buffer (read for static, write for dynamic)
-    data_type_t dt;                ///< Data type of the buffer (f32 or bf16 for scale, s32 for zp)
+    data_type_t
+    dt;                ///< Data type of the buffer (f32 or bf16 for scale, s32 for zp)
     std::vector<int64_t> dims;     ///< Dimensions matching tensor dimensionality
 
     /**
@@ -152,21 +154,48 @@ struct reorder_params_t {
   reorder_algo_t algo;                    ///< Selected algorithm
   //num_threads is int32_t to match the type used by OpenMP APIs
   int32_t num_threads;                    ///< Number of threads (0 = auto)
-  std::vector<int64_t> src_shape;         ///< Source shape: [nelems] or [M, N] or [batch, M, N]
-  std::vector<int64_t> dst_shape;         ///< Destination shape: must match src_shape
-  std::vector<int64_t> src_strides;       ///< Source strides for non-contiguous memory access
-  std::vector<int64_t> dst_strides;       ///< Destination strides (reserved for future, not currently supported)
+  std::vector<int64_t>
+  src_shape;         ///< Source shape: [nelems] or [M, N] or [batch, M, N]
+  std::vector<int64_t>
+  dst_shape;         ///< Destination shape: must match src_shape
+  std::vector<int64_t>
+  src_strides;       ///< Source strides for non-contiguous memory access
+  std::vector<int64_t>
+  dst_strides;       ///< Destination strides (reserved for future, not currently supported)
   bool dynamic_quant;                     ///< Enable dynamic quantization (compute scale/zp from source data)
+  bool is_prepack;                        ///< True when this call is a weight-prepack request.
+
+  /**
+   * @brief Weight-prepack request piggy-backed on reorder_direct.
+   *
+   * When @c is_prepack is true, @ref reorder_direct dispatches to the
+   * weight-prepack pipeline using the fields in @c prepack (algo,
+   * wei_dtype, K, N, ldb, ...). The other reorder fields — src_dtype,
+   * dst_dtype, shape, quant_params, ... — are then ignored. Default-
+   * constructed @c is_prepack is false, so existing reorder_direct
+   * callers are unaffected.
+   *
+   * Workflow:
+   *   1. Fill @c reorder_params_t::prepack fields (algo / wei_dtype /
+   *      K / N / ldb / transposed / ...) and set @c is_prepack = true.
+   *   2. @c size_t size = weight_prepack_size(rp); — returns 0 on error.
+   *   3. Allocate a buffer of that size.
+   *   4. @c reorder_direct(weights, dst, rp);
+   *
+   * Note: the same @c rp is reused for both calls — there is no need
+   * to keep a separate prepack_params_t variable around.
+   */
+  prepack_params_t prepack;
 
   /**
    * @brief Default constructor
    */
   reorder_params_t()
-      : src_dtype(data_type_t::none), dst_dtype(data_type_t::none),
-        quant_params(), algo(reorder_algo_t::DT), num_threads(0),
-        src_shape(), dst_shape(), src_strides(), dst_strides(),
-        dynamic_quant(false) {}
-  
+    : src_dtype(data_type_t::none), dst_dtype(data_type_t::none),
+      quant_params(), algo(reorder_algo_t::DT), num_threads(0),
+      src_shape(), dst_shape(), src_strides(), dst_strides(),
+      dynamic_quant(false), is_prepack(false), prepack() {}
+
   /**
    * @brief Check if this is a 1D shape
    */
@@ -180,7 +209,7 @@ struct reorder_params_t {
   bool is_2d() const {
     return src_shape.size() == 2;
   }
-  
+
   /**
    * @brief Check if this is a 3D shape (batched)
    */
@@ -192,9 +221,13 @@ struct reorder_params_t {
    * @brief Check if shape is provided and valid
    */
   bool is_shaped() const {
-    if (src_shape.empty()) return false;
+    if (src_shape.empty()) {
+      return false;
+    }
     for (auto dim : src_shape) {
-      if (dim <= 0) return false;
+      if (dim <= 0) {
+        return false;
+      }
     }
     return true;
   }
@@ -211,7 +244,9 @@ struct reorder_params_t {
    * @brief Get total number of elements
    */
   int64_t nelems() const {
-    if (src_shape.empty()) return 0;
+    if (src_shape.empty()) {
+      return 0;
+    }
     int64_t n = 1;
     for (auto dim : src_shape) {
       n *= dim;
@@ -230,9 +265,15 @@ struct reorder_params_t {
    * @brief Get M dimension (rows)
    */
   int64_t M() const {
-    if (is_1d()) return src_shape[0];
-    if (is_2d()) return src_shape[0];
-    if (is_3d()) return src_shape[1];
+    if (is_1d()) {
+      return src_shape[0];
+    }
+    if (is_2d()) {
+      return src_shape[0];
+    }
+    if (is_3d()) {
+      return src_shape[1];
+    }
     return 0;
   }
 
@@ -240,12 +281,18 @@ struct reorder_params_t {
    * @brief Get N dimension (columns)
    */
   int64_t N() const {
-    if (is_1d()) return 1;
-    if (is_2d()) return src_shape[1];
-    if (is_3d()) return src_shape[2];
+    if (is_1d()) {
+      return 1;
+    }
+    if (is_2d()) {
+      return src_shape[1];
+    }
+    if (is_3d()) {
+      return src_shape[2];
+    }
     return 0;
   }
-  
+
   /**
    * @brief Check if source strides are specified
    */
@@ -259,7 +306,7 @@ struct reorder_params_t {
   bool has_dst_strides() const {
     return !dst_strides.empty();
   }
-  
+
   /**
    * @brief Check if source memory layout is contiguous
    */
@@ -267,15 +314,17 @@ struct reorder_params_t {
     if (!has_src_strides() || !is_shaped()) {
       return true;  // No strides or no shape means contiguous
     }
-    
+
     // Check if strides match contiguous layout
     if (src_strides.size() == 1) {
       return src_strides[0] == 1;
-    } else if (src_strides.size() == 2 && is_2d()) {
+    }
+    else if (src_strides.size() == 2 && is_2d()) {
       return src_strides[0] == N() && src_strides[1] == 1;
-    } else if (src_strides.size() == 3 && is_3d()) {
-      return src_strides[0] == (M() * N()) && 
-             src_strides[1] == N() && 
+    }
+    else if (src_strides.size() == 3 && is_3d()) {
+      return src_strides[0] == (M() * N()) &&
+             src_strides[1] == N() &&
              src_strides[2] == 1;
     }
     return false;
@@ -298,7 +347,9 @@ inline int32_t get_dynamic_quant_algo_override() {
     const char *env = std::getenv("ZENDNNL_DYNAMIC_QUANT_ALGO");
     if (env) {
       int32_t v = std::atoi(env);
-      if (v >= 1 && v <= 4) return v;
+      if (v >= 1 && v <= 4) {
+        return v;
+      }
     }
     return 0;
   }();

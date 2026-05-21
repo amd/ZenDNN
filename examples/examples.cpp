@@ -200,6 +200,13 @@ int main() {
     run_lowoha_reorder_bf16_scale_f32_to_s8_test();            // FP32->S8 with bf16 scale
     run_lowoha_reorder_bf16_scale_dynamic_quant_test();        // Dynamic quant with bf16 scale output
 
+    // Weight prepack examples (lowoha_operators/reorder/prepack).
+    // Each example exposes algo + shape as tunable local variables at
+    // the top of the function body — flip them to try other backends.
+    run_lowoha_weight_prepack_f32_test();                      // F32 weight prepack
+    run_lowoha_weight_prepack_bf16_test();                     // BF16 weight prepack
+    run_lowoha_weight_prepack_s8_test();                       // S8 weight prepack
+
     /** LOWOHA Softmax operator functionality examples.
      *  Demonstrates softmax, log-softmax, and softmin operations using the
      *  low-overhead LOWOHA API with support for multi-dimensional tensors.

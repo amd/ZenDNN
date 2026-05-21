@@ -20,6 +20,7 @@
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/scalar_impl/scalar_kernels.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
+#include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 
@@ -38,13 +39,18 @@ using zendnnl::lowoha::matmul::zendnnl_parallel_for;
 using zendnnl::common::op_instrumentation;
 
 status_t reorder_direct(const void *src, void *dst,
-                         reorder_params_t &params) {
+                        reorder_params_t &params) {
+  //============================================================================
+  // Check if this is a weight-prepack request
+  // When params.is_prepack is true, delegate to the prepack pipeline
+  // (the prepack-specific fields live in params.prepack).
+  //============================================================================
+  if (params.is_prepack) {
+    return weight_prepack_into(src, params, dst);
+  }
+
   // Compute nelems from shape
   const size_t nelems = static_cast<size_t>(params.nelems());
-
-  const int32_t omp_mt = thread_guard::max_threads();
-  params.num_threads = resolve_num_threads(params.num_threads, omp_mt);
-  thread_guard tg(params.num_threads, omp_mt);
 
   //============================================================================
   // Dynamic Quantization Mode
@@ -52,11 +58,14 @@ status_t reorder_direct(const void *src, void *dst,
   if (params.dynamic_quant) {
     // Validate dynamic quantization parameters and shape
     status_t dq_status = op_instrumentation::validate([&]() {
-      if (validate_dynamic_quant_params(src, params) != status_t::success)
+      if (validate_dynamic_quant_params(src, params) != status_t::success) {
         return status_t::failure;
+      }
       return validate_reorder_shape(params);
     });
-    if (dq_status != status_t::success) return dq_status; // validation failed
+    if (dq_status != status_t::success) {
+      return dq_status;  // validation failed
+    }
 
     // Create profiler instance for timing
     profiler_t profiler;
@@ -75,7 +84,7 @@ status_t reorder_direct(const void *src, void *dst,
              << ", src_dtype=" << reorder_data_type_to_string(params.src_dtype)
              << ", dst_dtype=" << reorder_data_type_to_string(params.dst_dtype)
              << ", granularity=" << granularity_to_string(
-                    get_single_granularity(params.quant_params.scale.dims, params.src_shape))
+               get_single_granularity(params.quant_params.scale.dims, params.src_shape))
              << ", dst=" << (dst == nullptr ? "nullptr (compute only)" : "valid");
       dq_params_str = ss_tmp.str();
 
@@ -113,7 +122,8 @@ status_t reorder_direct(const void *src, void *dst,
            dq_algo_override == 1) &&
           dispatch_fused_per_token(src, dst, params, params.M(), params.N())) {
         if (is_profile) {
-          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " +
+                               dq_params_str;
           profiler.tbp_stop();
           profilelog_verbose(dq_log,
                              ", kernel=native (fused per-token), time=",
@@ -121,10 +131,12 @@ status_t reorder_direct(const void *src, void *dst,
                              profiler.get_res_str());
         }
         return status_t::success;
-      } else if (dq_algo_override == 2 &&
-          dispatch_unfused_per_token(src, dst, params, params.M(), params.N())) {
+      }
+      else if (dq_algo_override == 2 &&
+               dispatch_unfused_per_token(src, dst, params, params.M(), params.N())) {
         if (is_profile) {
-          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " +
+                               dq_params_str;
           profiler.tbp_stop();
           profilelog_verbose(dq_log,
                              ", kernel=native (unfused per-token), time=",
@@ -132,10 +144,12 @@ status_t reorder_direct(const void *src, void *dst,
                              profiler.get_res_str());
         }
         return status_t::success;
-      } else if (dq_algo_override == 3 &&
-          dispatch_fused_per_token_ref(src, dst, params, params.M(), params.N())) {
+      }
+      else if (dq_algo_override == 3 &&
+               dispatch_fused_per_token_ref(src, dst, params, params.M(), params.N())) {
         if (is_profile) {
-          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " +
+                               dq_params_str;
           profiler.tbp_stop();
           profilelog_verbose(dq_log,
                              ", kernel=reference (fused per-token), time=",
@@ -154,7 +168,8 @@ status_t reorder_direct(const void *src, void *dst,
            dq_algo_override == 1) &&
           dispatch_fused_per_group(src, dst, params, params.M(), params.N())) {
         if (is_profile) {
-          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " + dq_params_str;
+          std::string dq_log = "LOWOHA reorder_direct (Dynamic_Quantize): " +
+                               dq_params_str;
           profiler.tbp_stop();
           profilelog_verbose(dq_log,
                              ", kernel=native (fused per-group), time=",
@@ -172,7 +187,8 @@ status_t reorder_direct(const void *src, void *dst,
     }
 
     if (is_profile) {
-      std::string dq_log = "LOWOHA reorder_direct (Dynamic_Compute): " + dq_params_str;
+      std::string dq_log = "LOWOHA reorder_direct (Dynamic_Compute): " +
+                           dq_params_str;
       profiler.tbp_stop();
       profilelog_verbose(dq_log, ", time=", profiler.tbp_elapsedtime(),
                          profiler.get_res_str());
@@ -193,7 +209,9 @@ status_t reorder_direct(const void *src, void *dst,
   status_t val_status = op_instrumentation::validate([&]() {
     return validate_reorder_inputs(src, dst, nelems, params);
   });
-  if (val_status != status_t::success) return val_status;
+  if (val_status != status_t::success) {
+    return val_status;
+  }
 
   // Select algorithm
   reorder_algo_t algo = select_reorder_algo(params, nelems);
@@ -216,15 +234,17 @@ status_t reorder_direct(const void *src, void *dst,
        << ", zero_point=" << zp_val
        << ", kernel=" << reorder_algo_to_string(algo)
        << ", granularity=" << granularity_to_string(
-              (params.quant_params.zero_point.buff == nullptr)
-                  ? get_single_granularity(params.quant_params.scale.dims, params.src_shape)
-                  : get_granularity_type(params));
+         (params.quant_params.zero_point.buff == nullptr)
+         ? get_single_granularity(params.quant_params.scale.dims, params.src_shape)
+         : get_granularity_type(params));
 
     // Add stride information to log
     if (params.has_src_strides()) {
       ss << ", strides=[";
       for (size_t i = 0; i < params.src_strides.size(); ++i) {
-        if (i > 0) ss << ", ";
+        if (i > 0) {
+          ss << ", ";
+        }
         ss << params.src_strides[i];
       }
       ss << "]";

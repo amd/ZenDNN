@@ -126,12 +126,14 @@ struct reorder_params_t {
   data_type_t dst_dtype;                  // Destination data type
   reorder_quant_params_t quant_params;    // Quantization parameters (scale, zero_point)
   reorder_algo_t algo;                    // Algorithm selection
-  uint64_t num_threads;                   // Number of threads (0 = auto)
+  int32_t num_threads;                    // Number of threads (0 = auto)
   std::vector<int64_t> src_shape;         // Source shape: [N] or [M, N] or [batch, M, N] (mandatory)
   std::vector<int64_t> dst_shape;         // Destination shape: must match src_shape (mandatory)
   std::vector<int64_t> src_strides;       // Source strides for non-contiguous memory (optional)
   std::vector<int64_t> dst_strides;       // Destination strides (reserved for future, not currently supported)
   bool dynamic_quant;                     // Enable dynamic quantization (default: false)
+  bool is_prepack;                        // Weight-prepack mode (see "Weight Prepack Mode" below)
+  prepack_params_t prepack;               // Prepack request (used only when is_prepack = true)
 };
 ```
 
@@ -352,6 +354,136 @@ When `dst = nullptr`, the API only computes scale and zero-point values without 
 - Pre-computing quantization parameters for later use
 - Profiling the parameter computation overhead separately
 - Using the computed parameters with a different quantization implementation
+
+
+## Weight Prepack Mode
+
+Weight prepack lets the caller produce a backend-blocked weight buffer **once** (e.g. at model load), then reuse it across many matmul calls without paying the per-call internal-reorder cost.
+
+The mode is selected by setting `reorder_params_t::is_prepack = true` on the same `reorder_params_t` you hand to `reorder_direct`. The prepack-specific knobs (algo / dtypes / K / N / ldb / ...) live on the embedded `reorder_params_t::prepack` sub-struct; the rest of the standard reorder fields (`src_dtype`, `dst_dtype`, `quant_params`, `src_shape`, `dst_strides`, `dynamic_quant`, ...) are ignored in this mode.
+
+### Supported Algos
+
+Only **AOCL DLP blocked** is supported:
+
+| `prepack.algo` | Supported | Notes |
+|----------------|-----------|-------|
+| `matmul_algo_t::aocl_dlp_blocked` | ✅ Yes | f32 / bf16 / f16 / s8 (+ s8 sym-quant variant) / s4 / u4 |
+| `matmul_algo_t::libxsmm_blocked`  | ❌ No  | Layout would mis-match if the matmul-side partitioner falls back to AOCL DLP — silent wrong results. |
+| `matmul_algo_t::onednn_blocked`   | ❌ No  | OneDNN's blocked layout depends on (M, K, N, dtypes, post-ops, ISA) — the prepack can't reproduce the matmul-time layout. |
+| Anything else                     | ❌ No  | Non-blocked variants consume raw weights; no prepack needed. |
+
+Anything other than `aocl_dlp_blocked` returns `status_t::unimplemented` with a clear error in the log.
+
+### Two-Step Caller Workflow
+
+The contract is: **call `weight_prepack_size` first, allocate exactly that many bytes, then call `reorder_direct`**.
+
+1. **Query the required size** with `weight_prepack_size(rp)`. Returns the prepacked-buffer size in bytes (already rounded up to 64-byte alignment) on success, `0` on validation/dispatch failure.
+2. **Allocate a buffer of at least that size.** No specific alignment is required, but 64-byte alignment is recommended for best AVX-512 throughput.
+3. **Call `reorder_direct(weights, dst, rp)`** with the same `rp`. The library writes the prepacked layout into `dst`.
+
+> ⚠️ **The buffer size MUST match (or exceed) the value returned by `weight_prepack_size`.**
+> The library does **not** verify the buffer length (a `void *` carries no size information in C/C++). An under-sized buffer causes out-of-bounds writes — silent corruption, not an error. Always pair the size query with the allocation.
+
+### `prepack_params_t`
+
+```cpp
+struct prepack_params_t {
+  matmul_algo_t algo;           // Must be matmul_algo_t::aocl_dlp_blocked
+  data_type_t   wei_dtype;      // Weight data type (f32 / bf16 / f16 / s8 / s4 / u4)
+  data_type_t   src_dtype;      // Source (matmul A) dtype (disambiguates s8 vs u8 src)
+  int64_t       K;              // Weight rows
+  int64_t       N;              // Weight cols
+  int64_t       ldb;            // Physical leading dimension of the input weights
+  bool          transposed;     // true => weights are column-major ('ba')
+  int           sym_group_size; // AOCL: >0 selects s8 sym-quant variant
+  size_t        cached_size;    // (out, internal) — populated by weight_prepack_size
+};
+```
+
+### Supported `wei_dtype` Routing
+
+| `wei_dtype` | `src_dtype`        | AOCL DLP reorder kernel used         |
+|-------------|--------------------|---------------------------------------|
+| `f32`       | any                | `aocl_reorder_f32f32f32of32`         |
+| `bf16`      | any                | `aocl_reorder_bf16bf16f32of32`       |
+| `f16`       | any                | `aocl_reorder_f16f16f16of16` (DLP only) |
+| `s4` / `u4` | any                | `aocl_reorder_bf16s4f32of32` (4-bit wei, bf16 act) |
+| `s8`        | `s8` / `bf16` / `f32` | `aocl_reorder_s8s8s32os32`        |
+| `s8`        | `u8`               | `aocl_reorder_u8s8s32os32`           |
+| `s8` + `sym_group_size > 0` (with `src_dtype = bf16`) | — | `aocl_reorder_s8s8s32os32_sym_quant` (DLP only) |
+
+### Consuming the Prepacked Buffer at Matmul Time
+
+Hand the prepacked buffer to `matmul_direct` with:
+
+- `matmul_params::lowoha_algo = matmul_algo_t::aocl_dlp_blocked`
+- `matmul_params::mem_format_b = 'r'`
+
+`mem_format_b = 'r'` tells the matmul backend "the `weight` pointer is already in AOCL DLP blocked layout, skip the internal reorder". `matmul_direct` validates that `lowoha_algo == aocl_dlp_blocked` whenever `mem_format_b == 'r'`; any other algo is rejected up front (would otherwise silently produce wrong results).
+
+### End-to-End Example
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
+
+// --- Model load: prepack once ------------------------------------------
+reorder_params_t rp;
+rp.is_prepack         = true;
+rp.prepack.algo       = matmul_algo_t::aocl_dlp_blocked;
+rp.prepack.wei_dtype  = data_type_t::s8;
+rp.prepack.src_dtype  = data_type_t::bf16;   // matmul A is bf16 -> sym-quant variant
+rp.prepack.K          = K;
+rp.prepack.N          = N;
+rp.prepack.ldb        = N;                   // row-major leading dim
+rp.prepack.transposed = false;
+rp.prepack.sym_group_size = K;               // per-row scale (optional)
+
+// Step 1: query the required size
+size_t prepack_bytes = weight_prepack_size(rp);
+if (prepack_bytes == 0) { /* validation error -- check apilog_error */ }
+
+// Step 2: allocate a buffer of exactly that size
+std::vector<uint8_t> prepacked_buf(prepack_bytes);
+
+// Step 3: prepack
+status_t st = reorder_direct(original_weight, prepacked_buf.data(), rp);
+if (st != status_t::success) { /* prepack failed */ }
+
+// --- Inference: reuse `prepacked_buf` across many matmuls --------------
+matmul_params mp;
+mp.lowoha_algo  = matmul_algo_t::aocl_dlp_blocked;
+mp.mem_format_b = 'r';                       // <-- skip internal reorder
+mp.dtypes.src   = data_type_t::bf16;
+mp.dtypes.wei   = data_type_t::s8;
+mp.dtypes.dst   = data_type_t::bf16;
+// ... other matmul fields ...
+
+matmul_batch_params_t bp;
+matmul_direct(/*layout*/'r', /*transA*/false, /*transB*/false,
+              M, N, K, /*alpha*/1.0f,
+              activation, /*lda*/K,
+              prepacked_buf.data(), /*ldb*/N,    // <-- prepacked weight
+              bias, /*beta*/0.0f, dst, /*ldc*/N,
+              /*is_weights_const*/true,
+              bp, mp);
+```
+
+### Caller Responsibilities
+
+The library trusts the caller to keep prepack-time and matmul-time parameters in sync. A mismatch produces **silently wrong results** — no error, no crash, just bad math. Make sure these match between the `reorder_direct` (prepack) call and the subsequent `matmul_direct` call:
+
+- `K`, `N`, `ldb`, `transposed`
+- `wei_dtype`, `src_dtype`
+- `sym_group_size` (for the s8 sym-quant variant)
+
+If you mutate any of these on `rp.prepack` between the size query and the prepack call (or between the prepack call and the matmul call), the buffer's layout will not match what the matmul kernel expects.
+
+### Buffer Lifetime
+
+The library never allocates the prepacked buffer; the caller owns it end-to-end. As long as the buffer outlives the last `matmul_direct` call that uses it (with `mem_format_b = 'r'`), there is no freeing or special teardown to remember.
 
 
 ## Usage Examples
@@ -1230,6 +1362,14 @@ The operator performs the following validations:
 15. **Symmetric mode:** If zero_point.buff is nullptr, destination must be S8
 16. **Asymmetric mode:** If zero_point.buff is provided, destination must be U8, and zero_point dims must match scale granularity
 17. **Zero-point data type:** Must be s32 (when provided)
+
+### Weight Prepack Validation (when `is_prepack = true`)
+
+18. **Null pointer checks:** `weights` and `dst` buffers must not be null
+19. **Dimensions:** `prepack.K > 0` and `prepack.N > 0`
+20. **Leading dimension:** `prepack.ldb` must be ≥ `prepack.K` (transposed) or ≥ `prepack.N` (non-transposed)
+21. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` (any other value returns `status_t::unimplemented` / `weight_prepack_size` returns 0)
+22. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_prepack_size(params)` bytes. The library does **not** verify this; an undersized buffer causes silent out-of-bounds writes.
 
 
 ## Implementation Support Matrix

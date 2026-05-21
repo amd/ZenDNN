@@ -430,7 +430,7 @@ int run_lowoha_reorder_f32_to_bf16_batched_test();
 // Dynamic Quantization Tests
 //
 // Validation Strategy: Quantize -> Dequantize -> Compare with original
-// 
+//
 // Symmetric (s8): scale = max(abs(A)) / 127, zp = 0
 //   Quantize:   Q = round(A / scale)
 //   Dequantize: A' = Q * scale
@@ -528,6 +528,29 @@ int run_lowoha_reorder_bf16_scale_f32_to_s8_test();
  *  @brief Dynamic quantization (F32 → S8) with bf16 scale output buffer.
  */
 int run_lowoha_reorder_bf16_scale_dynamic_quant_test();
+
+//==============================================================================
+// Weight Prepack Examples (two-step API)
+//
+// Demonstrate the two-step prepack flow from @c zendnnl::lowoha::reorder:
+//   1. size_t size = weight_prepack_size(prepack_params_t)  — returns
+//      buffer size in bytes (0 on error).
+//   2. reorder_direct(src, dst, reorder_params_t&)          — fill the
+//      buffer (set @c reorder_params_t::prepack to the same prepack
+//      params to switch reorder_direct into prepack mode).
+//
+// One example per weight dtype; algo and shape are tunable local
+// variables at the top of each function.
+//==============================================================================
+
+/** @brief Two-step weight prepack with an F32 weight. */
+int run_lowoha_weight_prepack_f32_test();
+
+/** @brief Two-step weight prepack with a BF16 weight. */
+int run_lowoha_weight_prepack_bf16_test();
+
+/** @brief Two-step weight prepack with an S8 (int8) weight. */
+int run_lowoha_weight_prepack_s8_test();
 
 } // namespace examples
 } // namespace zendnnl

@@ -398,6 +398,11 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
 
+  // When mem_format_b == 'r' the caller is asserting the weight buffer
+  // is already in the AOCL DLP blocked layout (typically produced via
+  // reorder_direct() prepack). reorderAndCacheWeights short-circuits
+  // on that flag and uses B as-is, skipping the internal reorder.
+
   size_t run_src_scale_nelems = get_num_elements(
                                   lowoha_param.quant_params.src_scale.dims);
 

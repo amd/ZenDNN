@@ -29,14 +29,41 @@ using zendnnl::memory::status_t;
 using zendnnl::memory::data_type_t;
 
 /**
- * @brief Execute data type conversion (reorder) with quantization support
+ * @brief Multi-mode reorder entry point.
  *
- * Performs element-wise data type conversion from source to destination buffer.
+ * Dispatches a reorder request to one of several pipelines based on
+ * fields in @p params. New modes can be added over time without
+ * changing this signature -- callers select a mode by populating the
+ * corresponding sub-struct / flag in @ref reorder_params_t.
+ *
+ * Currently registered modes (checked in this order; the first match
+ * wins):
+ *
+ *   - Weight prepack
+ *       Selected when @c params.is_prepack is true. Reorders a weight
+ *       matrix into the backend-specific blocked layout consumed by
+ *       the matching matmul algo (aocl_dlp_blocked, libxsmm_blocked,
+ *       onednn_blocked) named in @c params.prepack.algo. The caller
+ *       must have queried the destination size via
+ *       @c weight_prepack_size(params) and allocated at least that
+ *       many bytes at @p dst.
+ *
+ *   - Dynamic quantization
+ *       Selected when @c params.dynamic_quant is true. Computes
+ *       scale / zero-point from the source data and (optionally)
+ *       quantizes into @p dst.
+ *
+ *   - Standard reorder (default)
+ *       Element-wise dtype conversion / static (de)quantization. See
+ *       "Standard reorder" notes below for supported conversions and
+ *       formulas.
+ *
+ * --- Standard reorder ---
  *
  * Supported conversions:
- * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
- * - F32  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
- * - F32  ↔ BF16:  Type conversion with optional scale and zero-point
+ * - BF16 <-> S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  <-> S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  <-> BF16:  Type conversion with optional scale and zero-point
  *
  * Quantization formulas:
  * - Quantize:   int_val = clamp(round(src_val / scale) + zero_point, min, max)
@@ -44,7 +71,7 @@ using zendnnl::memory::data_type_t;
  * - F32->BF16:  bf16_val = bf16((f32_val / scale) + zero_point)  [scale/zp optional]
  * - BF16->F32:  f32_val = (bf16_as_f32 - zero_point) * scale     [scale/zp optional]
  *
- * For F32 ↔ BF16 conversions:
+ * For F32 <-> BF16 conversions:
  * - Scale and zero_point are OPTIONAL
  * - If not provided (buff = nullptr), simple type conversion is performed
  * - Default values when not provided: scale = 1.0, zero_point = 0
@@ -53,18 +80,20 @@ using zendnnl::memory::data_type_t;
  * Strides: Optional for non-contiguous source memory
  * Granularity: Per-tensor, per-channel, or per-group (inferred from scale/zp dims)
  *
- * @param src    Source data buffer
- * @param dst    Destination data buffer (always contiguous output)
- * @param params Reorder parameters (data types, shape, quantization params, strides)
+ * @param src    Source data buffer.
+ * @param dst    Destination data buffer (caller-allocated and sized
+ *               according to the selected mode's contract).
+ * @param params Reorder parameters. The fields consulted depend on the
+ *               selected mode (see per-mode descriptions above).
  *
- * @return status_t::success on success, status_t::failure otherwise
+ * @return status_t::success on success, status_t::failure otherwise.
  *
- * @note Shape is mandatory; nelems is computed automatically from shape.
- * @note Destination is always written in contiguous format.
+ * @note Mode-specific contracts (mandatory shape, alignment, capacity,
+ *       etc.) are documented with each mode above.
  * @note Buffers must not overlap.
  */
 status_t reorder_direct(const void *src, void *dst,
-                         reorder_params_t &params);
+                        reorder_params_t &params);
 
 
 } // namespace reorder
