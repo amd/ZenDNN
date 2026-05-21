@@ -16,7 +16,16 @@
 
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+
+#include <vector>
+
+// Per-token bf16/f32 + s8 source path selector (manual source toggle):
+//   1 = reorder compute-only (scales) + native bf16s8 / f32s8 GEMM.
+//   0 = full reorder quantize A to s8 + s8s8_sym_quant GEMM (default).
+// To switch paths, edit the value below and rebuild.
+#define ZENDNNL_LOWOHA_DQ_BF16S8 0
 
 namespace zendnnl {
 namespace lowoha {
@@ -26,6 +35,8 @@ using namespace zendnnl::ops;
 using zendnnl::common::size_of;
 using zendnnl::common::op_instrumentation;
 using zendnnl::lowoha::reorder::reorder_algo_t;
+using zendnnl::lowoha::reorder::get_single_granularity;
+using zendnnl::lowoha::reorder::granularity_type_t;
 
 status_t reorder_quantization_wrapper(
     const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
@@ -89,13 +100,6 @@ status_t reorder_quantization_wrapper(
   const int64_t batch_A = batch_params.Batch_A;
   const bool is_batched = (batch_A > 1);
 
-  buffers.src_buf = static_cast<uint8_t *>(
-      malloc(static_cast<size_t>(batch_A * phys_rows * phys_cols)));
-  if (!buffers.src_buf) {
-    log_error("Reorder quantization: failed to allocate quantized source buffer");
-    return status_t::failure;
-  }
-
   void *scale_buff = const_cast<void *>(params.quant_params.src_scale.buff);
   if (!scale_buff) {
     int64_t n = 1;
@@ -108,23 +112,6 @@ status_t reorder_quantization_wrapper(
       return status_t::failure;
     }
     scale_buff = buffers.scale_buf;
-  }
-
-  void *zp_buff = nullptr;
-  if (needs_zp) {
-    zp_buff = const_cast<void *>(params.quant_params.src_zp.buff);
-    if (!zp_buff) {
-      int64_t n = 1;
-      for (auto d : params.quant_params.src_zp.dims) n *= d;
-      buffers.zp_buf = static_cast<uint8_t *>(
-          malloc(static_cast<size_t>(n) *
-                 size_of(params.quant_params.src_zp.dt)));
-      if (!buffers.zp_buf) {
-        log_error("Reorder quantization: failed to allocate zero-point buffer");
-        return status_t::failure;
-      }
-      zp_buff = buffers.zp_buf;
-    }
   }
 
   zendnnl::lowoha::reorder::reorder_params_t rp;
@@ -160,10 +147,87 @@ status_t reorder_quantization_wrapper(
     std::swap(rp.quant_params.scale.dims[0], rp.quant_params.scale.dims[1]);
   }
 
+  // Per-token dynamic quant: see ZENDNNL_LOWOHA_DQ_BF16S8 at top of file.
+  // Classify granularity against the *logical* shape {M, K} and the original
+  // (pre-swap) src_scale.dims so transA=1 per-token cases are recognized:
+  // physical dims/shape (post-swap) would mis-classify them as per_channel.
+#if ZENDNNL_LOWOHA_DQ_BF16S8
+  const std::vector<int64_t> logical_shape_for_gran = {
+      static_cast<int64_t>(M), static_cast<int64_t>(K)};
+  const bool try_native_bf16_f32_s8 =
+      is_dynamic && !needs_zp && quant_dtype == data_type_t::s8 &&
+      !is_batched &&
+      (orig_src_dtype == data_type_t::bf16 ||
+       orig_src_dtype == data_type_t::f32) &&
+      get_single_granularity(params.quant_params.src_scale.dims,
+                             logical_shape_for_gran) ==
+          granularity_type_t::per_token;
+#else
+  const bool try_native_bf16_f32_s8 = false;
+#endif
+
+  if (try_native_bf16_f32_s8) {
+    const status_t compute_status =
+        zendnnl::lowoha::reorder::reorder_direct(src, nullptr, rp);
+    if (compute_status == status_t::success) {
+      if (transA && params.quant_params.src_scale.dims.size() == 2) {
+        const int64_t M_dim = params.quant_params.src_scale.dims[0];
+        const int64_t G_dim = params.quant_params.src_scale.dims[1];
+        if (M_dim != G_dim && M_dim > 1 && G_dim > 1) {
+          const size_t nelems = static_cast<size_t>(M_dim * G_dim);
+          const size_t elem_size = size_of(params.quant_params.src_scale.dt);
+          std::vector<uint8_t> tmp(nelems * elem_size);
+          uint8_t *buf = static_cast<uint8_t *>(scale_buff);
+          std::memcpy(tmp.data(), buf, nelems * elem_size);
+          #pragma omp parallel for collapse(2)
+          for (int64_t m = 0; m < M_dim; ++m) {
+            for (int64_t g = 0; g < G_dim; ++g) {
+              std::memcpy(buf + static_cast<size_t>(m * G_dim + g) * elem_size,
+                          tmp.data() + static_cast<size_t>(g * M_dim + m) * elem_size,
+                          elem_size);
+            }
+          }
+        }
+      }
+      params.quant_params.src_scale.buff = scale_buff;
+      apilog_info("Reorder quantization: per-token dynamic scales (compute-only); "
+                  "source left as ",
+                  dtype_info(orig_src_dtype),
+                  " for native bf16s8/f32s8 GEMM");
+      return status_t::success;
+    }
+    log_error("Reorder quantization: compute-only scale failed, "
+              "falling back to s8 source quantization");
+  }
+
+  void *zp_buff = nullptr;
+  if (needs_zp) {
+    zp_buff = const_cast<void *>(params.quant_params.src_zp.buff);
+    if (!zp_buff) {
+      int64_t n = 1;
+      for (auto d : params.quant_params.src_zp.dims) n *= d;
+      buffers.zp_buf = static_cast<uint8_t *>(
+          malloc(static_cast<size_t>(n) *
+                 size_of(params.quant_params.src_zp.dt)));
+      if (!buffers.zp_buf) {
+        log_error("Reorder quantization: failed to allocate zero-point buffer");
+        return status_t::failure;
+      }
+      zp_buff = buffers.zp_buf;
+    }
+  }
+
   if (needs_zp) {
     rp.quant_params.zero_point.buff = zp_buff;
     rp.quant_params.zero_point.dt = params.quant_params.src_zp.dt;
     rp.quant_params.zero_point.dims = params.quant_params.src_zp.dims;
+  }
+
+  buffers.src_buf = static_cast<uint8_t *>(
+      malloc(static_cast<size_t>(batch_A * phys_rows * phys_cols)));
+  if (!buffers.src_buf) {
+    log_error("Reorder quantization: failed to allocate quantized source buffer");
+    return status_t::failure;
   }
 
   const status_t reorder_status = zendnnl::lowoha::reorder::reorder_direct(

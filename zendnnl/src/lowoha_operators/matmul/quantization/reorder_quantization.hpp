@@ -64,6 +64,11 @@ struct reorder_quant_buffers_t {
  * - Dynamic (true):  Computes scale (and zp for u8) on-the-fly.
  * - Static  (false): Uses user-provided scale (and zp for u8) values.
  *
+ * Per-token symmetric dynamic quant (bf16/f32 src, s8 weights, s8 compute):
+ * controlled by macro ZENDNNL_LOWOHA_DQ_BF16S8 in reorder_quantization.cpp
+ * (1 = compute-only scales + bf16s8/f32s8 GEMM; 0 = quantize A to s8 + s8s8_sym_quant).
+ * Other granularities still quantize the source to s8/u8.
+ *
  * @param[in,out] src              Source data pointer; updated on success
  * @param[in]     lda              Leading dimension of original source
  * @param[in,out] reordered_lda    Updated to contiguous lda on success

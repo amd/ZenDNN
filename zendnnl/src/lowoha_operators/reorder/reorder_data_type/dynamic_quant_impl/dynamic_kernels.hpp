@@ -52,6 +52,29 @@ void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t K, int64_t G);
 
+// Per-row scale / zp only (AVX-512F pass 1), contiguous [M,N], batch = 1.
+// Used by compute_dynamic_quant_params when dst is nullptr (compute scales
+// only) and by the unfused 2-pass kernels below. num_threads <= 0 uses
+// omp_get_max_threads() for the OpenMP team size.
+void dynamic_per_token_compute_scales_bf16_s8_symmetric(const uint16_t *src,
+                                                         float *scales,
+                                                         int64_t M, int64_t N,
+                                                         int num_threads);
+void dynamic_per_token_compute_scales_f32_s8_symmetric(const float *src,
+                                                        float *scales,
+                                                        int64_t M, int64_t N,
+                                                        int num_threads);
+void dynamic_per_token_compute_scales_bf16_u8_asymmetric(const uint16_t *src,
+                                                          float *scales,
+                                                          int32_t *zps,
+                                                          int64_t M, int64_t N,
+                                                          int num_threads);
+void dynamic_per_token_compute_scales_f32_u8_asymmetric(const float *src,
+                                                         float *scales,
+                                                         int32_t *zps,
+                                                         int64_t M, int64_t N,
+                                                         int num_threads);
+
 // Unfused 2-pass per-token AVX512 native kernels
 void dynamic_per_token_quant_bf16_s8_unfused_native(const uint16_t *src,
                                                      int8_t *dst, float *scales,

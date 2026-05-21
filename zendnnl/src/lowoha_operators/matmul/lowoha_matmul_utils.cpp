@@ -713,12 +713,23 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   for (auto d : params.quant_params.src_scale.dims) {
     src_scale_nelems *= static_cast<size_t>(d);
   }
-  const bool is_sym_quant = params.dtypes.src == data_type_t::s8 &&
-                            params.dtypes.wei == data_type_t::s8 &&
+  const bool is_bf16_f32_per_token_sym =
+      params.dtypes.wei == data_type_t::s8 &&
+      (params.dtypes.src == data_type_t::bf16 ||
+       params.dtypes.src == data_type_t::f32) &&
+      !params.quant_params.src_zp.buff &&
+      src_scale_nelems > 1 &&
+      src_scale_nelems == static_cast<size_t>(M) &&
+      (params.dtypes.dst == data_type_t::f32 ||
+       params.dtypes.dst == data_type_t::bf16);
+
+  const bool is_sym_quant = params.dtypes.wei == data_type_t::s8 &&
                             !params.quant_params.src_zp.buff &&
                             src_scale_nelems > 1 &&
                             (params.dtypes.dst == data_type_t::f32 ||
-                             params.dtypes.dst == data_type_t::bf16);
+                             params.dtypes.dst == data_type_t::bf16) &&
+                            (params.dtypes.src == data_type_t::s8 ||
+                             is_bf16_f32_per_token_sym);
 
   if (is_sym_quant && kernel != matmul_algo_t::aocl_dlp_blocked) {
     kernel = matmul_algo_t::aocl_dlp_blocked;
@@ -726,7 +737,8 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
 
   const bool is_non_qunat_int8 = (params.dtypes.src == data_type_t::bf16 ||
                                   params.dtypes.src == data_type_t::f32) &&
-                                 (params.dtypes.wei == data_type_t::s8);
+                                 (params.dtypes.wei == data_type_t::s8) &&
+                                 !is_bf16_f32_per_token_sym;
 
   if (is_non_qunat_int8 && kernel != matmul_algo_t::aocl_dlp_blocked) {
     log_info("Non-quantized INT8 detected, switching to aocl_dlp kernel");

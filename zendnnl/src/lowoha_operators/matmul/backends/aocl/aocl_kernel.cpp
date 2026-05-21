@@ -19,7 +19,6 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
 #include <cstdlib>
-#include <cstring>
 #include <mutex>
 
 namespace zendnnl {
@@ -177,6 +176,7 @@ void clear_aocl_woq_weight_cache_under_lock() {
   std::lock_guard<std::mutex> lock(get_aocl_woq_weight_cache_mutex());
   get_aocl_woq_weight_cache().clear();
 }
+
 void clear_aocl_symquant_weight_cache_under_lock() {
   std::lock_guard<std::mutex> lock(get_aocl_symquant_weight_cache_mutex());
   get_aocl_symquant_weight_cache().clear();
@@ -286,7 +286,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
   }
 
   if (weight_cache_type == 0) {
-    apilog_info("AOCL sym_quant reorder weights (WEIGHT_CACHE_DISABLE)");
+    apilog_info("AOCL grouped symmetric-quant reorder for s8 weights "
+                "(WEIGHT_CACHE_DISABLE); GEMM = s8s8_sym_quant");
     size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                    k, n, symq_meta, nullptr);
     size_t alignment    = 64;
@@ -399,14 +400,18 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
   size_t run_src_scale_nelems = get_num_elements(
                                   lowoha_param.quant_params.src_scale.dims);
-  bool is_sym_quant = dtypes.wei == data_type_t::s8 &&
-                      dtypes.src == data_type_t::s8 &&
-                      !lowoha_param.quant_params.src_zp.buff &&
-                      run_src_scale_nelems > 1 &&
-                      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16);
+
+  // s8×s8 sym_quant uses a distinct blocked weight layout. bf16/f32 per-token
+  // still runs bf16s8/f32s8 GEMMs with standard s8 blocked weights + a_pre/a_post.
+  const bool is_s8_sym_quant_scales =
+      dtypes.wei == data_type_t::s8 &&
+      !lowoha_param.quant_params.src_zp.buff &&
+      run_src_scale_nelems > 1 &&
+      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16) &&
+      dtypes.src == data_type_t::s8;
 
   size_t cache_extra_hash = 0;
-  if (is_sym_quant) {
+  if (is_s8_sym_quant_scales) {
     int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
                       ? K : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
     cache_extra_hash = std::hash<int64_t> {}(src_grp);
@@ -449,7 +454,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                      weight_cache_type);
     }
     else if (lowoha_param.dtypes.wei == data_type_t::s8) {
-      if (is_sym_quant) {
+      if (is_s8_sym_quant_scales) {
         int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
                           ? K : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
         DLP_SYMM_STAT_QUANT symq_meta;
@@ -710,7 +715,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   else if (dtypes.src == data_type_t::s8 && dtypes.wei == data_type_t::s8) {
     const int8_t *weight_ptr = is_weight_blocked ? static_cast<int8_t *>
                                (reordered_mem) : static_cast<const int8_t *>(B);
-    if (is_sym_quant) {
+    if (is_s8_sym_quant_scales) {
       switch (dtypes.dst) {
       case data_type_t::f32:
         aocl_gemm_s8s8s32of32_sym_quant(layout, transA, transB, M, N, K, alpha,

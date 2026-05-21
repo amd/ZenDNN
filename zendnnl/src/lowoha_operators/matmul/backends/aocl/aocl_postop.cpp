@@ -203,22 +203,37 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   // Check if this is INT8 quantization case
   bool is_int8 = dtypes.wei == data_type_t::s8;
 
-  bool is_non_quant_src_int8 = (dtypes.src == data_type_t::bf16 ||
-                                dtypes.src == data_type_t::f32) &&
-                               is_int8;
-
   size_t src_scale_nelems = get_num_elements(
                               lowoha_param.quant_params.src_scale.dims);
-  bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8 &&
-                      !lowoha_param.quant_params.src_zp.buff &&
-                      src_scale_nelems > 1 &&
-                      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16);
+  // bf16/f32 + s8 with per-token symmetric scales: per-row a_pre_quant /
+  // a_post_quant carry the src scales, while the weight scale remains a SCALE op.
+  const bool is_bf16_f32_per_token_sym =
+    is_int8 &&
+    (dtypes.src == data_type_t::bf16 || dtypes.src == data_type_t::f32) &&
+    !lowoha_param.quant_params.src_zp.buff &&
+    src_scale_nelems > 1 &&
+    src_scale_nelems == static_cast<size_t>(M) &&
+    (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16);
 
-  // Count INT8 scale post-ops (sym_quant scales go via post_op_grp, not SCALE post-ops)
+  bool is_non_quant_src_int8 = (dtypes.src == data_type_t::bf16 ||
+                                dtypes.src == data_type_t::f32) &&
+                               is_int8 &&
+                               !is_bf16_f32_per_token_sym;
+
+  // post_op_grp is consumed by s8s8 *_sym_quant GEMMs; bf16s8/f32s8 paths use
+  // a_pre_quant/a_post_quant and regular SCALE post-ops instead.
+  const bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8 &&
+                            !lowoha_param.quant_params.src_zp.buff &&
+                            src_scale_nelems > 1 &&
+                            (dtypes.dst == data_type_t::f32 ||
+                             dtypes.dst == data_type_t::bf16);
+
+  // Count INT8 scale post-ops (s8 sym_quant scales go via post_op_grp; bf16/f32
+  // per-token source scales go via a_pre_quant/a_post_quant).
   int int8_scale_count = 0;
   if (is_int8) {
     if (lowoha_param.quant_params.src_scale.buff && !is_non_quant_src_int8 &&
-        !is_sym_quant) {
+        !is_sym_quant && !is_bf16_f32_per_token_sym) {
       int8_scale_count++;
     }
     if (lowoha_param.quant_params.wei_scale.buff && !is_sym_quant) {
@@ -316,8 +331,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   else {
     dlp_metadata->seq_vector = nullptr;
   }
-  // Allocate pre-quantization INT8 scale
-  if (is_non_quant_src_int8) {
+  // Allocate pre/post quant metadata for bf16/f32 + s8. Scalar and asymmetric
+  // cases use a single source scale; per-token symmetric uses M scales.
+  if (is_non_quant_src_int8 || is_bf16_f32_per_token_sym) {
     dlp_metadata->a_pre_quant = static_cast<dlp_quant_op *>(calloc(1,
                                 sizeof(dlp_quant_op)));
     if (!dlp_metadata->a_pre_quant) {
@@ -373,29 +389,43 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
+    const data_type_t src_scale_dt = lowoha_param.quant_params.src_scale.dt;
+    const md_t src_quant_scale_len =
+      is_bf16_f32_per_token_sym ? static_cast<md_t>(src_scale_nelems) : 1;
+
     dlp_metadata->a_pre_quant->group_size = 0;
+    dlp_metadata->a_post_quant->group_size = 0;
     dlp_metadata->a_pre_quant->src_type = to_dlp_type(dtypes.src);
     dlp_metadata->a_pre_quant->dst_type = DLP_S8;
-    dlp_metadata->a_pre_quant->scl->scale_factor = malloc(sizeof(float));
-    if (!dlp_metadata->a_pre_quant->scl->scale_factor) {
+    dlp_metadata->a_post_quant->src_type = to_dlp_type(dtypes.src);
+    dlp_metadata->a_post_quant->dst_type = DLP_S8;
+
+    float *inv_scales = static_cast<float *>(
+        malloc(static_cast<size_t>(src_quant_scale_len) * sizeof(float)));
+    if (!inv_scales) {
       log_error("BF16-INT8: Failed to allocate pre_quant scale_factor");
       cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
-    float inv_scale_factor = 1.0f / (static_cast<const float *>
-                                     (lowoha_param.quant_params.src_scale.buff))[0];
-    *static_cast<float *>(dlp_metadata->a_pre_quant->scl->scale_factor) =
-      inv_scale_factor;
-    dlp_metadata->a_pre_quant->scl->scale_factor_len = 1;
+    for (md_t si = 0; si < src_quant_scale_len; ++si) {
+      float s = read_and_cast<float>(
+                  lowoha_param.quant_params.src_scale.buff, src_scale_dt,
+                  static_cast<size_t>(si));
+      if (s < 1e-20f) {
+        s = 1e-20f;
+      }
+      inv_scales[si] = 1.0f / s;
+    }
+
+    dlp_metadata->a_pre_quant->scl->scale_factor = inv_scales;
+    dlp_metadata->a_pre_quant->scl->scale_factor_len = src_quant_scale_len;
     dlp_metadata->a_pre_quant->scl->scale_factor_type = DLP_F32;
     // Set scale factor for post-quantization
-    dlp_metadata->a_post_quant->group_size = 0;
-    dlp_metadata->a_post_quant->src_type = to_dlp_type(dtypes.src);
-    dlp_metadata->a_post_quant->dst_type = DLP_S8;
     dlp_metadata->a_post_quant->scl->scale_factor = const_cast<void *>
         (lowoha_param.quant_params.src_scale.buff);
-    dlp_metadata->a_post_quant->scl->scale_factor_len = 1;
-    dlp_metadata->a_post_quant->scl->scale_factor_type = DLP_F32;
+    dlp_metadata->a_post_quant->scl->scale_factor_len = src_quant_scale_len;
+    dlp_metadata->a_post_quant->scl->scale_factor_type =
+      to_dlp_type(src_scale_dt);
   }
   if (is_sym_quant) {
     int64_t src_group_size = (src_scale_nelems == static_cast<size_t>(M))
@@ -605,9 +635,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     matrix_add_index++;
   }
 
-  // For INT8: Add source scale (skip for sym_quant, handled via post_op_grp)
+  // For INT8: Add source scale unless it is handled by post_op_grp or
+  // a_pre_quant/a_post_quant.
   if (is_int8 && lowoha_param.quant_params.src_scale.buff &&
-      !is_non_quant_src_int8 && !is_sym_quant) {
+      !is_non_quant_src_int8 && !is_sym_quant && !is_bf16_f32_per_token_sym) {
     dlp_metadata->seq_vector[op_index++] = SCALE;
     dlp_metadata->scale[scale_index].sf->scale_factor =
       const_cast<void *>(lowoha_param.quant_params.src_scale.buff);

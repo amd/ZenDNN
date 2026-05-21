@@ -15,10 +15,12 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
+#include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
 #include "common/zendnnl_global.hpp"
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace zendnnl {
 namespace lowoha {
@@ -725,6 +727,81 @@ status_t compute_dynamic_quant_params(const void *src, const reorder_params_t &p
     bool is_per_row = is_per_channel_row_dims(scale_dims, shape);
     
     if (is_per_row) {
+      const bool contiguous_batch1 =
+          (batch == 1 && stride_n == 1 && stride_m == N &&
+           (!has_strides || stride_b == M * N));
+
+      if (contiguous_batch1 && M > 0 && N > 0) {
+        if (is_symmetric) {
+          if (is_bf16_src) {
+            if (scale_out_bf16) {
+              std::vector<float> tmp(static_cast<size_t>(M));
+              dynamic_per_token_compute_scales_bf16_s8_symmetric(
+                  src_bf16, tmp.data(), M, N, nthreads);
+              for (int64_t m = 0; m < M; ++m) {
+                scale_out_bf16p[m] =
+                    float_to_bf16(tmp[static_cast<size_t>(m)]);
+              }
+            }
+            else {
+              dynamic_per_token_compute_scales_bf16_s8_symmetric(
+                  src_bf16, scale_out_f32, M, N, nthreads);
+            }
+            return status_t::success;
+          }
+          if (!is_bf16_src) {
+            if (scale_out_bf16) {
+              std::vector<float> tmp(static_cast<size_t>(M));
+              dynamic_per_token_compute_scales_f32_s8_symmetric(
+                  src_f32, tmp.data(), M, N, nthreads);
+              for (int64_t m = 0; m < M; ++m) {
+                scale_out_bf16p[m] =
+                    float_to_bf16(tmp[static_cast<size_t>(m)]);
+              }
+            }
+            else {
+              dynamic_per_token_compute_scales_f32_s8_symmetric(
+                  src_f32, scale_out_f32, M, N, nthreads);
+            }
+            return status_t::success;
+          }
+        }
+        else if (zp_out != nullptr) {
+          if (is_bf16_src) {
+            if (scale_out_bf16) {
+              std::vector<float> tmp(static_cast<size_t>(M));
+              dynamic_per_token_compute_scales_bf16_u8_asymmetric(
+                  src_bf16, tmp.data(), zp_out, M, N, nthreads);
+              for (int64_t m = 0; m < M; ++m) {
+                scale_out_bf16p[m] =
+                    float_to_bf16(tmp[static_cast<size_t>(m)]);
+              }
+            }
+            else {
+              dynamic_per_token_compute_scales_bf16_u8_asymmetric(
+                  src_bf16, scale_out_f32, zp_out, M, N, nthreads);
+            }
+            return status_t::success;
+          }
+          if (!is_bf16_src) {
+            if (scale_out_bf16) {
+              std::vector<float> tmp(static_cast<size_t>(M));
+              dynamic_per_token_compute_scales_f32_u8_asymmetric(
+                  src_f32, tmp.data(), zp_out, M, N, nthreads);
+              for (int64_t m = 0; m < M; ++m) {
+                scale_out_bf16p[m] =
+                    float_to_bf16(tmp[static_cast<size_t>(m)]);
+              }
+            }
+            else {
+              dynamic_per_token_compute_scales_f32_u8_asymmetric(
+                  src_f32, scale_out_f32, zp_out, M, N, nthreads);
+            }
+            return status_t::success;
+          }
+        }
+      }
+
       // Per-channel-row (per-token): M values, one per row
       // This matches the "per-token" quantization from the spec
       #pragma omp parallel for num_threads(nthreads)
