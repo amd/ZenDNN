@@ -114,10 +114,11 @@ inline bool prepack_extras_metadata_undersized(
 //   (i)  This function — `validate_group_matmul_direct_inputs` —
 //        owns the FULL Phase A-G input contract with rich
 //        `log_error` diagnostics.  Wrapped in
-//        `op_instrumentation::validate(...)`, so the body runs only
-//        when `ZENDNNL_DIAGNOSTICS_ENABLE=1` was captured at first
-//        call.  Production builds with diagnostics off skip the
-//        entire body.
+//        `op_instrumentation::validate(...)`, whose gate defaults
+//        to ENABLED; the body therefore runs on first call unless
+//        `ZENDNNL_DIAGNOSTICS_ENABLE=0` was captured at process
+//        start.  Production deployments that disable diagnostics
+//        explicitly skip the entire body.
 //
 //   (ii) The dispatch body (`group_matmul_direct(...)` below) carries
 //        an always-on inline guard that runs the SUBSET of Phase A
@@ -323,8 +324,10 @@ status_t validate_group_matmul_direct_inputs(
   // first become active, defeating eager prepack.  Reject up front
   // with a precise diagnostic so framework integrators can tell at a
   // glance which vector was undersized.  Diagnostic-only path
-  // (DIAGNOSTICS_ENABLE=1); the always-on inline guard returns the
-  // same failure without the log_error in production builds.
+  // (gated by ZENDNNL_DIAGNOSTICS_ENABLE, default ON; bypassed only
+  // when explicitly set to "0"); the always-on inline guard returns
+  // the same failure without the log_error when diagnostics are
+  // disabled.
   if (size_ctx.relaxed
       && params[0].total_matmul > params[0].active_matmul) {
     undersized_info first_failure{};
@@ -769,7 +772,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   //
   // Phase B-G (per-element null / dimension / fused-MoE /
   // moe-postop) plus the rich `log_error` messages remain behind
-  // `ZENDNNL_DIAGNOSTICS_ENABLE` and live in
+  // the `ZENDNNL_DIAGNOSTICS_ENABLE` gate (default ON; disabled
+  // only when explicitly set to `0`) and live in
   // `validate_group_matmul_direct_inputs()`.
   if (M.empty() || params.empty() || src.empty())
     return status_t::failure;
@@ -936,9 +940,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     }
   }
 
-  // Diagnostic-only full input validation.  No-op at near-zero cost
-  // when ZENDNNL_DIAGNOSTICS_ENABLE is unset (single branch), full
-  // contract enforcement when set.  See the doc-block above
+  // Diagnostic-only full input validation.  Runs by default (the
+  // gate is ON when ZENDNNL_DIAGNOSTICS_ENABLE is unset or set to
+  // anything other than "0"); collapses to a single predicted-
+  // taken branch when explicitly disabled via
+  // ZENDNNL_DIAGNOSTICS_ENABLE=0.  See the doc-block above
   // validate_group_matmul_direct_inputs() for the seven phases.
   status_t val = op_instrumentation::validate([&]() {
     return validate_group_matmul_direct_inputs(

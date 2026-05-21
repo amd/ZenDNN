@@ -165,12 +165,25 @@ void matmul_execute(const char layout,
                            params.dtypes.dst == data_type_t::bf16 ||
                            params.dtypes.dst == data_type_t::s8 ||
                            params.dtypes.dst == data_type_t::u8));
+    // TODO: Remove this workaround once the native kernel supports mish
+    bool has_mish = false;
+    for (size_t i = 0; i < params.postop_.size(); ++i) {
+      if (params.postop_[i].po_type == post_op_type_t::mish) {
+        has_mish = true;
+        break;
+      }
+    }
     if (!is_fp32 && !is_bf16 && !is_int8) {
       log_info("Native kernel: unsupported data type, falling back to aocl_dlp");
       kernel = matmul_algo_t::aocl_dlp;
     }
     else if (transA) {
       log_info("Native kernel: transA not supported, falling back to aocl_dlp");
+      kernel = matmul_algo_t::aocl_dlp;
+    }
+    else if (has_mish) {
+      log_info("Native kernel: mish post-op not implemented in the native "
+               "dispatcher, falling back to aocl_dlp");
       kernel = matmul_algo_t::aocl_dlp;
     }
     else {
@@ -234,10 +247,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     return status_t::isa_unsupported;
   }
 
-  // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this
-  // resolves to a single predicted-not-taken branch, skipping the full
-  // validation path (null-pointer checks, dimension checks, and
-  // quantization-parameter validation).
+  // Validate inputs unless ZENDNNL_DIAGNOSTICS_ENABLE=0 is set (the gate
+  // defaults to enabled). In production hot paths where the variable is
+  // explicitly disabled, this resolves to a single predicted-taken branch,
+  // skipping the full validation path (null-pointer checks, dimension
+  // checks, and quantization-parameter validation).
   status_t status = zendnnl::common::op_instrumentation::validate([&]() {
     return validate_matmul_direct_inputs(src, weight, dst, M, N, K,
                                          batch_params.Batch_A, batch_params.Batch_B,
@@ -249,7 +263,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
   // [in,out] Mutates params.postop_[].leading_dim: defaults to N for binary
   // post-ops when the caller leaves it at -1. Must always execute regardless
-  // of the ZENDNNL_DIAGNOSTICS_ENABLE flag.
+  // of the ZENDNNL_DIAGNOSTICS_ENABLE flag (i.e. even when diagnostics are
+  // explicitly disabled with ZENDNNL_DIAGNOSTICS_ENABLE=0).
   for (auto &po : params.postop_) {
     if (po.po_type == post_op_type_t::binary_add ||
         po.po_type == post_op_type_t::binary_mul) {

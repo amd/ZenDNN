@@ -418,6 +418,7 @@ const post_op_type_t post_op_arr[] = {
   post_op_type_t::clip,
   post_op_type_t::binary_add,
   post_op_type_t::binary_mul,
+  post_op_type_t::mish,
   post_op_type_t::none
 };
 
@@ -502,6 +503,14 @@ std::string postOpsToStr(post_op_type_t post_op);
  *         non-`none` names joined with ':'.
  */
 std::string postOpTypesToStr(const std::vector<post_op_type_t> &po_types);
+
+/**
+ * @fn neutralize_mish_quant_int8
+ * @brief Replace mish post-op with `none` when running INT8 tests on the dynamic quant or sym quant.
+ *
+ * @param po_types Post-op chain to mutate in place.
+ */
+void neutralize_mish_quant_int8(std::vector<post_op_type_t> &po_types);
 
 /** @fn read_matmul_inputs
  *  @brief Read and parse matmul test configurations from a file

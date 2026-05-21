@@ -107,6 +107,9 @@ static void setup_dlp_postops(dlp_metadata_t *md,
     case post_op_type_t::clip:
       put_eltwise(CLIP, get_void_ptr(po.alpha), get_void_ptr(po.beta));
       break;
+    case post_op_type_t::mish:
+      put_eltwise(MISH);
+      break;
     case post_op_type_t::binary_add:
       put_matrix(md->matrix_add, matrix_add_index, MATRIX_ADD, po);
       break;
@@ -305,6 +308,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     case post_op_type_t::swish:
     case post_op_type_t::tanh:
     case post_op_type_t::clip:
+    case post_op_type_t::mish:
       eltwise_count++;
       break;
     case post_op_type_t::binary_add:

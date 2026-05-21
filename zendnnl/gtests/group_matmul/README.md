@@ -298,7 +298,7 @@ first read for the process lifetime, in-process `setenv` is a no-op).
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` | 0 (off) | yes | Override outer N-tile minimum |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | 1 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP cache; 0 short-circuits the prepack AOCL warmer |
 | `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | AOCL DLP reorder LRU capacity.  Caps the prepack guarantee — populated entries can be evicted under pressure.  No effect on the custom-kernel pack arena (intentionally eviction-immune). |
-| `ZENDNNL_DIAGNOSTICS_ENABLE` | OFF | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Used by `[15]` subprocess test to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
+| `ZENDNNL_DIAGNOSTICS_ENABLE` | ON (set `=0` to disable) | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Default-enabled so contract violations are surfaced; the `[15]` subprocess test re-asserts the knob explicitly via `setenv(..., "1")` to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
 
 Cached = read once via `static const v = []() { getenv(...); }()` at first
 call.  Production deployments set these once at process start; tests

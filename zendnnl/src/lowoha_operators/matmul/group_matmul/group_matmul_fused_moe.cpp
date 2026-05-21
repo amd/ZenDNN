@@ -278,7 +278,8 @@ status_t group_matmul_fused_moe_execute(
   //
   // Silent-wrong-result scalars (bias dtype declaration, activation
   // dtype bucket, mixed-state dst[] iteration when legacy mode is
-  // engaged) move under ZENDNNL_DIAGNOSTICS_ENABLE below because
+  // engaged) move under the ZENDNNL_DIAGNOSTICS_ENABLE gate below
+  // (default ON; bypassed only when explicitly set to "0") because
   // they are either already covered by group_matmul_direct's
   // phase-D/F validator or produce wrong numbers without corrupting
   // memory.

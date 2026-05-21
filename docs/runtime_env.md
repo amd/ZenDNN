@@ -148,6 +148,22 @@ Log levels control the verbosity of messages for different modules.
 
 ---
 
+## Diagnostics Configuration
+
+The diagnostics layer gates expensive input-validation paths (null-pointer checks, dimension checks, quantization-parameter checks, and fused-MoE / group-MatMul contract checks) inside the low-overhead operators (`matmul`, `group_matmul`, `flash_sdpa`, `normalization`).  See `src/lowoha_operators/common/operator_instrumentation.hpp` for the gate implementation.
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_DIAGNOSTICS_ENABLE` | Master switch for runtime input validation in low-overhead operators.  When enabled, validators run and emit rich `log_error` diagnostics on contract violations.  When disabled, the gate collapses to a single predicted-taken branch with no validator body executed.  Cached on first read. | `1` (enabled) | `0` (disabled); unset or any other value (enabled) |
+
+### Notes
+
+- The gate covers diagnostic-only checks.  Memory-safety checks that are always required (e.g. empty-vector reject in `group_matmul_direct`, post-op `leading_dim` defaulting in `matmul`) execute unconditionally regardless of this flag.
+- Profiling and logging are separate subsystems (`ZENDNNL_ENABLE_PROFILER`, `ZENDNNL_*_LOG_LEVEL`) and are NOT controlled by this flag.
+- The value is captured once per process via `static const bool`, so in-process `setenv` / `unsetenv` calls after the first validator call have no effect.  Tests that need to deterministically toggle the gate must do so via `fork()` / `execve()` subprocesses (see `[15] TestDispatcherActiveTotalNegative` in `gtests/group_matmul/test_fused_moe.cpp`).
+
+---
+
 ## LRU Cache Configuration
 
 The LRU (Least Recently Used) cache stores precomputed data for reuse.

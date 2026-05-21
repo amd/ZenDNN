@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -85,6 +85,9 @@ std::string post_op_t::post_op_info(post_op_t post_op) {
     break;
   case post_op_type_t::binary_mul:
     return std::string("binary_mul");
+    break;
+  case post_op_type_t::mish:
+    return std::string("mish");
     break;
   default:
     return std::string("");

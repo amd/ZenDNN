@@ -449,6 +449,13 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                                    lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
         break;
       }
+      case post_op_type_t::mish: {
+        log_info("Adding mish post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_mish,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
       case post_op_type_t::clip: {
         log_info("Adding Clip post-op");
         matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip,

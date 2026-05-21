@@ -149,6 +149,7 @@ The following post-operations are supported for matmul and its variations:
 - `sigmoid`
 - `swish`
 - `tanh`
+- `mish`
 - `binary_add`
 - `binary_mul`
 
@@ -330,7 +331,7 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 **Field Descriptions:**
 - **M, K, N**: Matrix dimensions
 - **BS**: Batch size (for batch matmul only)
-- **postOp**: Post-op(s) after the GEMM; for a chain, join with **`:`** (e.g. `relu:tanh`). Same token names as a single op: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `binary_add`, `binary_mul`, or `none`. The chain may include at most **`POST_OPS_LIMIT`** operations (default `3`).
+- **postOp**: Post-op(s) after the GEMM; for a chain, join with **`:`** (e.g. `relu:tanh`). Same token names as a single op: `relu`, `gelu_tanh`, `gelu_erf`, `sigmoid`, `swish`, `tanh`, `mish`, `binary_add`, `binary_mul`, or `none`. The chain may include at most **`POST_OPS_LIMIT`** operations (default `3`).
 - **kernel**: Backend algorithm (aocl_dlp, aocl_dlp_blocked, onednn, onednn_blocked, libxsmm, libxsmm_blocked)
 - **transA, transB**: Transpose flags (0 or 1)
 - **alpha, beta**: Scaling factors for matmul operations

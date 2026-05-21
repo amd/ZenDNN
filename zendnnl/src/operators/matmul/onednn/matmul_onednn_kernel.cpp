@@ -268,6 +268,11 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip, po_alpha, po_beta);
         break;
       }
+      case post_op_type_t::mish: {
+        po_alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_mish, po_alpha, po_beta);
+        break;
+      }
       case post_op_type_t::binary_add: {
         std::string key_add = "binary_add_tensor_" + std::to_string(add_index++);
         auto buffer_it      = inputs_.find(key_add);

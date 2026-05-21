@@ -164,12 +164,21 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                      params.quant_params.wei_scale.dims.end(),
                                      int64_t{1}, std::multiplies<int64_t>())
                                  : 0;
-      if (is_per_token && wei_scale_nelems != static_cast<int64_t>(N)) {
+      // GGML-packed weights (pack_format_b == 1) carry per-group fp16
+      // scales interleaved inside the packed buffer; the matching
+      // params.quant_params.wei_scale.{buff,dt,dims} is populated later
+      // by unpack_ggml_weights_and_cache, after this validator runs. The
+      // dim cross-check below only applies when the caller is responsible
+      // for supplying a separate weight scale buffer.
+      const bool wei_scale_supplied_externally =
+          (params.packing.pack_format_b != 1);
+      if (wei_scale_supplied_externally && is_per_token &&
+          wei_scale_nelems != static_cast<int64_t>(N)) {
         log_error("Per-token source scale requires per-channel weight scale "
                   "(expected ", N, " elements, got ", wei_scale_nelems, ")");
         return status_t::failure;
       }
-      if (is_per_group) {
+      if (wei_scale_supplied_externally && is_per_group) {
         int64_t src_num_groups = nelems / static_cast<int64_t>(M);
         int64_t expected_wei_nelems = src_num_groups * static_cast<int64_t>(N);
         if (wei_scale_nelems != expected_wei_nelems) {
@@ -256,12 +265,37 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
+  // Lazy sym_quant / dynamic_quant detection: only pay for it if a
+  // mish post-op is actually present.  Keeps the common case (no mish
+  // in the chain) at a single load+compare per post-op, even when this
+  // validator runs.
+  bool dlp_int8_path_checked = false;
+  bool dlp_int8_path = false;
   for (size_t i = 0; i < params.postop_.size(); ++i) {
     auto &po = params.postop_[i];
     if (po.po_type == post_op_type_t::clip) {
       if (!std::isfinite(po.alpha) || !std::isfinite(po.beta)) {
         log_error("Clip post-op[", i, "]: alpha (lower) and beta (upper) "
                   "must be finite, got alpha=", po.alpha, ", beta=", po.beta);
+        return status_t::failure;
+      }
+    }
+    // The AOCL-DLP classic sym_quant kernel rejects mish and silently
+    // drops it, producing wrong results.  Reject upfront so callers see
+    // a clear failure instead of a corrupted output.  Dynamic
+    // quantization (`params.dynamic_quant`) converts the source to s8/u8
+    // and lands on the same kernel, so it falls in the same bucket.
+    else if (po.po_type == post_op_type_t::mish) {
+      if (!dlp_int8_path_checked) {
+        dlp_int8_path =
+          is_sym_quant_config(params) || is_dynamic_quant_config(params);
+        dlp_int8_path_checked = true;
+      }
+      if (dlp_int8_path) {
+        log_error("Post-op[", i, "]: mish is not supported on the AOCL-DLP "
+                  "INT8 sym_quant / dynamic_quant kernel path (s8/s8 with "
+                  "per-token/per-group src scale + f32/bf16 dst, or "
+                  "dynamic_quant of bf16/f32 src to s8/u8 with s8 wei).");
         return status_t::failure;
       }
     }
@@ -294,6 +328,8 @@ inline const char *post_op_type_to_string(post_op_type_t type) {
     return "binary_add";
   case post_op_type_t::binary_mul:
     return "binary_mul";
+  case post_op_type_t::mish:
+    return "mish";
   default:
     return "unknown";
   }

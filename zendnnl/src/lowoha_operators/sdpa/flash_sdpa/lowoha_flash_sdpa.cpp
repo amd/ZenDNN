@@ -50,10 +50,11 @@ status_t flash_sdpa(
   void *output,
   const sdpa_params &params) {
 
-  // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this
-  // resolves to a single predicted-not-taken branch, skipping the full
-  // validation path (null-pointer checks, dimension checks, and
-  // quantization-parameter validation).
+  // Validate inputs unless ZENDNNL_DIAGNOSTICS_ENABLE=0 is set (the gate
+  // defaults to enabled). In production hot paths where the variable is
+  // explicitly disabled, this resolves to a single predicted-taken branch,
+  // skipping the full validation path (null-pointer checks, dimension
+  // checks, and quantization-parameter validation).
   status_t status = zendnnl::common::op_instrumentation::validate([&]() {
     return validate_flash_sdpa_inputs(query, key, value, output, attn_mask, params);
   });

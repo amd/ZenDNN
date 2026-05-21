@@ -248,6 +248,9 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
       case post_op_type_t::clip:
         num_post_ops_eltwise++;
         break;
+      case post_op_type_t::mish:
+        num_post_ops_eltwise++;
+        break;
       case post_op_type_t::binary_add: {
         auto it = inputs_.find(zen_po.binary_add_params.tensor_name);
         if (it != inputs_.end() && it->second.get_size().size() == 1) {
@@ -431,6 +434,13 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       }
     }
     break;
+    case post_op_type_t::mish: {
+      log_info("Adding mish post-op");
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::MISH);
+      eltwise_index++;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
+      break;
+    }
     default:
       log_error("This postop in aocl is not supported");
       return status_t::failure;

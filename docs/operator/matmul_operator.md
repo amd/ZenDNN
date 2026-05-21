@@ -104,6 +104,7 @@ $$
   - Tanh
   - GELU (both erf and tanh variants)
   - SiLU (also known as Swish)
+  - Mish
 
 - **Flexible Composition**: The MatMul operator supports chaining multiple post-operations, allowing for expressive and customizable computation pipelines.
   - Multiple BinaryOps
@@ -325,6 +326,7 @@ This table provides a detailed overview of supported configurations for matrix m
 | GELU (erf)     | Gaussian Error Linear Unit (erf variant) |
 | GELU (tanh)    | Gaussian Error Linear Unit (tanh variant) |
 | SiLU           | Sigmoid Linear Unit (Swish)    |
+| Mish           | Mish                           |
 ---
 | Binary Post-Op | Description                     |
 |----------------|---------------------------------|

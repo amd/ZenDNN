@@ -640,6 +640,10 @@ status_t matmul_ref_kernel_t::apply_post_op(tensor_t &tensor_,
                           upper);
     break;
   }
+  case post_op_type_t::mish: {
+    apply_eltwise_post_op(&matmul_ref_kernel_t::mish_fwd, tensor_, output);
+    break;
+  }
   default:
     log_error("this postop is not supported in ref kernel");
     return status_t::unimplemented;
@@ -746,6 +750,14 @@ float matmul_ref_kernel_t::log_fwd(float x) {
 float matmul_ref_kernel_t::clip_fwd(float x, float lower, float upper) {
   x = x > lower ? x : lower;
   return x > upper ? upper : x ;
+}
+
+float matmul_ref_kernel_t::mish_fwd(float x) {
+  // Mish: x * tanh(softplus(x)) = x * tanh(ln(1 + e^x))
+  // Numerically stable softplus avoids overflow when x is large and positive:
+  // softplus(x) = max(x, 0) + log1p(exp(-|x|))
+  const float softplus = std::fmax(x, 0.0f) + std::log1p(std::exp(-std::fabs(x)));
+  return x * std::tanh(softplus);
 }
 
 float matmul_ref_kernel_t::binary_add_fwd(float x, float y, float scale) {

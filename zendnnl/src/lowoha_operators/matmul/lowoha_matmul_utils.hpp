@@ -163,6 +163,68 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const bool is_weights_const);
 
 /**
+ * @brief Detects a symmetric-quantization INT8 configuration.
+ *
+ * Returns true when @p params describes the AOCL-DLP sym_quant kernel
+ * path: s8 source, s8 weight, no source zero-point, a per-token or
+ * per-group source scale (more than one scale element), and an f32 or
+ * bf16 destination.  Mirrors the inline definitions used by
+ * `kernel_select` and the AOCL backend.  Used by the validator and the
+ * LOWOHA dispatcher to gate features (e.g. post-ops) that the classic
+ * AOCL-DLP sym_quant kernel does not support.
+ *
+ * @param params Matmul parameters.
+ * @return true if the config matches the sym_quant path; false otherwise.
+ */
+inline bool is_sym_quant_config(const matmul_params &params) {
+  // Cheapest short-circuit first: src/wei dtype.  Non-s8 sources skip
+  // every subsequent check (the vast majority of matmul calls).
+  if (params.dtypes.src != data_type_t::s8 ||
+      params.dtypes.wei != data_type_t::s8) {
+    return false;
+  }
+  if (params.quant_params.src_zp.buff) {
+    return false;
+  }
+  if (params.dtypes.dst != data_type_t::f32 &&
+      params.dtypes.dst != data_type_t::bf16) {
+    return false;
+  }
+  size_t src_scale_nelems = 1;
+  for (auto d : params.quant_params.src_scale.dims) {
+    src_scale_nelems *= static_cast<size_t>(d);
+  }
+  return src_scale_nelems > 1;
+}
+
+/**
+ * @brief Detects a dynamic-quantization INT8 configuration.
+ *
+ * Returns true when @p params describes the dynamic-quantization path
+ * that `reorder_quantization_wrapper` will pick up: `dynamic_quant`
+ * flag set, s8 weight, bf16/f32 source, and an s8/u8 compute dtype.
+ *
+ * @param params Matmul parameters.
+ * @return true if the config will be dynamic-quantized; false otherwise.
+ */
+inline bool is_dynamic_quant_config(const matmul_params &params) {
+  // Cheapest short-circuit: the dynamic_quant flag is unset for the
+  // vast majority of matmul calls.
+  if (!params.dynamic_quant) {
+    return false;
+  }
+  if (params.dtypes.wei != data_type_t::s8) {
+    return false;
+  }
+  if (params.dtypes.src != data_type_t::bf16 &&
+      params.dtypes.src != data_type_t::f32) {
+    return false;
+  }
+  return params.dtypes.compute == data_type_t::s8 ||
+         params.dtypes.compute == data_type_t::u8;
+}
+
+/**
  * @brief Convert post-op names to a comma-separated string.
  *
  * This function takes a matmul_params structure and converts all post-op types

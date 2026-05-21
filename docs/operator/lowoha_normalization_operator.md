@@ -444,7 +444,7 @@ If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f
 
 ## Diagnostics and Profiling
 
-- **Input validation** runs only when the environment variable `ZENDNNL_DIAGNOSTICS_ENABLE=1` is set. In production builds, validation resolves to a single predicted-not-taken branch.
+- **Input validation** runs by default. It is gated by the environment variable `ZENDNNL_DIAGNOSTICS_ENABLE`, which defaults to enabled (anything other than `0`). To disable validation in production hot paths and reduce the gate to a single predicted-taken branch, set `ZENDNNL_DIAGNOSTICS_ENABLE=0` before launching the application.
 - **Profiling** is controlled by the environment variable `ZENDNNL_ENABLE_PROFILER=1` and `ZENDNNL_PROFILE_LOG_LEVEL=4`. When active, `normalization_direct` reports execution time and operator parameters.
 
 ## Error Handling
@@ -454,7 +454,7 @@ The `normalization_direct` function returns `status_t`:
 - `status_t::success`: Operation completed successfully
 - `status_t::failure`: Operation failed (check logs for details)
 
-Common failure causes (checked when `ZENDNNL_DIAGNOSTICS_ENABLE=1`):
+Common failure causes (checked when diagnostics are enabled, i.e. `ZENDNNL_DIAGNOSTICS_ENABLE` is unset or set to anything other than `0`):
 - Null input or output pointers
 - `norm_type` not specified (`NONE`)
 - Unsupported `src_dt` or `dst_dt` (not f32 or bf16)

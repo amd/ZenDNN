@@ -165,6 +165,9 @@ post_op_type_t strToPostOps(const std::string &str) {
   if (str == "binary_mul") {
     return post_op_type_t::binary_mul;
   }
+  if (str == "mish") {
+    return post_op_type_t::mish;
+  }
   throw std::invalid_argument("Unknown post-op string '" + str + "'");
 }
 
@@ -206,6 +209,8 @@ std::string postOpsToStr(post_op_type_t post_op) {
     return "binary_add";
   case post_op_type_t::binary_mul:
     return "binary_mul";
+  case post_op_type_t::mish:
+    return "mish";
   default:
     return "relu";
   }

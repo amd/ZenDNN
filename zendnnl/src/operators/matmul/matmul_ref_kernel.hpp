@@ -303,6 +303,18 @@ class matmul_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
   float clip_fwd(float x, float lower, float upper);
 
   /**
+  * @brief Forward implementation of the Mish activation function.
+  *
+  * Mish is defined as: mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + e^x)).
+  * The implementation uses the numerically stable softplus form
+  * max(x, 0) + log1p(exp(-|x|)) to avoid overflow for large positive x.
+  *
+  * @param x Input value.
+  * @return Output value after applying Mish.
+  */
+  float mish_fwd(float x);
+
+  /**
   * @brief Forward implementation of the Binary Add operation.
   * @param x Input value.
   * @param y Second input value.

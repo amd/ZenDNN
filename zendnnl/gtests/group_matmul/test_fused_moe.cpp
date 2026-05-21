@@ -1651,25 +1651,30 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEActiveTotalEdge,
 //             ? total experts cannot be less than firing experts.
 //
 //      Both paths live behind `op_instrumentation::validate(...)`,
-//      which is a no-op unless `ZENDNNL_DIAGNOSTICS_ENABLE=1` was
-//      set at the time of the first call (the env value is captured
-//      once via `static const bool`).  Production runs WITHOUT
-//      diagnostics silently clamp `active_matmul` to `M.size()` via
-//      `std::min(am, M.size())` in the always-on inline guard
-//      (group_matmul_direct.cpp lines 695-699) and silently accept
-//      `total < active` because prepack accounting only uses
-//      `max(M.size(), total_matmul)` ? the contract is "no work
-//      dropped, no OOB" rather than "no impossible hint".  The
-//      diagnostic mode upgrades to a hard reject so frameworks can
-//      enable it in CI and catch contract drift early.
+//      whose gate now defaults to ENABLED: the body runs unless
+//      `ZENDNNL_DIAGNOSTICS_ENABLE=0` was captured at the time of
+//      the first call (the env value is cached once via
+//      `static const bool`).  Production deployments that opt out
+//      with `ZENDNNL_DIAGNOSTICS_ENABLE=0` silently clamp
+//      `active_matmul` to `M.size()` via `std::min(am, M.size())`
+//      in the always-on inline guard (group_matmul_direct.cpp lines
+//      695-699) and silently accept `total < active` because
+//      prepack accounting only uses `max(M.size(), total_matmul)`
+//      ? the opt-out contract is "no work dropped, no OOB" rather
+//      than "no impossible hint".  With the default-on diagnostic
+//      mode, the validator hard-rejects so frameworks catch
+//      contract drift early in both CI and production.
 //
-//      To exercise the validator we use the same subprocess pattern
-//      as `[26] TestPrepackEnvBucketA`: set the env knob in the
-//      parent, then `EXPECT_EXIT` with `threadsafe` death-test style
-//      which `fork()` + `execve()`s a child whose first-time read of
-//      `ZENDNNL_DIAGNOSTICS_ENABLE` returns "1".  The child runs the
-//      dispatcher with intentionally-bad params; the parent asserts
-//      a non-zero exit (the child sets it via `std::exit(1)` when
+//      To exercise the validator deterministically (independent of
+//      whatever the parent process has cached in its
+//      `static const bool`) we use the same subprocess pattern as
+//      `[26] TestPrepackEnvBucketA`: explicitly set the env knob in
+//      the parent, then `EXPECT_EXIT` with `threadsafe` death-test
+//      style which `fork()` + `execve()`s a child whose first-time
+//      read of `ZENDNNL_DIAGNOSTICS_ENABLE` returns "1" (matching
+//      the default-on intent).  The child runs the dispatcher with
+//      intentionally-bad params; the parent asserts a non-zero exit
+//      (the child sets it via `std::exit(1)` when
 //      `status_t::failure` is NOT returned, i.e. the validator
 //      regressed).  Subprocess overhead is ~150 ms per case ? two
 //      cases adds ~0.3 s to the suite, negligible.

@@ -249,14 +249,26 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     if (!cli_params.beta || (beta != 0.0f && beta != 1.0f)) {
       beta = rand() % 2;
     }
-    // gelu_tanh and clip are not supported for LIBXSMM
+    // gelu_tanh, mish, swish and clip are not supported for LIBXSMM
     // binary_mul and binary_add dropped for accuracy issues
     for (uint32_t i = 0; i < po_types.size(); ++i) {
       if (po_types[i] == post_op_type_t::gelu_tanh ||
         po_types[i] == post_op_type_t::binary_mul ||
         po_types[i] == post_op_type_t::binary_add ||
+        po_types[i] == post_op_type_t::mish ||
         po_types[i] == post_op_type_t::swish ||
           po_types[i] == post_op_type_t::clip) {
+        po_types[i] = post_op_type_t::none;
+      }
+    }
+  }
+
+  // mish is not implemented in the native (gemm/brgemm) post-op
+  // dispatchers, so neutralize it for those algos to avoid silent skips.
+  if (algo == matmul_algo_t::native_gemm ||
+      algo == matmul_algo_t::native_brgemm) {
+    for (uint32_t i = 0; i < po_types.size(); ++i) {
+      if (po_types[i] == post_op_type_t::mish) {
         po_types[i] = post_op_type_t::none;
       }
     }
@@ -2055,6 +2067,9 @@ post_op_type_t strToPostOps(const std::string &str) {
   if (str == "binary_mul") {
     return post_op_type_t::binary_mul;
   }
+  if (str == "mish") {
+    return post_op_type_t::mish;
+  }
   if (str == "none") {
     return post_op_type_t::none;
   }
@@ -2081,6 +2096,8 @@ std::string postOpsToStr(post_op_type_t post_op) {
     return "binary_add";
   case post_op_type_t::binary_mul:
     return "binary_mul";
+  case post_op_type_t::mish:
+    return "mish";
   default:
     return "none";
   }
@@ -2100,6 +2117,14 @@ std::string postOpTypesToStr(const std::vector<post_op_type_t> &po_types) {
     first = false;
   }
   return s;
+}
+
+void neutralize_mish_quant_int8(std::vector<post_op_type_t> &po_types) {
+  for (uint32_t i = 0; i < po_types.size(); ++i) {
+    if (po_types[i] == post_op_type_t::mish) {
+      po_types[i] = post_op_type_t::none;
+    }
+  }
 }
 
 void trim(std::string &str) {
@@ -2293,6 +2318,18 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
             }
           }
         }
+        // mish has no LIBXSMM or native (gemm/brgemm) implementation; map it
+        // to none so file-driven tests on those algos don't silently mismatch.
+        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
+            cfg.mat.algo == matmul_algo_t::libxsmm_blocked ||
+            cfg.mat.algo == matmul_algo_t::native_gemm ||
+            cfg.mat.algo == matmul_algo_t::native_brgemm) {
+          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
+            if (cfg.mat.po_types[i] == post_op_type_t::mish) {
+              cfg.mat.po_types[i] = post_op_type_t::none;
+            }
+          }
+        }
         cfg.mat.source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
         cfg.mat.output_dtype = dtype_arr[rand() % dtype_size];
         cfg.mat.weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
@@ -2445,6 +2482,18 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
               cfg.mat.po_types[i] == post_op_type_t::binary_add ||
               cfg.mat.po_types[i] == post_op_type_t::swish ||
                 cfg.mat.po_types[i] == post_op_type_t::clip) {
+              cfg.mat.po_types[i] = post_op_type_t::none;
+            }
+          }
+        }
+        // mish has no LIBXSMM or native (gemm/brgemm) implementation; map it
+        // to none so file-driven tests on those algos don't silently mismatch.
+        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
+            cfg.mat.algo == matmul_algo_t::libxsmm_blocked ||
+            cfg.mat.algo == matmul_algo_t::native_gemm ||
+            cfg.mat.algo == matmul_algo_t::native_brgemm) {
+          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
+            if (cfg.mat.po_types[i] == post_op_type_t::mish) {
               cfg.mat.po_types[i] = post_op_type_t::none;
             }
           }

@@ -28,35 +28,38 @@ namespace common {
 //  Operator instrumentation — runtime-gated diagnostic layer.
 //
 //  Provides a lightweight gate for expensive diagnostic operations
-//  (e.g., input validation) that should run during development but
-//  can be skipped in production for zero overhead.
+//  (e.g., input validation) that run by default to surface contract
+//  violations early, and can be turned off explicitly in production
+//  hot paths where the per-call validation cost is unacceptable.
 //
 //  Controlled by a process-lifetime boolean initialized once from
-//  the ZENDNNL_DIAGNOSTICS_ENABLE environment variable. When disabled
-//  (default), each method reduces to a single predicted-not-taken
-//  branch.
+//  the ZENDNNL_DIAGNOSTICS_ENABLE environment variable. The flag
+//  defaults to ENABLED; setting the variable to "0" disables it,
+//  in which case each method reduces to a single predicted-taken
+//  branch with no validator body executed.
 //
 //  Profiling and logging are handled directly by their respective
 //  optimized subsystems (is_profile_enabled(), apilog_info_enabled())
 //  and do not require this gate.
 //
 //  Usage:
-//    export ZENDNNL_DIAGNOSTICS_ENABLE=1   # enable before launching application
-//    (unset or =0)                  # disabled — near-zero overhead
+//    (unset, or set to anything other than "0")  # enabled (default)
+//    export ZENDNNL_DIAGNOSTICS_ENABLE=0         # disable for near-zero overhead
 // ═══════════════════════════════════════════════════════════════════════════
 struct op_instrumentation {
 
   static bool is_enabled() {
     static const bool val = []() {
       const char *env = std::getenv("ZENDNNL_DIAGNOSTICS_ENABLE");
-      return env && env[0] == '1';
+      // Default ON: only an explicit leading '0' disables diagnostics.
+      return !env || env[0] != '0';
     }();
     return val;
   }
 
   template <typename Fn>
   static inline status_t validate(Fn &&fn) {
-    if (__builtin_expect(is_enabled(), 0)) {
+    if (__builtin_expect(is_enabled(), 1)) {
       return fn();
     }
     return status_t::success;

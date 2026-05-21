@@ -155,8 +155,11 @@ struct matmul_post_op {
 | `post_op_type_t::sigmoid` | Sigmoid | No |
 | `post_op_type_t::tanh` | Hyperbolic Tangent | No |
 | `post_op_type_t::clip` | Element-wise Clip to `[alpha, beta]` (lower, upper) | No |
+| `post_op_type_t::mish` | Mish | No |
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
+
+ > **Note — On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, `mish` is rejected by input validation in `validate_matmul_direct_inputs`. This runs by default (diagnostics are enabled unless `ZENDNNL_DIAGNOSTICS_ENABLE=0` is set); the kernel does not perform an additional always-on runtime rejection beyond the validator.**
 
 **Binary Post-Op Dimensions:**
 
@@ -675,6 +678,8 @@ Currently only **dynamic quantization** is supported. Static quantization suppor
 |------|----------------|-----------------|--------|
 | **Dynamic** | `true` | Optional — allocated internally if `buff` is `nullptr` | Supported |
 | **Static** | `false` | User must provide pre-computed `src_scale.buff` (and `src_zp.buff` for U8) | Not yet supported |
+
+> **Post-op restriction:** the `mish` post-op is **not supported** on the reorder/dynamic-quantization path. `matmul_direct` returns `status_t::failure` for `dynamic_quant` configurations that include `mish` in `params.postop_`, because the underlying AOCL-DLP `sym_quant` kernel does not implement `mish` and would otherwise silently drop it.
 
 ### Zero-Point Handling
 

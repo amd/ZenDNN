@@ -879,6 +879,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_BF16) {
 
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
 
   data_type_t ref_dt = data_type_t::bf16;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
@@ -947,6 +948,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
 
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
 
   data_type_t ref_dt = data_type_t::f32;
   data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
@@ -1016,6 +1018,7 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
 
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
 
   uint64_t num_groups = sym_k / 32;
   data_type_t scale_dt = data_type_t::bf16;
@@ -1119,6 +1122,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
 
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
 
   data_type_t ref_dt = data_type_t::bf16;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBF17);
@@ -1176,6 +1180,7 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
 
   source_dtype = data_type_t::s8;
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
 
   data_type_t ref_dt = data_type_t::f32;
   std::mt19937 local_rng(m ^ k ^ n ^ 0xF321);
@@ -1232,6 +1237,7 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
   }
 
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
   data_type_t test_dt = data_type_t::bf16;
 
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBF18);
@@ -1319,6 +1325,7 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
   }
 
   use_LOWOHA = true;
+  neutralize_mish_quant_int8(po_types);
   data_type_t test_dt = data_type_t::f32;
 
   std::mt19937 local_rng(m ^ k ^ n ^ 0xF322);

@@ -31,7 +31,7 @@
 
 using namespace std;
 
-const uint32_t po_size = 9; //Supported postops
+const uint32_t po_size = 10; //Supported postops
 
 const uint32_t dtype_size = 5; //Supported dtypes
 vector<data_type_t> dtype_arr(dtype_size);
