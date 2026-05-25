@@ -66,7 +66,19 @@ using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
  * @param mem_format_b Memory format specifier for matrix B
  * @param get_reorder_buf_size Function pointer to calculate required buffer size for reordering
  * @param reorder_func Function pointer to perform the actual reordering operation
- * @param weight_cache_type Type of caching strategy to use (0: no cache, 1: persistent cache, etc.)
+ * @param weight_cache_type Caching strategy to use:
+ *        - 0: caching disabled, reorder into a freshly allocated buffer that
+ *          the caller must free.
+ *        - 1: out-of-place caching. Reordered weights live in a freshly
+ *          allocated buffer owned by the LRU cache; the user's weight buffer
+ *          is left untouched.
+ *        - 2: in-place caching. The user's weight buffer is reused as the
+ *          reorder destination (a temporary buffer is used during the
+ *          reorder, then copied back). The cache stores a borrowed pointer
+ *          to the user's buffer, so no extra persistent allocation is kept.
+ *          Falls back to out-of-place caching when the AOCL blocked size
+ *          differs from the plain k*n size or the aligned allocation size
+ *          would exceed the user buffer.
  * @return true if reordering was performed (cache miss), false if cached version was used (cache hit)
  */
 template <typename T>

@@ -2271,7 +2271,10 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
   omp_set_num_threads(32);
   int actual_team_size = 0;
   #pragma omp parallel
-  { #pragma omp master actual_team_size = omp_get_num_threads(); }
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
   if (actual_team_size < 32) {
     GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
   }
@@ -2339,7 +2342,10 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
   omp_set_num_threads(32);
   int actual_team_size = 0;
   #pragma omp parallel
-  { #pragma omp master actual_team_size = omp_get_num_threads(); }
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
   if (actual_team_size < 32) {
     GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
   }

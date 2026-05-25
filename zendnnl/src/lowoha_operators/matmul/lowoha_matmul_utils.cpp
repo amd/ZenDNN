@@ -659,6 +659,31 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   // Default to AOCL DLP blocked kernel
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::aocl_dlp_blocked : static_cast<matmul_algo_t>(algo);
+
+  // In-place weight caching is controlled only by
+  // ZENDNNL_MATMUL_WEIGHT_CACHE / matmul_config::weight_cache. Mode 2
+  // reuses the user's weight buffer as the reorder destination, so it
+  // can only be honored when a single backend ever reorders that buffer.
+  // The auto_tuner and dynamic_dispatch (decision-tree) paths can each
+  // pick either OneDNN or AOCL for the same buffer across calls; doing
+  // in-place reorders under those paths would corrupt the buffer for the
+  // other backend. Preserve the user-selected dispatch algorithm and
+  // instead downgrade the cache mode to out-of-place (mode 1) so both
+  // backends can safely cache reordered copies. The downgrade mutates
+  // the process-wide config and persists for the rest of the run -- this
+  // is intentional, since once we cross-dispatched once, switching back
+  // to mode 2 mid-run would corrupt any buffer the other backend
+  // already populated out-of-place.
+  if (matmul_config.get_weight_cache() == 2 &&
+      (kernel == matmul_algo_t::auto_tuner ||
+       kernel == matmul_algo_t::dynamic_dispatch)) {
+    log_info("weight_cache_type=2 is incompatible with "
+             "auto_tuner/dynamic_dispatch; downgrading cache mode to "
+             "out-of-place (weight_cache_type=1) for the rest of the "
+             "process; kernel selection unchanged");
+    matmul_config.set_weight_cache(1);
+  }
+
   bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                 (params.dtypes.wei == data_type_t::s4 || params.dtypes.wei == data_type_t::u4);
   bool is_f16 = (params.dtypes.src == data_type_t::f16) &&

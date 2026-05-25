@@ -19,8 +19,10 @@
 
 #include "memory/memory_utils.hpp"
 #include "operators/common/post_op.hpp"
+#include "operators/matmul/matmul_config.hpp"
 #include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
+#include <algorithm>
 #include <cstdint>
 
 namespace zendnnl {
@@ -210,13 +212,28 @@ struct matmul_params {
   // contract and worked example.
   uint32_t total_matmul;                       ///< Total expert weight slots present in the call (>= active_matmul).
   uint32_t active_matmul;                      ///< Count of firing experts (the leading prefix of all weight-side vectors).
+
+  // Per-call cap on weight-cache mode: 0 = disabled, 1 = out-of-place,
+  // 2 = allow in-place when the process-wide setting also permits it.
+  int32_t weight_cache_type;
+
   /**
    * @brief Default constructor for matmul_params
    */
   matmul_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
     mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0),
-    plugin_op(""), dynamic_quant(false), packing(), total_matmul(0), active_matmul(0) {}
+    plugin_op(""), dynamic_quant(false), packing(), total_matmul(0), active_matmul(0),
+    weight_cache_type(2) {}
 };
+
+/**
+ * @brief Returns the cache mode allowed by both process and call settings.
+ */
+static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
+  static const int32_t env_cache_type =
+    zendnnl::ops::matmul_config_t::instance().get_weight_cache();
+  return std::min(env_cache_type, weight_cache_type);
+}
 
 } // namespace matmul
 } // namespace lowoha

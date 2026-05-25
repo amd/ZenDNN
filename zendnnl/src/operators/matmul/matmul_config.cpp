@@ -15,9 +15,13 @@
 # *******************************************************************************/
 
 #include "matmul_config.hpp"
+#include "common/zendnnl_global.hpp"
+#include <cstring>
 
 namespace zendnnl {
 namespace ops {
+
+using namespace zendnnl::error_handling;
 
 void matmul_config_t::set_default_config() {
   // Set default configuration for matmul
@@ -95,7 +99,24 @@ status_t matmul_config_t::set_user_config(json config_json) {
       auto matmul_weight_cache_str = matmul_weight_cache_json.template
                                      get<std::string>();
       if (! matmul_weight_cache_str.empty()) {
-        matmul_weight_cache = (matmul_weight_cache_str == "0") ? 0 : 1;
+        // 0: disabled, 1: out-of-place (default), 2: inplace
+        if (matmul_weight_cache_str == "0") {
+          matmul_weight_cache = 0;
+        }
+        else if (matmul_weight_cache_str == "1") {
+          matmul_weight_cache = 1;
+        }
+        else if (matmul_weight_cache_str == "2") {
+          matmul_weight_cache = 2;
+        }
+        else {
+          apilog_warning("Unrecognized matmul weight_cache JSON value '",
+                         matmul_weight_cache_str,
+                         "'; expected \"0\" (disabled), \"1\" "
+                         "(out-of-place) or \"2\" (in-place). "
+                         "Defaulting to 1 (out-of-place).");
+          matmul_weight_cache = 1;
+        }
       }
     }
     auto otf_bpack_json = matmul_json["otf_bpack"];
@@ -207,9 +228,35 @@ void matmul_config_t::set_env_config() {
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
   [[maybe_unused]] int32_t matmul_weight_cache = 1;
   if (weight_cache_env) {
-    int32_t weight_cache = std::stoi(weight_cache_env);
-    if (weight_cache == 0 || weight_cache == 1) {
+    // 0: disabled, 1: out-of-place (default), 2: inplace.
+    // Parse defensively: stoi throws on non-numeric input, which would
+    // otherwise crash matmul initialisation. Treat anything not in
+    // {0, 1, 2} as user error and fall back to the safe default with a
+    // warning so misconfigurations are visible rather than silently
+    // ignored.
+    bool valid = false;
+    int32_t weight_cache = 1;
+    try {
+      size_t consumed = 0;
+      weight_cache = std::stoi(weight_cache_env, &consumed);
+      // require the whole string to be the integer (no trailing junk)
+      valid = (consumed == std::strlen(weight_cache_env)) &&
+              (weight_cache == 0 || weight_cache == 1 || weight_cache == 2);
+    }
+    catch (const std::invalid_argument &) {
+      valid = false;
+    }
+    catch (const std::out_of_range &) {
+      valid = false;
+    }
+    if (valid) {
       matmul_weight_cache = weight_cache;
+    }
+    else {
+      apilog_warning("Unrecognized ZENDNNL_MATMUL_WEIGHT_CACHE value '",
+                     weight_cache_env,
+                     "'; expected 0 (disabled), 1 (out-of-place) or "
+                     "2 (in-place). Defaulting to 1 (out-of-place).");
     }
   }
   set_weight_cache(matmul_weight_cache);

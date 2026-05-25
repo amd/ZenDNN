@@ -119,13 +119,16 @@ class matmul_config_t final : public op_config_t {
 
   /** @brief Sets matmul_weight_cache.
   *
-  * @param weight_cache The matmul_weight_cache type to set.
+  * @param weight_cache The matmul_weight_cache type to set:
+  *                     0 = disabled, 1 = out-of-place, 2 = allow AOCL
+  *                     in-place reordering when the layout is safe.
   */
   void set_weight_cache(int32_t weight_cache);
 
   /** @brief Get matmul_weight_cache.
    *
-   * @return matmul_weight_cache.
+   * @return matmul_weight_cache (0 = disabled, 1 = out-of-place,
+   *         2 = in-place).
    */
   int32_t get_weight_cache();
 

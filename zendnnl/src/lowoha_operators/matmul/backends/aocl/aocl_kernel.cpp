@@ -253,8 +253,116 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
       matmul_weight_cache.add(key, reorder_weights);
     }
     else {
-      apilog_verbose("[AOCL.reorder HIT] weight cache hit — reusing cached pack");
-      reorder_weights = matmul_weight_cache.get(key);
+      // The same cache key may already hold a nullptr from the prepacked
+      // mem_format_b == 'r' path above, or from an earlier in-place reorder.
+      // In both cases the caller's weight buffer is the reordered buffer.
+      void *cached_ptr = matmul_weight_cache.get(key);
+      if (cached_ptr == nullptr) {
+        apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE "
+                    "(reusing user buffer)");
+        reorder_weights = const_cast<void *>(weights);
+      }
+      else {
+        apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+        reorder_weights = cached_ptr;
+      }
+    }
+  }
+  // In-place reordering: the user's weight buffer is reused as the reorder
+  // destination, so the cache only needs to remember that the reorder has
+  // been performed; the reordered bytes already live in the user's buffer.
+  // We therefore store @c nullptr as the cache value (the same convention
+  // used by the @c mem_format_b == 'r' early-return path above): this
+  // avoids the LRU eviction path treating the cached entry as an owned
+  // allocation and calling @c std::free on the user's weight buffer.
+  //
+  // If the reordered layout cannot fit inside the user's allocation we
+  // transparently fall back to an out-of-place allocation; in that case the
+  // cache stores the actual reordered buffer pointer just like
+  // @c weight_cache_type == 1. The cache-hit branch distinguishes the two
+  // by inspecting whether the stored pointer is null.
+  else if (weight_cache_type == 2) {
+    std::lock_guard<std::mutex> lock(weight_cache_mutex);
+    auto found_obj = matmul_weight_cache.find_key(key);
+    if (found_obj) {
+      void *cached_ptr = matmul_weight_cache.get(key);
+      if (cached_ptr == nullptr) {
+        apilog_info("Read AOCL cached weights WEIGHT_CACHE_IN_PLACE "
+                    "(reusing user buffer)");
+        reorder_weights = const_cast<void *>(weights);
+      }
+      else {
+        apilog_info("Read AOCL cached weights WEIGHT_CACHE_IN_PLACE "
+                    "(fall-back out-of-place buffer)");
+        reorder_weights = cached_ptr;
+      }
+      return true;
+    }
+
+    size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B', k, n,
+                                   nullptr);
+    // Two-part gate for engaging the in-place path:
+    //
+    //   1. b_reorder_buf_siz_req == plain_size
+    //      Strict size equality matches the old library's
+    //      WEIGHT_CACHE_INPLACE branch (zendnn_reorder_cache.cpp).
+    //      Any padding/internal blocking changes the size and means the
+    //      in-place mutation cannot be safely re-derived from the user's
+    //      buffer on a later call.
+    //   2. reorder_size == plain_size
+    //      The out-of-place path allocates @c reorder_size bytes (rounded
+    //      up to the 64-byte alignment) so AOCL's SIMD-aware kernels can
+    //      safely overscan the blocked layout. The user's weight
+    //      allocation is only guaranteed to be @c plain_size bytes; if
+    //      @c reorder_size > plain_size, an in-place mutation would leave
+    //      0..63 bytes of overscan reading past the user's allocation.
+    //      Requiring @c plain_size to already be 64-byte aligned closes
+    //      that window.
+    //
+    // When either part fails, fall through to allocating a fresh
+    // out-of-place cache buffer and leave the user's buffer untouched.
+    size_t plain_size   = static_cast<size_t>(k) * static_cast<size_t>(n)
+                          * sizeof(T);
+    size_t alignment    = 64;
+    size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1) & ~
+                          (alignment - 1);
+
+    if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
+      apilog_info("AOCL reorder weights WEIGHT_CACHE_IN_PLACE");
+      T *interim = (T *)aligned_alloc(alignment, reorder_size);
+      if (!interim) {
+        apilog_error("AOCL in-place reorder: aligned_alloc failed, "
+                     "falling back to out-of-place");
+        reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+        if (!reorder_weights) {
+          return false;
+        }
+        reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                     k, n, ldb, nullptr);
+        matmul_weight_cache.add(key, reorder_weights);
+        return true;
+      }
+      reorder_func(order, trans, 'B', (T *)weights, interim, k, n, ldb, nullptr);
+      std::memcpy(const_cast<void *>(weights), interim, b_reorder_buf_siz_req);
+      std::free(interim);
+      reorder_weights = const_cast<void *>(weights);
+      // Store nullptr sentinel: the user buffer itself holds the
+      // reordered bytes. This keeps the LRU evictor from free()-ing the
+      // user's buffer. Caller contract: do not clear/evict this cache
+      // while reusing the in-place-mutated weight buffer.
+      matmul_weight_cache.add(key, nullptr);
+    }
+    else {
+      apilog_info("AOCL reorder weights WEIGHT_CACHE_IN_PLACE "
+                  "(blocked size != plain size, falling back to out-of-place)");
+      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+      if (reorder_weights == nullptr) {
+        apilog_error("AOCL in-place reorder fall-back: aligned_alloc failed");
+        return false;
+      }
+      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                   k, n, ldb, nullptr);
+      matmul_weight_cache.add(key, reorder_weights);
     }
   }
   return true;
@@ -324,9 +432,94 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
       matmul_weight_cache.add(key, reorder_weights);
     }
     else {
-      apilog_verbose("[AOCL.reorder symquant HIT] weight cache hit — "
-                     "reusing cached pack");
-      reorder_weights = matmul_weight_cache.get(key);
+      // See reorderAndCacheWeights: nullptr means a prior prepack or
+      // in-place path made the caller's weight buffer the reordered buffer.
+      void *cached_ptr = matmul_weight_cache.get(key);
+      if (cached_ptr == nullptr) {
+        apilog_info("Read AOCL sym_quant cached weights "
+                    "WEIGHT_CACHE_OUT_OF_PLACE (reusing user buffer)");
+        reorder_weights = const_cast<void *>(weights);
+      }
+      else {
+        apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+        reorder_weights = cached_ptr;
+      }
+    }
+  }
+  // In-place reordering for the sym_quant path. Mirrors the standard
+  // reorderAndCacheWeights in-place branch: reorder into a temporary
+  // buffer, memcpy the result back into the user's weight buffer, and
+  // record the reorder by adding @c nullptr to the cache (the user buffer
+  // itself holds the reordered bytes). On the fall-back path (reorder
+  // doesn't fit in the user's buffer) the cache stores the actual reorder
+  // buffer just like the out-of-place branch.
+  else if (weight_cache_type == 2) {
+    std::lock_guard<std::mutex> lock(weight_cache_mutex);
+    auto found_obj = matmul_weight_cache.find_key(key);
+    if (found_obj) {
+      void *cached_ptr = matmul_weight_cache.get(key);
+      if (cached_ptr == nullptr) {
+        apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_IN_PLACE "
+                    "(reusing user buffer)");
+        reorder_weights = const_cast<void *>(weights);
+      }
+      else {
+        apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_IN_PLACE "
+                    "(fall-back out-of-place buffer)");
+        reorder_weights = cached_ptr;
+      }
+      return true;
+    }
+
+    size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                   k, n, symq_meta, nullptr);
+    // See reorderAndCacheWeights for the rationale -- two-part gate:
+    // (1) blocked size equals the plain k*n size (old library's
+    //     WEIGHT_CACHE_INPLACE check), and
+    // (2) plain_size is already 64-byte aligned so the user's
+    //     allocation is large enough to absorb any SIMD overscan the
+    //     AOCL kernel may perform on the blocked layout.
+    size_t plain_size   = static_cast<size_t>(k) * static_cast<size_t>(n)
+                          * sizeof(T);
+    size_t alignment    = 64;
+    size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1) & ~
+                          (alignment - 1);
+
+    if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
+      apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE");
+      T *interim = (T *)aligned_alloc(alignment, reorder_size);
+      if (!interim) {
+        apilog_error("AOCL sym_quant in-place reorder: aligned_alloc failed, "
+                     "falling back to out-of-place");
+        reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+        if (!reorder_weights) {
+          return false;
+        }
+        reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                     k, n, ldb, symq_meta, nullptr);
+        matmul_weight_cache.add(key, reorder_weights);
+        return true;
+      }
+      reorder_func(order, trans, 'B', (T *)weights, interim, k, n, ldb,
+                   symq_meta, nullptr);
+      std::memcpy(const_cast<void *>(weights), interim, b_reorder_buf_siz_req);
+      std::free(interim);
+      reorder_weights = const_cast<void *>(weights);
+      // See reorderAndCacheWeights: nullptr means the user buffer holds
+      // the reordered bytes and must remain associated with this cache
+      // entry while the buffer is reused.
+      matmul_weight_cache.add(key, nullptr);
+    }
+    else {
+      apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE "
+                  "(blocked size != plain size, falling back to out-of-place)");
+      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+      if (!reorder_weights) {
+        return false;
+      }
+      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                   k, n, ldb, symq_meta, nullptr);
+      matmul_weight_cache.add(key, reorder_weights);
     }
   }
   return true;
@@ -344,8 +537,12 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                                    const matmul_quantization_params_t &quant_params,
                                    data_type_t wei_dt,
                                    int weight_cache_type) {
-  // Weight caching inplace support cannot be added since buffer size is
-  // always expanded.
+  // WOQ always converts 4-bit weights to bf16 before reordering, so the
+  // reordered buffer is strictly larger than the caller's 4-bit weight
+  // buffer. In-place caching is therefore not feasible for the WOQ path; the
+  // caller (run_dlp) downgrades weight_cache_type == 2 to 1 before invoking
+  // this function so the cache, allocation and cleanup logic all stay
+  // consistent.
   lru_cache_t<Key_matmul, void *> &matmul_weight_cache_woq =
     get_aocl_woq_weight_cache();
   std::mutex &woq_cache_mutex = get_aocl_woq_weight_cache_mutex();
@@ -405,12 +602,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   void *reordered_mem = nullptr;
   bool simulated_woq_free_buff = false;
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t weight_cache_type = matmul_config.get_weight_cache();
-
-  // When mem_format_b == 'r' the caller is asserting the weight buffer
-  // is already in the AOCL DLP blocked layout (typically produced via
-  // reorder_direct() prepack). reorderAndCacheWeights short-circuits
-  // on that flag and uses B as-is, skipping the internal reorder.
+  int32_t weight_cache_type =
+    effective_weight_cache_type(lowoha_param.weight_cache_type);
 
   size_t run_src_scale_nelems = get_num_elements(
                                   lowoha_param.quant_params.src_scale.dims);
@@ -504,14 +697,20 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   }
   else if (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp &&
            (dtypes.wei == data_type_t::s4 || dtypes.wei == data_type_t::u4)) {
+    // WOQ expands the 4-bit input into a bf16-blocked layout, so the
+    // reordered buffer cannot fit inside the caller's weight buffer.
+    // Treat in-place caching the same as out-of-place caching for this path.
+    int32_t woq_weight_cache_type = (weight_cache_type == 2) ? 1 :
+                                    weight_cache_type;
     //call woq reorder and cache function
     woqReorderAndCacheWeightsAocl(cache_key, static_cast<const int8_t *>(B),
                                   reordered_mem, K,
                                   N, ldb, is_weights_const, 'r', transB, mem_format_b,
-                                  lowoha_param.quant_params, dtypes.wei, weight_cache_type);
+                                  lowoha_param.quant_params, dtypes.wei,
+                                  woq_weight_cache_type);
     is_weight_blocked = true;
     mem_format_b = 'r';
-    simulated_woq_free_buff = !is_weights_const || weight_cache_type != 1;
+    simulated_woq_free_buff = !is_weights_const || woq_weight_cache_type != 1;
   }
 
   // Compute zero-point compensation for INT8 (with caching for 1D case)
