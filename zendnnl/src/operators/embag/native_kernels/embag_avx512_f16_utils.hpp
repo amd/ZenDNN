@@ -36,10 +36,15 @@ namespace ops {
 #if __GNUC__ >= 12
 
 using common::float16_t;
-// Pull the masked-PH load/store shims from common into ops scope so that
-// the F16 (no-conversion) path can call them directly.
-using common::f16_maskz_loadu_vec;
-using common::f16_mask_storeu_vec;
+// Boundary load/store helpers shared with the normalization F16-FMA
+// kernels (defined in common/float16.hpp). The typed variants pick the
+// right intrinsic via `if constexpr` on the storage type, so the FMA
+// inner loop below stays in __m512h regardless of whether table/output
+// are stored as f16 or f32 in memory.
+using common::f16x32_load_typed;
+using common::f16x32_load_tail_typed;
+using common::f16x32_store_typed;
+using common::f16x32_store_tail_typed;
 
 /*-----------------------------------------------------------------------------
   embag_avx512_f16_fma_kernel:
@@ -48,7 +53,7 @@ using common::f16_mask_storeu_vec;
   All compute (FMA, max, div) is performed in FP16 using __m512h registers
   (32 elements per ZMM, 2x throughput over the FP32 path). Type conversions
   happen only at the load/store boundaries, selected at compile time via
-  if constexpr on InType / OutType.
+  if constexpr on InType / OutType in the shared common::f16x32_*_typed helpers.
 
   Supported type combinations:
     InType=float16_t, OutType=float16_t  — pure F16: no conversion
@@ -64,92 +69,6 @@ using common::f16_mask_storeu_vec;
   - OffsetType : Offset data type (int32_t or int64_t)
   - OutType    : Output data type (float16_t or float)
 */
-
-// ── Load helpers ─────────────────────────────────────────────────────────
-// For F32 input: load f32 from memory (full or tail-masked) and call the
-// shared float16_t SIMD API to convert to __m512h. For F16 input: load
-// directly via PH intrinsic.
-
-template <typename InType>
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline __m512h f16_load_full(const InType *src) {
-  if constexpr(std::is_same_v<InType, float16_t>) {
-    return _mm512_loadu_ph(src);
-  }
-  else {
-    const float *fp = reinterpret_cast<const float *>(src);
-    __m512 lo = _mm512_loadu_ps(fp);
-    __m512 hi = _mm512_loadu_ps(fp + 16);
-    return float16_t::cvt_f32_to_f16_vec(lo, hi);
-  }
-}
-
-template <typename InType>
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline __m512h f16_load_tail(const InType *src, int tail) {
-  if constexpr(std::is_same_v<InType, float16_t>) {
-    __mmask32 mask = (1u << tail) - 1;
-    return f16_maskz_loadu_vec(mask, src);
-  }
-  else {
-    const float *fp = reinterpret_cast<const float *>(src);
-    __m512 lo, hi;
-    if (tail <= 16) {
-      __mmask16 lo_mask = (1u << tail) - 1;
-      lo = _mm512_maskz_loadu_ps(lo_mask, fp);
-      hi = _mm512_setzero_ps();
-    }
-    else {
-      lo = _mm512_loadu_ps(fp);
-      __mmask16 hi_mask = (1u << (tail - 16)) - 1;
-      hi = _mm512_maskz_loadu_ps(hi_mask, fp + 16);
-    }
-    return float16_t::cvt_f32_to_f16_vec(lo, hi);
-  }
-}
-
-// ── Store helpers ────────────────────────────────────────────────────────
-// For F32 output: convert __m512h -> two __m512 via float16_t API, then
-// store f32 to memory (full or tail-masked). For F16 output: store
-// directly via PH intrinsic.
-
-template <typename OutType>
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline void f16_store_full(OutType *dst, __m512h val) {
-  if constexpr(std::is_same_v<OutType, float16_t>) {
-    _mm512_storeu_ph(dst, val);
-  }
-  else {
-    float *fp = reinterpret_cast<float *>(dst);
-    __m512 lo, hi;
-    float16_t::cvt_f16_to_f32_vec(val, lo, hi);
-    _mm512_storeu_ps(fp,      lo);
-    _mm512_storeu_ps(fp + 16, hi);
-  }
-}
-
-template <typename OutType>
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline void f16_store_tail(OutType *dst, __m512h val, int tail) {
-  if constexpr(std::is_same_v<OutType, float16_t>) {
-    __mmask32 mask = (1u << tail) - 1;
-    f16_mask_storeu_vec(dst, mask, val);
-  }
-  else {
-    float *fp = reinterpret_cast<float *>(dst);
-    __m512 lo, hi;
-    float16_t::cvt_f16_to_f32_vec(val, lo, hi);
-    if (tail <= 16) {
-      __mmask16 mask = (1u << tail) - 1;
-      _mm512_mask_storeu_ps(fp, mask, lo);
-    }
-    else {
-      _mm512_storeu_ps(fp, lo);
-      __mmask16 hi_mask = (1u << (tail - 16)) - 1;
-      _mm512_mask_storeu_ps(fp + 16, hi_mask, hi);
-    }
-  }
-}
 
 template <typename InType, typename IndexType, typename OffsetType,
           typename OutType>
@@ -235,7 +154,7 @@ void embag_avx512_f16_fma_kernel(
         __m512h wt_vec = _mm512_set1_ph((_Float16)wt_f32);
 
         for (int b = 0; b < full_blocks; ++b) {
-          __m512h in_vec = f16_load_full<InType>(
+          __m512h in_vec = f16x32_load_typed<InType>(
                              &input[input_offset + b * simd_width]);
 
           if (is_embedding) {
@@ -254,8 +173,9 @@ void embag_avx512_f16_fma_kernel(
 
         if (tail > 0) {
           __mmask32 tail_mask = (1u << tail) - 1;
-          __m512h in_vec = f16_load_tail<InType>(
-                             &input[input_offset + full_blocks * simd_width], tail);
+          __m512h in_vec = f16x32_load_tail_typed<InType>(
+                             &input[input_offset + full_blocks * simd_width],
+                             tail_mask, tail);
 
           if (is_embedding) {
             acc[full_blocks] = in_vec;
@@ -289,12 +209,14 @@ void embag_avx512_f16_fma_kernel(
       }
 
       for (int b = 0; b < full_blocks; ++b) {
-        f16_store_full<OutType>(&dst[dst_offset + b * simd_width], acc[b]);
+        f16x32_store_typed<OutType>(&dst[dst_offset + b * simd_width], acc[b]);
       }
 
       if (tail > 0) {
-        f16_store_tail<OutType>(
-          &dst[dst_offset + full_blocks * simd_width], acc[full_blocks], tail);
+        __mmask32 tail_mask = (1u << tail) - 1;
+        f16x32_store_tail_typed<OutType>(
+          &dst[dst_offset + full_blocks * simd_width], acc[full_blocks],
+          tail_mask, tail);
       }
     } // end for oi
 

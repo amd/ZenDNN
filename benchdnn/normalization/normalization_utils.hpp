@@ -36,12 +36,18 @@ namespace normalization {
  * flags, and iteration counts.
  *
  * @var norm_type Normalization variant: "layer_norm", "batch_norm", "rms_norm", or "fused_add_rms_norm".
- * @var batch Product of all outer (non-normalized) dimensions.
- * @var norm_size Product of all normalized (trailing) dimensions.
- * @var num_channels Channel count (BatchNorm only).
+ * @var shape Full N-D shape from user input (e.g. {2, 4096} or {32, 64, 56, 56}).
+ * @var norm_ndims Number of trailing dimensions to normalize over.
+ *                 0 for batch_norm; 1..ndims-1 for the other norm types.
+ * @var batch Product of all outer (non-normalized) dimensions
+ *            (derived from shape and norm_ndims).
+ * @var norm_size Product of all normalized (trailing) dimensions
+ *                (derived from shape and norm_ndims).
+ * @var num_channels Channel count (BatchNorm only; derived from shape[1]).
  * @var total_elements Total number of elements (batch * norm_size, or batch * num_channels * norm_size for BatchNorm).
- * @var src_dt Source (input) data type (f32 or bf16).
- * @var dst_dt Destination (output) data type (f32 or bf16).
+ * @var src_dt Source (input) data type (f32, bf16, or f16).
+ * @var dst_dt Destination (output) data type (f32, bf16, or f16; cannot mix
+ *             f16 with bf16 between src and dst).
  * @var gamma_dt Gamma (scale) parameter data type (default: f32).
  * @var beta_dt Beta (shift) parameter data type (default: f32).
  * @var epsilon Numerical stability constant (e.g., 1e-5).
@@ -56,6 +62,8 @@ namespace normalization {
  */
 struct NormalizationConfig {
   std::string norm_type;
+  std::vector<uint64_t> shape;    ///< Full N-D shape from user input
+  int norm_ndims;                 ///< Number of trailing dims to normalize
   uint64_t batch;
   uint64_t norm_size;
   uint64_t num_channels;
@@ -105,8 +113,15 @@ norm_algo_t strToLowohaAlgo(const std::string &algo);
  * @brief Parses the input file and populates a vector of NormalizationConfig structures.
  *
  * Each line in the input file specifies a benchmark configuration in CSV format:
- *   norm_type, batch, norm_size, src_dt:dst_dt, epsilon, use_scale, use_shift, iters
- *   [, warmup_iters, gamma_dt, beta_dt, algorithm, num_threads, isInplace, num_channels]
+ *   norm_type, shape, norm_ndims, src_dt:dst_dt, epsilon, use_scale, use_shift, iters
+ *   [, warmup_iters, gamma_dt, beta_dt, algorithm, num_threads, isInplace]
+ *
+ * `shape`       — dimensions joined by 'x' (e.g. "2x4096", "32x64x56x56").
+ * `norm_ndims`  — trailing dims to normalize together:
+ *                   * 0 for batch_norm
+ *                   * 1..ndims-1 for layer_norm / rms_norm / fused_add_rms_norm
+ *                 The shape is flattened to (batch, [num_channels,] norm_size)
+ *                 internally.
  *
  * @param infile Reference to an open std::ifstream containing the input configurations.
  * @param configs Reference to a vector of NormalizationConfig to be populated.

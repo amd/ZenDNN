@@ -778,7 +778,7 @@ static void dispatch_avx512_kernel(
   // Native ZenDNN path: F16 accumulation only when at least one of
   // table/output is F16 AND the F16 FMA kernel is actually available
   // (GCC >= 12 for intrinsics, and can_use_f16_fma_kernel() for HW +
-  // ZENDNNL_EMBAG_NATIVE_F32_ACCUM). Otherwise the kernel accumulates in F32.
+  // ZENDNNL_NATIVE_F32_ACCUM). Otherwise the kernel accumulates in F32.
   [[maybe_unused]] bool is_f16_path = (params.dtypes.table == data_type_t::f16 ||
                                        params.dtypes.output == data_type_t::f16);
 #if __GNUC__ >= 12

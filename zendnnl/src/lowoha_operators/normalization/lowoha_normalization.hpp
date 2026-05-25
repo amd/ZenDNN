@@ -39,8 +39,9 @@ namespace normalization {
  *   - norm_type   : LAYER_NORM, RMS_NORM, BATCH_NORM, or FUSED_ADD_RMS_NORM
  *   - shape       : tensor dimensions (e.g. params.shape = {batch, hidden_dim})
  *   - norm_ndims  : number of trailing dims to normalize (LayerNorm/RMSNorm/FusedAddRMSNorm)
- *   - src_dt      : source data type (f32 or bf16)
- *   - dst_dt      : destination data type (f32 or bf16)
+ *   - src_dt      : source data type (f32, bf16, or f16)
+ *   - dst_dt      : destination data type (f32, bf16, or f16; cannot mix
+ *                   f16 with bf16 between src and dst)
  *   - epsilon     : numerical-stability constant (e.g. 1e-5f)
  *   - use_scale   : whether gamma is applied
  *   - use_shift   : whether beta is applied (ignored by RMSNorm/FusedAddRMSNorm)
@@ -89,7 +90,12 @@ namespace normalization {
  * @param params            Normalization parameters (type, dims, data types, etc.)
  *                          Must have shape and norm_type populated.
  *
- * @return status_t::success on successful execution, status_t::failure otherwise
+ * @return status_t::success on success,
+ *         status_t::isa_unsupported if an f16 buffer is used on a host
+ *         without AVX512-FP16 (unless the library was built with
+ *         -DZENDNNL_NATIVE_F32_ACCUM=ON, in which case f16 storage is
+ *         handled via F16C convert in the FP32 kernel),
+ *         or status_t::failure otherwise.
  */
 status_t normalization_direct(
   const void *input,
@@ -115,6 +121,9 @@ status_t normalization_direct(
  * @param residual          Residual buffer (FusedAddRMSNorm only), modified in-place.
  *                          Same shape and element type as input. nullptr otherwise.
  * @param params            Normalization parameters
+ *
+ * @return status_t::success, status_t::failure, or status_t::unimplemented
+ *         (consumed internally to fall through to the FP32 AVX-512 kernel).
  */
 status_t normalization_kernel_wrapper(
   const void *input,

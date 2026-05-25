@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cmath>
 #include <initializer_list>
+#include <type_traits>
 #include <immintrin.h>
 
 namespace zendnnl {
@@ -250,6 +251,187 @@ static inline void f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
   _mm512_mask_storeu_ph(addr, k, val);
 #endif
 }
+
+//===----------------------------------------------------------------------===//
+// AVX-512-FP16 32-lane load/store helpers
+//
+// Building blocks for SIMD kernels that compute in __m512h. The in-memory
+// storage type (f16 or f32) is selected at compile time via the template
+// parameter; the conversion (when needed) happens once at the load/store
+// boundary via the float16_t::cvt_*_vec methods above, so the FMA inner
+// loop stays in __m512h regardless of storage. For T = float16_t/uint16_t
+// the helpers collapse to a plain PH intrinsic with no conversion
+// overhead, so the all-f16 fast path pays nothing for templating.
+//
+// API surface (every helper is templated on the in-memory storage type):
+//
+//   f16x32_load_typed<T>(p)                      - 32-lane unmasked load
+//   f16x32_load_mask_typed<T>(p, mask)           - 32-lane masked load
+//   f16x32_load_tail_typed<T>(p, mask, tail)     - masked load + tail count
+//   f16x32_store_typed<T>(p, v)                  - 32-lane unmasked store
+//   f16x32_store_mask_typed<T>(p, v, mask)       - 32-lane masked store
+//   f16x32_store_tail_typed<T>(p, v, mask, tail) - masked store + tail count
+//
+// Callers must compute the __mmask32 themselves (typically once per
+// masked-tail block, then pass it to every load/store in that block).
+// This avoids redundant mask construction when multiple masked operations
+// share the same tail (the common case in the normalization kernels).
+//
+// All helpers are header-only and force-inlined; the per-function target
+// attribute makes them callable from any TU without requiring a file-level
+// #pragma GCC target.
+//===----------------------------------------------------------------------===//
+
+// ---- Typed load (f16 or f32 source) -------------------------------------
+
+template <typename InType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline __m512h f16x32_load_typed(const void *p) {
+  if constexpr(std::is_same_v<InType, float16_t> ||
+               std::is_same_v<InType, uint16_t>) {
+    return _mm512_loadu_ph(p);
+  }
+  else {
+    // InType == float
+    const float *fp = static_cast<const float *>(p);
+    __m512 lo = _mm512_loadu_ps(fp);
+    __m512 hi = _mm512_loadu_ps(fp + 16);
+    return float16_t::cvt_f32_to_f16_vec(lo, hi);
+  }
+}
+
+template <typename InType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline __m512h f16x32_load_tail_typed(const void *p, __mmask32 mask,
+    int tail) {
+  if constexpr(std::is_same_v<InType, float16_t> ||
+               std::is_same_v<InType, uint16_t>) {
+    return f16_maskz_loadu_vec(mask, p);
+  }
+  else {
+    // InType == float
+    const float *fp = static_cast<const float *>(p);
+    __m512 lo, hi;
+    if (tail <= 16) {
+      __mmask16 lo_mask = (__mmask16)((1u << tail) - 1u);
+      lo = _mm512_maskz_loadu_ps(lo_mask, fp);
+      hi = _mm512_setzero_ps();
+    }
+    else {
+      lo = _mm512_loadu_ps(fp);
+      __mmask16 hi_mask = (__mmask16)((1u << (tail - 16)) - 1u);
+      hi = _mm512_maskz_loadu_ps(hi_mask, fp + 16);
+    }
+    return float16_t::cvt_f32_to_f16_vec(lo, hi);
+  }
+}
+
+// 32-lane masked typed load. Companion to f16x32_load_tail_typed for
+// callers that already have a __mmask32 in hand and don't need an explicit
+// tail count (e.g., gamma/beta tail paths in the normalization kernels).
+// Splits the 32-lane mask into two 16-lane halves on the f32 path.
+template <typename InType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline __m512h f16x32_load_mask_typed(const void *p, __mmask32 mask) {
+  if constexpr(std::is_same_v<InType, float16_t> ||
+               std::is_same_v<InType, uint16_t>) {
+    return f16_maskz_loadu_vec(mask, p);
+  }
+  else {
+    // InType == float
+    const float *fp = static_cast<const float *>(p);
+    const __mmask16 lo_mask = (__mmask16)(mask & 0xFFFFu);
+    const __mmask16 hi_mask = (__mmask16)((mask >> 16) & 0xFFFFu);
+    __m512 lo = _mm512_maskz_loadu_ps(lo_mask, fp);
+    __m512 hi = _mm512_maskz_loadu_ps(hi_mask, fp + 16);
+    return float16_t::cvt_f32_to_f16_vec(lo, hi);
+  }
+}
+
+// ---- Typed store (f16 or f32 destination) -------------------------------
+
+template <typename OutType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline void f16x32_store_typed(void *p, __m512h v) {
+  if constexpr(std::is_same_v<OutType, float16_t> ||
+               std::is_same_v<OutType, uint16_t>) {
+    _mm512_storeu_ph(p, v);
+  }
+  else {
+    // OutType == float
+    float *fp = static_cast<float *>(p);
+    __m512 lo, hi;
+    float16_t::cvt_f16_to_f32_vec(v, lo, hi);
+    _mm512_storeu_ps(fp,      lo);
+    _mm512_storeu_ps(fp + 16, hi);
+  }
+}
+
+// 32-lane masked typed store. Companion to f16x32_load_mask_typed for
+// callers that already have a __mmask32 in hand and don't need an explicit
+// tail count (e.g., the masked-tail residual store in FusedAddRMSNorm).
+// Splits the 32-lane mask into two 16-lane halves on the f32 path.
+template <typename OutType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline void f16x32_store_mask_typed(void *p, __m512h v, __mmask32 mask) {
+  if constexpr(std::is_same_v<OutType, float16_t> ||
+               std::is_same_v<OutType, uint16_t>) {
+    f16_mask_storeu_vec(p, mask, v);
+  }
+  else {
+    // OutType == float
+    float *fp = static_cast<float *>(p);
+    __m512 lo, hi;
+    float16_t::cvt_f16_to_f32_vec(v, lo, hi);
+    const __mmask16 lo_mask = (__mmask16)(mask & 0xFFFFu);
+    const __mmask16 hi_mask = (__mmask16)((mask >> 16) & 0xFFFFu);
+    _mm512_mask_storeu_ps(fp,      lo_mask, lo);
+    _mm512_mask_storeu_ps(fp + 16, hi_mask, hi);
+  }
+}
+
+template <typename OutType>
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline void f16x32_store_tail_typed(void *p, __m512h v, __mmask32 mask,
+    int tail) {
+  if constexpr(std::is_same_v<OutType, float16_t> ||
+               std::is_same_v<OutType, uint16_t>) {
+    f16_mask_storeu_vec(p, mask, v);
+  }
+  else {
+    // OutType == float
+    float *fp = static_cast<float *>(p);
+    __m512 lo, hi;
+    float16_t::cvt_f16_to_f32_vec(v, lo, hi);
+    if (tail <= 16) {
+      __mmask16 lo_mask = (__mmask16)((1u << tail) - 1u);
+      _mm512_mask_storeu_ps(fp, lo_mask, lo);
+    }
+    else {
+      _mm512_storeu_ps(fp, lo);
+      __mmask16 hi_mask = (__mmask16)((1u << (tail - 16)) - 1u);
+      _mm512_mask_storeu_ps(fp + 16, hi_mask, hi);
+    }
+  }
+}
+
+// ---- Horizontal reduce: 32 FP16 lanes -> 1 FP32 scalar ------------------
+//
+// Widens to FP32 once before the horizontal sum to avoid FP16 precision
+// loss across long rows: 32 lanes added in FP16 can already lose meaningful
+// bits when the row sum is large compared to per-lane values (common for
+// hidden sizes >= 4 K). Costs 2 vcvtph2ps + 1 vaddps + 1 reduce per call,
+// negligible against the multi-K-lane main loop that produced v.
+
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline float reduce_add_ph_to_fp32(__m512h v) {
+  __m256i lo16 = _mm512_castsi512_si256(_mm512_castph_si512(v));
+  __m256i hi16 = _mm512_extracti64x4_epi64(_mm512_castph_si512(v), 1);
+  __m512  lo32 = _mm512_cvtph_ps(lo16);
+  __m512  hi32 = _mm512_cvtph_ps(hi16);
+  return _mm512_reduce_add_ps(_mm512_add_ps(lo32, hi32));
+}
+
 #endif  // __GNUC__ >= 12
 
 }//namespace common

@@ -113,7 +113,7 @@ class TestNormalization : public ::testing::TestWithParam<NormalizationType> {
     if (norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
       residual_tensor     = tensor_factory.uniform_dist_tensor(shape, src_dt, 2.0f);
       residual_tensor_ref = tensor_factory.zero_tensor(shape, src_dt);
-      size_t elem_bytes = (src_dt == data_type_t::bf16) ? 2 : 4;
+      size_t elem_bytes = size_of(src_dt);
       std::memcpy(residual_tensor_ref.get_raw_handle_unsafe(),
                   residual_tensor.get_raw_handle_unsafe(),
                   total_elements * elem_bytes);
@@ -160,20 +160,15 @@ TEST_P(TestNormalization, F32_F32) {
 
   create_optional_tensors(src_dt);
 
-  norm_params np     = build_params(src_dt, dst_dt);
-  norm_params ref_np = build_params(src_dt, dst_dt);
+  norm_params np = build_params(src_dt, dst_dt);
 
   status_t status = normalization_kernel_test(
                       input_tensor, output_tensor, gamma_tensor, beta_tensor,
                       running_mean_tensor, running_var_tensor, residual_tensor, np);
-  log_info("F32_F32 native kernel status: ",
-           (status == status_t::success) ? "success" : "failure");
 
   status_t ref_status = normalization_forced_ref_kernel_test(
                           input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
-                          running_mean_tensor, running_var_tensor, residual_tensor_ref, ref_np);
-  log_info("F32_F32 reference kernel status: ",
-           (ref_status == status_t::success) ? "success" : "failure");
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -203,20 +198,15 @@ TEST_P(TestNormalization, BF16_BF16) {
 
   create_optional_tensors(src_dt);
 
-  norm_params np     = build_params(src_dt, dst_dt);
-  norm_params ref_np = build_params(src_dt, dst_dt);
+  norm_params np = build_params(src_dt, dst_dt);
 
   status_t status = normalization_kernel_test(
                       input_tensor, output_tensor, gamma_tensor, beta_tensor,
                       running_mean_tensor, running_var_tensor, residual_tensor, np);
-  log_info("BF16_BF16 native kernel status: ",
-           (status == status_t::success) ? "success" : "failure");
 
   status_t ref_status = normalization_forced_ref_kernel_test(
                           input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
-                          running_mean_tensor, running_var_tensor, residual_tensor_ref, ref_np);
-  log_info("BF16_BF16 reference kernel status: ",
-           (ref_status == status_t::success) ? "success" : "failure");
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -246,20 +236,15 @@ TEST_P(TestNormalization, BF16_F32) {
 
   create_optional_tensors(src_dt);
 
-  norm_params np     = build_params(src_dt, dst_dt);
-  norm_params ref_np = build_params(src_dt, dst_dt);
+  norm_params np = build_params(src_dt, dst_dt);
 
   status_t status = normalization_kernel_test(
                       input_tensor, output_tensor, gamma_tensor, beta_tensor,
                       running_mean_tensor, running_var_tensor, residual_tensor, np);
-  log_info("BF16_F32 native kernel status: ",
-           (status == status_t::success) ? "success" : "failure");
 
   status_t ref_status = normalization_forced_ref_kernel_test(
                           input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
-                          running_mean_tensor, running_var_tensor, residual_tensor_ref, ref_np);
-  log_info("BF16_F32 reference kernel status: ",
-           (ref_status == status_t::success) ? "success" : "failure");
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -289,20 +274,15 @@ TEST_P(TestNormalization, F32_BF16) {
 
   create_optional_tensors(src_dt);
 
-  norm_params np     = build_params(src_dt, dst_dt);
-  norm_params ref_np = build_params(src_dt, dst_dt);
+  norm_params np = build_params(src_dt, dst_dt);
 
   status_t status = normalization_kernel_test(
                       input_tensor, output_tensor, gamma_tensor, beta_tensor,
                       running_mean_tensor, running_var_tensor, residual_tensor, np);
-  log_info("F32_BF16 native kernel status: ",
-           (status == status_t::success) ? "success" : "failure");
 
   status_t ref_status = normalization_forced_ref_kernel_test(
                           input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
-                          running_mean_tensor, running_var_tensor, residual_tensor_ref, ref_np);
-  log_info("F32_BF16 reference kernel status: ",
-           (ref_status == status_t::success) ? "success" : "failure");
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -311,6 +291,132 @@ TEST_P(TestNormalization, F32_BF16) {
     compare_norm_tensors(output_tensor, output_tensor_ref,
                          shape, total_elements,
                          NORM_BF16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestNormalization parameterized test class
+ *  @param F16_F16 src=f16, dst=f16
+ *  @brief Validates normalization native kernel against reference kernel (f16 I/O).
+ *         Skipped at runtime if the platform lacks AVX512-FP16 ISA support.
+ */
+TEST_P(TestNormalization, F16_F16) {
+  data_type_t src_dt = data_type_t::f16;
+  data_type_t dst_dt = data_type_t::f16;
+
+  auto input_tensor      = tensor_factory.uniform_dist_tensor(shape, src_dt,
+                           2.0f);
+  auto output_tensor     = tensor_factory.zero_tensor(shape, dst_dt);
+  auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
+
+  create_optional_tensors(src_dt);
+
+  norm_params np = build_params(src_dt, dst_dt);
+
+  status_t status = normalization_kernel_test(
+                      input_tensor, output_tensor, gamma_tensor, beta_tensor,
+                      running_mean_tensor, running_var_tensor, residual_tensor, np);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+
+  status_t ref_status = normalization_forced_ref_kernel_test(
+                          input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_norm_tensors(output_tensor, output_tensor_ref,
+                         shape, total_elements,
+                         NORM_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestNormalization parameterized test class
+ *  @param F16_F32 src=f16, dst=f32
+ *  @brief Validates normalization native kernel against reference kernel
+ *         (f16 input, f32 output). Skipped at runtime if F16 ISA is unavailable.
+ */
+TEST_P(TestNormalization, F16_F32) {
+  data_type_t src_dt = data_type_t::f16;
+  data_type_t dst_dt = data_type_t::f32;
+
+  auto input_tensor      = tensor_factory.uniform_dist_tensor(shape, src_dt,
+                           2.0f);
+  auto output_tensor     = tensor_factory.zero_tensor(shape, dst_dt);
+  auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
+
+  create_optional_tensors(src_dt);
+
+  norm_params np = build_params(src_dt, dst_dt);
+
+  status_t status = normalization_kernel_test(
+                      input_tensor, output_tensor, gamma_tensor, beta_tensor,
+                      running_mean_tensor, running_var_tensor, residual_tensor, np);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+
+  status_t ref_status = normalization_forced_ref_kernel_test(
+                          input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_norm_tensors(output_tensor, output_tensor_ref,
+                         shape, total_elements,
+                         NORM_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestNormalization parameterized test class
+ *  @param F32_F16 src=f32, dst=f16
+ *  @brief Validates normalization native kernel against reference kernel
+ *         (f32 input, f16 output). Skipped at runtime if F16 ISA is unavailable.
+ */
+TEST_P(TestNormalization, F32_F16) {
+  data_type_t src_dt = data_type_t::f32;
+  data_type_t dst_dt = data_type_t::f16;
+
+  auto input_tensor      = tensor_factory.uniform_dist_tensor(shape, src_dt,
+                           2.0f);
+  auto output_tensor     = tensor_factory.zero_tensor(shape, dst_dt);
+  auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
+
+  create_optional_tensors(src_dt);
+
+  norm_params np = build_params(src_dt, dst_dt);
+
+  status_t status = normalization_kernel_test(
+                      input_tensor, output_tensor, gamma_tensor, beta_tensor,
+                      running_mean_tensor, running_var_tensor, residual_tensor, np);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+
+  status_t ref_status = normalization_forced_ref_kernel_test(
+                          input_tensor, output_tensor_ref, gamma_tensor, beta_tensor,
+                          running_mean_tensor, running_var_tensor, residual_tensor_ref, np);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_norm_tensors(output_tensor, output_tensor_ref,
+                         shape, total_elements,
+                         NORM_F16_TOL, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);

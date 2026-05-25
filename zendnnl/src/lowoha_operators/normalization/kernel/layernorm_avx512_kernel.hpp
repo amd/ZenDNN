@@ -36,8 +36,8 @@ namespace normalization {
 //
 // @param input      Input tensor (contiguous, row-major)
 // @param output     Output tensor
-// @param gamma      Scale parameter (FP32 or BF16, nullptr if !use_scale)
-// @param beta       Shift parameter (FP32 or BF16, nullptr if !use_shift)
+// @param gamma      Scale parameter (FP32, BF16, or F16, nullptr if !use_scale)
+// @param beta       Shift parameter (FP32, BF16, or F16, nullptr if !use_shift)
 // @param params     Normalization parameters
 //
 // @return status_t::success on successful execution

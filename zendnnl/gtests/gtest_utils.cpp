@@ -533,34 +533,41 @@ NormalizationType::NormalizationType() {
     use_shift = cli_params.use_shift ? *cli_params.use_shift : false;
   }
 
-  if (cli_params.gamma_dt) {
-    if (*cli_params.gamma_dt == data_type_t::bf16 ||
-        *cli_params.gamma_dt == data_type_t::f32) {
-      gamma_dt = *cli_params.gamma_dt;
+  // Pick gamma_dt / beta_dt independently from {f32, bf16, f16}. f16 is only
+  // included when the platform supports F16 ISA, since otherwise F32/BF16 I/O
+  // tests would fail with isa_unsupported when gamma/beta are f16.
+  // CLI overrides (--gamma_dt, --beta_dt) are honored when valid; otherwise
+  // a random pick from the supported set is used.
+  const bool f16_ok = zendnnl_platform_info().get_avx512_f16_status();
+  auto pick_gamma_beta_dt = [f16_ok]() {
+    int n_choices = f16_ok ? 3 : 2;
+    int c = std::rand() % n_choices;
+    if (c == 0) {
+      return data_type_t::f32;
     }
-    else {
-      log_info("Unsupported gamma_dt: ", dtype_info(*cli_params.gamma_dt),
-               " (use bf16, f32); using random gamma_dt.");
-      gamma_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
+    if (c == 1) {
+      return data_type_t::bf16;
     }
-  }
-  else {
-    gamma_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
-  }
-  if (cli_params.beta_dt) {
-    if (*cli_params.beta_dt == data_type_t::bf16 ||
-        *cli_params.beta_dt == data_type_t::f32) {
-      beta_dt = *cli_params.beta_dt;
+    return data_type_t::f16;
+  };
+  auto resolve_gamma_beta_dt = [&](const char *name,
+  const std::optional<data_type_t> &cli_dt) {
+    if (cli_dt) {
+      const bool supported = (*cli_dt == data_type_t::f32 ||
+                              *cli_dt == data_type_t::bf16 ||
+                              (*cli_dt == data_type_t::f16 && f16_ok));
+      if (supported) {
+        return *cli_dt;
+      }
+      log_info("Unsupported ", name, ": ", dtype_info(*cli_dt),
+               " (use f32, bf16",
+               f16_ok ? ", f16" : "",
+               "); using random ", name, ".");
     }
-    else {
-      log_info("Unsupported beta_dt: ", dtype_info(*cli_params.beta_dt),
-               " (use bf16, f32); using random beta_dt.");
-      beta_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
-    }
-  }
-  else {
-    beta_dt = rand() % 4 == 0 ? data_type_t::bf16 : data_type_t::f32;
-  }
+    return pick_gamma_beta_dt();
+  };
+  gamma_dt = resolve_gamma_beta_dt("gamma_dt", cli_params.gamma_dt);
+  beta_dt  = resolve_gamma_beta_dt("beta_dt",  cli_params.beta_dt);
 
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -4532,7 +4539,9 @@ status_t normalization_kernel_test(
                         mean_ptr, var_ptr, residual_ptr, params);
 
     if (status != status_t::success) {
-      log_error("normalization_direct execution failed");
+      if (status != status_t::isa_unsupported) {
+        log_error("normalization_direct execution failed");
+      }
     }
     return status;
   }
@@ -4569,7 +4578,9 @@ status_t normalization_forced_ref_kernel_test(
                         mean_ptr, var_ptr, residual_ptr, params);
 
     if (status != status_t::success) {
-      log_error("normalization_reference_wrapper execution failed");
+      if (status != status_t::isa_unsupported) {
+        log_error("normalization_reference_wrapper execution failed");
+      }
     }
     return status;
   }

@@ -65,7 +65,8 @@ class platform_info_t final {
    *
    *  True only when the CPU supports AVX512-FP16 (CPUID leaf 7, subleaf 0,
    *  EDX bit 23), which provides native FP16 FMA, add, mul, etc.
-   *  Required for embag_avx512_f16_fma_kernel.
+   *  Required for any kernel that emits __m512h / _ph intrinsics
+   *  (e.g. embag_avx512_f16_fma_kernel, rmsnorm/layernorm AVX512-FP16 kernels).
    *
    *  @return true if platform supports AVX512-FP16, false otherwise.
    */

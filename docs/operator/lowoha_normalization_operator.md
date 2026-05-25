@@ -9,9 +9,9 @@ The **LOWOHA Normalization Operator** is a high-performance, low-overhead normal
 
 LOWOHA Normalization provides a **function-based interface** optimized for:
 - Minimal execution overhead
-- FP32 and BF16 data types (input, output, gamma, beta)
+- FP32, BF16, and F16 data types (input, output, gamma, beta)
 - Multiple normalization variants via a single API
-- AVX-512 vectorized kernels for RMSNorm and FusedAddRMSNorm
+- AVX-512 and AVX-512-FP16 vectorized kernels for LayerNorm, RMSNorm, and FusedAddRMSNorm
 - Direct control over execution parameters
 
 ## Supported Normalization Types
@@ -83,9 +83,10 @@ status_t normalization_direct(
   norm_params &params        // Normalization parameters
 );
 ```
-Current dispatch logic:
-- `RMS_NORM` / `FUSED_ADD_RMS_NORM` → AVX-512 kernel (`rms_norm_avx512`)
-- `LAYER_NORM` / `BATCH_NORM` → Reference (scalar) kernel (`normalization_reference_wrapper`)
+Current dispatch logic (see the [F16 FMA Mode](#f16-fma-mode-native-avx512-fp16) section for the full per-norm-type matrix):
+- `LAYER_NORM` / `RMS_NORM` / `FUSED_ADD_RMS_NORM` → AVX-512-FP16 (`__m512h`) when eligible, otherwise the FP32-accumulating AVX-512 kernel.
+- `BATCH_NORM` → Reference (scalar) kernel (`normalization_reference_wrapper`).
+- For non-F16 configurations, any path falls back to the reference kernel if no AVX-512 hardware is available. F16 configurations (where any actually-used buffer is `f16`) require AVX512-FP16 ISA up-front: `normalization_direct` returns `status_t::isa_unsupported` and does **not** fall back to the reference kernel — see the [Error Handling](#error-handling) section.
 
 ## Parameters Structure
 
@@ -118,6 +119,9 @@ struct norm_params {
   norm_algo_t algorithm;          // Selected algorithm / backend (default: none)
 
   int32_t num_threads;            // Number of threads, 0 = auto (default: 0)
+
+  // --- Internal dispatch breadcrumb (do not set from caller code) ---
+  data_type_t accum_type;
 };
 ```
 
@@ -150,18 +154,55 @@ enum class norm_type_t : int {
 
 | Input Type | Output Type |
 |------------|-------------|
-| FP32 | FP32 |
-| BF16 | BF16 |
-| BF16 | FP32 |
-| FP32 | BF16 |
+| FP32       | FP32        |
+| BF16       | BF16        |
+| BF16       | FP32        |
+| FP32       | BF16        |
+| F16        | F16         |
+| F16        | FP32        |
+| FP32       | F16         |
+
+> **Note:** F16 cannot be cross-mixed with BF16 between `src_dt` and `dst_dt`
+> (e.g. `F16 → BF16` or `BF16 → F16` is rejected at validation). BF16 and
+> non-native-F16 paths perform normalization compute in FP32 internally, while
+> native AVX512-FP16 F16 kernels accumulate and perform elementwise arithmetic
+> in `__m512h`; type conversion still occurs at the load/store boundary.
 
 **Gamma / Beta (`gamma_dt`, `beta_dt`):**
 
-| Supported Types | Default |
-|-----------------|---------|
-| FP32, BF16 | FP32 |
+| Supported Types  | Default |
+|------------------|---------|
+| FP32, BF16, F16  | FP32    |
+
+`gamma_dt` and `beta_dt` are independent of `src_dt` / `dst_dt` and may be
+chosen freely from the supported list.
 
 **BatchNorm running mean / variance:** FP32 only (cast to `const float *` internally).
+
+### F16 FMA Mode (Native AVX512-FP16)
+
+When the full eligibility matrix below is satisfied — i.e., the norm type is `LAYER_NORM`, `RMS_NORM`, or `FUSED_ADD_RMS_NORM`; at least one of `src_dt`/`dst_dt` is F16; the actually-used gamma/beta dtypes are F16/F32 (BF16 gamma/beta force the FP32 path); the host CPU exposes the AVX512-FP16 ISA; and the build was not configured with `-DZENDNNL_NATIVE_F32_ACCUM=ON` — the dispatch routes the call to a native FP16-FMA kernel that performs the inner loop in `__m512h` registers (32 lanes per register, ~2x throughput over the FP32-accumulating AVX-512 path). Storage-side conversions (F16↔F32) happen only at the load/store boundary; the FMA chain itself stays in FP16. `BATCH_NORM` is never eligible (it always uses the reference kernel).
+
+**Dispatch matrix** for `LAYER_NORM` and `RMS_NORM`:
+
+| `(src_dt, dst_dt)` | `gamma_dt` | `beta_dt` (LayerNorm + `use_shift`) | Kernel chosen |
+|---|---|---|---|
+| `(f16, f16)` / `(f16, f32)` / `(f32, f16)` | `f16` or `f32` | `f16` or `f32` | **AVX512-FP16** |
+| as above, but `gamma_dt = bf16` or `beta_dt = bf16` | bf16 | bf16 | AVX-512 (FP32-accumulating) |
+| `(f32, f32)` (no F16 anywhere) | any | any | AVX-512 (FP32-accumulating) |
+| `(bf16, bf16)` / `(bf16, f32)` / `(f32, bf16)` | any | any | AVX-512 (FP32-accumulating) |
+| `(f16, bf16)` / `(bf16, f16)` | any | any | **Rejected** — `normalization_direct` returns `status_t::failure` (F16↔BF16 cross-mixing between src and dst is not supported) |
+
+`FUSED_ADD_RMS_NORM` keeps a stricter gate: `src_dt == dst_dt == gamma_dt == f16` (the residual buffer aliases src and is read-modify-written in place, so it must share the f16 storage layout). Mixed-dtype fused-add falls through to the AVX-512 (FP32) kernel.
+
+`BATCH_NORM` always uses the reference kernel (no AVX-512 BatchNorm fast path).
+
+**Build-time opt-out:** Pass `-DZENDNNL_NATIVE_F32_ACCUM=ON` to CMake to disable the native AVX512-FP16 fast path for the LayerNorm, RMSNorm, and FusedAddRMSNorm dispatches in the rows of the table above marked **AVX512-FP16**. With this flag set, those calls take the FP32-accumulating AVX-512 kernel instead — useful for A/B precision comparisons and numerical reproducibility studies. Two side effects of the flag:
+
+- It also **enables f16 inputs on hosts without AVX-512-FP16**: the FP32-accumulating kernel handles f16 storage via F16C convert (`_mm512_cvtph_ps` / `_mm512_cvtps_ph`), which any AVX-512 host has. Without the flag, `normalization_direct` returns `status_t::isa_unsupported` early for any call that uses an f16 buffer on a non-AVX-512-FP16 host.
+- It does **not** affect BatchNorm (always reference kernel) or `bf16`-gamma/beta combos (already on the FP32 path).
+
+The same switch also covers the F16 path in the embedding-bag operator.
 
 ### Parameter Requirements by Norm Type
 
@@ -412,7 +453,7 @@ int batch_norm_inference_example() {
 The `residual` parameter is unique to `FUSED_ADD_RMS_NORM`:
 
 - **Required:** Must be non-null when `norm_type == FUSED_ADD_RMS_NORM`
-- **Element type:** Same as `params.src_dt` (f32 or bf16)
+- **Element type:** Same as `params.src_dt` (f32, bf16, or f16)
 - **Access:** Read-write (modified in-place)
 - **After the call:** `residual[i] = old_residual[i] + input[i]`
 
@@ -420,10 +461,10 @@ For all other norm types, pass `nullptr` for the residual parameter.
 
 ### Gamma and Beta
 
-- **Gamma (scale):** Shape `[norm_size]` for LayerNorm/RMSNorm/FusedAddRMSNorm, `[num_channels]` for BatchNorm. Supports FP32 (default) or BF16 — set `params.gamma_dt` to match the buffer's element type. Pass `nullptr` if `use_scale == false`.
-- **Beta (shift):** Shape `[norm_size]` for LayerNorm, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Supports FP32 (default) or BF16 — set `params.beta_dt` to match the buffer's element type. Pass `nullptr` if `use_shift == false` or not applicable.
+- **Gamma (scale):** Shape `[norm_size]` for LayerNorm/RMSNorm/FusedAddRMSNorm, `[num_channels]` for BatchNorm. Supports FP32 (default), BF16, or F16 — set `params.gamma_dt` to match the buffer's element type. Pass `nullptr` if `use_scale == false`.
+- **Beta (shift):** Shape `[norm_size]` for LayerNorm, `[num_channels]` for BatchNorm. Unused by RMSNorm and FusedAddRMSNorm. Supports FP32 (default), BF16, or F16 — set `params.beta_dt` to match the buffer's element type. Pass `nullptr` if `use_shift == false` or not applicable.
 
-If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f32`. When providing BF16 gamma/beta buffers, you **must** set the corresponding `gamma_dt`/`beta_dt` to `data_type_t::bf16`; a mismatch between the field and the actual buffer type leads to undefined behavior.
+If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f32`. When providing BF16/F16 gamma/beta buffers, you **must** set the corresponding `gamma_dt`/`beta_dt` to `data_type_t::bf16` or `data_type_t::f16`; a mismatch between the field and the actual buffer type leads to undefined behavior.
 
 ## API Summary
 
@@ -446,6 +487,7 @@ If `gamma_dt` or `beta_dt` is not explicitly set, it defaults to `data_type_t::f
 
 - **Input validation** runs by default. It is gated by the environment variable `ZENDNNL_DIAGNOSTICS_ENABLE`, which defaults to enabled (anything other than `0`). To disable validation in production hot paths and reduce the gate to a single predicted-taken branch, set `ZENDNNL_DIAGNOSTICS_ENABLE=0` before launching the application.
 - **Profiling** is controlled by the environment variable `ZENDNNL_ENABLE_PROFILER=1` and `ZENDNNL_PROFILE_LOG_LEVEL=4`. When active, `normalization_direct` reports execution time and operator parameters.
+- **F16-FMA build-time toggle:** Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to disable the native AVX512-FP16 fast path for LayerNorm/RMSNorm/FusedAddRMSNorm on AVX-512-FP16-capable hosts; those dispatches take the FP32-accumulating AVX-512 kernel instead. The flag also enables f16 inputs on hosts without AVX-512-FP16 (storage is handled via F16C convert in the FP32 kernel). It has no effect on BatchNorm or `bf16`-gamma/beta combos. See the [F16 FMA Mode](#f16-fma-mode-native-avx512-fp16) section for details.
 
 ## Error Handling
 
@@ -453,16 +495,20 @@ The `normalization_direct` function returns `status_t`:
 
 - `status_t::success`: Operation completed successfully
 - `status_t::failure`: Operation failed (check logs for details)
+- `status_t::isa_unsupported`: F16 was requested but the platform lacks AVX512-FP16 ISA support
 
-Common failure causes (checked when diagnostics are enabled, i.e. `ZENDNNL_DIAGNOSTICS_ENABLE` is unset or set to anything other than `0`):
+Failure causes checked unconditionally (production hot path):
+- F16/BF16 cross-mixing between `src_dt` and `dst_dt`
+- FusedAddRMSNorm with a null residual buffer
+
+Additional failure causes checked only when `ZENDNNL_DIAGNOSTICS_ENABLE=1`:
 - Null input or output pointers
 - `norm_type` not specified (`NONE`)
-- Unsupported `src_dt` or `dst_dt` (not f32 or bf16)
+- Unsupported `src_dt` or `dst_dt` (not f32, bf16, or f16)
 - `batch == 0` or `norm_size == 0`
-- Unsupported `gamma_dt` (not f32 or bf16) when `use_scale == true`
-- Unsupported `beta_dt` (not f32 or bf16) when `use_shift == true`
+- Unsupported `gamma_dt` (not f32, bf16, or f16) when `use_scale == true`
+- Unsupported `beta_dt` (not f32, bf16, or f16) when `use_shift == true`
 - `use_scale == true` but gamma pointer is null
 - `use_shift == true` but beta pointer is null (LayerNorm/BatchNorm only; RMSNorm and FusedAddRMSNorm skip this check)
 - BatchNorm missing `running_mean` or `running_var`
-- FusedAddRMSNorm missing residual buffer
 - `epsilon <= 0`

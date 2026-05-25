@@ -284,6 +284,7 @@ extern const float LOWOHA_REORDER_BF16_TOL;
 extern const float LOWOHA_REORDER_F32_TOL;
 extern const float NORM_F32_TOL;
 extern const float NORM_BF16_TOL;
+extern const float NORM_F16_TOL;
 extern const float SOFTMAX_F32_TOL;
 extern const float SOFTMAX_BF16_TOL;
 extern const float epsilon_f32;
@@ -890,10 +891,13 @@ status_t quant_params_compute(
 /** @fn normalization_kernel_test
  *  @brief Test function for normalization kernel (native path)
  *
- *  Calls normalization_direct() which dispatches to the best available kernel:
- *  AVX-512 for RMSNorm/FusedAddRMSNorm, reference for LayerNorm/BatchNorm.
+ *  Calls normalization_direct() which dispatches to the best available
+ *  kernel: AVX-512-FP16 / AVX-512 for LayerNorm and RMSNorm /
+ *  FusedAddRMSNorm, reference for BatchNorm.
  *
- *  @return status_t Success or failure status
+ *  @return status_t::success, status_t::isa_unsupported when an f16 buffer
+ *  is used on a host without AVX-512-FP16 (unless the library was built
+ *  with -DZENDNNL_NATIVE_F32_ACCUM=ON), or status_t::failure otherwise.
  */
 status_t normalization_kernel_test(
   tensor_t &input_tensor,
@@ -912,7 +916,7 @@ status_t normalization_kernel_test(
  *  dispatch to always use the scalar reference. Caller must set batch and
  *  norm_size in params before calling.
  *
- *  @return status_t Success or failure status
+ *  @return status_t::success or status_t::failure.
  */
 status_t normalization_forced_ref_kernel_test(
   tensor_t &input_tensor,

@@ -71,7 +71,7 @@ inline void maybe_prefetch_weight(const float *weights, int64_t i,
   - This kernel handles F16 only when (the gate above has passed and)
     one of these holds:
       * GCC < 12 (native FP16 intrinsics unavailable), or
-      * the build was configured with -DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON
+      * the build was configured with -DZENDNNL_NATIVE_F32_ACCUM=ON
         (force F32 accumulation for reproducibility).
     In that path, F16 inputs are widened to FP32 via _mm512_cvtph_ps at
     load, accumulation runs in FP32, and results are narrowed back via

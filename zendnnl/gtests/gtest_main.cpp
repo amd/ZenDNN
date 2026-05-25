@@ -70,6 +70,7 @@ const float LOWOHA_REORDER_F32_TOL  = 0.001; // For f32 output
 // Normalization tolerance constants
 const float NORM_F32_TOL  = 0.001;
 const float NORM_BF16_TOL = 0.01;
+const float NORM_F16_TOL  = 0.01;
 
 // Softmax tolerance constants
 const float SOFTMAX_F32_TOL  = 0.001;

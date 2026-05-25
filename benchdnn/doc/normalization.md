@@ -25,14 +25,14 @@ Provide a file with one configuration per line. Lines starting with `#` are comm
 - `norm_type` (Normalization variant: `layer_norm`, `batch_norm`, `rms_norm`, `fused_add_rms_norm`)
 - `shape` (Tensor dimensions separated by `x`, e.g., `2x4096`, `32x64x56x56`)
 - `norm_ndims` (Number of trailing dimensions to normalize; must be `0` for `batch_norm`, `1` to `ndims` for others)
-- `src_dt:dst_dt` (Source and destination data types, e.g., `f32:f32`, `bf16:bf16`, `bf16:f32`, `f32:bf16`)
+- `src_dt:dst_dt` (Source and destination data types, e.g., `f32:f32`, `bf16:bf16`, `bf16:f32`, `f32:bf16`, `f16:f16`, `f16:f32`, `f32:f16`. `f16` cannot be cross-mixed with `bf16` between src and dst.)
 - `epsilon` (Numerical stability constant, e.g., `1e-5`)
 - `use_scale` (Whether to apply gamma/scale: `true`/`false`)
 - `use_shift` (Whether to apply beta/shift: `true`/`false`; ignored for `rms_norm` and `fused_add_rms_norm`)
 - `iters` (Number of benchmark iterations)
 - `warmup_iters` (optional; defaults to 20% of `iters`)
-- `gamma_dt` (optional; data type for gamma: `f32` or `bf16`; defaults to `f32`)
-- `beta_dt` (optional; data type for beta: `f32` or `bf16`; defaults to `f32`)
+- `gamma_dt` (optional; data type for gamma: `f32`, `bf16`, or `f16`; defaults to `f32`. May be chosen independently of `src_dt`/`dst_dt`.)
+- `beta_dt` (optional; data type for beta: `f32`, `bf16`, or `f16`; defaults to `f32`. May be chosen independently of `src_dt`/`dst_dt`.)
 - `algorithm` (optional; backend selection: `none`, `dynamic_dispatch`, `reference`; defaults to `none`)
 - `num_threads` (optional; number of threads, `0` = auto/all available; defaults to `0`)
 - `isInplace` (optional; `true`/`1` to perform in-place normalization where output overwrites the input buffer, `false`/`0` for out-of-place; defaults to `true`. Requires `src_dt == dst_dt` when in-place.)
@@ -52,6 +52,12 @@ batch_norm, 32x64x56x56, 0, f32:f32, 1e-5, true, true, 200
 fused_add_rms_norm, 4x4096, 1, f32:f32, 1e-6, true, false, 100, 20, f32, f32, dynamic_dispatch, 8
 layer_norm, 4x8x512, 2, f32:f32, 1e-5, true, true, 100, 20, bf16, bf16
 layer_norm, 2x4096, 1, f32:f32, 1e-5, true, true, 100, 20, f32, f32, none, 0, true
+rms_norm, 4x4096, 1, f16:f16, 1e-6, true, false, 100, 20, f16
+layer_norm, 2x4096, 1, f16:f32, 1e-5, true, true, 100, 20, f16, f16
+# F16-FMA fast path with f32 gamma/beta (require AVX512-FP16):
+rms_norm,   8x4096, 1, f16:f16, 1e-6, true, false, 100, 20, f32
+layer_norm, 2x4096, 1, f16:f16, 1e-5, true, true,  100, 20, f32, f32
+layer_norm, 2x4096, 1, f32:f16, 1e-5, true, true,  100, 20, f16, f32
 ```
 ---
 
@@ -61,6 +67,14 @@ layer_norm, 2x4096, 1, f32:f32, 1e-5, true, true, 100, 20, f32, f32, none, 0, tr
 > - `norm_ndims` controls how many trailing dimensions are normalized together. For example, with shape `4x8x512` and `norm_ndims=2`, normalization is performed over the last 2 dimensions (8x512). Setting `norm_ndims` equal to the total number of dimensions normalizes the entire tensor as a single group.
 > - The `warmup_iters` parameter is optional and can be used to specify the number of warmup iterations before benchmarking.
 > - In-place normalization (`isInplace=true`) requires that `src_dt` and `dst_dt` are the same data type. The output overwrites the input buffer, reducing memory usage. If `isInplace` is `true` (whether explicitly set or defaulted) and `src_dt != dst_dt`, it automatically falls back to out-of-place with a warning.
+> - `f16` (input, output, gamma, or beta — whenever the corresponding buffer is actually used) requires **either** AVX512-FP16 ISA on the host **or** a library built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`. With the macro OFF, hosts without AVX512-FP16 return `status_t::isa_unsupported` before any kernel dispatch; the benchmark driver currently logs these as failed runs (the driver does not yet treat `isa_unsupported` as a clean skip), so use an input file matched to your hardware. With the macro ON, the FP32-accumulating AVX-512 kernel handles f16 storage via F16C convert (`_mm512_cvtph_ps` / `_mm512_cvtps_ph`), which any AVX-512 host has — f16 inputs then run end-to-end on non-AVX512-FP16 hardware. The benchmark itself still runs; only AVX-512F (very widely available) is required.
+> - **F16-FMA fast path:** On hosts with AVX512-FP16, the native FP16-FMA kernel performs the inner loop in `__m512h` registers (~2x throughput vs. the FP32-accumulating AVX-512 kernel). The eligibility predicate depends on the norm type:
+>     - `rms_norm` — `src_dt`/`dst_dt` ∈ `{f16, f32}` with at least one `f16`, and `gamma_dt` ∈ `{f16, f32}`. `beta_dt` is irrelevant (RMSNorm never reads beta).
+>     - `layer_norm` — same as `rms_norm`, plus `beta_dt` ∈ `{f16, f32}` only when `use_shift=true` (if `use_shift=false`, `beta_dt` is irrelevant).
+>     - `fused_add_rms_norm` — strict `src_dt = dst_dt = gamma_dt = f16` (residual aliases src in place and must share the f16 storage layout). Mixed `(src, dst)` falls through to the FP32 path. `beta_dt` is irrelevant.
+>     - `batch_norm` — always uses the reference kernel; the F16-FMA path does not apply.
+>
+>   `bf16` in a *checked* operand always disqualifies the FP16-FMA path for that call. To force the FP32 path library-wide for A/B comparisons on an AVX512-FP16 host, build with `-DZENDNNL_NATIVE_F32_ACCUM=ON`.
 
 ## Output
 

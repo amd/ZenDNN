@@ -60,7 +60,7 @@ void embag_ref_kernel(
   //
   // The producers already gate F16 on __GNUC__ >= 12 and
   // can_use_f16_fma_kernel() (which itself returns false when
-  // ZENDNNL_EMBAG_NATIVE_F32_ACCUM is defined), so the singleton can only
+  // ZENDNNL_NATIVE_F32_ACCUM is defined), so the singleton can only
   // ever hold f16 when the F16 FMA path was actually used - no extra
   // build-time check is needed here. The (input_is_f16 || output_is_f16)
   // guard ensures non-F16-touching dtypes are unaffected by any stale
@@ -337,7 +337,7 @@ void embag_int8_int4_ref_kernel(
   //
   // The producers already gate F16 on __GNUC__ >= 12 and
   // can_use_f16_fma_kernel() (which itself returns false when
-  // ZENDNNL_EMBAG_NATIVE_F32_ACCUM is defined), so the singleton can only
+  // ZENDNNL_NATIVE_F32_ACCUM is defined), so the singleton can only
   // ever hold f16 when the F16 FMA path was actually used - no extra
   // build-time check is needed here. For quantized inputs, F16 accumulation
   // only makes sense when the output is F16, so we additionally guard on

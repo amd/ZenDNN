@@ -19,12 +19,33 @@
 
 #include <cstdint>
 #include "memory/memory_utils.hpp"
+#include "common/platform_info.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace normalization {
 
 using namespace zendnnl::common;
+
+/** @brief Should the AVX512-FP16 native-FMA normalization kernels be used?
+ *
+ *  Returns true only when both:
+ *    - the CPU exposes the AVX512-FP16 ISA (required for __m512h / _ph FMA), and
+ *    - ZENDNNL_NATIVE_F32_ACCUM is not defined (compile-time opt-out to
+ *      force the FP32-accumulating AVX-512 kernel for A/B comparisons).
+ *
+ *  The F16-FMA kernel translation units additionally guard their bodies on
+ *  __GNUC__ >= 12 (first toolchain shipping __m512h). On older toolchains
+ *  those kernels return status_t::isa_unsupported and the dispatch falls
+ *  through to the FP32 AVX-512 kernel.
+ */
+inline bool can_use_f16_fma_kernel() {
+#if !defined(ZENDNNL_NATIVE_F32_ACCUM)
+  return zendnnl_platform_info().get_avx512_f16_status();
+#else
+  return false;
+#endif
+}
 
 /**
  * @brief Normalization type
@@ -93,7 +114,7 @@ struct norm_params {
   // --- Normalization parameters ---
   float epsilon;                  ///< Small constant for numerical stability (default 1e-5)
   bool use_scale;                 ///< Whether to apply learned scale (gamma)
-  bool use_shift;                 ///< Whether to apply learned shift (beta); ignored by RMSNorm
+  bool use_shift;                 ///< Whether to apply learned shift (beta); ignored by RMSNorm and FusedAddRMSNorm
 
   // --- Data types ---
   data_type_t src_dt;             ///< Source / input data type
@@ -105,6 +126,13 @@ struct norm_params {
   norm_algo_t algorithm;          ///< Selected algorithm / backend
 
   int32_t num_threads;            ///< Number of threads (0 = auto)
+
+  // Communicates the FMA precision the production kernel used to the reference
+  // kernel, so gtest comparisons can bit-match. Set by the dispatch in
+  // lowoha_normalization.cpp; read by reference_kernel.cpp. Defaults to f32;
+  // the F16-FMA branches overwrite to f16 before invoking the compute path.
+  // Callers should leave this at its default.
+  data_type_t accum_type;
 
   norm_params()
     : norm_type(norm_type_t::NONE),
@@ -119,7 +147,8 @@ struct norm_params {
       gamma_dt(data_type_t::f32),
       beta_dt(data_type_t::f32),
       algorithm(norm_algo_t::none),
-      num_threads(0) {}
+      num_threads(0),
+      accum_type(data_type_t::f32) {}
 };
 
 } // namespace normalization

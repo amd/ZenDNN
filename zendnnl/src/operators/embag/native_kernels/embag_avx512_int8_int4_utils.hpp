@@ -708,10 +708,18 @@ void embag_avx512_int8_int4_kernel(
 //   INT4:  nibble unpack -> cvte[pu|pi]8_epi16 -> cvtepi16_ph -> fmadd_ph
 //
 // Requires GCC >= 12 and AVX512-FP16 ISA at runtime.
-// Controlled by the same ZENDNNL_EMBAG_NATIVE_F32_ACCUM macro and
+// Controlled by the same ZENDNNL_NATIVE_F32_ACCUM macro and
 // can_use_f16_fma_kernel() runtime check used for F16 table types.
 // =========================================================================
 #if __GNUC__ >= 12
+
+// Boundary store helpers shared with the non-quantized embag F16-FMA kernel
+// (embag_avx512_f16_utils.hpp) and the normalization F16-FMA kernels. The
+// typed variants pick the right intrinsic via `if constexpr` on the storage
+// type, so the FMA accumulator stays in __m512h regardless of whether the
+// output is stored as f16 or f32.
+using common::f16x32_store_typed;
+using common::f16x32_store_tail_typed;
 
 template <typename InType>
 __attribute__((target("avx512f,avx512bw,avx512fp16")))
@@ -1003,11 +1011,13 @@ void embag_avx512_int8_int4_f16_fma_kernel(
     }
 
     for (int b = 0; b < full_blocks; ++b) {
-      f16_store_full<OutType>(&dst[dst_offset + b * simd_width], acc[b]);
+      f16x32_store_typed<OutType>(&dst[dst_offset + b * simd_width], acc[b]);
     }
     if (tail > 0) {
-      f16_store_tail<OutType>(
-        &dst[dst_offset + full_blocks * simd_width], acc[full_blocks], tail);
+      __mmask32 tail_mask = (1u << tail) - 1;
+      f16x32_store_tail_typed<OutType>(
+        &dst[dst_offset + full_blocks * simd_width], acc[full_blocks],
+        tail_mask, tail);
     }
   }
 }

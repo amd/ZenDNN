@@ -34,6 +34,7 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `EMBAG_F16_TOL`: Tolerance for EmbeddingBag FP16 precision in tests (default: `0.01`).
 - `NORM_F32_TOL`: Tolerance for normalization F32 tests (default: `0.001`).
 - `NORM_BF16_TOL`: Tolerance for normalization BF16 tests (default: `0.01`).
+- `NORM_F16_TOL`: Tolerance for normalization F16 tests (default: `0.01`).
 - `SOFTMAX_F32_TOL`: Tolerance for softmax F32 tests (default: `0.001`).
 - `SOFTMAX_BF16_TOL`: Tolerance for softmax BF16 tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `400`).
@@ -285,7 +286,7 @@ If `--dim_choice` is omitted **or invalid on the command line**, dimensionality 
 | `--norm_type` | `layer` → LayerNorm, `batch` → BatchNorm, `rms` → RMSNorm, `fusedaddrms` → FusedAddRMSNorm |
 | `--norm_shape` | Comma-separated positive integers; a single dimension is valid for `layer`, `rms`, and `fusedaddrms`, while `batch` requires **at least two** (e.g. `32`, `2,8,32`) |
 | `--use_scale`, `--use_shift` | Boolean |
-| `--gamma_dt`, `--beta_dt` | **`bf16`** or **`f32`** |
+| `--gamma_dt`, `--beta_dt` | **`f32`**, **`bf16`**, or **`f16`** (`f16` only on AVX512-FP16-capable hosts; otherwise rejected with a log message and a random fallback) |
 
 Unset optional flags keep the suite’s **random defaults** defined in the corresponding `*Type` constructors.
 
@@ -684,10 +685,13 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```
 
 ### Normalization Tests
- - Normalization TestSuite has four testcases (F32_F32, BF16_BF16, BF16_F32, F32_BF16)
+ - Normalization TestSuite has seven testcases (F32_F32, BF16_BF16, BF16_F32,
+   F32_BF16, F16_F16, F16_F32, F32_F16)
  - Supports four normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, BatchNorm
  - Test parameters (shape, norm_ndims, use_scale, use_shift, gamma/beta data types) are randomly generated
  - Validates native kernel output against the reference (scalar) kernel output
+ - F16 tests skip at runtime if the platform lacks AVX512-FP16 ISA support
+   (returns `status_t::isa_unsupported`)
 
 1. Run all F32 Input, F32 Output normalization tests:
 ``` bash
@@ -705,11 +709,23 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ``` bash
 ./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F32_BF16/*
 ```
-5. Run all normalization tests:
+5. Run all F16 Input, F16 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F16_F16/*
+```
+6. Run all F16 Input, F32 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F16_F32/*
+```
+7. Run all F32 Input, F16 Output normalization tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Normalization/TestNormalization.F32_F16/*
+```
+8. Run all normalization tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Normalization/*
 ```
-6. Run normalization tests with 8 threads:
+9. Run normalization tests with 8 threads:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Normalization/* --num_threads 8
 ```

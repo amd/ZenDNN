@@ -26,8 +26,8 @@ set(ZENDNNL_BUILD_ASAN     OFF CACHE BOOL "Build With Address Sanitizer")
 set(ZENDNNL_LIB_BUILD_ARCHIVE  ON CACHE BOOL "Build zendnnl archive library")
 set(ZENDNNL_LIB_BUILD_SHARED  OFF CACHE BOOL "Build zendnl shared library")
 
-set(ZENDNNL_EMBAG_NATIVE_F32_ACCUM OFF CACHE BOOL
-  "Force F32 accumulation in the F16 embedding-bag kernel")
+set(ZENDNNL_NATIVE_F32_ACCUM OFF CACHE BOOL
+  "Force F32 accumulation in F16 native kernels (embedding-bag, normalization)")
 
 # sanity check
 if((NOT ZENDNNL_LIB_BUILD_ARCHIVE) AND (NOT ZENDNNL_LIB_BUILD_SHARED))

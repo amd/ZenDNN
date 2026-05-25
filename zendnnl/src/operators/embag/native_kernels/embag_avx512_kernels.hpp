@@ -31,7 +31,7 @@ namespace ops {
 using namespace zendnnl::error_handling;
 
 inline bool can_use_f16_fma_kernel() {
-#if !defined(ZENDNNL_EMBAG_NATIVE_F32_ACCUM)
+#if !defined(ZENDNNL_NATIVE_F32_ACCUM)
   return common::zendnnl_platform_info().get_avx512_f16_status();
 #else
   return false;

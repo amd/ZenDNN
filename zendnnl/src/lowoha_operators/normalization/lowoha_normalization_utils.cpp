@@ -47,12 +47,27 @@ status_t validate_normalization_inputs(
   }
 
   // Validate data types
-  if (params.src_dt != data_type_t::f32 && params.src_dt != data_type_t::bf16) {
+  if (params.src_dt != data_type_t::f32 &&
+      params.src_dt != data_type_t::bf16 &&
+      params.src_dt != data_type_t::f16) {
     log_error("Normalization: Unsupported source data type");
     return status_t::failure;
   }
-  if (params.dst_dt != data_type_t::f32 && params.dst_dt != data_type_t::bf16) {
+  if (params.dst_dt != data_type_t::f32 &&
+      params.dst_dt != data_type_t::bf16 &&
+      params.dst_dt != data_type_t::f16) {
     log_error("Normalization: Unsupported destination data type");
+    return status_t::failure;
+  }
+
+  // Disallow f16/bf16 cross-mixing between src and dst (matches matmul/embag policy)
+  const bool src_is_f16  = (params.src_dt == data_type_t::f16);
+  const bool src_is_bf16 = (params.src_dt == data_type_t::bf16);
+  const bool dst_is_f16  = (params.dst_dt == data_type_t::f16);
+  const bool dst_is_bf16 = (params.dst_dt == data_type_t::bf16);
+  if ((src_is_f16 && dst_is_bf16) || (src_is_bf16 && dst_is_f16)) {
+    log_error("Normalization: f16/bf16 cross-mixing between src and dst "
+              "is not supported");
     return status_t::failure;
   }
 
@@ -73,9 +88,11 @@ status_t validate_normalization_inputs(
       return status_t::failure;
     }
     if (params.gamma_dt != data_type_t::f32 &&
-        params.gamma_dt != data_type_t::bf16) {
+        params.gamma_dt != data_type_t::bf16 &&
+        params.gamma_dt != data_type_t::f16) {
       log_error("Normalization: Unsupported gamma data type (",
-                static_cast<int>(params.gamma_dt), "). Supported: f32, bf16");
+                static_cast<int>(params.gamma_dt),
+                "). Supported: f32, bf16, f16");
       return status_t::failure;
     }
   }
@@ -90,9 +107,12 @@ status_t validate_normalization_inputs(
                 "(required for ", norm_type_to_str(params.norm_type), ")");
       return status_t::failure;
     }
-    if (params.beta_dt != data_type_t::f32 && params.beta_dt != data_type_t::bf16) {
+    if (params.beta_dt != data_type_t::f32 &&
+        params.beta_dt != data_type_t::bf16 &&
+        params.beta_dt != data_type_t::f16) {
       log_error("Normalization: Unsupported beta data type (",
-                static_cast<int>(params.beta_dt), "). Supported: f32, bf16");
+                static_cast<int>(params.beta_dt),
+                "). Supported: f32, bf16, f16");
       return status_t::failure;
     }
   }

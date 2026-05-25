@@ -293,21 +293,24 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
 endif()
 
-# Build-time toggle for the F16 embedding-bag accumulation mode. The cache
+# Build-time toggle for F16 native-kernel accumulation precision. The cache
 # variable itself is declared in cmake/ZenDnnlComponentsOptions.cmake (single
 # canonical location, alongside every other ZENDNNL_* component option). Here
 # we only consume the variable to attach the matching C++ preprocessor macro
 # to the library targets when the user passes
-#   -DZENDNNL_EMBAG_NATIVE_F32_ACCUM=ON
-# on the cmake command line.
-if(ZENDNNL_EMBAG_NATIVE_F32_ACCUM)
+#   -DZENDNNL_NATIVE_F32_ACCUM=ON
+# on the cmake command line. Each operator that has an F16-FMA fast path
+# (embedding-bag, normalization, ...) gates its can_use_f16_fma_kernel()
+# helper on this macro, so a single switch forces every such operator onto
+# its FP32-accumulating AVX-512 path for numerical-reproducibility studies.
+if(ZENDNNL_NATIVE_F32_ACCUM)
   if(ZENDNNL_LIB_BUILD_ARCHIVE)
     target_compile_definitions(zendnnl_archive
-      PUBLIC ZENDNNL_EMBAG_NATIVE_F32_ACCUM)
+      PUBLIC ZENDNNL_NATIVE_F32_ACCUM)
   endif()
   if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl
-      PUBLIC ZENDNNL_EMBAG_NATIVE_F32_ACCUM)
+      PUBLIC ZENDNNL_NATIVE_F32_ACCUM)
   endif()
 endif()
 
