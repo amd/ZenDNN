@@ -140,6 +140,31 @@ inline bool is_profile_enabled() {
   return cached;
 }
 
+/** @fn is_postop_cache_enabled
+ * @brief Check if the AOCL DLP post-op metadata cache is enabled.
+ *
+ * Sampled once per process (via the `static const` cache) so that the
+ * env var ZENDNNL_ENABLE_POSTOP_CACHE acts as a fixed-for-the-run
+ * toggle. Hot-path callers (create_dlp_post_op) read this on every
+ * invocation; a `static const bool` read compiles to a single load
+ * with no per-call getenv overhead.
+ *
+ * Default: true. Set ZENDNNL_ENABLE_POSTOP_CACHE=0 (or false/off/no)
+ * to force every create_dlp_post_op() call through the cold path.
+ * Intended as a runtime kill switch for triage and as a safety valve
+ * for integrators (zentorch, vLLM, etc.) who hit unexpected behavior
+ * in the field. The default was previously false during the initial
+ * cache soak and was flipped to true once the cache had been
+ * validated in the wild.
+ *
+ * @return True if the post-op cache is enabled.
+ */
+inline bool is_postop_cache_enabled() {
+  static const bool cached
+      = zendnnl_global_block().get_config_manager().get_postop_cache_config().enable;
+  return cached;
+}
+
 }//common
 
 namespace error_handling {

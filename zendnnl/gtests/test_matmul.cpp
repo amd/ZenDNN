@@ -1510,6 +1510,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 //   EXPECT_TRUE(is_test_successful);
 // }
 
+// Post-op metadata cache tests for the AOCL DLP backend live in
+// test_postop_cache.cpp (their own value-parameterized fixture).
+
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers Matmul parameterized test suite
  */

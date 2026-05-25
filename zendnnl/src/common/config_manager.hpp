@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -94,6 +94,14 @@ class config_manager_t final {
    */
   const config_lru_cache_t   &get_lru_cache_config() const;
 
+  /** @brief Get post-op cache configuration
+   *
+   *  @return Post-op metadata cache configuration. Drives the runtime
+   *          kill switch for the per-layer AOCL DLP post-op cache
+   *          (see is_postop_cache_enabled in zendnnl_global.hpp).
+   */
+  const config_postop_cache_t &get_postop_cache_config() const;
+
   /**@}*/
 
  private:
@@ -172,11 +180,31 @@ class config_manager_t final {
    */
   status_t           set_env_lru_cache_config();
 
+  /** @brief Set default post-op cache config (disabled; opt-in via env).
+   *
+   * @return success.
+   */
+  status_t          set_default_postop_cache_config();
+
+  /** @brief Set post-op cache config from JSON file.
+   *
+   * @return success.
+   */
+  status_t          set_user_postop_cache_config();
+
+  /** @brief Set post-op cache config from environment variables.
+   *
+   * @return success.
+   */
+  status_t          set_env_postop_cache_config();
+
   json               config_json;     /**< JSON object read from
                                        config file */
   config_logger_t    config_logger;   /**< Logger config */
   config_profiler_t  config_profiler; /**< Profiler config */
   config_lru_cache_t config_lru_cache; /**< Global LRU cache config */
+  config_postop_cache_t config_postop_cache; /**< Post-op metadata
+                                       cache toggle */
 };
 
 

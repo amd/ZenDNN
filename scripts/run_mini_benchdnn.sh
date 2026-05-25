@@ -27,7 +27,8 @@
 #
 # Kernel: matmul uses aocl_dlp_blocked, BMM uses aocl_dlp (--kernel overrides both).
 # Datatype: --dtype src:wei:dst (e.g. bf16:bf16:bf16).
-# Binary post-ops (from input models): --post-op-dt (default f32); see benchdnn doc/matmul.md.
+# Post-op chain: --post-ops token1[:token2:...] (omit for no chain). Bias: --bias true|false.
+# Binary post-op tensor dtype: --post-op-dt (default f32). See benchdnn doc/matmul.md.
 # Weight quant scales (optional): --weight-scale-granularity, --weight-group-size, --weight-scale-dt
 # (benchdnn --scale_granularity, --group_size, --scale_dt; omit to use benchdnn defaults).
 # Scaling: --alpha and --beta (defaults 1.0 and 0.0).
@@ -38,7 +39,8 @@
 #   ./run_mini_benchdnn.sh [options]
 #
 #   [--op matmul|bmm|all] [--recsys-m M[,M...]] [--llm-m M[,M...]]
-#   [--dtype src:wei:dst] [--bias-dtype DT] [--post-op-dt DT]
+#   [--dtype src:wei:dst] [--bias true|false] [--bias-dtype DT]
+#   [--post-ops token1[:token2:...]] [--post-op-dt DT]
 #   [--weight-scale-granularity G] [--weight-group-size N] [--weight-scale-dt DT]
 #   [--alpha A] [--beta B]
 #   [--recsys-omp N] [--llm-omp N] [--pytorch-omp N]
@@ -88,6 +90,15 @@ INPUT_FILES_DEFAULT="recsys.txt llm_generative.txt pytorch_matmul.txt pytorch_bm
 OP_FILTER_DEFAULT="all"   # matmul | bmm | all
 # Empty = omit --lowoha (benchdnn default: lowoha enabled). Set to true/false to pass explicitly.
 LOWOHA_DEFAULT=""
+# Empty = no post-op chain passed to benchdnn (cfg.post_ops stays empty for every row).
+# Set to a colon-separated chain (e.g. "binary_add:gelu_erf:binary_mul" or "relu") to enable
+# a post-op chain on every benchmark row. Tokens supported by benchdnn (strToPostOps):
+#   eltwise: relu, gelu_erf, gelu_tanh, swish, sigmoid, tanh, elu, leaky_relu,
+#            clip, square, abs, sqrt, exp, log, softmax, pooling
+#   binary:  binary_add, binary_mul   (use --post-op-dt to control binary tensor dtype)
+POST_OPS_DEFAULT=""
+# Empty = omit --bias (benchdnn default: bias disabled). Set to true|false to pass explicitly.
+BIAS_ENABLED_DEFAULT=""
 
 # Parsed options (set by parse_args)
 RECSYS_M="$RECSYS_M_DEFAULT"
@@ -111,6 +122,8 @@ USE_NUMACTL=1
 OUTPUT_PATH="$OUTPUT_DEFAULT"
 OP_FILTER="$OP_FILTER_DEFAULT"
 LOWOHA="$LOWOHA_DEFAULT"
+POST_OPS="$POST_OPS_DEFAULT"
+BIAS_ENABLED="$BIAS_ENABLED_DEFAULT"
 RECSYS_ITERS="$RECSYS_ITERS_DEFAULT"
 RECSYS_WARMUP="$RECSYS_WARMUP_DEFAULT"
 LLM_ITERS="$LLM_ITERS_DEFAULT"
@@ -209,6 +222,21 @@ parse_args() {
       --post-op-dt)
         [[ $# -lt 2 ]] && { echo "Error: --post-op-dt requires a datatype" >&2; exit 1; }
         POST_OP_DT="$2"
+        shift 2
+        ;;
+      --post-ops)
+        [[ $# -lt 2 || -z "$2" ]] && { echo "Error: --post-ops requires a colon-separated chain (e.g. binary_add:gelu_erf:binary_mul)" >&2; exit 1; }
+        POST_OPS="$2"
+        shift 2
+        ;;
+      --bias)
+        [[ $# -lt 2 ]] && { echo "Error: --bias requires true|false|1|0" >&2; exit 1; }
+        _bias_val="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+        case "$_bias_val" in
+          true|1) BIAS_ENABLED="true" ;;
+          false|0) BIAS_ENABLED="false" ;;
+          *) echo "Error: --bias must be true|false|1|0 (got: $2)" >&2; exit 1 ;;
+        esac
         shift 2
         ;;
       --weight-scale-granularity)
@@ -318,7 +346,8 @@ parse_args() {
         ;;
       -h|--help)
         echo "Usage: $0 [--op matmul|bmm|all] [--recsys-m M[,M...]] [--llm-m M[,M...]]"
-        echo "       [--dtype src:wei:dst] [--bias-dtype DT] [--post-op-dt DT]"
+        echo "       [--dtype src:wei:dst] [--bias true|false] [--bias-dtype DT]"
+        echo "       [--post-ops token1[:token2:...]] [--post-op-dt DT]"
         echo "       [--weight-scale-granularity G] [--weight-group-size N] [--weight-scale-dt DT]"
         echo "       [--alpha A] [--beta B] [--recsys-omp N] [--llm-omp N] [--pytorch-omp N]"
         echo "       [--recsys-iters N] [--recsys-warmup N] [--llm-iters N] [--llm-warmup N]"
@@ -327,7 +356,11 @@ parse_args() {
         echo "  --op: run only matmul, only bmm, or both (default: all). BMM = input files with 5 columns (Name,bs,M,K,N)."
         echo "  -o: output base path; writes <base>_matmul.csv and <base>_bmm.csv (matmul and BMM not combined)."
         echo "  --kernel: benchdnn --kernel_name (default: aocl_dlp_blocked for matmul, aocl_dlp for BMM; this flag sets both)."
-        echo "  --post-op-dt: benchdnn --post_op_dt for binary_add/binary_mul (default: f32)."
+        echo "  --bias: benchdnn --bias=true|false (omit for benchdnn default: false)."
+        echo "  --post-ops: benchdnn --post_ops, colon-separated chain (e.g. binary_add:gelu_erf:binary_mul). Omit for no chain."
+        echo "              Tokens: relu, gelu_erf, gelu_tanh, swish, sigmoid, tanh, elu, leaky_relu,"
+        echo "                      clip, square, abs, sqrt, exp, log, softmax, pooling, binary_add, binary_mul."
+        echo "  --post-op-dt: benchdnn --post_op_dt for binary_add/binary_mul tensors (default: f32)."
         echo "  --weight-scale-granularity: benchdnn --scale_granularity (per-channel|channel, per-group|group, per-tensor|tensor). Omit for benchdnn default."
         echo "  --weight-group-size: benchdnn --group_size for per-group scaling (non-negative int). Omit for benchdnn default."
         echo "  --weight-scale-dt: benchdnn --scale_dt for weight scale tensor (e.g. f32, bf16). Omit for benchdnn default."
@@ -425,6 +458,8 @@ run_benchdnn_one() {
   [[ -n "$WEIGHT_GROUP_SIZE" ]] && args+=(--group_size="$WEIGHT_GROUP_SIZE")
   [[ -n "$WEIGHT_SCALE_DT" ]] && args+=(--scale_dt="$WEIGHT_SCALE_DT")
   [[ -n "$LOWOHA" ]] && args+=(--lowoha="$LOWOHA")
+  [[ -n "$POST_OPS" ]] && args+=(--post_ops="$POST_OPS")
+  [[ -n "$BIAS_ENABLED" ]] && args+=(--bias="$BIAS_ENABLED")
   # --m override only for matmul (ndims=2)
   [[ -n "$m_val" && "$ndims" -eq 2 ]] && args+=(--m="$m_val")
 
@@ -495,6 +530,8 @@ main() {
   parse_args "$@"
   find_paths
   [[ -n "$LOWOHA" ]] && echo "benchdnn --lowoha=$LOWOHA"
+  [[ -n "$POST_OPS" ]] && echo "benchdnn --post_ops=$POST_OPS"
+  [[ -n "$BIAS_ENABLED" ]] && echo "benchdnn --bias=$BIAS_ENABLED"
 
   SESSION_DIR="$(mktemp -d "${BENCHDNN_BUILD}/mini_benchdnn_session.XXXXXX")" || {
     echo "Error: could not create session directory under $BENCHDNN_BUILD" >&2

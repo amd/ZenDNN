@@ -22,6 +22,7 @@ This document lists all environment variables available for configuring ZenDNNL 
 | `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `4` (aocl_dlp) | Integer ID or name. `-1` (none, falls back to default 4)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | Enable/disable weight caching for blocked algorithms | `0` (disabled), `1` for blocked/auto-tuner algos | `0` (disabled)<br>`1` (enabled) |
 | `ZENDNNL_ZP_COMP_CACHE` | Enable/disable zero-point compensation caching for quantized operations | `0` (disabled) | `0` (disabled)<br>non-zero (enabled) |
+| `ZENDNNL_ENABLE_POSTOP_CACHE` | Enable/disable AOCL DLP post-op metadata caching for the matmul fast path. When ON, the per-call build of post-op metadata (bias, binary_add, binary_mul, sum scales, src/wei/dst quant scales) is memoized and reused on subsequent calls with the same shape, dtypes, and post-op chain; mutable fields (data pointers, dynamic scale buffers) are refreshed on every hit. When OFF, the cache is cleared on every call and the cold path runs each time. Cached on first read. Recognized spellings are case-insensitive; unrecognized or empty values leave the default untouched. | `1` (enabled) | `1`/`true`/`on`/`yes` (enabled)<br>`0`/`false`/`off`/`no` (disabled) |
 
 ### Algorithm Details
 

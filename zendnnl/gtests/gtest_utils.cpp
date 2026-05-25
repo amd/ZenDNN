@@ -17,6 +17,7 @@
 #include "gtest_utils.hpp"
 #include "memory/memory_utils.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
@@ -71,6 +72,10 @@ uint16_t gtest_fp32_to_fp16(float f) {
 
 void clear_matmul_test_caches() {
   zendnnl::lowoha::matmul::clear_aocl_matmul_weight_caches();
+  // Each gtest case is a fresh "model" with new weight buffers, so the
+  // per-thread post-op metadata cache (keyed by weight_ptr) holds stale
+  // entries that point to freed test memory. Drop them between cases.
+  zendnnl::lowoha::matmul::clear_aocl_postop_metadata_cache();
 #if ZENDNNL_DEPENDS_ONEDNN
   zendnnl::lowoha::matmul::clear_onednn_matmul_weight_cache();
 #endif
@@ -2606,6 +2611,16 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
         const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                         algo == matmul_algo_t::libxsmm_blocked);
+        // skip_bias triggers in two cases:
+        //   1. libxsmm/libxsmm_blocked + bf16 dst (pre-existing accuracy
+        //      workaround).
+        //   2. Caller deliberately passed a default-constructed tensor_t()
+        //      as the "no bias" sentinel (status != success). Used by paths
+        //      that cannot exercise bias for the current (src, dst) pair —
+        //      e.g. TestPostopCache.LifecycleClear under F16_F16, which sets
+        //      drop_postops_and_bias=true via aocl_dlp_supports_postops_for_src().
+        // Both branches reduce to bias_data=nullptr + the f32 bias-dtype
+        // sentinel set below.
         const bool skip_bias =
           (is_libxsmm_kernel && output_tensor.get_data_type() == data_type_t::bf16) ||
           !bias_tensor.check();

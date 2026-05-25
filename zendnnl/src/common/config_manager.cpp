@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -52,6 +52,11 @@ const config_lru_cache_t &config_manager_t::get_lru_cache_config() const {
   return config_lru_cache;
 }
 
+const config_postop_cache_t &
+config_manager_t::get_postop_cache_config() const {
+  return config_postop_cache;
+}
+
 status_t config_manager_t::parse(std::string file_name_) {
 
   std::ifstream json_file(file_name_);
@@ -71,6 +76,7 @@ void config_manager_t::set_default_config() {
   set_default_logger_config();
   set_default_profiler_config();
   set_default_lru_cache_config();
+  set_default_postop_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set default configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -81,6 +87,7 @@ void config_manager_t::set_user_config() {
   set_user_logger_config();
   set_user_profiler_config();
   set_user_lru_cache_config();
+  set_user_postop_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set user configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -91,6 +98,7 @@ void config_manager_t::set_env_config() {
   set_env_logger_config();
   set_env_profiler_config();
   set_user_lru_cache_config();
+  set_env_postop_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set env configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -281,6 +289,58 @@ status_t config_manager_t::set_env_lru_cache_config() {
     if (lru_cache_capacity_str) {
       config_lru_cache.capacity = std::strtoul(lru_cache_capacity_str, &endptr, 10);
     }
+  }
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_default_postop_cache_config() {
+  // Cache is enabled by default. ZENDNNL_ENABLE_POSTOP_CACHE=0
+  // (or false/off/no) forces every create_dlp_post_op() call through
+  // the cold path — runtime kill switch for triage and as a safety
+  // valve for integrators (zentorch, vLLM, etc.). The default was
+  // previously false during the initial cache soak; flipped to true
+  // once the cache had been validated across integrator releases.
+  // Mirrors the struct-level default in config_params.hpp; both must
+  // move together.
+  config_postop_cache.enable = true;
+  return status_t::success;
+}
+
+status_t config_manager_t::set_user_postop_cache_config() {
+  auto postop_cache_json = config_json["postop_cache"];
+  if (postop_cache_json.empty()) {
+    return status_t::failure;
+  }
+
+  auto enable_json = postop_cache_json["enable"];
+  if (!enable_json.empty()) {
+    config_postop_cache.enable = enable_json.get<bool>();
+  }
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_env_postop_cache_config() {
+  // Accept the same truthy/falsy spellings as the other ZENDNNL_ENABLE_*
+  // toggles use today ("1"/"0"), plus the more readable "true"/"false"
+  // and "on"/"off" so integrators don't have to remember which we
+  // picked. Any unrecognized non-empty value leaves the prior value
+  // (default = true) untouched rather than silently disabling, so a
+  // typo can't accidentally turn the cache off.
+  char *enable_str = std::getenv("ZENDNNL_ENABLE_POSTOP_CACHE");
+  if (!enable_str) {
+    return status_t::success;
+  }
+
+  std::string v(enable_str);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  if (v == "0" || v == "false" || v == "off" || v == "no") {
+    config_postop_cache.enable = false;
+  } else if (v == "1" || v == "true" || v == "on" || v == "yes") {
+    config_postop_cache.enable = true;
   }
 
   return status_t::success;

@@ -753,7 +753,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
   // Create aocl_post_op structure for bias, post-ops, and WOQ pre-ops
   dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N, K,
-                            M, zp_comp_acc, zp_comp_ndim, kernel);
+                            M, zp_comp_acc, zp_comp_ndim, kernel, B);
 
   if (dtypes.src == data_type_t::f32 && dtypes.wei == data_type_t::f32 &&
       dtypes.dst == data_type_t::f32) {
@@ -1032,8 +1032,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   if (zp_comp_acc && (!zp_cache_enabled || wei_zp != 0)) {
     std::free(zp_comp_acc);
   }
-
-  // Clean up aocl_post_op structure
+  // Per-call teardown for the metadata returned by create_dlp_post_op().
+  // No-op for cached holders (the common case); frees the per-call
+  // holder + its heap-owned inv_scales[] for the BF16/INT8 per-token-sym
+  // path. Safe with nullptr.
   cleanup_dlp_post_op(aocl_po);
 }
 
@@ -1047,7 +1049,9 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 
 
   dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
-                                   N, K);
+                                   N, K, /*M=*/0, /*zp_comp_acc=*/nullptr,
+                                   /*zp_comp_ndim=*/0,
+                                   zendnnl::ops::matmul_algo_t::aocl_dlp, B);
   md_t m_ = M;
   md_t n_ = N;
   md_t k_ = K;
@@ -1159,8 +1163,10 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   else {
     log_error("Unsupported data type combination for batch GEMM");
   }
-
-  // Clean up aocl_post_op structure
+  // Per-call teardown for the metadata returned by create_dlp_post_op().
+  // No-op for cached holders (the common case); frees the per-call
+  // holder + its heap-owned inv_scales[] for the BF16/INT8 per-token-sym
+  // path. Safe with nullptr.
   cleanup_dlp_post_op(metadata_array);
 }
 

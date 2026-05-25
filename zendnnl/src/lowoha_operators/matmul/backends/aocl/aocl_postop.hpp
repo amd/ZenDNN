@@ -70,22 +70,96 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
  * @param zp_comp_acc Pointer to zero-point compensation buffer (nullptr if no ZP compensation)
  * @param zp_comp_ndim Dimensionality of ZP compensation: 0=none, 1=bias(N), 2=matrix(M*N)
  * @param kernel Algorithm selection for GEMM execution
- * @return Pointer to the created dlp_metadata_t object
+ * @param weight_ptr Original (pre-reorder) weight buffer pointer (the GEMM
+ *                   operand B as supplied by the caller, before any internal
+ *                   reorder). Used as the identity component of the per-
+ *                   layer cache key, so it must point at the same stable
+ *                   buffer for every call that targets a given layer.
+ *                   Required; must not be null. This is structurally
+ *                   guaranteed by both call sites in aocl_kernel.cpp:
+ *                   they pass the matmul B operand, which the AOCL DLP
+ *                   kernels themselves dereference further down the same
+ *                   wrapper -- a null B would have already crashed
+ *                   upstream before reaching this function, so no
+ *                   defensive null-check is added here.
+ * @return Pointer to the dlp_metadata_t inside the per-layer holder
+ *         (lifetime managed by the per-thread post-op metadata LRU),
+ *         OR nullptr for layers that legitimately have no post-op
+ *         metadata to wire. Two distinct nullptr-returning paths:
+ *           (a) Plain matmul with no post-op chain, not WOQ, not INT8
+ *               — re-dispatched on every call (cheap; no holder is
+ *               allocated or cached).
+ *           (b) BF16-INT8 with src_scale.buff == nullptr (logged
+ *               misconfiguration) — a no_metadata-flagged holder is
+ *               cached so subsequent calls on the same key short-
+ *               circuit to nullptr without re-logging.
+ *         Callers MUST tolerate nullptr and run the unfused GEMM
+ *         path when it occurs.
+ *
+ * @throws zendnnl::exception_t If the per-layer holder allocation
+ *         fails (std::calloc returns null). No in-function fallback
+ *         exists because every subsequent wiring step assumes a live
+ *         holder; callers that need a non-throwing path should catch
+ *         the exception at the matmul boundary.
  */
 dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                                    const void *bias, const matmul_data_types &dtypes, int N, int K,
-                                   int M = 0, int32_t *zp_comp_acc = nullptr, int zp_comp_ndim = 0,
-                                   zendnnl::ops::matmul_algo_t kernel = zendnnl::ops::matmul_algo_t::aocl_dlp);
+                                   int M, int32_t *zp_comp_acc, int zp_comp_ndim,
+                                   zendnnl::ops::matmul_algo_t kernel,
+                                   const void *weight_ptr);
 
 /**
-* @brief Cleans up DLP (Deep Learning Primitives) metadata.
-*
-* This function releases the resources allocated for the `dlp_metadata_t`
-* object used in post-operations.
-*
-* @param aocl_po Pointer to the `dlp_metadata_t` object to be cleaned up.
-*/
-void cleanup_dlp_post_op(dlp_metadata_t *aocl_po);
+ * @brief Per-call teardown for the metadata returned by create_dlp_post_op().
+ *
+ * No-op for the common case — cached holders are owned by the per-thread
+ * LRU cache, which frees them with std::free on eviction or thread exit.
+ *
+ * The non-trivial case is the BF16/INT8 per-token-symmetric quant path
+ * (is_bf16_f32_per_token_sym in create_dlp_post_op): that path can't be
+ * cached because its inverse-scale array has length = M (unknown at
+ * compile time, varies per call) which doesn't fit the cache holder's
+ * fixed layout. Such "per-call" holders are flagged inside the holder
+ * struct; this function recovers the holder from the metadata pointer
+ * (metadata is the first field of the holder), frees the heap-owned
+ * inv_scales array, and frees the holder itself.
+ *
+ * Safe to call with nullptr (matches the no-metadata return contract).
+ * MUST be called at every kernel call site that consumes the metadata
+ * returned by create_dlp_post_op(), exactly once per create call,
+ * AFTER the metadata's last use.
+ *
+ * @param metadata Pointer returned by create_dlp_post_op(); may be null.
+ */
+void cleanup_dlp_post_op(dlp_metadata_t *metadata);
+
+/**
+ * @brief Clears the calling thread's AOCL DLP post-op metadata cache.
+ *
+ * The post-op metadata cache is per-thread and indexed by Key_matmul
+ * (weight_ptr + N + K + algo + postop_signature). After this call, every
+ * subsequent create_dlp_post_op() invocation on this thread takes the
+ * cold path (allocate + build + insert) until the cache is repopulated.
+ *
+ * Intended for use between gtest cases (each test is a fresh "model" with
+ * new weight buffers, so the cached holders for the previous test become
+ * unreachable). Not meant to be called on the matmul hot path.
+ */
+void clear_aocl_postop_metadata_cache();
+
+/**
+ * @brief Returns the number of holders currently in the calling
+ *        thread's AOCL DLP post-op metadata cache.
+ *
+ * Intended for tests only — production code has no reason to inspect
+ * the cache size. Provides an observable signal that is independent of
+ * malloc address-reuse, so a test can assert that
+ * clear_aocl_postop_metadata_cache() actually evicted the holder
+ * (size==0 afterwards) rather than relying on the pointer of the next
+ * allocation being different — which it often isn't, because glibc's
+ * free-list happily hands a recently-freed slot back to the next
+ * same-sized request.
+ */
+std::size_t get_aocl_postop_metadata_cache_size();
 
 } // namespace matmul
 } // namespace lowoha

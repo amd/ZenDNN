@@ -30,6 +30,7 @@ if(ZENDNNL_BUILD_GTEST)
     gtest_main.cpp
     gtest_utils.cpp
     test_matmul.cpp
+    test_postop_cache.cpp
     test_reorder.cpp
     test_batchmatmul.cpp
     test_embag.cpp

@@ -561,6 +561,20 @@ void inputModelFileParser(std::ifstream &infile,
           }
         }
       }
+      else if (!options.post_ops.empty()) {
+        // Short-format input rows omit the [postOp] column; fall back to the
+        // global --post_ops chain so CLI defaults reach every row. Mirrors
+        // inputCommandLineParser's handling of options.post_ops.
+        auto binary_post_op_pos = 0;
+        for (auto i = 0; i < options.post_ops.size(); i++) {
+          cfg.post_ops.push_back(options.post_ops[i]);
+          if (options.post_ops[i] == post_op_type_t::binary_add ||
+              options.post_ops[i] == post_op_type_t::binary_mul) {
+            cfg.binary_post_ops_pos.push_back(binary_post_op_pos);
+          }
+          binary_post_op_pos++;
+        }
+      }
       id++;
 
       if (id < fields.size() && !(fields[id].empty())) {
@@ -579,7 +593,9 @@ void inputModelFileParser(std::ifstream &infile,
         }
       }
       else {
-        cfg.isBiasEnabled = false;
+        // Short-format input rows omit the [isBiasEnabled] column; fall back
+        // to --bias (defaults to false in global_options).
+        cfg.isBiasEnabled = options.isBiasEnabled;
       }
 
       cfg.iters = options.iters;
