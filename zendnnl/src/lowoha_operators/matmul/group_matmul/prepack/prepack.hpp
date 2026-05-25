@@ -58,7 +58,7 @@
 ///       tail.  Production MoE rotating-experts is the design target.
 ///
 ///     * Framework-hint regime, active-only (`active > 0 && total == 0`)
-///       — warms exactly `active_matmul` experts (no extras).  PACK_PROBE
+///       — warms exactly `active_matmul` experts (no extras).  PREPACK
 ///       reports `active = active_matmul` regardless of whether the
 ///       caller used Compact (`M.size() == active`) or Padded
 ///       (`M.size() == total` with placeholders) input layout.
@@ -111,10 +111,60 @@ struct PrepackParams {
   const std::vector<int>          *ldb              = nullptr;
   const std::vector<bool>         *transB           = nullptr;
 
+  // Optional per-expert M.  When supplied, `ck_eligible(p)` mirrors
+  // the runtime's first-active-expert selection for the pack_nr
+  // representative — `prepare_for_call` (custom_kernel/dispatch.cpp)
+  // skips experts with `M[i] <= 0` when picking the representative
+  // `(K, N)`.  Without it, `ck_eligible` falls back to `(K[0], N[0])`
+  // which can disagree with `prepare_for_call` when `M[0] == 0` and
+  // per-expert (K, N) are non-uniform.  Default `nullptr` preserves
+  // legacy behaviour (sample index 0).
+  // (No file-line citation deliberately — the dispatcher's
+  // first-active-expert pick has moved across past refactors and a
+  // line-precise comment goes stale fast.  Grep for the
+  // `M[i] <= 0`-guarded representative pick in
+  // `prepare_for_call` if the citation needs to be re-confirmed.)
+  const std::vector<int>          *M                = nullptr;
+
   // Optional: when present (and non-empty), AOCL warmer skips experts
   // with `is_weights_const[i] == false` (matches `run_dlp(...)`'s
   // gate).  Empty / nullptr = legacy "treat every entry as const".
   const std::vector<bool>         *is_weights_const = nullptr;
+
+  // Optional per-expert runtime context — mirrored here so
+  // `ck_eligible(p)` can match the gates `prepare_for_call` checks
+  // per-call AND prevent the prepack from false-positive-warming
+  // the CK pack arena on shapes the runtime will refuse.
+  //
+  // ── What each gate refuses at the runtime ──────────────────────
+  //   * `transA[i] == true`            -> `transA_not_supported`
+  //                                       (CK reads src row-major
+  //                                       only).
+  //   * `alpha[i] != 1.0f` or
+  //     `beta[i]  != 0.0f`             -> `alpha_beta_not_supported`.
+  //   * `is_weights_const[i] == false` -> `non_const_weight_in_active_expert`
+  //                                       (CK pack cache cannot honour
+  //                                       mutable weight).
+  //
+  // ── Why "all three optional" ───────────────────────────────────
+  // Legacy prepack callers — and `cross_warm` siblings — pre-date
+  // these fields.  Default `nullptr` means "no runtime context
+  // available; skip the gate".  The CK pack arena that those
+  // callers warm may still be served at runtime; the worst case
+  // is the pre-fix behaviour (warm an entry the runtime never
+  // reads).  Production call sites that DO have the context
+  // (`group_matmul_n_tile.cpp`, `group_matmul_parallel.cpp`) pass
+  // the vectors and get the bit-symmetric prepack/runtime contract
+  // — no wasted warm on any call the runtime would refuse.
+  //
+  // The vectors are indexed per active expert `i ∈ [0, num_ops_active)`.
+  // The warmer applies each gate only to active experts (matches
+  // the `prepare_for_call`'s `M[i] > 0` loop), so a Padded layout
+  // (`M.size() == total_matmul` with `M[active..] = 0`) does not
+  // refuse CK on a stale tail entry.
+  const std::vector<bool>         *transA = nullptr;
+  const std::vector<float>        *alpha  = nullptr;
+  const std::vector<float>        *beta   = nullptr;
 
   // Dtype context (read once from `params[0].dtypes` by the caller).
   data_type_t src_dtype = data_type_t::none;
@@ -127,7 +177,7 @@ struct PrepackParams {
   // `total <= active` short-circuit anymore.  The two fields exist
   // so the framework-hint regime (`total > active`) warms the
   // prepack-extras tail; `num_ops_active` is the firing-expert
-  // count reported in the PACK_PROBE log line.  See
+  // count reported in the PREPACK log line.  See
   // `build_prepack_params` for the active/total resolution that
   // mirrors the dispatcher's framework-opt-in contract, and the
   // file-level doc-block ("Uniform-eager semantic") for the
@@ -142,14 +192,30 @@ struct PrepackParams {
 
   // Gated activation kind for this dispatcher invocation, mirrored
   // here so `ck_eligible(p)` can match the runtime CK refusal gate
-  // in `custom_kernel/dispatch.cpp::prepare_for_call`.  The runtime
-  // refuses CK for any activation other than `swiglu_oai_mul` /
-  // `none`; warming the CK pack arena under refused activations
-  // populates entries the runtime never reads (a substantial waste
-  // of resident memory on many-experts MoE) AND silently routes the
-  // call to AOCL DLP per-tile, adding a large number of lazy reorders
-  // at first execution (Bug-class B17 — see prepack/prepack.cpp::
-  // ck_eligible for the symmetry contract).
+  // in `custom_kernel/dispatch.cpp::prepare_for_call`.
+  //
+  // Runtime CK acceptance matrix (as of the silu/gelu fused-CK PR):
+  //   * `none`                                — always accepted
+  //                                              (plain matmul tile).
+  //   * `swiglu_oai_mul` + BF16 dst           — accepted; caller-
+  //                                              side interleaved
+  //                                              W13.
+  //   * `silu_and_mul`   + BF16 dst + no bias — accepted; prepack
+  //                                              re-interleaves
+  //                                              split-halves W13.
+  //   * `gelu_and_mul`   + BF16 dst + no bias — accepted (same
+  //                                              prepack permutation
+  //                                              as silu).
+  //   * gated-act + FP32 dst, or gated-act + bias — refused at runtime;
+  //                                              `ck_eligible` mirrors
+  //                                              the refusal here.
+  //
+  // Warming the CK pack arena under refused activations populates
+  // entries the runtime never reads (a substantial waste of resident
+  // memory on many-experts MoE) AND silently routes the call to AOCL
+  // DLP per-tile, adding a large number of lazy reorders at first
+  // execution.  See prepack/prepack.cpp::ck_eligible for the full
+  // symmetry contract.
   // Default `none` means "no gated activation"; legacy callers that
   // don't fill this field opt out of the activation gate (the rest
   // of `ck_eligible` still applies).
@@ -240,14 +306,26 @@ inline PrepackParams build_prepack_params(
     int                              num_threads = 0,
     int                              nr_align    = 0,
     grp_matmul_gated_act_t           act         = grp_matmul_gated_act_t::none,
-    data_type_t                      act_dtype   = data_type_t::none) {
+    data_type_t                      act_dtype   = data_type_t::none,
+    // Optional per-expert runtime context — when non-null, mirrors
+    // the runtime CK refusal gates in `prepare_for_call` (transA,
+    // alpha != 1, beta != 0, is_weights_const = false).  Legacy
+    // callers leave these unset (nullptr) and `ck_eligible` skips
+    // the corresponding checks — same as pre-PR behaviour.
+    const std::vector<bool>         *transA = nullptr,
+    const std::vector<float>        *alpha  = nullptr,
+    const std::vector<float>        *beta   = nullptr) {
   PrepackParams p;
   p.weight           = &weight;
   p.K                = &K;
   p.N                = &N;
   p.ldb              = &ldb;
   p.transB           = &transB;
+  p.M                = &M;
   p.is_weights_const = &is_weights_const;
+  p.transA           = transA;
+  p.alpha            = alpha;
+  p.beta             = beta;
 
   if (!params.empty()) {
     p.src_dtype  = params[0].dtypes.src;
@@ -266,7 +344,7 @@ inline PrepackParams build_prepack_params(
   //     (`M.size() == active_matmul`) and Padded (`M.size() ==
   //     total_matmul` with `M[active..]=0`) input layouts; in the
   //     Padded form `M.size()` over-counts the firing experts.  Use
-  //     `active_matmul` here so the PACK_PROBE log line and any
+  //     `active_matmul` here so the PREPACK log line and any
   //     downstream diagnostic that reads `num_ops_active` reflects
   //     the true firing count regardless of which layout the caller
   //     used.
@@ -282,7 +360,7 @@ inline PrepackParams build_prepack_params(
   //         first input is `num_ops_total`) would carve out distinct
   //         entries for callers that the dispatcher treats as
   //         identical;
-  //       - the PACK_PROBE log line would report a `total=N` that
+  //       - the PREPACK log line would report a `total=N` that
   //         exceeds the count the dispatcher actually runs;
   //       - the warmer would iterate `[0, total_matmul)` over weight
   //         vectors that legacy-mode strict size validation requires
@@ -366,7 +444,7 @@ void clear_fingerprint_cache_for_test();
 // under CK=0 to populate regime 2?).  Probe-stats counters
 // `AoclDlpPackProbeStats` / `PackProbeStats` are already accumulated
 // across the primary warm and any cross-warm inside the per-ALGO
-// function, but the final values get consumed by the PACK_PROBE
+// function, but the final values get consumed by the PREPACK
 // apilog line and discarded.  This API captures the most recent
 // invocation's accumulated stats into a process-wide accumulator that
 // tests can read.
@@ -378,10 +456,43 @@ void clear_fingerprint_cache_for_test();
 // reach for it by accident.
 // ───────────────────────────────────────────────────────────────────────
 
+/// Which cross_warm regime fired alongside the primary warm.  Recorded
+/// per invocation in `LastInvocationStats` and surfaced in the
+/// `[GRP_MATMUL.PREPACK]` apilog line as two separate fields:
+/// `cross_warm=<enabled|disabled>` (the env state, mirrors the
+/// `ZENDNNL_GRP_MATMUL_CROSS_WARM` knob) and `regime=<regime>` (this
+/// enum's stringified value).  Together they let a user debugging a
+/// HIT/MISS trace see at a glance whether cross-warm was on AND
+/// which backend path got opportunistically warmed for the OTHER
+/// algo regime.
+///
+/// The four states map to the four reachable code paths in
+/// `cross_warm()`:
+///   * `none`               — env `ZENDNNL_GRP_MATMUL_CROSS_WARM=0`, OR
+///                            inner_kernel != aocl_dlp_blocked, OR
+///                            the structural skip path on ALGO 3 where
+///                            the primary already covered the
+///                            cross-warm target.
+///   * `aocl_full_weight`   — fired from `prepack_for_algo_3`: covers
+///                            the upcoming ALGO 1 prompt path.
+///   * `custom_kernel_pack` — fired from a non-ALGO-3 prepack with
+///                            `ck_eligible(p)==true`: covers the
+///                            upcoming ALGO 3 + CK decode path.
+///   * `aocl_per_tile`      — fired from a non-ALGO-3 prepack with
+///                            CK ineligible: covers the upcoming
+///                            ALGO 3 + DLP decode path (per-tile cache
+///                            with nr_align=1).
+enum class CrossWarmRegime {
+  none               = 0,
+  aocl_full_weight   = 1,
+  custom_kernel_pack = 2,
+  aocl_per_tile      = 3,
+};
+
 namespace test_api {
 
 /// Snapshot of the most recent `prepack_for_algo_X` invocation's
-/// observable side-effects.  Mirrors what the PACK_PROBE apilog line
+/// observable side-effects.  Mirrors what the PREPACK apilog line
 /// reports, but in a struct that gtest can `EXPECT_*` on.
 struct LastInvocationStats {
   /// Scheduling ALGO whose per-ALGO function was called (1..5).
@@ -410,6 +521,14 @@ struct LastInvocationStats {
   /// Accumulated custom-kernel probe stats.  Same accumulation
   /// model as `aocl` above.
   custom_kernel::PackProbeStats ck{};
+
+  /// Which `cross_warm` regime ran for this invocation.  `none` when
+  /// the cross-warm helper was skipped (env off, non-DLP inner kernel,
+  /// or the primary already covered the cross-warm target).  Surfaces
+  /// in the `[GRP_MATMUL.PREPACK]` apilog line as `regime=<regime>`,
+  /// paired with the env-state field `cross_warm=<enabled|disabled>`
+  /// — see `CrossWarmRegime`'s doc-block above for the field layout.
+  CrossWarmRegime cross_warm_regime = CrossWarmRegime::none;
 
   /// True after a `prepack_for_algo_X` invocation that took the
   /// non-skip path through `prelude()`.  False after

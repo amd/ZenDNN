@@ -42,8 +42,8 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-using zendnnl::error_handling::apilog_info;
-using zendnnl::error_handling::apilog_info_enabled;
+using zendnnl::error_handling::apilog_verbose;
+using zendnnl::error_handling::apilog_verbose_enabled;
 using zendnnl::error_handling::log_error;
 
 namespace {
@@ -60,14 +60,58 @@ namespace {
 // layout and K for the [N,K] layout, but passed explicitly so the
 // pack supports non-contiguous tensors / slices correctly).
 //
-// The OUTPUT (packed[]) is identical for both transB values — only
-// the input access pattern differs.  This means the microkernel and
-// every downstream consumer remain layout-agnostic.
-void pack_bf16_vnni(const bfloat16_t *weight, int K, int N, int ldb,
-                    int pack_nr, bool transB, bfloat16_t *packed) {
+// `interleave_split_halves` selects how each pack column maps back
+// to a canonical-weight column:
+//   * false (default) — pack column `col` reads canonical column
+//     `col`.  Verbatim copy + VNNI re-tile; same OUTPUT for any
+//     caller layout that already presents the desired N-order
+//     (none / swiglu_oai_mul on already-interleaved input).
+//   * true (silu_and_mul / gelu_and_mul fused-CK paths) — caller's
+//     weight is in split-halves `[gate_cols | up_cols]` order
+//     (N = 2I).  Pack output column `2i+0` reads canonical column
+//     `i` (gate i); pack output column `2i+1` reads canonical column
+//     `I + i` (up i).  The resulting packed bytes are physically
+//     identical to what `swiglu_oai_mul`'s caller-side interleaved
+//     input would produce, so the in-register pair-store epilogues
+//     (`silu_and_mul_store_pair`, `gelu_and_mul_store_pair`) apply
+//     unchanged.  silu and gelu share the SAME permutation; the
+//     cache-key bit `kInterleaveSplitMarker` is shared between them
+//     so a packed arena warmed for silu can be reused for gelu on
+//     the same weight pointer.  Requires N to be even.
+//
+// The OUTPUT (packed[]) is identical to the swiglu_oai_mul layout
+// when interleaving is requested, so the microkernel and every
+// downstream consumer remain layout-agnostic.
+//
+// Implementation note: the `Interleave` template parameter on
+// `pack_bf16_vnni_impl` lifts the (loop-invariant) split-halves
+// branch out of the innermost loop body — both instantiations
+// compile to a tight branch-free pack kernel.  The thin
+// `pack_bf16_vnni` wrapper below selects the instantiation once
+// per call from the runtime flag.
+template <bool Interleave>
+inline void pack_bf16_vnni_impl(const bfloat16_t *weight, int K, int N,
+                                int ldb, int pack_nr, bool transB,
+                                bfloat16_t *packed) {
   const int K_pair = (K + 1) / 2;
   const int n_blocks = N / pack_nr;
   const size_t ldb_z = static_cast<size_t>(ldb);
+  // I = N / 2 is the half-width for the interleave path.  Read only
+  // when `Interleave` is true; the compiler removes the load in the
+  // identity-mapping instantiation.  N evenness is a precondition
+  // documented in the header; we don't re-check here to keep the
+  // hot loop lean.
+  //
+  // `if constexpr (!Interleave) (void)I` suppresses `-Wunused-variable`
+  // in the `Interleave == false` instantiation (the only branch that
+  // references `I` is the `col_canon` ternary's `Interleave?…:col_pack`
+  // arm, which the optimiser DCE-removes when the template parameter
+  // is false — but the un-optimised, warning-pass-time AST still sees
+  // the binding).  `if constexpr` ensures the cast itself is also
+  // gone from the `Interleave == true` instantiation, so no code-gen
+  // change in either branch.
+  const int I = N / 2;
+  if constexpr (!Interleave) (void)I;
 
   for (int o_blk = 0; o_blk < n_blocks; ++o_blk) {
     bfloat16_t *blk_base = packed + static_cast<size_t>(o_blk)
@@ -81,27 +125,45 @@ void pack_bf16_vnni(const bfloat16_t *weight, int K, int N, int ldb,
           + static_cast<size_t>(kp) * pack_nr * kVNNIPair;
 
       for (int n = 0; n < pack_nr; ++n) {
-        const int col = n_base + n;
+        // Pack output column = n_base + n.  Canonical column is
+        // identity when `Interleave` is false; pair-interleave
+        // permutation when true.  Either way the compiler folds the
+        // mapping into a constant-control sequence per instantiation.
+        const int col_pack = n_base + n;
+        const int col_canon = Interleave
+            ? ((col_pack & 1) ? (I + (col_pack >> 1)) : (col_pack >> 1))
+            : col_pack;
         // Row-major addressing in caller's layout.  For transB=false
-        // (canonical [K, N]) `k` indexes rows and `col` indexes cols.
-        // For transB=true ([N, K] PyTorch layout) `col` indexes rows
+        // (canonical [K, N]) `k` indexes rows and `col_canon` indexes cols.
+        // For transB=true ([N, K] PyTorch layout) `col_canon` indexes rows
         // and `k` indexes cols.  ldb is the caller's row stride in
         // either case, so the same `row * ldb + col` formula works
         // with the row/col labels swapped.
         const size_t lo_off = transB
-            ? static_cast<size_t>(col) * ldb_z + k_lo
-            : static_cast<size_t>(k_lo) * ldb_z + col;
+            ? static_cast<size_t>(col_canon) * ldb_z + k_lo
+            : static_cast<size_t>(k_lo) * ldb_z + col_canon;
         kp_base[n * kVNNIPair + 0] = weight[lo_off];
         if (k_hi < K) {
           const size_t hi_off = transB
-              ? static_cast<size_t>(col) * ldb_z + k_hi
-              : static_cast<size_t>(k_hi) * ldb_z + col;
+              ? static_cast<size_t>(col_canon) * ldb_z + k_hi
+              : static_cast<size_t>(k_hi) * ldb_z + col_canon;
           kp_base[n * kVNNIPair + 1] = weight[hi_off];
         } else {
           kp_base[n * kVNNIPair + 1] = bfloat16_t(0.0f);
         }
       }
     }
+  }
+}
+
+void pack_bf16_vnni(const bfloat16_t *weight, int K, int N, int ldb,
+                    int pack_nr, bool transB,
+                    bool interleave_split_halves,
+                    bfloat16_t *packed) {
+  if (interleave_split_halves) {
+    pack_bf16_vnni_impl<true>(weight, K, N, ldb, pack_nr, transB, packed);
+  } else {
+    pack_bf16_vnni_impl<false>(weight, K, N, ldb, pack_nr, transB, packed);
   }
 }
 
@@ -160,6 +222,7 @@ status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
     bool transB,
+    bool interleave_split_halves,
     const bfloat16_t **out_packed,
     bool *was_hit_out) {
 
@@ -173,6 +236,15 @@ status_t get_or_pack_weight_bf16(
     log_error("custom_kernel pack: invalid arg "
               "(weight, K, N, ldb must be valid; pack_nr in {",
               kNRMin, ",", kNRMax, "}; N %% pack_nr == 0)");
+    return status_t::failure;
+  }
+  // Interleaved-split-halves only valid when N is even (the
+  // permutation pairs `(2i, 2i+1)` over `[0, N)`).  Pack_nr is
+  // already a power of two divisor of N so this just covers the
+  // theoretical case N=2 × odd.
+  if (interleave_split_halves && (N & 1)) {
+    log_error("custom_kernel pack: interleave_split_halves requires "
+              "even N (got N=", N, ")");
     return status_t::failure;
   }
   // Caller stride sanity: must accommodate the LOGICAL layout the
@@ -213,12 +285,63 @@ status_t get_or_pack_weight_bf16(
 
   // Mark the cache slot as belonging to the custom BF16 microkernel
   // (so it doesn't collide with any existing cache that uses the
-  // same `Key_matmul`); fold pack_nr and transB into the discriminator.
-  // Bit 16 of the marker is reserved for the transB flag.
+  // same `Key_matmul`); fold pack_nr, transB, and the split-halves
+  // interleave flag into the discriminator.
+  //
+  // Bit layout of `kCustomKernelAlgoMarker = 0xC0DE0000`:
+  //
+  //   nibble [28..31] = 0xC = 1100  → bits 30, 31 set
+  //   nibble [24..27] = 0x0 = 0000  → all CLEAR (variant-bit zone)
+  //   nibble [20..23] = 0xD = 1101  → bits 20, 22, 23 set
+  //   nibble [16..19] = 0xE = 1110  → bits 17, 18, 19 set
+  //   nibble [ 0..15] = 0x0000      → all CLEAR (variant-bit zone)
+  //
+  // Variant bits MUST be picked from the CLEAR positions, otherwise
+  // an `ALGO_MARKER | flag` OR is a no-op and the cache key fails to
+  // distinguish flag-on vs flag-off entries — silently aliasing
+  // different physical pack layouts onto the same LRU slot.
+  //
+  //   * Bit 16 (0x00010000)  — transB flag.  Inside the [16..19]
+  //                            nibble but bit 16 itself is clear
+  //                            (nibble 0xE = 1110 has LSB clear).
+  //   * Bit 24 (0x01000000)  — interleave_split_halves flag.  Picked
+  //                            from the all-clear nibble [24..27] so
+  //                            future variant bits have a contiguous
+  //                            home that's structurally safe.
+  //                            Distinguishes packs built with the
+  //                            silu/gelu interleave permutation from
+  //                            ordinary swiglu_oai_mul / none packs
+  //                            of the same weight ptr.  Without
+  //                            this bit, switching activation kinds
+  //                            mid-process on the same weight
+  //                            pointer would silently serve the
+  //                            wrong layout from cache.
+  //
+  // Bit 17 was the previous (buggy) choice for the interleave
+  // marker — it's SET in `kCustomKernelAlgoMarker`'s 0xE nibble, so
+  // `kCustomKernelAlgoMarker | kInterleaveSplitMarker` was a no-op
+  // and interleaved packs aliased non-interleaved packs on the same
+  // weight pointer (caught in Copilot review, see commit log).
+  // The compile-time check below catches any future regression.
   static constexpr uint32_t kCustomKernelAlgoMarker = 0xC0DE0000U;
   static constexpr uint32_t kTransBMarker          = 0x00010000U;
+  static constexpr uint32_t kInterleaveSplitMarker = 0x01000000U;
+  // Compile-time invariant: every variant flag must be in a CLEAR
+  // bit of `kCustomKernelAlgoMarker` so the OR actually flips the
+  // cache key.  Catches any future flag bit that slips into a set
+  // position.
+  static_assert(
+      (kCustomKernelAlgoMarker & kTransBMarker) == 0u,
+      "kTransBMarker collides with kCustomKernelAlgoMarker — pick "
+      "a clear bit (positions 0-15, 16, 21, or 24-29).");
+  static_assert(
+      (kCustomKernelAlgoMarker & kInterleaveSplitMarker) == 0u,
+      "kInterleaveSplitMarker collides with kCustomKernelAlgoMarker — "
+      "pick a clear bit (positions 0-15, 16, 21, or 24-29).");
   const uint32_t variant_bits =
-      static_cast<uint32_t>(pack_nr) | (transB ? kTransBMarker : 0u);
+      static_cast<uint32_t>(pack_nr)
+      | (transB ? kTransBMarker : 0u)
+      | (interleave_split_halves ? kInterleaveSplitMarker : 0u);
   const size_t extra_hash = static_cast<size_t>(
       kCustomKernelAlgoMarker | variant_bits);
   Key_matmul key(weight, static_cast<unsigned>(N),
@@ -230,13 +353,17 @@ status_t get_or_pack_weight_bf16(
   key.ldb = static_cast<unsigned>(ldb);
 
   // Cached once on first entry; zero cost per call when API log level
-  // is below info.  Without this gate each `apilog_info(...)` below
-  // would still do one function call + cached-bool check per pack
-  // lookup — at ~16k lookups per MoE iteration that adds ~100 µs of
-  // pure waste when logging is off.  The `static const bool` pattern
-  // lets the compiler treat the whole log-message construction as
-  // dead code in the disabled case.
-  static const bool s_pack_log = apilog_info_enabled();
+  // is below verbose.  These HIT/MISS lines fire per-expert and can
+  // also be amplified inside OMP regions, so they are gated on the
+  // verbose level (`ZENDNNL_API_LOG_LEVEL=4`) — info level (3) stays
+  // clean and shows only the consolidated `[GRP_MATMUL.PREPACK]` line
+  // emitted from the prepack module.  Without this gate each
+  // `apilog_verbose(...)` below would still do one function call +
+  // cached-bool check per pack lookup — at ~16k lookups per MoE
+  // iteration that adds ~100 µs of pure waste when logging is off.
+  // The `static const bool` pattern lets the compiler treat the whole
+  // log-message construction as dead code in the disabled case.
+  static const bool s_pack_log = apilog_verbose_enabled();
 
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
@@ -253,11 +380,11 @@ status_t get_or_pack_weight_bf16(
     // framework is reallocating weights → cache churn is root-caused
     // to weight-lifecycle, not to anything the dispatcher can fix.
     if (s_pack_log) {
-      apilog_info("[GRP_MATMUL Level4 pack HIT] weight=", weight,
-                  " K=", K, " N=", N, " ldb=", ldb,
-                  " transB=", (transB ? 1 : 0),
-                  " pack_nr=", pack_nr,
-                  " WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_verbose("[GRP_MATMUL.PACK HIT] weight=", weight,
+                     " K=", K, " N=", N, " ldb=", ldb,
+                     " transB=", (transB ? 1 : 0),
+                     " interleave=", (interleave_split_halves ? 1 : 0),
+                     " pack_nr=", pack_nr);
     }
     return status_t::success;
   }
@@ -271,11 +398,11 @@ status_t get_or_pack_weight_bf16(
   // MISSes for the same (K, N, ldb, transB, pack_nr) with only
   // weight_ptr cycling indicate weight-pointer churn.
   if (s_pack_log) {
-    apilog_info("[GRP_MATMUL Level4 pack MISS] weight=", weight,
-                " K=", K, " N=", N, " ldb=", ldb,
-                " transB=", (transB ? 1 : 0),
-                " pack_nr=", pack_nr,
-                " WEIGHT_CACHE_OUT_OF_PLACE");
+    apilog_verbose("[GRP_MATMUL.PACK MISS] weight=", weight,
+                   " K=", K, " N=", N, " ldb=", ldb,
+                   " transB=", (transB ? 1 : 0),
+                   " interleave=", (interleave_split_halves ? 1 : 0),
+                   " pack_nr=", pack_nr);
   }
   const int K_pair = (K + 1) / 2;
   const size_t bytes = static_cast<size_t>(N / pack_nr)
@@ -291,6 +418,7 @@ status_t get_or_pack_weight_bf16(
   }
 
   pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                 interleave_split_halves,
                  static_cast<bfloat16_t *>(raw));
   pack_cache.add(key, raw);
 
@@ -299,42 +427,33 @@ status_t get_or_pack_weight_bf16(
 }
 
 // See pack.hpp for the quiescent-window safety contract.  The
-// implementation is a two-step capacity toggle on the same
-// lru_cache_t used by `get_or_pack_weight_bf16()`:
-//   1. Lower the capacity to 0 — the LRU's internal `evict()` pass
-//      runs on the next mutating op (below) and `std::free()`s every
-//      cached packed buffer via `if constexpr(is_pointer)` path.
-//   2. Nudge eviction immediately by calling `set_capacity(0)`
-//      (which evicts synchronously inside its own mutex).
-//   3. Restore capacity to UINT32_MAX so subsequent
-//      `get_or_pack_weight_bf16()` hits go back to the eviction-
-//      disabled regime.  Without this step the cache would begin
-//      evicting packs as callers add new entries — reintroducing
-//      the UAF concern that motivated the UINT32_MAX default.
+// implementation calls `lru_cache_t::clear()` under the same
+// `pack_mutex_singleton()` that `get_or_pack_weight_bf16()` holds,
+// so any racing pack call blocks until the clear completes.
+// Combined with the caller's quiescent-window guarantee (no
+// in-flight `dispatch_tile` reading a `ctx.packed_ptrs[i]` from a
+// previous prepare_for_call), the clear is safe even though the
+// cache's eviction-disabled UINT32_MAX capacity is never lowered.
 //
-// We also hold the outer `pack_mutex_singleton()` for the duration
-// so any racing `get_or_pack_weight_bf16()` call blocks until this
-// completes; combined with the caller's quiescent-window guarantee,
-// no in-flight microkernel can observe a partially-cleared cache.
+// `lru_cache_t::clear()` walks the map and `std::free()`s every
+// pointer regardless of the capacity setting — the right primitive
+// for this use case.  Previously this function attempted a two-
+// step `set_capacity(0)` + `set_capacity(MAX)` toggle, but the
+// parametrised `evict(n)` invoked by `set_capacity` has a size_t
+// underflow when `capacity_ == 0` (the loop condition
+// `size > capacity_ - n` wraps to `size > UINT_MAX - n + 1` and is
+// therefore always false), so the old form silently left every
+// entry in place.  Using `clear()` directly sidesteps the bug.
 void clear_custom_kernel_pack_cache() {
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
   auto &pack_cache = pack_cache_singleton();
-  // Use the dedicated `clear()` method instead of
-  // `set_capacity(0)` + `set_capacity(MAX)`: the parametrised
-  // `evict(n)` invoked by `set_capacity` has a size_t underflow
-  // when `capacity_=0` (the loop condition `size > capacity_ - n`
-  // wraps to `size > UINT_MAX - n + 1` and is therefore always
-  // false), so the old form silently left every entry in place.
-  // `lru_cache_t::clear()` calls the parameterless `evict()` which
-  // walks the map and frees every pointer regardless of capacity.
   pack_cache.clear();
   // Rare event (explicit cache clear); still gated for consistency
   // with HIT/MISS so all pack-related APILOG lines share the same
-  // enable criterion.
-  static const bool s_pack_log = apilog_info_enabled();
+  // enable criterion (gated on the verbose level).
+  static const bool s_pack_log = apilog_verbose_enabled();
   if (s_pack_log) {
-    apilog_info("[GRP_MATMUL Level4 pack cleared] Pack cache cleared "
-                "WEIGHT_CACHE_OUT_OF_PLACE");
+    apilog_verbose("[GRP_MATMUL.PACK cleared] Pack cache cleared");
   }
 }
 

@@ -128,7 +128,8 @@ status_t warm_pack_all_custom_kernel_experts(
     const std::vector<bool>         &transB,
     const std::vector<bool>         &is_weights_const,
     int                              total_count,
-    PackProbeStats                  &stats);
+    PackProbeStats                  &stats,
+    bool                             interleave_split_halves = false);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

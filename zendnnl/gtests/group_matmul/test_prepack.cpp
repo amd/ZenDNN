@@ -211,6 +211,16 @@ struct PrepackHarness {
   std::vector<int>          ldb;
   std::vector<bool>         transB;
   std::vector<bool>         is_weights_const;
+  // Per-expert runtime context — mirrors the gates the runtime CK
+  // checks per-call.  Populated to neutral CK-accepting defaults
+  // (transA=false, alpha=1, beta=0) so `ck_eligible(p)` accepts the
+  // baseline harness; individual tests flip one entry to assert the
+  // refusal contract.  Pointers in `pp` are set so legacy harness
+  // users (tests written before P1) keep getting the pre-fix
+  // behaviour by overriding the pp pointers to nullptr if needed.
+  std::vector<bool>         transA;
+  std::vector<float>        alpha;
+  std::vector<float>        beta;
   zendnnl::lowoha::matmul::group_matmul_prepack::PrepackParams pp;
 };
 
@@ -225,6 +235,9 @@ PrepackHarness make_harness(int total, int active, int K_v, int N_v,
   h.ldb.assign(total, N_v);
   h.transB.assign(total, false);
   h.is_weights_const.assign(total, true);
+  h.transA.assign(total, false);
+  h.alpha.assign(total, 1.0f);
+  h.beta.assign(total, 0.0f);
   for (int e = 0; e < total; ++e) {
     h.banks[e].assign((size_t)K_v * N_v,
                       bfloat16_t(fill_value + 0.001f * (float)e));
@@ -236,6 +249,9 @@ PrepackHarness make_harness(int total, int active, int K_v, int N_v,
   h.pp.ldb              = &h.ldb;
   h.pp.transB           = &h.transB;
   h.pp.is_weights_const = &h.is_weights_const;
+  h.pp.transA           = &h.transA;
+  h.pp.alpha            = &h.alpha;
+  h.pp.beta             = &h.beta;
   h.pp.src_dtype = data_type_t::bf16;
   h.pp.wei_dtype = data_type_t::bf16;
   h.pp.dst_dtype = data_type_t::bf16;
@@ -2749,15 +2765,20 @@ TEST_F(TestPrepackCkGateSymmetry, AllGatesPassEnablesCustomKernelWarm) {
       << "All-pass gate must engage warm_custom (CK pack arena populated)";
 }
 
-TEST_F(TestPrepackCkGateSymmetry, ActSiluRefusedNoCkWarm) {
+TEST_F(TestPrepackCkGateSymmetry, ActSiluWithoutBiasWarmsCkArena) {
   namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
   using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
   clear_custom_kernel_pack_cache();
   prepack::clear_fingerprint_cache_for_test();
   prepack::test_api::clear_last_invocation_stats();
 
-  // silu_and_mul is refused by the runtime CK (only swiglu_oai_mul /
-  // none are accepted).  Prepack must mirror -> no CK warm.
+  // silu_and_mul (no bias) is now ACCEPTED by the runtime CK (the
+  // prepack permutes canonical split-halves W13 into the interleaved
+  // CK layout the in-register fused epilogue expects).  Prepack must
+  // mirror -> engages warm_custom and the per-expert CK pack arena
+  // is populated.  Asymmetry vs the dispatcher would either waste
+  // memory (warm without runtime consumption) or pay a first-call
+  // pack spike (runtime without warm).
   auto h = make_harness(/*total=*/4, /*active=*/4,
                         /*K=*/32, /*N=*/64, /*fill=*/0.402f);
   h.pp.act       = grp_matmul_gated_act_t::silu_and_mul;
@@ -2768,19 +2789,52 @@ TEST_F(TestPrepackCkGateSymmetry, ActSiluRefusedNoCkWarm) {
 
   const auto stats = prepack::test_api::get_last_invocation_stats();
   ASSERT_TRUE(stats.valid);
-  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
-      << "act=silu_and_mul is refused by runtime CK; prepack must NOT "
-         "warm CK pack arena (wasted memory + Fix-B skipped per-tile "
-         "AOCL warm + runtime falls back to AOCL DLP per-tile)";
+  EXPECT_GT(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "act=silu_and_mul (no bias) is now accepted by runtime CK; "
+         "prepack must warm the CK pack arena so first-call decode "
+         "does not pay the pack-spike cost.";
 }
 
-TEST_F(TestPrepackCkGateSymmetry, ActGeluRefusedNoCkWarm) {
+TEST_F(TestPrepackCkGateSymmetry, ActSiluWithBiasRefusedNoCkWarm) {
   namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
   using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
   clear_custom_kernel_pack_cache();
   prepack::clear_fingerprint_cache_for_test();
   prepack::test_api::clear_last_invocation_stats();
 
+  // silu_and_mul + bias is refused by the runtime CK (bias-into-init
+  // under the interleaved layout is a planned follow-up).  Prepack
+  // must mirror -> no CK warm.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.404f);
+  h.pp.act       = grp_matmul_gated_act_t::silu_and_mul;
+  h.pp.act_dtype = data_type_t::bf16;
+  h.pp.bias_dtype  = data_type_t::bf16;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "act=silu_and_mul + bias is refused by runtime CK; prepack "
+         "must NOT warm CK pack arena (wasted memory + Fix-B skipped "
+         "per-tile AOCL warm + runtime falls back to AOCL DLP).";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, ActGeluWithoutBiasWarmsCkArena) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // gelu_and_mul (no bias) is now ACCEPTED by the runtime CK (the
+  // prepack permutes canonical split-halves W13 into the interleaved
+  // CK layout — same permutation as silu_and_mul, since the layout
+  // cost is purely physical and the only kernel-side difference is
+  // the activation math).  Prepack must mirror -> engages
+  // warm_custom and the per-expert CK pack arena is populated.
   auto h = make_harness(/*total=*/4, /*active=*/4,
                         /*K=*/32, /*N=*/64, /*fill=*/0.403f);
   h.pp.act       = grp_matmul_gated_act_t::gelu_and_mul;
@@ -2791,9 +2845,38 @@ TEST_F(TestPrepackCkGateSymmetry, ActGeluRefusedNoCkWarm) {
 
   const auto stats = prepack::test_api::get_last_invocation_stats();
   ASSERT_TRUE(stats.valid);
+  EXPECT_GT(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "act=gelu_and_mul (no bias) is now accepted by runtime CK; "
+         "prepack must warm the CK pack arena so first-call decode "
+         "does not pay the pack-spike cost.";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, ActGeluWithBiasRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // gelu_and_mul + bias is refused by the runtime CK (same rationale
+  // as silu_and_mul + bias — bias-into-init under the interleaved
+  // layout is a planned follow-up).  Prepack must mirror -> no CK
+  // warm.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.405f);
+  h.pp.act       = grp_matmul_gated_act_t::gelu_and_mul;
+  h.pp.act_dtype = data_type_t::bf16;
+  h.pp.bias_dtype  = data_type_t::bf16;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
   EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
-      << "act=gelu_and_mul is refused by runtime CK; prepack must NOT "
-         "warm CK pack arena";
+      << "act=gelu_and_mul + bias is refused by runtime CK; prepack "
+         "must NOT warm CK pack arena (wasted memory + Fix-B skipped "
+         "per-tile AOCL warm + runtime falls back to AOCL DLP).";
 }
 
 TEST_F(TestPrepackCkGateSymmetry, ActDtypeF32WithGatedActRefusedNoCkWarm) {
@@ -3014,6 +3097,165 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
       << "Second call (silu refused) must NOT warm CK arena";
 }
 
+// ────────────────────────────────────────────────────────────────
+// P1 — per-expert runtime-gate mirroring in `ck_eligible(p)`.
+//
+// `prepare_for_call` refuses CK per-call for three gates that can
+// also be checked at prepack time:
+//   * `transA[i] == true`               -> `transA_not_supported`
+//   * `alpha[i] != 1 || beta[i] != 0`   -> `alpha_beta_not_supported`
+//   * `is_weights_const[i] == false`    -> `non_const_weight_in_active_expert`
+//
+// Pre-P1, `ck_eligible` skipped these per-expert checks and the
+// prepack false-positive-warmed regime 3 for shapes the runtime would
+// reject.  Net effect: wasted resident memory on the CK arena (the
+// runtime never consults the warmed entry) + first-call lazy reorder
+// spike on the regime 2 fallback (which Fix-B skipped because
+// ck_eligible was true).
+//
+// The harness `make_harness` populates transA/alpha/beta vectors and
+// wires the pointers into `pp`; individual tests flip one entry to
+// pin the refusal contract.  Tests use baseline `act = none` so the
+// only gate flipped is the one under test.
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(TestPrepackCkGateSymmetry, TransATrueRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // transA[i]=true on any active expert -> runtime CK refuses with
+  // `transA_not_supported`.  Prepack must mirror -> no CK warm.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.420f);
+  h.pp.act         = grp_matmul_gated_act_t::none;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  // Flip transA on a single active expert to trigger the gate.
+  h.transA[2] = true;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "transA[i]=true on any active expert must refuse CK warm "
+         "(runtime refuses with `transA_not_supported`); "
+         "asymmetry wastes resident memory + pays first-call lazy "
+         "reorder via Fix-B skip.";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, AlphaNotOneRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // alpha[i] != 1 on any active expert -> runtime CK refuses with
+  // `alpha_beta_not_supported`.  Same expectation for beta != 0; this
+  // test covers alpha (beta has its own test below).
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.421f);
+  h.pp.act         = grp_matmul_gated_act_t::none;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  h.alpha[1] = 2.0f;  // !=1
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "alpha[i] != 1 on any active expert must refuse CK warm.";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, BetaNotZeroRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.422f);
+  h.pp.act         = grp_matmul_gated_act_t::none;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  h.beta[0] = 0.5f;  // !=0
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "beta[i] != 0 on any active expert must refuse CK warm.";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, IsWeightsConstFalseRefusedNoCkWarm) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // is_weights_const[i]=false on any active expert -> runtime CK
+  // refuses with `non_const_weight_in_active_expert` (the CK pack
+  // cache cannot honour mutable weight pointers).  Note: the AOCL
+  // warmer ALREADY honours this per-expert skip via
+  // `warm_pack_all_custom_kernel_experts` (see is_weights_const
+  // handling in prepack_custom_kernel.cpp), but `ck_eligible` itself
+  // didn't gate on it pre-P1 — so the all-experts ck_eligible verdict
+  // was true even when individual experts would refuse.  With Fix-B
+  // skipping regime 2 when ck_eligible is true, the runtime then paid
+  // a first-call lazy reorder.  P1 closes this asymmetry.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.423f);
+  h.pp.act         = grp_matmul_gated_act_t::none;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  h.is_weights_const[3] = false;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "is_weights_const[i]=false on any active expert must refuse "
+         "CK warm — runtime CK refuses the whole call, and ck_eligible "
+         "MUST mirror so Fix-B does not skip regime 2.";
+}
+
+TEST_F(TestPrepackCkGateSymmetry, RefusalScopedToActiveExpertsOnly) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  using zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache;
+  clear_custom_kernel_pack_cache();
+  prepack::clear_fingerprint_cache_for_test();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // Padded layout: total > active.  A refusal trigger on a TAIL
+  // (inactive) expert must NOT refuse CK warm — runtime
+  // `prepare_for_call` iterates only `[0, num_ops_active)`, so
+  // tail values are stale / unread.  ck_eligible MUST match that
+  // scoping or it would over-refuse on Padded callers.
+  auto h = make_harness(/*total=*/8, /*active=*/3,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.424f);
+  h.pp.act         = grp_matmul_gated_act_t::none;
+  h.pp.num_threads = 1;
+  h.pp.nr_align    = 1;
+  // Flip a refusal trigger on a TAIL (inactive) expert.
+  h.transA[5] = true;
+  h.alpha[6]  = 3.0f;
+  h.is_weights_const[7] = false;
+  prepack::prepack_for_algo_3(h.pp);
+
+  const auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_GT(stats.ck.cache_misses + stats.ck.cache_hits, 0)
+      << "Refusal triggers on inactive tail experts (i >= num_ops_active) "
+         "must NOT refuse CK warm; tail entries are stale and the "
+         "runtime never consults them.  Over-refusing here would "
+         "regress the Padded-layout opt-in callers.";
+}
+
 // ===============================================================================
 // [33] TestPrepackBuildParamsContract - pin `build_prepack_params` to
 //      the dispatcher's active/total contract
@@ -3038,7 +3280,7 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
 //      and Padded (`M.size() == total_matmul`) input layouts.  The
 //      Padded case is what regressed pre-fix: `build_prepack_params`
 //      used `M.size()` for `num_ops_active`, over-counting the firing
-//      experts in the PACK_PROBE log and any downstream diagnostic.
+//      experts in the PREPACK log and any downstream diagnostic.
 //      Each TEST_F pins one row of the contract.
 // ===============================================================================
 
@@ -3112,7 +3354,7 @@ TEST_F(TestPrepackBuildParamsContract, LegacyStaleTotalMatmulIsIgnored) {
   //   - have the warmer iterate `[0, total_matmul)` over weight
   //     vectors that strict legacy size validation requires to be
   //     exactly `M.size()` long (no UB — the warmer's `min({...})`
-  //     clamp still bounds the loop — but the PACK_PROBE log line
+  //     clamp still bounds the loop — but the PREPACK log line
   //     would report a misleading `total=N` larger than the count the
   //     dispatcher actually runs).
   // Expected: both fields fall back to `M.size()`.

@@ -290,7 +290,7 @@ first read for the process lifetime, in-process `setenv` is a no-op).
 | `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT` | 1 | yes | Force tight-dst layout for fused-MoE Op1 |
 | `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT` | ON | yes | Fuse swiglu_oai into ALGO 3 epilogue |
 | `ZENDNNL_GRP_MATMUL_N_ROUNDS` | 0 (auto) | yes | ALGO 3 round-mode (single/multi/balanced) |
-| `ZENDNNL_GRP_MATMUL_N_ORDER` | 0 (auto) | yes | Expert ordering within rounds |
+| `ZENDNNL_GRP_MATMUL_N_ORDER` | 3 (pair-balanced) | yes | Expert ordering within rounds. Production default is mode 3 (pair-balanced — desc, then heavy/light alternation). Empirically 5.4% faster than ascending on Qwen3-30B-A3B decode (CK=1, ALGO 3) across the full `N_ROUNDS × N_ORDER` cross-product. Pre-CK history of mode 1 (ascending) is preserved in `group_matmul_parallel_common.hpp`. |
 | `ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS` | 16 | yes | Divisor for stable n_thr |
 | `ZENDNNL_GRP_MATMUL_AOCL_BLIS_NC` | 128 | yes | BLIS-bf16 inner-N block (narrow-N density estimator) |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR` | 0 (auto -> 32) | yes | Pack/microkernel NR (32 or 64) |

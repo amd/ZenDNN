@@ -34,7 +34,14 @@
 ///   * `pick_fused_moe_want_tight()` decides per call whether to
 ///     allocate a tight [M, I] arena or the classic wide [M, 2I].
 ///   * Tight layout is requested when ALL of the following hold:
-///       - act == swiglu_oai_mul (activation halves N),
+///       - act is a gated activation that ALGO 3 can fuse into the
+///         per-thread epilogue — `a3_can_fuse_act(act,
+///         CUSTOM_KERNEL)` returns true.  Today that means
+///         `swiglu_oai_mul` (both CK and standard backend) and
+///         `silu_and_mul` / `gelu_and_mul` (CK only — the standard
+///         backend's `apply_swiglu_oai_tile_rows` is swiglu-only).
+///         All three activations halve the Op1 output width from
+///         2I → I, which is what makes the tight arena viable.
 ///       - dispatcher would route Op1 to ALGO 3 (only flat_n_tile
 ///         implements tight handling — ALGO 1/2/4/5 would overrun),
 ///       - `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT` is unset (auto)
@@ -44,8 +51,8 @@
 ///     it detects `ldc < N`, independent of the
 ///     `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT` env flag.  Tight layout
 ///     is a correctness contract for the caller's buffer (a
-///     separate-pass swiglu would overrun the [M, I] arena), so it
-///     must fuse regardless of the perf-tuning env.  This is why
+///     separate-pass gated act would overrun the [M, I] arena), so
+///     it must fuse regardless of the perf-tuning env.  This is why
 ///     the auto-fuse is not a gate in `pick_fused_moe_want_tight()`.
 ///     See `group_matmul_parallel.cpp::a3_fuses` for the corresponding
 ///     dispatcher logic.
@@ -151,9 +158,24 @@ struct FusedMoEScratch {
 //      caller-chosen ldc; the tight arena layout is library-private,
 //      so it's never visible to caller-allocated paths.
 //
-//   2. `act == swiglu_oai_mul` — tight's compaction is the swiglu
-//      gate·up fold; silu/gelu produce a half-layout activation that
-//      flat_n_tile does not support as an OOP writer.
+//   2. `act` admits the per-thread fused epilogue.  Three routes
+//      reach the tight compaction safely:
+//        * `swiglu_oai_mul` — supported by both backends:
+//          - CK on:  in-register `swiglu_oai_store_pair`.
+//          - CK off: standard backend's `apply_swiglu_oai_tile_rows_oop`
+//                    OOP writer (wide scratch → tight dst).
+//        * `silu_and_mul`   — CK-only today.  Caller-side W13 is in
+//          canonical split-halves layout; the prepack permutes
+//          source columns so the CK pack arena physically matches
+//          the swiglu_oai_mul layout, and `silu_and_mul_store_pair`
+//          applies the activation in registers.  No standard-backend
+//          OOP writer exists for silu_and_mul yet, so the silu
+//          branch requires `use_custom_kernel == true`.
+//        * `gelu_and_mul`   — CK-only today.  Same prepack-permuted
+//          layout as silu; `gelu_and_mul_store_pair` applies a
+//          `gelu_tanh` polynomial approximation in registers (within
+//          BF16 tolerance of the reference's `gelu_erf`).  Same CK
+//          gate as silu via `a3_can_fuse_act`.
 //
 //   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in flat_n_tile
 //      (only strategy that writes per-thread scratch + OOP swiglu into
@@ -197,7 +219,12 @@ inline bool pick_fused_moe_want_tight(
     const std::vector<matmul_params> &params,
     int num_threads) {
   if (!op1_internal) return false;
-  if (act != grp_matmul_gated_act_t::swiglu_oai_mul) return false;
+  // Reuse the same fusibility predicate the parallel dispatcher uses
+  // for its `a3_fuses` decision — keeps tight-engage and fuse-engage
+  // gated identically, so a tight-allocated arena is always
+  // accompanied by a fused epilogue (no silent overrun of the half-
+  // width dst by a wide GEMM that bypasses the fuse).
+  if (!a3_can_fuse_act(act, get_grp_matmul_custom_kernel())) return false;
   if (env_algo != 0 && env_algo != 3) return false;
   const int env_tight = get_grp_matmul_fused_moe_tight();
   if (env_tight == 0) return false;
@@ -428,23 +455,57 @@ status_t group_matmul_fused_moe_execute(
       op1_internal, act, env_algo_fused,
       layout, M, N, K, params, num_threads);
 
-  // ── APILOG: one line per fused_moe call summarising path decisions.
-  // Caller sees arena layout, per-side internal-alloc state, act
-  // kind, custom-kernel flag, and the env ALGO — full dispatch trail
-  // when `ZENDNNL_API_LOG_LEVEL=3`.  apilog_info_enabled() is cached
-  // after the first call so the gate check is free when logging is
-  // off.
+  // ── EXEC APILOG: one line per fused_moe call summarising arena
+  // layout, per-side internal-alloc state, act-fusion choice, and the
+  // W13 write width that flows out of those choices.  Caller sees
+  // exactly which Op1 path was selected at `ZENDNNL_API_LOG_LEVEL=3`.
+  //
+  // W13_write_elems_per_row tells the reader how many bytes per Op1
+  // row land in the arena:
+  //   * tight  + gated act  → I  (half-width store; fused gated act
+  //                               folds gate*up into I outputs)
+  //   * loose                → 2I (full gate+up store; act applied
+  //                                as a separate vectorised pass
+  //                                downstream)
+  //   * any   + act=none    → N  (Op1 output flows verbatim into Op2;
+  //                               not gated, not halved)
+  //
+  // apilog_info_enabled() is cached after the first call so the gate
+  // check is free when logging is off.
   static const bool s_apilog = apilog_info_enabled();
   if (s_apilog) {
-    apilog_info("[GRP_MATMUL Level2 fused_moe] arena=",
-                (want_tight ? "tight" : "wide"),
-                " op1_internal=", op1_internal,
-                " op2_internal=", op2_internal,
+    const bool act_is_gated = (act != grp_matmul_gated_act_t::none);
+    const char *w13_write_elems = act_is_gated
+        ? (want_tight ? "I" : "2I")
+        : "N";
+    // `act_in_register` reports ONLY the dispatcher-pre-known case
+    // where the tight arena guarantees the CK in-register fused
+    // epilogue runs.  When `want_tight` is false, the loose-arena
+    // path may STILL fuse the gated act inside ALGO 3 (when
+    // `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT=1` AND the dispatcher
+    // routes to ALGO 3) or run it as a separate post-pass — that
+    // distinction can't be made here, before `dispatch_op1` runs.
+    // The authoritative fusion choice for the loose path surfaces
+    // in the dispatcher's own `[GRP_MATMUL.CALL] mode=...` field
+    // (e.g. `flat_n_tile_fused_swiglu_oai_custom`) and the
+    // `[GRP_MATMUL.PLAN] flat_n_tile ... fused_epilogue=`
+    // (see `group_matmul_n_tile.cpp::gemm_mode_label` for the
+    // full mode-string set).
+    apilog_info("[GRP_MATMUL.EXEC] op=fused_moe arena=",
+                (want_tight ? "tight" : "loose"),
+                " op1_internal=", (op1_internal ? "yes" : "no"),
+                " op2_internal=", (op2_internal ? "yes" : "no"),
                 " act=", act_name(act),
+                " act_in_register=",
+                ((want_tight && act_is_gated) ? "yes" : "no"),
+                " W13_write_elems_per_row=", w13_write_elems,
+                " op2_dst_reuse=",
+                (op2_internal ? "src_inplace" : "caller_dst_down"),
                 " env_algo=", env_algo_fused,
                 " env_tight=", get_grp_matmul_fused_moe_tight(),
-                " num_ops=", (int)num_ops,
-                " custom_kernel_env=", custom_kernel_en);
+                " custom_kernel_env=",
+                (custom_kernel_en ? "on" : "off"),
+                " num_ops=", (int)num_ops);
   }
 
   // ── Always-on: per-expert dim / stride / pointer / N-evenness sweep

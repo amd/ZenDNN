@@ -148,10 +148,12 @@ inline bool grow_scratch(PerThreadScratch &s, size_t need) {
 //                        what auto-pick does, with the gemm_mode
 //                        label distinguishing the path for telemetry
 //                        (`flat_n_tile_sequential` vs
-//                        `sequential_experts`).  Skipped when the
-//                        user explicitly forces ntile via
+//                        `sequential_experts`).  Skipped under
 //                        `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=1` or
-//                        `=2` (benchmarking or override).
+//                        `=2`; `=2` is the production default, so
+//                        the auto-mirror gate is normally inactive
+//                        and ALGO 3 runs the Rounds path on every
+//                        shape that survives the structural gates.
 //
 // The auto-mirror replays auto-select's three-rule tree faithfully,
 // so Rule 1 (`num_ops ≥ num_threads → ALGO 3`) protects Qwen-class

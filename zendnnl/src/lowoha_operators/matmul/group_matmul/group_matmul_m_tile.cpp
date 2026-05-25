@@ -235,7 +235,8 @@ void flat_m_tile(
           weight, K, N, ldb, transB, is_weights_const, params, M,
           get_grp_matmul_custom_kernel(),
           num_threads, /*nr_align=*/0,
-          fused_act, act_dtype));
+          fused_act, act_dtype,
+          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
   matmul_algo_t algo = resolve_kernel();
 

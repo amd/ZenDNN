@@ -36,6 +36,7 @@
 #include "common/bfloat16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "group_matmul_direct.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {
@@ -47,6 +48,21 @@ using zendnnl::common::bfloat16_t;
 using zendnnl::memory::data_type_t;
 
 namespace {
+
+// Shared AVX-512 vector activation math — single source of truth
+// for `fast_exp_neg_avx512`, `sigmoid_avx512`, `silu_avx512`,
+// `gelu_avx512`, `swiglu_oai_avx512`, and the `bf16x16_to_f32` /
+// `f32_to_bf16x16` cvt helpers.  Pulled in via using-declarations
+// (rather than `using namespace ...;`) so each name is explicit
+// and pinned at the namespace boundary; future drift between this
+// file and `bf16_microkernel.cpp` is structurally impossible.
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::fast_exp_neg_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
 
 constexpr float kSqrtHalf = 0.7071067811865476f;
 
@@ -133,91 +149,13 @@ void swiglu_oai_mul_row_scalar_bf16(bfloat16_t *row, int dim) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// AVX-512 primitives (target-attributed, compiled unconditionally)
+// AVX-512 primitives — single source of truth in
+// `group_matmul_act_avx512.hpp`.  Both this file (the separate-pass
+// row helpers) and `custom_kernel/ukernel/bf16_microkernel.cpp` (the
+// fused-CK in-register store helpers) consume the same FP32 vector
+// math via the using-declarations above.  See the header doc-block
+// for the cross-path numerical contract.
 // ═══════════════════════════════════════════════════════════════════════
-
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 bf16x16_to_f32(__m256i bf16) {
-  return _mm512_castsi512_ps(
-      _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
-}
-
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m256i f32_to_bf16x16(__m512 f32) {
-  __m512i i32 = _mm512_castps_si512(f32);
-  __m512i bias = _mm512_add_epi32(
-      _mm512_set1_epi32(0x7FFF),
-      _mm512_and_si512(_mm512_srli_epi32(i32, 16), _mm512_set1_epi32(1)));
-  return _mm512_cvtepi32_epi16(_mm512_srli_epi32(
-      _mm512_add_epi32(i32, bias), 16));
-}
-
-// Fast exp(-x): 5th-degree Cephes polynomial for 2^f, exponent clamped.
-// Max relative error ~5e-5 — sufficient for sigmoid.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 fast_exp_neg_avx512(__m512 x) {
-  const __m512 log2e = _mm512_set1_ps(-1.4426950408889634f);
-
-  __m512 t = _mm512_mul_ps(x, log2e);
-  __m512 ti = _mm512_roundscale_ps(t, _MM_FROUND_TO_NEG_INF);
-  __m512 f = _mm512_sub_ps(t, ti);
-
-  const __m512 c0 = _mm512_set1_ps(1.0f);
-  const __m512 c1 = _mm512_set1_ps(0.6931472f);
-  const __m512 c2 = _mm512_set1_ps(0.2402265f);
-  const __m512 c3 = _mm512_set1_ps(0.0555042f);
-  const __m512 c4 = _mm512_set1_ps(0.0096838f);
-  const __m512 c5 = _mm512_set1_ps(0.0013364f);
-
-  __m512 p = _mm512_fmadd_ps(c5, f, c4);
-  p = _mm512_fmadd_ps(p, f, c3);
-  p = _mm512_fmadd_ps(p, f, c2);
-  p = _mm512_fmadd_ps(p, f, c1);
-  p = _mm512_fmadd_ps(p, f, c0);
-
-  __m512 ti_clamped = _mm512_max_ps(_mm512_min_ps(ti,
-      _mm512_set1_ps(127.0f)), _mm512_set1_ps(-126.0f));
-  __m512i ei = _mm512_cvtps_epi32(ti_clamped);
-  __m512i exp_bits = _mm512_slli_epi32(
-      _mm512_add_epi32(ei, _mm512_set1_epi32(127)), 23);
-  __m512 pow2i = _mm512_castsi512_ps(exp_bits);
-
-  __m512 result = _mm512_mul_ps(pow2i, p);
-  return _mm512_max_ps(result, _mm512_setzero_ps());
-}
-
-// sigmoid = 1/(1+exp(-x)) using rcp14 + 1 Newton-Raphson step.
-// rcp14 alone gives ~2^-14 relative error (~6e-5).  One NR iteration
-// refines to ~2^-28 (~3.7e-9), which is below the exp polynomial
-// error (5e-5), so the overall sigmoid accuracy is unchanged.
-// rcp14 + NR avoids the high-latency hardware divide.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 sigmoid_avx512(__m512 x) {
-  const __m512 one = _mm512_set1_ps(1.0f);
-  const __m512 two = _mm512_set1_ps(2.0f);
-  __m512 denom = _mm512_add_ps(one, fast_exp_neg_avx512(x));
-  __m512 rcp = _mm512_rcp14_ps(denom);
-  // NR: rcp' = rcp * (2 - denom * rcp)
-  rcp = _mm512_mul_ps(rcp, _mm512_fnmadd_ps(denom, rcp, two));
-  return rcp;
-}
-
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 silu_avx512(__m512 x) {
-  return _mm512_mul_ps(x, sigmoid_avx512(x));
-}
-
-// GELU: per-lane scalar std::erf (no AVX-512 erf intrinsic).  A
-// vectorised tanh-based approximation could replace this if a more
-// accurate / faster path is needed.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 gelu_avx512(__m512 x) {
-  alignas(64) float arr[16];
-  _mm512_store_ps(arr, x);
-  for (int i = 0; i < 16; ++i)
-    arr[i] = arr[i] * 0.5f * (1.0f + std::erf(arr[i] * kSqrtHalf));
-  return _mm512_load_ps(arr);
-}
 
 // Stride-2 gather index for swiglu_oai F32 (interleaved layout).
 alignas(64) static const int32_t kGatherIdx[16] =
@@ -300,25 +238,19 @@ static void gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
   }
 }
 
+// FP32 swiglu_oai row helper.  Stride-2 gather from the interleaved
+// `[g0, u0, g1, u1, ...]` buffer, then the unified
+// `swiglu_oai_avx512(gate, up)` does clamp + (1+u)·g·σ(α·g) on the
+// pre-deinterleaved zmm pair.  Scalar tail handles `dim % 16` only.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static void swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
-  const __m512 alpha_vec = _mm512_set1_ps(1.702f);
-  const __m512 one = _mm512_set1_ps(1.0f);
-  const __m512 clamp_max = _mm512_set1_ps(7.0f);
-  const __m512 clamp_min = _mm512_set1_ps(-7.0f);
   const __m512i idx = _mm512_load_si512(kGatherIdx);
 
   int n = 0;
   for (; n + 16 <= dim; n += 16) {
     __m512 g = _mm512_i32gather_ps(idx, row + 2 * n, 4);
     __m512 u = _mm512_i32gather_ps(idx, row + 2 * n + 1, 4);
-
-    g = _mm512_max_ps(clamp_min, _mm512_min_ps(g, clamp_max));
-    u = _mm512_max_ps(clamp_min, _mm512_min_ps(u, clamp_max));
-
-    __m512 sig = sigmoid_avx512(_mm512_mul_ps(g, alpha_vec));
-    _mm512_storeu_ps(row + n, _mm512_mul_ps(
-        _mm512_add_ps(one, u), _mm512_mul_ps(g, sig)));
+    _mm512_storeu_ps(row + n, swiglu_oai_avx512(g, u));
   }
   const float alpha = 1.702f;
   for (; n < dim; ++n) {
@@ -328,14 +260,14 @@ static void swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
   }
 }
 
-// BF16 swiglu: vectorized deinterleave via _mm512_permutexvar_epi16.
-// Replaces 16-iteration scalar loop with 1 load + 2 permutes.
+// BF16 swiglu_oai row helper.  One 32-lane vmovdqu64 of the
+// interleaved buffer, then two `vpermtxvar_epi16` extract gates
+// (even lanes) and ups (odd lanes) into separate 16-lane BF16 zmms,
+// `bf16x16_to_f32` lifts each to FP32, and the unified
+// `swiglu_oai_avx512(gate, up)` does the rest.  Replaces a 16-iter
+// scalar loop with 1 load + 2 permutes + the shared math.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
-  const __m512 alpha_vec = _mm512_set1_ps(1.702f);
-  const __m512 one = _mm512_set1_ps(1.0f);
-  const __m512 clamp_max = _mm512_set1_ps(7.0f);
-  const __m512 clamp_min = _mm512_set1_ps(-7.0f);
   const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
   const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -350,14 +282,8 @@ static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
     __m512 u = bf16x16_to_f32(
         _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
-    g = _mm512_max_ps(clamp_min, _mm512_min_ps(g, clamp_max));
-    u = _mm512_max_ps(clamp_min, _mm512_min_ps(u, clamp_max));
-    __m512 sig = sigmoid_avx512(_mm512_mul_ps(g, alpha_vec));
-    __m512 result = _mm512_mul_ps(
-        _mm512_add_ps(one, u), _mm512_mul_ps(g, sig));
-
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(&row[n]),
-        f32_to_bf16x16(result));
+        f32_to_bf16x16(swiglu_oai_avx512(g, u)));
   }
   const float alpha = 1.702f;
   for (; n < dim; ++n) {
@@ -408,24 +334,20 @@ void swiglu_oai_tile_scalar_bf16(const bfloat16_t *src, bfloat16_t *dst,
   }
 }
 
+// FP32 swiglu_oai OOP tile helper (separate src/dst buffers).
+// Same `(g, u)` deinterleave + shared `swiglu_oai_avx512(gate, up)`
+// pattern as the in-place row helper above; only the source / dst
+// pointers differ.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static void swiglu_oai_tile_avx512_f32(const float *src, float *dst,
                                        int pairs) {
-  const __m512 alpha_vec = _mm512_set1_ps(1.702f);
-  const __m512 one = _mm512_set1_ps(1.0f);
-  const __m512 clamp_max = _mm512_set1_ps(7.0f);
-  const __m512 clamp_min = _mm512_set1_ps(-7.0f);
   const __m512i idx = _mm512_load_si512(kGatherIdx);
 
   int n = 0;
   for (; n + 16 <= pairs; n += 16) {
     __m512 g = _mm512_i32gather_ps(idx, src + 2 * n, 4);
     __m512 u = _mm512_i32gather_ps(idx, src + 2 * n + 1, 4);
-    g = _mm512_max_ps(clamp_min, _mm512_min_ps(g, clamp_max));
-    u = _mm512_max_ps(clamp_min, _mm512_min_ps(u, clamp_max));
-    __m512 sig = sigmoid_avx512(_mm512_mul_ps(g, alpha_vec));
-    _mm512_storeu_ps(dst + n, _mm512_mul_ps(
-        _mm512_add_ps(one, u), _mm512_mul_ps(g, sig)));
+    _mm512_storeu_ps(dst + n, swiglu_oai_avx512(g, u));
   }
   const float alpha = 1.702f;
   for (; n < pairs; ++n) {
@@ -435,13 +357,12 @@ static void swiglu_oai_tile_avx512_f32(const float *src, float *dst,
   }
 }
 
+// BF16 swiglu_oai OOP tile helper.  Vectorised 32-lane load +
+// vpermtxvar_epi16 deinterleave, then shared
+// `swiglu_oai_avx512(gate, up)` + `f32_to_bf16x16` store.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static void swiglu_oai_tile_avx512_bf16(const bfloat16_t *src,
                                         bfloat16_t *dst, int pairs) {
-  const __m512 alpha_vec = _mm512_set1_ps(1.702f);
-  const __m512 one = _mm512_set1_ps(1.0f);
-  const __m512 clamp_max = _mm512_set1_ps(7.0f);
-  const __m512 clamp_min = _mm512_set1_ps(-7.0f);
   const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
   const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -455,14 +376,8 @@ static void swiglu_oai_tile_avx512_bf16(const bfloat16_t *src,
     __m512 u = bf16x16_to_f32(
         _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
 
-    g = _mm512_max_ps(clamp_min, _mm512_min_ps(g, clamp_max));
-    u = _mm512_max_ps(clamp_min, _mm512_min_ps(u, clamp_max));
-    __m512 sig = sigmoid_avx512(_mm512_mul_ps(g, alpha_vec));
-    __m512 result = _mm512_mul_ps(
-        _mm512_add_ps(one, u), _mm512_mul_ps(g, sig));
-
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[n]),
-        f32_to_bf16x16(result));
+        f32_to_bf16x16(swiglu_oai_avx512(g, u)));
   }
   const float alpha = 1.702f;
   for (; n < pairs; ++n) {

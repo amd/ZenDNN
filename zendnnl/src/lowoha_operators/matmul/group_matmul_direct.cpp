@@ -1132,7 +1132,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // `dt_name` for the format contract.
   if (s_l1_log || is_profile) {
     std::ostringstream ss;
-    ss << "[GRP_MATMUL Level1] num_ops=" << num_ops
+    ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops
        << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
        << " threads=" << num_threads
        << " dtype=" << dt_name(params[0].dtypes.src)

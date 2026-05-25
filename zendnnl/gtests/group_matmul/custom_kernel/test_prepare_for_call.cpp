@@ -228,36 +228,72 @@ static std::vector<ck_test::PrepCallCase> make_prepare_cases() {
     cases.push_back(c);
   }
 
-  // ── [Negative] silu_and_mul / gelu_and_mul refused at the gate ─
-  // The kernel cannot deinterleave the split-halves
-  // [gate_cols | up_cols] layout in its per-tile epilogue, and the
-  // dispatcher cannot enforce that a direct `prepare_for_call`
-  // caller actually runs the post-activation pass over the wide
-  // matmul output.  Production callers translate these activations
-  // to `act = none` BEFORE invoking `prepare_for_call` and run
-  // `group_matmul_moe_act_execute` themselves on the matmul output;
-  // the gate refuses split-halves activations directly so a future
-  // direct caller can't accidentally get only matmul output.
-  // Iterate over (bias, dst) so the refusal is asserted across the
-  // full dtype space — the gate fires before the dst/bias gates are
-  // reached.
+  // ── [Positive] silu_and_mul / gelu_and_mul fused-CK path ──────
+  // Prepack permutes canonical split-halves W13 into the
+  // interleaved CK layout (silu and gelu share the SAME
+  // permutation), and the in-register pair-store helpers
+  // (`silu_and_mul_store_pair`, `gelu_and_mul_store_pair`) apply
+  // the activation before the BF16 store.  Both gated-act +
+  // BF16-dst tuples are valid here; FP32 dst is structurally
+  // rejected (gated-act epilogue is BF16-only) and is asserted
+  // below.  act_dtype must be BF16 (CK requires it for any fused
+  // activation).
   for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
                    grp_matmul_gated_act_t::gelu_and_mul}) {
     const char *act_name =
         (act == grp_matmul_gated_act_t::silu_and_mul) ? "silu" : "gelu";
-    for (auto bias : {data_type_t::none, data_type_t::bf16,
-                      data_type_t::f32}) {
-      for (auto dst : {data_type_t::bf16, data_type_t::f32}) {
-        auto c = baseline(
-            std::string("neg_") + act_name
-            + "_bias_" + ck_test::dt_name(bias)
-            + "_dst_"  + ck_test::dt_name(dst),
-            /*expect_success=*/false);
-        c.act     = act;
-        c.bias_dt = bias;
-        c.dst_dt  = dst;
-        cases.push_back(c);
-      }
+    auto c = baseline(std::string("pos_") + act_name + "_no_bias_bf16dst");
+    c.act     = act;
+    c.bias_dt = data_type_t::none;
+    cases.push_back(c);
+  }
+
+  // ── [Negative] silu_and_mul / gelu_and_mul + bias refused at gate ─
+  // bias-into-init under the interleaved layout would have to read
+  // [gate_bias | up_bias] in permuted order to match the prepack
+  // permutation; both fused split-halves paths decline biased calls
+  // through the same `split_halves_act_with_bias_not_fused` reason
+  // string (planned follow-up).  Asserts for both supported bias
+  // dtypes × both gated kinds = 4 cases.
+  for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
+                   grp_matmul_gated_act_t::gelu_and_mul}) {
+    const char *act_name =
+        (act == grp_matmul_gated_act_t::silu_and_mul) ? "silu" : "gelu";
+    for (auto bias : {data_type_t::bf16, data_type_t::f32}) {
+      auto c = baseline(
+          std::string("neg_") + act_name + "_bias_" + ck_test::dt_name(bias)
+          + "_refused_at_gate",
+          /*expect_success=*/false);
+      c.act     = act;
+      c.bias_dt = bias;
+      cases.push_back(c);
+    }
+  }
+
+  // ── [Negative] silu_and_mul / gelu_and_mul + FP32 dst refused ──
+  // Symmetric with the swiglu_oai_mul rejection above — every
+  // gated-act pair-pack store helper writes BF16 only.  Same
+  // two-gate refusal pattern (act_dtype check vs
+  // kfn_table_fill_failed depending on act_dt) for both gated kinds.
+  for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
+                   grp_matmul_gated_act_t::gelu_and_mul}) {
+    const char *act_name =
+        (act == grp_matmul_gated_act_t::silu_and_mul) ? "silu" : "gelu";
+    {
+      auto c = baseline(std::string("neg_") + act_name + "_f32dst_actdt_f32",
+                        /*expect_success=*/false);
+      c.act    = act;
+      c.dst_dt = data_type_t::f32;
+      c.act_dt = data_type_t::f32;
+      cases.push_back(c);
+    }
+    {
+      auto c = baseline(std::string("neg_") + act_name + "_f32dst_actdt_bf16",
+                        /*expect_success=*/false);
+      c.act    = act;
+      c.dst_dt = data_type_t::f32;
+      c.act_dt = data_type_t::bf16;
+      cases.push_back(c);
     }
   }
 
@@ -283,35 +319,92 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 // ──────────────────────────────────────────────────────────────────
-// [Property] silu_and_mul / gelu_and_mul are refused at the gate.
-// `prepare_for_call` cannot enforce that a direct caller will run
-// the post-activation pass on the wide matmul output, so the gate
-// rejects split-halves activations and forces the caller to
-// translate them to `act = none` first (which is what `flat_n_tile`
-// does in production).  A regression that accidentally accepts
-// these activations would silently leave a direct caller with only
-// matmul output and no activation applied.
+// [Property] silu_and_mul and gelu_and_mul are ACCEPTED (bias-free)
+// and refused only when bias is present.
+//
+// Gate behaviour history:
+//   * Pre-fuse: both silu_and_mul and gelu_and_mul were refused at
+//     the gate; flat_n_tile translated them to `act = none` upstream
+//     and ran the post-activation pass over the wide matmul output.
+//   * silu fused: silu_and_mul accepted; prepack permutes canonical
+//     split-halves W13 into the interleaved CK layout; in-register
+//     `silu_and_mul_store_pair` applies silu before the BF16 store.
+//     With-bias silu still refused (bias-into-init under the
+//     interleaved layout is a follow-up).
+//   * gelu fused (this change): gelu_and_mul accepted with the same
+//     prepack permutation as silu; `gelu_and_mul_store_pair` applies
+//     a `gelu_tanh` polynomial in registers (matches `gelu_erf`
+//     within BF16 tolerance).  With-bias gelu also refused for the
+//     same reason as silu.
+//
+// Regression coverage (six cases — each gated kind, three bias states):
+//   1) silu_and_mul, no bias  → accept (was refused pre-fuse).
+//   2) silu_and_mul, bf16 bias → refuse (forces caller to fall back).
+//   3) silu_and_mul, f32 bias  → refuse.
+//   4) gelu_and_mul, no bias  → accept (was refused pre-fuse).
+//   5) gelu_and_mul, bf16 bias → refuse.
+//   6) gelu_and_mul, f32 bias  → refuse.
 // ──────────────────────────────────────────────────────────────────
-TEST(CkPrepareForCallProperties, SiluGeluRefusedAtGate) {
+TEST(CkPrepareForCallProperties, SiluGeluAcceptedNoBias) {
   CK_SKIP_IF_NO_BF16_ISA();
-  for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
-                   grp_matmul_gated_act_t::gelu_and_mul}) {
-    ck_test::PrepCallCase c{};
-    c.act = act;
-    c.label = "silu_gelu_refused_at_gate";
-    ck_test::PrepCallStorage storage;
-    ck::CallContext kctx;
-    EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure)
-        << "act=" << static_cast<int>(act)
-        << " — split-halves activations must be refused at the "
-           "gate so direct callers cannot get matmul-only output "
-           "without realising the post-pass is missing.";
-    EXPECT_FALSE(kctx.enabled);
-    // `kctx.variant` is populated by `resolve_variant` BEFORE the
-    // activation gate fires, so on refusal it can already hold the
-    // (bf16, bf16, bf16) row's `kBF16_BF16_BF16` value.  The
-    // contract on refusal is `enabled = false`; the variant field
-    // is undefined.
+
+  struct Row {
+    grp_matmul_gated_act_t act;
+    ck::ActKind            expect_act_kind;
+    const char            *act_name;
+  };
+  for (const auto &row : {
+           Row{grp_matmul_gated_act_t::silu_and_mul,
+               ck::ActKind::silu_and_mul, "silu"},
+           Row{grp_matmul_gated_act_t::gelu_and_mul,
+               ck::ActKind::gelu_and_mul, "gelu"},
+       }) {
+    // (a) no bias — ACCEPT.
+    {
+      ck_test::PrepCallCase c{};
+      c.act     = row.act;
+      c.bias_dt = data_type_t::none;
+      c.label   = std::string(row.act_name) + "_no_bias_accepted_at_gate";
+      ck_test::PrepCallStorage storage;
+      ck::CallContext kctx;
+      EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success)
+          << row.act_name << "_and_mul (no bias) must now be accepted "
+             "at the gate and route through the fused-CK in-register "
+             "epilogue.";
+      EXPECT_TRUE(kctx.enabled);
+      EXPECT_EQ(kctx.act_kind, row.expect_act_kind)
+          << "Accepted " << row.act_name << "_and_mul calls must map "
+             "to the matching ActKind (the dispatcher's act_kind "
+             "field) so dispatch_tile selects the right pair-store "
+             "helper at the runtime branch.";
+    }
+
+    // (b) bf16 bias — REFUSE (bias-into-init under interleaved layout
+    // is a planned follow-up; same restriction for silu and gelu).
+    {
+      ck_test::PrepCallCase c{};
+      c.act     = row.act;
+      c.bias_dt = data_type_t::bf16;
+      c.label   = std::string(row.act_name) + "_with_bf16_bias_refused";
+      ck_test::PrepCallStorage storage;
+      ck::CallContext kctx;
+      EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure)
+          << row.act_name << "_and_mul + bf16 bias must be refused.";
+      EXPECT_FALSE(kctx.enabled);
+    }
+
+    // (c) f32 bias — REFUSE (same reason).
+    {
+      ck_test::PrepCallCase c{};
+      c.act     = row.act;
+      c.bias_dt = data_type_t::f32;
+      c.label   = std::string(row.act_name) + "_with_f32_bias_refused";
+      ck_test::PrepCallStorage storage;
+      ck::CallContext kctx;
+      EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure)
+          << row.act_name << "_and_mul + f32 bias must be refused.";
+      EXPECT_FALSE(kctx.enabled);
+    }
   }
 }
 

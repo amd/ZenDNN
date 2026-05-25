@@ -221,9 +221,28 @@ void apply_gated_act_inplace(
  * Cross-thread correctness relies on the caller placing a barrier between
  * the matmul writes and the first call into this function.
  *
- * Only swiglu_oai_mul is supported (interleaved gate/up layout).  Legacy
- * split-halves activations (silu_and_mul / gelu_and_mul) are still handled
- * via the separate-pass path.
+ * Only swiglu_oai_mul is supported here (interleaved gate/up layout).
+ * Split-halves activations (silu_and_mul / gelu_and_mul) reach this
+ * non-custom tile path only on the WIDE caller layout (`ldc ≥ N`)
+ * after the parallel dispatcher routes them away from the fused-CK
+ * path; in that case the dispatcher runs the activation as a separate
+ * post-pass over the wide [M, N] arena via
+ * `group_matmul_moe_act_execute` (see the
+ * `if (run_gated_act && !act_fused)` block in
+ * `group_matmul_direct.cpp` — that block invokes the activation
+ * module, which internally fans out to the per-expert vectorised
+ * row helpers `execute_act_rows_avx512` (AVX-512 path) or
+ * `execute_act_rows_scalar` (scalar fallback) in
+ * `group_matmul_moe_act.cpp`), so this helper is never called with
+ * silu / gelu.  (Note: the sibling helper `apply_gated_act_inplace`
+ * in the same TU IS used by ALGO 1 / 2 / 4 / 5 dispatcher paths
+ * and by the ALGO 3 Sequential strategy's tight-split-halves
+ * fallback — but it is NOT called from inside
+ * `group_matmul_moe_act_execute`.)  For the TIGHT caller layout the
+ * fused-CK kernel handles all three gated kinds; when CK refuses on
+ * silu / gelu (e.g. +bias), `flat_n_tile` routes the call to the
+ * Sequential strategy fallback (see the `TIGHT_SPLIT_HALVES_FALLBACK`
+ * comment in `flat_n_tile`).
  *
  * @param dst_buf    Expert output buffer (base pointer to row 0, col 0).
  * @param M          Number of rows in the expert's output.

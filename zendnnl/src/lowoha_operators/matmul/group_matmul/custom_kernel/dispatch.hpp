@@ -54,14 +54,15 @@
 /// targeting) can evolve without breaking callers.
 ///
 /// ── Support matrix (act × dst_dtype) ───────────────────────────────
-/// `prepare_for_call` accepts only two activation values directly:
-/// `none` and `swiglu_oai_mul`.  Split-halves activations
-/// (`silu_and_mul`, `gelu_and_mul`) are NOT accepted at this gate —
-/// they require a caller-side post-activation pass over the wide
-/// `[M, N]` output and the dispatcher cannot enforce that.  Callers
-/// translate them to `act = none` before invoking
-/// `prepare_for_call` (this is what `flat_n_tile` does), then run
-/// the activation themselves on the matmul output.
+/// `prepare_for_call` accepts four activation values directly:
+/// `none`, `swiglu_oai_mul`, `silu_and_mul`, and `gelu_and_mul`.
+/// All three gated kinds use an in-register fused epilogue that
+/// halves the output to `[M, N/2]`.  The split-halves variants
+/// (silu_and_mul, gelu_and_mul) take caller-side canonical
+/// `[gate_cols | up_cols]` W13; the prepack module permutes source
+/// columns at pack time so the CK arena physically matches the
+/// swiglu_oai_mul interleaved layout — only the kernel-side
+/// activation math (silu vs gelu_tanh vs swiglu_oai) differs.
 ///
 /// For BF16 src + BF16 wei (the only src/wei tuple the kernel serves
 /// today; see `resolve_variant` for the full truth table) the
@@ -74,19 +75,40 @@
 ///   * (act = swiglu_oai_mul, dst = bf16) — CK serves via
 ///       `kBF16_BF16_BF16` with the activation fused in the per-tile
 ///       epilogue.  Output is the half-width [M, N/2] BF16 tile.
-///   * (act = swiglu_oai_mul, dst = f32 ) — CK refuses (the fused
-///       swiglu store helper writes BF16 only).  Caller falls back
-///       to AOCL DLP + a separate FP32 swiglu pass.
+///   * (act = silu_and_mul,   dst = bf16) — CK serves via
+///       `kBF16_BF16_BF16` with `silu_and_mul_store_pair` fused in
+///       the per-tile epilogue.  Half-width output.  No bias.
+///   * (act = gelu_and_mul,   dst = bf16) — CK serves via
+///       `kBF16_BF16_BF16` with `gelu_and_mul_store_pair` fused
+///       (gelu_tanh polynomial form, within BF16 tolerance of
+///       `gelu_erf`).  Half-width output.  No bias.
+///   * (gated-act, dst = f32 ) — CK refuses (every gated-act
+///       pair-pack store helper writes BF16 only).  Caller falls
+///       back to AOCL DLP + a separate FP32 activation pass.
+///   * (silu_and_mul / gelu_and_mul, +bias) — CK refuses
+///       (`split_halves_act_with_bias_not_fused`).  Bias-into-init
+///       under the prepack-permuted layout is a planned follow-up.
 ///
-/// For split-halves activations the production call sequence is:
+/// For cells the CK fused path doesn't serve, the production call
+/// sequence falls back to a two-pass route (matmul then separate
+/// activation):
 ///
-///   * (act = silu_and_mul,   dst = {bf16, f32}) — caller passes
-///       `act = none` to `prepare_for_call` (CK serves the matmul
-///       via `kBF16_BF16_BF16` or `kBF16_BF16_F32`), then runs
+///   * (act = silu_and_mul,   dst = f32) — `dst_dtype = f32`
+///       refuses CK fusion (gated-store helpers write BF16 only).
+///       Caller passes `act = none` to `prepare_for_call` (CK
+///       serves the matmul via `kBF16_BF16_F32`), then runs
 ///       `group_matmul_moe_act_execute` over the wide
 ///       `[gate_cols | up_cols]` output.
-///   * (act = gelu_and_mul,   dst = {bf16, f32}) — same as
-///       `silu_and_mul`.
+///   * (act = gelu_and_mul,   dst = f32) — same as `silu_and_mul`.
+///   * (silu/gelu, dst = bf16, +bias) — CK refuses
+///       (`split_halves_act_with_bias_not_fused`).  Caller falls
+///       back through `flat_n_tile`'s tight_split_halves Sequential
+///       path (wide [M, N] scratch + apply_gated_act_inplace +
+///       memcpy into the tight [M, I] dst).
+///
+/// The bf16-dst, no-bias silu/gelu cells DO take the direct CK
+/// fused path — see the support matrix above for the cells the
+/// kernel serves natively.
 ///
 /// Cells the kernel does not serve fall back to AOCL DLP via the
 /// caller's standard path (`execute_expert_slice` for non-fused,
@@ -262,22 +284,30 @@ struct CallContext {
 /// per tile (no specialisation explosion).
 ///
 /// Activation contract:
-///   * `swiglu_oai_mul` — fused in the per-tile epilogue (interleaved
-///     [g0,u0,g1,u1,...] layout puts (gate, up) pairs on every 32-col
-///     tile).  Halved output width.  `dst_dtype = bf16` ONLY (the
-///     swiglu store helper writes BF16; (swiglu, f32-dst) is rejected
-///     inside `select_ukernel`).
-///   * `silu_and_mul` / `gelu_and_mul` — REFUSED here.  The kernel
-///     could compute the matmul portion via the same path as
-///     `act = none`, but the split-halves [gate_cols|up_cols]
-///     layout requires a separate post-activation pass at the
-///     caller, and the dispatcher cannot enforce that.  Production
-///     callers translate these activations to `act = none` BEFORE
-///     calling `prepare_for_call` and run
-///     `group_matmul_moe_act_execute` on the wide matmul output;
-///     `flat_n_tile` does this automatically for the
-///     `group_matmul_direct` path.
 ///   * `none` — plain matmul.  Both BF16 and F32 dst admitted.
+///   * `swiglu_oai_mul` — fused in the per-tile epilogue (caller-
+///     side interleaved [g0,u0,g1,u1,...] layout puts (gate, up)
+///     pairs on every 32-col tile).  Halved output width.
+///     `dst_dtype = bf16` ONLY (the swiglu store helper writes
+///     BF16; (swiglu, f32-dst) is rejected inside `select_ukernel`).
+///   * `silu_and_mul` / `gelu_and_mul` — ALSO fused in the per-tile
+///     epilogue (via `silu_and_mul_store_pair` and
+///     `gelu_and_mul_store_pair` respectively).  Caller passes
+///     canonical split-halves `[gate_cols | up_cols]` W13; the
+///     prepack module re-permutes source columns so the CK arena
+///     physically matches the swiglu_oai_mul interleaved layout —
+///     silu and gelu only differ in the kernel-side activation
+///     math, not in the pack layout.  Halved output width.
+///     Refusal conditions, both routed back through the caller's
+///     fallback path:
+///       * `dst_dtype = f32` (gated-store helpers write BF16
+///         only) → caller takes the two-pass route described in
+///         the file header (act = none + `group_matmul_moe_act_
+///         execute`).
+///       * `bias_dtype != none` (bias-into-init under the
+///         prepack-permuted layout is a planned follow-up) →
+///         `flat_n_tile` routes to the Sequential tight_split_
+///         halves fallback.
 ///
 /// `is_weights_const` is the framework's per-expert constancy hint
 /// (matches the public API contract on `group_matmul_direct`).  The

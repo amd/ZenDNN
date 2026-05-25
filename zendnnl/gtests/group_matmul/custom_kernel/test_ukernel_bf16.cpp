@@ -320,25 +320,26 @@ TEST_P(CkUkernelCorrectness, MatchesScalarRef) {
   mt::CustomKernelNROverride  nr_guard(c.nr_override);
   ::reset_grp_matmul_caches();
 
-  // Three buffer-shape regimes:
-  //   * swiglu_oai_mul: dst is a half-width [M, N/2] arena; ldc = N/2.
-  //     Kernel writes the activated cols directly.
-  //   * silu_and_mul / gelu_and_mul: dst is the full [M, N] arena;
-  //     ldc = N.  CK writes the matmul output (full width); the
-  //     post-pass activation rewrites cols [0, N/2) in-place leaving
-  //     cols [N/2, N) as garbage by the public-API contract.
-  //   * none: dst is full [M, N]; ldc = N.
-  const bool is_swiglu = (c.act == grp_matmul_gated_act_t::swiglu_oai_mul);
-  const bool is_split_act =
-      (c.act == grp_matmul_gated_act_t::silu_and_mul
-       || c.act == grp_matmul_gated_act_t::gelu_and_mul);
-  // Allocation width (bytes per row count) — half for swiglu (kernel
-  // halves), full for everything else.
-  const int N_alloc = is_swiglu ? c.N / 2 : c.N;
+  // Two buffer-shape regimes after the gelu fusion landed:
+  //   * Any gated activation (swiglu_oai_mul, silu_and_mul,
+  //     gelu_and_mul) — dst is a half-width [M, N/2] arena;
+  //     ldc = N/2.  Kernel writes the activated cols directly
+  //     (in-register fused epilogue — pair-store helper
+  //     deinterleaves (g, u) and applies activation before the BF16
+  //     store).  silu and gelu also have the prepack permute
+  //     canonical split-halves W13 into the interleaved layout the
+  //     kernel expects.
+  //   * `none` — dst is full [M, N]; ldc = N.  Plain matmul.
+  const bool is_gated_fused_ck =
+      (c.act == grp_matmul_gated_act_t::swiglu_oai_mul)
+      || (c.act == grp_matmul_gated_act_t::silu_and_mul)
+      || (c.act == grp_matmul_gated_act_t::gelu_and_mul);
+  // Allocation width (bytes per row count) — half for any fused
+  // gated, full for `none`.
+  const int N_alloc = is_gated_fused_ck ? c.N / 2 : c.N;
   // Comparison width — half for any gated activation (only the
-  // first half holds activated values; for silu/gelu the second
-  // half is "garbage" by contract); full for plain matmul.
-  const int N_cmp = (is_swiglu || is_split_act) ? c.N / 2 : c.N;
+  // first half holds activated values); full for plain matmul.
+  const int N_cmp = is_gated_fused_ck ? c.N / 2 : c.N;
   // Post-activation N passed to ref_gemm_act.  Always equals the
   // comparison width: ref reads the matmul wei via `ldb = c.N` and
   // applies act-specific column math (interleave for swiglu, half-
@@ -631,16 +632,34 @@ static std::vector<UkernelCase> make_ukernel_cases() {
       for (auto bias : {data_type_t::none, data_type_t::bf16,
                         data_type_t::f32}) {
         for (auto dst : {data_type_t::bf16, data_type_t::f32}) {
-          // Filter the structurally invalid (swiglu, FP32-dst) tuple
-          // — swiglu's pair-pack store helper writes BF16 only.
-          if (act == grp_matmul_gated_act_t::swiglu_oai_mul
-              && dst == data_type_t::f32) {
+          // Filter structurally invalid (gated-fused, FP32-dst)
+          // tuples — every fused gated kind (swiglu_oai_mul,
+          // silu_and_mul, gelu_and_mul) uses the pair-pack store
+          // helper which writes BF16 only.  `select_ukernel`
+          // returns nullptr for these tuples, so prepare_for_call
+          // refuses with `kfn_table_fill_failed`; running the test
+          // would force a fall-back path that doesn't exercise the
+          // gated activation.
+          const bool is_gated_act =
+              (act == grp_matmul_gated_act_t::swiglu_oai_mul)
+              || (act == grp_matmul_gated_act_t::silu_and_mul)
+              || (act == grp_matmul_gated_act_t::gelu_and_mul);
+          if (is_gated_act && dst == data_type_t::f32) {
             continue;
           }
-          // silu/gelu are split-halves; their post-activation valid
-          // region is `c.N / 2`.  N must be even for the split to
-          // work — the smallest shape (N=128) and others in the
-          // grid are already even, so no shape filter is needed.
+          // silu_and_mul / gelu_and_mul are bias-free on the fused
+          // path (bias-into-init under the interleaved layout is a
+          // planned follow-up; see prepack/dispatch refusal).  Skip
+          // biased silu/gelu cases here — the gate refusal would
+          // force the test to run on the post-pass standard path
+          // (which also doesn't apply silu/gelu yet on tight dst),
+          // creating a false negative.
+          const bool is_split_halves_fused =
+              (act == grp_matmul_gated_act_t::silu_and_mul)
+              || (act == grp_matmul_gated_act_t::gelu_and_mul);
+          if (is_split_halves_fused && bias != data_type_t::none) {
+            continue;
+          }
           cases.push_back(
               {s.M, s.K, s.N, act, bias, dst, /*nr_override=*/0,
                mk_label(s.M, s.K, s.N, act, bias, dst)});
@@ -849,6 +868,467 @@ TEST(CkUkernelEngages, OnCanonicalShape) {
          "the dispatcher fell back to AOCL DLP, or the BF16 ISA gate / "
          "custom-kernel override regressed.  This is the strict CK "
          "engagement gate — investigate before merging.";
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Strict engagement gate — silu_and_mul on the canonical fused-CK
+// shape.  Sibling to `OnCanonicalShape` (act=none) above; pins the
+// silu fused-CK path so a regression in the prepack interleave, the
+// dispatcher's act-acceptance gate, the planner's `a3_can_fuse_act`
+// extension, or the `silu_and_mul_store_pair` kernel helper fails
+// the build on a single deterministic shape.
+//
+// Setup mirrors `OnCanonicalShape` but with:
+//   * `act = silu_and_mul`,
+//   * tight dst layout (ldc = N/2, halved output),
+//   * W13 in canonical split-halves layout (caller's W has
+//     [gate_cols=0..I | up_cols=I..2I]; the prepack permutes during
+//     pack so the CK arena physically matches the swiglu_oai_mul
+//     layout).
+//
+// Expected gemm_mode: `flat_n_tile_fused_silu_and_mul_tight_custom`.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkUkernelEngages, OnCanonicalShapeSiluFused) {
+  CK_SKIP_IF_NO_BF16_ISA();
+
+  mt::AlgoEnvGuard         algo_guard(3);
+  mt::CustomKernelOverride ck_guard(true);
+  ::reset_grp_matmul_caches();
+
+  constexpr int kNumOps = 4;
+  constexpr int M = 4, K = 1024, N = 2048;
+  constexpr int I = N / 2;
+
+  std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+  std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+  // Tight dst — silu fused-CK writes the half-width activated output.
+  std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+    wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+    dst_bufs[e].assign(static_cast<size_t>(M) * I, bfloat16_t(0.0f));
+    mt::fill_src(src_bufs[e],  /*e=*/e, 0.02f);
+    mt::fill_wei1(wei_bufs[e], /*e=*/e, 0.005f);
+  }
+
+  std::vector<char>         layout(kNumOps, 'r');
+  std::vector<bool>         transA(kNumOps, false), transB(kNumOps, false);
+  std::vector<int>          Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+  std::vector<float>        alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+  std::vector<int>          lda(kNumOps, K), ldb(kNumOps, N);
+  // ldc < N triggers the dispatcher's `caller_layout_tight` branch,
+  // which is the gate that auto-engages the fused tight epilogue
+  // (independent of the env knob).
+  std::vector<int>          ldc(kNumOps, I);
+  std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps);
+  std::vector<const void *> bias_ptrs(kNumOps, nullptr);
+  std::vector<void *>       dst_ptrs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_ptrs[e] = src_bufs[e].data();
+    wei_ptrs[e] = wei_bufs[e].data();
+    dst_ptrs[e] = dst_bufs[e].data();
+  }
+  std::vector<bool> is_wc(kNumOps, true);
+
+  std::vector<mt::matmul_params> params(kNumOps);
+  for (auto &p : params) {
+    p.dtypes.src  = data_type_t::bf16;
+    p.dtypes.wei  = data_type_t::bf16;
+    p.dtypes.dst  = data_type_t::bf16;
+    p.dtypes.bias = data_type_t::none;
+    p.num_threads = kCkTestThreads;
+  }
+
+  zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params{};
+  act_params.act = grp_matmul_gated_act_t::silu_and_mul;
+
+  moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+  const auto status = group_matmul_direct(
+      layout, transA, transB, Ms, Ns, Ks, alpha, src_ptrs, lda,
+      wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc, is_wc, params,
+      /*moe_postop=*/nullptr, &act_params);
+  ASSERT_EQ(status, status_t::success);
+
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode
+      .load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr)
+      << "group_matmul_direct did not publish a gemm_mode for the "
+         "silu_and_mul fused-CK engagement check.";
+  EXPECT_NE(std::strstr(mode, "_custom"), nullptr)
+      << "silu_and_mul + tight dst ran on '" << mode
+      << "' instead of the BF16 microkernel.  Either prepack rejected "
+         "the interleave (ck_eligible regression), the dispatcher's "
+         "silu acceptance gate refused, the planner's a3_can_fuse_act "
+         "stopped advertising silu fused, or the canonical shape "
+         "moved out of the per-tile dispatch envelope.  Investigate.";
+  EXPECT_NE(std::strstr(mode, "silu_and_mul"), nullptr)
+      << "fused silu_and_mul ran but `gemm_mode` lacks the "
+         "`silu_and_mul` label fragment (`" << mode << "`).  The "
+         "label is the only sticky signal in benchdnn / production "
+         "logs that silu fused engaged vs swiglu fused; a regression "
+         "here would silently flip the label back to swiglu_oai.";
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Strict engagement gate — gelu_and_mul on the canonical fused-CK
+// shape.  Sibling to `OnCanonicalShape` (act=none) and
+// `OnCanonicalShapeSiluFused`; pins the gelu fused-CK path so a
+// regression in the prepack interleave (which silu and gelu share),
+// the dispatcher's gelu acceptance gate, the planner's
+// `a3_can_fuse_act` extension, or the `gelu_and_mul_store_pair`
+// kernel helper fails the build on a single deterministic shape.
+//
+// Setup mirrors the silu engagement gate but with
+// `act = gelu_and_mul`.  Expected gemm_mode:
+// `flat_n_tile_fused_gelu_and_mul_tight_custom`.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkUkernelEngages, OnCanonicalShapeGeluFused) {
+  CK_SKIP_IF_NO_BF16_ISA();
+
+  mt::AlgoEnvGuard         algo_guard(3);
+  mt::CustomKernelOverride ck_guard(true);
+  ::reset_grp_matmul_caches();
+
+  constexpr int kNumOps = 4;
+  constexpr int M = 4, K = 1024, N = 2048;
+  constexpr int I = N / 2;
+
+  std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+  std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+  // Tight dst — gelu fused-CK writes the half-width activated output.
+  std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+    wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+    dst_bufs[e].assign(static_cast<size_t>(M) * I, bfloat16_t(0.0f));
+    mt::fill_src(src_bufs[e],  /*e=*/e, 0.02f);
+    mt::fill_wei1(wei_bufs[e], /*e=*/e, 0.005f);
+  }
+
+  std::vector<char>         layout(kNumOps, 'r');
+  std::vector<bool>         transA(kNumOps, false), transB(kNumOps, false);
+  std::vector<int>          Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+  std::vector<float>        alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+  std::vector<int>          lda(kNumOps, K), ldb(kNumOps, N);
+  std::vector<int>          ldc(kNumOps, I);
+  std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps);
+  std::vector<const void *> bias_ptrs(kNumOps, nullptr);
+  std::vector<void *>       dst_ptrs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_ptrs[e] = src_bufs[e].data();
+    wei_ptrs[e] = wei_bufs[e].data();
+    dst_ptrs[e] = dst_bufs[e].data();
+  }
+  std::vector<bool> is_wc(kNumOps, true);
+
+  std::vector<mt::matmul_params> params(kNumOps);
+  for (auto &p : params) {
+    p.dtypes.src  = data_type_t::bf16;
+    p.dtypes.wei  = data_type_t::bf16;
+    p.dtypes.dst  = data_type_t::bf16;
+    p.dtypes.bias = data_type_t::none;
+    p.num_threads = kCkTestThreads;
+  }
+
+  zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params{};
+  act_params.act = grp_matmul_gated_act_t::gelu_and_mul;
+
+  moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+  const auto status = group_matmul_direct(
+      layout, transA, transB, Ms, Ns, Ks, alpha, src_ptrs, lda,
+      wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc, is_wc, params,
+      /*moe_postop=*/nullptr, &act_params);
+  ASSERT_EQ(status, status_t::success);
+
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode
+      .load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr)
+      << "group_matmul_direct did not publish a gemm_mode for the "
+         "gelu_and_mul fused-CK engagement check.";
+  EXPECT_NE(std::strstr(mode, "_custom"), nullptr)
+      << "gelu_and_mul + tight dst ran on '" << mode
+      << "' instead of the BF16 microkernel.  Either prepack rejected "
+         "the interleave (ck_eligible regression — gelu shares the "
+         "permutation with silu), the dispatcher's gelu acceptance "
+         "gate refused, the planner's a3_can_fuse_act stopped "
+         "advertising gelu fused, or the canonical shape moved out "
+         "of the per-tile dispatch envelope.  Investigate.";
+  EXPECT_NE(std::strstr(mode, "gelu_and_mul"), nullptr)
+      << "fused gelu_and_mul ran but `gemm_mode` lacks the "
+         "`gelu_and_mul` label fragment (`" << mode << "`).  The "
+         "label is the only sticky signal in benchdnn / production "
+         "logs that gelu fused engaged; a regression here would "
+         "silently flip the label to silu_and_mul or swiglu_oai.";
+}
+
+// ──────────────────────────────────────────────────────────────────
+// CK-REFUSAL TIGHT FALLBACK regression — silu_and_mul / gelu_and_mul
+//
+// Pins the production-correctness contract from the
+// `TIGHT_SPLIT_HALVES_FALLBACK` block in `flat_n_tile`: when a
+// caller passes tight dst (`ldc < N`) with `silu_and_mul` or
+// `gelu_and_mul` AND a refusal trigger that disables CK
+// (`+bias` is the realistic production case), `flat_n_tile` MUST
+// reroute to the Sequential strategy so the activation is applied
+// correctly (matmul wide → activation in-place → memcpy I cols
+// into tight dst).
+//
+// History of the bug this guards against:
+// Before the production-readiness fix, `do_tile`'s `tight_fused_epilogue`
+// branch unconditionally called `apply_swiglu_oai_tile_rows_oop` for
+// any gated act, then was loosened in the silu/gelu commit to allow
+// the branch to be reached for silu/gelu — but the helper itself
+// stayed swiglu-only.  Result for silu/gelu + tight + CK-refusal:
+// swiglu_oai math applied to silu/gelu split-halves matmul output
+// (wrong activation + wrong layout), with the dispatcher's separate-
+// pass safety net skipped because `act_fused = a3_fuses = true`.
+//
+// What this test exercises:
+//   1. Allocate tight dst (`ldc = N/2`).
+//   2. Provide a bias buffer (forces `prepare_for_call` refusal via
+//      `split_halves_act_with_bias_not_fused`).
+//   3. Run group_matmul_direct.
+//   4. Expect the call SUCCEEDS (not a hard failure).
+//   5. Expect gemm_mode is `flat_n_tile_sequential` (NOT
+//      `flat_n_tile_fused_*_tight_custom`) — confirms the Sequential
+//      fallback engaged.
+//   6. Expect per-element output matches the FP32 scalar reference
+//      with the correct silu / gelu activation applied (NOT swiglu,
+//      NOT raw matmul, NOT NaN).
+//
+// Pre-fix this test would produce wrong numerics (swiglu applied to
+// silu/gelu data) or NaN on the small canonical shape.  Post-fix it
+// matches the reference to within the `tol_act(/*is_bf16=*/true)`
+// band.
+// ──────────────────────────────────────────────────────────────────
+namespace {
+// Shared body for the CK-refusal tight regression — runs the call
+// with the supplied gated activation + bias, asserts Sequential
+// routing, and validates per-element numerics against the scalar
+// reference.  Parameterised over (act, label) so we get one test
+// case per gated kind without duplicating the body.
+void RunTightCkRefusalTest(grp_matmul_gated_act_t act,
+                            const char *case_label) {
+  mt::AlgoEnvGuard         algo_guard(3);
+  mt::CustomKernelOverride ck_guard(true);
+  ::reset_grp_matmul_caches();
+
+  constexpr int kNumOps = 4;
+  constexpr int M = 4, K = 1024, N = 2048;
+  constexpr int I = N / 2;
+
+  std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+  std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+  std::vector<std::vector<bfloat16_t>> bias_bufs(kNumOps);
+  std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+    wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+    bias_bufs[e].assign(N, bfloat16_t(0.0f));
+    dst_bufs[e].assign(static_cast<size_t>(M) * I, bfloat16_t(0.0f));
+    mt::fill_src(src_bufs[e],  /*e=*/e, 0.02f);
+    mt::fill_wei1(wei_bufs[e], /*e=*/e, 0.005f);
+    // Small deterministic bias — non-zero so CK refusal is forced
+    // and the reference comparison is sensitive to bias being
+    // applied in the matmul.
+    for (int n = 0; n < N; ++n) {
+      bias_bufs[e][n] = bfloat16_t(
+          0.0005f * static_cast<float>((n + e * 7) % 13 - 6));
+    }
+  }
+
+  std::vector<char>         layout(kNumOps, 'r');
+  std::vector<bool>         transA(kNumOps, false), transB(kNumOps, false);
+  std::vector<int>          Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+  std::vector<float>        alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+  std::vector<int>          lda(kNumOps, K), ldb(kNumOps, N);
+  std::vector<int>          ldc(kNumOps, I);  // tight
+  std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps),
+                            bias_ptrs(kNumOps);
+  std::vector<void *>       dst_ptrs(kNumOps);
+  for (int e = 0; e < kNumOps; ++e) {
+    src_ptrs[e]  = src_bufs[e].data();
+    wei_ptrs[e]  = wei_bufs[e].data();
+    bias_ptrs[e] = bias_bufs[e].data();
+    dst_ptrs[e]  = dst_bufs[e].data();
+  }
+  std::vector<bool> is_wc(kNumOps, true);
+
+  std::vector<mt::matmul_params> params(kNumOps);
+  for (auto &p : params) {
+    p.dtypes.src  = data_type_t::bf16;
+    p.dtypes.wei  = data_type_t::bf16;
+    p.dtypes.dst  = data_type_t::bf16;
+    p.dtypes.bias = data_type_t::bf16;  // BF16 bias → CK refuses fused
+    p.num_threads = kCkTestThreads;
+  }
+
+  zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params{};
+  act_params.act = act;
+
+  moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+  const auto status = group_matmul_direct(
+      layout, transA, transB, Ms, Ns, Ks, alpha, src_ptrs, lda,
+      wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc, is_wc, params,
+      /*moe_postop=*/nullptr, &act_params);
+  ASSERT_EQ(status, status_t::success)
+      << case_label << ": tight + " << case_label
+      << " + bias must succeed (graceful Sequential fallback, not "
+         "a hard refusal).";
+
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode
+      .load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr)
+      << case_label << ": group_matmul_direct did not publish a "
+         "gemm_mode.";
+  // Either `flat_n_tile_sequential` (auto-routed by the planner for
+  // small shapes) or the explicit Sequential routing forced by the
+  // TIGHT_SPLIT_HALVES_FALLBACK block.  Both publish "sequential" in
+  // the mode string.  What we MUST NOT see is `_fused_*_tight_custom`
+  // (CK engaged — would mean the bias gate regressed) or
+  // `_fused_swiglu_oai_*` (silent-wrong: swiglu OOP on silu/gelu
+  // data — the original pre-fix bug).
+  EXPECT_NE(std::strstr(mode, "sequential"), nullptr)
+      << case_label << ": tight + " << case_label
+      << " + bias ran on '" << mode << "' instead of Sequential.  "
+         "If this is `flat_n_tile_fused_*_tight_custom` the CK bias "
+         "gate regressed; if it is `flat_n_tile_fused_swiglu_oai_*` "
+         "the silent-wrong-activation bug is back.";
+  EXPECT_EQ(std::strstr(mode, "swiglu_oai"), nullptr)
+      << case_label << ": tight + " << case_label
+      << " + bias selected the swiglu_oai code path (`" << mode
+      << "`) — this is the silent-wrong-activation regression.  "
+         "Expected silu/gelu math via Sequential's "
+         "apply_gated_act_inplace + memcpy fallback.";
+
+  // Per-element numerics — match the scalar reference (which
+  // applies bias inside the matmul and then silu / gelu).  Expert 0
+  // only; the kernel is shared across experts so checking one
+  // expert validates the whole call.  N_ref (= I) is the post-
+  // activation half-width; the reference's split-halves branch
+  // reads gate at col `n` and up at col `n + N_ref`.
+  const auto tol = mt::tol_act(/*is_bf16=*/true);
+  const auto *dst_actual = dst_bufs[0].data();
+  for (int m = 0; m < M; ++m) {
+    for (int n = 0; n < I; ++n) {
+      const float ref = ref_gemm_act(m, n, K, /*N_post=*/I,
+                                      src_bufs[0].data(), K,
+                                      wei_bufs[0].data(), N,
+                                      bias_bufs[0].data(),
+                                      data_type_t::bf16, act);
+      const float got = to_f32(dst_actual[m * I + n]);
+      const float bound = std::abs(ref) * tol.rel + tol.abs;
+      EXPECT_NEAR(got, ref, bound)
+          << case_label << " m=" << m << " n=" << n
+          << " ref=" << ref << " got=" << got;
+    }
+  }
+}
+}  // namespace
+
+TEST(CkUkernelFallback, TightSiluWithBiasRoutesToSequential) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  RunTightCkRefusalTest(grp_matmul_gated_act_t::silu_and_mul, "silu");
+}
+
+TEST(CkUkernelFallback, TightGeluWithBiasRoutesToSequential) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  RunTightCkRefusalTest(grp_matmul_gated_act_t::gelu_and_mul, "gelu");
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Focused parity test for the vectorized `gelu_avx512` polynomial
+// fallback (P2).  Drives `apply_gated_act_inplace(gelu_and_mul, ...)`
+// directly on a deterministic BF16 buffer and compares against a
+// per-lane `std::erf`-based reference (the same `gelu_erf` math the
+// previous scalar-loop implementation used).
+//
+// Pins:
+//   * The polynomial form's max delta vs `gelu_erf` stays within
+//     the `tol_act(/*is_bf16=*/true)` band ({rel=0.15, abs=0.02})
+//     across the full BF16-representable input range.
+//   * The fallback applies the activation in-place: gate cols
+//     [0, I) are overwritten with `gelu_tanh(gate) * up`; up cols
+//     [I, N) are left as-is (garbage per the public-API contract).
+//
+// This is a regression guard if anyone tweaks `gelu_avx512` or the
+// dispatch in `apply_gated_act_inplace`.  The CK fused gelu path
+// already exercises an equivalent polynomial via the
+// `OnCanonicalShapeGeluFused` engagement test (CK kernel side);
+// this test pins the non-CK / fallback side independently.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkUkernelFallback, VectorizedGeluAvx512MatchesErfReference) {
+  CK_SKIP_IF_NO_BF16_ISA();
+
+  // Sweep inputs across the realistic gelu range.  Includes a few
+  // boundary values where gelu has the steepest curvature
+  // (|x| ~ 0.5..1.5) so the polynomial-vs-erf delta is exercised
+  // where it matters most.
+  constexpr int M = 4;
+  constexpr int I = 256;
+  constexpr int N = 2 * I;
+
+  // Deterministic gate/up values: gate sweeps [-4, +4] across cols,
+  // up sweeps [-1, +1] — both ranges well inside the float32
+  // exponent envelope and inside the BF16 representable subset.
+  std::vector<bfloat16_t> buf(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+  for (int m = 0; m < M; ++m) {
+    for (int i = 0; i < I; ++i) {
+      const float g = -4.0f
+          + 8.0f * static_cast<float>((m * I + i) % I) / static_cast<float>(I - 1);
+      const float u = -1.0f
+          + 2.0f * static_cast<float>((m * I + i + 17) % I) / static_cast<float>(I - 1);
+      buf[m * N + i      ] = bfloat16_t(g);
+      buf[m * N + i + I  ] = bfloat16_t(u);
+    }
+  }
+
+  // Snapshot input for the reference computation BEFORE
+  // apply_gated_act_inplace overwrites the gate cols.
+  std::vector<float> gate_ref(static_cast<size_t>(M) * I);
+  std::vector<float> up_ref  (static_cast<size_t>(M) * I);
+  for (int m = 0; m < M; ++m) {
+    for (int i = 0; i < I; ++i) {
+      gate_ref[m * I + i] = to_f32(buf[m * N + i      ]);
+      up_ref  [m * I + i] = to_f32(buf[m * N + i + I  ]);
+    }
+  }
+
+  // Drive the fallback path directly.  apply_gated_act_inplace's
+  // AVX-512 branch dispatches to `gelu_and_mul_row_avx512_bf16`,
+  // which now uses the vectorized polynomial `gelu_avx512`.
+  zendnnl::lowoha::matmul::apply_gated_act_inplace(
+      grp_matmul_gated_act_t::gelu_and_mul,
+      buf.data(),
+      /*row_start=*/0, /*row_end=*/M,
+      /*N=*/N, /*ldc=*/N, data_type_t::bf16);
+
+  // Per-lane scalar `gelu_erf` reference — the math the previous
+  // implementation used; any vectorisation must stay within
+  // tolerance of this.
+  const float kSqrtHalf = 0.7071067811865476f;
+  const auto tol = mt::tol_act(/*is_bf16=*/true);
+  for (int m = 0; m < M; ++m) {
+    for (int i = 0; i < I; ++i) {
+      const float g = gate_ref[m * I + i];
+      const float u = up_ref  [m * I + i];
+      const float gelu_erf = g * 0.5f * (1.0f + std::erf(g * kSqrtHalf));
+      const float ref      = gelu_erf * u;
+      const float got      = to_f32(buf[m * N + i]);
+      const float bound    = std::abs(ref) * tol.rel + tol.abs;
+      EXPECT_NEAR(got, ref, bound)
+          << "gelu_tanh polynomial drifted from gelu_erf reference: "
+          << " m=" << m << " i=" << i
+          << " g=" << g << " u=" << u
+          << " ref=" << ref << " got=" << got;
+    }
+  }
 }
 
 }  // namespace

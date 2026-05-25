@@ -49,6 +49,7 @@
 
 #include <immintrin.h>
 
+#include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
@@ -67,113 +68,52 @@ bool avx512bf16_available() {
 namespace {
 
 // ── Activation epilogue helpers (AVX-512) ───────────────────────────
+//
+// The FP32 math primitives (`fast_exp_neg_avx512`, `sigmoid_avx512`,
+// `silu_avx512`, `gelu_avx512`, `swiglu_oai_avx512`) and the BF16↔FP32
+// cvt helpers (`bf16x16_to_f32`, `f32_to_bf16x16`) live in
+// `group_matmul_act_avx512.hpp` — the same header the separate-pass
+// `group_matmul_moe_act.cpp` consumes.  Pulled in via using-
+// declarations below so the in-register store helpers
+// (`swiglu_oai_store_pair`, `silu_and_mul_store_pair`,
+// `gelu_and_mul_store_pair`) share bit-for-bit identical math with
+// the standard reference's row helpers.  See the header doc-block
+// for the cross-path numerical contract.
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
 
 // Deinterleave indices for vpermt2ps over two source zmms (= 32 FP32
 // lanes total).  Even-indexed lanes (0, 2, ..., 30) are gates; odd-
-// indexed lanes (1, 3, ..., 31) are ups.
+// indexed lanes (1, 3, ..., 31) are ups.  File-local because the
+// constants are use-case specific — the moe_act row helpers
+// deinterleave from MEMORY (via vpgatherdd / vpermtxvar_epi16) and
+// use different index types.
 alignas(64) constexpr int32_t kGateLaneIdx[16] =
     {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
 alignas(64) constexpr int32_t kUpLaneIdx[16] =
     {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
-
-// Polynomial exp(-x) — 5th-degree Cephes 2^f approximation.
-// Identical numerics to group_matmul_moe_act.cpp's swiglu_oai
-// reference path, so the custom kernel matches the existing
-// per-element tolerance.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 fast_exp_neg(__m512 x) {
-  const __m512 log2e = _mm512_set1_ps(-1.4426950408889634f);
-  __m512 t  = _mm512_mul_ps(x, log2e);
-  __m512 ti = _mm512_roundscale_ps(t, _MM_FROUND_TO_NEG_INF);
-  __m512 f  = _mm512_sub_ps(t, ti);
-
-  const __m512 c0 = _mm512_set1_ps(1.0f);
-  const __m512 c1 = _mm512_set1_ps(0.6931472f);
-  const __m512 c2 = _mm512_set1_ps(0.2402265f);
-  const __m512 c3 = _mm512_set1_ps(0.0555042f);
-  const __m512 c4 = _mm512_set1_ps(0.0096838f);
-  const __m512 c5 = _mm512_set1_ps(0.0013364f);
-
-  __m512 p = _mm512_fmadd_ps(c5, f, c4);
-  p = _mm512_fmadd_ps(p, f, c3);
-  p = _mm512_fmadd_ps(p, f, c2);
-  p = _mm512_fmadd_ps(p, f, c1);
-  p = _mm512_fmadd_ps(p, f, c0);
-
-  __m512 ti_clamped = _mm512_max_ps(_mm512_min_ps(ti,
-      _mm512_set1_ps(127.0f)), _mm512_set1_ps(-126.0f));
-  __m512i ei = _mm512_cvtps_epi32(ti_clamped);
-  __m512i exp_bits = _mm512_slli_epi32(
-      _mm512_add_epi32(ei, _mm512_set1_epi32(127)), 23);
-  __m512 pow2i = _mm512_castsi512_ps(exp_bits);
-
-  return _mm512_max_ps(_mm512_mul_ps(pow2i, p), _mm512_setzero_ps());
-}
-
-// sigmoid = 1 / (1 + exp(-x))  via rcp14 + 1 Newton-Raphson refine.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 sigmoid_fast(__m512 x) {
-  const __m512 one   = _mm512_set1_ps(1.0f);
-  const __m512 two   = _mm512_set1_ps(2.0f);
-  __m512 denom = _mm512_add_ps(one, fast_exp_neg(x));
-  __m512 rcp   = _mm512_rcp14_ps(denom);
-  return _mm512_mul_ps(rcp, _mm512_fnmadd_ps(denom, rcp, two));
-}
-
-// BF16 → FP32 (zero-extend, shift-left 16) for the bias load.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m512 bf16x16_to_fp32(__m256i bf16) {
-  return _mm512_castsi512_ps(
-      _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
-}
-
-// FP32 → BF16 (round-to-nearest-even, manual sequence).  Bit-for-bit
-// identical to the standard reference path's `f32_to_bf16x16` in
-// group_matmul_moe_act.cpp.
-//
-// Why not the hardware `_mm512_cvtneps_pbh` (VCVTNEPS2BF16):
-//   The instruction is documented as round-to-nearest-even and agrees
-//   with this manual sequence on the vast majority of inputs.  Half-
-//   way (tie) cases can diverge between the silicon and the integer
-//   sequence depending on uarch implementation details, and that
-//   divergence becomes visible end-to-end on the fused MoE tight-
-//   arena path:
-//     custom matmul (FP32 acc) → swiglu(g, u) = (1+u)·g·σ(α·g)
-//                              → FP32→BF16
-//                              → Op2 GEMM amplifies × √K_down
-//   Using the manual sequence makes the custom path produce BIT-
-//   IDENTICAL BF16 output to the standard reference for the FP32→
-//   BF16 step, removing one source of cross-path divergence.  Cost:
-//   one extra integer add + shift per cvt vs a single VCVTNEPS2BF16
-//   — neutral end-to-end (the Op2 GEMM dominates by ~10×).
-__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
-static inline __m256i fp32_to_bf16x16_rne(__m512 f32) {
-  __m512i i32 = _mm512_castps_si512(f32);
-  // bias = 0x7FFF + (LSB of upper-16-bits) — implements RNE on the
-  // truncated mantissa via integer add + shift.  Identical to the
-  // standard reference path so cross-path comparisons are bit-exact.
-  __m512i bias = _mm512_add_epi32(
-      _mm512_set1_epi32(0x7FFF),
-      _mm512_and_si512(_mm512_srli_epi32(i32, 16),
-                       _mm512_set1_epi32(1)));
-  return _mm512_cvtepi32_epi16(_mm512_srli_epi32(
-      _mm512_add_epi32(i32, bias), 16));
-}
 
 // Apply swiglu_oai_mul in registers to one (gate, up) pair of FP32
 // accumulators and store 16 activated BF16 cols.  `dst_row` is the
 // tight destination row pointer (caller pre-offsets for col_start/2
 // and the within-row epilogue index `p`).
 //
-// ── Numerical contract ───────────────────────────────────────────────
-// Mathematically this routine is IDENTICAL to the standard reference
-// swiglu_oai path in group_matmul_moe_act.cpp: same 5-term Cephes
-// exp(-x) polynomial (c0..c5 = {1.0, 0.6931472, 0.2402265, 0.0555042,
-// 0.0096838, 0.0013364}), same rcp14 + 1-step Newton-Raphson sigmoid,
-// same clamp bounds [-7, 7] on gate/up, same multiply order
-// `(1 + up) * (gate * sigmoid(gate * 1.702f))`.
+// ── Structure ────────────────────────────────────────────────────────
+//   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
+//   2. Call the shared `swiglu_oai_avx512(gate, up)` from
+//      `group_matmul_act_avx512.hpp` — IDENTICAL math to the standard
+//      reference's row helpers in `group_matmul_moe_act.cpp` (same
+//      5-term Cephes exp(-x), same rcp14 + 1-step Newton-Raphson
+//      sigmoid, same clamp bounds [-7, +7], same multiply order
+//      `(1 + up) * (gate * sigmoid(gate * 1.702f))`).
+//   3. Manual RNE FP32→BF16 via the shared `f32_to_bf16x16` (bit-
+//      identical to the reference path's cvt step) and 256-bit store.
 //
-// Precision characteristic vs the standard two-pass pipeline:
+// ── Precision characteristic vs the standard two-pass pipeline ──────
 //   Standard reference: matmul writes BF16 to memory → activation
 //     reads BF16 → cvt BF16→FP32 → swiglu → cvt FP32→BF16 → store.
 //     The accumulator is rounded to BF16 before the activation sees
@@ -186,11 +126,6 @@ static inline __m256i fp32_to_bf16x16_rne(__m512 f32) {
 // for any (A, B, bias) input.  Cross-path comparisons should expect
 // sub-ULP differences in the "better" direction; the gated-act gtest
 // tolerance is sized to accept both.
-//
-// FP32→BF16 conversion uses the manual `fp32_to_bf16x16_rne` (above)
-// instead of the hardware `_mm512_cvtneps_pbh` so the cvt step is
-// bit-identical to the standard reference.  See the policy block on
-// `fp32_to_bf16x16_rne` for the rationale.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline void swiglu_oai_store_pair(
     __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
@@ -200,20 +135,119 @@ static inline void swiglu_oai_store_pair(
   __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
   __m512 up   = _mm512_permutex2var_ps(acc_lo, up_idx,   acc_hi);
 
-  const __m512 cmin = _mm512_set1_ps(-7.0f);
-  const __m512 cmax = _mm512_set1_ps(+7.0f);
-  gate = _mm512_max_ps(_mm512_min_ps(gate, cmax), cmin);
-  up   = _mm512_max_ps(_mm512_min_ps(up,   cmax), cmin);
+  __m512 r = swiglu_oai_avx512(gate, up);
 
-  const __m512 alpha = _mm512_set1_ps(1.702f);
-  const __m512 one   = _mm512_set1_ps(1.0f);
-  __m512 sig = sigmoid_fast(_mm512_mul_ps(gate, alpha));
-  __m512 r   = _mm512_mul_ps(_mm512_add_ps(one, up),
-                             _mm512_mul_ps(gate, sig));
+  __m256i out = f32_to_bf16x16(r);
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
+}
 
-  // Manual RNE FP32→BF16 — bit-identical to the standard reference's
-  // f32_to_bf16x16.  See the policy block above the function for why.
-  __m256i out = fp32_to_bf16x16_rne(r);
+// Apply gelu_and_mul in registers to one (gate, up) pair of FP32
+// accumulators and store 16 activated BF16 cols.
+//
+// ── Structure ────────────────────────────────────────────────────────
+//   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
+//   2. Call the shared `gelu_avx512(gate)` from
+//      `group_matmul_act_avx512.hpp` — same polynomial form used by
+//      the standard reference's `gelu_and_mul_row_avx512_*` helpers
+//      in `group_matmul_moe_act.cpp`, so both paths produce bit-
+//      identical activation output.
+//   3. Multiply by `up` and store as BF16 via the shared
+//      `f32_to_bf16x16` integer-RNE sequence.
+//
+// ── Numerical contract ───────────────────────────────────────────────
+// Mathematically equivalent (within BF16 tolerance) to the textbook
+// `gelu_and_mul` reference:
+//
+//   reference:  out = gelu_erf(gate) * up
+//               gelu_erf(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+//
+// The shared `gelu_avx512` uses the well-known `gelu_tanh`
+// polynomial approximation:
+//
+//               y = sqrt(2/pi) * (x + 0.044715 * x^3)
+//               gelu_tanh(x) = 0.5 * x * (1 + tanh(y))
+//
+// rewritten via `tanh(y) = 2·sigmoid(2y) − 1` so the form is one
+// `sigmoid_avx512` call:
+//
+//               gelu_tanh(x) = x * sigmoid(2y)
+//               y2 = c1*x + c2*x^3 ; c1 ≈ 1.5957691, c2 ≈ 0.0713548
+//               g'  = x * sigmoid_avx512(y2)
+//               out = g' * up
+//
+// Numerical fidelity:
+//   * |gelu_tanh − gelu_erf| ≤ 1.5e-3 across all real x (well-known).
+//   * BF16 ulp ≈ 7.8e-3 relative; so the gelu_tanh ↔ gelu_erf delta
+//     is about 5× tighter than BF16 can represent.
+//   * `mt::tol_act(/*is_bf16=*/true)` band is {rel=0.15, abs=0.02},
+//     so the kernel passes the existing reference comparison with
+//     >10× margin.
+//
+// Why gelu_tanh (polynomial) instead of gelu_erf (libc):
+//   * The reference's "AVX-512" gelu helper
+//     (`gelu_and_mul_row_avx512_*` in group_matmul_moe_act.cpp) is
+//     itself a thin wrapper around per-lane `std::erf` — it stores
+//     the FP32 vector to stack, calls libc 16 times, and reloads.
+//     That's the slow path the fused kernel is replacing.
+//   * Calling `std::erf` from inside the matmul ukernel would defeat
+//     the entire fusion (function-call overhead per output row).
+//   * gelu_tanh is the form used by GPT-2/BERT/PaLM; gelu_erf and
+//     gelu_tanh are interchangeable for any production model
+//     decoding into BF16 dst.
+//
+// Differences from `silu_and_mul_store_pair`:
+//   * Three FMAs to compute `y2 = c1·x + c2·x³` (vs zero in silu).
+//   * Otherwise identical: same `sigmoid_avx512`, same `gate * up`
+//     finish, same `f32_to_bf16x16` store path.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static inline void gelu_and_mul_store_pair(
+    __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+  const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
+  const __m512i up_idx   = _mm512_load_si512(kUpLaneIdx);
+
+  __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
+  __m512 up   = _mm512_permutex2var_ps(acc_lo, up_idx,   acc_hi);
+
+  __m512 r = _mm512_mul_ps(gelu_avx512(gate), up);
+
+  __m256i out = f32_to_bf16x16(r);
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
+}
+
+// Apply silu_and_mul in registers to one (gate, up) pair of FP32
+// accumulators and store 16 activated BF16 cols.
+//
+// ── Structure ────────────────────────────────────────────────────────
+//   1. Deinterleave gate/up out of the accumulator pair (`vpermt2ps`).
+//   2. Call the shared `silu_avx512(gate)` from
+//      `group_matmul_act_avx512.hpp` — same math as the standard
+//      reference's `silu_and_mul_row_avx512_*` helpers in
+//      `group_matmul_moe_act.cpp`, so both paths produce bit-
+//      identical activation output (modulo the elimination of one
+//      BF16 round-trip in the fused path; same direction as swiglu).
+//   3. Multiply by `up` and store as BF16 via the shared
+//      `f32_to_bf16x16` integer-RNE sequence.
+//
+// ── Numerical contract ───────────────────────────────────────────────
+//   out = silu(gate) * up,   silu(x) = x * sigmoid(x)
+//
+// Differences from `swiglu_oai_store_pair`:
+//   * No clamp on gate / up (silu is well-conditioned for any input).
+//   * No alpha multiplier on gate (swiglu_oai uses α=1.702; standard
+//     silu uses α=1, i.e. no multiplier).
+//   * Final multiply is `silu(gate) * up`, not `(1+up) * (gate * sig)`.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static inline void silu_and_mul_store_pair(
+    __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+  const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
+  const __m512i up_idx   = _mm512_load_si512(kUpLaneIdx);
+
+  __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
+  __m512 up   = _mm512_permutex2var_ps(acc_lo, up_idx,   acc_hi);
+
+  __m512 r = _mm512_mul_ps(silu_avx512(gate), up);
+
+  __m256i out = f32_to_bf16x16(r);
   _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst_row), out);
 }
 
@@ -238,20 +272,23 @@ static void ukernel_impl(
 
   static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
   static_assert(Act == ActKind::none || (NV % 2 == 0),
-                "swiglu epilogue requires even NV");
+                "gated-activation epilogue requires even NV");
   static_assert(std::is_same<DstT, bfloat16_t>::value
                     || std::is_same<DstT, float>::value,
                 "ukernel_impl: DstT must be bfloat16_t or float");
-  // The swiglu fused epilogue's pair-pack store helper writes 16 BF16
-  // lanes per (gate, up) pair via `_mm256_storeu_si256` — no FP32
-  // counterpart today, and the downstream consumer (Op2 src in fused
-  // MoE) reads BF16.  Refusing the (swiglu, FP32) tuple at compile
-  // time keeps `select_ukernel` from accidentally returning a
-  // mis-typed instantiation; runtime dispatch refuses earlier still
-  // (see `select_ukernel` in this file + the prepare_for_call gate).
-  static_assert(Act != ActKind::swiglu_oai_mul
+  // The gated-activation pair-pack store helpers
+  // (`swiglu_oai_store_pair`, `silu_and_mul_store_pair`,
+  // `gelu_and_mul_store_pair`) write 16 BF16 lanes per (gate, up)
+  // pair via `_mm256_storeu_si256` — no FP32 counterpart today, and
+  // the downstream consumer (Op2 src in fused MoE) reads BF16.
+  // Refusing the (gated_act, FP32) tuple at compile time keeps
+  // `select_ukernel` from accidentally returning a mis-typed
+  // instantiation; runtime dispatch refuses earlier still (see
+  // `select_ukernel` in this file + the prepare_for_call gate).
+  static_assert(Act == ActKind::none
                     || std::is_same<DstT, bfloat16_t>::value,
-                "ActKind::swiglu_oai_mul is BF16-dst only");
+                "Gated-activation kinds (swiglu_oai_mul, silu_and_mul, "
+                "gelu_and_mul) are BF16-dst only");
 
   // Reinterpret the dispatcher's `void *` outputs as the templated
   // dst type.  ldc / ldc_tight stay in element units (not bytes) —
@@ -303,7 +340,7 @@ static void ukernel_impl(
       for (int v = 0; v < NV; ++v) {
         __m256i b16 = _mm256_loadu_si256(
             reinterpret_cast<const __m256i *>(bias_bf16 + v * 16));
-        bias_vec[v] = bf16x16_to_fp32(b16);
+        bias_vec[v] = bf16x16_to_f32(b16);
       }
     } else {
       const auto *bias_fp32 = static_cast<const float *>(bias);
@@ -535,9 +572,14 @@ static void ukernel_impl(
   }
 
   // ── Epilogue ─────────────────────────────────────────────────────
-  if constexpr (Act == ActKind::swiglu_oai_mul) {
-    // Static_assert above guarantees DstT == bfloat16_t here, so the
-    // pair-pack store helper's BF16 output type matches `Cout_tight`.
+  // All three gated activations share the pair-pack store contract —
+  // they differ only in which helper deinterleaves+activates the
+  // (g, u) accumulator pair.  Same loop structure, same dst pointer
+  // arithmetic, same BF16-dst constraint (enforced by the
+  // static_assert above).
+  if constexpr (Act == ActKind::swiglu_oai_mul
+                  || Act == ActKind::silu_and_mul
+                  || Act == ActKind::gelu_and_mul) {
     constexpr int n_pairs = NV / 2;  // 1 for NV=2, 2 for NV=4
     #pragma GCC unroll 8
     for (int m = 0; m < MR; ++m) {
@@ -545,7 +587,16 @@ static void ukernel_impl(
       for (int p = 0; p < n_pairs; ++p) {
         bfloat16_t *dst = Cout_tight
             + static_cast<size_t>(m) * ldc_tight + p * 16;
-        swiglu_oai_store_pair(acc[0][m][2 * p], acc[0][m][2 * p + 1], dst);
+        if constexpr (Act == ActKind::swiglu_oai_mul) {
+          swiglu_oai_store_pair(acc[0][m][2 * p],
+                                acc[0][m][2 * p + 1], dst);
+        } else if constexpr (Act == ActKind::silu_and_mul) {
+          silu_and_mul_store_pair(acc[0][m][2 * p],
+                                   acc[0][m][2 * p + 1], dst);
+        } else {  // ActKind::gelu_and_mul
+          gelu_and_mul_store_pair(acc[0][m][2 * p],
+                                   acc[0][m][2 * p + 1], dst);
+        }
       }
     }
   } else if constexpr (std::is_same<DstT, bfloat16_t>::value) {
@@ -558,7 +609,7 @@ static void ukernel_impl(
       for (int v = 0; v < NV; ++v) {
         bfloat16_t *dst = Cout
             + static_cast<size_t>(m) * ldc + v * 16;
-        __m256i out = fp32_to_bf16x16_rne(acc[0][m][v]);
+        __m256i out = f32_to_bf16x16(acc[0][m][v]);
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), out);
       }
     }
@@ -588,18 +639,24 @@ static void ukernel_impl(
 // ── Function-pointer table dispatch (mirrors select_bf16_brgemm_kernel) ─
 //
 // One entry per supported (MR, NV, Act, DstDt) tuple.  Instantiation set:
-//   NV=2 (NR=32): MR ∈ {1..8} × {(none, BF16), (none, F32), (swiglu, BF16)}
-//   NV=4 (NR=64): MR ∈ {1..6} × {(none, BF16), (none, F32), (swiglu, BF16)}
-// Total: 8×3 + 6×3 = 42 specializations, all `noinline`.
+//   NV=2 (NR=32): MR ∈ {1..8} × {(none, BF16), (none, F32), (swiglu, BF16),
+//                                  (silu, BF16), (gelu, BF16)}
+//   NV=4 (NR=64): MR ∈ {1..6} × {(none, BF16), (none, F32), (swiglu, BF16),
+//                                  (silu, BF16), (gelu, BF16)}
+// Total: 8×5 + 6×5 = 70 specializations, all `noinline`.
 //
-// (swiglu_oai_mul, FP32) is intentionally NOT instantiated — the swiglu
-// fused store helper writes BF16 only, and downstream Op2 in fused MoE
-// reads BF16.  The dispatcher refuses that tuple at `prepare_for_call`
-// time (see `select_ukernel` returning nullptr below for that case).
+// Any (gated_act, FP32) tuple is intentionally NOT instantiated — the
+// in-register pair-pack store helpers write BF16 only, and downstream
+// Op2 in fused MoE reads BF16.  The dispatcher refuses those tuples at
+// `prepare_for_call` time (see the `select_ukernel` early-out below
+// returning nullptr for that case).
 ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
-  // Refuse the structurally-impossible (swiglu, FP32) combination
+  // Refuse the structurally-impossible (gated_act, FP32) combinations
   // before the per-(MR, NV) switch so callers see a clean nullptr.
-  if (act == ActKind::swiglu_oai_mul && dst_dt != DstDt::kBf16) {
+  const bool is_gated_act = (act == ActKind::swiglu_oai_mul
+                              || act == ActKind::silu_and_mul
+                              || act == ActKind::gelu_and_mul);
+  if (is_gated_act && dst_dt != DstDt::kBf16) {
     return nullptr;
   }
   if (NV == 2) {
@@ -613,6 +670,32 @@ ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
         case 6: return ukernel_impl<6, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
         case 7: return ukernel_impl<7, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
         case 8: return ukernel_impl<8, 2, ActKind::swiglu_oai_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    if (act == ActKind::silu_and_mul) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 7: return ukernel_impl<7, 2, ActKind::silu_and_mul, bfloat16_t>;
+        case 8: return ukernel_impl<8, 2, ActKind::silu_and_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    if (act == ActKind::gelu_and_mul) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 7: return ukernel_impl<7, 2, ActKind::gelu_and_mul, bfloat16_t>;
+        case 8: return ukernel_impl<8, 2, ActKind::gelu_and_mul, bfloat16_t>;
         default: return nullptr;
       }
     }
@@ -651,6 +734,28 @@ ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
         case 4: return ukernel_impl<4, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
         case 5: return ukernel_impl<5, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
         case 6: return ukernel_impl<6, 4, ActKind::swiglu_oai_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    if (act == ActKind::silu_and_mul) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 4, ActKind::silu_and_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 4, ActKind::silu_and_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 4, ActKind::silu_and_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 4, ActKind::silu_and_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 4, ActKind::silu_and_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 4, ActKind::silu_and_mul, bfloat16_t>;
+        default: return nullptr;
+      }
+    }
+    if (act == ActKind::gelu_and_mul) {
+      switch (MR) {
+        case 1: return ukernel_impl<1, 4, ActKind::gelu_and_mul, bfloat16_t>;
+        case 2: return ukernel_impl<2, 4, ActKind::gelu_and_mul, bfloat16_t>;
+        case 3: return ukernel_impl<3, 4, ActKind::gelu_and_mul, bfloat16_t>;
+        case 4: return ukernel_impl<4, 4, ActKind::gelu_and_mul, bfloat16_t>;
+        case 5: return ukernel_impl<5, 4, ActKind::gelu_and_mul, bfloat16_t>;
+        case 6: return ukernel_impl<6, 4, ActKind::gelu_and_mul, bfloat16_t>;
         default: return nullptr;
       }
     }

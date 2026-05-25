@@ -586,6 +586,95 @@ struct NTileStrategyOverride {
   NTileStrategyOverride &operator=(NTileStrategyOverride &&) = delete;
 };
 
+// RAII guard for the per-phase auto-select overrides (the test-only
+// path over `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` /
+// `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO`).  Same cache-bypass rationale
+// as the other Override structs — the env getters cache via
+// `static const` lambda, so flipping the env mid-process is invisible
+// without this atomic.
+//
+// Accepted values:
+//   * 0    — explicit legacy 3-rule cascade pin (equivalent to
+//            setting the env to "0").  NOT equivalent to "unset env":
+//            the env-unset / sentinel-`-1` path resolves to the
+//            documented per-phase default (PROMPT=1, DECODE=3) via
+//            the cached getter, NOT to 0.
+//   * 1..5 — force the matching ALGO for that phase.
+//   * < 0  — sentinel "no override"; falls through to the cached env
+//            path (which applies the documented defaults).
+//   * > 5  — clamps to the documented per-phase default in the
+//            getter (PROMPT=1, DECODE=3), matching the env-parse
+//            "validate or fall back to default" convention used by
+//            the other int env getters in this codebase.
+struct AutoPromptAlgoOverride {
+  int prev;
+  explicit AutoPromptAlgoOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_auto_prompt_algo_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~AutoPromptAlgoOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_auto_prompt_algo_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  AutoPromptAlgoOverride(const AutoPromptAlgoOverride &) = delete;
+  AutoPromptAlgoOverride &operator=(const AutoPromptAlgoOverride &) = delete;
+  AutoPromptAlgoOverride(AutoPromptAlgoOverride &&) = delete;
+  AutoPromptAlgoOverride &operator=(AutoPromptAlgoOverride &&) = delete;
+};
+
+struct AutoDecodeAlgoOverride {
+  int prev;
+  explicit AutoDecodeAlgoOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_auto_decode_algo_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~AutoDecodeAlgoOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_auto_decode_algo_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  AutoDecodeAlgoOverride(const AutoDecodeAlgoOverride &) = delete;
+  AutoDecodeAlgoOverride &operator=(const AutoDecodeAlgoOverride &) = delete;
+  AutoDecodeAlgoOverride(AutoDecodeAlgoOverride &&) = delete;
+  AutoDecodeAlgoOverride &operator=(AutoDecodeAlgoOverride &&) = delete;
+};
+
+// RAII guard for the experimental Option-A hybrid M-split threshold
+// (the test-only path over
+// `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`).  Same cache-bypass
+// rationale as the other Override structs.
+//
+// Accepted values:
+//   * 0    — explicit OFF (same as unset env / default).
+//   * > 0  — threshold value; experts with `M[e] > value` are tagged
+//            heavy and receive water-fill thread allocation.
+//   * < 0  — sentinel "no override"; falls through to the cached env
+//            path (which itself defaults to 0 = OFF).
+struct HybridMHeavyThresholdOverride {
+  int prev;
+  explicit HybridMHeavyThresholdOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_hybrid_m_heavy_threshold_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~HybridMHeavyThresholdOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_hybrid_m_heavy_threshold_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  HybridMHeavyThresholdOverride(
+      const HybridMHeavyThresholdOverride &) = delete;
+  HybridMHeavyThresholdOverride &operator=(
+      const HybridMHeavyThresholdOverride &) = delete;
+  HybridMHeavyThresholdOverride(
+      HybridMHeavyThresholdOverride &&) = delete;
+  HybridMHeavyThresholdOverride &operator=(
+      HybridMHeavyThresholdOverride &&) = delete;
+};
+
 // RAII guard for the per-expert subtile_cols knob (the test-only
 // path over `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT`).
 // Same rationale as the other overrides — the env getter caches

@@ -115,6 +115,24 @@ inline constexpr int kNRMax = 64;
 /// transB=false on the same weight pointer occupy distinct entries
 /// (would otherwise alias and produce silent-wrong output).
 ///
+/// `interleave_split_halves` (default false) — when true, the pack
+/// reads source columns in interleaved order so the resulting packed
+/// arena physically matches the `swiglu_oai_mul` layout.  Used for
+/// the `silu_and_mul` and `gelu_and_mul` fused-CK paths: in both
+/// cases the caller's W13 weight is in canonical split-halves
+/// `[gate_cols | up_cols]` layout, but the CK kernel's in-register
+/// pair-store epilogues (`silu_and_mul_store_pair`,
+/// `gelu_and_mul_store_pair`) require the interleaved
+/// `[g0, u0, g1, u1, ...]` order.  silu and gelu share the SAME
+/// permutation — only the kernel-side activation math differs — so
+/// the cache-key bit is shared between them and a packed arena
+/// warmed for silu can be reused for gelu on the same weight pointer.
+/// When the flag is set, pack output column `2i+0` reads canonical
+/// column `i` (gate i) and pack output column `2i+1` reads canonical
+/// column `I + i` (up i), where `I = N / 2`.  Requires N to be even.
+/// Folded into the cache key so the same weight pointer packed with
+/// and without interleaving occupies distinct entries.
+///
 /// `was_hit_out` (optional) — when non-null, set to `true` if this
 /// call served from the cache (no pack work) or `false` if it had
 /// to allocate + pack on a miss.  Used by the prepack-all probe
@@ -125,6 +143,7 @@ status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
     bool transB,
+    bool interleave_split_halves,
     const bfloat16_t **out_packed,
     bool *was_hit_out = nullptr);
 

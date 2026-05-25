@@ -105,7 +105,7 @@ status_t warm_pack_all_aocl_dlp_experts(
   // no-cache branch (`weight_cache_type=0`) when it returns 0.
   // Warming the LRU here would put entries in a cache that the
   // dispatcher will not consult — wasted CPU + memory.
-  // Short-circuit at entry; `stats` stays zeroed so the PACK_PROBE
+  // Short-circuit at entry; `stats` stays zeroed so the PREPACK
   // log line surfaces "no work attempted" rather than "all skipped".
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();

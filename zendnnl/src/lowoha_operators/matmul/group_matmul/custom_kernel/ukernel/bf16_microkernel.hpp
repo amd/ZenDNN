@@ -61,15 +61,40 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-/// Activation kinds the microkernel epilogue supports.  `swiglu_oai_mul`
-/// is used by the fused-MoE Op1 tight-arena path (halved output);
-/// `none` is used by the non-fused flat_n_tile path and by Op2 of the
-/// fused-MoE flow.  `silu_and_mul` / `gelu_and_mul` use a split layout
-/// that does not fit the in-register epilogue and stay on the standard
-/// dispatcher.
+/// Activation kinds the microkernel epilogue supports.
+///
+/// All gated variants share the same in-register pair-store contract:
+/// the per-row accumulator pair `(acc_lo, acc_hi)` covers 32 cols
+/// of `(gate, up)` data in the interleaved `[g0, u0, g1, u1, ...]`
+/// layout; the epilogue deinterleaves the (gate, up) lanes, applies
+/// the activation, and stores 16 BF16 cols of activated output.
+///
+///   * `none` — non-fused path; store full NR BF16 cols.  Used by
+///     the non-fused flat_n_tile path and Op2 of the fused-MoE flow.
+///   * `swiglu_oai_mul` — swiglu_oai (clamp + α-swish + (1+u)).
+///     Caller's framework weight is already interleaved at the API
+///     boundary; the kernel reads it directly.
+///   * `silu_and_mul` — plain silu(g) * u (no clamp, no alpha).
+///     Caller's framework weight is split-halves `[gate_cols | up_cols]`
+///     at the API boundary; the **prepack module re-interleaves**
+///     during CK pack so the kernel sees the same physical layout as
+///     swiglu_oai_mul.  Caller-side contract is unchanged.
+///   * `gelu_and_mul` — `gelu(g) * u`.  Caller-side contract is
+///     identical to `silu_and_mul` (split-halves, prepack-permuted
+///     into the interleaved layout).  Numerically uses the
+///     `gelu_tanh` polynomial form
+///     `0.5·g·(1 + tanh(√(2/π)·(g + 0.044715·g³)))` (rewritten as
+///     `g·sigmoid(2y)` to reuse the existing `sigmoid_fast` helper).
+///     The standard reference uses `gelu_erf` via `std::erf` per
+///     lane; max |gelu_tanh − gelu_erf| ≈ 1.5e-3 across all x,
+///     well below the BF16 dst's ~7.8e-3 ulp, so the
+///     `mt::tol_act(/*is_bf16=*/true)` band ({rel=0.15, abs=0.02})
+///     accepts both with margin to spare.
 enum class ActKind {
   none,            ///< Store full NR BF16 cols.
-  swiglu_oai_mul,  ///< Apply swiglu in registers, store NR/2 BF16 cols.
+  swiglu_oai_mul,  ///< Apply swiglu_oai in registers, store NR/2 BF16 cols.
+  silu_and_mul,    ///< Apply silu_and_mul in registers, store NR/2 BF16 cols.
+  gelu_and_mul,    ///< Apply gelu_and_mul in registers, store NR/2 BF16 cols.
 };
 
 /// Bias data-type — resolved at `prepare_for_call()` time and stored in
@@ -96,11 +121,12 @@ enum class BiasKind {
 /// time from the `KernelVariant` and threaded through `select_ukernel`
 /// so each (MR, NV, Act, DstDt) pair has its own ukernel instantiation.
 ///
-/// Constraint: `Act == ActKind::swiglu_oai_mul` is only valid with
-/// `DstDt::kBf16` — the swiglu fused epilogue's store path uses the
-/// half-width BF16 pair-pack helper (`swiglu_oai_store_pair`), and the
+/// Constraint: any gated `Act` (`swiglu_oai_mul`, `silu_and_mul`,
+/// `gelu_and_mul`) is only valid with `DstDt::kBf16` — the in-register
+/// pair-store helpers (`swiglu_oai_store_pair`, `silu_and_mul_store_pair`,
+/// `gelu_and_mul_store_pair`) write the half-width BF16 output, and the
 /// downstream consumers (Op2 in fused MoE) read BF16.  `select_ukernel`
-/// returns `nullptr` for the (swiglu, kF32) tuple so the dispatcher's
+/// returns `nullptr` for any (gated_act, kF32) tuple so the dispatcher's
 /// `fill_kfn_table` refuses the call cleanly.
 enum class DstDt {
   kBf16,

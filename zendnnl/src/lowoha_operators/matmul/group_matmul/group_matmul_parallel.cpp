@@ -86,7 +86,8 @@ void sequential_experts(
           weight, K, N, ldb, transB, is_weights_const, params, M,
           get_grp_matmul_custom_kernel(),
           num_threads, /*nr_align=*/0,
-          fused_act, act_dtype));
+          fused_act, act_dtype,
+          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
   matmul_algo_t algo = resolve_kernel();
 
@@ -139,7 +140,8 @@ void parallel_multilevel(
           weight, K, N, ldb, transB, is_weights_const, params, M,
           get_grp_matmul_custom_kernel(),
           num_threads, /*nr_align=*/0,
-          fused_act, act_dtype));
+          fused_act, act_dtype,
+          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
   matmul_algo_t algo = resolve_kernel();
 
@@ -256,7 +258,8 @@ void parallel_per_expert(
           weight, K, N, ldb, transB, is_weights_const, params, M,
           get_grp_matmul_custom_kernel(),
           num_threads, /*nr_align=*/0,
-          fused_act, act_dtype));
+          fused_act, act_dtype,
+          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
   matmul_algo_t algo = resolve_kernel();
   scoped_active_levels guard(1);
@@ -463,17 +466,15 @@ static bool check_n_tile_extra(
 
 // Auto-select (ALGO 0) heuristic — used when the caller leaves
 // ZENDNNL_GRP_MATMUL_ALGO unset.  Picks between {ALGO 1, ALGO 3,
-// ALGO 5}; ALGO 2 (M-tile) and ALGO 4 (multilevel nested OMP) are
-// reachable only via the env override because:
-//   * ALGO 2 covers the same prompt shapes as ALGO 3 with no measured
-//     win on the workloads we target.
-//   * ALGO 4's nested OMP regions interact poorly with framework-side
-//     OMP teams.
+// ALGO 5} via the legacy 3-rule cascade, OR pins to a specific
+// ALGO per phase via the AUTO_PROMPT_ALGO / AUTO_DECODE_ALGO envs
+// (defaults: PROMPT=1 (sequential_experts) / DECODE=3 (N-tile + CK)
+// — the measured-best out-of-the-box auto policy; set the env to
+// `0` for the legacy cascade).
 //
-// Decision rule (three lines + one capacity carve-out, in priority
-// order):
+// Decision precedence (tightest first):
 //
-//   0. num_ops > kNTilePlanMaxExperts (=256)  → ALGO 5
+//   0. STRUCTURAL — num_ops > kNTilePlanMaxExperts (=256) → ALGO 5
 //      Capacity carve-out: the N-tile planner's R3 gate rejects
 //      calls beyond `GroupNTilePlan::kMaxExperts` and silently
 //      falls back to its Sequential strategy (one expert at a
@@ -482,49 +483,69 @@ static bool check_n_tile_extra(
 //      schedule) on every num_ops > 256 shape we have measured —
 //      e.g., a hypothetical 300-expert MoE on 128 threads would
 //      run ~300 serial full-team matmuls instead of ~3 waves of
-//      128 parallel per-expert tasks.  Gate is placed BEFORE the
-//      three rules so it catches both `num_ops >= num_threads`
-//      (rule 1 territory) and the rare `kNTilePlanMaxExperts <
-//      num_ops < num_threads` case (rule 3 decode territory, e.g.,
-//      300 experts on a 512-thread host).  ALGO 5 has no quant
-//      guard so it covers n_tile_safe = false too — the value of
-//      n_tile_safe is irrelevant here.
+//      128 parallel per-expert tasks.  Phase env cannot override
+//      this — the planner's R3 gate is structural.  ALGO 5 has no
+//      m_tile/n_tile safety dependency so it covers unsafe paths too.
 //
-//   1. num_ops ≥ num_threads               → ALGO 3
-//      (Qwen3-30B-A3B-class: 128 experts on 64-128t hosts.  At this
-//       expert/thread ratio every expert sees a thin per-expert team
-//       and N-tile's round-based scheduling consistently outperforms
-//       ALGO 1's serial-experts-with-full-team approach.  Honors
-//       n_tile_safe — quantised paths fall back to ALGO 1.)
+//   1. PHASE ENV — `max_M ≤ kDecodeMaxM` (decode) →
+//                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
+//                  `max_M >  kDecodeMaxM` (prompt) →
+//                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (default 1)
+//      When the active phase env is non-zero (the default cases),
+//      that ALGO is returned directly with the same m_tile_safe /
+//      n_tile_safe clamps the global ALGO env path applies in
+//      `select_grp_matmul_algo`.  The defaults give a sensible
+//      out-of-the-box auto policy: ALGO 1 (sequential_experts) for
+//      prompt — the legacy auto-Rule-3 choice; same wall time as
+//      the post-fix ALGO 3 path on skewed-M prompt until the
+//      planner gains M-weighted multi-thread-per-expert, and lower
+//      code surface — and ALGO 3 (N-tile rounds + CK) for decode,
+//      the measured decode winner across every benchmarked MoE
+//      workload.  Set the env to `0` for the legacy 3-rule cascade.
 //
-//   2. num_ops ≤ kFewExpertsAlgo1 (=8)     → ALGO 1
-//      (Mixtral-8x*-class: 8 experts.  Per-expert weight footprint is
-//       large enough that the full-weight AOCL DLP cache key + serial
-//       expert iteration amortises DRAM traffic better than N-tile's
-//       per-thread column slices on a thin per-expert team.)
+//   2. LEGACY RULES (phase env == 0):
 //
-//   3. otherwise (9 ≤ num_ops < num_threads) — M-driven:
-//        prompt (max_M >  kDecodeMaxM)     → ALGO 1
-//        decode (max_M ≤  kDecodeMaxM)     → ALGO 3
-//      (gpt-oss-20B-class: ops typically 9..32 on 64-128t hosts.
-//       Prompt uses ALGO 1's thread-count-stable full-weight cache
-//       key; decode uses ALGO 3's custom-kernel + per-tile path which
-//       is the measured win on the MoE decode hot path.  N-tile's
-//       internal Sequential-strategy fallback handles narrow-N shapes
-//       where the planner can't satisfy `tiles_per_expert ≥ min`.)
+//      a. num_ops ≥ num_threads               → ALGO 3
+//         (Qwen3-30B-A3B-class: 128 experts on 64-128t hosts.  At
+//          this expert/thread ratio every expert sees a thin per-
+//          expert team and N-tile's round-based scheduling
+//          consistently outperforms ALGO 1's serial-experts-with-
+//          full-team approach.  Honors n_tile_safe — quantised paths
+//          fall back to ALGO 1.)
+//
+//      b. num_ops ≤ kFewExpertsAlgo1 (=8)     → ALGO 1
+//         (Mixtral-8x*-class: 8 experts.  Per-expert weight footprint
+//          is large enough that the full-weight AOCL DLP cache key
+//          + serial expert iteration amortises DRAM traffic better
+//          than N-tile's per-thread column slices on a thin per-
+//          expert team.)
+//
+//      c. otherwise (9 ≤ num_ops < num_threads) — M-driven:
+//           prompt (max_M >  kDecodeMaxM)     → ALGO 1
+//           decode (max_M ≤  kDecodeMaxM)     → ALGO 3
+//         (gpt-oss-20B-class: ops typically 9..32 on 64-128t hosts.
+//          Prompt uses ALGO 1's thread-count-stable full-weight cache
+//          key; decode uses ALGO 3's custom-kernel + per-tile path
+//          which is the measured win on the MoE decode hot path.
+//          N-tile's internal Sequential-strategy fallback handles
+//          narrow-N shapes where the planner can't satisfy
+//          `tiles_per_expert ≥ min`.)
 //
 // The historical large-weight wide-N prompt carve-out and weight-class
 // branching are intentionally dropped — the simpler M-driven default
 // preserves gpt-oss prompt routing, gives Mixtral and Qwen explicit
 // per-arch arrows, and the auto-selector now reads as a 3-rule table.
 // Callers that need a non-default decision on a specific deployment
-// can still pin via ZENDNNL_GRP_MATMUL_ALGO.
+// can still pin via `ZENDNNL_GRP_MATMUL_ALGO` (global pin) or via
+// `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` (per-phase pin while
+// keeping the global env unset / 0).
 static int auto_select_algo(
   const std::vector<int> &M,
   const std::vector<int> &N,
   const std::vector<int> &K,
   const std::vector<matmul_params> &params,
   int num_threads,
+  bool m_tile_safe,
   bool n_tile_safe) {
   (void)N;        // Kept in the signature for symmetry with the M-tile
   (void)K;        // / N-tile safety helpers and to ease future heuristic
@@ -535,53 +556,66 @@ static int auto_select_algo(
     return 1;
   }
 
-  // Rule 0 — Capacity carve-out: num_ops > kNTilePlanMaxExperts.
-  // Placed before the three policy rules so it catches every shape
-  // that would otherwise reach the N-tile planner's R3 Sequential
-  // fallback.  See the doc-block above (rule 0) for full rationale.
+  // Rule 0 — STRUCTURAL capacity carve-out (ignores phase env).
+  // Placed before the phase env so it catches every shape that would
+  // otherwise reach the N-tile planner's R3 Sequential fallback.
   if (num_ops > kNTilePlanMaxExperts) {
     return 5;
   }
 
-  // Rule 1 — num_ops ≥ num_threads (Qwen-style).  Highest of the
-  // three policy rules so an 8-expert deployment on a ≤ 8-thread
-  // host (rare but possible for local dev / single-CCD profiling)
-  // routes here, not to rule 2.
+  // Rule 1 — PHASE ENV.  Single-line phase classification (decode iff
+  // `max_M ≤ kDecodeMaxM`) drives which env is consulted.  When the
+  // active phase env is non-zero the operator has explicitly pinned
+  // that algo for the phase — return it directly, with the same
+  // m_tile_safe / n_tile_safe correctness clamps the global ALGO env
+  // path applies.  Non-tile-safe + ALGO 3 falls to ALGO 1; non-m-tile-
+  // safe + ALGO 2 falls to ALGO 1; the clamps are silent here because
+  // the matching `[GRP_MATMUL.ALGO WARN]` apilog already fires from
+  // `select_grp_matmul_algo`'s safety branch when env_algo asks for
+  // the same algo on the same unsafe shape — emitting the WARN twice
+  // would be confusing.  Operators see the clamp via the
+  // `[GRP_MATMUL.ALGO]` line's `chosen=ALGO_X reason=auto_phase_env_clamp`.
+  const int max_M = *std::max_element(M.begin(), M.end());
+  const bool is_decode = (max_M <= kDecodeMaxM);
+  const int phase_algo = is_decode
+      ? get_grp_matmul_auto_decode_algo()
+      : get_grp_matmul_auto_prompt_algo();
+  if (phase_algo >= 1 && phase_algo <= 5) {
+    if (phase_algo == 2 && !m_tile_safe) return 1;
+    if (phase_algo == 3 && !n_tile_safe) return 1;
+    return phase_algo;
+  }
+
+  // Rule 2 — LEGACY RULES (phase env == 0).
+  //
+  // 2a. num_ops ≥ num_threads (Qwen-style).  Highest of the three
+  //     legacy rules so an 8-expert deployment on a ≤ 8-thread host
+  //     (rare but possible for local dev / single-CCD profiling)
+  //     routes here, not to rule 2b.
   //
   // SCOPE NOTE — N-tile viability NOT consulted by design.
   //   The previous heuristic gated rule-1-like cases on
   //   `tiles_per_expert ≥ min_ntiles`.  The new rule deliberately
   //   skips that check: the N-tile planner's `ntile_viable` runs
-  //   anyway as part of `plan_group_n_tile` and silently routes
-  //   non-viable shapes (e.g., Qwen prompt at N=1536: 1536/512 = 3
-  //   tiles < ManyExperts minimum) to its Sequential strategy,
-  //   which behaves like ALGO 1 (serial experts with full thread
-  //   team each).  The cost of this routing is the ALGO 3 planning
-  //   overhead (~µs, dwarfed by the GEMM work that follows) and
-  //   one extra warm-pack call for the per-tile cache (one-time per
-  //   process — amortised across all subsequent decode iterations).
-  //   Acceptable trade-off vs the simplicity of a 3-rule table.
-  //   Callers that have measured ALGO 1 as a win on a specific
-  //   shape can pin via `ZENDNNL_GRP_MATMUL_ALGO=1`.
+  //   anyway as part of `plan_group_n_tile`.  Since the
+  //   `N_TILE_STRATEGY=2` (rounds, default) fix to the planner,
+  //   `!viable` no longer demotes to Sequential under force_ntile —
+  //   it stays on rounds with a `[GRP_MATMUL.PLAN.HINT]` line.
+  //   Under `n_tile_strategy=0` (auto) the planner still uses
+  //   viability as a perf hint.
   if (num_ops >= num_threads) {
     return n_tile_safe ? 3 : 1;
   }
 
-  // Rule 2 — num_ops ≤ kFewExpertsAlgo1 (Mixtral-style).
+  // 2b. num_ops ≤ kFewExpertsAlgo1 (Mixtral-style).
   if (num_ops <= kFewExpertsAlgo1) {
     return 1;
   }
 
-  // Rule 3 — M-driven default (prompt → ALGO 1, decode → ALGO 3).
+  // 2c. M-driven default (prompt → ALGO 1, decode → ALGO 3).
   // The decode arrow does NOT consult N-tile viability for the same
-  // reason rule 1 doesn't — see the SCOPE NOTE on rule 1 above.  For
-  // narrow-N decode shapes (e.g. `max_N < 4 × kDecodeNTile` on an
-  // 8-core CCD), `plan_group_n_tile` will route to Sequential after
-  // the ALGO 3 planning + warm-pack pass, behaving like ALGO 1.
-  // The cost is small (one-time prepack per process) and acceptable
-  // for the simplicity of the M-driven default.
-  const int max_M = *std::max_element(M.begin(), M.end());
-  if (max_M > kDecodeMaxM) {
+  // reason rule 2a doesn't — see the SCOPE NOTE on rule 2a above.
+  if (!is_decode) {
     return 1;
   }
   return n_tile_safe ? 3 : 1;
@@ -638,7 +672,7 @@ int select_grp_matmul_algo(
       static const bool s_log = apilog_warning_enabled();
       if (s_log) {
         apilog_warning(
-            "[GRP_MATMUL Level2 dispatch WARN] env_algo=2 (flat_m_tile) "
+            "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) "
             "REJECTED: m_tile unsafe (non-row-major, per-expert dtype "
             "mismatch, packed B, softmax/pooling post-op, or "
             "dynamic-quant with non-row-local src granularity). "
@@ -650,7 +684,7 @@ int select_grp_matmul_algo(
       static const bool s_log = apilog_warning_enabled();
       if (s_log) {
         apilog_warning(
-            "[GRP_MATMUL Level2 dispatch WARN] env_algo=3 (flat_n_tile) "
+            "[GRP_MATMUL.ALGO WARN] env_algo=3 (flat_n_tile) "
             "REJECTED: n_tile unsafe (non-row-major, dtype mismatch, "
             "quantised weights or src scales, dynamic source "
             "quantisation, or buffer post-op).  See "
@@ -663,7 +697,8 @@ int select_grp_matmul_algo(
     return algo;
   }
 
-  return auto_select_algo(M, N, K, params, num_threads, n_tile_safe);
+  return auto_select_algo(M, N, K, params, num_threads,
+                          m_tile_safe, n_tile_safe);
 }
 
 // ── Dispatch ────────────────────────────────────────────────────────────
@@ -710,19 +745,35 @@ bool group_matmul_run_parallel_dispatch(
   //     activation pass after this function returns.
   const bool caller_layout_tight = (use_algo == 3)
                                    && !ldc.empty() && !N.empty() && ldc[0] < N[0];
+  // Wide-fused (caller's ldc ≥ N) routes through the standard
+  // backend's `apply_swiglu_oai_tile_rows`; that helper handles
+  // swiglu_oai_mul only.  silu_and_mul and gelu_and_mul have no
+  // wide-helper siblings yet, so they can only fuse on the tight
+  // layout (CK path).  `a3_can_fuse_act` already gates silu/gelu
+  // on `use_custom_kernel=true` — combined with this tight-only
+  // gate, the silu/gelu fused path engages exclusively when
+  // (CK-on AND tight caller).  Wide non-CK silu/gelu falls through
+  // to the dispatcher's separate-pass post-pass.
+  const bool wide_fuse_supported =
+      (fused_act == grp_matmul_gated_act_t::swiglu_oai_mul)
+      && get_grp_n_tile_fused_act();
   const bool a3_fuses = (use_algo == 3)
-                        && a3_can_fuse_act(fused_act)
-                        && (caller_layout_tight || get_grp_n_tile_fused_act());
+                        && a3_can_fuse_act(fused_act,
+                                           get_grp_matmul_custom_kernel())
+                        && (caller_layout_tight || wide_fuse_supported);
   const bool act_fused = a3_fuses
                          || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
 
-  // ── Top-level dispatch APILOG ─────────────────────────────────────
-  // Emits the final routing decision (POST env-override, POST auto-
-  // select) with the discriminator values that drove it.  Users
-  // debugging "why did my shape land on ALGO X" get a single line
-  // that tells the complete story — shape + all gates + the
-  // chosen algo.  Gated by apilog_info_enabled() (cached); free
-  // when logging is off.
+  // ── ALGO-decision APILOG ──────────────────────────────────────────
+  // Emits the chosen ALGO and the discriminators that drove the
+  // decision (POST env-override, POST auto-select).  Single line at
+  // info level; users debugging "why did my shape land on ALGO X"
+  // get a complete story — shape + all gates + the chosen algo +
+  // CK-eligibility hint.  Sister line to `[GRP_MATMUL.CALL]` (emitted
+  // at the top of group_matmul_direct.cpp) which carries the framework
+  // input metadata, and `[GRP_MATMUL.EXEC]` / `[GRP_MATMUL.PLAN]` /
+  // `[GRP_MATMUL.PREPACK]` which cover the rest of the per-call trail.
+  // Gated by apilog_info_enabled() (cached); free when logging is off.
   static const bool s_dispatch_log = apilog_info_enabled();
   if (s_dispatch_log && !M.empty()) {
     const int env_algo = get_grp_matmul_algo();
@@ -732,25 +783,79 @@ bool group_matmul_run_parallel_dispatch(
     const size_t wei_elem_b = size_of(params[0].dtypes.wei);
     const size_t wei_per_expert_mb =
         (static_cast<size_t>(max_K_v) * max_N_v * wei_elem_b) >> 20;
-    const char *reason =
-        (env_algo >= 1 && env_algo <= 5)
-            ? (env_algo == use_algo ? "env_ok" : "env_fallback")
-            : "auto";
+    // Phase + per-phase env values for telemetry.  The phase
+    // classification mirrors `auto_select_algo`'s phase gate so the
+    // log reflects the routing decision the planner actually made.
+    const bool is_decode = (max_M_v <= kDecodeMaxM);
+    const int phase_env_prompt = get_grp_matmul_auto_prompt_algo();
+    const int phase_env_decode = get_grp_matmul_auto_decode_algo();
+    const int phase_env_active = is_decode ? phase_env_decode
+                                           : phase_env_prompt;
+    // Reason hierarchy — surfaces which gate drove the chosen ALGO.
+    // ORDER MUST MIRROR `auto_select_algo`'s precedence so the log
+    // line reflects the actual decision path:
+    //
+    //   1. env_ok / env_fallback   — global `ZENDNNL_GRP_MATMUL_ALGO`
+    //                                hit OR safety-clamped (clamp
+    //                                emits a [WARN] line too).
+    //   2. auto_single_thread      — `auto_select_algo`'s
+    //                                `num_threads <= 1 || num_ops == 0`
+    //                                early-exit branch (returns 1
+    //                                before any other rule).
+    //   3. auto_rule0_capacity     — `num_ops > kNTilePlanMaxExperts`
+    //                                → ALGO 5 (structural).
+    //   4. auto_phase_env*         — `ZENDNNL_GRP_MATMUL_AUTO_*_ALGO`
+    //                                non-zero AND honoured (`_clamp`
+    //                                suffix when the m_tile_safe /
+    //                                n_tile_safe clamp downgraded to
+    //                                ALGO 1).
+    //   5. auto_rule_legacy        — fell through to the legacy 3-rule
+    //                                cascade (phase env explicitly =0).
+    const char *reason = nullptr;
+    if (env_algo >= 1 && env_algo <= 5) {
+      reason = (env_algo == use_algo) ? "env_ok" : "env_fallback";
+    } else if (num_threads <= 1 || M.empty()) {
+      reason = "auto_single_thread";
+    } else if (static_cast<int>(M.size()) > kNTilePlanMaxExperts) {
+      reason = "auto_rule0_capacity";
+    } else if (phase_env_active >= 1 && phase_env_active <= 5) {
+      reason = (phase_env_active == use_algo) ? "auto_phase_env"
+                                              : "auto_phase_env_clamp";
+    } else {
+      reason = "auto_rule_legacy";
+    }
+    // CK eligibility hint: a single boolean that combines the
+    // structurally-knowable conditions a level-3 reader can see
+    // without consulting the deeper dispatcher.  The runtime CK
+    // gate (`custom_kernel::prepare_for_call`) adds per-expert
+    // checks not visible here (`transA`, `alpha`, `beta`,
+    // `is_weights_const`, `ldb` min-row-stride, fused-act/bias dtype
+    // matrix).  Surface as a hint, not a guarantee.
+    const bool ck_hint =
+        (use_algo == 3)
+        && get_grp_matmul_custom_kernel()
+        && (params[0].dtypes.src == data_type_t::bf16)
+        && (params[0].dtypes.wei == data_type_t::bf16);
     apilog_info(
-        "[GRP_MATMUL Level2 dispatch] algo=", use_algo,
-        " env=", env_algo,
+        "[GRP_MATMUL.ALGO] chosen=ALGO_", use_algo,
+        " env_algo=", env_algo,
         " reason=", reason,
+        " phase=", (is_decode ? "decode" : "prompt"),
+        " auto_prompt_env=", phase_env_prompt,
+        " auto_decode_env=", phase_env_decode,
         " act=", act_name(fused_act),
-        " act_fused=", act_fused,
+        " act_fused=", (act_fused ? "yes" : "no"),
+        " ck_eligible_hint=", (ck_hint ? "yes" : "no"),
         " num_ops=", static_cast<int>(M.size()),
         " num_threads=", num_threads,
         " max_M=", max_M_v,
         " max_N=", max_N_v,
         " max_K=", max_K_v,
         " wei/expert(MB)=", wei_per_expert_mb,
-        " wide_N=", (max_N_v > max_K_v),
-        " many_experts=", (static_cast<int>(M.size()) >= 16),
-        " caller_tight=", caller_layout_tight);
+        " wide_N=", (max_N_v > max_K_v ? "yes" : "no"),
+        " many_experts=",
+        (static_cast<int>(M.size()) >= 16 ? "yes" : "no"),
+        " caller_tight=", (caller_layout_tight ? "yes" : "no"));
   }
 
   auto set_mode = [&](const char *s) {

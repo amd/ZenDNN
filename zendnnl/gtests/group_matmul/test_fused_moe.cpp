@@ -1096,8 +1096,8 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEActiveMatmul,
 // expert is its own std::vector with a stable .data()) the warm-
 // pack effect is automatic and transparent.  A separate model-
 // level / benchmark verification is needed for the spike-removal
-// behaviour itself (visible via the APILOG `[GRP_MATMUL Level3
-// PACK_PROBE]` line); unit tests just verify that swapping the
+// behaviour itself (visible via the APILOG `[GRP_MATMUL.PREPACK]`
+// line); unit tests just verify that swapping the
 // fired subset across iterations does not change the result.
 //
 // Scenario per test:

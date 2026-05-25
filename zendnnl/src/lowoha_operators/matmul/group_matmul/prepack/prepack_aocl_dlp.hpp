@@ -55,7 +55,7 @@ using zendnnl::common::data_type_t;
 using zendnnl::error_handling::status_t;
 
 /// PROBE counters for the AOCL DLP warm-pack.  Reported in the
-/// fused-MoE entry's `Level3 PACK_PROBE` line so a model-level run
+/// fused-MoE entry's `[GRP_MATMUL.PREPACK]` line so a model-level run
 /// can see at a glance how many entries the helper actually touched
 /// and how many were rejected.  HIT/MISS is intentionally not tracked
 /// here — that would require modifying `aocl_kernel.cpp` to expose

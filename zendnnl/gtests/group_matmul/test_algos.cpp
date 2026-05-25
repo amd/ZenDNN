@@ -1600,6 +1600,14 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
   // prior test would shadow our expectation).  `get_grp_matmul_algo`
   // returns 0 for any non-{1..5} value, i.e. "auto-select".
   AlgoEnvGuard reset_algo(0);
+  // Explicitly disable the phase env (default PROMPT=1 / DECODE=3) so
+  // this suite continues to assert the LEGACY 3-rule cascade outcomes
+  // it was authored for.  Without these overrides, the new default
+  // phase pins would shadow the cascade and break every parametrized
+  // row.  The phase env behaviour is covered by
+  // `TestGroupMatmulAutoPhaseEnv` below.
+  AutoPromptAlgoOverride legacy_prompt(0);
+  AutoDecodeAlgoOverride legacy_decode(0);
 
   const int N_ops = p.num_ops;
 
@@ -1831,6 +1839,14 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, RejectsAlgo3) {
 
   reset_grp_matmul_caches();
   AlgoEnvGuard reset_algo(0);   // auto-select
+  // Force the legacy 3-rule cascade — the test was authored to assert
+  // a Rule-3 decode-class shape ALGO 3 → ALGO 1 transition driven by
+  // the dynamic_quant gate.  With the new phase env defaults the
+  // decode path would resolve via `AUTO_DECODE_ALGO=3` clamped on
+  // !n_tile_safe to ALGO 1 directly, masking the actual gate this
+  // test was written to pin.
+  AutoPromptAlgoOverride legacy_prompt(0);
+  AutoDecodeAlgoOverride legacy_decode(0);
 
   const int N_ops       = 32;
   const int M_val       = 16;     // decode-class (≤ kDecodeMaxM)
@@ -1878,5 +1894,552 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, RejectsAlgo3) {
       << "dynamic_quant=true with otherwise N-tile-viable inputs "
          "should fall back to ALGO 1; got something else (regression "
          "in `check_n_tile_extra` dynamic_quant gate?)";
+}
+
+// ===============================================================================
+// [8d] TestGroupMatmulAutoPhaseEnv — `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO`
+//      and `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` per-phase pinning.
+//
+// New envs let an operator pin a specific ALGO per phase without
+// touching the global `ZENDNNL_GRP_MATMUL_ALGO`.  Defaults:
+// PROMPT=1 (sequential_experts), DECODE=3 (N-tile rounds + CK).
+// Set the env to `0` for the legacy 3-rule cascade.  Tests here
+// pin both branches: explicit env=0 reproduces the legacy cascade,
+// env=1..3 honoured for the matching phase, plus the safety clamp
+// paths (ALGO 3 on !n_tile_safe) and the structural R0 capacity
+// gate that ignores the phase env.
+//
+// All tests use `select_grp_matmul_algo` directly with `ALGO=0` so
+// auto-select fires; the phase env is the only thing that varies.
+// ===============================================================================
+
+namespace {
+
+// Build a minimal valid `(layout, M, N, K, params)` tuple for an
+// auto-select probe.  Row-major BF16, no quant, no packed-B.
+struct AutoProbeShape {
+  std::vector<char>            layout;
+  std::vector<int>             M;
+  std::vector<int>             N;
+  std::vector<int>             K;
+  std::vector<zendnnl::lowoha::matmul::matmul_params> params;
+  int                          num_threads;
+};
+
+static AutoProbeShape build_auto_probe(int M_val, int K_val, int N_val,
+                                       int num_ops, int num_threads) {
+  using namespace zendnnl::lowoha::matmul;
+  AutoProbeShape s;
+  s.layout.assign(num_ops, 'r');
+  s.M.assign(num_ops, M_val);
+  s.N.assign(num_ops, N_val);
+  s.K.assign(num_ops, K_val);
+  s.params.resize(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    s.params[i].dtypes.src           = data_type_t::bf16;
+    s.params[i].dtypes.wei           = data_type_t::bf16;
+    s.params[i].dtypes.dst           = data_type_t::bf16;
+    s.params[i].dtypes.bias          = data_type_t::bf16;
+    s.params[i].mem_format_a         = 'n';
+    s.params[i].mem_format_b         = 'n';
+    s.params[i].dynamic_quant        = false;
+    s.params[i].packing.pack_format_b = 0;
+  }
+  s.num_threads = num_threads;
+  return s;
+}
+
+}  // namespace
+
+// Explicit-zero phase env (escape hatch for legacy behaviour) — sets
+// `AUTO_PROMPT_ALGO=0` and asserts the legacy 3-rule cascade fires.
+// Mixtral-class prompt → Rule 2b (num_ops≤8) → ALGO 1.
+TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyMixtralPrompt) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride explicit_legacy_prompt(0);  // explicit legacy
+  AutoDecodeAlgoOverride explicit_legacy_decode(0);
+
+  // Mixtral-class prompt: 8 experts, K=4096, N=14336, M=256 (prompt).
+  // Legacy Rule 2 → ALGO 1.
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "AUTO_PROMPT_ALGO=0 must defer to legacy rules (Mixtral-8 "
+         "prompt → Rule 2 → ALGO 1)";
+}
+
+// Explicit-zero again, exercising legacy Rule 1 (num_ops ≥ num_threads).
+TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyQwenPrompt) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride explicit_legacy_prompt(0);
+  AutoDecodeAlgoOverride explicit_legacy_decode(0);
+
+  auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/128, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "AUTO_PROMPT_ALGO=0 must defer to legacy rules (Qwen "
+         "num_ops≥num_threads → Rule 1 → ALGO 3)";
+}
+
+// Default (env unset → cached `1` for prompt, `3` for decode).
+// Prompt-class Mixtral shape: phase env defaults to 1 (sequential_
+// experts) — the measured-best out-of-the-box auto policy.  No
+// `Override` set; tests the cached env path's actual default value.
+TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  // No AutoPromptAlgoOverride / AutoDecodeAlgoOverride — exercises
+  // the unset-env default (PROMPT=1, DECODE=3).
+
+  // Mixtral-class prompt — with the new default the phase env picks
+  // ALGO 1 (sequential_experts).  No safety clamps apply (ALGO 1 has
+  // no m_tile_safe / n_tile_safe precondition).
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "AUTO_PROMPT_ALGO default (=1) must route prompt → ALGO 1";
+}
+
+// Default decode: phase env defaults to 3 (N-tile rounds + CK).
+TEST(TestGroupMatmulAutoPhaseEnv, DefaultDecodeRoutesToAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // gpt-oss-style decode, n_tile_safe.
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+                            /*num_ops=*/32, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "AUTO_DECODE_ALGO default (=3) must route decode → ALGO 3";
+}
+
+// AUTO_PROMPT_ALGO=3 forces ALGO 3 on a shape Rule 2 would have
+// sent to ALGO 1 (Mixtral-class prompt) — the override is honoured.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvForcesAlgo3OnMixtralPrompt) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride force_prompt(3);  // ALGO 3 for prompt
+  AutoDecodeAlgoOverride no_decode(0);
+
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "AUTO_PROMPT_ALGO=3 must override Rule 2 (num_ops≤8) for "
+         "the prompt phase";
+}
+
+// AUTO_DECODE_ALGO=1 forces ALGO 1 on a decode shape Rule 3 would
+// have sent to ALGO 3 (gpt-oss-class decode) — phase env honoured
+// for decode phase only.
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvForcesAlgo1OnGptOssDecode) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride no_prompt(0);
+  AutoDecodeAlgoOverride force_decode(1);  // ALGO 1 for decode
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+                            /*num_ops=*/32, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "AUTO_DECODE_ALGO=1 must override Rule 3 (decode → ALGO 3) "
+         "for the decode phase";
+}
+
+// Phase env isolation: setting AUTO_PROMPT_ALGO=3 must NOT affect
+// decode-class calls, and vice versa.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvDoesNotLeakIntoDecode) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride force_prompt(2);  // bogus-for-decode ALGO
+  AutoDecodeAlgoOverride no_decode(0);     // legacy for decode
+
+  // Decode-class (M=16 ≤ kDecodeMaxM), gpt-oss-style, num_ops=32.
+  // Legacy rule 3 → ALGO 3.  Prompt env must not bleed in.
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+                            /*num_ops=*/32, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "Decode-class call must read AUTO_DECODE_ALGO (=0, legacy "
+         "rules → ALGO 3), NOT AUTO_PROMPT_ALGO";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvDoesNotLeakIntoPrompt) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride no_prompt(0);     // legacy for prompt
+  AutoDecodeAlgoOverride force_decode(2);  // bogus-for-prompt ALGO
+
+  // Prompt-class (M=256), Mixtral-style, num_ops=8.
+  // Legacy rule 2 → ALGO 1.  Decode env must not bleed in.
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "Prompt-class call must read AUTO_PROMPT_ALGO (=0, legacy "
+         "rules → ALGO 1), NOT AUTO_DECODE_ALGO";
+}
+
+// Bogus phase env values (>5 or invalid) clamp to the documented
+// default for the phase — matching the env-parse "validate or fall
+// back to default" convention used by every other int env getter in
+// this header.  PROMPT default=1, DECODE default=3.
+TEST(TestGroupMatmulAutoPhaseEnv, BogusValueFallsBackToDefault) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride bogus_prompt(99);   // > 5, clamps to 1 (default)
+  AutoDecodeAlgoOverride bogus_decode(99);   // > 5, clamps to 3 (default)
+
+  // Mixtral-class prompt → phase default 1 (sequential_experts).
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "AUTO_PROMPT_ALGO=99 must clamp to default (=1)";
+
+  // Decode shape with n_tile_safe=true → phase default 3 (N-tile rounds).
+  auto sd = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+                             /*num_ops=*/32, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(sd.layout, sd.M, sd.N, sd.K, sd.params,
+                                   sd.num_threads),
+            3)
+      << "AUTO_DECODE_ALGO=99 must clamp to default (=3)";
+}
+
+// Structural R0 (capacity overflow num_ops > kNTilePlanMaxExperts=256)
+// fires BEFORE the phase env so num_ops=300 → ALGO 5 even with
+// AUTO_PROMPT_ALGO/AUTO_DECODE_ALGO forced to 3.
+TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowIgnoresPhaseEnv) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride force_prompt(3);
+  AutoDecodeAlgoOverride force_decode(3);
+
+  // Decode-class with 300 experts > kNTilePlanMaxExperts(256).
+  // Phase env says 3, but R0 must win → ALGO 5.
+  auto s = build_auto_probe(/*M=*/4, /*K=*/2880, /*N=*/5760,
+                            /*num_ops=*/300, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "R0 capacity gate must override phase env "
+         "(num_ops > kNTilePlanMaxExperts → ALGO 5)";
+}
+
+// ALGO 3 phase env clamps to ALGO 1 when the shape fails
+// `check_n_tile_extra` (e.g., dynamic_quant=true).  Same correctness
+// contract the global ALGO=3 path has, applied to the auto path.
+// ===============================================================================
+// [8e] TestGroupMatmulHybridMSplit — Option-A M-weighted water-fill
+//      heavy distribution under
+//      `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`.
+//
+// Targets the new path inside
+// `apply_round_pick(RoundPick::Single, use_custom=true)` that fires
+// when the env (or test override) is positive AND the M distribution
+// has both heavy and light experts.  Verified via the existing
+// `PhaseBSnapshot` capture hook so the test is a true white-box
+// observation of the planner's per-expert thread distribution.
+//
+// Two cases:
+//
+//   1. `OffByDefaultRunsPhaseB` — `threshold=0` (default) MUST leave
+//      the existing Phase B remainder behaviour intact.  Sanity
+//      check that the hybrid gate doesn't fire when env is unset.
+//
+//   2. `OnDistributesHeavyByM` — `threshold=100` with a bimodal M
+//      vector produces an asymmetric allocation: every active light
+//      expert gets exactly 1 thread, the heavy experts share the
+//      remaining budget proportional to M (heavier gets ≥ lighter).
+// ===============================================================================
+
+namespace {
+
+// Shared shape builder for Hybrid M-split tests.  Uses uniform
+// row-major BF16 inputs and the same N=1024 / K=64 dims as the
+// existing PhaseB test fixtures.  M vector and num_threads are
+// caller-supplied.
+struct HybridProbeShape {
+  int num_ops;
+  int num_threads;
+  int N;
+  int K;
+  std::vector<int> Ms;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> src;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> wei;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> dst;
+  std::vector<const void *> srcs;
+  std::vector<const void *> weis;
+  std::vector<const void *> biases;
+  std::vector<void *> dsts;
+  moe_test_utils::GemmVecs gv;
+  std::vector<zendnnl::lowoha::matmul::matmul_params> params;
+};
+
+static HybridProbeShape build_hybrid_probe(int num_threads,
+                                           const std::vector<int> &Ms,
+                                           int N = 1024, int K = 64) {
+  using namespace moe_test_utils;
+  using zendnnl::common::bfloat16_t;
+  using zendnnl::common::data_type_t;
+  HybridProbeShape s;
+  s.num_threads = num_threads;
+  s.num_ops     = static_cast<int>(Ms.size());
+  s.N           = N;
+  s.K           = K;
+  s.Ms          = Ms;
+  s.src.resize(s.num_ops);
+  s.wei.resize(s.num_ops);
+  s.dst.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.src[e].resize(static_cast<size_t>(Ms[e]) * K);
+    s.wei[e].resize(static_cast<size_t>(K) * N);
+    s.dst[e].assign(static_cast<size_t>(Ms[e]) * N, bfloat16_t(0.0f));
+    fill_src(s.src[e],  e, 0.02f);
+    fill_wei1(s.wei[e], e, 0.005f);
+  }
+  s.srcs.resize(s.num_ops);
+  s.weis.resize(s.num_ops);
+  s.biases.assign(s.num_ops, nullptr);
+  s.dsts.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.srcs[e] = s.src[e].data();
+    s.weis[e] = s.wei[e].data();
+    s.dsts[e] = s.dst[e].data();
+  }
+  s.gv = GemmVecs::uniform(s.num_ops, /*M=*/0, N, K,
+                           /*alpha=*/1.0f, /*beta=*/0.0f,
+                           /*wc=*/true, /*tA=*/false, /*tB=*/false);
+  s.gv.Ms = Ms;
+  s.params = make_uniform_params(s.num_ops, data_type_t::bf16);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.params[e].num_threads = num_threads;
+  }
+  return s;
+}
+
+}  // namespace
+
+// Hybrid OFF (default) → existing Phase B distribution fires
+// (per-expert allocation is `base` or `base+1`, not the water-fill
+// product).  Sanity check that the new gate doesn't accidentally
+// fire when the threshold env is 0.
+TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::GroupNTileStrategy;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  { #pragma omp master actual_team_size = omp_get_num_threads(); }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride           ck_on(true);
+  NRoundsModeOverride            single_round(1);
+  CustomKernelNTileOverride      default_n_tile(0);
+  NTileStrategyOverride          auto_strategy(0);
+  HybridMHeavyThresholdOverride  hybrid_off(0);   // explicit OFF
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  // 14 active experts, decode-class M (≤ 32) so we land on the
+  // CK Single round (matches the existing PhaseB heaviest-first
+  // test shape).
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4});
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  EXPECT_TRUE(snap.per_expert_remainder);
+  // Phase B keeps `n_thr_fixed = base` (=2 here); the hybrid path
+  // sets it to 0.  Asserting non-zero pins the Phase-B branch.
+  EXPECT_NE(snap.n_thr_fixed, 0)
+      << "Hybrid gate must NOT fire when threshold env is 0; "
+         "expected Phase B's `n_thr_fixed=base`, got 0 (hybrid).";
+  // Every allocation must be `base` (=2) or `base + 1` (=3).
+  for (int e = 0; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    EXPECT_TRUE(n == 2 || n == 3)
+        << "expert e=" << e << " M=" << s.Ms[e]
+        << " got n_thr=" << n << " (Phase B should produce 2 or 3).";
+  }
+}
+
+// Hybrid ON → water-fill distribution: heavier-M experts receive
+// strictly ≥ threads of lighter heavies; every active light
+// expert gets exactly 1 thread; `n_thr_fixed == 0` to tell the
+// executor to use prefix-sum mapping; `sum(stable_n_thr) <=
+// num_threads` (water-fill may leave a tail of idle threads when
+// every heavy hits its per-expert cap).
+TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::GroupNTileStrategy;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  { #pragma omp master actual_team_size = omp_get_num_threads(); }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride           ck_on(true);
+  NRoundsModeOverride            single_round(1);
+  CustomKernelNTileOverride      default_n_tile(0);
+  NTileStrategyOverride          auto_strategy(0);
+  HybridMHeavyThresholdOverride  hybrid_on(20);   // M > 20 = heavy
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  // 14 experts, with M chosen so M=4 and M=6 are LIGHT (≤ 20) and
+  // M ∈ {30, 25, 24} are HEAVY (> 20).  3 heavy + 11 light.
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{30, 25, 24, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4});
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  EXPECT_TRUE(snap.per_expert_remainder)
+      << "Hybrid path MUST set per_expert_remainder=true so the "
+         "executor reads stable_n_thr_per_expert[].";
+  EXPECT_EQ(snap.n_thr_fixed, 0)
+      << "Hybrid path MUST set n_thr_fixed=0 so the executor takes "
+         "the prefix-sum scan instead of the uniform `tid/tpe` mapping.";
+
+  // Per-expert assertions.  Experts e=0..2 are heavy (M = 30, 25,
+  // 24); e=3..13 are light (M = 4).  Light experts must each
+  // receive exactly 1 thread.  Heavies must receive ≥ 1, AND the
+  // M-descending water-fill ordering implies n_thr[e=0] ≥ n_thr[e=1]
+  // ≥ n_thr[e=2].
+  const int n0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+  const int n1 = static_cast<int>(snap.stable_n_thr_per_expert[1]);
+  const int n2 = static_cast<int>(snap.stable_n_thr_per_expert[2]);
+  EXPECT_GE(n0, 1);
+  EXPECT_GE(n0, n1)
+      << "Heavier expert e=0 (M=30) must receive >= threads as e=1 (M=25).";
+  EXPECT_GE(n1, n2)
+      << "Heavier expert e=1 (M=25) must receive >= threads as e=2 (M=24).";
+  // At least one heavy must receive more than the per-light
+  // allocation (= 1), otherwise the path collapses to "everyone
+  // gets 1 thread" which is no better than the legacy single-round
+  // behaviour pre-Phase-B.
+  EXPECT_GT(n0 + n1 + n2, 3)
+      << "Heavies should collectively absorb more than 1 thread each.";
+  for (int e = 3; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    EXPECT_EQ(n, 1)
+        << "Light expert e=" << e << " (M=" << s.Ms[e]
+        << ") must receive exactly 1 thread under hybrid M-split.";
+  }
+  // Total must NOT exceed num_threads (water-fill respects the
+  // overall thread budget).  Equality is the common case; strictly
+  // less can happen if every heavy hits its per-expert cap.
+  int sum = 0;
+  for (int e = 0; e < s.num_ops; ++e) {
+    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+  }
+  EXPECT_LE(sum, 32)
+      << "Hybrid distribution must not over-subscribe the team; "
+         "sum(stable_n_thr_per_expert) = " << sum;
+  EXPECT_GT(sum, s.num_ops - 3 /*lights*/ + 3 /*heavies*/)
+      << "Hybrid distribution should give heavies > 1 thread each; "
+         "sum = " << sum << " is suspiciously low.";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride force_prompt(3);
+  AutoDecodeAlgoOverride no_decode(0);
+
+  // Mixtral-class prompt, with dynamic_quant=true → n_tile_safe=false.
+  // Phase env asks for ALGO 3, but the safety clamp falls to ALGO 1.
+  auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  for (auto &p : s.params) {
+    p.dynamic_quant                  = true;
+    p.quant_params.src_scale.dims    = {256, 1};
+    p.quant_params.src_scale.dt      = data_type_t::f32;
+  }
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "AUTO_PROMPT_ALGO=3 with !n_tile_safe must clamp to ALGO 1 "
+         "(same correctness contract as global ALGO=3 path)";
 }
 

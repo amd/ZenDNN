@@ -217,8 +217,15 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
     return true;
   }
 
+  // The three per-call cache-event lines below are demoted to
+  // apilog_verbose: they fire per-expert from inside the ALGO 3 /
+  // ALGO 1 OMP region (when called via group_matmul) and can amplify
+  // to thousands of lines per benchmark iteration.  Info level
+  // (`ZENDNNL_API_LOG_LEVEL=3`) keeps the consolidated
+  // [GRP_MATMUL.PREPACK] / [GRP_MATMUL.PROBE] summary lines instead;
+  // verbose level (=4) brings the per-event detail back.
   if (weight_cache_type == 0) {
-    apilog_info("AOCL reorder weights (WEIGHT_CACHE_DISABLE)");
+    apilog_verbose("[AOCL.reorder] WEIGHT_CACHE_DISABLE — out-of-place reorder");
     size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                    k, n,nullptr);
     size_t alignment      = 64;
@@ -233,7 +240,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
-      apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_verbose("[AOCL.reorder MISS] weight cache miss — packing weights");
       size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B', k, n,
                                      nullptr);
       size_t alignment      = 64;
@@ -246,7 +253,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
       matmul_weight_cache.add(key, reorder_weights);
     }
     else {
-      apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_verbose("[AOCL.reorder HIT] weight cache hit — reusing cached pack");
       reorder_weights = matmul_weight_cache.get(key);
     }
   }
@@ -286,8 +293,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
   }
 
   if (weight_cache_type == 0) {
-    apilog_info("AOCL grouped symmetric-quant reorder for s8 weights "
-                "(WEIGHT_CACHE_DISABLE); GEMM = s8s8_sym_quant");
+    apilog_verbose("[AOCL.reorder symquant] WEIGHT_CACHE_DISABLE — "
+                   "out-of-place reorder for s8 weights (GEMM = s8s8_sym_quant)");
     size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                    k, n, symq_meta, nullptr);
     size_t alignment    = 64;
@@ -305,7 +312,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
-      apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_verbose("[AOCL.reorder symquant MISS] weight cache miss — packing");
       size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                      k, n, symq_meta, nullptr);
       size_t alignment    = 64;
@@ -317,7 +324,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
       matmul_weight_cache.add(key, reorder_weights);
     }
     else {
-      apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_verbose("[AOCL.reorder symquant HIT] weight cache hit — "
+                     "reusing cached pack");
       reorder_weights = matmul_weight_cache.get(key);
     }
   }
@@ -349,8 +357,8 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
   auto found_obj = matmul_weight_cache_woq.find_key(key);
 
   if (!is_weights_const || !found_obj) {
-    apilog_info("WOQ Simulated AOCL reorder weights (weight_cache_type=",
-                weight_cache_type, ")");
+    apilog_verbose("[AOCL.reorder WOQ MISS] simulated WOQ reorder "
+                   "(weight_cache_type=", weight_cache_type, ")");
     size_t alignment = 64;
     size_t cvt_weights_size = (sizeof(bfloat16_t)*k*n + alignment - 1) & ~
                               (alignment - 1);
@@ -378,7 +386,8 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
     }
   }
   else {
-    apilog_info("Read WOQ Simulated AOCL cached weights");
+    apilog_verbose("[AOCL.reorder WOQ HIT] simulated WOQ cache hit — "
+                   "reusing cached pack");
     reorder_weights = matmul_weight_cache_woq.get(key);
   }
 }

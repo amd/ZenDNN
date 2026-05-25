@@ -80,7 +80,8 @@ status_t warm_pack_all_custom_kernel_experts(
     const std::vector<bool>         &transB,
     const std::vector<bool>         &is_weights_const,
     int                              total_count,
-    PackProbeStats                  &stats) {
+    PackProbeStats                  &stats,
+    bool                             interleave_split_halves) {
 
   if (!ck::dispatch_supported() || total_count <= 0)
     return status_t::success;
@@ -134,6 +135,7 @@ status_t warm_pack_all_custom_kernel_experts(
     status_t pst = ck::get_or_pack_weight_bf16(
         static_cast<const bfloat16_t *>(weight[i]),
         K[i], N[i], ldb[i], pack_nr, transB[i],
+        /*interleave_split_halves=*/interleave_split_halves,
         &packed_ignored, &was_hit);
 
     if (pst == status_t::success) {

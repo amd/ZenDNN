@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -153,12 +154,163 @@ inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
 // Env-driven feature flags.
 // ──────────────────────────────────────────────────────────────────────
 
+/// Parse `e` as a base-10 integer with strict validation.
+///
+/// Returns `true` only when the string is non-empty, parses to a full
+/// numeric value (no trailing junk like `"1abc"` or `"abc"`), did not
+/// overflow `long`, and fits in `int`.  On success, writes the parsed
+/// value into `out`.  On any failure mode `out` is left untouched and
+/// the function returns `false` — callers should then fall back to
+/// the documented default for the env knob.
+///
+/// Rationale: the legacy `std::atoi(e)` pattern silently returns `0`
+/// for non-numeric inputs (e.g. `"abc"` → 0).  For env knobs whose
+/// documented default is NOT `0` (e.g. N_ORDER default 3, N_ROUNDS
+/// default 1, N_TILE_STRATEGY default 2) `atoi` would coincidentally
+/// pick mode 0 — a valid value but NOT the documented default the
+/// user intended when they typo'd the env value.  Strict validation
+/// makes "invalid env value → fall back to documented default" the
+/// observable behaviour.
+inline bool parse_env_int_strict(const char *e, int &out) {
+  if (e == nullptr || e[0] == '\0') return false;
+  char *end = nullptr;
+  errno = 0;
+  const long v = std::strtol(e, &end, 10);
+  if (end == e) return false;        // no digits consumed
+  if (*end != '\0') return false;    // trailing junk (e.g. "1abc")
+  if (errno == ERANGE) return false; // overflowed long
+  if (v < static_cast<long>(std::numeric_limits<int>::min())
+      || v > static_cast<long>(std::numeric_limits<int>::max()))
+    return false;
+  out = static_cast<int>(v);
+  return true;
+}
+
 /// ZENDNNL_GRP_MATMUL_ALGO = "1".."5" force a specific ALGO, "0"/unset
 /// = auto-select.  Intentionally NOT cached — gtests toggle mid-process
-/// via AlgoEnvGuard (test_group_matmul.cpp).
+/// via AlgoEnvGuard (test_group_matmul.cpp).  Strict single-digit
+/// validation: only the literal characters `'1'..'5'` (as the FIRST
+/// byte, with no further bytes implied here) are honoured.  This is
+/// already strict — `"5xyz"` returns 5 because we only inspect the
+/// first byte, but no current ZenDNN deployment passes such values
+/// and there is no doc-promised behaviour to disagree with.  Leave
+/// as-is; documented behaviour matches code.
 inline int get_grp_matmul_algo() {
   const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
   return (env && env[0] >= '1' && env[0] <= '5') ? (env[0] - '0') : 0;
+}
+
+// ── Auto-select per-phase overrides (consulted only under ALGO=0) ─────
+//
+// The auto-selector (`auto_select_algo` in `group_matmul_parallel.cpp`)
+// classifies every call as either DECODE (`max_M ≤ kDecodeMaxM=32`) or
+// PROMPT (otherwise) and picks an ALGO via these two phase envs.  When
+// the active phase env is `0`, the legacy 3-rule cascade fires instead
+// (Rule 1: num_ops ≥ num_threads → ALGO 3; Rule 2: num_ops ≤ 8 →
+// ALGO 1; Rule 3: prompt → ALGO 1, decode → ALGO 3).
+//
+// IMPORTANT: these envs are ONLY consulted under `ZENDNNL_GRP_MATMUL_
+// ALGO=0` (auto).  When the global ALGO env is set to 1..5 the user
+// has explicitly pinned that algo for every call regardless of phase;
+// the phase envs are never read in that path (see
+// `select_grp_matmul_algo` in `group_matmul_parallel.cpp`).
+//
+// Defaults — chosen to give a sensible out-of-the-box auto policy
+// that captures the measured-best path per phase across the MoE
+// envelope we benchmark:
+//
+//   AUTO_PROMPT_ALGO default = 1 (sequential_experts).
+//     E2E measurement on the Qwen3-30B-A3B prompt path showed that
+//     forcing ALGO 3 (N-tile rounds + CK) with the post-`N_TILE_
+//     STRATEGY` fix landed every call on the intended fused-CK
+//     route, but the call wall time (avg ~117 ms / call) was
+//     wall-time-equivalent to legacy Sequential AOCL DLP (~122 ms /
+//     call) because the ManyExperts plan's `n_thr_fixed=1` per
+//     expert is bottlenecked by the heaviest-M expert's single
+//     thread on skewed-M prompts (max_M / mean_M_active ≈ 11×
+//     skew on Qwen3 prompt).  Until the planner gains M-weighted
+//     multi-thread-per-expert allocation, ALGO 1's full-team
+//     AOCL DLP per expert delivers the same prompt wall at lower
+//     code surface — and ALGO 1 is what auto-select's legacy
+//     Rule 3 would have picked for this shape (`num_ops <
+//     num_threads ∧ prompt`).  Set `AUTO_PROMPT_ALGO=3` to
+//     opt-in to the ALGO 3 prompt path (e.g. for Mixtral-class
+//     with `num_ops ≤ 8` + huge N where M-skew bottleneck is
+//     smaller).
+//
+//   AUTO_DECODE_ALGO default = 3 (flat_n_tile / N-tile rounds path).
+//     ALGO 3 + CK rounds is the measured decode winner across every
+//     benchmarked MoE workload (Qwen3-30B-A3B, GPT-OSS, Mixtral
+//     8x7B).  Safety clamp: when `!n_tile_safe` the auto path falls
+//     back to ALGO 1, matching the global `ALGO=3` env path.
+//
+// Set the env to `0` explicitly to restore the legacy 3-rule cascade
+// for the matching phase (escape hatch for A/B regression testing
+// against pre-default-flip behaviour).  Set to a specific algo
+// (1..5) to pin that phase to a single ALGO for tuning.
+//
+// Structural gates that ALWAYS fire (independent of phase env):
+//   * R0 capacity (`num_ops > kNTilePlanMaxExperts=256`) → ALGO 5.
+//     Phase env cannot override the N-tile planner's capacity
+//     ceiling.
+//
+// Telemetry: the `[GRP_MATMUL.ALGO]` apilog line surfaces `phase=`
+// (prompt/decode) and `auto_prompt_env=` / `auto_decode_env=` (the
+// active value of each phase env, post-override) so operators can
+// confirm in one grep which routing decision fired.
+//
+// Mid-process env changes have no effect (cached static const); tests
+// override via the atomics below.
+
+// ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO = { 0, 1..5 } — cached, default 1.
+//   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
+//   the call classifies as PROMPT (`max_M > kDecodeMaxM`).  Value 0
+//   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
+//   the prompt phase (with the same m_tile_safe / n_tile_safe safety
+//   clamps the global `ALGO` env path applies).  Default 1
+//   (sequential_experts) is the measured-best out-of-the-box prompt
+//   choice — see the doc-block on this group of envs for the
+//   rationale.
+inline std::atomic<int> &test_api_auto_prompt_algo_override();
+inline int get_grp_matmul_auto_prompt_algo() {
+  // Strict env parsing — non-numeric input falls back to the documented
+  // default 1 (sequential_experts).  Bogus values (< 0 OR > 5) also
+  // clamp to the default so a typo cannot accidentally pin an
+  // unintended algo.
+  constexpr int kDefault = 1;
+  const int ovr = test_api_auto_prompt_algo_override().load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 0 && parsed <= 5) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO = { 0, 1..5 } — cached, default 3.
+//   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
+//   the call classifies as DECODE (`max_M ≤ kDecodeMaxM`).  Value 0
+//   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
+//   the decode phase (with the same safety clamps as the prompt
+//   path).  Default 3 (N-tile rounds + CK) is the new out-of-the-
+//   box decode choice — the measured decode winner across the MoE
+//   envelope we benchmark.
+inline std::atomic<int> &test_api_auto_decode_algo_override();
+inline int get_grp_matmul_auto_decode_algo() {
+  constexpr int kDefault = 3;
+  const int ovr = test_api_auto_decode_algo_override().load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 0 && parsed <= 5) ? parsed : kDefault;
+  }();
+  return v;
 }
 
 // ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT = { "0", "1" } — cached, default ON.
@@ -178,8 +330,35 @@ inline bool get_grp_n_tile_fused_act() {
 
 /// True when ALGO 3 can fuse `act` into the per-thread epilogue.
 /// Extend here when new activation kinds gain epilogue support.
-inline bool a3_can_fuse_act(grp_matmul_gated_act_t act) {
-  return act == grp_matmul_gated_act_t::swiglu_oai_mul;
+///
+/// Currently supports:
+///   * `swiglu_oai_mul` — interleaved-input path (caller-side
+///     interleaved W13).  Both the CK in-register epilogue
+///     (`swiglu_oai_store_pair`) and the standard-backend
+///     wide-arena helper (`apply_swiglu_oai_tile_rows`) handle it,
+///     so the fused path is supported regardless of `use_custom_kernel`.
+///   * `silu_and_mul` — split-halves input (canonical W13).  Only
+///     the CK in-register epilogue (`silu_and_mul_store_pair`)
+///     handles it today; the standard backend's
+///     `apply_swiglu_oai_tile_rows` is swiglu-only and has no silu
+///     sibling, so this kind is fusible only when CK is engaged.
+///   * `gelu_and_mul` — split-halves input (canonical W13).  Same
+///     story as silu: only the CK in-register epilogue
+///     (`gelu_and_mul_store_pair`) implements the fused form, with
+///     a `gelu_tanh` polynomial approximation that matches the
+///     reference's `gelu_erf` to within BF16 tolerance.  The
+///     standard backend's wide-arena helper is swiglu-only, so
+///     gelu fused requires `use_custom_kernel=true`.
+///
+/// Standard-backend silu / gelu tile helpers are a planned follow-up;
+/// until then, callers with CK off fall back to the separate-pass
+/// path (`act_fused = false`) by way of this gate returning `false`.
+inline bool a3_can_fuse_act(grp_matmul_gated_act_t act,
+                            bool use_custom_kernel) {
+  if (act == grp_matmul_gated_act_t::swiglu_oai_mul) return true;
+  if (act == grp_matmul_gated_act_t::silu_and_mul) return use_custom_kernel;
+  if (act == grp_matmul_gated_act_t::gelu_and_mul) return use_custom_kernel;
+  return false;
 }
 
 // ZENDNNL_GRP_MATMUL_N_ROUNDS = { 0, 1, 2, 3 } — cached, default 1.
@@ -243,6 +422,38 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override{-1};
 // production env path.
 inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
 
+// Sentinel `-1` = no override.  Settable values: 0 (explicit legacy
+// 3-rule cascade — escape hatch from the new default phase pin),
+// 1..5 (force the matching ALGO for the phase matching the override's
+// name).  Override semantics in `get_grp_matmul_auto_prompt_algo()` /
+// `get_grp_matmul_auto_decode_algo()`:
+//   * any negative value (including the `-1` sentinel) → fall
+//     through to the cached env path (which itself applies the
+//     documented defaults — 1 for prompt, 3 for decode).
+//   * 0          — explicit legacy 3-rule cascade selection.
+//                  Production deployments that want pre-default-flip
+//                  behaviour use this (or the env equivalent
+//                  `AUTO_*_ALGO=0`).
+//   * 1..5       — adopted as the override value.
+//   * > 5        — clamped to the documented default (1 for prompt,
+//                  3 for decode), matching the env-parse validation
+//                  behaviour.
+inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override{-1};
+inline std::atomic<int> s_grp_matmul_auto_decode_algo_override{-1};
+
+// Sentinel `-1` = no override; falls through to the cached env path
+// (which itself applies the documented default 0 = OFF).  Settable
+// values: 0 (OFF — Phase B remainder distribution unchanged), positive
+// int (ON — heavy / light split at this M threshold).  Override
+// semantics in `get_grp_matmul_hybrid_m_heavy_threshold()`:
+//   * any negative value (including the `-1` sentinel) → fall
+//     through to the cached env path.
+//   * 0          — explicit OFF (same as unset env).
+//   * > 0        — adopted as the threshold value (heavy iff
+//                  `M[e] > value`).
+//   * Non-positive values from the env path → cached default 0 (OFF).
+inline std::atomic<int> s_grp_matmul_hybrid_m_heavy_threshold_override{-1};
+
 // Sentinel `-1` = no override.  Settable values: 0 (per-expert
 // subtile sizing OFF — use one m_max-sized `subtile_cols` for every
 // active expert), 1 (ON — populate `subtile_cols_per_expert[e]`
@@ -284,40 +495,58 @@ inline std::atomic<bool>         s_capture_gemm_mode{false};
 inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode{nullptr};
 }  // namespace test_api
 
+// Out-of-namespace accessors for the AUTO_*_ALGO override atomics.
+// Forward-declared above the getters (which are defined inline near
+// the top of this header, above the `test_api` namespace block) so
+// the getter doesn't depend on header-ordering between its own
+// definition and the override atomic.  Same single-relaxed-load
+// pattern as the other `test_api::*` consumers.
+inline std::atomic<int> &test_api_auto_prompt_algo_override() {
+  return test_api::s_grp_matmul_auto_prompt_algo_override;
+}
+inline std::atomic<int> &test_api_auto_decode_algo_override() {
+  return test_api::s_grp_matmul_auto_decode_algo_override;
+}
+
 inline int get_grp_n_rounds_mode() {
   const int ovr = test_api::s_grp_n_rounds_mode_override.load(
       std::memory_order_relaxed);
   if (ovr >= 0) return ovr;
+  // Default: 1 (single-round).  Strict env parsing — anything that
+  // is not exactly `"0"`, `"1"`, `"2"`, or `"3"` falls back to the
+  // documented default (NOT silently to mode 0 via the legacy
+  // atoi-returns-0-for-junk behaviour).  See `parse_env_int_strict`.
+  constexpr int kDefault = 1;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ROUNDS");
-    if (e == nullptr || e[0] == '\0') return 1;
-    const int parsed = std::atoi(e);
-    if (parsed == 1) return 1;
-    if (parsed == 2) return 2;
-    if (parsed == 3) return 3;
-    return 0;
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 0 && parsed <= 3) ? parsed : kDefault;
   }();
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2 } — cached, default 0.
+// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2 } — cached, default 2 (rounds).
 //
 // Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
 // controls whether the planner's auto-mirror perf gate fires.
 // Three values with distinct semantics:
 //
-//     0 = auto (default).  Honour the planner's auto-mirror gate
-//         (route to Sequential when `auto_select_algo` would have
-//         picked ALGO 1 for this shape — Mixtral-class with
+//     0 = auto (opt-in heuristic).  Honour the planner's auto-mirror
+//         gate (route to Sequential when `auto_select_algo` would
+//         have picked ALGO 1 for this shape — Mixtral-class with
 //         num_ops ≤ 8, or prompt-class with num_ops < num_threads).
 //         If the call survives auto-mirror, try DecodeD WITH its
 //         perf-eligibility heuristic (decode-class max_M ≤ 32,
 //         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
 //         max_N / decode_n_tile ≤ team_size_est); fall through to
 //         Rounds (FewExperts / ManyExperts) when the heuristic
-//         refuses.  This is the production default and matches what
-//         env=0 (ALGO 0 auto-pick) does on shapes auto-select
-//         routes to ALGO 3.
+//         refuses.  Retained as an opt-in for shapes where DecodeD
+//         was empirically the better path; no longer the default
+//         because DecodeD never engaged on the production workloads
+//         (GPT-OSS-20B/120B, Qwen3-30B-A3B) — its eligibility gate
+//         consistently refused — so the auto branch reduced to
+//         "Rounds with extra precondition checks" in practice.
 //
 //     1 = decode (FORCE).  SKIP the auto-mirror gate AND skip the
 //         perf-eligibility heuristic — run DecodeD on every shape
@@ -333,46 +562,94 @@ inline int get_grp_n_rounds_mode() {
 //         describing the resulting allocation, OR a fallback line
 //         if num_threads < num_ops forces a Rounds fall-through.
 //
-//     2 = rounds (FORCE).  SKIP the auto-mirror gate (same as 1).
-//         Skip the DecodeD attempt entirely; always run the Rounds
-//         path (FewExperts / ManyExperts).  Useful for benchmarking
-//         Rounds parity vs DecodeD on decode-class shapes, or for
-//         working around a hypothetical DecodeD-specific regression
-//         without rebuilding.
+//     2 = rounds (DEFAULT, FORCE).  SKIP the auto-mirror gate AND
+//         the viability perf heuristic (same as 1) — when the caller
+//         (or ALGO 0 auto-pick) routed to ALGO 3 we mean to run
+//         N-tile, not silently bounce back to Sequential on a perf
+//         preference.  Skip the DecodeD attempt entirely; always run
+//         the Rounds path (FewExperts / ManyExperts).  This is the
+//         production envelope: it gives deterministic ALGO 3 = "true
+//         N-tile with rounds" behaviour across all decode and prompt
+//         shapes that survive the structural gates, which is the
+//         path validated by every in-tree MoE benchmark and gtest.
 //
-// STRUCTURAL gates (`!ntile_viable`, R3 capacity-overflow,
-// F3 narrow-N alignment escape) ALWAYS fire regardless of the knob
-// — those are memory safety / kernel correctness, not perf
-// preference.  When any of those routes the call to Sequential, the
-// knob is irrelevant.  See `plan_group_n_tile` in
-// `group_matmul_n_tile.cpp` for the precedence diagram.
+// What survives `n_tile_strategy = {1, 2}` (genuinely STRUCTURAL —
+// memory safety / kernel correctness, not perf):
+//
+//   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
+//     = 256`).  Stack-array bound on the planner; demoting to
+//     Sequential is the only safe recourse.  Auto-select rule 0 also
+//     captures this upstream by routing to ALGO 5.
+//
+//   * F3 narrow-N escape — only reachable when the strict-stable
+//     AOCL path runs (`CUSTOM_KERNEL=0 && AOCL_STABLE_NTILE=1`).
+//     When `stable * nr_align > max_N`, `aligned_n_split` cannot
+//     produce stable aligned partitions and the AOCL kernel's
+//     nr-alignment contract would be violated.  Sequential bypasses
+//     tile-level keys entirely.  Not reachable under the production
+//     default `CUSTOM_KERNEL=1`.
+//
+//   * tight split-halves CK refusal — silu_and_mul / gelu_and_mul +
+//     tight caller (`ldc < N`) when the custom kernel refuses
+//     (typically silu/gelu + bias).  Handled post-plan in
+//     `flat_n_tile`; Sequential allocates the wide [M, N] scratch +
+//     `apply_gated_act_inplace` + tight memcpy that the tight
+//     swiglu-only fast path cannot.
+//
+// What is GATED behind `!force_ntile` (auto-mode-only perf
+// heuristics — honoured under env=0, ignored under env={1,2}):
+//
+//   * `auto_mirror` — replays auto-select's ALGO 1 preference.
+//     Lets `ALGO=3` behave like `ALGO=0` on shapes the auto-picker
+//     would have routed to ALGO 1, with a distinct gemm_mode label
+//     for telemetry.
+//
+//   * `!ntile_viable` — heuristic "N too thin for a useful per-
+//     thread split".  Under explicit env=1/2 the user accepts
+//     whatever cost a thin N gives them — we run N-tile and emit a
+//     `[GRP_MATMUL.PLAN.HINT]` line so the env-honoured-over-
+//     heuristic decision is visible in the L3 trail.
+//
+// See `plan_group_n_tile` in `group_matmul_n_tile.cpp` for the
+// authoritative precedence diagram and emission sites.
 //
 // Mid-process env changes have no effect (cached static const);
 // tests should use `s_grp_n_tile_strategy_override` via the RAII
 // helper `NTileStrategyOverride` in `gtests/group_matmul/
 // moe_test_utils.hpp` to flip it deterministically inside the same
-// process.
+// process.  Existing tests that pin the planner to its heuristic
+// path use `NTileStrategyOverride(0)` and continue to work — only
+// the unset / invalid default changed.
 //
 // Validation paths differ slightly between the env and the override:
-//   * Env path  — invalid values (< 0 OR > 2) parse to 0 (auto),
-//                 matching the env-parse "validate or treat as
-//                 unset" convention used by the other knobs in this
-//                 header.
+//   * Env path  — invalid values (< 0 OR > 2) parse to 2 (rounds),
+//                 matching the "unset → safe default" convention used
+//                 by the other knobs in this header.  Note this
+//                 differs from the historical default of 0 (auto)
+//                 documented in older notes.
 //   * Override path — `-1` is the sentinel for "no override" and
 //                 falls through to the cached env path; any other
 //                 negative value also falls through (so a bogus
 //                 negative typo cannot accidentally pin a strategy).
-//                 Non-negative override values > 2 clamp to 0
-//                 (auto), mirroring the env path on the upper end.
+//                 Non-negative override values > 2 clamp to 2
+//                 (rounds), mirroring the env path on the upper end.
 inline int get_grp_n_tile_strategy() {
+  // Unset / invalid → 2 (rounds): production default; ALGO 3 always
+  // runs FewExperts / ManyExperts when the structural gates pass.
+  // See the doc-block above for the rationale and the precedence
+  // diagram in `plan_group_n_tile`.  Strict env parsing — non-
+  // numeric input (e.g. `"abc"`) falls back to the documented
+  // default 2, NOT silently to mode 0 via legacy atoi-returns-0
+  // behaviour.  See `parse_env_int_strict`.
+  constexpr int kDefault = 2;
   const int ovr = test_api::s_grp_n_tile_strategy_override.load(
       std::memory_order_relaxed);
-  if (ovr >= 0) return (ovr <= 2) ? ovr : 0;
+  if (ovr >= 0) return (ovr <= 2) ? ovr : kDefault;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY");
-    if (e == nullptr || e[0] == '\0') return 0;
-    const int parsed = std::atoi(e);
-    return (parsed >= 0 && parsed <= 2) ? parsed : 0;
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 0 && parsed <= 2) ? parsed : kDefault;
   }();
   return v;
 }
@@ -391,44 +668,63 @@ inline int get_grp_n_tile_strategy() {
 // getter when needed.
 inline constexpr bool kDecodeTileAbOn = true;
 
-// ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 1 (ascending).
+// ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 3 (pair-balanced).
 //   Permutation of experts walked by ALGO 3 FewExperts/ManyExperts.
 //     0 = auto: shape-aware picker (auto_pick_n_order); resolved
-//         sub-mode is logged in [Level3 flat_n_tile] APILOG.
-//     1 = ascending  — by M, lightest first.  CURRENT DEFAULT:
-//         pins the per-expert thread-id mapping to a stable
-//         shape-independent order so the AOCL DLP per-tile cache
-//         keys stay consistent across decode iterations.  Auto-mode
-//         (was the default until this commit) resolves to mode 3
-//         (pair-balanced) for most num_ops bands and mode 0 (walk-
-//         input) in the 19..23 band — the bouncing between modes
-//         can shuffle thread-id → expert assignment across calls
-//         that share an OMP team, causing per-tile cache misses
-//         when the scheduler rebinds threads to different experts.
-//         Ascending is shape-deterministic regardless of num_ops.
-//         Under the default `N_ROUNDS=1` (Single-round) wall time
-//         is dominated by max(M_e) and not the round permutation,
-//         so the conventional "descending wins on round-based
-//         schedulers" argument does not apply.
+//         sub-mode is logged in `[GRP_MATMUL.PLAN]` APILOG.
+//     1 = ascending  — by M, lightest first.  Was the previous
+//         default for AOCL DLP cache-key stability (n_thr_fixed
+//         schedule keeps thread-id → expert mapping shape-invariant
+//         when permutation is shape-invariant too).  That rationale
+//         no longer dominates: under `CK=1` (production default)
+//         the per-tile cache is shape-keyed in the CK pack arena,
+//         not thread-id-keyed, so the ordering is free to optimise
+//         purely for load balance.
 //     2 = descending — by M, heaviest first; minimises
 //                      Σ max_M_per_round under fixed-batch rounds.
-//                      Preferred for multi-round configurations
-//                      (`N_ROUNDS=2` or `=3`).
+//                      Was historically suggested for multi-round
+//                      configurations, but a CK=1 + Qwen3-30B
+//                      `N_ROUNDS={1,2,3} × N_ORDER={1,2,3,4}` cross
+//                      (16 cells × 200 frames × 200 iters) confirmed
+//                      single-round + ORDER=3 dominates the entire
+//                      matrix; descending lost by 1.6% under
+//                      single-round and was never competitive under
+//                      multi-round either.
 //     3 = pair-balanced — desc, then interleave largest with smallest
-//                         (heavy/light alternation).  Caveat: long-
-//                         tailed M still 2-bucket sum-imbalanced;
-//                         use mode 4 for those.
+//         (heavy/light alternation).  CURRENT DEFAULT.  Single-round
+//         wall time is bounded by the slowest thread's per-expert
+//         duty cycle; pair-balanced flattens this duty cycle across
+//         the OMP team by alternating heavy/light experts so all
+//         threads finish around the same time.  Empirical: Qwen3-
+//         30B-A3B decode (CK=1, ALGO 3, 128 threads, sum_M=256,
+//         num_active ∈ [10, 114]) was 5.4% faster (10.6% higher
+//         GFLOPS) under ORDER=3 vs ORDER=1 across 6 trials at >35σ
+//         vs the Phase 0 noise floor (CoV = 0.14%).  Reproduce with
+//         the in-tree workload
+//         `benchdnn/input/grp_matmul/moe_fused/qwen3_30b_moe_decode_fused_no_postop.txt`
+//         under `ZENDNNL_GRP_MATMUL_N_ORDER={1,2,3,4}` × N_ROUNDS={1,2,3}.
+//         Caveat: long-tailed M can still be 2-bucket sum-imbalanced;
+//         use mode 4 for those.
 //     4 = balanced-spread — prefix-sum-balanced: any K-way consecutive
 //                           split yields Σ M per chunk ≈ total / K
 //                           (heavies evenly distributed throughout).
+//                           Same sweep showed it 4.0% faster than
+//                           ascending but 1.6% slower than mode 3
+//                           on Qwen3; available for shapes with
+//                           pathological long tails where mode 3's
+//                           2-bucket residual hurts.
 //   Mid-process env changes have no effect; relaunch for A/B.
 inline int get_grp_matmul_n_order() {
+  // Default: 3 (pair-balanced).  Strict env parsing — non-numeric
+  // input (e.g. `"abc"`) falls back to the documented default 3,
+  // NOT silently to mode 0 via the legacy `std::atoi`-returns-0
+  // behaviour.  See `parse_env_int_strict`.
+  constexpr int kDefault = 3;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ORDER");
-    if (e == nullptr || e[0] == '\0') return 1;  // default: ascending
-    const int parsed = std::atoi(e);
-    if (parsed >= 0 && parsed <= 4) return parsed;
-    return 1;  // invalid env value → fall back to the default
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 0 && parsed <= 4) ? parsed : kDefault;
   }();
   return v;
 }
@@ -437,17 +733,21 @@ inline int get_grp_matmul_n_order() {
 //   Fused MoE Op1 → act → Op2 arena layout: tight [M, I] when 1,
 //   wide [M, 2I] when "0".  Tight halves Op2's src DRAM traffic and
 //   is neutral-or-positive on every measured workload.  The dispatcher
-//   only engages tight when ALL of: act=swiglu_oai_mul, Op1 internal-
-//   alloc on, ALGO 3 selected (auto or env-forced), shape-adaptive
-//   picker agrees — otherwise falls back to wide silently regardless
-//   of this env.  Note: ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT is NOT a
-//   tight-engagement gate — when the fused-MoE picker hands the
-//   dispatcher a tight destination (ldc < N), the dispatcher auto-
-//   enables ALGO 3 fused activation regardless of N_TILE_FUSED_ACT
-//   (tight is a correctness constraint on the writer, not a perf
-//   toggle).  See `pick_fused_moe_want_tight` in
-//   group_matmul_fused_moe.cpp for the full predicate.  Set "0" here
-//   to force wide (debug / layout-regression bisection).
+//   only engages tight when ALL of: act is a CK-fusible gated
+//   activation (swiglu_oai_mul, silu_and_mul, gelu_and_mul — see
+//   `a3_can_fuse_act` for the live predicate; silu and gelu require
+//   `CUSTOM_KERNEL=1` because only the CK in-register epilogue
+//   implements them), Op1 internal-alloc on, ALGO 3 selected (auto
+//   or env-forced), shape-adaptive picker agrees — otherwise falls
+//   back to wide silently regardless of this env.  Note:
+//   ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT is NOT a tight-engagement
+//   gate — when the fused-MoE picker hands the dispatcher a tight
+//   destination (ldc < N), the dispatcher auto-enables ALGO 3 fused
+//   activation regardless of N_TILE_FUSED_ACT (tight is a
+//   correctness constraint on the writer, not a perf toggle).  See
+//   `pick_fused_moe_want_tight` in group_matmul_fused_moe.cpp for
+//   the full predicate.  Set "0" here to force wide (debug /
+//   layout-regression bisection).
 inline int get_grp_matmul_fused_moe_tight() {
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT");
@@ -696,26 +996,107 @@ inline constexpr int kAoclBlisNc                = 128;  // BLIS-bf16 inner-N blo
 //   raise for many-expert deployments where reducing per-expert fan-
 //   out helps.  Non-positive → default.
 inline int get_grp_matmul_aocl_target_slots() {
+  // Strict env parsing — non-numeric input falls back to default.
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AOCL_TARGET_SLOTS");
-    if (e == nullptr || e[0] == '\0') return kAoclTargetConcurrentSlots;
-    const int parsed = std::atoi(e);
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kAoclTargetConcurrentSlots;
     return (parsed > 0) ? parsed : kAoclTargetConcurrentSlots;
   }();
   return v;
 }
 
 // ZENDNNL_GRP_MATMUL_AOCL_BLIS_NC = positive int — cached, default 128.
-//   AOCL density floor: each thread's slice must be ≥ NC cols for
-//   reorder amortisation to win.  Lower → more parallelism per
-//   expert / thinner slices; higher → wider slices / fewer slots.
-//   Non-positive → default.
+//   Informational / telemetry only as of the strict-stable cache-key
+//   simplification.  The original `aocl_stable_n_thr` formula included
+//   a `by_density = N / kAoclBlisNc` term that protected thin-N
+//   shapes above AOCL's NC=128 amortisation point; that term was
+//   removed because it re-introduced an N-dependence into the per-
+//   expert thread count and rotated the AOCL DLP cache key per call.
+//   Narrow-N protection is now handled by the planner's narrow-N
+//   escape (see `aocl_stable_n_thr` and the F3 escape comment in
+//   `plan_group_n_tile`).
+//
+//   The env value is parsed (strict) and emitted in the
+//   `[GRP_MATMUL.PLAN] flat_n_tile ...` apilog line so external
+//   telemetry can correlate user-set tuning with the planner's
+//   actual choices; setting it does NOT change planning behaviour.
+//   Non-positive → default.  Kept as a getter (rather than removed
+//   outright) so reintroducing a density floor in future is a one-
+//   line change in `aocl_stable_n_thr` and we don't churn the env
+//   surface area.
 inline int get_grp_matmul_aocl_blis_nc() {
+  // Strict env parsing — non-numeric input falls back to default.
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AOCL_BLIS_NC");
-    if (e == nullptr || e[0] == '\0') return kAoclBlisNc;
-    const int parsed = std::atoi(e);
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kAoclBlisNc;
     return (parsed > 0) ? parsed : kAoclBlisNc;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD = positive int —
+//   cached, default 0 (OFF).
+//
+// EXPERIMENTAL — Option-A M-weighted per-expert thread distribution
+// inside the ALGO 3 ManyExperts Single-round plan.  When > 0:
+//
+//   * Experts with `M[e] > threshold` are tagged HEAVY.
+//   * Each ACTIVE light expert (M > 0, M ≤ threshold) reserves
+//     exactly 1 thread.
+//   * Remaining threads (`num_threads - num_light_active`) are
+//     distributed across the heavy experts via a greedy water-fill
+//     keyed on per-expert M — the heaviest expert receives the
+//     marginal next-thread first until its per-expert cap is hit,
+//     iterating until the heavy budget is exhausted.
+//   * Per-expert thread count is capped by
+//     `min(ccd_size, max_tiles = max_N / ab_min_tile, N[e] / ab_min_tile)`.
+//     On Qwen3-30B-A3B prompt (`max_N=1536, ab_min_tile=kMinNTile=512`)
+//     that hard cap is 3 threads / expert.  To unlock higher per-
+//     expert teams (up to `ccd_size = 8`) on the same shape, ALSO
+//     set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=256` (lifts max_tiles
+//     to 6) or `=128` (lifts to 12, capped at ccd_size=8).
+//
+// Gating in `apply_round_pick` (group_matmul_n_tile.cpp):
+//   * Single round only — Multi / Balanced / DecodeD / FewExperts
+//     keep their existing distribution.
+//   * CK path only (`use_custom == true`) — the executor's CK round
+//     path consumes `stable_n_thr_per_expert[]` via the prefix-sum
+//     scan (see `execute_rounds`).  Non-custom paths don't support
+//     asymmetric per-expert teams in this code path.
+//   * Requires both heavy and light experts present — degenerate
+//     cases (all-heavy / all-light) fall through to the existing
+//     Phase B remainder distribution (`base + 1` for top-N M).
+//
+// Intent — addresses the heaviest-M-expert × 1-thread bottleneck on
+// many-experts MoE shapes where `num_ops ≈ num_threads` and the M
+// distribution is bimodal (a few "heavy" experts with M >> mean,
+// many "light" experts with M ≈ 1-50).  On Qwen3-30B-A3B prompt
+// (max_M ≈ 3500, mean_M_active ≈ 256, skew ≈ 14×, num_ops=121,
+// num_threads=128) the current Single+Phase-B path caps the
+// heaviest expert at 2 threads (base=1 + remainder=1), leaving
+// the call wall bounded by the heavy expert's single-thread
+// compute (~200-400 ms).  This redistribution lifts the cap to
+// `min(ccd_size, max_tiles)` per heavy expert — 3 threads today
+// without `CUSTOM_KERNEL_N_TILE` tuning, up to 8 with it.
+//
+// Sensible starting threshold: 256 (= 8 × ccd_size; gives "8 tokens
+// per thread" as the heavy/light cutoff).  Tune per workload.
+// Non-positive → OFF.
+inline int get_grp_matmul_hybrid_m_heavy_threshold() {
+  constexpr int kDefault = 0;  // OFF
+  // Test override (sentinel `-1` = no override).  Production keeps
+  // the static-const env-cache for branch-predictor-friendly reads.
+  const int ovr = test_api::s_grp_matmul_hybrid_m_heavy_threshold_override
+      .load(std::memory_order_relaxed);
+  if (ovr >= 0) return ovr;
+  static const int v = []() {
+    const char *e =
+        std::getenv("ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed > 0) ? parsed : kDefault;
   }();
   return v;
 }
@@ -760,12 +1141,12 @@ inline int get_grp_matmul_custom_kernel_nr() {
   if (ovr >= 0) {
     return (ovr == 32 || ovr == 64) ? ovr : 0;
   }
+  // Strict env parsing — non-numeric input (or anything other than
+  // exactly "32" / "64") falls back to 0 (auto-pick).
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR");
-    if (e == nullptr || e[0] == '\0') {
-      return 0;
-    }
-    int parsed = std::atoi(e);
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return 0;
     return (parsed == 32 || parsed == 64) ? parsed : 0;
   }
   ();
@@ -822,10 +1203,12 @@ inline int get_grp_matmul_custom_kernel_n_tile() {
   // (0 and any positive value, valid or not); only `-1` falls
   // through to the env path.
   if (ovr >= 0) return (ovr > 0 && (ovr % 32) == 0) ? ovr : 0;
+  // Strict env parsing — non-numeric input falls back to 0
+  // (auto-pick the planner's `effective_decode_n_tile()`).
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE");
-    if (e == nullptr || e[0] == '\0') return 0;
-    const int parsed = std::atoi(e);
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return 0;
     return (parsed > 0 && (parsed % 32) == 0) ? parsed : 0;
   }
   ();

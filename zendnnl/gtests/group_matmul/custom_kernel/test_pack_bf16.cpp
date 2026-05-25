@@ -255,4 +255,167 @@ TEST(CkPackBf16, DistinctWeightPointersProduceDistinctPacks) {
          "pointer — LRU is not keyed on weight pointer";
 }
 
+// ──────────────────────────────────────────────────────────────────
+// silu_and_mul / gelu_and_mul interleave layout —
+//   bit-equality with swiglu_oai_mul.
+//
+// Both fused split-halves paths (silu and gelu) are built on this
+// physical invariant: after the prepack permutes a canonical
+// split-halves W13 `[gate_cols | up_cols]` into the CK arena, the
+// resulting bytes MUST be bit-identical to what `swiglu_oai_mul`
+// produces when fed an already-interleaved W13
+// `[g0, u0, g1, u1, ...]`.  silu and gelu use the SAME permutation
+// (they differ only in the kernel-side activation math, not in the
+// pack layout), so this test asserts both lay down the same bytes.
+//
+// Construction:
+//   * Build an interleaved weight `W_i[k, 2*j+0] = gate[k, j]`,
+//                                  `W_i[k, 2*j+1] = up  [k, j]`.
+//   * Build a split-halves weight `W_s[k, j]       = gate[k, j]`,
+//                                  `W_s[k, I + j]   = up  [k, j]`.
+//   * Pack `W_i` with `act = swiglu_oai_mul` (no interleave flag).
+//   * Pack `W_s` with `act = silu_and_mul` (interleave flag set).
+//   * Pack `W_s` with `act = gelu_and_mul` (interleave flag set —
+//     same physical layout as silu, since the cache key shares
+//     `kInterleaveSplitMarker` and the prepack permutation is
+//     activation-agnostic).
+//   * Assert all three packed buffers are byte-identical.
+//
+// We drive every pack via the public `prepare_for_call` path so the
+// test exercises the same code that runs in production.
+//
+// Cache-key note: silu and gelu share the same `interleave=1` cache
+// key bit, so technically the second of the two prepares (with the
+// same weight pointer + dims + transB + pack_nr) would HIT the same
+// LRU entry the first one populated.  To exercise the actual gelu
+// pack code path (and not just a HIT against silu's earlier entry)
+// we use distinct weight buffers for silu vs gelu.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkPackBf16, SiluGeluInterleavedPackMatchesSwigluBytes) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  ::reset_grp_matmul_caches();
+
+  constexpr int kK = 64;
+  constexpr int kN = 256;
+  constexpr int kI = kN / 2;
+
+  // Deterministic source data — same value generator across all
+  // three logical weight buffers so the only physical difference is
+  // row order.
+  auto val_gate = [](int k, int j) {
+    return static_cast<float>(k * 31 + j) * 1.0e-3f;
+  };
+  auto val_up = [](int k, int j) {
+    return static_cast<float>(k * 31 + j + kI) * 1.0e-3f;
+  };
+
+  std::vector<bfloat16_t> w_interleaved(
+      static_cast<size_t>(kK) * kN, bfloat16_t(0.0f));
+  // Two distinct split-halves buffers — same logical content.
+  // Distinct pointers force distinct LRU keys so the second pack
+  // (gelu) actually runs the prepack path instead of HITting the
+  // entry the first pack (silu) populated.
+  std::vector<bfloat16_t> w_split_silu(
+      static_cast<size_t>(kK) * kN, bfloat16_t(0.0f));
+  std::vector<bfloat16_t> w_split_gelu(
+      static_cast<size_t>(kK) * kN, bfloat16_t(0.0f));
+  for (int k = 0; k < kK; ++k) {
+    for (int j = 0; j < kI; ++j) {
+      w_interleaved[k * kN + 2 * j + 0] = bfloat16_t(val_gate(k, j));
+      w_interleaved[k * kN + 2 * j + 1] = bfloat16_t(val_up  (k, j));
+      w_split_silu [k * kN + j]         = bfloat16_t(val_gate(k, j));
+      w_split_silu [k * kN + kI + j]    = bfloat16_t(val_up  (k, j));
+      w_split_gelu [k * kN + j]         = bfloat16_t(val_gate(k, j));
+      w_split_gelu [k * kN + kI + j]    = bfloat16_t(val_up  (k, j));
+    }
+  }
+
+  // Pack all three layouts via prepare_for_call.
+  std::vector<bool>  transA_v{false};
+  std::vector<bool>  transB_v{false};
+  std::vector<int>   M_v{16};
+  std::vector<int>   N_v{kN};
+  std::vector<int>   K_v{kK};
+  std::vector<int>   ldb_v{kN};
+  std::vector<float> alpha_v{1.0f};
+  std::vector<float> beta_v{0.0f};
+  std::vector<bool>  is_wc_v{true};
+
+  std::vector<const void *> wi_v{w_interleaved.data()};
+  std::vector<const void *> ws_silu_v{w_split_silu.data()};
+  std::vector<const void *> ws_gelu_v{w_split_gelu.data()};
+
+  ck::CallContext kctx_swiglu, kctx_silu, kctx_gelu;
+  ASSERT_EQ(ck::prepare_for_call(grp_matmul_gated_act_t::swiglu_oai_mul,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::none,
+                                  transA_v, transB_v, M_v, N_v, K_v, ldb_v,
+                                  alpha_v, beta_v, wi_v, is_wc_v,
+                                  kctx_swiglu),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_TRUE(kctx_swiglu.enabled);
+
+  ASSERT_EQ(ck::prepare_for_call(grp_matmul_gated_act_t::silu_and_mul,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::none,
+                                  transA_v, transB_v, M_v, N_v, K_v, ldb_v,
+                                  alpha_v, beta_v, ws_silu_v, is_wc_v,
+                                  kctx_silu),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_TRUE(kctx_silu.enabled);
+
+  ASSERT_EQ(ck::prepare_for_call(grp_matmul_gated_act_t::gelu_and_mul,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::bf16, data_type_t::bf16,
+                                  data_type_t::none,
+                                  transA_v, transB_v, M_v, N_v, K_v, ldb_v,
+                                  alpha_v, beta_v, ws_gelu_v, is_wc_v,
+                                  kctx_gelu),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_TRUE(kctx_gelu.enabled);
+
+  // Same `pack_nr` chosen by all three paths (planner is a pure
+  // function of (K, N)).
+  ASSERT_EQ(kctx_swiglu.pack_nr, kctx_silu.pack_nr);
+  ASSERT_EQ(kctx_swiglu.pack_nr, kctx_gelu.pack_nr);
+
+  const int pack_nr = kctx_swiglu.pack_nr;
+  const int K_pair = (kK + 1) / 2;
+  const size_t pack_bytes = static_cast<size_t>(kN / pack_nr)
+      * K_pair * pack_nr * 2 /*VNNI pair*/ * sizeof(bfloat16_t);
+
+  const auto *p_swiglu = static_cast<const bfloat16_t *>(
+      kctx_swiglu.packed_ptrs[0]);
+  const auto *p_silu = static_cast<const bfloat16_t *>(
+      kctx_silu.packed_ptrs[0]);
+  const auto *p_gelu = static_cast<const bfloat16_t *>(
+      kctx_gelu.packed_ptrs[0]);
+  ASSERT_NE(p_swiglu, nullptr);
+  ASSERT_NE(p_silu, nullptr);
+  ASSERT_NE(p_gelu, nullptr);
+
+  // Bit-equality — the silu/gelu prepack column permutation must be
+  // the exact inverse of the caller's split-halves layout, so the
+  // packed arena lands at the same physical bytes the swiglu path
+  // produces from a pre-interleaved input.
+  EXPECT_EQ(0, std::memcmp(p_swiglu, p_silu, pack_bytes))
+      << "silu_and_mul pack bytes do not match swiglu_oai_mul pack "
+         "bytes — the silu in-register fused epilogue would "
+         "deinterleave (g, u) from the wrong columns and produce "
+         "silent-wrong activations.";
+  EXPECT_EQ(0, std::memcmp(p_swiglu, p_gelu, pack_bytes))
+      << "gelu_and_mul pack bytes do not match swiglu_oai_mul pack "
+         "bytes — the gelu in-register fused epilogue would "
+         "deinterleave (g, u) from the wrong columns and produce "
+         "silent-wrong activations.  silu and gelu MUST share the "
+         "same prepack permutation (only the kernel-side activation "
+         "math differs).";
+  EXPECT_EQ(0, std::memcmp(p_silu, p_gelu, pack_bytes))
+      << "silu_and_mul and gelu_and_mul packs differ — they should "
+         "be byte-identical for the same logical weight, since the "
+         "prepack interleave is activation-agnostic.";
+}
+
 }  // namespace

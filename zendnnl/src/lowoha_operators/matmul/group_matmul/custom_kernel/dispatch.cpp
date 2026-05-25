@@ -33,8 +33,8 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-using zendnnl::error_handling::apilog_info;
-using zendnnl::error_handling::apilog_info_enabled;
+using zendnnl::error_handling::apilog_verbose;
+using zendnnl::error_handling::apilog_verbose_enabled;
 
 bool dispatch_supported() {
   return avx512bf16_available();
@@ -194,29 +194,43 @@ status_t prepare_for_call(
   // it immediately obvious why the custom kernel was skipped — a
   // silent refusal just produced `kernel=standard` with no clue
   // whether the env was off, a dtype mismatched, or the pack-NR
-  // check failed.  Single cached apilog_info_enabled() check.
+  // check failed.
   //
-  // Lambda overhead note: both helpers are captureless (`[]`, not
-  // `[&]`) so they are stateless functors — zero construction cost
-  // at runtime.  `s_refuse_log` is a function-scope `static const`
-  // which C++ lambdas can reference without capture, so the `if
-  // (s_refuse_log)` guard inside `refuse()` still compiles and still
-  // short-circuits to the plain `return status_t::failure` when API
-  // info logging is off.  Net impact on a successful
-  // `prepare_for_call` with logging disabled: zero — neither lambda
-  // object is ever instantiated nor invoked on the success path,
-  // and `dt_name` only gets called from the failure paths that also
-  // read `s_refuse_log`.
-  static const bool s_refuse_log = apilog_info_enabled();
-  auto refuse = [](const char *reason_tag,
-                   const char *detail = nullptr) -> status_t {
+  // Gated on the verbose level (`ZENDNNL_API_LOG_LEVEL=4`): these
+  // lines fire per-expert per-call from inside the ALGO 3 OMP region,
+  // so they belong on the per-thread / per-event channel.  Info
+  // level (3) stays clean and shows only the consolidated planner
+  // and prepack summary lines.  Single cached `apilog_verbose_enabled()`
+  // check.
+  //
+  // Lambda overhead note: `dt_name` is captureless (`[]`) — a
+  // stateless functor with zero runtime construction cost.  `refuse`
+  // is `[&]` cosmetically (see capture-note paragraph below for why):
+  // `s_refuse_log` has STATIC storage duration (function-local
+  // `static const`), so a captureless `[]` for `refuse` would also
+  // compile and reference it correctly per
+  // [expr.prim.lambda.capture] — captures are only required for
+  // variables with AUTOMATIC storage duration.  `[&]` produces the
+  // same closure body in this case (no actual captures are emitted
+  // because `s_refuse_log` is still static-duration), so the
+  // construction cost is still zero.  The `[&]` form is used purely
+  // to silence static-analysis tooling that mis-reads the
+  // captureless variant as a capture omission.
+  //
+  // Net impact on a successful `prepare_for_call` with logging
+  // disabled: zero — neither lambda object is ever invoked on the
+  // success path, and `dt_name` only gets called from the failure
+  // paths that also read `s_refuse_log`.
+  static const bool s_refuse_log = apilog_verbose_enabled();
+  auto refuse = [&](const char *reason_tag,
+                    const char *detail = nullptr) -> status_t {
     if (s_refuse_log) {
       if (detail != nullptr) {
-        apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason=",
-                    reason_tag, " (", detail, ")");
+        apilog_verbose("[GRP_MATMUL.CK REFUSED] reason=",
+                       reason_tag, " (", detail, ")");
       } else {
-        apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason=",
-                    reason_tag);
+        apilog_verbose("[GRP_MATMUL.CK REFUSED] reason=",
+                       reason_tag);
       }
     }
     return status_t::failure;
@@ -247,12 +261,12 @@ status_t prepare_for_call(
       resolve_variant(src_dtype, wei_dtype, dst_dtype);
   if (variant == KernelVariant::kUnsupported) {
     if (s_refuse_log) {
-      apilog_info("[GRP_MATMUL Level4 custom_kernel REFUSED] reason="
-                  "unsupported_dtype (src=", dt_name(src_dtype),
-                  " wei=", dt_name(wei_dtype),
-                  " dst=", dt_name(dst_dtype),
-                  " — see resolve_variant() in custom_kernel/dispatch.cpp"
-                  " for the supported table)");
+      apilog_verbose("[GRP_MATMUL.CK REFUSED] reason="
+                     "unsupported_dtype (src=", dt_name(src_dtype),
+                     " wei=", dt_name(wei_dtype),
+                     " dst=", dt_name(dst_dtype),
+                     " — see resolve_variant() in custom_kernel/dispatch.cpp"
+                     " for the supported table)");
     }
     return status_t::failure;
   }
@@ -262,38 +276,55 @@ status_t prepare_for_call(
   out.variant = variant;
   // Activation gate.
   //
-  // The kernel handles two activation states inline:
+  // The kernel handles four activation states inline:
   //
   //   * `none` — plain matmul; the epilogue stores the wide output.
-  //   * `swiglu_oai_mul` — fused-in-kernel activation.  The
-  //     interleaved `[g0, u0, g1, u1, ...]` layout puts gate / up
-  //     pairs on every 32-col tile, so the pair-pack store helper
-  //     can deinterleave and apply the activation in registers (one
-  //     fused matmul + activation pass, halved-width output).
+  //   * `swiglu_oai_mul` — fused-in-kernel activation.  Caller
+  //     provides W13 already interleaved as `[g0, u0, g1, u1, ...]`;
+  //     the pair-pack store helper deinterleaves and applies the
+  //     activation in registers (one fused matmul + activation pass,
+  //     halved-width output).
+  //   * `silu_and_mul` — fused-in-kernel activation.  Caller's W13
+  //     is in canonical split-halves `[gate_cols | up_cols]`; the
+  //     prepack permutes source columns so the CK arena physically
+  //     matches the swiglu_oai_mul layout.  Same in-register
+  //     epilogue contract.
+  //   * `gelu_and_mul` — fused-in-kernel activation.  Caller-side
+  //     contract is identical to `silu_and_mul`; the prepack uses
+  //     the same column-interleave permutation, and the in-register
+  //     epilogue uses a `gelu_tanh` polynomial approximation
+  //     (max delta ≤ 1.5e-3 vs the reference's `gelu_erf`,
+  //     comfortably inside the BF16 tolerance band).
   //
-  // `silu_and_mul` and `gelu_and_mul` are NOT accepted here even
-  // though the kernel could serve them via the matmul-only path.
-  // Their split-halves layout `[gate_cols | up_cols]` puts gate /
-  // up of the same output position in DIFFERENT N-tiles, so the
-  // per-tile microkernel cannot deinterleave them — the activation
-  // must run as a separate post-pass on the wide [M, N] output.
-  // Because the dispatcher cannot enforce that a direct caller
-  // actually runs that post-pass, accepting these activations here
-  // would silently leave a caller with only matmul output and no
-  // activation applied.  Production callers translate silu/gelu →
-  // act = none BEFORE invoking `prepare_for_call` and run the
-  // activation themselves; `flat_n_tile` does this for the
-  // group_matmul_direct path (it passes `custom_act = none` for any
-  // act other than swiglu_oai_mul) and `group_matmul_direct` then
-  // invokes `group_matmul_moe_act_execute` on the wide output.
+  // Bias is NOT supported on `silu_and_mul` / `gelu_and_mul` yet —
+  // the bias-into-init epilogue would need to read
+  // `[gate_bias | up_bias]` in permuted order; planned follow-up.
   if (act != grp_matmul_gated_act_t::swiglu_oai_mul
+      && act != grp_matmul_gated_act_t::silu_and_mul
+      && act != grp_matmul_gated_act_t::gelu_and_mul
       && act != grp_matmul_gated_act_t::none) {
     return refuse("unsupported_activation",
-                  "custom kernel admits only none / swiglu_oai_mul "
-                  "(fused).  Split-halves activations "
-                  "(silu_and_mul, gelu_and_mul) require the caller "
-                  "to translate to act=none and apply the "
-                  "activation as a separate post-pass.");
+                  "custom kernel admits only none / swiglu_oai_mul / "
+                  "silu_and_mul / gelu_and_mul (fused).  Other "
+                  "activations require the caller to translate to "
+                  "act=none and apply the activation as a separate "
+                  "post-pass.");
+  }
+  // silu_and_mul / gelu_and_mul + bias is not yet supported by the
+  // fused epilogue (split-halves bias would need to be read in
+  // permuted order to match the interleaved layout).  Refuse the
+  // combination cleanly so the caller falls back to the
+  // separate-pass path with canonical bias-into-init.  Production
+  // envelope (Qwen3, Mixtral, DBRX, DeepSeek) is bias-free on W13,
+  // so this refusal does not affect typical decode.
+  if ((act == grp_matmul_gated_act_t::silu_and_mul
+       || act == grp_matmul_gated_act_t::gelu_and_mul)
+      && bias_dtype != data_type_t::none) {
+    return refuse("split_halves_act_with_bias_not_fused",
+                  "silu_and_mul / gelu_and_mul fused-CK path is "
+                  "bias-free in this release; fall back to "
+                  "separate-pass for biased calls (planned "
+                  "follow-up).");
   }
   // `act_dtype` only matters when an activation is actually applied —
   // for `act = none` (plain GEMM) we accept any act_dtype (including
@@ -409,8 +440,16 @@ status_t prepare_for_call(
   out.pack_nr      = pack_nr;
   out.NV           = pack_nr / 16;
   out.max_mr       = max_mr_for_nv(out.NV);
+  // Map framework activation → CK ActKind.  Order matters: refusal
+  // gate above guarantees `act` is one of {none, swiglu_oai_mul,
+  // silu_and_mul, gelu_and_mul} at this point.
   out.act_kind     = (act == grp_matmul_gated_act_t::swiglu_oai_mul)
-      ? ActKind::swiglu_oai_mul : ActKind::none;
+      ? ActKind::swiglu_oai_mul
+      : (act == grp_matmul_gated_act_t::silu_and_mul)
+          ? ActKind::silu_and_mul
+          : (act == grp_matmul_gated_act_t::gelu_and_mul)
+              ? ActKind::gelu_and_mul
+              : ActKind::none;
   out.bias_kind    = bias_kind;
   // Representative subtile_cols (worst-case m_max) — used by APILOG /
   // debug.  Dispatch reads per-expert values below.
@@ -440,6 +479,20 @@ status_t prepare_for_call(
   // sized `ctx.subtile_cols` — the production baseline.
   const bool per_expert_subtile =
       get_grp_matmul_custom_kernel_subtile_per_expert();
+  // For `silu_and_mul` and `gelu_and_mul` the caller's W13 is in
+  // canonical split-halves layout; the prepack permutes source
+  // columns into the interleaved layout the in-register fused
+  // epilogue expects.  Both split-halves variants share the SAME
+  // permutation — they differ only in the kernel-side activation
+  // math, not in the pack layout, so the cache key bit
+  // (`kInterleaveSplitMarker` in pack.cpp) is shared and a packed
+  // arena warmed for silu can be reused for gelu on the same
+  // weight pointer.
+  // `swiglu_oai_mul` callers already provide interleaved weight at
+  // the API boundary, so the flag stays false for them.
+  const bool interleave_split_halves =
+      (act == grp_matmul_gated_act_t::silu_and_mul)
+      || (act == grp_matmul_gated_act_t::gelu_and_mul);
   out.packed_ptrs.fill(nullptr);
   out.subtile_cols_per_expert.fill(0);
   for (int i = 0; i < num_ops; ++i) {
@@ -448,6 +501,7 @@ status_t prepare_for_call(
         static_cast<const bfloat16_t *>(weight[i]),
         K[i], N[i], ldb[i], pack_nr,
         /*transB=*/transB[i],
+        /*interleave_split_halves=*/interleave_split_halves,
         &out.packed_ptrs[i]);
     if (pst != status_t::success) {
       // `get_or_pack_weight_bf16` already logged the concrete reason
@@ -465,13 +519,17 @@ status_t prepare_for_call(
 
   out.enabled = true;
   if (s_refuse_log) {
-    apilog_info("[GRP_MATMUL Level4 custom_kernel] ENGAGED pack_nr=",
+    apilog_verbose("[GRP_MATMUL.CK ENGAGED] pack_nr=",
                 out.pack_nr,
                 " NV=", out.NV,
                 " max_mr=", out.max_mr,
                 " subtile_cols=", out.subtile_cols,
                 " act_kind=", (out.act_kind == ActKind::swiglu_oai_mul
-                               ? "swiglu_oai_mul" : "none"),
+                               ? "swiglu_oai_mul"
+                               : out.act_kind == ActKind::silu_and_mul
+                                 ? "silu_and_mul"
+                                 : out.act_kind == ActKind::gelu_and_mul
+                                   ? "gelu_and_mul" : "none"),
                 " bias_kind=", (out.bias_kind == BiasKind::none ? "none"
                                 : out.bias_kind == BiasKind::bf16 ? "bf16"
                                 : "fp32"),
@@ -596,8 +654,19 @@ void dispatch_tile(
       : sizeof(bfloat16_t);  // bf16 (and none — unused when bias==null)
 
   // Hoist the act-kind branch out of the loops — straight-line code
-  // with one indirect call per microkernel invocation.
-  if (ctx.act_kind == ActKind::swiglu_oai_mul) {
+  // with one indirect call per microkernel invocation.  All three
+  // gated-activation kinds (swiglu_oai_mul, silu_and_mul,
+  // gelu_and_mul) share the same tight-arena contract: halved-width
+  // output, BF16-only, 16 cols per (g, u) pair × NV/2 pairs per
+  // kernel call.  They differ only in which in-register pair-store
+  // helper the microkernel calls (resolved at `select_ukernel` time
+  // and baked into `ctx.kfn_table[]`), so the dispatcher loop body
+  // is identical.
+  const bool is_gated_act =
+      (ctx.act_kind == ActKind::swiglu_oai_mul)
+      || (ctx.act_kind == ActKind::silu_and_mul)
+      || (ctx.act_kind == ActKind::gelu_and_mul);
+  if (is_gated_act) {
     // Walk the per-thread N range in L2-friendly sub-tiles.  Each
     // sub-tile's B strip (= K × subtile_cols × 2 bytes) fits in L2
     // alongside the input slice, so the microkernel never hits L3 /
@@ -621,9 +690,11 @@ void dispatch_tile(
 
         const bfloat16_t *A_chunk =
             A + static_cast<size_t>(m_off) * lda;
-        // swiglu epilogue is BF16-dst-only (gated by select_ukernel),
-        // so the half-width tight arena's element stride is fixed at
-        // `sizeof(bfloat16_t)` here regardless of `dst_elem_bytes`.
+        // Gated-act epilogues are BF16-dst-only (gated by
+        // select_ukernel for swiglu_oai_mul, silu_and_mul, and
+        // gelu_and_mul — see `is_gated_act` above), so the half-width
+        // tight arena's element stride is fixed at `sizeof(bfloat16_t)`
+        // here regardless of `dst_elem_bytes`.
         std::byte *Tight_row_base = Tight_bytes
             + (static_cast<size_t>(m_off) * tight_ldc
                + (sub_col_base / 2)) * sizeof(bfloat16_t);

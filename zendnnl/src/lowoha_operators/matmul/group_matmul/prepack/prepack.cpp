@@ -19,7 +19,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_set>
 
 #include "common/zendnnl_global.hpp"
@@ -193,14 +196,22 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
   // call after the swap.
   s = mix_hash(s, static_cast<size_t>(p.num_threads));
   s = mix_hash(s, static_cast<size_t>(p.nr_align));
-  // Fold the activation + bias dtype context into the fingerprint
-  // because they participate in `ck_eligible(p)` (mirrors the runtime
-  // CK refusal gate).  Without these terms, a process that toggles
-  // between two layers with different `act` (e.g. one swiglu_oai_mul,
-  // one silu_and_mul) would cache the first call's eligibility
-  // verdict and short-circuit re-warming for the second — which has
-  // a different verdict.  Cost is two mix_hash calls per fingerprint
-  // (~5 ns); negligible vs the matmul body.
+  // Fold every dtype context bit `ck_eligible(p)` reads into the
+  // fingerprint so a process that toggles between layers with
+  // different (src, wei, dst, act, act_dtype, bias) dtype tuples
+  // re-warms on each unique tuple instead of caching the first
+  // verdict.  Without these terms, e.g., a process running first
+  // with dst=bf16 and then dst=f32 (both legal under
+  // `kBF16_BF16_BF16` and `kBF16_BF16_F32` resolve_variant entries)
+  // would short-circuit the second call with the first call's
+  // eligibility verdict — benign for non-gated act (the pack is
+  // dst-agnostic) but the cross_warm regime decision for gated +
+  // f32 (refused) differs from gated + bf16 (eligible), and the
+  // Fix-B per-tile-AOCL-skip would apply the wrong logic.  Cost:
+  // six mix_hash calls (~15 ns), negligible vs the matmul body.
+  s = mix_hash(s, static_cast<size_t>(p.src_dtype));
+  s = mix_hash(s, static_cast<size_t>(p.wei_dtype));
+  s = mix_hash(s, static_cast<size_t>(p.dst_dtype));
   s = mix_hash(s, static_cast<size_t>(p.act));
   s = mix_hash(s, static_cast<size_t>(p.act_dtype));
   s = mix_hash(s, static_cast<size_t>(p.bias_dtype));
@@ -258,16 +269,31 @@ inline bool already_warmed(const PrepackParams &p, int scheduling_algo) {
   return !s_warmed_fps.insert(fp).second;
 }
 
+// Reason the prelude short-circuited (when `skip == true`).  Used by
+// the skip-path apilog emitter to print a descriptive `state=...`
+// field so a level-3 reader can tell "first call, env-disabled" from
+// "subsequent call, fingerprint cached".  Order matches the gate
+// order inside `prelude()`.
+enum class PreludeSkipReason {
+  none                 = 0,  ///< `skip == false`; ignore this field
+  env_disabled         = 1,  ///< `ZENDNNL_GRP_MATMUL_PREPACK = 0`
+  fingerprint_already  = 2,  ///< `already_warmed(...) == true`
+};
+
 // Result of the shared opening sequence: one of `skip` (the per-ALGO
 // function should return immediately) or a resolved inner kernel.
 struct PreludeResult {
-  bool          skip          = true;
-  matmul_algo_t inner_kernel  = matmul_algo_t::none;
+  bool              skip          = true;
+  matmul_algo_t     inner_kernel  = matmul_algo_t::none;
+  PreludeSkipReason skip_reason   = PreludeSkipReason::env_disabled;
 };
 
 inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
   PreludeResult r;
-  if (!get_grp_matmul_prepack())                  return r;  // env OFF
+  if (!get_grp_matmul_prepack()) {
+    r.skip_reason = PreludeSkipReason::env_disabled;
+    return r;
+  }
   // NOTE: the previous `if (p.num_ops_total <= p.num_ops_active) return r;`
   // gate was removed.  Under the uniform-eager semantic, PREPACK=ON
   // ALWAYS warms `max(M.size(), total_matmul)` experts up front,
@@ -278,7 +304,10 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
   // they pay a one-time first-iter serial reorder cost in exchange
   // for `do_tile()` cache hits afterwards.  Set
   // `ZENDNNL_GRP_MATMUL_PREPACK=0` to restore the lazy-only path.
-  if (already_warmed(p, scheduling_algo))         return r;  // fingerprint hit
+  if (already_warmed(p, scheduling_algo)) {
+    r.skip_reason = PreludeSkipReason::fingerprint_already;
+    return r;
+  }
 
   r.skip         = false;
   r.inner_kernel = resolve_kernel();
@@ -351,14 +380,25 @@ inline int compute_max_n(const PrepackParams &p) {
 // `custom_kernel/dispatch.cpp::prepare_for_call`.  Empty vector =
 // "treat every entry as const" (legacy callers that don't supply
 // the field).
+//
+// `interleave_split_halves` mirrors the dispatcher's flag: for
+// `silu_and_mul` and `gelu_and_mul` the canonical W13 weight is in
+// split-halves layout and the pack permutes source columns to
+// produce the same interleaved arena the in-register fused
+// epilogue expects.  Other activations (none, swiglu_oai_mul) pack
+// verbatim.  silu and gelu share the same permutation — only the
+// kernel's activation math differs.
 inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
   custom_kernel::PackProbeStats st;
   static const std::vector<bool> kEmptyIsConst;
   const std::vector<bool> &iwc =
       (p.is_weights_const != nullptr) ? *p.is_weights_const : kEmptyIsConst;
+  const bool interleave_split_halves =
+      (p.act == grp_matmul_gated_act_t::silu_and_mul)
+      || (p.act == grp_matmul_gated_act_t::gelu_and_mul);
   custom_kernel::warm_pack_all_custom_kernel_experts(
       *p.weight, *p.K, *p.N, *p.ldb, *p.transB, iwc,
-      p.num_ops_total, st);
+      p.num_ops_total, st, interleave_split_halves);
   return st;
 }
 
@@ -371,39 +411,154 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
 static std::mutex                   s_last_invocation_mtx;
 static test_api::LastInvocationStats s_last_invocation;
 
-// Single PROBE log line shared across the five per-ALGO functions so
+// Map `CrossWarmRegime` → human-readable string used by the apilog
+// emitter and the `next_HIT_for=[...]` helper below.
+inline const char *cross_warm_regime_name(CrossWarmRegime r) {
+  switch (r) {
+  case CrossWarmRegime::none:               return "none";
+  case CrossWarmRegime::aocl_full_weight:   return "aocl_full_weight";
+  case CrossWarmRegime::custom_kernel_pack: return "custom_kernel_pack";
+  case CrossWarmRegime::aocl_per_tile:      return "aocl_per_tile";
+  }
+  return "?";
+}
+
+// Compose the `next_HIT_for=[...]` field describing which inverse-algo
+// runtime call is guaranteed to hit cache given the (primary,
+// cross_warm) pair this invocation just warmed.  The strings are kept
+// fixed and short for downstream log greps.
+//
+// Encoding:
+//   primary kind            cross_warm regime          → next_HIT_for
+//   ck_pack                 aocl_full_weight           → [ALGO_3+CK_decode, ALGO_1+DLP_prompt]
+//   ck_pack                 none                       → [ALGO_3+CK_decode]
+//   aocl_full_weight        custom_kernel_pack         → [ALGO_3+CK_decode, ALGO_1+DLP_prompt]
+//   aocl_full_weight        aocl_per_tile              → [ALGO_3+DLP_decode, ALGO_1+DLP_prompt]
+//   aocl_full_weight        none                       → [ALGO_1+DLP_prompt]
+//   aocl_per_tile           aocl_full_weight           → [ALGO_3+DLP_decode, ALGO_1+DLP_prompt]
+//   aocl_per_tile           none                       → [ALGO_3+DLP_decode]
+//   any                     anything else              → fallback: "(see escapes)"
+inline const char *next_hit_for_label(const char *primary,
+                                      CrossWarmRegime cross) {
+  if (primary == nullptr) return "[]";
+  if (std::strcmp(primary, "ck_pack") == 0) {
+    return (cross == CrossWarmRegime::aocl_full_weight)
+        ? "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]"
+        : "[ALGO_3+CK_decode]";
+  }
+  if (std::strcmp(primary, "aocl_full_weight") == 0) {
+    switch (cross) {
+    case CrossWarmRegime::custom_kernel_pack:
+      return "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]";
+    case CrossWarmRegime::aocl_per_tile:
+      return "[ALGO_3+DLP_decode, ALGO_1+DLP_prompt]";
+    default:
+      return "[ALGO_1+DLP_prompt]";
+    }
+  }
+  if (std::strcmp(primary, "aocl_per_tile") == 0) {
+    return (cross == CrossWarmRegime::aocl_full_weight)
+        ? "[ALGO_3+DLP_decode, ALGO_1+DLP_prompt]"
+        : "[ALGO_3+DLP_decode]";
+  }
+  return "[]";
+}
+
+// Format a fingerprint as a fixed-width "0xHHHHHHHHHHHHHHHH" string so
+// the apilog stream can take it as a plain `const char *`.  Avoids
+// fighting the logger's stream-state manipulators (`std::hex` toggles
+// the stream globally which would corrupt subsequent numeric fields).
+inline std::string format_fingerprint(size_t fp) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "0x%016zx",
+                static_cast<std::size_t>(fp));
+  return std::string(buf);
+}
+
+// Single PREPACK log line shared across the five per-ALGO functions so
 // downstream tooling sees the same field set regardless of which
 // scheduling algo was warmed.  Also records the per-invocation
 // accumulator for the test-only API in `prepack.hpp::test_api::`.
+//
+// Format (level 3, info):
+//   [GRP_MATMUL.PREPACK] for=ALGO_N state=warmed active=A total=T
+//     primary=<label>     ck=[hits= misses= skipped=]
+//                         aocl=[packed= skipped=]
+//     cross_warm=<enabled|disabled> regime=<regime>
+//     next_HIT_for=[<paths>]
+//     fingerprint=0x<hex>
+//
+// `primary_label` is supplied by the per-ALGO body — it knows which
+// warmer fired first ("ck_pack", "aocl_full_weight", "aocl_per_tile",
+// or "none").  `next_HIT_for=[...]` is computed from the
+// (primary_label, cross_warm_regime) pair; see the encoding table in
+// `next_hit_for_label()` above.
 inline void log_pack_probe(int scheduling_algo,
                            const PrepackParams &p,
                            matmul_algo_t inner_kernel,
                            const aocl_dlp::AoclDlpPackProbeStats &st_aocl,
-                           const custom_kernel::PackProbeStats   &st_ck) {
+                           const custom_kernel::PackProbeStats   &st_ck,
+                           CrossWarmRegime regime,
+                           const char *primary_label) {
   // Always record stats — the gate below only controls the log emission,
   // not the accumulator.  Tests benefit even when the apilog level
-  // hides the PROBE line.  Cost: one mutex lock + struct copy, ~50 ns.
+  // hides the PREPACK line.  Cost: one mutex lock + struct copy, ~50 ns.
   {
     std::lock_guard<std::mutex> lk(s_last_invocation_mtx);
-    s_last_invocation.scheduling_algo = scheduling_algo;
-    s_last_invocation.inner_kernel    = inner_kernel;
-    s_last_invocation.aocl            = st_aocl;
-    s_last_invocation.ck              = st_ck;
-    s_last_invocation.valid           = true;
+    s_last_invocation.scheduling_algo   = scheduling_algo;
+    s_last_invocation.inner_kernel      = inner_kernel;
+    s_last_invocation.aocl              = st_aocl;
+    s_last_invocation.ck                = st_ck;
+    s_last_invocation.cross_warm_regime = regime;
+    s_last_invocation.valid             = true;
   }
 
-  static const bool s_l1_log = apilog_info_enabled();
-  if (!s_l1_log) return;
+  static const bool s_l3_log = apilog_info_enabled();
+  if (!s_l3_log) return;
+  const bool cross_enabled = (regime != CrossWarmRegime::none);
+  const std::string fp_str = format_fingerprint(fingerprint(p, scheduling_algo));
   apilog_info(
-      "[GRP_MATMUL Level3 PACK_PROBE] sched_algo=", scheduling_algo,
-      " inner_kernel=", static_cast<int>(inner_kernel),
-      " active=", p.num_ops_active,
+      "[GRP_MATMUL.PREPACK] for=ALGO_", scheduling_algo,
+      " state=warmed active=", p.num_ops_active,
       " total=", p.num_ops_total,
+      " primary=", primary_label,
       " ck=[hits=", st_ck.cache_hits,
       " misses=", st_ck.cache_misses,
       " skipped=", st_ck.skipped_invalid, "]",
       " aocl=[packed=", st_aocl.packed_ok,
-      " skipped=", st_aocl.skipped_invalid, "]");
+      " skipped=", st_aocl.skipped_invalid, "]",
+      " cross_warm=", (cross_enabled ? "enabled" : "disabled"),
+      " regime=", cross_warm_regime_name(regime),
+      " next_HIT_for=", next_hit_for_label(primary_label, regime),
+      " fingerprint=", fp_str.c_str());
+}
+
+// Companion emitter for the skip path (env-disabled / fingerprint
+// already warmed).  Keeps the level-3 stream coherent: a user
+// debugging "why am I not seeing a HIT?" can grep for
+// `[GRP_MATMUL.PREPACK]` and see one line per prepack invocation
+// regardless of whether work was done.
+inline void log_pack_probe_skip(int scheduling_algo,
+                                const PrepackParams &p,
+                                PreludeSkipReason reason) {
+  static const bool s_l3_log = apilog_info_enabled();
+  if (!s_l3_log) return;
+  const char *state =
+      (reason == PreludeSkipReason::env_disabled)
+          ? "disabled"
+          : "skipped_fingerprint";
+  const char *note =
+      (reason == PreludeSkipReason::env_disabled)
+          ? " note=first_runtime_call_pays_lazy_reorder_cost"
+          : " note=already_warmed";
+  const std::string fp_str = format_fingerprint(fingerprint(p, scheduling_algo));
+  apilog_info(
+      "[GRP_MATMUL.PREPACK] for=ALGO_", scheduling_algo,
+      " state=", state,
+      " active=", p.num_ops_active,
+      " total=", p.num_ops_total,
+      " fingerprint=", fp_str.c_str(),
+      note);
 }
 
 // Eligibility for the BF16 custom-kernel pack (ALGO 3 only).  Mirrors
@@ -428,22 +583,31 @@ inline void log_pack_probe(int scheduling_algo,
 //     (the pack format is fixed by NR + kernel layout, dst only
 //     affects the post-K epilogue), so a single warm covers both.
 //     (refusal: `unsupported_dtype` from `resolve_variant`)
-//   * act in {swiglu_oai_mul, none} (refusal: `unsupported_activation`)
-//     Split-halves activations (silu_and_mul / gelu_and_mul) are
-//     also refused here, mirroring `prepare_for_call`'s refusal.
-//     The production parallel dispatcher pre-translates these to
-//     `act = none` before calling `flat_n_tile` (and hence before
-//     reaching this prepack module), so silu/gelu calls in
-//     production are warmed correctly under the `act = none`
-//     branch.  Direct prepack callers passing silu/gelu — e.g.
-//     ALGO 1/4/5 cross-warm — take a one-time first-call lazy CK
-//     pack instead of a divergent prepack-vs-runtime gate (the
-//     full rationale is in `ck_eligible` below).
-//   * (swiglu_oai_mul, f32 dst) refused — the fused swiglu store helper
-//     writes BF16 only, so `select_ukernel` returns nullptr for that
-//     (Act, DstDt) tuple and `prepare_for_call` refuses with
-//     `kfn_table_fill_failed`.  The caller takes the AOCL DLP +
-//     separate FP32 swiglu pass instead.
+//   * act in {none, swiglu_oai_mul, silu_and_mul, gelu_and_mul}
+//     (refusal: `unsupported_activation`).  All three gated kinds
+//     have an in-register fused-CK epilogue:
+//       - swiglu_oai_mul: caller-side interleaved W13 layout.
+//       - silu_and_mul / gelu_and_mul: caller-side canonical
+//         split-halves W13 layout; the prepack permutes source
+//         columns into the same interleaved layout swiglu uses, so
+//         the CK arena is physically identical regardless of caller
+//         convention and the in-register pair-store helpers
+//         (`silu_and_mul_store_pair`, `gelu_and_mul_store_pair`)
+//         apply unchanged.  silu and gelu share the SAME prepack
+//         permutation; the cache-key bit `kInterleaveSplitMarker`
+//         is shared between them.
+//   * (gated-act, f32 dst) refused — every gated-act pair-pack store
+//     helper writes BF16 only, so `select_ukernel` returns nullptr
+//     for any (gated-act, FP32) tuple and `prepare_for_call` refuses
+//     with `kfn_table_fill_failed`.  The caller falls back to AOCL
+//     DLP + a separate FP32 activation pass.
+//   * (silu_and_mul / gelu_and_mul, +bias) refused — bias-into-init
+//     under the prepack-permuted layout would need a permuted
+//     `[gate_bias | up_bias]` read; deferred to a planned follow-up.
+//     The runtime gate (`split_halves_act_with_bias_not_fused`) and
+//     this prepack gate are kept symmetric so a biased silu/gelu
+//     call neither warms a CK arena nor skips the AOCL per-tile
+//     warm.
 //   * act_dtype = bf16 when act != none (refusal: `unsupported_act_dtype`)
 //   * bias_dtype in {none, bf16, f32} (refusal: `unsupported_bias_dtype`)
 //   * pack_nr ∈ {32, 64} divides N (refusal: `N_not_multiple_of_pack_nr`)
@@ -455,8 +619,8 @@ inline void log_pack_probe(int scheduling_algo,
 // path; the false-positive of warming CK arena when 1-of-N experts
 // breaks contract is bounded (max num_ops × pack_size memory) and is
 // considered acceptable noise floor.  Frameworks that hit per-expert
-// refusals will still see a runtime APILOG `[GRP_MATMUL Level4
-// custom_kernel REFUSED] reason=...` line at the first refused call.
+// refusals will still see a runtime APILOG `[GRP_MATMUL.CK REFUSED]
+// reason=...` line (verbose level) at the first refused call.
 inline bool ck_eligible(const PrepackParams &p) {
   if (!p.custom_kernel_on) return false;
   if (p.src_dtype != data_type_t::bf16) return false;
@@ -468,43 +632,58 @@ inline bool ck_eligible(const PrepackParams &p) {
   // arena warms both runtime variants.
   if (p.dst_dtype != data_type_t::bf16
       && p.dst_dtype != data_type_t::f32) return false;
-  // Why split-halves activations (silu_and_mul / gelu_and_mul) are
-  // refused here even though the runtime CK kernel CAN compute the
-  // matmul portion for those calls:
+  // Gated activations accepted by the CK fused epilogue.  Two
+  // physical layouts at the API boundary:
   //
-  // The production parallel dispatcher
-  // (`group_matmul_run_parallel_dispatch`) already translates
-  // silu/gelu → `none` BEFORE invoking `flat_n_tile`
-  // (group_matmul_parallel.cpp:789, `a3_fuses ? fused_act : none`).
-  // `flat_n_tile` then forwards that translated `none` to BOTH the
-  // prepack call site (group_matmul_n_tile.cpp:1929) and the runtime
-  // `prepare_for_call` — so prepack and the runtime CK gate see the
-  // same `none` for silu/gelu calls in production, and CK is warmed
-  // / engaged identically.
+  //   * `swiglu_oai_mul` — caller already provides W13 interleaved
+  //     as [g0, u0, g1, u1, ...].  Prepack copies rows verbatim into
+  //     the CK pack arena.
+  //   * `silu_and_mul` / `gelu_and_mul` — caller provides W13 in
+  //     canonical split-halves [gate_cols | up_cols].  Prepack
+  //     re-interleaves the source row order during packing
+  //     (canonical row `i` → pack row `2i`; canonical row `I+i` →
+  //     pack row `2i+1`).  The packed bytes end up physically
+  //     identical to the swiglu_oai_mul layout, so the existing
+  //     in-register pair-store epilogues
+  //     (`silu_and_mul_store_pair`, `gelu_and_mul_store_pair`)
+  //     apply unchanged.  silu and gelu share the SAME prepack
+  //     interleave permutation — they differ only in the kernel-side
+  //     activation math, not in the pack layout.
   //
-  // This refusal therefore only fires for direct prepack callers
-  // (e.g. unit tests, or hypothetical future callers that bypass
-  // the parallel dispatcher).  Refusing them here keeps prepack
-  // symmetric with `prepare_for_call`'s own silu/gelu refusal in
-  // `dispatch.cpp`, which is the safer contract for direct callers
-  // — translating silently here would mask the fact that the
-  // runtime gate refuses these activations.  Cross-warm callers
-  // (ALGO 1/4/5 prepack invoked with the original silu/gelu act)
-  // accept a one-time first-call lazy CK pack on the subsequent
-  // ALGO 3 call rather than a divergent gate semantics.
+  // Split-halves silu_and_mul / gelu_and_mul + bias is NOT yet
+  // eligible — the bias-into-init epilogue would need to read the
+  // canonical [gate_bias | up_bias] in permuted order.  Bias-free
+  // silu/gelu covers the production envelope (Qwen3, Mixtral, DBRX,
+  // DeepSeek — none of these use W13 bias) and ships as the first
+  // cut.  With-bias silu/gelu stays on the separate-pass path until
+  // a follow-up adds permuted bias-init.
+  //
+  // Cross-warm semantics: when a non-ALGO-3 prepack call site
+  // invokes cross_warm with act ∈ {silu_and_mul, gelu_and_mul}
+  // (e.g., ALGO 1 prompt warming up the decode-time CK arena), the
+  // CK warm path receives the same act value, hits this gate, and
+  // packs the interleaved layout correctly.  No change to
+  // cross_warm's contract.
+  const bool split_halves_no_bias =
+      (p.act == grp_matmul_gated_act_t::silu_and_mul
+       || p.act == grp_matmul_gated_act_t::gelu_and_mul)
+      && (p.bias_dtype == data_type_t::none);
   if (p.act != grp_matmul_gated_act_t::swiglu_oai_mul
-      && p.act != grp_matmul_gated_act_t::none) {
+      && p.act != grp_matmul_gated_act_t::none
+      && !split_halves_no_bias) {
     return false;
   }
-  // (swiglu_oai_mul, f32 dst) is structurally rejected at runtime
-  // (`select_ukernel` returns nullptr for that DstDt) — `prepare_for_call`
-  // refuses with `kfn_table_fill_failed`, and the caller falls back to
-  // AOCL DLP + a separate FP32 swiglu pass.  Mirror that refusal here
-  // so prepack does not warm a CK arena for a runtime path that will
-  // never engage (and so the `!ck_eligible(p)` branch above runs the
-  // AOCL per-tile warm instead).
-  if (p.act == grp_matmul_gated_act_t::swiglu_oai_mul
-      && p.dst_dtype != data_type_t::bf16) {
+  // Any gated activation (swiglu_oai_mul, silu_and_mul, gelu_and_mul)
+  // is structurally BF16-dst only — the in-register pair-store
+  // helpers write 16 BF16 lanes per call.  `select_ukernel` returns
+  // nullptr for the (gated_act, FP32) tuple so `prepare_for_call`
+  // would refuse with `kfn_table_fill_failed`.  Mirror that refusal
+  // here.
+  const bool is_gated_act =
+      (p.act == grp_matmul_gated_act_t::swiglu_oai_mul)
+      || (p.act == grp_matmul_gated_act_t::silu_and_mul)
+      || (p.act == grp_matmul_gated_act_t::gelu_and_mul);
+  if (is_gated_act && p.dst_dtype != data_type_t::bf16) {
     return false;
   }
   if (p.act != grp_matmul_gated_act_t::none
@@ -516,20 +695,97 @@ inline bool ck_eligible(const PrepackParams &p) {
       && p.bias_dtype != data_type_t::f32) {
     return false;
   }
+  // Per-expert runtime-gate mirroring.  Each gate below has a
+  // matching refusal in `prepare_for_call`; checking the SAME
+  // condition at prepack time prevents the warmer from populating
+  // CK pack arena entries the runtime would reject.  Without these
+  // gates the prepack false-positive-warms regime 3 for shapes the
+  // runtime refuses (resident memory waste) AND silently routes
+  // the call to AOCL DLP per-tile, paying first-call lazy reorders
+  // because Fix-B (CK-on -> skip R2 primary warm) ran on a regime
+  // that's never consulted.
+  //
+  // All three vectors are optional (nullptr / empty = legacy caller
+  // didn't supply runtime context; skip the gate — pre-PR
+  // behaviour).  Production call sites in `group_matmul_n_tile.cpp`
+  // and `group_matmul_parallel.cpp` pass them explicitly.  Scope is
+  // active experts only `[0, num_ops_active)` — under both Compact
+  // (`M.size() == active_matmul`) and Padded (`M.size() ==
+  // total_matmul` with `M[active..] = 0`) layouts, indices in this
+  // range are firing experts; the tail entries (Padded) are zero
+  // and are excluded from the runtime's `M[i] > 0` loop, so we
+  // match by iterating only the active range here.
+  const int n_active = p.num_ops_active;
+  for (int i = 0; i < n_active; ++i) {
+    // transA — `prepare_for_call` refuses with `transA_not_supported`.
+    if (p.transA != nullptr
+        && i < static_cast<int>(p.transA->size())
+        && (*p.transA)[i]) {
+      return false;
+    }
+    // alpha != 1 / beta != 0 — `alpha_beta_not_supported`.
+    if (p.alpha != nullptr
+        && i < static_cast<int>(p.alpha->size())
+        && (*p.alpha)[i] != 1.0f) {
+      return false;
+    }
+    if (p.beta != nullptr
+        && i < static_cast<int>(p.beta->size())
+        && (*p.beta)[i] != 0.0f) {
+      return false;
+    }
+    // is_weights_const = false — `non_const_weight_in_active_expert`.
+    // Legacy callers leave the vector empty (= "treat every entry
+    // as const"); only refuse when the vector is supplied AND the
+    // entry is explicitly false.
+    if (p.is_weights_const != nullptr
+        && !p.is_weights_const->empty()
+        && i < static_cast<int>(p.is_weights_const->size())
+        && !(*p.is_weights_const)[i]) {
+      return false;
+    }
+  }
   // Delegate the NR-planner decision to the single source of truth in
   // `custom_kernel::plan_pack_nr` (dispatch.cpp) so the prepack-vs-
   // runtime gate stays bit-identical on every shape — including the
   // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR env override.  Use the first
-  // active expert's (K, N) as the representative; the runtime gate
-  // does the same (dispatch.cpp::prepare_for_call's loop breaks on
-  // the first active expert).  Guarded against an empty / null K, N
-  // vector.  Namespace alias is function-local because the enclosing
-  // `group_matmul_prepack` already has its own `custom_kernel` sub-
-  // namespace (warm-pack helpers); a file-scope alias would shadow it.
+  // ACTIVE expert's (K, N) — matches `prepare_for_call`'s loop
+  // (dispatch.cpp:357-361 `if (M[i] <= 0) continue; ... break;`).
+  // The active range is `[0, n_active)`; if a caller produces M[i]=0
+  // for some i < n_active (legal under both Compact and Padded
+  // layouts) we MUST skip it here too, otherwise prepack's verdict
+  // (using K[0]/N[0] unconditionally) and dispatch's verdict (skipping
+  // M[0]=0 experts) can disagree on `(K, N)` for callers with non-
+  // uniform per-expert shapes.  Falls back to (K[0], N[0]) if every
+  // active expert has M=0 (degenerate; runtime would no-op anyway).
+  //
+  // Guarded against an empty / null K, N vector.  Namespace alias is
+  // function-local because the enclosing `group_matmul_prepack` already
+  // has its own `custom_kernel` sub-namespace (warm-pack helpers); a
+  // file-scope alias would shadow it.
   namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
   if (p.K == nullptr || p.K->empty()) return false;
   if (p.N == nullptr || p.N->empty()) return false;
-  const int pack_nr = ck::plan_pack_nr((*p.K)[0], (*p.N)[0]);
+  int rep_K = (*p.K)[0];
+  int rep_N = (*p.N)[0];
+  // M may be empty (legacy callers / direct prepack invocations from
+  // tests).  When non-empty, mirror prepare_for_call by skipping
+  // zero-M experts when picking the representative.
+  if (p.M != nullptr) {
+    const int n_active = p.num_ops_active;
+    const int sweep = std::min<int>(
+        n_active,
+        static_cast<int>(std::min({p.K->size(), p.N->size(),
+                                   p.M->size()})));
+    for (int i = 0; i < sweep; ++i) {
+      if ((*p.M)[i] > 0) {
+        rep_K = (*p.K)[i];
+        rep_N = (*p.N)[i];
+        break;
+      }
+    }
+  }
+  const int pack_nr = ck::plan_pack_nr(rep_K, rep_N);
   if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) return false;
   return true;
 }
@@ -561,17 +817,26 @@ inline bool ck_eligible(const PrepackParams &p) {
 //   - `primary_did_custom=true`   → skip the custom-kernel pack cross-warm
 //
 // All extra warmer outputs are accumulated into `st_aocl` / `st_ck`
-// so the unified `PACK_PROBE` log line reports total work done
-// (primary + cross) for this prepack invocation.
+// so the unified `[GRP_MATMUL.PREPACK]` log line reports total work
+// done (primary + cross) for this prepack invocation.
 //
 // Gated by `ZENDNNL_GRP_MATMUL_CROSS_WARM` (default ON).
+//
+// `out_regime` is written to indicate which branch ran: `none` if
+// cross-warm was skipped entirely (env off, non-DLP inner_kernel, or
+// the structural skip on ALGO 3 where the primary already covered the
+// cross-warm target), otherwise the specific regime that fired.
+// Callers thread `out_regime` into `log_pack_probe(...)` so the
+// `[GRP_MATMUL.PREPACK]` line can surface it.
 inline void cross_warm(const PrepackParams                  &p,
                        matmul_algo_t                         inner_kernel,
                        int                                   current_algo,
                        bool                                  primary_did_aocl_fw,
                        bool                                  primary_did_custom,
                        aocl_dlp::AoclDlpPackProbeStats      &st_aocl,
-                       custom_kernel::PackProbeStats        &st_ck) {
+                       custom_kernel::PackProbeStats        &st_ck,
+                       CrossWarmRegime                      &out_regime) {
+  out_regime = CrossWarmRegime::none;
   if (!get_grp_matmul_cross_warm())                          return;
   if (inner_kernel != matmul_algo_t::aocl_dlp_blocked)       return;
 
@@ -584,6 +849,7 @@ inline void cross_warm(const PrepackParams                  &p,
       st_aocl.total_attempted += st_extra.total_attempted;
       st_aocl.packed_ok       += st_extra.packed_ok;
       st_aocl.skipped_invalid += st_extra.skipped_invalid;
+      out_regime = CrossWarmRegime::aocl_full_weight;
     }
     return;
   }
@@ -594,6 +860,7 @@ inline void cross_warm(const PrepackParams                  &p,
     // CK=1: decode will use custom kernel → warm regime 3.
     if (!primary_did_custom) {
       st_ck = warm_custom(p);
+      out_regime = CrossWarmRegime::custom_kernel_pack;
     }
     return;
   }
@@ -614,6 +881,7 @@ inline void cross_warm(const PrepackParams                  &p,
       st_aocl.total_attempted += st_extra.total_attempted;
       st_aocl.packed_ok       += st_extra.packed_ok;
       st_aocl.skipped_invalid += st_extra.skipped_invalid;
+      out_regime = CrossWarmRegime::aocl_per_tile;
     }
   }
 }
@@ -629,34 +897,48 @@ inline void cross_warm(const PrepackParams                  &p,
 // ─────────────────────────────────────────────────────────────────────
 void prepack_for_algo_1(const PrepackParams &p) {
   auto pre = prelude(p, /*scheduling_algo=*/1);
-  if (pre.skip) return;
+  if (pre.skip) {
+    log_pack_probe_skip(/*scheduling_algo=*/1, p, pre.skip_reason);
+    return;
+  }
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
+  const char *primary_label = "none";
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
     st_aocl = warm_aocl(p);
     primary_did_aocl_fw = true;
+    primary_label = "aocl_full_weight";
   }
+  CrossWarmRegime cwr = CrossWarmRegime::none;
   cross_warm(p, pre.inner_kernel, /*current_algo=*/1,
              primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck);
-  log_pack_probe(/*scheduling_algo=*/1, p, pre.inner_kernel, st_aocl, st_ck);
+             st_aocl, st_ck, cwr);
+  log_pack_probe(/*scheduling_algo=*/1, p, pre.inner_kernel, st_aocl, st_ck,
+                 cwr, primary_label);
 }
 
 void prepack_for_algo_2(const PrepackParams &p) {
   auto pre = prelude(p, /*scheduling_algo=*/2);
-  if (pre.skip) return;
+  if (pre.skip) {
+    log_pack_probe_skip(/*scheduling_algo=*/2, p, pre.skip_reason);
+    return;
+  }
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
+  const char *primary_label = "none";
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
     st_aocl = warm_aocl(p);
     primary_did_aocl_fw = true;
+    primary_label = "aocl_full_weight";
   }
+  CrossWarmRegime cwr = CrossWarmRegime::none;
   cross_warm(p, pre.inner_kernel, /*current_algo=*/2,
              primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck);
-  log_pack_probe(/*scheduling_algo=*/2, p, pre.inner_kernel, st_aocl, st_ck);
+             st_aocl, st_ck, cwr);
+  log_pack_probe(/*scheduling_algo=*/2, p, pre.inner_kernel, st_aocl, st_ck,
+                 cwr, primary_label);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -699,14 +981,30 @@ void prepack_for_algo_2(const PrepackParams &p) {
 // ─────────────────────────────────────────────────────────────────────
 void prepack_for_algo_3(const PrepackParams &p) {
   auto pre = prelude(p, /*scheduling_algo=*/3);
-  if (pre.skip) return;
+  if (pre.skip) {
+    log_pack_probe_skip(/*scheduling_algo=*/3, p, pre.skip_reason);
+    return;
+  }
 
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
+  const char *primary_label = "none";
+
+  // Compute the CK eligibility verdict ONCE up front and reuse it.
+  // `ck_eligible(p)` walks `[0, num_ops_active)` per-expert checking
+  // transA / alpha / beta / is_weights_const — O(num_ops_active)
+  // work.  Previously called twice in this function (once gating the
+  // AOCL per-tile warm decision, once gating the CK warm) and a
+  // third time inside `cross_warm` for non-ALGO-3 callers.  Caching
+  // here drops that to one call per prepack invocation; for a 128-
+  // expert MoE block this saves ~10 µs of redundant work on the
+  // cold path and avoids any risk of the two calls drifting if a
+  // future contributor edits one branch without the other.
+  const bool eligible_ck = ck_eligible(p);
 
   // AOCL DLP per-tile warm is also skipped when the custom kernel
-  // will handle the actual compute (`ck_eligible(p)` true): the
+  // will handle the actual compute (`eligible_ck` true): the
   // runtime ALGO 3 path picks the custom kernel for every BF16/BF16/
   // BF16 + alpha=1/beta=0 + supported-act call when `CUSTOM_KERNEL=1`,
   // so the per-tile AOCL DLP LRU entries would be populated but
@@ -724,7 +1022,7 @@ void prepack_for_algo_3(const PrepackParams &p) {
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked
       && get_grp_matmul_aocl_stable_ntile()
       && p.num_threads > 0 && p.nr_align > 0
-      && !ck_eligible(p)) {
+      && !eligible_ck) {
     const int max_N = compute_max_n(p);
     const int nr_align_eff = std::max(1, p.nr_align);
     const int stable = aocl_stable_n_thr(p.num_threads, max_N);
@@ -733,11 +1031,13 @@ void prepack_for_algo_3(const PrepackParams &p) {
       // Strict-stable ManyExperts: per-tile decomposition matches
       // the runtime cache key.
       st_aocl = warm_aocl_n_tile(p, stable, nr_align_eff);
+      primary_label = "aocl_per_tile";
     } else {
       // Narrow-N escape (`stable * nr_align > max_N`): planner
       // routes to Sequential which uses the full-weight key.
       st_aocl = warm_aocl(p);
       primary_did_aocl_fw = true;
+      primary_label = "aocl_full_weight";
     }
   }
   // else: AOCL DLP warm intentionally skipped.  Reasons (in order):
@@ -748,56 +1048,77 @@ void prepack_for_algo_3(const PrepackParams &p) {
   //     direct prepack invocations from tests / future internal
   //     callers; the `flat_n_tile` production call site always
   //     supplies both num_threads and nr_align.
-  //   * `ck_eligible(p)` is true (BF16/BF16/{BF16,F32} +
+  //   * `eligible_ck` is true (BF16/BF16/{BF16,F32} +
   //     `CUSTOM_KERNEL=1`) — custom kernel will handle compute, AOCL
   //     DLP cache is wasted memory (see the multi-line note above).
 
-  const bool primary_did_custom = ck_eligible(p);
+  const bool primary_did_custom = eligible_ck;
   if (primary_did_custom) {
     st_ck = warm_custom(p);
+    // CK pack is the dominant primary signal whenever it fires —
+    // overrides the AOCL primary_label which would only have been
+    // set to "none" since the AOCL warm branch above is gated on
+    // `!eligible_ck`.
+    primary_label = "ck_pack";
   }
 
   // Cross-warm regime 1 (full-weight AOCL) so the upcoming ALGO 1
   // prompt path finds its cache warm if the same process toggles
   // between phases.  Skipped when narrow-N escape already populated
   // regime 1, and gated by `ZENDNNL_GRP_MATMUL_CROSS_WARM`.
+  CrossWarmRegime cwr = CrossWarmRegime::none;
   cross_warm(p, pre.inner_kernel, /*current_algo=*/3,
              primary_did_aocl_fw, primary_did_custom,
-             st_aocl, st_ck);
+             st_aocl, st_ck, cwr);
 
-  log_pack_probe(/*scheduling_algo=*/3, p, pre.inner_kernel, st_aocl, st_ck);
+  log_pack_probe(/*scheduling_algo=*/3, p, pre.inner_kernel, st_aocl, st_ck,
+                 cwr, primary_label);
 }
 
 void prepack_for_algo_4(const PrepackParams &p) {
   auto pre = prelude(p, /*scheduling_algo=*/4);
-  if (pre.skip) return;
+  if (pre.skip) {
+    log_pack_probe_skip(/*scheduling_algo=*/4, p, pre.skip_reason);
+    return;
+  }
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
+  const char *primary_label = "none";
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
     st_aocl = warm_aocl(p);
     primary_did_aocl_fw = true;
+    primary_label = "aocl_full_weight";
   }
+  CrossWarmRegime cwr = CrossWarmRegime::none;
   cross_warm(p, pre.inner_kernel, /*current_algo=*/4,
              primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck);
-  log_pack_probe(/*scheduling_algo=*/4, p, pre.inner_kernel, st_aocl, st_ck);
+             st_aocl, st_ck, cwr);
+  log_pack_probe(/*scheduling_algo=*/4, p, pre.inner_kernel, st_aocl, st_ck,
+                 cwr, primary_label);
 }
 
 void prepack_for_algo_5(const PrepackParams &p) {
   auto pre = prelude(p, /*scheduling_algo=*/5);
-  if (pre.skip) return;
+  if (pre.skip) {
+    log_pack_probe_skip(/*scheduling_algo=*/5, p, pre.skip_reason);
+    return;
+  }
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
+  const char *primary_label = "none";
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
     st_aocl = warm_aocl(p);
     primary_did_aocl_fw = true;
+    primary_label = "aocl_full_weight";
   }
+  CrossWarmRegime cwr = CrossWarmRegime::none;
   cross_warm(p, pre.inner_kernel, /*current_algo=*/5,
              primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck);
-  log_pack_probe(/*scheduling_algo=*/5, p, pre.inner_kernel, st_aocl, st_ck);
+             st_aocl, st_ck, cwr);
+  log_pack_probe(/*scheduling_algo=*/5, p, pre.inner_kernel, st_aocl, st_ck,
+                 cwr, primary_label);
 }
 
 void clear_fingerprint_cache_for_test() {
