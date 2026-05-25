@@ -707,6 +707,11 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
  *  @brief Test to validate batchmatmul F16
  */
 TEST_P(TestBatchMatmul, F16_3D) {
+  bool skip_bias = false;
+  if (algo == matmul_algo_t::batched_sgemm) {
+    skip_bias = true;
+    po_types.assign(1, post_op_type_t::none);
+  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   //INPUT {MB,M,K}
@@ -715,8 +720,9 @@ TEST_P(TestBatchMatmul, F16_3D) {
   //WEI {MB,K,N}
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
                             data_type_t::f16, 2.0, transB);
-  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
-                            bias_dtype, 2.0);
+  auto bias_tensor        = skip_bias ? tensor_t{} :
+                            tensor_factory.uniform_dist_tensor({1, 1, n},
+                                bias_dtype, 2.0);
   //Binary Tensor {}
   auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
                         binary_dtype);
@@ -752,6 +758,11 @@ TEST_P(TestBatchMatmul, F16_3D) {
  *  @brief Test to validate batchmatmul F16 input/weight with F32 output
  */
 TEST_P(TestBatchMatmul, F16_F32_3D) {
+  bool skip_bias = false;
+  if (algo == matmul_algo_t::batched_sgemm) {
+    skip_bias = true;
+    po_types.assign(1, post_op_type_t::none);
+  }
   auto bias_dtype   = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   auto binary_dtype = (rand() + k) % 2 == 0 ? data_type_t::f16 : data_type_t::f32;
   //INPUT {MB,M,K}
@@ -760,8 +771,9 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
   //WEI {MB,K,N}
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({batch_size, k, n},
                             data_type_t::f16, 2.0, transB);
-  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
-                            bias_dtype, 2.0);
+  auto bias_tensor        = skip_bias ? tensor_t{} :
+                            tensor_factory.uniform_dist_tensor({1, 1, n},
+                                bias_dtype, 2.0);
   //Binary Tensor {}
   auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
                         binary_dtype);

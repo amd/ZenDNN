@@ -253,10 +253,10 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     // binary_mul and binary_add dropped for accuracy issues
     for (uint32_t i = 0; i < po_types.size(); ++i) {
       if (po_types[i] == post_op_type_t::gelu_tanh ||
-        po_types[i] == post_op_type_t::binary_mul ||
-        po_types[i] == post_op_type_t::binary_add ||
-        po_types[i] == post_op_type_t::mish ||
-        po_types[i] == post_op_type_t::swish ||
+          po_types[i] == post_op_type_t::binary_mul ||
+          po_types[i] == post_op_type_t::binary_add ||
+          po_types[i] == post_op_type_t::mish ||
+          po_types[i] == post_op_type_t::swish ||
           po_types[i] == post_op_type_t::clip) {
         po_types[i] = post_op_type_t::none;
       }
@@ -2317,9 +2317,9 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
             cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
           for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
             if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
-              cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
-              cfg.mat.po_types[i] == post_op_type_t::binary_add ||
-              cfg.mat.po_types[i] == post_op_type_t::swish ||
+                cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
+                cfg.mat.po_types[i] == post_op_type_t::binary_add ||
+                cfg.mat.po_types[i] == post_op_type_t::swish ||
                 cfg.mat.po_types[i] == post_op_type_t::clip) {
               cfg.mat.po_types[i] = post_op_type_t::none;
             }
@@ -2485,9 +2485,9 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
             cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
           for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
             if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
-              cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
-              cfg.mat.po_types[i] == post_op_type_t::binary_add ||
-              cfg.mat.po_types[i] == post_op_type_t::swish ||
+                cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
+                cfg.mat.po_types[i] == post_op_type_t::binary_add ||
+                cfg.mat.po_types[i] == post_op_type_t::swish ||
                 cfg.mat.po_types[i] == post_op_type_t::clip) {
               cfg.mat.po_types[i] = post_op_type_t::none;
             }
@@ -2607,7 +2607,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                         algo == matmul_algo_t::libxsmm_blocked);
         const bool skip_bias =
-          (is_libxsmm_kernel && output_tensor.get_data_type() == data_type_t::bf16);
+          (is_libxsmm_kernel && output_tensor.get_data_type() == data_type_t::bf16) ||
+          !bias_tensor.check();
         void *bias_data = skip_bias ? nullptr :
                           bias_tensor.get_raw_handle_unsafe();
 
@@ -2906,14 +2907,19 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
     }
     else {
       weight_tensor.set_name("weights");
-      bias_tensor.set_name("bias");
+      const bool has_bias = bias_tensor.check();
+      if (has_bias) {
+        bias_tensor.set_name("bias");
+      }
 
       //define matmul context
       matmul_context_t matmul_context = matmul_context_t()
                                         .set_param("weights", weight_tensor)
-                                        .set_param("bias", bias_tensor)
                                         .set_alpha(alpha)
                                         .set_beta(beta);
+      if (has_bias) {
+        matmul_context = matmul_context.set_param("bias", bias_tensor);
+      }
       for (const auto &po : po_types) {
         auto post_op = post_op_t{po};
         if (po  != post_op_type_t::none) {
@@ -3024,7 +3030,10 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        float beta) {
   try {
     weight_tensor.set_name("weights");
-    bias_tensor.set_name("bias");
+    const bool has_bias = bias_tensor.check();
+    if (has_bias) {
+      bias_tensor.set_name("bias");
+    }
 
     //define matmul context
     matmul_context_t matmul_context = matmul_context_t()
@@ -3033,7 +3042,9 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                       .set_beta(beta);
 
     //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
-    if (!((algo == matmul_algo_t::libxsmm ||
+    // bias is not supported for F16 batched_sgemm.
+    if (has_bias &&
+        !((algo == matmul_algo_t::libxsmm ||
            algo == matmul_algo_t::libxsmm_blocked) &&
           output_tensor.get_data_type() == data_type_t::bf16)) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);

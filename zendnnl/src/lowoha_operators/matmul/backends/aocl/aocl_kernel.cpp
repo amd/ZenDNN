@@ -418,11 +418,11 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   // s8×s8 sym_quant uses a distinct blocked weight layout. bf16/f32 per-token
   // still runs bf16s8/f32s8 GEMMs with standard s8 blocked weights + a_pre/a_post.
   const bool is_s8_sym_quant_scales =
-      dtypes.wei == data_type_t::s8 &&
-      !lowoha_param.quant_params.src_zp.buff &&
-      run_src_scale_nelems > 1 &&
-      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16) &&
-      dtypes.src == data_type_t::s8;
+    dtypes.wei == data_type_t::s8 &&
+    !lowoha_param.quant_params.src_zp.buff &&
+    run_src_scale_nelems > 1 &&
+    (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16) &&
+    dtypes.src == data_type_t::s8;
 
   size_t cache_extra_hash = 0;
   if (is_s8_sym_quant_scales) {
@@ -935,6 +935,23 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       reinterpret_cast<const float16 **>(b_ptrs.data()), &ldb_,
       &beta_f16,
       reinterpret_cast<float16 **>(c_ptrs.data()), &ldc_,
+      1, // single group
+      &group_size,
+      &mem_format_a, &mem_format_b,
+      &metadata_array);
+  }
+  else if (dtypes.src == data_type_t::f16 && dtypes.dst == data_type_t::f32) {
+    const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);
+    const uint16_t beta_f16  = common::float16_t::f32_to_f16_val(beta);
+    apilog_info("executing aocl_batch_gemm_f16f16f16of32");
+    aocl_batch_gemm_f16f16f16of32(
+      &layout, &transA, &transB,
+      &m_, &n_, &k_,
+      &alpha_f16,
+      reinterpret_cast<const float16 **>(a_ptrs.data()), &lda_,
+      reinterpret_cast<const float16 **>(b_ptrs.data()), &ldb_,
+      &beta_f16,
+      reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
       1, // single group
       &group_size,
       &mem_format_a, &mem_format_b,

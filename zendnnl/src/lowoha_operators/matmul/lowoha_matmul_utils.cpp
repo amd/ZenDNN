@@ -171,7 +171,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
       // dim cross-check below only applies when the caller is responsible
       // for supplying a separate weight scale buffer.
       const bool wei_scale_supplied_externally =
-          (params.packing.pack_format_b != 1);
+        (params.packing.pack_format_b != 1);
       if (wei_scale_supplied_externally && is_per_token &&
           wei_scale_nelems != static_cast<int64_t>(N)) {
         log_error("Per-token source scale requires per-channel weight scale "
@@ -750,14 +750,14 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     src_scale_nelems *= static_cast<size_t>(d);
   }
   const bool is_bf16_f32_per_token_sym =
-      params.dtypes.wei == data_type_t::s8 &&
-      (params.dtypes.src == data_type_t::bf16 ||
-       params.dtypes.src == data_type_t::f32) &&
-      !params.quant_params.src_zp.buff &&
-      src_scale_nelems > 1 &&
-      src_scale_nelems == static_cast<size_t>(M) &&
-      (params.dtypes.dst == data_type_t::f32 ||
-       params.dtypes.dst == data_type_t::bf16);
+    params.dtypes.wei == data_type_t::s8 &&
+    (params.dtypes.src == data_type_t::bf16 ||
+     params.dtypes.src == data_type_t::f32) &&
+    !params.quant_params.src_zp.buff &&
+    src_scale_nelems > 1 &&
+    src_scale_nelems == static_cast<size_t>(M) &&
+    (params.dtypes.dst == data_type_t::f32 ||
+     params.dtypes.dst == data_type_t::bf16);
 
   const bool is_sym_quant = params.dtypes.wei == data_type_t::s8 &&
                             !params.quant_params.src_zp.buff &&
@@ -801,7 +801,14 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                            kernel == matmul_algo_t::onednn_blocked);
     bool is_aocl_algo = (kernel == matmul_algo_t::aocl_dlp ||
                          kernel == matmul_algo_t::aocl_dlp_blocked);
-    if (!is_onednn_algo && !is_aocl_algo) {
+    // batched_sgemm dispatches to aocl_batch_gemm_f16f16f16of16/of32.
+    // DLP's F16 batch GEMM does NOT support bias or post-ops, so this
+    // path is only valid when there is no bias and no post-op.
+    bool f16_batched_sgemm_eligible = (batch_count > 1 &&
+                                       kernel == matmul_algo_t::batched_sgemm &&
+                                       bias == nullptr &&
+                                       params.postop_.empty());
+    if (!is_onednn_algo && !is_aocl_algo && !f16_batched_sgemm_eligible) {
       log_info("Switching to aocl_dlp_blocked kernel for F16 GEMM");
       kernel = matmul_algo_t::aocl_dlp_blocked;
     }
@@ -824,10 +831,15 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
 
   params.lowoha_algo = kernel;
 
-  bool is_aocl = (kernel == matmul_algo_t::aocl_dlp ||
-                  kernel == matmul_algo_t::aocl_dlp_blocked);
+  // aocl_dlp / aocl_dlp_blocked use native F16 accumulation for F16 GEMM.
+  // batched_sgemm dispatches to aocl_batch_gemm_f16f16f16of16/of32 which also
+  // accumulate in native F16, so the reference kernel must match that behavior
+  // when validating any of these paths.
+  bool is_aocl_f16_accum = (kernel == matmul_algo_t::aocl_dlp ||
+                            kernel == matmul_algo_t::aocl_dlp_blocked ||
+                            kernel == matmul_algo_t::batched_sgemm);
   matmul_config.set_accum_type(
-    (is_aocl && is_f16) ? data_type_t::f16
+    (is_aocl_f16_accum && is_f16) ? data_type_t::f16
     : data_type_t::f32);
 
   return kernel;
