@@ -1,7 +1,7 @@
 (Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Overview
-`benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul, Reorder, Embedding Bag, and Normalization operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
+`benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul, Reorder, Embedding Bag, Normalization, Group MatMul, and Scaled Dot-Product Attention (SDPA) operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
 
 # Purpose and Audience
 This tool is indispensable for a wide range of users, including `developers`, `researchers`, and `performance engineers`. Whether you're optimizing kernel implementations, experimenting with new data types, or evaluating the impact of various optimization strategies, `benchdnn` provides the precision and flexibility needed to make informed decisions.
@@ -27,9 +27,9 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 
 | Feature              | Supported Values                        |
 |----------------------|----------------------------------------|
-| Operators            | matmul, reorder, embag, normalization, grp_matmul |
+| Operators            | matmul, reorder, embag, normalization, grp_matmul, sdpa |
 | Multi-layer Matmul   | Supported                               |
-| Data Types           | f32, bf16                               |
+| Data Types           | Floating-point: `f32`, `bf16` (all ops), and `f16` (SDPA only, requires AVX512-FP16). Integer / quantized: `s8`, `u8`, `s4` on the matmul / reorder / embag paths. See each operator's doc for the exact per-op support matrix. |
 | Timing Modes         | end-to-end, detailed timing breakdowns  |
 | Cache Modes          | `hot`, `cold`; matmul also `warm` (`--cache_mode`, default `hot`) |
 | Warmup Iterations    | Supported (configurable)                |
@@ -50,7 +50,7 @@ Cache behavior is selected at run time with `--cache_mode=<value>`. Values are c
 - **`cold`**: Flush caches before each timed iteration where the operator path supports it (cold-cache style).
 - **`warm`** (matmul only): Intermediate behavior; see [matmul](doc/matmul.md) for details.
 
-Reorder and embag support `cold` and `hot`. Matmul supports `cold`, `warm`, and `hot`. Operator-specific examples are in the linked operator documentation.
+Matmul supports `cold`, `warm`, and `hot`. All other operators (reorder, embag, normalization, grp_matmul, sdpa) support `cold` and `hot`; passing `--cache_mode=warm` with any non-matmul `--op` is rejected by `main()`. Operator-specific examples are in the linked operator documentation.
 
 #### Timing Mode Selection
 The timing mode is controlled by the macro `MEASURE_INDIVIDUAL_TIMINGS` defined in `benchdnn.hpp`:
@@ -85,13 +85,14 @@ The flow is split into two main sections:
 
 
 ## Features
-- **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`, `--op=embag`, `--op=normalization`).
+- **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`, `--op=embag`, `--op=normalization`, `--op=grp_matmul`, `--op=sdpa`).
 - **Flexible Input File**: Use `--input_file=<filename>` to provide a configuration file tailored to the selected operator.
 - **Matmul Benchmarking**: Supports matrix multiplication benchmarks with options for single-layer, multi-layer, and batched matmul.
 - **Reorder Benchmarking**: Supports tensor reorder benchmarks with configurable parameters.
 - **Embag Benchmarking**: Supports embedding bag benchmarks with configurable parameters.
 - **Normalization Benchmarking**: Supports layer_norm, batch_norm, rms_norm, and fused_add_rms_norm benchmarks via the LOWOHA API with configurable shapes, data types, thread counts, and in-place operation (enabled by default).
-- **Multiple Data Types**: Supports a range of data types (e.g., `f32`, `bf16`)
+- **SDPA Benchmarking**: Supports Scaled Dot-Product Attention (Flash Attention CPU backend) via the LOWOHA `sdpa_direct` API. Covers self-attention and cross-attention, causal and additive (2D / 4D) masks, `f32`, `bf16` and `f16` Q/K/V (the `f16` path requires AVX512-FP16), and the matching set of mask dtypes (`f32` for `f32`; `f32`/`bf16` for `bf16`; `f32`/`f16` for `f16`).
+- **Multiple Data Types**: Floating-point `f32` and `bf16` across all operators, `f16` for SDPA (requires AVX512-FP16), plus integer / quantized paths (`s8`, `u8`, `s4`) on matmul, reorder, and embag. Per-operator support matrices are documented in the linked operator docs (e.g. matmul's `(src, wei, dst)` triplets and SDPA's `(qkv_dt, mask_ndims, mask_dt)` table).
 - **Detailed Timing**: Reports total time, GFLOPS, and detailed timing statistics (context creation, operator creation, execution), including percentage breakdowns for each stage (% of total time)
 - **Warmup Iterations**: Optional warmup runs to stabilize measurements
 - **Cache control**: `--cache_mode` selects hot, cold, or (matmul) warm behavior at run time
@@ -123,6 +124,7 @@ To run a benchmark, specify the operator and input method as command-line argume
   - [embag](doc/embag.md)
   - [normalization](doc/normalization.md)
   - [grp_matmul](doc/grp_matmul.md)
+  - [sdpa](doc/sdpa.md)
 - `--input_file=<file>`: Path to a configuration file with one or more test cases.
 - `--input_model_file=<model_file>`: (Optional) Path to a model file for model-based benchmarking.
 - `[command-line options]`: Command-line arguments to specify all required parameters directly. These can be used in combination with model files.

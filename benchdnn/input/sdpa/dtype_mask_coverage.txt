@@ -1,0 +1,103 @@
+# SDPA dtype x mask coverage matrix
+# Exercises every legal (qkv_dt, mask_ndims, mask_dt, is_causal) combination
+# accepted by lowoha_flash_sdpa_utils.cpp::validate_flash_sdpa_inputs.
+#
+# Format:
+#   batch, num_heads, seq_len, kv_seq_len, head_dim, qkv_dt,
+#   is_causal, mask_ndims, mask_dt, iters
+#   [, warmup_iters, scale, num_threads, out_dt, qkv_layout]
+#
+# Legend:
+#   kv_seq_len = 0 -> use seq_len (self-attention)
+#   mask_ndims = 0 -> no additive mask (mask_dt ignored)
+#   scale = 0.0   -> auto = 1 / sqrt(head_dim)
+#   num_threads = 0 -> auto (use OMP_NUM_THREADS or all available cores)
+#   qkv_layout = bhsd (default, head-major) | bshd (token-major)
+
+# ----------------------------------------------------------------------------
+# qkv_dt = f32 (fp32 path; mask must be f32 when present)
+# ----------------------------------------------------------------------------
+# (f32, no_mask)
+2,  8, 384, 0, 64, f32, false, 0, none, 100, 20, 0.0, 0, none
+2,  8, 384, 0, 64, f32, true , 0, none, 100, 20, 0.0, 0, none
+# (f32, 2D mask = [S_q,S_kv])
+2,  8, 384, 0, 64, f32, false, 2, f32 , 100, 20, 0.0, 0, none
+2,  8, 384, 0, 64, f32, true , 2, f32 , 100, 20, 0.0, 0, none
+# (f32, 4D mask = [B,H,S_q,S_kv])
+2,  8, 384, 0, 64, f32, false, 4, f32 , 100, 20, 0.0, 0, none
+2,  8, 384, 0, 64, f32, true , 4, f32 , 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# qkv_dt = bf16 (bf16 path; mask may be f32 or bf16)
+# ----------------------------------------------------------------------------
+# (bf16, no_mask)
+4, 16, 1024, 0, 64, bf16, false, 0, none, 100, 20, 0.0, 0, none
+4, 16, 1024, 0, 64, bf16, true , 0, none, 100, 20, 0.0, 0, none
+# (bf16, 2D mask = f32)
+2, 12,  512, 0, 64, bf16, false, 2, f32 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, bf16, true , 2, f32 , 100, 20, 0.0, 0, none
+# (bf16, 2D mask = bf16)
+2, 12,  512, 0, 64, bf16, false, 2, bf16, 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, bf16, true , 2, bf16, 100, 20, 0.0, 0, none
+# (bf16, 4D mask = f32)
+2, 12,  512, 0, 64, bf16, false, 4, f32 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, bf16, true , 4, f32 , 100, 20, 0.0, 0, none
+# (bf16, 4D mask = bf16)
+2, 12,  512, 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, bf16, true , 4, bf16, 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# qkv_dt = f16 (fp16 path; mask may be f32 or f16).
+# Requires AVX512-FP16 at runtime (Zen5 / Granite Rapids and newer); on CPUs
+# without AVX512-FP16 the kernel returns a failure status and the runner
+# logs + skips these rows.
+# ----------------------------------------------------------------------------
+# (f16, no_mask)
+4, 16, 1024, 0, 64, f16, false, 0, none, 100, 20, 0.0, 0, none
+4, 16, 1024, 0, 64, f16, true , 0, none, 100, 20, 0.0, 0, none
+# (f16, 2D mask = f32)
+2, 12,  512, 0, 64, f16, false, 2, f32 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, f16, true , 2, f32 , 100, 20, 0.0, 0, none
+# (f16, 2D mask = f16)
+2, 12,  512, 0, 64, f16, false, 2, f16 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, f16, true , 2, f16 , 100, 20, 0.0, 0, none
+# (f16, 4D mask = f32)
+2, 12,  512, 0, 64, f16, false, 4, f32 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, f16, true , 4, f32 , 100, 20, 0.0, 0, none
+# (f16, 4D mask = f16)
+2, 12,  512, 0, 64, f16, false, 4, f16 , 100, 20, 0.0, 0, none
+2, 12,  512, 0, 64, f16, true , 4, f16 , 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# Cross-attention (S_q != S_kv).  Exercises distinct query/key sequence lengths
+# with both 2D and 4D masks for the bf16 path.
+# ----------------------------------------------------------------------------
+# Decode-style: 1 query token attends to 512 KV tokens
+2, 12, 1, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+2, 12, 1, 512, 64, bf16, false, 2, bf16, 100, 20, 0.0, 0, none
+# Encoder-decoder cross-attention
+2, 12, 64, 256, 64, bf16, false, 4, f32 , 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# qkv_layout = bshd (token-major, [B,S,H,D] memory order)
+# Same logical shapes as the BHSD section above, but with a permuted physical
+# stride pattern. Useful for measuring the layout overhead of the flash kernel
+# and confirming the strided-access path matches the contiguous one.
+# ----------------------------------------------------------------------------
+# (bshd, f32, no_mask)
+2,  8, 384, 0, 64, f32, false, 0, none, 100, 20, 0.0, 0, none, bshd
+2,  8, 384, 0, 64, f32, true , 0, none, 100, 20, 0.0, 0, none, bshd
+# (bshd, f32, 2D / 4D)
+2,  8, 384, 0, 64, f32, false, 2, f32 , 100, 20, 0.0, 0, none, bshd
+2,  8, 384, 0, 64, f32, false, 4, f32 , 100, 20, 0.0, 0, none, bshd
+# (bshd, bf16, no_mask)
+4, 16, 1024, 0, 64, bf16, false, 0, none, 100, 20, 0.0, 0, none, bshd
+4, 16, 1024, 0, 64, bf16, true , 0, none, 100, 20, 0.0, 0, none, bshd
+# (bshd, bf16, 2D / 4D, both mask dtypes)
+2, 12,  512, 0, 64, bf16, false, 2, f32 , 100, 20, 0.0, 0, none, bshd
+2, 12,  512, 0, 64, bf16, false, 2, bf16, 100, 20, 0.0, 0, none, bshd
+2, 12,  512, 0, 64, bf16, false, 4, f32 , 100, 20, 0.0, 0, none, bshd
+2, 12,  512, 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none, bshd
+# (bshd, cross-attention; S_q != S_kv exercises the K/V stride path)
+2, 12, 1, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none, bshd
+2, 12, 64, 256, 64, bf16, false, 4, f32 , 100, 20, 0.0, 0, none, bshd

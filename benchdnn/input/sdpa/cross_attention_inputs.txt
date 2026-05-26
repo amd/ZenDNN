@@ -1,0 +1,60 @@
+# Encoder-decoder cross-attention shapes (T5 / MT5 / BART family).
+# In cross-attention, queries come from the decoder and keys/values come from
+# the encoder; therefore S_q (decoder seq len) and S_kv (encoder seq len) are
+# typically different.  All cases here are non-causal (cross-attention can see
+# all encoder tokens) but use a 4D additive mask to handle padding.
+#
+# Format:
+#   batch, num_heads, seq_len, kv_seq_len, head_dim, qkv_dt,
+#   is_causal, mask_ndims, mask_dt, iters
+#   [, warmup_iters, scale, num_threads, out_dt, qkv_layout]
+#
+# qkv_layout (optional, default = bhsd): physical Q/K/V memory order.
+#   bhsd = [B,H,S,D] (head-major, default) | bshd = [B,S,H,D] (token-major).
+
+# ============================================================================
+# T5-base    : H = 12, D = 64, hidden = 768
+# ============================================================================
+# Encoder source = 128, decoder target steps from 1 to 128
+1, 12,   1, 128, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1, 12,  16, 128, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1, 12,  64, 128, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1, 12, 128, 128, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+# Encoder source = 512, decoder target steps from 1 to 256
+1, 12,   1, 512, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1, 12,  64, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 12, 128, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 12, 256, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+# Batched cross-attention
+8, 12,  64, 256, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+8, 12, 128, 512, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+
+# ============================================================================
+# T5-large   : H = 16, D = 64, hidden = 1024
+# ============================================================================
+1, 16,   1, 512 , 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1, 16,  64, 512 , 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 16, 128, 512 , 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 16, 256, 1024, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+
+# ============================================================================
+# Whisper-medium audio cross-attention : H = 16, D = 64
+# Encoder produces 1500 audio frame tokens; decoder text len varies.
+# ============================================================================
+1, 16,  64, 1500, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 16, 128, 1500, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+1, 16, 256, 1500, 64, bf16, false, 4, bf16,  50, 10, 0.0, 0, none
+
+# ============================================================================
+# Mixed mask-dtype variants (bf16 model, f32 mask).  Useful for verifying the
+# bf16/f32 mask dtype split in flash_sdpa_utils.
+# ============================================================================
+1, 12,  64, 256, 64, bf16, false, 4, f32 , 100, 20, 0.0, 0, none
+1, 12,  64, 256, 64, bf16, false, 2, f32 , 100, 20, 0.0, 0, none
+1, 12,  64, 256, 64, bf16, false, 2, bf16, 100, 20, 0.0, 0, none
+
+# ============================================================================
+# fp32 cross-attention sanity check.
+# ============================================================================
+1, 12,  64, 256, 64, f32 , false, 4, f32 , 100, 20, 0.0, 0, none
+1, 12,  64, 256, 64, f32 , false, 2, f32 , 100, 20, 0.0, 0, none

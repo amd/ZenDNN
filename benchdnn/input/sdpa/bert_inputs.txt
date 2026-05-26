@@ -1,0 +1,50 @@
+# BERT-style encoder self-attention shapes.
+# Workload: classification / NER / QA inference, no causal mask, full padding mask.
+# Both BERT-base (H=12, D=64, hidden=768) and BERT-large (H=16, D=64, hidden=1024).
+#
+# Format:
+#   batch, num_heads, seq_len, kv_seq_len, head_dim, qkv_dt,
+#   is_causal, mask_ndims, mask_dt, iters
+#   [, warmup_iters, scale, num_threads, out_dt, qkv_layout]
+#
+# qkv_layout (optional, default = bhsd): physical Q/K/V memory order.
+#   bhsd = [B,H,S,D] (head-major, default) | bshd = [B,S,H,D] (token-major).
+
+# ----------------------------------------------------------------------------
+# BERT-base (H=12, D=64), bf16 + 4D padding mask
+# ----------------------------------------------------------------------------
+1 , 12, 128 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 12, 256 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 12, 384 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 12, 512 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 12, 128 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 12, 256 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 12, 384 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 12, 512 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+32, 12, 128 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 12, 256 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 12, 384 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 12, 512 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# BERT-large (H=16, D=64), bf16 + 4D padding mask
+# ----------------------------------------------------------------------------
+1 , 16, 128 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 16, 256 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 16, 384 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+1 , 16, 512 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 16, 128 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 16, 256 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 16, 384 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+8 , 16, 512 , 0, 64, bf16, false, 4, bf16, 200, 40, 0.0, 0, none
+32, 16, 128 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 16, 256 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 16, 384 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+32, 16, 512 , 0, 64, bf16, false, 4, bf16, 100, 20, 0.0, 0, none
+
+# ----------------------------------------------------------------------------
+# BERT-base in fp32
+# ----------------------------------------------------------------------------
+1 , 12, 128 , 0, 64, f32 , false, 4, f32 , 200, 40, 0.0, 0, none
+1 , 12, 384 , 0, 64, f32 , false, 4, f32 , 200, 40, 0.0, 0, none
+8 , 12, 384 , 0, 64, f32 , false, 4, f32 , 100, 20, 0.0, 0, none

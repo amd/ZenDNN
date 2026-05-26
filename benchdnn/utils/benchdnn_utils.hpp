@@ -46,9 +46,10 @@ enum class CacheMode {
  * @var ndims Number of dimensions for tensors (e.g., 2 for standard matmul, 3 for batched matmul).
  */
 struct global_options {
-  size_t bs; /**< Batch size (for batched matmul; default 1 for non-batched). */
-  size_t m; /**< Number of rows in matrix A (output rows). */
-  size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
+  size_t bs; /**< CLI batch size (B). 0 = unset; required for BMM matmul
+                 (--ndims>2) and for SDPA. Ignored for non-batched matmul. */
+  size_t m;  /**< CLI matmul M dimension. 0 = unset; required for matmul. */
+  size_t k;  /**< CLI matmul K dimension. 0 = unset; required for matmul. */
   std::vector<size_t> n_values; /**< Vector of output columns
                                for each layer (multi-layer support). */
   bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
@@ -82,16 +83,58 @@ struct global_options {
                                      per-tensor | per-token | per-group. */
   uint64_t src_group_size; /**< K-direction group size for per-group source scales. */
   data_type_t src_scale_dt; /**< Datatype of source scale (f32 | bf16). */
-  global_options() : isBiasEnabled(false), ndims(2), iters(100),
-    sdt(data_type_t::f32), wdt(data_type_t::f32),
-    ddt(data_type_t::f32), is_weights_const(-1), bias_dt(data_type_t::f32),
+
+  // SDPA-specific options (used by --op=sdpa).
+  // Two different conventions are used for the default-constructed values below:
+  //   * Required dimensions (num_heads, seq_len, head_dim) use 0 as an "unset"
+  //     sentinel; the CLI parser rejects values <= 0 so the SDPA driver can
+  //     detect when the user forgot to supply them.
+  //   * Every other field treats its default (0 / false / data_type_t::none /
+  //     "bhsd") as a real, semantic value -- NOT a sentinel. For example:
+  //       kv_seq_len = 0          -> self-attention (use seq_len)
+  //       mask_ndims = 0          -> no attention mask
+  //       mask_dt    = none       -> no mask dtype
+  //       is_causal  = false      -> no causal mask (a valid default)
+  //       scale      = 0.0        -> auto = 1 / sqrt(head_dim)
+  //       num_threads= 0          -> auto (use all available threads)
+  //       out_dt     = none       -> use qkv dtype
+  //       qkv_layout = "bhsd"     -> head-major BHSD memory layout
+  // See each field's docstring for the exact semantics.
+  int64_t num_heads;     /**< SDPA: number of attention heads (H). 0 = unset. */
+  int64_t seq_len;       /**< SDPA: query sequence length (S_q). 0 = unset. */
+  int64_t kv_seq_len;    /**< SDPA: key/value sequence length. 0 = use seq_len. */
+  int64_t head_dim;      /**< SDPA: per-head dimension (D). 0 = unset. */
+  int mask_ndims;        /**< SDPA: 0 (none), 2 ([S_q,S_kv]) or 4 ([B,H,S_q,S_kv]). */
+  data_type_t mask_dt;   /**< SDPA: mask data type when mask_ndims > 0. */
+  bool is_causal;        /**< SDPA: apply causal upper-triangular mask. */
+  double scale;          /**< SDPA: softmax scale; 0.0 -> auto = 1/sqrt(D). */
+  int32_t num_threads;   /**< SDPA: OpenMP thread count; 0 = auto/all available. */
+  data_type_t out_dt;    /**< SDPA: output dtype. `none` -> use qkv_dt. */
+  std::string qkv_layout; /**< SDPA: physical Q/K/V layout: "bhsd" (default) or "bshd".
+                               Stored as a string here to keep this op-agnostic header
+                               independent of SDPA-specific enums; converted to
+                               `qkv_layout_t` once at config-build time. */
+
+  global_options() :
+    bs(0), m(0), k(0),
+    isBiasEnabled(false),
     post_op_dt(data_type_t::f32),
-    isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
+    ndims(2), iters(100),
+    sdt(data_type_t::f32), wdt(data_type_t::f32), ddt(data_type_t::f32),
+    is_weights_const(-1), bias_dt(data_type_t::f32),
+    isTransA(false), isTransB(false),
+    alpha(1.0f), beta(0.0f),
     scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32),
-    perf_counters(false), perf_profile_str("cache"), cache_mode(CacheMode::HOT),
+    warmup_iters(-1),
+    perf_counters(false), perf_profile_str("cache"),
+    cache_mode(CacheMode::HOT),
     num_weight_buffers(-1),
     src_dynamic_quant(false), src_scale_granularity("per-tensor"),
-    src_group_size(0), src_scale_dt(data_type_t::f32) {}
+    src_group_size(0), src_scale_dt(data_type_t::f32),
+    num_heads(0), seq_len(0), kv_seq_len(0), head_dim(0),
+    mask_ndims(0), mask_dt(data_type_t::none), is_causal(false),
+    scale(0.0), num_threads(0), out_dt(data_type_t::none),
+    qkv_layout("bhsd") {}
 };
 
 /**
@@ -135,8 +178,24 @@ std::vector<std::string> split(const std::string &s, char delimiter);
  *
  * @param str String representation of the data type (e.g., "f32", "s8").
  * @return data_type_t Corresponding enum value.
+ * @throws std::invalid_argument if @p str is not a recognized concrete dtype.
  */
 data_type_t strToDatatype(const std::string &str);
+
+/**
+ * @brief Like `strToDatatype()`, but additionally maps the literal string "none"
+ *        to `data_type_t::none`.
+ *
+ * Use this only at parse sites where an unset dtype is a meaningful, well-defined
+ * value (e.g. SDPA's `--mask_dt` when `mask_ndims == 0`, or `--out_dt` meaning
+ * "default to qkv_dt"). Anywhere else, prefer the strict `strToDatatype()` so
+ * malformed input is rejected at parse time.
+ *
+ * @param str String representation of the data type, or the literal "none".
+ * @return data_type_t Corresponding enum value, or `data_type_t::none` for "none".
+ * @throws std::invalid_argument if @p str is neither "none" nor a recognized dtype.
+ */
+data_type_t strToOptionalDatatype(const std::string &str);
 
 /**
  * @brief Converts a data_type_t enum value to its string representation.

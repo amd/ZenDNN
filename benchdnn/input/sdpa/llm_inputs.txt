@@ -1,0 +1,54 @@
+# LLM-style causal decoder shapes (Llama / GPT family).
+# Two phases per model:
+#   - Prefill: long prompt, S_q == S_kv, causal mask (kv_seq_len = 0).
+#   - Decode : 1 query token, growing KV cache, S_q=1, S_kv=N, causal still on.
+#
+# Format:
+#   batch, num_heads, seq_len, kv_seq_len, head_dim, qkv_dt,
+#   is_causal, mask_ndims, mask_dt, iters
+#   [, warmup_iters, scale, num_threads, out_dt, qkv_layout]
+
+# ============================================================================
+# Llama-7B  : H = 32, D = 128, hidden = 4096
+# ============================================================================
+# Prefill (causal, no additive mask, kv_seq_len = 0 -> use seq_len)
+1, 32, 128 , 0, 128, bf16, true , 0, none, 100, 20, 0.0, 0, none
+1, 32, 512 , 0, 128, bf16, true , 0, none, 100, 20, 0.0, 0, none
+1, 32, 1024, 0, 128, bf16, true , 0, none, 100, 20, 0.0, 0, none
+1, 32, 2048, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+1, 32, 4096, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+4, 32, 1024, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+8, 32, 1024, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+# Decode (1 new token attends to growing KV cache; causal still set, but trivially satisfied)
+1, 32, 1, 128 , 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+1, 32, 1, 512 , 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+1, 32, 1, 1024, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+1, 32, 1, 2048, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+1, 32, 1, 4096, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+4, 32, 1, 2048, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+
+# ============================================================================
+# Llama-13B : H = 40, D = 128, hidden = 5120
+# ============================================================================
+# Prefill
+1, 40, 512 , 0, 128, bf16, true , 0, none, 100, 20, 0.0, 0, none
+1, 40, 1024, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+1, 40, 2048, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+4, 40, 1024, 0, 128, bf16, true , 0, none,  50, 10, 0.0, 0, none
+# Decode
+1, 40, 1, 1024, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+1, 40, 1, 2048, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+4, 40, 1, 2048, 128, bf16, true , 0, none, 200, 40, 0.0, 0, none
+
+# ============================================================================
+# GPT-J 6B  : H = 16, D = 256
+# ============================================================================
+1, 16, 1024, 0, 256, bf16, true , 0, none,  50, 10, 0.0, 0, none
+1, 16, 2048, 0, 256, bf16, true , 0, none,  50, 10, 0.0, 0, none
+1, 16, 1, 2048, 256, bf16, true , 0, none, 200, 40, 0.0, 0, none
+
+# ============================================================================
+# fp32 sanity-check shape for the prefill path.
+# ============================================================================
+1, 32, 1024, 0, 128, f32 , true , 0, none,  50, 10, 0.0, 0, none
+1, 32, 1, 1024, 128, f32 , true , 0, none, 200, 40, 0.0, 0, none

@@ -16,12 +16,100 @@
 
 #include "benchdnn_utils.hpp"
 
+#include <limits>
+#include <stdexcept>
+
 namespace zendnnl {
 namespace benchdnn {
 
 volatile unsigned long global_sum = 0;
 
 using namespace zendnnl::interface;
+
+namespace {
+
+// Non-throwing wrappers around std::stoll / std::stoi / std::stod /
+// strToOptionalDatatype. benchdnn.cpp does not catch exceptions around
+// parseCLArgs(), so a malformed CLI value (e.g. --seq_len=abc, --scale=1e999,
+// --mask_dt=foo) would otherwise propagate out of main() and abort the
+// process. These helpers log a flag-specific error and return false instead,
+// so callers can simply `return NOT_OK;` consistent with the other
+// validation paths in parseCLArgs().
+
+bool tryParseInt64(const std::string &val, const char *flag, int64_t &out) {
+  try {
+    size_t pos = 0;
+    out = std::stoll(val, &pos);
+    if (pos != val.size()) {
+      commonlog_error(flag, " value '", val,
+                      "' has trailing characters; expected an integer.");
+      return false;
+    }
+    return true;
+  }
+  catch (const std::invalid_argument &) {
+    commonlog_error(flag, " value '", val, "' is not a valid integer.");
+    return false;
+  }
+  catch (const std::out_of_range &) {
+    commonlog_error(flag, " value '", val,
+                    "' is out of range for a 64-bit integer.");
+    return false;
+  }
+}
+
+bool tryParseInt(const std::string &val, const char *flag, int &out) {
+  int64_t tmp = 0;
+  if (!tryParseInt64(val, flag, tmp)) {
+    return false;
+  }
+  if (tmp < std::numeric_limits<int>::min() ||
+      tmp > std::numeric_limits<int>::max()) {
+    commonlog_error(flag, " value '", val,
+                    "' is out of range for a 32-bit int.");
+    return false;
+  }
+  out = static_cast<int>(tmp);
+  return true;
+}
+
+bool tryParseDouble(const std::string &val, const char *flag, double &out) {
+  try {
+    size_t pos = 0;
+    out = std::stod(val, &pos);
+    if (pos != val.size()) {
+      commonlog_error(flag, " value '", val,
+                      "' has trailing characters; expected a number.");
+      return false;
+    }
+    return true;
+  }
+  catch (const std::invalid_argument &) {
+    commonlog_error(flag, " value '", val, "' is not a valid number.");
+    return false;
+  }
+  catch (const std::out_of_range &) {
+    commonlog_error(flag, " value '", val,
+                    "' is out of range for a double.");
+    return false;
+  }
+}
+
+bool tryParseOptionalDatatype(const std::string &val, const char *flag,
+                              data_type_t &out) {
+  try {
+    out = strToOptionalDatatype(val);
+    return true;
+  }
+  catch (const std::exception &e) {
+    commonlog_error(flag, " value '", val,
+                    "' is not a recognized data type (", e.what(),
+                    "). Use 'none' or one of the supported dtypes.");
+    return false;
+  }
+}
+
+} // anonymous namespace
 
 void trim(std::string &str) {
   str.erase(std::remove_if(str.begin(), str.end(), ::isspace), str.end());
@@ -81,8 +169,17 @@ data_type_t strToDatatype(const std::string &str) {
   throw std::invalid_argument("Unknown data type string '" + str + "'");
 }
 
+data_type_t strToOptionalDatatype(const std::string &str) {
+  if (str == "none") {
+    return data_type_t::none;
+  }
+  return strToDatatype(str);
+}
+
 std::string datatypeToStr(data_type_t dt) {
   switch (dt) {
+  case data_type_t::none:
+    return "none";
   case data_type_t::f32:
     return "f32";
   case data_type_t::f16:
@@ -353,25 +450,43 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
     options.ndims = std::stoi(arg.substr(8));
   }
   else if (arg.find("--bs=") == 0) {
-    if (arg.substr(5).empty() || std::stoi(arg.substr(5)) <= 0) {
-      commonlog_error("bs value cannot be empty or <= 0. Please provide a valid number.");
+    std::string val = arg.substr(5);
+    if (val.empty()) {
+      commonlog_error("bs value cannot be empty. Please provide a valid number.");
       return NOT_OK;
     }
-    options.bs = std::stoi(arg.substr(5));
+    int bs = std::stoi(val);
+    if (bs <= 0) {
+      commonlog_error("bs value must be > 0.");
+      return NOT_OK;
+    }
+    options.bs = bs;
   }
   else if (arg.find("--m=") == 0) {
-    if (arg.substr(4).empty() || std::stoi(arg.substr(4)) <= 0) {
-      commonlog_error("M value cannot be empty or <= 0. Please provide a valid number.");
+    std::string val = arg.substr(4);
+    if (val.empty()) {
+      commonlog_error("M value cannot be empty. Please provide a valid number.");
       return NOT_OK;
     }
-    options.m = std::stoi(arg.substr(4));
+    int m = std::stoi(val);
+    if (m <= 0) {
+      commonlog_error("M value must be > 0.");
+      return NOT_OK;
+    }
+    options.m = m;
   }
   else if (arg.find("--k=") == 0) {
-    if (arg.substr(4).empty() || std::stoi(arg.substr(4)) <= 0) {
-      commonlog_error("K value cannot be empty or <= 0. Please provide a valid number.");
+    std::string val = arg.substr(4);
+    if (val.empty()) {
+      commonlog_error("K value cannot be empty. Please provide a valid number.");
       return NOT_OK;
     }
-    options.k = std::stoi(arg.substr(4));
+    int k = std::stoi(val);
+    if (k <= 0) {
+      commonlog_error("K value must be > 0.");
+      return NOT_OK;
+    }
+    options.k = k;
   }
   else if (arg.find("--n=") == 0) {
     std::string n_values_str = arg.substr(4);
@@ -381,11 +496,16 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
     }
     auto n_values = split(n_values_str, ':');
     for (const auto &n : n_values) {
-      if (n.empty() || std::stoi(n) <= 0) {
-        commonlog_error("One of the n values is empty or <= 0. Please provide a valid value.");
+      if (n.empty()) {
+        commonlog_error("One of the n values is empty. Please provide a valid value.");
         return NOT_OK;
       }
-      options.n_values.push_back(std::stoi(n));
+      int n_val = std::stoi(n);
+      if (n_val <= 0) {
+        commonlog_error("One of the n values is <= 0. Please provide a valid value.");
+        return NOT_OK;
+      }
+      options.n_values.push_back(n_val);
     }
   }
   else if (arg.find("--bias=") == 0) {
@@ -606,6 +726,170 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.num_weight_buffers = std::stoi(arg.substr(21));
+  }
+  // ----------------------- SDPA-specific flags --------------------------
+  else if (arg.find("--num_heads=") == 0) {
+    std::string val = arg.substr(12);
+    if (val.empty()) {
+      commonlog_error("num_heads value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    int64_t num_heads = 0;
+    if (!tryParseInt64(val, "--num_heads", num_heads)) {
+      return NOT_OK;
+    }
+    if (num_heads <= 0) {
+      commonlog_error("num_heads value must be > 0.");
+      return NOT_OK;
+    }
+    options.num_heads = num_heads;
+  }
+  else if (arg.find("--seq_len=") == 0) {
+    std::string val = arg.substr(10);
+    if (val.empty()) {
+      commonlog_error("seq_len value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    int64_t seq_len = 0;
+    if (!tryParseInt64(val, "--seq_len", seq_len)) {
+      return NOT_OK;
+    }
+    if (seq_len <= 0) {
+      commonlog_error("seq_len value must be > 0.");
+      return NOT_OK;
+    }
+    options.seq_len = seq_len;
+  }
+  else if (arg.find("--kv_seq_len=") == 0) {
+    std::string val = arg.substr(13);
+    if (val.empty()) {
+      commonlog_error("kv_seq_len value cannot be empty. Please provide a valid number (>= 0).");
+      return NOT_OK;
+    }
+    int64_t kv = 0;
+    if (!tryParseInt64(val, "--kv_seq_len", kv)) {
+      return NOT_OK;
+    }
+    if (kv < 0) {
+      commonlog_error("kv_seq_len must be >= 0 (0 means same as seq_len).");
+      return NOT_OK;
+    }
+    options.kv_seq_len = kv;
+  }
+  else if (arg.find("--head_dim=") == 0) {
+    std::string val = arg.substr(11);
+    if (val.empty()) {
+      commonlog_error("head_dim value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    int64_t head_dim = 0;
+    if (!tryParseInt64(val, "--head_dim", head_dim)) {
+      return NOT_OK;
+    }
+    if (head_dim <= 0) {
+      commonlog_error("head_dim value must be > 0.");
+      return NOT_OK;
+    }
+    options.head_dim = head_dim;
+  }
+  else if (arg.find("--mask_ndims=") == 0) {
+    std::string val = arg.substr(13);
+    if (val.empty()) {
+      commonlog_error("mask_ndims value cannot be empty. Please provide 0, 2, or 4.");
+      return NOT_OK;
+    }
+    int v = 0;
+    if (!tryParseInt(val, "--mask_ndims", v)) {
+      return NOT_OK;
+    }
+    if (v != 0 && v != 2 && v != 4) {
+      commonlog_error("mask_ndims must be 0, 2, or 4.");
+      return NOT_OK;
+    }
+    options.mask_ndims = v;
+  }
+  else if (arg.find("--mask_dt=") == 0) {
+    std::string val = arg.substr(10);
+    if (val.empty()) {
+      commonlog_error("mask_dt cannot be empty. Use 'none', 'f32', 'f16', or 'bf16'.");
+      return NOT_OK;
+    }
+    data_type_t mask_dt = data_type_t::none;
+    if (!tryParseOptionalDatatype(val, "--mask_dt", mask_dt)) {
+      return NOT_OK;
+    }
+    options.mask_dt = mask_dt;
+  }
+  else if (arg.find("--is_causal=") == 0) {
+    std::string val = arg.substr(12);
+    if (val.empty()) {
+      commonlog_error("is_causal value cannot be empty. Use true/false or 1/0.");
+      return NOT_OK;
+    }
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "true" || val == "1") {
+      options.is_causal = true;
+    }
+    else if (val == "false" || val == "0") {
+      options.is_causal = false;
+    }
+    else {
+      commonlog_error("Invalid value for is_causal. Use true/false or 1/0.");
+      return NOT_OK;
+    }
+  }
+  else if (arg.find("--scale=") == 0) {
+    std::string val = arg.substr(8);
+    if (val.empty()) {
+      commonlog_error("scale value cannot be empty. Use 0.0 for auto = 1/sqrt(head_dim).");
+      return NOT_OK;
+    }
+    double scale = 0.0;
+    if (!tryParseDouble(val, "--scale", scale)) {
+      return NOT_OK;
+    }
+    options.scale = scale;
+  }
+  else if (arg.find("--num_threads=") == 0) {
+    std::string val = arg.substr(14);
+    if (val.empty()) {
+      commonlog_error("num_threads value cannot be empty. Use 0 for auto.");
+      return NOT_OK;
+    }
+    int v = 0;
+    if (!tryParseInt(val, "--num_threads", v)) {
+      return NOT_OK;
+    }
+    if (v < 0) {
+      commonlog_error("num_threads must be >= 0 (0 = auto).");
+      return NOT_OK;
+    }
+    options.num_threads = v;
+  }
+  else if (arg.find("--out_dt=") == 0) {
+    std::string val = arg.substr(9);
+    if (val.empty()) {
+      commonlog_error("out_dt cannot be empty. Use 'none', 'f32', 'f16', or 'bf16'.");
+      return NOT_OK;
+    }
+    data_type_t out_dt = data_type_t::none;
+    if (!tryParseOptionalDatatype(val, "--out_dt", out_dt)) {
+      return NOT_OK;
+    }
+    options.out_dt = out_dt;
+  }
+  else if (arg.find("--qkv_layout=") == 0) {
+    std::string val = arg.substr(13);
+    if (val.empty()) {
+      commonlog_error("qkv_layout value cannot be empty. Use 'bhsd' or 'bshd'.");
+      return NOT_OK;
+    }
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val != "bhsd" && val != "bshd") {
+      commonlog_error("Invalid qkv_layout '", val, "'. Use 'bhsd' or 'bshd'.");
+      return NOT_OK;
+    }
+    options.qkv_layout = val;
   }
   else if (arg.find("--dynamic_quant=") == 0) {
     if (arg.substr(16).empty()) {

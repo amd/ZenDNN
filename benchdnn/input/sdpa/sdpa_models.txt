@@ -1,0 +1,58 @@
+# SDPA model-shapes file (MODEL input mode).
+# Used with: --op=sdpa --input_model_file=<this_file> plus CLI overrides for
+# qkv_dt, mask_ndims, mask_dt, is_causal, scale, num_threads, iters,
+# warmup_iters, out_dt, qkv_layout.
+#
+# Format per line (CSV, '#' comments and blank lines ignored):
+#   ModelName, batch, num_heads, seq_len, kv_seq_len, head_dim
+#
+# kv_seq_len = 0 -> use seq_len (self-attention).
+# qkv_layout defaults to bhsd ([B,H,S,D] head-major); pass --qkv_layout=bshd
+# to benchmark the token-major ([B,S,H,D]) physical layout.
+#
+# Example invocation (bf16 + 4D bf16 mask, non-causal, BERT/T5 style):
+#   ./benchdnn --op=sdpa --input_model_file=sdpa_models.txt \
+#              --sdt=bf16 --mask_ndims=4 --mask_dt=bf16 \
+#              --is_causal=false --iters=100 --warmup_iters=20
+
+# ----------------------------------------------------------------------------
+# Encoder self-attention (BERT family, ViT family)
+# ----------------------------------------------------------------------------
+BERT_base_S128       , 1, 12, 128, 0, 64
+BERT_base_S384       , 1, 12, 384, 0, 64
+BERT_base_S512       , 1, 12, 512, 0, 64
+BERT_large_S128      , 1, 16, 128, 0, 64
+BERT_large_S384      , 1, 16, 384, 0, 64
+BERT_large_S512      , 1, 16, 512, 0, 64
+DistilBERT_base_S128 , 1, 12, 128, 0, 64
+RoBERTa_base_S512    , 1, 12, 512, 0, 64
+ViT_base_S197        , 1, 12, 197, 0, 64
+ViT_large_S197       , 1, 16, 197, 0, 64
+
+# ----------------------------------------------------------------------------
+# Causal decoder prefill (LLM family).  Use --is_causal=true on the CLI.
+# ----------------------------------------------------------------------------
+Llama7B_prefill_S1024  , 1, 32, 1024, 0, 128
+Llama7B_prefill_S2048  , 1, 32, 2048, 0, 128
+Llama7B_prefill_S4096  , 1, 32, 4096, 0, 128
+Llama13B_prefill_S2048 , 1, 40, 2048, 0, 128
+GPTJ6B_prefill_S2048   , 1, 16, 2048, 0, 256
+Mistral7B_prefill_S4096, 1, 32, 4096, 0, 128
+
+# ----------------------------------------------------------------------------
+# Causal decoder decode-step (S_q = 1, S_kv = current cache length)
+# ----------------------------------------------------------------------------
+Llama7B_decode_K512   , 1, 32, 1, 512 , 128
+Llama7B_decode_K1024  , 1, 32, 1, 1024, 128
+Llama7B_decode_K2048  , 1, 32, 1, 2048, 128
+Llama7B_decode_K4096  , 1, 32, 1, 4096, 128
+Llama13B_decode_K2048 , 1, 40, 1, 2048, 128
+GPTJ6B_decode_K2048   , 1, 16, 1, 2048, 256
+
+# ----------------------------------------------------------------------------
+# Cross-attention (T5 / BART / Whisper).  Use --is_causal=false on the CLI.
+# ----------------------------------------------------------------------------
+T5_base_xattn_S64_K128    , 1, 12,  64, 128, 64
+T5_base_xattn_S128_K512   , 1, 12, 128, 512, 64
+T5_large_xattn_S128_K512  , 1, 16, 128, 512, 64
+Whisper_xattn_S128_K1500  , 1, 16, 128, 1500, 64

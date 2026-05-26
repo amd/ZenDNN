@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
   // Validate required arguments
   if (op.empty()) {
     commonlog_error("Usage: ", argv[0],
-                    " --op=<matmul|reorder|embag|normalization> ...");
+                    " --op=<matmul|reorder|embag|normalization|grp_matmul|sdpa> ...");
     return NOT_OK;
   }
 
@@ -123,10 +123,27 @@ int main(int argc, char **argv) {
   }
 
   if (inputMode == benchdnn::InputMode::COMMAND_LINE) {
-    if ((options.ndims > 2 && options.bs == 0) || options.m == 0 ||
-        options.k == 0 || options.n_values.size() < 1) {
-      commonlog_error("For COMMAND_LINE mode, ", (options.ndims > 2) ? "--bs, " : "",
-                      "--m, --k, and --n must be specified.");
+    if (op == "matmul") {
+      if ((options.ndims > 2 && options.bs == 0) || options.m == 0 ||
+          options.k == 0 || options.n_values.size() < 1) {
+        commonlog_error("For COMMAND_LINE mode, ", (options.ndims > 2) ? "--bs, " : "",
+                        "--m, --k, and --n must be specified.");
+        return NOT_OK;
+      }
+    }
+    else if (op == "sdpa") {
+      if (options.bs == 0 || options.num_heads == 0 ||
+          options.seq_len == 0 || options.head_dim == 0) {
+        commonlog_error(
+          "For COMMAND_LINE mode with --op=sdpa, --bs, --num_heads, --seq_len, "
+          "and --head_dim must be specified (use --kv_seq_len=0 for self-attention).");
+        return NOT_OK;
+      }
+    }
+    else {
+      commonlog_error("--op=", op,
+                      " requires --input_file=<...>. COMMAND_LINE mode is supported "
+                      "only for --op=matmul and --op=sdpa.");
       return NOT_OK;
     }
   }
@@ -166,9 +183,13 @@ int main(int argc, char **argv) {
     return benchdnn::grp_matmul::bench(in_filename, out_filename,
                                        options, cache_size);
   }
+  else if (op == "sdpa") {
+    return benchdnn::sdpa::bench(in_filename, out_filename, inputMode,
+                                 options, isLOWOHA, cache_size);
+  }
   else {
     commonlog_error("Unsupported operator: ", op);
-    commonlog_error("Supported operators: matmul, reorder, embag, normalization, grp_matmul");
+    commonlog_error("Supported operators: matmul, reorder, embag, normalization, grp_matmul, sdpa");
     return NOT_OK;
   }
 }

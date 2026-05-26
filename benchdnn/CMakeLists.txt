@@ -58,6 +58,7 @@ add_subdirectory(reorder)
 add_subdirectory(embag)
 add_subdirectory(normalization)
 add_subdirectory(grp_matmul)
+add_subdirectory(sdpa)
 add_subdirectory(utils)
 
 add_executable(benchdnn ${benchdnn_sources})
@@ -70,6 +71,7 @@ target_link_libraries(benchdnn
   embag_benchdnn
   normalization_benchdnn
   grp_matmul_benchdnn
+  sdpa_benchdnn
   benchdnn_utils)
 
 # Link to whichever zendnnl library variant was built
