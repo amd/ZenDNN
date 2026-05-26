@@ -757,7 +757,7 @@ inline int get_grp_matmul_fused_moe_tight() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default ON.
+// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default OFF.
 //   Master switch for the hand-rolled AVX-512-BF16 microkernel
 //   (custom_kernel/).  ON: ALGO 3 flat_n_tile dispatches per-tile
 //   GEMM through VDPBF16PS, with swiglu_oai_mul applied in-register
@@ -766,29 +766,40 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   through the standard AOCL DLP / BRGEMM dispatch, fused activation
 //   runs as a separate per-tile pass.
 //
-//   Why default ON: production-sweep results across the target MoE
-//   envelope showed the custom kernel a consistent win — fewer
-//   weight-reorder spikes (the pack arena is eviction-immune,
-//   unlike the AOCL DLP LRU under capacity pressure), in-register
-//   swiglu_oai_mul fusion that halves Op2 src DRAM traffic on the
-//   tight layout, and bit-identical FP32→BF16 conversion to the
-//   reference path.  The dispatcher refuses cleanly and falls
-//   back to the standard AOCL DLP path for any expert that
-//   violates the kernel's contract (non-bf16, transA, alpha≠1,
-//   β≠0, N % pack_nr ≠ 0, non-const weights, etc. — see
-//   `custom_kernel/dispatch.cpp::prepare_for_call` for the full
-//   gate cascade), so callers outside the supported envelope see
-//   no behaviour change.  Callers that want the pre-flip path
-//   (e.g. for A/B perf comparison or to side-step the CK pack
-//   arena's resident memory cost on memory-constrained hosts)
-//   set this knob to "0".
+//   Why default OFF (changed from ON): the CK pack cache is keyed by
+//   the raw weight pointer (see `custom_kernel/pack.cpp`), which
+//   means a framework that frees a tensor and then allocates a new
+//   one at the same address (PyTorch's CPU allocator routinely
+//   recycles freed addresses) silently serves stale packed bytes —
+//   producing wildly wrong matmul output for the new tensor.  The
+//   pre-PR production-sweep that motivated default-ON did not
+//   exercise the recycled-pointer regime that real Python /
+//   PyTorch test sessions trigger.  Flipping the default to OFF
+//   keeps the standard AOCL DLP path as the per-tile dispatcher;
+//   that path's cache is more conservative and gated by
+//   `ZENDNNL_MATMUL_WEIGHT_CACHE` so a caller can disable it
+//   cleanly when needed.
+//
+//   To re-engage the CK path (e.g. for benchmarking on a workload
+//   where weight pointers are stable across the entire process
+//   lifetime — typical production MoE serving with a fixed model)
+//   set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1`.  Until the CK pack
+//   cache grows a content-aware invalidation hook, default-ON is
+//   not safe for arbitrary frameworks.
+//
+//   The dispatcher refuses cleanly and falls back to the standard
+//   AOCL DLP path for any expert that violates the CK contract
+//   (non-bf16, transA, alpha≠1, β≠0, N % pack_nr ≠ 0, non-const
+//   weights, etc. — see `custom_kernel/dispatch.cpp::prepare_for_call`
+//   for the full gate cascade), so callers outside the supported
+//   envelope see no behaviour change regardless of this knob.
 inline bool get_grp_matmul_custom_kernel() {
   const int ovr = test_api::s_grp_matmul_custom_kernel_override.load(
       std::memory_order_relaxed);
   if (ovr >= 0) return ovr != 0;
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL");
-    if (e == nullptr || e[0] == '\0') return true;  // default: ON
+    if (e == nullptr || e[0] == '\0') return false;  // default: OFF
     return e[0] != '0';
   }();
   return v;

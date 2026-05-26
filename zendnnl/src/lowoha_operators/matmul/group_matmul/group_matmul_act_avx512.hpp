@@ -191,33 +191,126 @@ static inline __m512 silu_avx512(__m512 x) {
   return _mm512_mul_ps(x, sigmoid_avx512(x));
 }
 
-/// `gelu_avx512(x)` — vectorised `gelu_tanh` polynomial form (NOT
-/// `gelu_erf`).
+/// `erf_avx512(x)` — vectorised error function via the
+/// Abramowitz & Stegun 7.1.26 rational/exp approximation:
 ///
-///   gelu_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715·x³)))
+///   erf(x) ≈ sign(x) · (1 − P(t) · exp(−x²)),
+///   t = 1 / (1 + p·|x|),
+///   P(t) = ((((a5·t + a4)·t + a3)·t + a2)·t + a1)·t,
 ///
-/// Rewritten via the identity `tanh(y) = 2·sigmoid(2y) − 1`:
-///
-///   gelu_tanh(x) = x * sigmoid(2y),
-///   where 2y = c1·x + c2·x³,
-///         c1 = 2·sqrt(2/π)            ≈ 1.5957691,
-///         c2 = 2·sqrt(2/π) · 0.044715 ≈ 0.0713548.
-///
-/// One `sigmoid_avx512` call.  Max delta vs the reference `gelu_erf`
-/// ≤ 1.5e-3 across all real x (well-known bound) — ~5× tighter than
-/// BF16 ulp.  The `mt::tol_act(/*is_bf16=*/true)` band accepts both
-/// forms with ~10× margin.
-///
-/// Replaces a per-lane `std::erf` loop (16 libc calls per zmm) →
-/// ~10× faster on Zen4/5.
+/// with constants {p, a1..a5} from A&S 7.1.26.  Note: the published
+/// ≤1.5e-7 absolute-error bound assumes an accurate `expf`; this
+/// implementation uses `fast_exp_neg_avx512`, so the total error is
+/// dominated by that exp approximation (~5e-5 relative).
+/// Cost is one `fast_exp_neg_avx512` + one `rcp14_ps` + NR step +
+/// five FMAs and a sign mask, comparable to the previous `gelu_tanh` form.
+// `avx512dq` is added to the target attribute (in addition to the
+// base `avx512f,avx512bw,avx512vl,fma` set used by the rest of this
+// header) because the FP-domain bitwise intrinsics
+// `_mm512_and_ps` / `_mm512_andnot_ps` / `_mm512_xor_ps` live in
+// AVX-512 DQ (header `avx512dqintrin.h`).  All Zen 3+ and
+// Skylake-X+ CPUs that ship AVX-512 also ship AVX-512 DQ — the
+// pre-existing AVX-512 platform gate elsewhere in the library is
+// sufficient to ensure this code path is only entered on
+// DQ-capable hardware.
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,fma")))
+static inline __m512 erf_avx512(__m512 x) {
+  const __m512  one  = _mm512_set1_ps(1.0f);
+  const __m512  two  = _mm512_set1_ps(2.0f);
+  const __m512  p    = _mm512_set1_ps(0.3275911f);
+  const __m512  a1   = _mm512_set1_ps( 0.254829592f);
+  const __m512  a2   = _mm512_set1_ps(-0.284496736f);
+  const __m512  a3   = _mm512_set1_ps( 1.421413741f);
+  const __m512  a4   = _mm512_set1_ps(-1.453152027f);
+  const __m512  a5   = _mm512_set1_ps( 1.061405429f);
+
+  // Extract sign(x) and |x| via a `-0.0f` float mask.  `-0.0f` has
+  // exactly the IEEE-754 sign bit set and all other bits clear, so:
+  //   sign(x) = x &  (-0.0f)  ── keeps only the sign bit of x
+  //   |x|     = x & ~(-0.0f)  ── clears the sign bit, leaves magnitude
+  // Both operations stay in the FP domain (`_mm512_and_ps` /
+  // `_mm512_andnot_ps`) — no int-bit constants, no
+  // implementation-defined `0x80000000u → int` conversions.  The
+  // VANDPS / VANDNPS instructions are the same micro-op family as
+  // the int variants on Zen / Skylake, so codegen is unchanged.
+  const __m512 sign_mask = _mm512_set1_ps(-0.0f);
+  __m512 sign  = _mm512_and_ps   (x, sign_mask);
+  __m512 absx  = _mm512_andnot_ps(sign_mask, x);
+
+  // t = 1 / (1 + p·|x|), refined by one Newton-Raphson step so the
+  // residual is bounded by `fast_exp_neg_avx512`'s ~5e-5 envelope
+  // rather than `rcp14_ps`'s ~2⁻¹⁴.
+  //
+  // Overflow defence (NR step): for catastrophically large `|x|`
+  // (`|x| > (FLT_MAX − 1) / p ≈ 1e38`) the FMA `denom = 1 + p·|x|`
+  // overflows to `+inf`.  `rcp14_ps(+inf)` returns `0`, and the NR
+  // expression `t · (2 − denom · t)` then evaluates as
+  // `0 · (2 − inf·0) = 0 · (2 − NaN) = 0 · NaN = NaN` — silently
+  // poisoning the polynomial below.  Mask the NR result to `0` on
+  // any lane whose `denom` is non-finite (`!(denom < +inf)`, which
+  // also catches `denom == NaN`).  The downstream polynomial then
+  // collapses to `poly · t = 0`, and the final `1 − poly · ex² = 1`
+  // gives the correct erf saturation magnitude (sign re-applied
+  // below via XOR).  IEEE `_CMP_LT_OQ` returns false on NaN, so
+  // the `denom_finite` mask is `0` for NaN lanes — same fallback.
+  const __m512 fp_inf = _mm512_castsi512_ps(_mm512_set1_epi32(0x7f800000));
+  __m512 denom = _mm512_fmadd_ps(p, absx, one);
+  __m512 t     = _mm512_rcp14_ps(denom);
+  t = _mm512_mul_ps(t, _mm512_fnmadd_ps(denom, t, two));
+  const __mmask16 denom_finite =
+      _mm512_cmp_ps_mask(denom, fp_inf, _CMP_LT_OQ);
+  t = _mm512_maskz_mov_ps(denom_finite, t);
+
+  // P(t) · t (Horner)
+  __m512 poly = _mm512_fmadd_ps(a5, t, a4);
+  poly        = _mm512_fmadd_ps(poly, t, a3);
+  poly        = _mm512_fmadd_ps(poly, t, a2);
+  poly        = _mm512_fmadd_ps(poly, t, a1);
+  poly        = _mm512_mul_ps(poly, t);
+
+  // result = 1 − P(t) · exp(−x²); then re-apply sign of x via
+  // `_mm512_xor_ps`.  The `sign` mask holds only the sign bit of x,
+  // so XOR-ing it into `result` flips the sign iff x was negative —
+  // the same bit-level operation as before, just expressed without
+  // the int reinterpret.
+  //
+  // Overflow defence (exp argument): `absx · absx` overflows to
+  // `+inf` for `|x| > √FLT_MAX ≈ 1.84e19`.  `fast_exp_neg_avx512`'s
+  // exponent-recovery path produces `NaN` for an `+inf` argument
+  // (`floor(+inf) = +inf`; subsequent `inf − inf = NaN`).  Force
+  // `ex² = 0` on any lane whose `x²` is non-finite — mathematically
+  // exact (`exp(−∞) = 0`), and the final `1 − poly · 0 = 1` gives
+  // the correct saturation magnitude for `|x| → ∞`.  Same
+  // `_CMP_LT_OQ` semantics handle the NaN-propagating case too.
+  __m512 x2     = _mm512_mul_ps(absx, absx);
+  __m512 ex2    = fast_exp_neg_avx512(x2);
+  const __mmask16 x2_finite =
+      _mm512_cmp_ps_mask(x2, fp_inf, _CMP_LT_OQ);
+  ex2           = _mm512_maskz_mov_ps(x2_finite, ex2);
+  __m512 result = _mm512_fnmadd_ps(poly, ex2, one);
+  __m512 signed_result = _mm512_xor_ps(result, sign);
+  const __mmask16 nan_mask = _mm512_cmp_ps_mask(x, x, _CMP_UNORD_Q);
+  return _mm512_mask_mov_ps(signed_result, nan_mask, x);
+}
+
+/// `gelu_avx512(x)` — vectorised `gelu_erf` form using `erf_avx512`,
+/// intended to closely track the scalar reference in
+/// `group_matmul_moe_act.cpp::gelu_scalar` (and PyTorch's default
+/// `torch.nn.functional.gelu(...)`) within the FP32 / BF16 tolerances:
+///   gelu_erf(x) = 0.5 · x · (1 + erf(x / √2))
+
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 static inline __m512 gelu_avx512(__m512 x) {
-  const __m512 c1 = _mm512_set1_ps(1.5957691216057308f);
-  const __m512 c2 = _mm512_set1_ps(0.0713548097404904f);
-  __m512 x2  = _mm512_mul_ps(x, x);
-  __m512 c1x = _mm512_mul_ps(c1, x);
-  __m512 y2  = _mm512_fmadd_ps(_mm512_mul_ps(c2, x), x2, c1x);
-  return _mm512_mul_ps(x, sigmoid_avx512(y2));
+  const __m512 half       = _mm512_set1_ps(0.5f);
+  const __m512 one        = _mm512_set1_ps(1.0f);
+  // 1/√2 = √0.5; full-precision constant so the FP32 product
+  // matches `M_SQRT1_2` (which the scalar `gelu_scalar` uses
+  // implicitly via `std::erf(x * 1/√2)`).
+  const __m512 inv_sqrt2  = _mm512_set1_ps(0.7071067811865475f);
+  __m512 z   = _mm512_mul_ps(x, inv_sqrt2);
+  __m512 e   = erf_avx512(z);
+  return _mm512_mul_ps(_mm512_mul_ps(half, x),
+                       _mm512_add_ps(one, e));
 }
 
 // ═══════════════════════════════════════════════════════════════════
