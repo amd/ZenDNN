@@ -26,12 +26,12 @@ using zendnnl::lowoha::matmul::zendnnl_parallel_for;
 
 /**
  * @brief Execute element-wise quantization for 2D matrix (non-per-tensor granularity)
- * 
+ *
  * Handles per-channel, per-group, and mixed quantization where each element
  * may use a different scale/zero-point based on its position.
  */
 void reorder_granular_scaler_impl_2d(const void *src, void *dst,
-                                         const reorder_params_t &params) {
+                                     const reorder_params_t &params) {
   const int64_t M = params.M();
   const int64_t N = params.N();
   const int64_t total_work = M * N;
@@ -61,9 +61,9 @@ void reorder_granular_scaler_impl_2d(const void *src, void *dst,
   // ONLY path that needs the fix.
   const bool has_src_strides = params.has_src_strides();
   const int64_t stride_m =
-      has_src_strides ? params.src_strides[0] : N;
+    has_src_strides ? params.src_strides[0] : N;
   const int64_t stride_n =
-      has_src_strides ? params.src_strides[1] : 1;
+    has_src_strides ? params.src_strides[1] : 1;
 
   // Hot-path branch-free helper.  Returns the absolute element index
   // into the typed src array for the (i, j) coordinate the work loop
@@ -74,190 +74,322 @@ void reorder_granular_scaler_impl_2d(const void *src, void *dst,
   };
 
   // BF16 -> INT8
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::s8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     int8_t *dst_int8 = static_cast<int8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_int8[work_idx] = quantize_bf16_to_s8_scalar(src_bf16[src_idx_for(i, j)], scale, zp);
+        dst_int8[work_idx] = quantize_bf16_to_s8_scalar(src_bf16[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
   }
-  
+
   // BF16 -> UINT8
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::u8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_uint8[work_idx] = quantize_bf16_to_u8_scalar(src_bf16[src_idx_for(i, j)], scale, zp);
+        dst_uint8[work_idx] = quantize_bf16_to_u8_scalar(src_bf16[src_idx_for(i, j)],
+                              scale, zp);
       }
     });
     return;
   }
-  
+
   // INT8 -> BF16
-  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::s8 &&
+      params.dst_dtype == data_type_t::bf16) {
     const int8_t *src_int8 = static_cast<const int8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = dequantize_s8_to_bf16_scalar(src_int8[src_idx_for(i, j)], scale, zp);
+        dst_bf16[work_idx] = dequantize_s8_to_bf16_scalar(src_int8[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
   }
-  
+
   // UINT8 -> BF16
-  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::u8 &&
+      params.dst_dtype == data_type_t::bf16) {
     const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = dequantize_u8_to_bf16_scalar(src_uint8[src_idx_for(i, j)], scale, zp);
+        dst_bf16[work_idx] = dequantize_u8_to_bf16_scalar(src_uint8[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
   }
 
   // FP32 -> INT8
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::s8) {
     const float *src_f32 = static_cast<const float *>(src);
     int8_t *dst_int8 = static_cast<int8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[src_idx_for(i, j)], scale, zp);
+        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
   }
-  
+
   // FP32 -> UINT8
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::u8) {
     const float *src_f32 = static_cast<const float *>(src);
     uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[src_idx_for(i, j)], scale, zp);
+        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[src_idx_for(i, j)],
+                              scale, zp);
       }
     });
     return;
   }
-  
+
   // INT8 -> FP32
-  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::s8 &&
+      params.dst_dtype == data_type_t::f32) {
     const int8_t *src_int8 = static_cast<const int8_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[src_idx_for(i, j)], scale, zp);
+        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[src_idx_for(i, j)],
+                            scale, zp);
       }
     });
     return;
   }
-  
+
   // UINT8 -> FP32
-  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::u8 &&
+      params.dst_dtype == data_type_t::f32) {
     const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[src_idx_for(i, j)], scale, zp);
+        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[src_idx_for(i, j)],
+                            scale, zp);
       }
     });
     return;
   }
 
   // FP32 -> BF16 (with optional scaling)
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::bf16) {
     const float *src_f32 = static_cast<const float *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[src_idx_for(i, j)], scale, zp);
+        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
   }
 
   // BF16 -> FP32 (with optional scaling)
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::f32) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t i = work_idx / N;
         int64_t j = work_idx % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[src_idx_for(i, j)], scale, zp);
+        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[src_idx_for(i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // FP32 -> F16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::f16) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f16[work_idx] = convert_f32_to_f16_scalar(src_f32[src_idx_for(i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // F16 -> FP32 (with optional scaling)
+  if (params.src_dtype == data_type_t::f16 &&
+      params.dst_dtype == data_type_t::f32) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = convert_f16_to_f32_scalar(src_f16[src_idx_for(i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // BF16 -> F16 (with optional scaling)
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::f16) {
+    const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f16[work_idx] = convert_bf16_to_f16_scalar(src_bf16[src_idx_for(i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // F16 -> BF16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f16 &&
+      params.dst_dtype == data_type_t::bf16) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_bf16[work_idx] = convert_f16_to_bf16_scalar(src_f16[src_idx_for(i, j)],
+                             scale, zp);
       }
     });
     return;
@@ -265,12 +397,12 @@ void reorder_granular_scaler_impl_2d(const void *src, void *dst,
 }
 /**
  * @brief Execute element-wise quantization for 3D batched matrix (non-per-tensor granularity)
- * 
+ *
  * Handles per-channel, per-group, and mixed quantization where each element
  * may use a different scale/zero-point based on its position.
  */
 void reorder_granular_scaler_impl_3d(const void *src, void *dst,
-                                         const reorder_params_t &params) {
+                                     const reorder_params_t &params) {
   const int64_t batch = params.batch();
   const int64_t M = params.M();
   const int64_t N = params.N();
@@ -289,19 +421,20 @@ void reorder_granular_scaler_impl_3d(const void *src, void *dst,
   // fast path.
   const bool has_src_strides = params.has_src_strides();
   const int64_t stride_batch =
-      has_src_strides ? params.src_strides[0] : matrix_size;
+    has_src_strides ? params.src_strides[0] : matrix_size;
   const int64_t stride_m =
-      has_src_strides ? params.src_strides[1] : N;
+    has_src_strides ? params.src_strides[1] : N;
   const int64_t stride_n =
-      has_src_strides ? params.src_strides[2] : 1;
+    has_src_strides ? params.src_strides[2] : 1;
 
   auto src_idx_for = [stride_batch, stride_m, stride_n](
-      int64_t b, int64_t i, int64_t j) -> int64_t {
+  int64_t b, int64_t i, int64_t j) -> int64_t {
     return b * stride_batch + i * stride_m + j * stride_n;
   };
 
   // BF16 -> INT8
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::s8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     int8_t *dst_int8 = static_cast<int8_t *>(dst);
 
@@ -311,81 +444,97 @@ void reorder_granular_scaler_impl_3d(const void *src, void *dst,
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_int8[work_idx] = quantize_bf16_to_s8_scalar(src_bf16[src_idx_for(b, i, j)], scale, zp);
+        dst_int8[work_idx] = quantize_bf16_to_s8_scalar(src_bf16[src_idx_for(b, i, j)],
+                             scale, zp);
       }
     });
     return;
   }
-  
+
   // BF16 -> UINT8
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::u8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_uint8[work_idx] = quantize_bf16_to_u8_scalar(src_bf16[src_idx_for(b, i, j)], scale, zp);
+        dst_uint8[work_idx] = quantize_bf16_to_u8_scalar(src_bf16[src_idx_for(b, i, j)],
+                              scale, zp);
       }
     });
     return;
   }
-  
+
   // INT8 -> BF16
-  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::s8 &&
+      params.dst_dtype == data_type_t::bf16) {
     const int8_t *src_int8 = static_cast<const int8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = dequantize_s8_to_bf16_scalar(src_int8[src_idx_for(b, i, j)], scale, zp);
+        dst_bf16[work_idx] = dequantize_s8_to_bf16_scalar(src_int8[src_idx_for(b, i,
+                             j)], scale, zp);
       }
     });
     return;
   }
-  
+
   // UINT8 -> BF16
-  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::u8 &&
+      params.dst_dtype == data_type_t::bf16) {
     const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = dequantize_u8_to_bf16_scalar(src_uint8[src_idx_for(b, i, j)], scale, zp);
+        dst_bf16[work_idx] = dequantize_u8_to_bf16_scalar(src_uint8[src_idx_for(b, i,
+                             j)], scale, zp);
       }
     });
     return;
   }
 
   // FP32 -> INT8
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::s8) {
     const float *src_f32 = static_cast<const float *>(src);
     int8_t *dst_int8 = static_cast<int8_t *>(dst);
 
@@ -395,116 +544,239 @@ void reorder_granular_scaler_impl_3d(const void *src, void *dst,
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[src_idx_for(b, i, j)], scale, zp);
+        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[src_idx_for(b, i, j)],
+                             scale, zp);
       }
     });
     return;
   }
-  
+
   // FP32 -> UINT8
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::u8) {
     const float *src_f32 = static_cast<const float *>(src);
     uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[src_idx_for(b, i, j)], scale, zp);
+        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[src_idx_for(b, i, j)],
+                              scale, zp);
       }
     });
     return;
   }
-  
+
   // INT8 -> FP32
-  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::s8 &&
+      params.dst_dtype == data_type_t::f32) {
     const int8_t *src_int8 = static_cast<const int8_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[src_idx_for(b, i, j)], scale, zp);
+        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[src_idx_for(b, i, j)],
+                            scale, zp);
       }
     });
     return;
   }
-  
+
   // UINT8 -> FP32
-  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::u8 &&
+      params.dst_dtype == data_type_t::f32) {
     const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[src_idx_for(b, i, j)], scale, zp);
+        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[src_idx_for(b, i, j)],
+                            scale, zp);
       }
     });
     return;
   }
 
   // FP32 -> BF16 (with optional scaling)
-  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) {
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::bf16) {
     const float *src_f32 = static_cast<const float *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[src_idx_for(b, i, j)], scale, zp);
+        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[src_idx_for(b, i, j)],
+                             scale, zp);
       }
     });
     return;
   }
 
   // BF16 -> FP32 (with optional scaling)
-  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32) {
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::f32) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     float *dst_f32 = static_cast<float *>(dst);
-    
+
     zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
       for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
         int64_t b = work_idx / matrix_size;
         int64_t elem_in_matrix = work_idx % matrix_size;
         int64_t i = elem_in_matrix / N;
         int64_t j = elem_in_matrix % N;
-        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims, params.src_shape, M, N, i, j);
-        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims, params.src_shape, M, N, i, j);
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
-        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[src_idx_for(b, i, j)], scale, zp);
+        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[src_idx_for(b, i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // FP32 -> F16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f32 &&
+      params.dst_dtype == data_type_t::f16) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t b = work_idx / matrix_size;
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f16[work_idx] = convert_f32_to_f16_scalar(src_f32[src_idx_for(b, i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // F16 -> FP32 (with optional scaling)
+  if (params.src_dtype == data_type_t::f16 &&
+      params.dst_dtype == data_type_t::f32) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t b = work_idx / matrix_size;
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = convert_f16_to_f32_scalar(src_f16[src_idx_for(b, i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // BF16 -> F16 (with optional scaling)
+  if (params.src_dtype == data_type_t::bf16 &&
+      params.dst_dtype == data_type_t::f16) {
+    const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t b = work_idx / matrix_size;
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f16[work_idx] = convert_bf16_to_f16_scalar(src_bf16[src_idx_for(b, i, j)],
+                            scale, zp);
+      }
+    });
+    return;
+  }
+
+  // F16 -> BF16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f16 &&
+      params.dst_dtype == data_type_t::bf16) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t b = work_idx / matrix_size;
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_quant_param_index(params.quant_params.scale.dims,
+                           params.src_shape, M, N, i, j);
+        size_t zp_idx = get_quant_param_index(params.quant_params.zero_point.dims,
+                                              params.src_shape, M, N, i, j);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_bf16[work_idx] = convert_f16_to_bf16_scalar(src_f16[src_idx_for(b, i, j)],
+                             scale, zp);
       }
     });
     return;

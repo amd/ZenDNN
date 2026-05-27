@@ -27,48 +27,56 @@ namespace reorder {
 
 // Ref bulk per-tensor quant/dequant kernels
 void quantize_bf16_to_int8_ref(const uint16_t *input, int8_t *output,
-                                size_t nelems, float scale, int zero_point);
-void dequantize_int8_to_bf16_ref(const int8_t *input, uint16_t *output,
-                                  size_t nelems, float scale, int zero_point);
-void quantize_bf16_to_uint8_ref(const uint16_t *input, uint8_t *output,
-                                 size_t nelems, float scale, int zero_point);
-void dequantize_uint8_to_bf16_ref(const uint8_t *input, uint16_t *output,
-                                   size_t nelems, float scale, int zero_point);
-void quantize_f32_to_int8_ref(const float *input, int8_t *output,
                                size_t nelems, float scale, int zero_point);
-void dequantize_int8_to_f32_ref(const int8_t *input, float *output,
+void dequantize_int8_to_bf16_ref(const int8_t *input, uint16_t *output,
                                  size_t nelems, float scale, int zero_point);
-void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
+void quantize_bf16_to_uint8_ref(const uint16_t *input, uint8_t *output,
                                 size_t nelems, float scale, int zero_point);
-void dequantize_uint8_to_f32_ref(const uint8_t *input, float *output,
+void dequantize_uint8_to_bf16_ref(const uint8_t *input, uint16_t *output,
                                   size_t nelems, float scale, int zero_point);
+void quantize_f32_to_int8_ref(const float *input, int8_t *output,
+                              size_t nelems, float scale, int zero_point);
+void dequantize_int8_to_f32_ref(const int8_t *input, float *output,
+                                size_t nelems, float scale, int zero_point);
+void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
+                               size_t nelems, float scale, int zero_point);
+void dequantize_uint8_to_f32_ref(const uint8_t *input, float *output,
+                                 size_t nelems, float scale, int zero_point);
 void convert_f32_to_bf16_ref(const float *input, uint16_t *output,
-                              size_t nelems, float scale, int zero_point);
+                             size_t nelems, float scale, int zero_point);
 void convert_bf16_to_f32_ref(const uint16_t *input, float *output,
-                              size_t nelems, float scale, int zero_point);
+                             size_t nelems, float scale, int zero_point);
+void convert_f32_to_f16_ref(const float *input, uint16_t *output,
+                            size_t nelems, float scale, int zero_point);
+void convert_f16_to_f32_ref(const uint16_t *input, float *output,
+                            size_t nelems, float scale, int zero_point);
+void convert_bf16_to_f16_ref(const uint16_t *input, uint16_t *output,
+                             size_t nelems, float scale, int zero_point);
+void convert_f16_to_bf16_ref(const uint16_t *input, uint16_t *output,
+                             size_t nelems, float scale, int zero_point);
 
 // Ref fused per-token dynamic quantization kernels
 void dynamic_per_token_quant_bf16_s8_ref(const uint16_t *src, int8_t *dst,
-                                          float *scales, int64_t M, int64_t N);
+    float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_s8_ref(const float *src, int8_t *dst,
-                                         float *scales, int64_t M, int64_t N);
+                                        float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_bf16_u8_ref(const uint16_t *src, uint8_t *dst,
-                                          float *scales, int32_t *zps,
-                                          int64_t M, int64_t N);
+    float *scales, int32_t *zps,
+    int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_u8_ref(const float *src, uint8_t *dst,
-                                         float *scales, int32_t *zps,
-                                         int64_t M, int64_t N);
+                                        float *scales, int32_t *zps,
+                                        int64_t M, int64_t N);
 
 // Scalar granular implementations
 void reorder_granular_scaler_impl_2d(const void *src, void *dst,
-                                      const reorder_params_t &params);
+                                     const reorder_params_t &params);
 void reorder_granular_scaler_impl_3d(const void *src, void *dst,
-                                      const reorder_params_t &params);
+                                     const reorder_params_t &params);
 
 // Scalar fused dynamic per-token dispatch
 bool dispatch_fused_per_token_ref(const void *src, void *dst,
-                                   const reorder_params_t &params,
-                                   int64_t M, int64_t N);
+                                  const reorder_params_t &params,
+                                  int64_t M, int64_t N);
 
 } // namespace reorder
 } // namespace lowoha

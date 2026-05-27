@@ -4096,7 +4096,10 @@ void compare_lowoha_reorder_output(tensor_t &output_tensor,
       params.dst_dtype == data_type_t::u8) {
     tol = LOWOHA_REORDER_INT8_TOL;
   }
-  else if (params.dst_dtype == data_type_t::bf16) {
+  else if (params.dst_dtype == data_type_t::bf16 ||
+           params.dst_dtype == data_type_t::f16) {
+    // Both bf16 (7 mantissa bits) and f16 (10 mantissa bits) are reduced
+    // precision; reuse the same conservative tolerance for round-trip checks.
     tol = LOWOHA_REORDER_BF16_TOL;
   }
   else {
@@ -4175,14 +4178,26 @@ void compare_lowoha_reorder_output(tensor_t &output_tensor,
 
 void log_lowoha_test_info(const ReorderType &params, data_type_t src_dt,
                           data_type_t dst_dt, bool strided, bool use_scale_zp) {
-  std::string src_dt_str = (src_dt == data_type_t::bf16) ? "BF16" :
-                           (src_dt == data_type_t::f32)  ? "F32" :
-                           (src_dt == data_type_t::s8)   ? "S8" :
-                           (src_dt == data_type_t::u8)   ? "U8" : "unknown";
-  std::string dst_dt_str = (dst_dt == data_type_t::bf16) ? "BF16" :
-                           (dst_dt == data_type_t::f32)  ? "F32" :
-                           (dst_dt == data_type_t::s8)   ? "S8" :
-                           (dst_dt == data_type_t::u8)   ? "U8" : "unknown";
+  // Helper: stringify a data_type_t for log output. Centralized here so a
+  // future addition of a new dtype only needs one update site.
+  auto dtype_to_label = [](data_type_t dt) -> std::string {
+    switch (dt) {
+    case data_type_t::bf16:
+      return "BF16";
+    case data_type_t::f32:
+      return "F32";
+    case data_type_t::f16:
+      return "F16";
+    case data_type_t::s8:
+      return "S8";
+    case data_type_t::u8:
+      return "U8";
+    default:
+      return "unknown";
+    }
+  };
+  std::string src_dt_str = dtype_to_label(src_dt);
+  std::string dst_dt_str = dtype_to_label(dst_dt);
   log_info("LOWOHA Reorder: batch=", params.batch,
            " M=", params.M, " N=", params.N,
            " src=", src_dt_str, " dst=", dst_dt_str,
@@ -4351,11 +4366,31 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
   // Base tolerance: half a quantization step (max rounding error)
   float tol = max_scale / 2.0f;
 
-  // Add epsilon for numerical noise and BF16 truncation
-  // BF16 has ~8 bits of mantissa, so truncation error ≈ |value| * 2^-8
-  // For values up to ~100, this is ~0.4
-  if (params.src_dtype == data_type_t::bf16) {
-    tol += 0.03f;  // BF16 truncation + numerical noise
+  // Add epsilon for numerical noise and reduced-precision truncation:
+  //   - BF16 has 7 mantissa bits  -> rel error ≈ 2^-7 ≈ 0.8% per truncation
+  //   - F16  has 10 mantissa bits -> rel error ≈ 2^-10 ≈ 0.1% per truncation
+  // For float<->float scaled round-trips, the intermediate (post-divide)
+  // value can be up to ~|src|/scale, and f16 truncation of THAT intermediate
+  // re-scales back to scale * |src|/scale * 2^-mantissa = |src| * 2^-mantissa.
+  // We bake that into the epsilon when f16 is involved alongside bf16, where
+  // the round-trip narrows twice with very different mantissa widths.
+  const bool involves_bf16 = (params.src_dtype == data_type_t::bf16) ||
+                             (params.dst_dtype == data_type_t::bf16);
+  const bool involves_f16  = (params.src_dtype == data_type_t::f16)  ||
+                             (params.dst_dtype == data_type_t::f16);
+  if (involves_bf16 && involves_f16) {
+    // BF16 <-> F16 scaled round-trip: error compounds across two narrows
+    // (bf16 -> f16 narrows ~7 mantissa bits to ~10, and the reverse direction
+    // narrows ~10 mantissa bits to ~7). For typical scale ~ 0.1 and src in
+    // [-2,2] with zp in [-64,64], the intermediate value lives near
+    // |src|/scale + zp ~ 80, which f16 represents with ~0.08 absolute step.
+    tol += 0.1f;
+  }
+  else if (involves_bf16) {
+    tol += 0.03f;   // BF16 truncation + numerical noise
+  }
+  else if (involves_f16) {
+    tol += 0.01f;   // F16 truncation + numerical noise
   }
   else {
     tol += 0.001f;  // Small epsilon for F32 numerical noise

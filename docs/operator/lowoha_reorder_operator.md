@@ -5,13 +5,13 @@
 
 ## Overview
 
-The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization, dequantization, and data type conversion in workloads**. It provides a direct API to convert data between BF16/FP32 and INT8/UINT8 formats, as well as between FP32 and BF16 formats, with configurable scale and zero-point parameters.
+The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization, dequantization, and data type conversion in workloads**. It provides a direct API to convert data between BF16/FP32/F16 and INT8/UINT8 formats, and for conversions among FP32, BF16, F16 in any direction, with configurable scale and zero-point parameters.
 
 Unlike the standard Reorder operator which uses the operator factory pattern, LowOHA Reorder provides a **function-based interface** optimized for:
 - Minimal execution overhead
 - Quantization (BF16/FP32 → INT8/UINT8)
 - Dequantization (INT8/UINT8 → BF16/FP32)
-- Data type conversion (FP32 ⇔ BF16)
+- Data type conversion (FP32 ⇔ BF16, FP32 ⇔ F16, BF16 ⇔ F16)
 - **Dynamic quantization** (compute scale/zero-point from source data at runtime)
 - Per-tensor, per-channel (row and column), and per-group (row and column) quantization granularities
 - Strided (non-contiguous) source memory support
@@ -181,8 +181,12 @@ Source strides enable reading from non-contiguous source memory:
 | S8 (INT8) | FP32 | Dequantization |
 | FP32 | U8 (UINT8) | Quantization |
 | U8 (UINT8) | FP32 | Dequantization |
-| FP32 | BF16 | Data Type Conversion |
-| BF16 | FP32 | Data Type Conversion |
+| FP32 | BF16 | Data Type Conversion (optional scale/zp) |
+| BF16 | FP32 | Data Type Conversion (optional scale/zp) |
+| FP32 | F16  | Data Type Conversion (optional scale/zp) |
+| F16  | FP32 | Data Type Conversion (optional scale/zp) |
+| BF16 | F16  | Data Type Conversion (optional scale/zp, via FP32) |
+| F16  | BF16 | Data Type Conversion (optional scale/zp, via FP32) |
 
 
 ### `reorder_quant_params_t`
@@ -1068,7 +1072,192 @@ int bf16_to_f32_with_scale_example() {
 }
 ```
 
-### Example 14: Dynamic Quantization — Symmetric Per-Tensor (BF16 → S8)
+### Example 14: FP32 to F16 Simple Conversion (No Scale/Zero-Point)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_f16_simple_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+
+  // F16 destination buffer is stored as uint16_t.
+  std::vector<float>    input_f32(M * N);
+  std::vector<uint16_t> output_f16(M * N);
+
+  // Initialize input...
+
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::f16;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  // No scale/zp -> simple narrow with round-to-nearest-even (VCVTPS2PH).
+
+  params.algo = reorder_algo_t::DT;
+
+  status_t status = reorder_direct(input_f32.data(), output_f16.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 15: F16 to FP32 with Scale/Zero-Point
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f16_to_f32_with_scale_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+
+  float scale = 0.5f;
+  int32_t zero_point = 2;
+
+  std::vector<uint16_t> input_f16(M * N);   // F16 stored as uint16_t
+  std::vector<float>    output_f32(M * N);
+
+  // Initialize input...
+
+  // Formula applied: f32_val = (f32(f16) - zp) * scale
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f16;
+  params.dst_dtype = data_type_t::f32;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt   = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt   = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+
+  params.algo = reorder_algo_t::DT;
+
+  status_t status = reorder_direct(input_f16.data(), output_f32.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 16: BF16 to F16 Simple Conversion (No Scale/Zero-Point)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int bf16_to_f16_simple_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+
+  // Both BF16 and F16 are stored as uint16_t in user buffers.
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<uint16_t> output_f16(M * N);
+
+  // Initialize input (BF16 layout)...
+
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::f16;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  // No scale/zp; the kernel widens BF16 -> FP32 then narrows FP32 -> F16.
+
+  params.algo = reorder_algo_t::DT;
+
+  status_t status = reorder_direct(input_bf16.data(), output_f16.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 17: F16 to BF16 with Scale/Zero-Point (Per-Tensor)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f16_to_bf16_with_scale_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+
+  float scale = 0.5f;
+  int32_t zero_point = 2;
+
+  std::vector<uint16_t> input_f16(M * N);
+  std::vector<uint16_t> output_bf16(M * N);
+
+  // Initialize input...
+
+  // Formula applied: bf16_val = bf16( (f32(f16) - zp) * scale )
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f16;
+  params.dst_dtype = data_type_t::bf16;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt   = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt   = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+
+  params.algo = reorder_algo_t::DT;
+
+  status_t status = reorder_direct(input_f16.data(), output_bf16.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 18: FP32 to F16 Per-Channel Conversion
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_f16_per_channel_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 4;
+
+  // One scale/zp per column.
+  std::vector<float>   scales      = {0.25f, 0.5f, 0.75f, 1.0f};
+  std::vector<int32_t> zero_points = {0, 1, 2, 3};
+
+  std::vector<float>    input_f32(M * N);
+  std::vector<uint16_t> output_f16(M * N);
+
+  // Initialize input...
+
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::f16;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+
+  params.quant_params.scale.buff      = scales.data();
+  params.quant_params.scale.dt        = data_type_t::f32;
+  params.quant_params.scale.dims      = {1, N};        // per-channel-col
+
+  params.quant_params.zero_point.buff = zero_points.data();
+  params.quant_params.zero_point.dt   = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, N};
+
+  params.algo = reorder_algo_t::DT;
+
+  status_t status = reorder_direct(input_f32.data(), output_f16.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 19: Dynamic Quantization — Symmetric Per-Tensor (BF16 → S8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1112,7 +1301,7 @@ int dynamic_quant_symmetric_per_tensor_example() {
 }
 ```
 
-### Example 15: Dynamic Quantization — Asymmetric Per-Tensor (FP32 → U8)
+### Example 20: Dynamic Quantization — Asymmetric Per-Tensor (FP32 → U8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1162,7 +1351,7 @@ int dynamic_quant_asymmetric_per_tensor_example() {
 }
 ```
 
-### Example 16: Dynamic Quantization — Per-Token / Per-Row (BF16 → S8)
+### Example 21: Dynamic Quantization — Per-Token / Per-Row (BF16 → S8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1205,7 +1394,7 @@ int dynamic_quant_per_token_example() {
 }
 ```
 
-### Example 17: Dynamic Quantization — Compute-Only Mode (dst = nullptr)
+### Example 22: Dynamic Quantization — Compute-Only Mode (dst = nullptr)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1246,7 +1435,7 @@ int dynamic_quant_compute_only_example() {
 }
 ```
 
-### Example 18: Dynamic Quantization — Asymmetric Per-Token (BF16 → U8)
+### Example 23: Dynamic Quantization — Asymmetric Per-Token (BF16 → U8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1292,7 +1481,7 @@ int dynamic_quant_asymmetric_per_token_example() {
 }
 ```
 
-### Example 19: Dynamic Quantization — Per-Group-Row (BF16 → S8)
+### Example 24: Dynamic Quantization — Per-Group-Row (BF16 → S8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1417,5 +1606,5 @@ After computing dynamic quantization parameters, the standard reorder path is us
 - **Source Memory Layout:** Contiguous source memory is fastest; strided source with last_stride=1 can still use optimal path
 - **Destination Memory:** Always written contiguously (strided destination not currently supported)
 - **Granularity:** Per-tensor is fastest with optimal support; per-channel/per-group use reference implementation
-- **FP32 ↔ BF16 Conversion:** Simple conversion (no scale/zp) is fastest; scaled conversion follows the same granularity performance characteristics as quantization/dequantization
+ - **Float ↔ Float Conversion (FP32, BF16, F16):** Simple conversion (no scale/zp) is fastest. The optimal `native` path is the AVX-512 per-tensor path with contiguous source memory (or 2D -> [x, 1]/ 3D -> [x, y, 1] padded stride). Availability of this path follows the implementation's current ISA/runtime selection logic for `native`; this documentation does not guarantee a separate F16C-specific dispatcher check or fallback for FP32 ↔ F16 / BF16 ↔ F16 conversions. BF16 ↔ F16 conversion goes through FP32 in registers, so it has the same per-element cost as two 16-bit ↔ FP32 conversions fused together.
 - **Dynamic Quantization:** Adds a min/max scan pass over the source data before quantization. For per-tensor, this scans all elements sequentially. For per-channel and per-group, the scan is parallelized with OpenMP. The compute-only mode (`dst = nullptr`) can be used to separate the parameter computation from the quantization step.

@@ -24,28 +24,38 @@ namespace zendnnl {
 namespace lowoha {
 namespace reorder {
 
-void bf16_to_float32_avx512(const uint16_t *input, float *output, size_t nelems);
-void float32_to_bf16_avx512(const float *input, uint16_t *output, size_t nelems);
+void bf16_to_float32_avx512(const uint16_t *input, float *output,
+                            size_t nelems);
+void float32_to_bf16_avx512(const float *input, uint16_t *output,
+                            size_t nelems);
 void quantize_bf16_to_int8_avx512(const uint16_t *input, int8_t *output,
-                                   size_t nelems, float scale, int zero_point);
-void dequantize_int8_to_bf16_avx512(const int8_t *input, uint16_t *output,
-                                     size_t nelems, float scale, int zero_point);
-void quantize_bf16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
-                                    size_t nelems, float scale, int zero_point);
-void dequantize_uint8_to_bf16_avx512(const uint8_t *input, uint16_t *output,
-                                      size_t nelems, float scale, int zero_point);
-void quantize_f32_to_int8_avx512(const float *input, int8_t *output,
                                   size_t nelems, float scale, int zero_point);
-void dequantize_int8_to_f32_avx512(const int8_t *input, float *output,
+void dequantize_int8_to_bf16_avx512(const int8_t *input, uint16_t *output,
                                     size_t nelems, float scale, int zero_point);
-void quantize_f32_to_uint8_avx512(const float *input, uint8_t *output,
+void quantize_bf16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
                                    size_t nelems, float scale, int zero_point);
-void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
+void dequantize_uint8_to_bf16_avx512(const uint8_t *input, uint16_t *output,
                                      size_t nelems, float scale, int zero_point);
+void quantize_f32_to_int8_avx512(const float *input, int8_t *output,
+                                 size_t nelems, float scale, int zero_point);
+void dequantize_int8_to_f32_avx512(const int8_t *input, float *output,
+                                   size_t nelems, float scale, int zero_point);
+void quantize_f32_to_uint8_avx512(const float *input, uint8_t *output,
+                                  size_t nelems, float scale, int zero_point);
+void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
+                                    size_t nelems, float scale, int zero_point);
 void convert_f32_to_bf16_avx512(const float *input, uint16_t *output,
-                                 size_t nelems, float scale, int zero_point);
+                                size_t nelems, float scale, int zero_point);
 void convert_bf16_to_f32_avx512(const uint16_t *input, float *output,
-                                 size_t nelems, float scale, int zero_point);
+                                size_t nelems, float scale, int zero_point);
+void convert_f32_to_f16_avx512(const float *input, uint16_t *output,
+                               size_t nelems, float scale, int zero_point);
+void convert_f16_to_f32_avx512(const uint16_t *input, float *output,
+                               size_t nelems, float scale, int zero_point);
+void convert_bf16_to_f16_avx512(const uint16_t *input, uint16_t *output,
+                                size_t nelems, float scale, int zero_point);
+void convert_f16_to_bf16_avx512(const uint16_t *input, uint16_t *output,
+                                size_t nelems, float scale, int zero_point);
 
 } // namespace reorder
 } // namespace lowoha

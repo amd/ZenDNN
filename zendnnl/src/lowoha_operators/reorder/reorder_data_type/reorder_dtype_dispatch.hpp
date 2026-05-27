@@ -29,21 +29,28 @@ void reorder_wrapper(const void *src, void *dst, size_t nelems,
                      reorder_algo_t algo);
 
 void reorder_granular_scaler_impl_2d(const void *src, void *dst,
-                                      const reorder_params_t &params);
+                                     const reorder_params_t &params);
 
 void reorder_granular_scaler_impl_3d(const void *src, void *dst,
-                                      const reorder_params_t &params);
+                                     const reorder_params_t &params);
 
 /**
  * @brief Helper function to get element size for a given data type
  */
 inline size_t get_dtype_size(data_type_t dtype) {
   switch (dtype) {
-    case data_type_t::f32:  return sizeof(float);
-    case data_type_t::bf16: return sizeof(uint16_t);
-    case data_type_t::s8:   return sizeof(int8_t);
-    case data_type_t::u8:   return sizeof(uint8_t);
-    default:                return 1;
+  case data_type_t::f32:
+    return sizeof(float);
+  case data_type_t::f16:
+    return sizeof(uint16_t);
+  case data_type_t::bf16:
+    return sizeof(uint16_t);
+  case data_type_t::s8:
+    return sizeof(int8_t);
+  case data_type_t::u8:
+    return sizeof(uint8_t);
+  default:
+    return 1;
   }
 }
 

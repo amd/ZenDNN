@@ -61,17 +61,23 @@ using zendnnl::memory::data_type_t;
  * --- Standard reorder ---
  *
  * Supported conversions:
- * - BF16 <-> S8/U8: Quantization/Dequantization with scale and zero-point
- * - F32  <-> S8/U8: Quantization/Dequantization with scale and zero-point
- * - F32  <-> BF16:  Type conversion with optional scale and zero-point
+ * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  ↔ BF16:  Type conversion with optional scale and zero-point
+ * - F32  ↔ F16:   Type conversion with optional scale and zero-point
+ * - BF16 ↔ F16:   Type conversion with optional scale and zero-point (via f32)
  *
  * Quantization formulas:
  * - Quantize:   int_val = clamp(round(src_val / scale) + zero_point, min, max)
  * - Dequantize: dst_val = (int_val - zero_point) * scale
  * - F32->BF16:  bf16_val = bf16((f32_val / scale) + zero_point)  [scale/zp optional]
  * - BF16->F32:  f32_val = (bf16_as_f32 - zero_point) * scale     [scale/zp optional]
+ * - F32->F16:   f16_val = f16((f32_val / scale) + zero_point)    [scale/zp optional]
+ * - F16->F32:   f32_val = (f16_as_f32 - zero_point) * scale      [scale/zp optional]
+ * - BF16->F16:  f16_val = f16((bf16_as_f32 / scale) + zero_point) [scale/zp optional]
+ * - F16->BF16:  bf16_val = bf16((f16_as_f32 - zero_point) * scale) [scale/zp optional]
  *
- * For F32 <-> BF16 conversions:
+ * For float-only conversions (F32 ↔ BF16, F32 ↔ F16, BF16 ↔ F16):
  * - Scale and zero_point are OPTIONAL
  * - If not provided (buff = nullptr), simple type conversion is performed
  * - Default values when not provided: scale = 1.0, zero_point = 0

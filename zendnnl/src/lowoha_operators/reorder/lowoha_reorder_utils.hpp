@@ -19,6 +19,8 @@
 
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 #include "memory/memory_utils.hpp"
+#include "common/float16.hpp"
+#include "common/bfloat16.hpp"
 #include <cstring>
 #include <cmath>
 #include <cstdint>
@@ -29,6 +31,8 @@ namespace lowoha {
 namespace reorder {
 
 using zendnnl::memory::status_t;
+using zendnnl::common::float16_t;
+using zendnnl::common::bfloat16_t;
 
 //==============================================================================
 // Granularity type enum
@@ -54,22 +58,34 @@ enum class granularity_type_t {
  * @brief Convert bf16 (stored as uint16_t) to float32
  */
 static inline float bf16_to_float(uint16_t val) {
-  uint32_t bits = static_cast<uint32_t>(val) << 16;
-  float result;
-  std::memcpy(&result, &bits, sizeof(float));
-  return result;
+  return bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(val));
 }
 
 /**
  * @brief Convert float32 to bf16 (stored as uint16_t) with round-to-nearest-even
  */
 static inline uint16_t float_to_bf16(float val) {
-  uint32_t bits;
-  std::memcpy(&bits, &val, sizeof(float));
-  uint32_t lsb = (bits >> 16) & 1;
-  uint32_t rounding_bias = 0x7FFF + lsb;
-  bits += rounding_bias;
-  return static_cast<uint16_t>(bits >> 16);
+  return bfloat16_t::f32_to_bf16_val(val);
+}
+
+/**
+ * @brief Convert f16 (stored as uint16_t) to float32
+ *
+ * Uses the IEEE 754 half-precision conversion provided by float16_t,
+ * which correctly handles subnormals, infinities and NaNs.
+ */
+static inline float f16_to_float(uint16_t val) {
+  return float16_t::f16_to_f32_val(val);
+}
+
+/**
+ * @brief Convert float32 to f16 (stored as uint16_t) with round-to-nearest-even
+ *
+ * Uses the IEEE 754 half-precision conversion provided by float16_t,
+ * which correctly handles subnormals, overflow to infinity and NaNs.
+ */
+static inline uint16_t float_to_f16(float val) {
+  return float16_t::f32_to_f16_val(val);
 }
 
 //==============================================================================
@@ -78,17 +94,18 @@ static inline uint16_t float_to_bf16(float val) {
 
 /**
  * @brief Extract scale value from quant_t at given index
- * 
+ *
  * Supports both f32 and bf16 scale buffers.  When the buffer is bf16 the
  * value is transparently converted to f32 so that all downstream arithmetic
  * operates in full precision.
- * 
+ *
  * @param scale_param The scale quant_t parameter
  * @param index Index into the scale array (0 for per-tensor)
  * @return Scale value as f32 (default 1.0f if buffer is null)
  */
-static inline float get_scale_value(const reorder_quant_params_t::quant_t &scale_param, 
-                                     size_t index = 0) {
+static inline float get_scale_value(const reorder_quant_params_t::quant_t
+                                    &scale_param,
+                                    size_t index = 0) {
   if (scale_param.buff == nullptr) {
     return 1.0f;
   }
@@ -104,8 +121,9 @@ static inline float get_scale_value(const reorder_quant_params_t::quant_t &scale
  * @param index Index into the zero_point array (0 for per-tensor)
  * @return Zero point value (default 0 if buffer is null)
  */
-static inline int get_zero_point_value(const reorder_quant_params_t::quant_t &zp_param,
-                                        size_t index = 0) {
+static inline int get_zero_point_value(const reorder_quant_params_t::quant_t
+                                       &zp_param,
+                                       size_t index = 0) {
   if (zp_param.buff == nullptr) {
     return 0;
   }
@@ -123,7 +141,8 @@ static inline int get_zero_point_value(const reorder_quant_params_t::quant_t &zp
  * @param zp Zero point
  * @return Quantized int8 value
  */
-static inline int8_t quantize_bf16_to_s8_scalar(uint16_t bf16_val, float scale, int zp) {
+static inline int8_t quantize_bf16_to_s8_scalar(uint16_t bf16_val, float scale,
+    int zp) {
   float f32_val = bf16_to_float(bf16_val);
   int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
@@ -136,7 +155,8 @@ static inline int8_t quantize_bf16_to_s8_scalar(uint16_t bf16_val, float scale, 
  * @param zp Zero point
  * @return Quantized uint8 value
  */
-static inline uint8_t quantize_bf16_to_u8_scalar(uint16_t bf16_val, float scale, int zp) {
+static inline uint8_t quantize_bf16_to_u8_scalar(uint16_t bf16_val, float scale,
+    int zp) {
   float f32_val = bf16_to_float(bf16_val);
   int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
@@ -149,7 +169,8 @@ static inline uint8_t quantize_bf16_to_u8_scalar(uint16_t bf16_val, float scale,
  * @param zp Zero point
  * @return Dequantized bf16 value (as uint16_t)
  */
-static inline uint16_t dequantize_s8_to_bf16_scalar(int8_t s8_val, float scale, int zp) {
+static inline uint16_t dequantize_s8_to_bf16_scalar(int8_t s8_val, float scale,
+    int zp) {
   float f32_val = (static_cast<float>(s8_val) - zp) * scale;
   return float_to_bf16(f32_val);
 }
@@ -161,7 +182,8 @@ static inline uint16_t dequantize_s8_to_bf16_scalar(int8_t s8_val, float scale, 
  * @param zp Zero point
  * @return Dequantized bf16 value (as uint16_t)
  */
-static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale, int zp) {
+static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale,
+    int zp) {
   float f32_val = (static_cast<float>(u8_val) - zp) * scale;
   return float_to_bf16(f32_val);
 }
@@ -177,7 +199,8 @@ static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale,
  * @param zp Zero point
  * @return Quantized int8 value
  */
-static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale, int zp) {
+static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale,
+    int zp) {
   int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
 }
@@ -189,7 +212,8 @@ static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale, int z
  * @param zp Zero point
  * @return Quantized uint8 value
  */
-static inline uint8_t quantize_f32_to_u8_scalar(float f32_val, float scale, int zp) {
+static inline uint8_t quantize_f32_to_u8_scalar(float f32_val, float scale,
+    int zp) {
   int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
 }
@@ -201,7 +225,8 @@ static inline uint8_t quantize_f32_to_u8_scalar(float f32_val, float scale, int 
  * @param zp Zero point
  * @return Dequantized fp32 value
  */
-static inline float dequantize_s8_to_f32_scalar(int8_t s8_val, float scale, int zp) {
+static inline float dequantize_s8_to_f32_scalar(int8_t s8_val, float scale,
+    int zp) {
   return (static_cast<float>(s8_val) - zp) * scale;
 }
 
@@ -212,7 +237,8 @@ static inline float dequantize_s8_to_f32_scalar(int8_t s8_val, float scale, int 
  * @param zp Zero point
  * @return Dequantized fp32 value
  */
-static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale, int zp) {
+static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale,
+    int zp) {
   return (static_cast<float>(u8_val) - zp) * scale;
 }
 
@@ -222,18 +248,19 @@ static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale, int
 
 /**
  * @brief Convert a single fp32 value to bf16 with optional scale/zero-point
- * 
+ *
  * If scale is provided (scale != 1.0 or zp != 0), applies:
  *   bf16_val = bf16(f32_val / scale + zp)
  * Otherwise, performs simple type conversion:
  *   bf16_val = bf16(f32_val)
- * 
+ *
  * @param f32_val Input fp32 value
  * @param scale Scale factor (1.0 means no scaling)
  * @param zp Zero point (0 means no offset)
  * @return Converted bf16 value (as uint16_t)
  */
-static inline uint16_t convert_f32_to_bf16_scalar(float f32_val, float scale, int zp) {
+static inline uint16_t convert_f32_to_bf16_scalar(float f32_val, float scale,
+    int zp) {
   float scaled_val = f32_val;
   if (scale != 1.0f || zp != 0) {
     scaled_val = f32_val / scale + static_cast<float>(zp);
@@ -243,18 +270,19 @@ static inline uint16_t convert_f32_to_bf16_scalar(float f32_val, float scale, in
 
 /**
  * @brief Convert a single bf16 value to fp32 with optional scale/zero-point
- * 
+ *
  * If scale is provided (scale != 1.0 or zp != 0), applies:
  *   f32_val = (bf16_as_f32 - zp) * scale
  * Otherwise, performs simple type conversion:
  *   f32_val = bf16_as_f32
- * 
+ *
  * @param bf16_val Input bf16 value (as uint16_t)
  * @param scale Scale factor (1.0 means no scaling)
  * @param zp Zero point (0 means no offset)
  * @return Converted fp32 value
  */
-static inline float convert_bf16_to_f32_scalar(uint16_t bf16_val, float scale, int zp) {
+static inline float convert_bf16_to_f32_scalar(uint16_t bf16_val, float scale,
+    int zp) {
   float f32_val = bf16_to_float(bf16_val);
   if (scale != 1.0f || zp != 0) {
     f32_val = (f32_val - static_cast<float>(zp)) * scale;
@@ -263,12 +291,110 @@ static inline float convert_bf16_to_f32_scalar(uint16_t bf16_val, float scale, i
 }
 
 //==============================================================================
+// Inline helper functions for FP32 <-> F16 conversion with optional scale/zp
+//==============================================================================
+
+/**
+ * @brief Convert a single fp32 value to f16 with optional scale/zero-point
+ *
+ * If scale is provided (scale != 1.0 or zp != 0), applies:
+ *   f16_val = f16(f32_val / scale + zp)
+ * Otherwise, performs simple type conversion:
+ *   f16_val = f16(f32_val)
+ *
+ * @param f32_val Input fp32 value
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted f16 value (as uint16_t)
+ */
+static inline uint16_t convert_f32_to_f16_scalar(float f32_val, float scale,
+    int zp) {
+  float scaled_val = f32_val;
+  if (scale != 1.0f || zp != 0) {
+    scaled_val = f32_val / scale + static_cast<float>(zp);
+  }
+  return float_to_f16(scaled_val);
+}
+
+/**
+ * @brief Convert a single f16 value to fp32 with optional scale/zero-point
+ *
+ * If scale is provided (scale != 1.0 or zp != 0), applies:
+ *   f32_val = (f16_as_f32 - zp) * scale
+ * Otherwise, performs simple type conversion:
+ *   f32_val = f16_as_f32
+ *
+ * @param f16_val Input f16 value (as uint16_t)
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted fp32 value
+ */
+static inline float convert_f16_to_f32_scalar(uint16_t f16_val, float scale,
+    int zp) {
+  float f32_val = f16_to_float(f16_val);
+  if (scale != 1.0f || zp != 0) {
+    f32_val = (f32_val - static_cast<float>(zp)) * scale;
+  }
+  return f32_val;
+}
+
+//==============================================================================
+// Inline helper functions for BF16 <-> F16 conversion with optional scale/zp
+//==============================================================================
+
+/**
+ * @brief Convert a single bf16 value to f16 with optional scale/zero-point
+ *
+ * Conversion goes through fp32. When scale/zp are provided, the
+ * quantization-style formula is applied (matches the public docstring
+ * `f16_val = f16(bf16_as_f32 / scale + zp)`):
+ *   - scaled: bf16 -> f32 -> (val / scale + zp) -> f16
+ *   - simple: bf16 -> f32 -> f16
+ *
+ * @param bf16_val Input bf16 value (as uint16_t)
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted f16 value (as uint16_t)
+ */
+static inline uint16_t convert_bf16_to_f16_scalar(uint16_t bf16_val,
+    float scale, int zp) {
+  float f32_val = bf16_to_float(bf16_val);
+  if (scale != 1.0f || zp != 0) {
+    f32_val = f32_val / scale + static_cast<float>(zp);
+  }
+  return float_to_f16(f32_val);
+}
+
+/**
+ * @brief Convert a single f16 value to bf16 with optional scale/zero-point
+ *
+ * Conversion goes through fp32. When scale/zp are provided, the
+ * dequantization-style formula is applied (matches the public docstring
+ * `bf16_val = bf16((f16_as_f32 - zp) * scale)`):
+ *   - scaled: f16 -> f32 -> ((val - zp) * scale) -> bf16
+ *   - simple: f16 -> f32 -> bf16
+ *
+ * @param f16_val Input f16 value (as uint16_t)
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted bf16 value (as uint16_t)
+ */
+static inline uint16_t convert_f16_to_bf16_scalar(uint16_t f16_val, float scale,
+    int zp) {
+  float f32_val = f16_to_float(f16_val);
+  if (scale != 1.0f || zp != 0) {
+    f32_val = (f32_val - static_cast<float>(zp)) * scale;
+  }
+  return float_to_bf16(f32_val);
+}
+
+//==============================================================================
 // Inline helper functions for granularity detection and index calculation
 //==============================================================================
 
 /**
  * @brief Helper to check if dims represent per-tensor (all dimensions are 1)
- * 
+ *
  * Per-tensor dims:
  *   - 1D: {1}
  *   - 2D: {1, 1}
@@ -276,9 +402,13 @@ static inline float convert_bf16_to_f32_scalar(uint16_t bf16_val, float scale, i
  */
 static inline bool is_per_tensor_dims(const std::vector<int64_t> &dims) {
   // Empty dims means no scale/zp provided - treat as per-tensor (default: scale=1.0, zp=0)
-  if (dims.empty()) return true;
+  if (dims.empty()) {
+    return true;
+  }
   for (int64_t d : dims) {
-    if (d != 1) return false;
+    if (d != 1) {
+      return false;
+    }
   }
   return true;
 }
@@ -287,23 +417,27 @@ static inline bool is_per_tensor_dims(const std::vector<int64_t> &dims) {
  * @brief Helper to check if dims represent per-channel-column quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-channel-col dims (different value for each column):
  *   - 1D: dims = {N} where dims[0] == shape[0] (N values)
  *   - 2D: dims = {1, N} where dims[1] == shape[1] (N values)
  *   - 3D: dims = {1, 1, N} where dims[2] == shape[2] (N values)
  */
 static inline bool is_per_channel_col_dims(const std::vector<int64_t> &dims,
-                                            const std::vector<int64_t> &shape) {
-  if (dims.empty() || dims.size() != shape.size()) return false;
-  
+    const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) {
+    return false;
+  }
+
   if (dims.size() == 1) {
     // 1D: per-channel means dims[0] == shape[0] (N values)
     return dims[0] == shape[0];
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     // 2D: per-channel-col means dims = {1, N}
     return dims[0] == 1 && dims[1] == shape[1];
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     // 3D: per-channel-col means dims = {1, 1, N}
     return dims[0] == 1 && dims[1] == 1 && dims[2] == shape[2];
   }
@@ -314,23 +448,27 @@ static inline bool is_per_channel_col_dims(const std::vector<int64_t> &dims,
  * @brief Helper to check if dims represent per-channel-row quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-channel-row dims (different value for each row, same across columns):
  *   - 1D: Not applicable (use per-channel-col)
  *   - 2D: dims = {M, 1} where dims[0] == shape[0] (M values)
  *   - 3D: dims = {1, M, 1} where dims[1] == shape[1] (M values)
  */
 static inline bool is_per_channel_row_dims(const std::vector<int64_t> &dims,
-                                            const std::vector<int64_t> &shape) {
-  if (dims.empty() || dims.size() != shape.size()) return false;
-  
+    const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) {
+    return false;
+  }
+
   if (dims.size() == 1) {
     // 1D: no per-channel-row support
     return false;
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     // 2D: per-channel-row means dims = {M, 1}
     return dims[0] == shape[0] && dims[1] == 1;
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     // 3D: per-channel-row means dims = {1, M, 1}
     return dims[0] == 1 && dims[1] == shape[1] && dims[2] == 1;
   }
@@ -341,40 +479,45 @@ static inline bool is_per_channel_row_dims(const std::vector<int64_t> &dims,
  * @brief Helper to check if dims represent per-channel quantization (either row or column)
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-channel dims:
  *   - per-channel-col: {1, N} for 2D, {1, 1, N} for 3D
  *   - per-channel-row: {M, 1} for 2D, {1, M, 1} for 3D
  */
 static inline bool is_per_channel_dims(const std::vector<int64_t> &dims,
-                                        const std::vector<int64_t> &shape) {
-  return is_per_channel_col_dims(dims, shape) || is_per_channel_row_dims(dims, shape);
+                                       const std::vector<int64_t> &shape) {
+  return is_per_channel_col_dims(dims, shape) ||
+         is_per_channel_row_dims(dims, shape);
 }
 
 /**
  * @brief Helper to check if dims represent per-group-row quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-group-row dims (G groups across rows, each group has N values):
  *   - 1D: Not supported (use per-channel instead)
  *   - 2D: dims = {G, N} where M % G == 0 and G > 1 (G*N total values)
  *   - 3D: dims = {1, G, N} where M % G == 0 and G > 1 (G*N total values)
  */
 static inline bool is_per_group_row_dims(const std::vector<int64_t> &dims,
-                                          const std::vector<int64_t> &shape) {
-  if (dims.empty() || dims.size() != shape.size()) return false;
-  
+    const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) {
+    return false;
+  }
+
   // 1D: no per-group support
   if (dims.size() == 1) {
     return false;
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     // 2D: per-group-row means dims = {G, N} where G > 1 (G*N total values)
     int64_t G = dims[0];
     int64_t M = shape[0];
     int64_t N = shape[1];
     return G > 1 && dims[1] == N && (M % G == 0);
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     // 3D: per-group-row means dims = {1, G, N} where G > 1 (G*N total values)
     int64_t G = dims[1];
     int64_t M = shape[1];
@@ -388,26 +531,30 @@ static inline bool is_per_group_row_dims(const std::vector<int64_t> &dims,
  * @brief Helper to check if dims represent per-group-col quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-group-col dims (G groups across columns, each row has G values):
  *   - 1D: Not supported
  *   - 2D: dims = {M, G} where N % G == 0 and G > 1 (M*G total values)
  *   - 3D: dims = {1, M, G} where N % G == 0 and G > 1 (M*G total values)
  */
 static inline bool is_per_group_col_dims(const std::vector<int64_t> &dims,
-                                          const std::vector<int64_t> &shape) {
-  if (dims.empty() || dims.size() != shape.size()) return false;
-  
+    const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) {
+    return false;
+  }
+
   // 1D: no per-group support
   if (dims.size() == 1) {
     return false;
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     // 2D: per-group-col means dims = {M, G} where G > 1 (M*G total values)
     int64_t M = shape[0];
     int64_t N = shape[1];
     int64_t G = dims[1];
     return dims[0] == M && G > 1 && (N % G == 0);
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     // 3D: per-group-col means dims = {1, M, G} where G > 1 (M*G total values)
     int64_t M = shape[1];
     int64_t N = shape[2];
@@ -421,13 +568,13 @@ static inline bool is_per_group_col_dims(const std::vector<int64_t> &dims,
  * @brief Helper to check if dims represent per-group quantization (either row or column)
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
- * 
+ *
  * Per-group dims:
  *   - per-group-row: {G, N} for 2D, {1, G, N} for 3D (groups divide rows)
  *   - per-group-col: {M, G} for 2D, {1, M, G} for 3D (groups divide columns)
  */
 static inline bool is_per_group_dims(const std::vector<int64_t> &dims,
-                                      const std::vector<int64_t> &shape) {
+                                     const std::vector<int64_t> &shape) {
   return is_per_group_row_dims(dims, shape) || is_per_group_col_dims(dims, shape);
 }
 
@@ -437,15 +584,19 @@ static inline bool is_per_group_dims(const std::vector<int64_t> &dims,
  * @param shape Tensor shape
  * @return Granularity type enum value
  */
-static inline granularity_type_t get_single_granularity(const std::vector<int64_t> &dims,
-                                                         const std::vector<int64_t> &shape) {
+static inline granularity_type_t get_single_granularity(
+  const std::vector<int64_t> &dims,
+  const std::vector<int64_t> &shape) {
   if (is_per_tensor_dims(dims)) {
     return granularity_type_t::per_tensor;
-  } else if (is_per_channel_row_dims(dims, shape)) {
+  }
+  else if (is_per_channel_row_dims(dims, shape)) {
     return granularity_type_t::per_token;
-  } else if (is_per_channel_col_dims(dims, shape)) {
+  }
+  else if (is_per_channel_col_dims(dims, shape)) {
     return granularity_type_t::per_channel;
-  } else if (is_per_group_dims(dims, shape)) {
+  }
+  else if (is_per_group_dims(dims, shape)) {
     return granularity_type_t::per_group;
   }
   return granularity_type_t::invalid;  // Invalid dims configuration
@@ -456,19 +607,20 @@ static inline granularity_type_t get_single_granularity(const std::vector<int64_
  * @param params Reorder parameters
  * @return Granularity type enum value (mixed if scale and zp have different granularities)
  */
-static inline granularity_type_t get_granularity_type(const reorder_params_t &params) {
+static inline granularity_type_t get_granularity_type(const reorder_params_t
+    &params) {
   const auto &shape = params.src_shape;
   const auto &scale_dims = params.quant_params.scale.dims;
   const auto &zp_dims = params.quant_params.zero_point.dims;
-  
+
   granularity_type_t scale_gran = get_single_granularity(scale_dims, shape);
   granularity_type_t zp_gran = get_single_granularity(zp_dims, shape);
-  
+
   // If both are the same, return that granularity
   if (scale_gran == zp_gran) {
     return scale_gran;
   }
-  
+
   // Different granularities for scale and zp
   return granularity_type_t::mixed;
 }
@@ -482,9 +634,11 @@ static inline int64_t get_num_groups_row(const std::vector<int64_t> &dims) {
   // 1D: no per-group support, return 1
   if (dims.size() == 1) {
     return 1;
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     return dims[0];  // 2D: dims = {G, N}
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     return dims[1];  // 3D: dims = {1, G, N}
   }
   return 1;
@@ -499,9 +653,11 @@ static inline int64_t get_num_groups_col(const std::vector<int64_t> &dims) {
   // 1D: no per-group support, return 1
   if (dims.size() == 1) {
     return 1;
-  } else if (dims.size() == 2) {
+  }
+  else if (dims.size() == 2) {
     return dims[1];  // 2D: dims = {M, G}
-  } else if (dims.size() == 3) {
+  }
+  else if (dims.size() == 3) {
     return dims[2];  // 3D: dims = {1, M, G}
   }
   return 1;
@@ -517,7 +673,7 @@ static inline int64_t get_num_groups_col(const std::vector<int64_t> &dims) {
  * @param row Row index (M dimension)
  * @param col Column index (N dimension)
  * @return Index into the quantization parameter array
- * 
+ *
  * Index calculation for different granularities:
  *   - per-tensor: 0
  *   - per-channel-col {1, N}: col
@@ -526,24 +682,28 @@ static inline int64_t get_num_groups_col(const std::vector<int64_t> &dims) {
  *   - per-group-col {M, G}: row * G + group_col_idx, where group_col_idx = col / (N / G)
  */
 static inline size_t get_quant_param_index(const std::vector<int64_t> &dims,
-                                            const std::vector<int64_t> &shape,
-                                            int64_t M, int64_t N,
-                                            int64_t row, int64_t col) {
+    const std::vector<int64_t> &shape,
+    int64_t M, int64_t N,
+    int64_t row, int64_t col) {
   if (is_per_tensor_dims(dims)) {
     return 0;
-  } else if (is_per_channel_col_dims(dims, shape)) {
+  }
+  else if (is_per_channel_col_dims(dims, shape)) {
     // Per-channel-col: index by column
     return static_cast<size_t>(col);
-  } else if (is_per_channel_row_dims(dims, shape)) {
+  }
+  else if (is_per_channel_row_dims(dims, shape)) {
     // Per-channel-row: index by row
     return static_cast<size_t>(row);
-  } else if (is_per_group_row_dims(dims, shape)) {
+  }
+  else if (is_per_group_row_dims(dims, shape)) {
     // Per-group-row: index = group_row_idx * N + col
     int64_t G = get_num_groups_row(dims);
     int64_t group_size = M / G;
     int64_t group_idx = row / group_size;
     return static_cast<size_t>(group_idx * N + col);
-  } else if (is_per_group_col_dims(dims, shape)) {
+  }
+  else if (is_per_group_col_dims(dims, shape)) {
     // Per-group-col: index = row * G + group_col_idx
     int64_t G = get_num_groups_col(dims);
     int64_t group_size = N / G;
@@ -561,7 +721,7 @@ static inline size_t get_quant_param_index(const std::vector<int64_t> &dims,
  * @brief Validates input parameters for reorder operation.
  */
 status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
-                                  const reorder_params_t &params);
+                                 const reorder_params_t &params);
 
 /**
  * @brief Convert data_type_t enum to string representation.
@@ -576,7 +736,8 @@ const char *reorder_algo_to_string(reorder_algo_t algo);
 /**
  * @brief Select the optimal reorder algorithm based on parameters.
  */
-reorder_algo_t select_reorder_algo(const reorder_params_t &params, size_t nelems);
+reorder_algo_t select_reorder_algo(const reorder_params_t &params,
+                                   size_t nelems);
 
 /**
  * @brief Check if the given data type combination is supported for reorder.
@@ -595,7 +756,7 @@ status_t validate_reorder_strides(const reorder_params_t &params);
 
 /**
  * @brief Validate quantization parameters (scale and zero_point dimensions).
- * 
+ *
  * Checks that:
  * - Per-channel: dims match N (number of columns)
  * - Per-group: M is divisible by group_size and num_groups = M / group_size
@@ -618,60 +779,66 @@ const char *granularity_to_string(granularity_type_t granularity);
 
 /**
  * @brief Validate dynamic quantization parameters
- * 
+ *
  * Checks that:
  * - Source data type is bf16 or f32 (float types for quantization)
  * - Destination data type is s8 or u8 (int8 types)
  * - Output buffers (buff) are provided for scale and zero_point
  * - Dims are valid for the given shape
- * 
+ *
  * @param src Source data buffer
  * @param params Reorder parameters with dynamic_quant = true
  * @return status_t::success if valid, status_t::failure otherwise
  */
-status_t validate_dynamic_quant_params(const void *src, const reorder_params_t &params);
+status_t validate_dynamic_quant_params(const void *src,
+                                       const reorder_params_t &params);
 
 /**
  * @brief Compute dynamic quantization parameters from source data
- * 
+ *
  * Computes scale and zero_point based on the source data's min/max values
  * and fills the user-provided output buffers.
- * 
+ *
  * Granularity is determined from quant_params.scale.dims:
  *   - per-tensor:      Single scale/zp for all elements
  *   - per-channel-row: One scale/zp per row (M values)
  *   - per-channel-col: One scale/zp per column (N values)
  *   - per-group-row:   G*N values (G groups across rows)
  *   - per-group-col:   M*G values (G groups across columns)
- * 
+ *
  * Formulas (for asymmetric quantization with u8):
  *   scale = (max - min) / 255.0
  *   zero_point = -round(min / scale)
- * 
+ *
  * Formulas (for symmetric quantization with s8):
  *   scale = max(|min|, |max|) / 127.0
  *   zero_point = 0
- * 
+ *
  * @param src Source data buffer
  * @param params Reorder parameters (modified: scale/zp buffers filled)
  * @return status_t::success on success, status_t::failure on error
  */
-status_t compute_dynamic_quant_params(const void *src, const reorder_params_t &params);
+status_t compute_dynamic_quant_params(const void *src,
+                                      const reorder_params_t &params);
 
 /**
  * @brief Helper to get the number of quantization parameter elements
- * 
+ *
  * Computes the total number of scale/zero_point values based on dims.
  * Uses checked multiplication to detect overflow of user-provided dims.
- * 
+ *
  * @param dims Quantization parameter dimensions
  * @return Number of elements (product of all dims), or -1 on overflow
  */
 static inline int64_t get_quant_param_nelems(const std::vector<int64_t> &dims) {
-  if (dims.empty()) return 1;
+  if (dims.empty()) {
+    return 1;
+  }
   int64_t nelems = 1;
   for (int64_t d : dims) {
-    if (d <= 0) return -1;
+    if (d <= 0) {
+      return -1;
+    }
     if (nelems > std::numeric_limits<int64_t>::max() / d) {
       return -1;  // overflow
     }
