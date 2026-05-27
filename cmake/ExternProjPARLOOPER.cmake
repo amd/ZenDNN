@@ -40,7 +40,17 @@ if (ZENDNNL_DEPENDS_PARLOOPER)
     list(APPEND PARLOOPER_MAKE_ARGS
       "SRCFILES=jit_compile.cpp par_loop_generator.cpp common_loops.cpp")
 
-    message(DEBUG "${ZENDNNL_MSG_PREFIX}LIBXSMM_MAKE_ARGS=${PARLOOPER_MAKE_ARGS}")
+    # Workaround upstream UB in parlooper loop_generator() (chained VLAs
+    # sized via strlen() of uninitialised storage, par_loop_generator.cpp
+    # ~L783-786). At -D_FORTIFY_SOURCE=3 __strcpy_chk sees the random VLA
+    # size and aborts with "*** buffer overflow detected ***". Lowers
+    # fortify to 2 for parlooper TUs only; rest of ZenDNN keeps the distro default.
+    # Drop once fixed upstream. Injected via CXX= because parlooper's Makefile
+    # resets CXXFLAGS inside ifeq(PARLOOPER_COMPILER,gcc).
+    set(PARLOOPER_HARDENING_FLAGS "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2")
+    list(APPEND PARLOOPER_MAKE_ARGS
+      "CXX=${CMAKE_CXX_COMPILER} ${PARLOOPER_HARDENING_FLAGS}")
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}PARLOOPER_MAKE_ARGS=${PARLOOPER_MAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
 
