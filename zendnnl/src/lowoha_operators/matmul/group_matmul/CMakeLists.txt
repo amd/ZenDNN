@@ -23,6 +23,7 @@ set(lowoha_group_matmul_sources
   group_matmul/group_matmul_n_tile.cpp
   group_matmul/group_matmul_moe_postop.cpp
   group_matmul/group_matmul_moe_act.cpp
+  group_matmul/group_matmul_moe_act_dlp.cpp
   group_matmul/group_matmul_fused_moe.cpp
   group_matmul/prepack/prepack.cpp
   group_matmul/prepack/prepack_aocl_dlp.cpp

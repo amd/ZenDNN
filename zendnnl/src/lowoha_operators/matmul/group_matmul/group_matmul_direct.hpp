@@ -283,6 +283,70 @@ void apply_swiglu_oai_tile_rows_oop(
     void *dst_buf, int dst_ldc, int dst_col_start,
     int M, int pairs, data_type_t dtype);
 
+// --- AOCL DLP-backed gated activations (implemented in
+//     group_matmul_moe_act_dlp.cpp).  Same row-range contract as
+//     apply_gated_act_inplace; callers can swap on a per-activation
+//     basis once an ISA / env gate decides to use DLP. ---
+//
+// Layout (shared by silu_and_mul_dlp and gelu_and_mul_dlp):
+//   gate occupies dst columns [0, dim), up occupies [dim, 2*dim),
+//   where dim = N / 2.  The whole [m_rows × dim] block is processed in
+//   a single DLP call.
+
+/**
+ * @brief Apply silu_and_mul to a row range via AOCL DLP.
+ *
+ * Effect (per row m in [row_start, row_end)):
+ *   dst[m, 0:dim) = silu(dst[m, 0:dim)) * dst[m, dim:2*dim)
+ *
+ * @param dst       Expert output buffer [M, ldc].
+ * @param row_start First row to process (inclusive).
+ * @param row_end   Last row to process (exclusive).
+ * @param N         Total columns (must be positive and even: N = 2*dim).
+ * @param ldc       Leading dimension of dst (elements, not bytes).
+ * @param dst_dtype Data type of dst (f32 or bf16).
+ */
+// Returns true on success (or no-op for empty range/null dst); false
+// when DLP setup/execution fails and the caller must fall back to
+// apply_gated_act_inplace().
+bool silu_and_mul_dlp(
+    void *dst, int row_start, int row_end,
+    int N, int ldc, data_type_t dst_dtype);
+
+/**
+ * @brief Apply gelu_and_mul to a row range via AOCL DLP.
+ *
+ * Effect (per row m in [row_start, row_end)):
+ *   dst[m, 0:dim) = gelu(dst[m, 0:dim)) * dst[m, dim:2*dim)
+ *
+ * AOCL chain: ELTWISE(GELU_ERF) + MATRIX_MUL(up half, ldm=ldc).
+ *
+ * Matches the exact-erf form used by gelu_scalar / gelu_avx512 in
+ * group_matmul_moe_act.cpp, so results should agree with the AVX-512
+ * kernel within rounding tolerance.
+ *
+ * @param dst       Expert output buffer [M, ldc].
+ * @param row_start First row to process (inclusive).
+ * @param row_end   Last row to process (exclusive).
+ * @param N         Total columns (must be positive and even: N = 2*dim).
+ * @param ldc       Leading dimension of dst (elements, not bytes).
+ * @param dst_dtype Data type of dst (f32 or bf16).
+ */
+// Returns true on success (or no-op for empty range/null dst); false
+// when DLP setup/execution fails and the caller must fall back to
+// apply_gated_act_inplace().
+bool gelu_and_mul_dlp(
+    void *dst, int row_start, int row_end,
+    int N, int ldc, data_type_t dst_dtype);
+
+// Common DLP entry point.  Returns false when DLP can't handle the
+// activation (currently: swiglu_oai_mul); caller must fall back to
+// apply_gated_act_inplace().
+bool apply_gated_act_inplace_dlp(
+    grp_matmul_gated_act_t act,
+    void *dst, int row_start, int row_end,
+    int N, int ldc, data_type_t dst_dtype);
+
 // --- Fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one pass ---
 
 /**

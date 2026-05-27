@@ -287,9 +287,13 @@ void flat_m_tile(
               src[e], lda[e], weight[e], ldb[e],
               bias[e], beta[e], dst[e], ldc[e],
               is_weights_const[e], 1, local_params, algo);
-          if (fused_act != grp_matmul_gated_act_t::none)
-            apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
-                                    N[e], ldc[e], act_dtype);
+              if (fused_act != grp_matmul_gated_act_t::none) {
+                if (!apply_gated_act_inplace_dlp(fused_act, dst[e], 0, M[e],
+                                                 N[e], ldc[e], act_dtype)) {
+                  apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
+                                          N[e], ldc[e], act_dtype);
+                }
+              }
         }
         #pragma omp barrier
       }
