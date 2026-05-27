@@ -50,8 +50,14 @@ def _config_snapshot(config: PipelineConfig) -> dict[str, Any]:
         "post_prune_redundant": config.post_prune_redundant,
         "run_cv": config.run_cv,
         "feature_engineering": config.feature_engineering,
+        "feature_engineering_cols": config.feature_engineering_cols,
         "depth_range": depth_str,
         "param_grid_size": _grid_size(config.param_grid),
+        "resample_strategy": config.resample_strategy,
+        "undersample_ratio_ceil": config.undersample_ratio_ceil,
+        "undersample_max_factor": config.undersample_max_factor,
+        "oversample_target_ratio": config.oversample_target_ratio,
+        "minority_split": config.minority_split,
     }
 
 
@@ -74,6 +80,20 @@ def _config_summary_str(snap: dict[str, Any]) -> str:
         parts.append("whole")
     if snap["exclude_m"]:
         parts.append("no-M")
+    resample = snap.get("resample_strategy", "none")
+    if resample != "none":
+        rs_params: list[str] = []
+        if resample in ("undersample", "hybrid"):
+            rs_params.append(f"ceil={snap.get('undersample_ratio_ceil')}")
+            mf = snap.get("undersample_max_factor")
+            if mf is not None:
+                rs_params.append(f"mf={mf}")
+        if resample in ("oversample", "hybrid"):
+            rs_params.append(f"tr={snap.get('oversample_target_ratio')}")
+        rs_detail = f"{resample}({','.join(rs_params)})" if rs_params else resample
+        parts.append(rs_detail)
+    if snap.get("minority_split"):
+        parts.append("min-split")
     return ", ".join(parts)
 
 
@@ -134,6 +154,7 @@ class RunHistory:
 
         self._runs.append({
             "run_id": run_id,
+            "run_name": config.run_name or "",
             "timestamp": datetime.now(),
             "config_snapshot": _config_snapshot(config),
             "has_baseline": config.has_baseline,
@@ -145,7 +166,8 @@ class RunHistory:
         })
         metric = _sort_metric_value(best_entry, config) if best_entry else "—"
         label = _sort_metric_label(config)
-        print(f"Run {run_id} saved ({len(sorted_results)} models, "
+        name_tag = f" [{config.run_name}]" if config.run_name else ""
+        print(f"Run {run_id}{name_tag} saved ({len(sorted_results)} models, "
               f"best {label}: {metric})")
         return run_id
 
@@ -239,7 +261,12 @@ class RunHistory:
         if "hmean" in metric_types:
             metric_cols.append(("HMean", "hmean"))
 
-        headers = ["Run", "Time", "Config"]
+        has_names = any(run.get("run_name") for run in self._runs)
+
+        headers = ["Run"]
+        if has_names:
+            headers.append("Name")
+        headers += ["Time", "Config"]
         headers += [mc[0] for mc in metric_cols]
         headers += ["Depth", "Nodes", "Mispred", "Models"]
 
@@ -247,25 +274,26 @@ class RunHistory:
         table.field_names = headers
         table.align = "r"
         table.align["Config"] = "l"
+        if has_names:
+            table.align["Name"] = "l"
 
         scores = []
         for run in self._runs:
             snap = run["config_snapshot"]
             entry = run["best_entry"]
 
+            row = [run["run_id"]]
+            if has_names:
+                row.append(run.get("run_name") or "")
+            row += [run["timestamp"].strftime("%H:%M:%S"),
+                    _config_summary_str(snap)]
+
             if entry is None:
-                row = [run["run_id"],
-                       run["timestamp"].strftime("%H:%M:%S"),
-                       _config_summary_str(snap)]
                 row += ["—"] * len(metric_cols)
                 row += ["—", "—", "—", run["num_models"]]
                 table.add_row(row)
                 scores.append(-1)
                 continue
-
-            row = [run["run_id"],
-                   run["timestamp"].strftime("%H:%M:%S"),
-                   _config_summary_str(snap)]
 
             for _, mt in metric_cols:
                 if mt == "geomean":
@@ -292,7 +320,8 @@ class RunHistory:
                 best_run = self._runs[best_idx]
                 sort_label = _sort_metric_label(config)
                 best_val = _sort_metric_value(best_run["best_entry"], config)
-                print(f"\n  * Global best: Run {best_run['run_id']} "
+                name_tag = f" [{best_run['run_name']}]" if best_run.get("run_name") else ""
+                print(f"\n  * Global best: Run {best_run['run_id']}{name_tag} "
                       f"({sort_label}: {best_val})")
 
     def clear(self) -> None:

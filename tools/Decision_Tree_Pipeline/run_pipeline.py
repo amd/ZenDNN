@@ -110,12 +110,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-engineering", default="none",
                         choices=["none", "cheap", "moderate", "expensive"],
                         help="Derived feature tier (default: none)")
+    parser.add_argument("--feature-engineering-cols", default=None,
+                        metavar="COLS",
+                        help="Comma-separated subset of feature columns used to build derived "
+                             "features (default: all numeric columns in feature_cols, "
+                             "e.g. M,K,N for matmul-only interactions while keeping Core)")
     parser.add_argument("--top-n", type=int, default=None,
                         help="Display only top N results (default: all)")
     parser.add_argument("--max-depth", type=int, nargs="+", default=None,
                         help="Override max_depth grid values")
     parser.add_argument("--function-name", default="Decision_tree_path_BF16",
                         help="Name for the generated C++ function")
+    parser.add_argument("--resample", default="none",
+                        choices=["none", "undersample", "oversample", "hybrid"],
+                        help="Resampling strategy for class imbalance (default: none). "
+                             "Normally applied to training data only, after the split; "
+                             "with --train-on-whole, applied to the full dataset before "
+                             "the diagnostic split.")
+    parser.add_argument("--undersample-ceil", type=float, default=1.05,
+                        help="Drop majority records with Ratio <= this (default: 1.05)")
+    parser.add_argument("--undersample-max-factor", type=float, default=None,
+                        help="Cap majority at N * minority count (default: no cap)")
+    parser.add_argument("--oversample-target", type=float, default=1.0,
+                        help="Target minority/majority ratio after oversampling (default: 1.0)")
+    parser.add_argument("--minority-split", action="store_true",
+                        help="Use 25%% train / 75%% test split for rigorous evaluation "
+                             "on imbalanced datasets")
+    parser.add_argument("--run-name", default="",
+                        help="Label for this run in the history table (e.g. 'matmul', 'embbag')")
     return parser.parse_args()
 
 
@@ -141,6 +163,24 @@ def main() -> None:
     config.print_params = args.print_params
     config.run_cv = args.run_cv
     config.feature_engineering = args.feature_engineering
+    if args.feature_engineering_cols:
+        config.feature_engineering_cols = [
+            c.strip() for c in args.feature_engineering_cols.split(",") if c.strip()]
+    config.resample_strategy = args.resample
+    if args.undersample_ceil < 0:
+        print(f"ERROR: --undersample-ceil must be >= 0 (got {args.undersample_ceil})")
+        sys.exit(1)
+    config.undersample_ratio_ceil = args.undersample_ceil
+    if args.undersample_max_factor is not None and args.undersample_max_factor <= 0:
+        print(f"ERROR: --undersample-max-factor must be > 0 (got {args.undersample_max_factor})")
+        sys.exit(1)
+    config.undersample_max_factor = args.undersample_max_factor
+    if args.oversample_target <= 0:
+        print(f"ERROR: --oversample-target must be > 0 (got {args.oversample_target})")
+        sys.exit(1)
+    config.oversample_target_ratio = args.oversample_target
+    config.minority_split = args.minority_split
+    config.run_name = args.run_name
 
     if args.max_depth:
         valid_depth_set = set(
@@ -170,10 +210,9 @@ def main() -> None:
     except ValueError as e:
         print(f"ERROR: Cannot split data (too few samples per class?): {e}")
         sys.exit(1)
-    print(f"Train: {len(train_df)} records, Test: {len(test_df)} records\n")
-
+    df_whole = config.full_df_after_split if config.full_df_after_split is not None else df
     try:
-        results_list, models_dict = run_grid_search(df, train_df, test_df, config)
+        results_list, models_dict = run_grid_search(df_whole, train_df, test_df, config)
     except Exception as e:
         print(f"ERROR: Training failed: {e}")
         sys.exit(1)
@@ -190,7 +229,7 @@ def main() -> None:
     selected_model = models_dict[selected_key]
     print(f"\nSelected model: {selected_key}")
 
-    display_impact_groups(selected_model, df, train_df, test_df, config,
+    display_impact_groups(selected_model, df_whole, train_df, test_df, config,
                           selected_key=selected_key)
 
     output_dir = Path(args.output_dir)
@@ -207,9 +246,10 @@ def main() -> None:
     feature_names = list(config.feature_cols)
     derived_cpp = get_derived_feature_cpp(config)
 
+    base_features = [c for c in config.all_feature_cols if c != 'M'] if config.exclude_m else list(config.all_feature_cols)
     cpp_code = tree_to_c_code(selected_model, feature_names,
                               function_name=args.function_name,
-                              base_features=list(config.all_feature_cols),
+                              base_features=base_features,
                               derived_features=derived_cpp)
     cpp_path = output_dir / "decision_tree.cpp"
     try:

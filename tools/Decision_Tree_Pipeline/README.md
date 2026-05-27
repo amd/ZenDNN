@@ -31,9 +31,10 @@ Decision_Tree_Pipeline/
 │       ├── tree_utils.py         #   Tree fingerprinting, redundant branch pruning
 │       ├── trainer.py            #   Grid search loop with dedup & CCP pruning
 │       ├── results.py            #   Sort, display, per-impact-group analysis
-│       ├── history.py            #   RunHistory for tracking experiments in notebook
+│       ├── history.py            #   RunHistory for tracking named experiments in notebook
 │       ├── feature_engineering.py#   Derived feature tiers (cheap/moderate/expensive)
-│       └── code_generator.py     #   Export DT as C++ / Python function
+│       ├── resampling.py         #   Class-imbalance detection and resampling strategies
+│       └── code_generator.py     #   Export DT as C++ / Python / Excel formula
 │
 └── README.md
 ```
@@ -101,10 +102,17 @@ python run_pipeline.py output.csv \
 | `--no-prune-redundant`  | off                          | Disable redundant branch pruning                                   |
 | `--run-cv`              | off                          | Enable cross-validation (disabled by default for small datasets)   |
 | `--feature-engineering` | `none`                       | Derived feature tier: none, cheap, moderate, expensive             |
+| `--feature-engineering-cols` | all numeric             | Comma-separated subset of columns to build derived features from   |
 | `--print-params`        | off                          | Print hyperparameters during training                              |
 | `--top-n`               | all                          | Only display top N results                                         |
 | `--max-depth`           | 1 2 3 4                      | Override max_depth grid values                                     |
 | `--function-name`       | `Decision_tree_path_BF16`    | Name for the generated C++ function                                |
+| `--resample`            | `none`                       | Resampling strategy: none, undersample, oversample, hybrid (train split only; full dataset when `--train-on-whole`) |
+| `--undersample-ceil`    | `1.05`                       | Drop majority records with Ratio <= this                           |
+| `--undersample-max-factor` | none                      | Cap majority at N × minority count                                 |
+| `--oversample-target`   | `1.0`                        | Target minority/majority ratio after oversampling                  |
+| `--minority-split`      | off                          | Use 25% train / 75% test split for imbalanced datasets             |
+| `--run-name`            | `""`                         | Label for this run in the history table                            |
 
 **Output:** `decision_tree.cpp` in the output directory, ready for ZenDNN integration.
 
@@ -133,12 +141,13 @@ compare results across multiple experiments within a session.
 1. **Imports** — loads all modules from `ml_pipeline.core`
 2. **Configuration** — create and tweak `PipelineConfig` (uncomment `config.show_all_params()` to see everything)
 3. **Load Data** — reads CSV, auto-detects timing columns and features
-4. **Split Data** — stratified 70/30 train/test split
+4. **Split Data** — stratified train/test split; resampling applied to train data only (full dataset when `train_on_whole` is enabled)
 5. **Grid Search** — trains all hyperparameter combinations with deduplication
 6. **Results** — sorted table with weighted accuracy, harmonic mean, CV metrics
-7. **Run History** — compare best models across all runs in the session
+7. **Run History** — compare named runs across experiments in the session
 8. **Inspect** — selected model's tree structure and per-impact-group accuracy
-9. **Export** — generates C++ code for the selected model
+9. **Export C++/Python** — generates C++ code for the selected model
+10. **Export Excel** — generates a copy-pasteable nested IF() formula
 
 ---
 
@@ -163,6 +172,13 @@ Use `config.show_all_params()` to print every parameter with its current value.
 | `param_grid`             | (see config.py)  | Hyperparameter grid search space              |
 | `cv_folds`               | `5`              | Number of cross-validation folds              |
 | `test_size`              | `0.3`            | Train/test split ratio                        |
+| `run_name`               | `""`             | Label for history table (e.g. "matmul")       |
+| `feature_engineering_cols`| `None`          | Subset of feature_cols used for FE (default: all) |
+| `resample_strategy`      | `"none"`         | Resampling: none, undersample, oversample, hybrid |
+| `undersample_ratio_ceil` | `1.05`           | Drop majority records with Ratio <= this threshold |
+| `undersample_max_factor` | `None`           | Cap majority to N× minority count after filtering |
+| `oversample_target_ratio`| `1.0`            | Target minority/majority ratio after oversampling |
+| `minority_split`         | `False`          | Use 25% train / 75% test split               |
 
 ## Dependencies
 

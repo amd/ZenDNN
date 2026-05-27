@@ -43,7 +43,8 @@ def run_grid_search(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
     tree deduplication.
 
     Args:
-        df: Full DataFrame (used for whole-dataset evaluation).
+        df: Full DataFrame (used for whole-dataset evaluation unless
+            ``config.full_df_after_split`` is set — see ``split_data``).
         train_df: Training split DataFrame.
         test_df: Test split DataFrame.
         config: PipelineConfig instance.
@@ -57,13 +58,15 @@ def run_grid_search(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
 
     X, y = prepare_features(train_df, config)
     X_test, y_test = prepare_features(test_df, config)
-    X_whole, y_whole = prepare_features(df, config)
+
+    df_whole = config.full_df_after_split if config.full_df_after_split is not None else df
+    X_whole, y_whole = prepare_features(df_whole, config)
 
     weights_train = transform_weights(train_df[config.weight_col], config)
-    weights_whole = transform_weights(df[config.weight_col], config)
+    weights_whole = transform_weights(df_whole[config.weight_col], config)
 
     if config.train_on_whole:
-        X_fit, y_fit, weights_fit, fit_df = X_whole, y_whole, weights_whole, df
+        X_fit, y_fit, weights_fit, fit_df = X_whole, y_whole, weights_whole, df_whole
         print("Training mode: WHOLE dataset (train + test combined)")
     else:
         X_fit, y_fit, weights_fit, fit_df = X, y, weights_train, train_df
@@ -135,7 +138,7 @@ def run_grid_search(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
             y_whole_pred = dt_pruned.predict(X_whole)
 
             mispred_whole, score, w_acc = calculate_mismatch_metric(
-                y_whole_pred, df, config)
+                y_whole_pred, df_whole, config)
 
             mispred_train = score_train = w_acc_train = None
             mispred_test = score_test = w_acc_test = None
@@ -155,7 +158,7 @@ def run_grid_search(df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFr
 
             geo_mean = None
             if config.has_baseline:
-                geo_mean = calculate_geo_mean(y_whole_pred, df, config)
+                geo_mean = calculate_geo_mean(y_whole_pred, df_whole, config)
 
             all_scores.append(ModelResult(
                 index_key=indx, params=params,

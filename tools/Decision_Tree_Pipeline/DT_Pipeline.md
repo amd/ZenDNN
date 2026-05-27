@@ -6,7 +6,7 @@ this notebook is a thin wrapper for data exploration and model selection.
 **Workflow:**
 1. Configure `PipelineConfig` (tweak params below)
 2. Load data, auto-detect columns
-3. Split data (stratified 70/30)
+3. Split data (stratified) — resampling applied to train data only (full dataset when `train_on_whole=True`)
 4. Run grid search (one function call)
 5. Review sorted results
 6. Select model, inspect impact group accuracy
@@ -16,10 +16,10 @@ this notebook is a thin wrapper for data exploration and model selection.
 ```python
 from ml_pipeline.core.config import PipelineConfig
 from ml_pipeline.core.data_loader import load_data, detect_columns, split_data, prepare_features
-from ml_pipeline.core.feature_engineering import apply_feature_engineering, get_derived_feature_cpp, get_derived_feature_py
+from ml_pipeline.core.feature_engineering import apply_feature_engineering, get_derived_feature_cpp, get_derived_feature_py, get_derived_feature_excel
 from ml_pipeline.core.trainer import run_grid_search
 from ml_pipeline.core.results import sort_results, display_results, display_impact_groups
-from ml_pipeline.core.code_generator import tree_to_python_code, tree_to_c_code
+from ml_pipeline.core.code_generator import tree_to_python_code, tree_to_c_code, tree_to_excel_formula
 from ml_pipeline.core.history import RunHistory
 ```
 
@@ -31,6 +31,7 @@ from ml_pipeline.core.history import RunHistory
 CSV_PATH = 'output.csv'
 
 config = PipelineConfig()
+config.run_name = ""                   # label for history table (e.g. "matmul", "embbag")
 config.exclude_m = False
 config.train_on_whole = False
 config.weight_transform = 'raw'        # 'raw', 'log+1', 'sqrt', 'minmax', 'rank', 'percentile_clip'
@@ -42,6 +43,16 @@ config.run_cv = False                    # Enable for cross-validation (recommen
 config.feature_engineering = "none"      # "none", "cheap", "moderate", "expensive"
 config.impact_threshold_low = 5
 config.impact_threshold_high = 50
+
+# Resampling — applied to training data only (after the split) to prevent data leakage.
+# Exception: when train_on_whole=True, resampling is applied to the full dataset before a diagnostic split.
+config.resample_strategy = "none"          # "none", "undersample", "oversample", "hybrid"
+config.undersample_ratio_ceil = 1.05       # drop majority records with Ratio <= this
+# config.undersample_max_factor = 2.0      # optional: cap majority at N × minority count
+# config.oversample_target_ratio = 1.0     # target minority/majority ratio after oversampling
+
+# Minority split — use 25% train / 75% test for rigorous evaluation on imbalanced datasets.
+config.minority_split = False
 
 # Override grid search params if needed:
 # config.param_grid['max_depth'] = [1, 2, 3, 4]
@@ -79,7 +90,8 @@ print(f'\nTest target distribution:\n{test_df[config.target_col].value_counts(no
 
 ```python
 # ── Grid Search ────────────────────────────────────────────────────────
-results_list, models_dict = run_grid_search(df, train_df, test_df, config)
+df_whole = config.full_df_after_split if config.full_df_after_split is not None else df
+results_list, models_dict = run_grid_search(df_whole, train_df, test_df, config)
 ```
 
 
@@ -130,7 +142,8 @@ else:
     print(export_text(selected_model, feature_names=list(X_train.columns)))
 
     # Impact group accuracy
-    display_impact_groups(selected_model, df, train_df, test_df, config,
+    df_display = config.full_df_after_split if config.full_df_after_split is not None else df
+    display_impact_groups(selected_model, df_display, train_df, test_df, config,
                           selected_key=SELECTED_MODEL_KEY)
 ```
 
@@ -141,7 +154,7 @@ if selected_model is None:
     print("No model selected. Run cells 5-6 and 8 first.")
 else:
     feature_names = list(config.feature_cols)
-    base_features = list(config.all_feature_cols)
+    base_features = [c for c in config.all_feature_cols if c != 'M'] if config.exclude_m else list(config.all_feature_cols)
     derived_cpp = get_derived_feature_cpp(config)
     derived_py = get_derived_feature_py(config)
 
@@ -155,4 +168,29 @@ else:
                               base_features=base_features,
                               derived_features=derived_cpp)
     print(cpp_code)
+```
+
+
+```python
+# ── Export Excel Formula ───────────────────────────────────────────────
+# Generates a nested IF() formula you can paste directly into Excel/Sheets.
+# Customize cell_map if your spreadsheet layout differs from the default.
+# Default: first feature → A2, second → B2, etc. (row 2, header in row 1).
+
+# Set to None for auto-mapping (A2, B2, ...), or specify your spreadsheet cells:
+cell_map = None
+# cell_map = {"Core": "A2", "M": "B2", "K": "C2", "N": "D2"}
+
+if selected_model is None:
+    print("No model selected. Run cells 5-6 and 8 first.")
+else:
+    feature_names = list(config.feature_cols)
+    base_features = [c for c in config.all_feature_cols if c != 'M'] if config.exclude_m else list(config.all_feature_cols)
+    derived_excel = get_derived_feature_excel(config)
+
+    excel_formula = tree_to_excel_formula(selected_model, feature_names,
+                                          cell_map=cell_map,
+                                          base_features=base_features,
+                                          derived_features=derived_excel)
+    print(excel_formula)
 ```

@@ -18,10 +18,15 @@
 """Tiered feature engineering for the DT pipeline.
 
 Four tiers of derived features, each cumulative:
-  none     — raw M, K, N only
-  cheap    — add, sub, compare  (~1-3 CPU cycles)
-  moderate — integer mul, div   (~3-30 cycles)
-  expensive — log, sqrt         (~50-100+ cycles)
+  none     — raw features only (whatever ``detect_columns`` put in ``feature_cols``)
+  cheap    — pairwise add / abs-diff / compare, plus full sum when >= 3 bases
+  moderate — pairwise integer mul / floored div
+  expensive — per-feature log2, sqrt of product of all bases
+
+Derived features are built from the **numeric** columns in ``config.feature_cols``
+at the time ``apply_feature_engineering`` runs (after ``detect_columns``), so
+matmul workloads keep M, K, N-style interactions while embbag-style CSVs use
+BS, Heads, Seq, Dim, etc.
 
 Usage:
     apply_feature_engineering(df, config)          # adds columns + updates config
@@ -31,167 +36,16 @@ Usage:
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 
 if TYPE_CHECKING:
-    import pandas as pd
     from .config import PipelineConfig
 
 
 TIER_ORDER = ["cheap", "moderate", "expensive"]
-_M_PATTERN = re.compile(r'\bM\b')
-
-# Each entry: (name, tier, pandas_fn, cpp_expr, py_expr)
-# pandas_fn: callable(df) -> Series
-# cpp_expr:  C++ expression using raw variable names (M, K, N)
-# py_expr:   Python expression using features['M'] etc.
-
-_FEATURE_DEFS = [
-    # ── Cheap tier: add, sub, compare ──────────────────────────────────
-    ("M_plus_K", "cheap",
-     lambda df: df["M"] + df["K"],
-     "M + K",
-     "features['M'] + features['K']"),
-
-    ("M_plus_N", "cheap",
-     lambda df: df["M"] + df["N"],
-     "M + N",
-     "features['M'] + features['N']"),
-
-    ("K_plus_N", "cheap",
-     lambda df: df["K"] + df["N"],
-     "K + N",
-     "features['K'] + features['N']"),
-
-    ("M_plus_K_plus_N", "cheap",
-     lambda df: df["M"] + df["K"] + df["N"],
-     "M + K + N",
-     "features['M'] + features['K'] + features['N']"),
-
-    ("abs_M_minus_K", "cheap",
-     lambda df: (df["M"] - df["K"]).abs(),
-     "((M >= K) ? (M - K) : (K - M))",
-     "abs(features['M'] - features['K'])"),
-
-    ("abs_M_minus_N", "cheap",
-     lambda df: (df["M"] - df["N"]).abs(),
-     "((M >= N) ? (M - N) : (N - M))",
-     "abs(features['M'] - features['N'])"),
-
-    ("abs_K_minus_N", "cheap",
-     lambda df: (df["K"] - df["N"]).abs(),
-     "((K >= N) ? (K - N) : (N - K))",
-     "abs(features['K'] - features['N'])"),
-
-    ("max_MKN", "cheap",
-     lambda df: df[["M", "K", "N"]].max(axis=1),
-     "((M >= K && M >= N) ? M : ((K >= N) ? K : N))",
-     "max(features['M'], features['K'], features['N'])"),
-
-    ("min_MKN", "cheap",
-     lambda df: df[["M", "K", "N"]].min(axis=1),
-     "((M <= K && M <= N) ? M : ((K <= N) ? K : N))",
-     "min(features['M'], features['K'], features['N'])"),
-
-    ("M_lt_K", "cheap",
-     lambda df: (df["M"] < df["K"]).astype(int),
-     "(M < K)",
-     "int(features['M'] < features['K'])"),
-
-    ("M_lt_N", "cheap",
-     lambda df: (df["M"] < df["N"]).astype(int),
-     "(M < N)",
-     "int(features['M'] < features['N'])"),
-
-    ("N_lt_K", "cheap",
-     lambda df: (df["N"] < df["K"]).astype(int),
-     "(N < K)",
-     "int(features['N'] < features['K'])"),
-
-    ("M_eq_K", "cheap",
-     lambda df: (df["M"] == df["K"]).astype(int),
-     "(M == K)",
-     "int(features['M'] == features['K'])"),
-
-    ("N_eq_K", "cheap",
-     lambda df: (df["N"] == df["K"]).astype(int),
-     "(N == K)",
-     "int(features['N'] == features['K'])"),
-
-    ("M_eq_N", "cheap",
-     lambda df: (df["M"] == df["N"]).astype(int),
-     "(M == N)",
-     "int(features['M'] == features['N'])"),
-
-    # ── Moderate tier: integer multiply, divide ────────────────────────
-    ("MK", "moderate",
-     lambda df: df["M"] * df["K"],
-     "M * K",
-     "features['M'] * features['K']"),
-
-    ("MN", "moderate",
-     lambda df: df["M"] * df["N"],
-     "M * N",
-     "features['M'] * features['N']"),
-
-    ("KN", "moderate",
-     lambda df: df["K"] * df["N"],
-     "K * N",
-     "features['K'] * features['N']"),
-
-    ("MKN", "moderate",
-     lambda df: df["M"] * df["K"] * df["N"],
-     "M * K * N",
-     "features['M'] * features['K'] * features['N']"),
-
-    # M, K, N are matmul dimensions and will never be 0 in practice;
-    # zero-guards are included purely as defensive coding.
-    ("M_div_K", "moderate",
-     lambda df: np.where(df["K"] != 0, df["M"] // df["K"], 0),
-     "(K != 0 ? M / K : 0)",
-     "(features['M'] // features['K'] if features['K'] != 0 else 0)"),
-
-    ("M_div_N", "moderate",
-     lambda df: np.where(df["N"] != 0, df["M"] // df["N"], 0),
-     "(N != 0 ? M / N : 0)",
-     "(features['M'] // features['N'] if features['N'] != 0 else 0)"),
-
-    ("K_div_N", "moderate",
-     lambda df: np.where(df["N"] != 0, df["K"] // df["N"], 0),
-     "(N != 0 ? K / N : 0)",
-     "(features['K'] // features['N'] if features['N'] != 0 else 0)"),
-
-    # ── Expensive tier: log, sqrt ──────────────────────────────────────
-    # These features use costlier math ops. The generated C++ code runs at
-    # inference time on every matmul call, so we intentionally use float
-    # (sqrtf) over double (sqrt) to minimise latency. All inputs are
-    # integers and the result is truncated to int, so float32 precision
-    # (~7 digits) is more than sufficient for practical M, K, N ranges.
-    ("log2_M", "expensive",
-     lambda df: np.log2(df["M"].clip(lower=1)).astype(int),
-     "static_cast<int>(log2(M > 1 ? M : 1))",
-     "int(math.log2(max(features['M'], 1)))"),
-
-    ("log2_K", "expensive",
-     lambda df: np.log2(df["K"].clip(lower=1)).astype(int),
-     "static_cast<int>(log2(K > 1 ? K : 1))",
-     "int(math.log2(max(features['K'], 1)))"),
-
-    ("log2_N", "expensive",
-     lambda df: np.log2(df["N"].clip(lower=1)).astype(int),
-     "static_cast<int>(log2(N > 1 ? N : 1))",
-     "int(math.log2(max(features['N'], 1)))"),
-
-    ("sqrt_MKN", "expensive",
-     lambda df: np.sqrt(df["M"].astype(np.float32) * df["K"] * df["N"]).astype(int),
-     "static_cast<int>(sqrtf(static_cast<float>(M) * K * N))",
-     "int(math.sqrt(float(features['M']) * features['K'] * features['N']))"),
-]
-
-_EXPENSIVE_NAMES = {name for name, tier, *_ in _FEATURE_DEFS if tier == "expensive"}
 
 
 def _tiers_for_level(level: str) -> set[str]:
@@ -203,7 +57,185 @@ def _tiers_for_level(level: str) -> set[str]:
               f"Valid options: 'none', {TIER_ORDER}. Defaulting to 'none'.")
         return set()
     idx = TIER_ORDER.index(level)
-    return set(TIER_ORDER[:idx + 1])
+    return set(TIER_ORDER[: idx + 1])
+
+
+def _numeric_base_columns(df: pd.DataFrame, feature_cols: list[str]) -> list[str]:
+    """Keep feature names that exist in df and are numeric (int/float/bool).
+
+    Note: exported code (C++/Excel) casts thresholds to int, so float-typed
+    features may cause boundary mismatches. A warning is printed if any
+    float columns are included.
+    """
+    out: list[str] = []
+    float_cols: list[str] = []
+    for c in feature_cols:
+        if c not in df.columns:
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            out.append(c)
+            if pd.api.types.is_float_dtype(df[c]):
+                float_cols.append(c)
+    if float_cols:
+        print(f"WARNING: Float-typed feature columns {float_cols} detected. "
+              f"Exported C++/Excel code casts thresholds to int, which may "
+              f"shift decision boundaries for non-integer values.")
+    return out
+
+
+def _cpp_abs_diff(a: str, b: str) -> str:
+    return f"(({a} >= {b}) ? ({a} - {b}) : ({b} - {a}))"
+
+
+def _excel_abs_diff(a: str, b: str) -> str:
+    return f"ABS({a}-{b})"
+
+
+_MAX_FE_BASE_COLS = 10
+
+
+def _build_dynamic_defs(
+    cols: list[str],
+    tiers: set[str],
+) -> list[tuple[str, str, object, str, str, str]]:
+    """Return rows: (name, tier, pandas_fn, cpp_expr, py_expr, excel_expr)."""
+    defs: list[tuple[str, str, object, str, str, str]] = []
+    n = len(cols)
+    if n > _MAX_FE_BASE_COLS:
+        print(f"WARNING: {n} base columns → O(n²) derived features. "
+              f"Set config.feature_engineering_cols to a smaller subset "
+              f"(max recommended: {_MAX_FE_BASE_COLS}).")
+
+    def py_feat(c: str) -> str:
+        return f"features[{c!r}]"
+
+    # ── cheap ───────────────────────────────────────────────────────────
+    if "cheap" in tiers:
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = cols[i], cols[j]
+                name = f"{a}_plus_{b}"
+
+                def _sum_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return df[ca] + df[cb]
+
+                defs.append(
+                    (name, "cheap", _sum_pair, f"{a} + {b}",
+                     f"{py_feat(a)} + {py_feat(b)}", f"{a}+{b}"),
+                )
+
+                name_abs = f"abs_{a}_minus_{b}"
+
+                def _abs_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return (df[ca] - df[cb]).abs()
+
+                defs.append(
+                    (name_abs, "cheap", _abs_pair, _cpp_abs_diff(a, b),
+                     f"abs({py_feat(a)} - {py_feat(b)})", _excel_abs_diff(a, b)),
+                )
+
+                name_lt = f"{a}_lt_{b}"
+
+                def _lt_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return (df[ca] < df[cb]).astype(int)
+
+                defs.append(
+                    (name_lt, "cheap", _lt_pair, f"({a} < {b})",
+                     f"int({py_feat(a)} < {py_feat(b)})", f"IF({a}<{b},1,0)"),
+                )
+
+                name_eq = f"{a}_eq_{b}"
+
+                def _eq_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return (df[ca] == df[cb]).astype(int)
+
+                defs.append(
+                    (name_eq, "cheap", _eq_pair, f"({a} == {b})",
+                     f"int({py_feat(a)} == {py_feat(b)})", f"IF({a}={b},1,0)"),
+                )
+
+        if n >= 3:
+            name = "_plus_".join(cols)
+
+            def _sum_all(df: pd.DataFrame, cc: tuple[str, ...] = tuple(cols)) -> pd.Series:
+                s = df[cc[0]]
+                for c in cc[1:]:
+                    s = s + df[c]
+                return s
+
+            cpp_sum = " + ".join(cols)
+            py_sum = " + ".join(py_feat(c) for c in cols)
+            xl_sum = "+".join(cols)
+            defs.append((name, "cheap", _sum_all, cpp_sum, py_sum, xl_sum))
+
+    # ── moderate ────────────────────────────────────────────────────────
+    if "moderate" in tiers:
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = cols[i], cols[j]
+                name = f"{a}_mul_{b}"
+
+                def _mul_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return df[ca] * df[cb]
+
+                defs.append(
+                    (name, "moderate", _mul_pair, f"{a} * {b}",
+                     f"{py_feat(a)} * {py_feat(b)}", f"{a}*{b}"),
+                )
+
+                name_div = f"{a}_div_{b}"
+
+                def _div_pair(df: pd.DataFrame, ca=a, cb=b) -> pd.Series:
+                    return np.where(df[cb] != 0, df[ca] // df[cb], 0)
+
+                defs.append(
+                    (name_div, "moderate", _div_pair, f"({b} != 0 ? {a} / {b} : 0)",
+                     f"({py_feat(a)} // {py_feat(b)} if {py_feat(b)} != 0 else 0)",
+                     f"IF({b}<>0,INT({a}/{b}),0)"),
+                )
+
+    # ── expensive ───────────────────────────────────────────────────────
+    if "expensive" in tiers:
+        for c in cols:
+            name = f"log2_{c}"
+
+            def _log2_one(df: pd.DataFrame, cc=c) -> pd.Series:
+                return np.log2(df[cc].clip(lower=1)).astype(int)
+
+            defs.append(
+                (name, "expensive", _log2_one,
+                 f"static_cast<int>(log2({c} > 1 ? {c} : 1))",
+                 f"int(math.log2(max({py_feat(c)}, 1)))",
+                 f"INT(LOG(IF({c}>1,{c},1),2))"),
+            )
+
+        if n >= 1:
+            prod_cpp = " * ".join(
+                [f"static_cast<float>({cols[0]})"] + cols[1:]
+            ) if n > 1 else f"static_cast<float>({cols[0]})"
+            name = "sqrt_" + "_".join(cols)
+
+            def _sqrt_prod(df: pd.DataFrame, cc: tuple[str, ...] = tuple(cols)) -> pd.Series:
+                p = df[cc[0]].astype(np.float32)
+                for c in cc[1:]:
+                    p = p * df[c].astype(np.float32)
+                return np.sqrt(p).astype(int)
+
+            py_terms = " * ".join(f"float({py_feat(c)})" for c in cols)
+            defs.append(
+                (name, "expensive", _sqrt_prod,
+                 f"static_cast<int>(sqrtf({prod_cpp}))",
+                 f"int(math.sqrt({py_terms}))",
+                 f"INT(SQRT({'*'.join(cols)}))"),
+            )
+
+    return defs
+
+
+def _clear_derived_caches(config: PipelineConfig) -> None:
+    config.derived_feature_cpp = {}
+    config.derived_feature_py = {}
+    config.derived_feature_excel = {}
 
 
 def apply_feature_engineering(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
@@ -214,6 +246,7 @@ def apply_feature_engineering(df: pd.DataFrame, config: PipelineConfig) -> pd.Da
     Both ``df`` and ``config`` are modified in-place:
     - ``df`` gets new columns for each derived feature.
     - ``config.feature_cols`` is extended with the derived feature names.
+    - ``config.derived_feature_{cpp,py,excel}`` are filled for codegen.
 
     Args:
         df: Training DataFrame (modified in-place).
@@ -222,65 +255,97 @@ def apply_feature_engineering(df: pd.DataFrame, config: PipelineConfig) -> pd.Da
     Returns:
         The modified DataFrame (same object, returned for convenience).
     """
+    _clear_derived_caches(config)
+
+    raw_set = set(config.all_feature_cols) if config.all_feature_cols else set()
+    if raw_set:
+        base_cols = [c for c in config.feature_cols if c in raw_set]
+    else:
+        base_cols = list(config.feature_cols)
+    config.feature_cols = list(base_cols)
+
     if config.feature_engineering == "none":
         print("Feature engineering: none (raw features only)")
         return df
 
-    required = {"M", "K", "N"}
-    if not required.issubset(set(df.columns)):
-        missing = required - set(df.columns)
-        print(f"WARNING: Feature engineering requires {required}, "
-              f"but {missing} are missing. Skipping.")
+    base = list(base_cols)
+    if config.feature_engineering_cols is not None:
+        allowed = set(config.feature_engineering_cols)
+        extra = allowed - set(base)
+        if extra:
+            print(f"WARNING: feature_engineering_cols contains names not in feature_cols {extra}; "
+                  f"ignoring those.")
+        base = [c for c in config.feature_engineering_cols if c in base]
+        if not base:
+            print("WARNING: feature_engineering_cols does not overlap feature_cols. Skipping FE.")
+            return df
+    numeric = _numeric_base_columns(df, base)
+    if len(numeric) < 1:
+        print("WARNING: Feature engineering needs at least one numeric column in "
+              f"feature_cols; got {base}. Skipping.")
         return df
 
     tiers = _tiers_for_level(config.feature_engineering)
-    added = []
-    skipped_m = []
-    for name, tier, compute_fn, cpp_expr, _ in _FEATURE_DEFS:
-        if tier in tiers:
-            if config.exclude_m and _M_PATTERN.search(cpp_expr):
-                skipped_m.append(name)
-                continue
-            df[name] = compute_fn(df)
-            if name not in config.feature_cols:
-                config.feature_cols.append(name)
-            added.append(name)
+    defs = _build_dynamic_defs(numeric, tiers)
 
-    print(f"Feature engineering ({config.feature_engineering}): "
+    added = []
+    skipped_collisions: list[str] = []
+    base_set = set(base_cols)
+    cpp_map: dict[str, str] = {}
+    py_map: dict[str, str] = {}
+    xl_map: dict[str, str] = {}
+
+    for name, _tier, compute_fn, cpp_expr, py_expr, xl_expr in defs:
+        if name in base_set:
+            skipped_collisions.append(name)
+            continue
+        df[name] = compute_fn(df)  # type: ignore[operator]
+        if name not in config.feature_cols:
+            config.feature_cols.append(name)
+        added.append(name)
+        cpp_map[name] = cpp_expr
+        py_map[name] = py_expr
+        xl_map[name] = xl_expr
+
+    if skipped_collisions:
+        print(f"WARNING: Skipped {len(skipped_collisions)} derived feature(s) "
+              f"that collide with base columns: {skipped_collisions[:5]}")
+
+    config.derived_feature_cpp = cpp_map
+    config.derived_feature_py = py_map
+    config.derived_feature_excel = xl_map
+
+    print(f"Feature engineering ({config.feature_engineering}) on {numeric}: "
           f"added {len(added)} derived features")
-    if skipped_m:
-        print(f"  Skipped {len(skipped_m)} M-dependent features (exclude_m=True)")
     return df
 
 
-def _should_include(cpp_expr: str, config: PipelineConfig) -> bool:
-    """Check if a feature should be included given exclude_m setting."""
-    return not (config.exclude_m and _M_PATTERN.search(cpp_expr))
-
-
 def get_derived_feature_cpp(config: PipelineConfig) -> dict[str, str]:
-    """Return {name: cpp_expression} for all derived features in active tier."""
-    if config.feature_engineering == "none":
-        return {}
-    tiers = _tiers_for_level(config.feature_engineering)
-    return {name: cpp for name, tier, _, cpp, _ in _FEATURE_DEFS
-            if tier in tiers and _should_include(cpp, config)}
+    """Return {name: cpp_expression} for derived features from the last apply."""
+    return dict(config.derived_feature_cpp)
 
 
 def get_derived_feature_py(config: PipelineConfig) -> dict[str, str]:
-    """Return {name: python_expression} for all derived features in active tier."""
-    if config.feature_engineering == "none":
-        return {}
-    tiers = _tiers_for_level(config.feature_engineering)
-    return {name: py for name, tier, _, cpp, py in _FEATURE_DEFS
-            if tier in tiers and _should_include(cpp, config)}
+    """Return {name: python_expression} for derived features from the last apply."""
+    return dict(config.derived_feature_py)
+
+
+def get_derived_feature_excel(config: PipelineConfig) -> dict[str, str]:
+    """Return {name: excel_expression} with raw feature names (cell-subst later)."""
+    return dict(config.derived_feature_excel)
 
 
 def needs_cmath(used_feature_names: dict[str, str]) -> bool:
     """Check if any of the used features require <cmath> in C++."""
-    return bool(set(used_feature_names) & _EXPENSIVE_NAMES)
+    for cpp in used_feature_names.values():
+        if "log2" in cpp or "sqrt" in cpp.lower():
+            return True
+    return False
 
 
 def needs_math_import(used_feature_names: dict[str, str]) -> bool:
     """Check if any of the used features require 'import math' in Python."""
-    return bool(set(used_feature_names) & _EXPENSIVE_NAMES)
+    for py in used_feature_names.values():
+        if "math." in py:
+            return True
+    return False

@@ -28,6 +28,9 @@ class PipelineConfig:
     """
 
     def __init__(self):
+        # Run identification — shown in the history table to distinguish workloads.
+        self.run_name = ""
+
         # Column roles (auto-detected after data load via detect_columns)
         self.target_col = "Algo"
         self.weight_col = "Ratio"
@@ -42,10 +45,19 @@ class PipelineConfig:
         # Feature toggles
         self.exclude_m = False
         self.train_on_whole = False
+        # Set by split_data() when train_on_whole + resampling: full resampled frame for fit + whole metrics.
+        self.full_df_after_split = None
         self.post_prune_redundant = True
         self.print_params = False
         self.run_cv = False
         self.feature_engineering = "none"
+        # If set, restrict derived features to this subset of feature_cols (order preserved).
+        # None means: use every numeric column in feature_cols (e.g. BS, Heads, Seq, Dim).
+        self.feature_engineering_cols = None
+        # Filled by apply_feature_engineering() when tier != "none" (for codegen / export).
+        self.derived_feature_cpp = {}
+        self.derived_feature_py = {}
+        self.derived_feature_excel = {}
 
         # Weight transformation
         self.weight_transform = "minmax"
@@ -56,6 +68,17 @@ class PipelineConfig:
         # Impact group thresholds
         self.impact_threshold_low = 5
         self.impact_threshold_high = 50
+
+        # Resampling (train split only; full dataset when train_on_whole is enabled)
+        self.resample_strategy = "none"        # "none", "undersample", "oversample", "hybrid"
+        self.imbalance_warn_threshold = 0.33   # warn if minority class < this fraction
+        self.undersample_ratio_ceil = 1.05     # drop majority records with Ratio <= this
+        self.undersample_max_factor = None     # cap majority at N × minority count (None = no cap)
+        self.oversample_target_ratio = 1.0     # target minority/majority ratio after oversampling
+
+        # Minority-aware split: use 25% train / 75% test for more rigorous
+        # evaluation when the minority class is small.
+        self.minority_split = False
 
         # Grid search hyperparameters
         self.param_grid = {
@@ -99,9 +122,36 @@ class PipelineConfig:
             wt_extra = f" (range [{self.weight_minmax_low}, {self.weight_minmax_high}])"
         lines.append(f"Weight transform : {self.weight_transform}{wt_extra}")
 
+        resample_detail = self.resample_strategy
+        if self.resample_strategy != "none":
+            parts = []
+            if self.resample_strategy in ("undersample", "hybrid"):
+                parts.append(f"ceil={self.undersample_ratio_ceil}")
+                if self.undersample_max_factor is not None:
+                    parts.append(f"max_factor={self.undersample_max_factor}")
+            if self.resample_strategy in ("oversample", "hybrid"):
+                parts.append(f"target_ratio={self.oversample_target_ratio}")
+            if parts:
+                resample_detail += f" ({', '.join(parts)})"
+
+        if self.resample_strategy == "none":
+            rs_scope = "off"
+        elif self.train_on_whole:
+            rs_scope = "full dataset (train_on_whole)"
+        else:
+            rs_scope = "train split only"
+
         lines.extend([
-            f"Feature engineering  : {self.feature_engineering}",
-            f"Train on whole data  : {self.train_on_whole}",
+            f"Resampling          : {resample_detail} ({rs_scope})",
+            f"Feature engineering  : {self.feature_engineering}"
+            + (f" (bases: {self.feature_engineering_cols})"
+               if self.feature_engineering != "none" and self.feature_engineering_cols else ""),
+            f"Minority split      : {self.minority_split}"
+            + (f" (25% train / 75% test)" if self.minority_split else ""),
+            f"Train on whole data  : {self.train_on_whole}"
+            + (f"" if self.train_on_whole else
+               (f" (train 25% / test 75%)" if self.minority_split else
+                f" (train {round((1 - self.test_size) * 100):.0f}% / test {round(self.test_size * 100):.0f}%)")),
             f"Cross-validation     : {self.run_cv} ({self.cv_folds}-fold)" if self.run_cv else f"Cross-validation     : {self.run_cv}",
             f"Redundant branch pruning: {self.post_prune_redundant}",
             f"Print params         : {self.print_params}",
@@ -131,10 +181,12 @@ class PipelineConfig:
         print("\n  Feature Toggles:")
         print(f"    exclude_m           = {self.exclude_m}")
         print(f"    feature_engineering = {self.feature_engineering!r}")
+        print(f"    feature_engineering_cols = {self.feature_engineering_cols!r}")
         print(f"    train_on_whole      = {self.train_on_whole}")
         print(f"    post_prune_redundant= {self.post_prune_redundant}")
         print(f"    print_params        = {self.print_params}")
         print(f"    run_cv              = {self.run_cv}")
+        print(f"    run_name            = {self.run_name!r}")
 
         print("\n  Weight Transformation:")
         print(f"    weight_transform    = {self.weight_transform!r}")
@@ -146,6 +198,23 @@ class PipelineConfig:
         print(f"    impact_threshold_low  = {self.impact_threshold_low}")
         print(f"    impact_threshold_high = {self.impact_threshold_high}")
 
+        print("\n  Train/Test Split:")
+        print(f"    test_size           = {self.test_size}")
+        print(f"    minority_split      = {self.minority_split}")
+
+        if self.resample_strategy == "none":
+            rs_scope = "not applied"
+        elif self.train_on_whole:
+            rs_scope = "applied to full dataset"
+        else:
+            rs_scope = "applied to training data only, after split"
+        print(f"\n  Resampling ({rs_scope}):")
+        print(f"    resample_strategy   = {self.resample_strategy!r}")
+        print(f"    imbalance_warn_threshold = {self.imbalance_warn_threshold}")
+        print(f"    undersample_ratio_ceil   = {self.undersample_ratio_ceil}")
+        print(f"    undersample_max_factor   = {self.undersample_max_factor}")
+        print(f"    oversample_target_ratio  = {self.oversample_target_ratio}")
+
         print("\n  Grid Search Hyperparameters:")
         for key, vals in self.param_grid.items():
             print(f"    {key:<22} = {vals}")
@@ -154,8 +223,7 @@ class PipelineConfig:
             total *= len(vals)
         print(f"    {'(total combinations)':<22} = {total}")
 
-        print("\n  Cross-Validation & Split:")
+        print("\n  Cross-Validation & Random State:")
         print(f"    cv_folds            = {self.cv_folds}")
         print(f"    random_state        = {self.random_state}")
-        print(f"    test_size           = {self.test_size}")
         print(sep)
