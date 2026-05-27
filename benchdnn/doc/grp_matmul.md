@@ -149,6 +149,71 @@ Results are printed to the console and written to a timestamped CSV file.
 | `avg_ms` / `min_ms` | Mean / minimum per-iter kernel time. |
 | `GFLOPS_avg` / `GFLOPS_peak` | GFLOPS based on `avg_ms` / `min_ms`.  Includes Op1 + Op2 + MoE post-op FLOPs as applicable. |
 
+## Hardware performance counters
+
+Per-shape AMD Zen 4 / Zen 5 PMU counter collection is supported via the top-level
+`--perf-counters[=<profile>]` flag, sharing the same infrastructure used by the
+matmul driver (`benchdnn/utils/perf_counters.{hpp,cpp}`).
+
+The grp_matmul driver opens the `perf_event_open()` file descriptors **once
+per benchdnn process** at `bench()` entry — *before* any OpenMP parallel
+region — and **reuses them across all configs**.  This guarantees the OMP
+team that libgomp / libiomp5 spawns during the first config's warmup joins
+the perf-event inheritance subtree (`attr.inherit=1`) and stays in it for
+the whole sweep.  Each config then just does `reset/enable/disable/read`
+around its own timed `iters` loop, so warmup, tensor init, and process
+startup overhead are excluded from the totals.
+
+Note that `restore_src()` (the in-place src refill used when `use_internal_alloc=1`)
+and `flush_cache()` (used when `--cache_mode=cold`) sit **inside** the iter loop
+but **outside** the per-iter `ti0/ti1` timing bracket — so they contribute to the
+counter totals but not to `sum_iter_ms`.  When this matters (e.g. when correlating
+`L2BW%m` with `sum_iter_ms`), prefer `--cache_mode=hot` and `use_internal_alloc=0`
+so the counters and the kernel-time denominator both reflect pure GEMM work.
+
+```bash
+sudo benchdnn --op=grp_matmul --input_file=<file> --perf-counters             # cache (default)
+sudo benchdnn --op=grp_matmul --input_file=<file> --perf-counters=tlb         # DTLB + IPC
+sudo benchdnn --op=grp_matmul --input_file=<file> --perf-counters=stalls      # dispatch stalls + IPC
+```
+
+Requires `sudo` or `sysctl kernel.perf_event_paranoid <= 1`.  When unavailable,
+benchdnn warns and continues without counters — the timing output is
+unchanged.
+
+Per-config output, printed immediately after the existing console row:
+
+```
+   8     M=4         4096   14336   200      50  bf16:bf16:bf16     topk=2  N_down=4096*    2.345     2.123    8127.1    8954.3
+  [PERF]   18.2%    3.1%    0.0%   85.3%   12.4%    2.3%   34.7%
+  [ARCH] Zen5 (Family 0x1A) profile=cache
+        1234567890      L1-dcache-loads
+          45678901      L1-dcache-load-misses
+          ...
+```
+
+Two grp_matmul-specific notes on the derived metrics:
+
+- **`elapsed_sec` basis** = `sum_iter_ms / 1000.0` (kernel-only wall time
+  across all `cfg.iters`).  This matches the CSV's `sum_iter_ms` column, so
+  `L2BW%m` and other per-time ratios line up 1:1 with the reported timing.
+- **Per-thread normalization** uses `omp_get_max_threads()` for the
+  `L2BW%m` denominator — i.e. the formula *assumes* the absolute
+  counter sums reflect the whole OMP team.  In practice this assumption
+  is broken by Linux perf-event read semantics + benchdnn's per-shape
+  `open()` (the counters reflect the master thread only — see
+  [perf_counters.md → What the counters actually measure](perf_counters.md#what-the-counters-actually-measure-important)).
+  Ratio metrics (L1miss%, L2miss%, DTLB%, stall%, IPC) remain meaningful
+  because numerator and denominator come from the same scope, but the
+  absolute `L2BW%m` value will be roughly `1 / num_threads` of the true
+  process-wide bandwidth.  Recommended workaround for multi-thread
+  sweeps: `OMP_NUM_THREADS=1`, one config per invocation, or external
+  `perf stat`.
+
+The CSV is **not** modified — perf-counter values appear on stdout only.
+See [perf_counters.md](perf_counters.md) for the full event tables, derived
+metric formulas, and interpretation guide.
+
 ## Sweep script
 
 Use `scripts/run_matmul_benchmark_sweep.sh` for automated benchmarking:

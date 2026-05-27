@@ -34,6 +34,7 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 | Cache Modes          | `hot`, `cold`; matmul also `warm` (`--cache_mode`, default `hot`) |
 | Warmup Iterations    | Supported (configurable)                |
 | Batched Matmul (BMM) | Supported (via 'bs' field and --ndims=3)         |
+| HW Perf Counters     | matmul, grp_matmul (`--perf-counters[=cache|tlb|stalls]`, AMD Zen 4 / Zen 5 only) |
 
 ## Flow Diagram
 
@@ -97,6 +98,7 @@ The flow is split into two main sections:
 - **Warmup Iterations**: Optional warmup runs to stabilize measurements
 - **Cache control**: `--cache_mode` selects hot, cold, or (matmul) warm behavior at run time
 - **LOWOHA vs regular API**: `--lowoha=true|false` (or `1`/`0`); default is `true` for matmul, reorder, and embag (see operator docs for input format differences)
+- **HW Performance Counters** *(matmul, grp_matmul; AMD Zen 4 / Zen 5)*: `--perf-counters[=cache|tlb|stalls]` collects per-shape PMU counters via `perf_event_open()` and prints `[PERF]` / `[ARCH]` lines with derived L1/L2/L3 miss rates, prefetcher behaviour, L2 bandwidth, IPC, DTLB walks, or dispatch stalls.  See [doc/perf_counters.md](doc/perf_counters.md) for the full event tables and formulas.
 - **Comprehensive Output**: Results are printed to the console and saved to a timestamped CSV file for easy analysis
 
 

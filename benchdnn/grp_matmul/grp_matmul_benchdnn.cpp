@@ -69,6 +69,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -84,6 +85,11 @@
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "utils/benchdnn_utils.hpp"
+#include "utils/perf_counters.hpp"
+
+#ifdef _OPENMP
+  #include <omp.h>
+#endif
 
 namespace zendnnl {
 namespace benchdnn {
@@ -94,10 +100,21 @@ using zendnnl::common::data_type_t;
 using zendnnl::common::size_of;
 
 // ── Run one config ──────────────────────────────────────────────────────
+//
+// `perf_ctrs` (nullable) is owned by the caller (`bench()`) so that the
+// underlying `perf_event_open()` fds are created once per process,
+// *before* any OpenMP parallel region in benchdnn.  The OMP team
+// spawned during the first config's warmup then joins the inheritance
+// subtree, and every subsequent config can do `reset/enable/disable/
+// read` without needing to re-open (which would otherwise leave the
+// already-spawned OMP pool outside the inheritance tree — see
+// `doc/perf_counters.md`).  Passing `nullptr` disables perf counter
+// collection for this config.
 
 static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
                        const global_options &options,
-                       [[maybe_unused]] size_t cache_size) {
+                       [[maybe_unused]] size_t cache_size,
+                       PerfCounterGroup *perf_ctrs) {
     if (cfg.iters <= 0) {
         std::cerr << "ERROR: iters=" << cfg.iters << " must be > 0\n";
         return false;
@@ -481,6 +498,16 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         }
     }
 
+    // ── HW perf counters ──────────────────────────────────────────────
+    // The PerfCounterGroup is owned by bench() and was opened once for
+    // the whole process, before any OpenMP parallel region in benchdnn.
+    // Here we only `reset/enable` immediately before the timed loop and
+    // `disable/read` immediately after — warmup costs (thread spawn,
+    // JIT, ITLB warmup, code-cache fills) are therefore not folded into
+    // the counter totals.  `use_perf` short-circuits both branches when
+    // the caller didn't request counters (or open() failed in bench()).
+    const bool use_perf = (perf_ctrs != nullptr);
+
     // ── Warmup ────────────────────────────────────────────────────────
     // Warmup primes the OMP thread team, jit caches, page tables and
     // the L1/L2/L3 hierarchy.  Crucial for stable measurements:
@@ -530,6 +557,10 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // sum_iter_ms isolates the kernel time we actually care about.
     double min_ms = std::numeric_limits<double>::max();
     double sum_iter_ms = 0.0;
+    if (use_perf && perf_ctrs->is_available()) {
+        perf_ctrs->reset();
+        perf_ctrs->enable();
+    }
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int it = 0; it < cfg.iters; ++it) {
         // Runtime cache_mode (cold/warm/hot) replaces the older
@@ -557,6 +588,10 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         if (iter_ms < min_ms) min_ms = iter_ms;
     }
     auto t1 = std::chrono::high_resolution_clock::now();
+    if (use_perf && perf_ctrs->is_available()) {
+        perf_ctrs->disable();
+        perf_ctrs->read();
+    }
 
     double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double avg_ms = sum_iter_ms / cfg.iters;
@@ -611,6 +646,25 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
               << std::setw(9) << gflops_avg << "  "
               << std::setw(9) << gflops_peak
               << std::endl;
+
+    // HW perf counter print — uses sum_iter_ms (kernel-only wall time
+    // across all timed iters, restore_src + flush_cache excluded) as
+    // the elapsed_sec basis for derived metrics so the per-byte /
+    // per-cycle ratios reflect actual GEMM work, not the measurement
+    // harness.  Mirrors the matmul driver's [PERF] line + raw dump.
+    if (use_perf && perf_ctrs->is_available()) {
+        const double elapsed_sec = sum_iter_ms / 1000.0;
+        int nt = 1;
+#ifdef _OPENMP
+        nt = omp_get_max_threads();
+#endif
+        if (nt < 1) nt = 1;
+        auto derived = perf_ctrs->derive(elapsed_sec, nt);
+        printf("  [PERF]");
+        perf_ctrs->print_values(derived, false);
+        printf("\n");
+        perf_ctrs->print_raw_counters();
+    }
 
     // CSV (wall_ms = outer t1-t0; sum_iter_ms = ∑ per-iter kernel time;
     // gap = wall - sum_iter ≈ flush_cache + chrono overhead)
@@ -677,8 +731,43 @@ int bench(const std::string &in_filename, const std::string &out_filename,
                  "'N_down=X*' = library-allocated + src-reuse)"
               << std::endl;
 
+    // ── HW perf counters: open once per process ─────────────────────
+    // Lifecycle is owned here, not in run_config().  Opening before
+    // the first call to run_config() guarantees the perf_event_open()
+    // fds exist *before* any OpenMP parallel region in benchdnn — so
+    // the OMP team that libgomp / libiomp5 spawns during the first
+    // config's warmup joins the inheritance subtree of these counters
+    // (`attr.inherit=1`, `pid=getpid()` in perf_counters.cpp).
+    //
+    // For all subsequent configs we just reset/enable/disable/read
+    // around the timed loop; the same set of OMP workers stays in the
+    // inheritance subtree across the whole sweep.  Without this lift,
+    // each config opened fresh fds after the OMP pool already existed,
+    // leaving every config after the first with no descendants in its
+    // perf-event subtree.
+    //
+    // Residual limitation: Linux returns
+    //   master_task_count + sum(counts of EXITED descendants)
+    // on `read()`, i.e. *live* descendants are not walked at read
+    // time.  Persistent OMP pools never exit, so even with the lift
+    // the `[PERF]` line still reflects predominantly master-thread
+    // events.  For true process-wide aggregation use external
+    // `perf stat ./benchdnn ...` or run with `OMP_NUM_THREADS=1`.
+    // See doc/perf_counters.md for the full discussion.
+    PerfProfile perf_profile = parse_perf_profile(
+                                 options.perf_profile_str.c_str());
+    PerfCounterGroup perf_ctrs(perf_profile);
+    PerfCounterGroup *perf_ctrs_ptr = nullptr;
+    if (options.perf_counters && perf_ctrs.is_available()) {
+        if (perf_ctrs.open()) {
+            perf_ctrs_ptr = &perf_ctrs;
+        } else {
+            commonlog_warning("HW perf counters unavailable; continuing without them.");
+        }
+    }
+
     for (const auto &cfg : configs) {
-        if (!run_config(cfg, csv, options, cache_size))
+        if (!run_config(cfg, csv, options, cache_size, perf_ctrs_ptr))
             std::cerr << "  ^ Failed, skipping." << std::endl;
     }
 

@@ -2,10 +2,25 @@
 
 ## Overview
 
-BenchDNN supports **in-process hardware performance counter collection** for matmul
-operations using the Linux `perf_event_open()` API. This provides per-shape cache
-behavior analysis without external profiling tools, measuring **only the matmul
-iterations** (excluding warmup, tensor init, and process startup overhead).
+BenchDNN supports **in-process hardware performance counter collection** for the
+matmul and grp_matmul (group GEMM / MoE) drivers using the Linux
+`perf_event_open()` API. This provides per-shape cache behavior analysis
+without external profiling tools, measuring **only the timed iterations**
+(excluding warmup, tensor init, and process startup overhead). See the
+"Execution Flow" note below for two grp_matmul-specific exceptions
+(`restore_src` and `flush_cache`).
+
+> **Scope of measurement**: the implementation uses
+> `perf_event_open(pid=getpid(), inherit=1)`.  grp_matmul opens once
+> per process (before any OpenMP parallel region) and reuses across
+> configs; matmul still opens per shape.  Either way, Linux's master
+> fd `read()` does not aggregate *live* descendants, so under
+> persistent OpenMP pools the `[PERF]` line effectively reflects
+> **master-thread events during the enabled window** — accurate for
+> `OMP_NUM_THREADS=1` and useful for relative comparisons, but not a
+> process-wide aggregation.  See
+> [What the counters actually measure](#what-the-counters-actually-measure-important)
+> and [Limitations](#limitations) for details and mitigations.
 
 **Supported architectures:** AMD Zen 4 (EPYC 9004 / Family 19h) and Zen 5 (EPYC 9005 / Family 1Ah).
 Architecture is auto-detected at runtime via CPUID; constants (L2 bandwidth,
@@ -27,31 +42,93 @@ all events experience the same proportional sampling.
 
 ## Execution Flow
 
+The same high-level phases apply to both matmul and grp_matmul;
+substitute `matmul_direct(...)` with `group_matmul_direct(...)` for
+grp_matmul. The perf-counter open/reset strategy differs, however:
+grp_matmul opens once per process and reuses across configs, while
+matmul opens per shape.
+
 ```
-  FOR EACH SHAPE in input file:
+  FOR EACH SHAPE / CONFIG in input file:
   ┌───────────────────────────────────────────────────────────────┐
   │ Phase 1: Setup (NOT MEASURED)                                 │
-  │   Parse M,K,N,dtype → Allocate tensors                        │
+  │   Parse shape/dtype → Allocate tensors                        │
   │   detect_zen_arch() → select ArchConstants (Zen4 or Zen5)     │
-  │   Open perf fds for selected profile (disabled)               │
+  │   Open perf fds for selected profile (disabled), pid=getpid() │
   ├───────────────────────────────────────────────────────────────┤
   │ Phase 2: Warmup (NOT MEASURED, counters disabled)             │
-  │   for j = 1..warmup_iters: matmul_direct(...)                 │
-  │   OMP threads created here inherit the perf fds               │
+  │   for j = 1..warmup_iters: matmul_direct / group_matmul_direct│
   ├───────────────────────────────────────────────────────────────┤
   │ perf_ctrs.reset() + enable()              ◄── START counting  │
   │ ╔═══════════════════════════════════════════════════════════╗  │
-  │ ║ Phase 3: Measurement (COUNTERS ACTIVE)                   ║  │
+  │ ║ Phase 3: Measurement (COUNTERS ACTIVE on the calling task)║  │
   │ ║   for j = 1..iters:                                      ║  │
-  │ ║     matmul_direct(M, K, N, A, B, C, ...)  ◄── measured   ║  │
-  │ ║   Counters accumulate across ALL iters and ALL OMP threads║  │
+  │ ║     (grp_matmul: optional restore_src + flush_cache)     ║  │
+  │ ║     matmul_direct / group_matmul_direct  ◄── measured   ║  │
   │ ╚═══════════════════════════════════════════════════════════╝  │
   │ perf_ctrs.disable() + read()              ◄── STOP counting  │
   ├───────────────────────────────────────────────────────────────┤
   │ Phase 4: Output                                               │
-  │   Print timing (GOPS) + [PERF] derived + [ARCH] + raw ctrs   │
+  │   Print timing (GFLOPS) + [PERF] derived + [ARCH] + raw ctrs │
   └───────────────────────────────────────────────────────────────┘
 ```
+
+For grp_matmul, `restore_src()` (the in-place src refill used in
+`use_internal_alloc=1` mode) and `flush_cache()` (when
+`--cache_mode=cold`) sit inside the iter loop but **outside** the
+per-iter `ti0/ti1` timing bracket — so they contribute to the counter
+totals but not to `sum_iter_ms`.
+
+### What the counters actually measure (important)
+
+The two drivers currently use *different* lifecycle patterns; the
+inheritance and read semantics differ accordingly.
+
+#### grp_matmul: open once per process (current pattern)
+
+The grp_matmul driver opens **one perf_event per process** with
+`perf_event_open(attr, getpid(), -1, -1, 0)` and `attr.inherit=1`.
+The open happens at the top of `grp_matmul::bench()`, *before* any
+OpenMP parallel region in benchdnn.  The OMP team that libgomp /
+libiomp5 spawns during the first config's warmup therefore joins the
+inheritance subtree at spawn time, and every subsequent config simply
+does `reset/enable/disable/read` around its own timed loop — the same
+set of OMP workers remains in the subtree for the whole sweep.
+
+This fixes the *inheritance lineage*, but Linux still returns
+
+```
+master_task_count + sum(counts of descendant tasks that have already EXITED)
+```
+
+on `read()`.  Live descendants are **not** walked at read time.  With
+persistent OMP pools (`OMP_WAIT_POLICY=ACTIVE`, `KMP_BLOCKTIME>0`)
+workers don't exit, so the `[PERF]` line still reflects
+**master-thread events during the enabled window** — useful for
+sequential workloads, master-thread cache behavior, and relative
+comparisons, but not a process-wide aggregation.
+
+#### matmul: open once per shape (legacy pattern)
+
+The matmul driver still creates a fresh `PerfCounterGroup` *inside*
+its per-shape loop.  In that case both limitations apply:
+
+| Shape index | OMP team state at `open()` | What the read reflects |
+|-------------|---------------------------|------------------------|
+| **1st**     | Pool not yet spawned.  First parallel region during warmup spawns the team **after** `open()` → workers join the inheritance subtree, but their counts are still master-only on `read()` because they never exit. | Master thread events for the bracket. |
+| **2nd, 3rd, …** | Pool already exists from the previous shape's warmup, spawned **before** this shape's `open()` → none of those workers are in the new subtree at all. | Master thread events only. |
+
+Behaviourally the numbers are *master-only* for both patterns under
+persistent OMP pools; the grp_matmul pattern just makes the
+inheritance lineage consistent across configs (which matters for
+any future per-thread aggregation work — see [Limitations](#limitations)).
+
+See [Multi-thread support](#multi-thread-support) and
+[Limitations](#limitations) for the recommended mitigations
+(`OMP_NUM_THREADS=1`, single-config invocations, or external
+`perf stat`).  When this matters (e.g. when
+correlating L2 BW with kernel time), prefer
+`--cache_mode=hot` and avoid `use_internal_alloc=1`.
 
 ## Architecture Support
 
@@ -125,19 +202,27 @@ Source: LIKWID `perfmon_zen4_events.txt`, AMD PPR for Family 1Ah (Zen 5).
 ### In-process counters (recommended)
 
 ```bash
-# Cache profile (default) — L1/L2 hit-miss analysis
+# matmul — cache profile (default), L1/L2 hit-miss analysis
 sudo benchdnn --op=matmul --lowoha=true --perf-counters \
     --input_file=benchdnn/input/matmul/benchmark_gemv_sweep_bf16.txt
 
-# TLB profile — page walk analysis + IPC
+# matmul — TLB profile, page walk analysis + IPC
 sudo benchdnn --op=matmul --lowoha=true --perf-counters=tlb \
     --input_file=benchdnn/input/matmul/benchmark_gemv_sweep_bf16.txt
 
-# Stalls profile — dispatch bottleneck analysis
+# matmul — stalls profile, dispatch bottleneck analysis
 sudo benchdnn --op=matmul --lowoha=true --perf-counters=stalls \
     --input_file=benchdnn/input/matmul/benchmark_gemv_sweep_bf16.txt
 
-# Via the benchmark script
+# grp_matmul (group GEMM / MoE) — same three profiles
+sudo benchdnn --op=grp_matmul --perf-counters \
+    --input_file=benchdnn/input/grp_matmul/grp_matmul_prompt.txt
+sudo benchdnn --op=grp_matmul --perf-counters=tlb \
+    --input_file=benchdnn/input/grp_matmul/grp_matmul_prompt.txt
+sudo benchdnn --op=grp_matmul --perf-counters=stalls \
+    --input_file=benchdnn/input/grp_matmul/grp_matmul_prompt.txt
+
+# Via the benchmark script (matmul)
 sudo bash scripts/run_matmul_benchmark_sweep.sh -a 1 -t 1 -P -i bf16          # cache (default)
 sudo bash scripts/run_matmul_benchmark_sweep.sh -a 1 -t 1 -P tlb -i bf16      # TLB + IPC
 sudo bash scripts/run_matmul_benchmark_sweep.sh -a 1 -t 128 -P stalls -i bf16  # dispatch stalls
@@ -199,6 +284,7 @@ implemented in the analysis script.
 | `benchdnn/utils/perf_counters.hpp` | `PerfCounterGroup`, `ZenArch`, `PerfProfile`, `ArchConstants` |
 | `benchdnn/utils/perf_counters.cpp` | CPUID detection, event tables, `perf_event_open()`, derive, print |
 | `benchdnn/matmul/matmul_lowoha.cpp` | Integration into matmul measurement loop |
+| `benchdnn/grp_matmul/grp_matmul_benchdnn.cpp` | Integration into grp_matmul (group GEMM / MoE) measurement loop |
 | `benchdnn/benchdnn.cpp` | `--perf-counters[=profile]` CLI flag |
 | `scripts/analyze_benchmark.py` | Offline analysis with `--perf` mode |
 | `scripts/run_matmul_benchmark_sweep.sh` | `-P [profile]` flag for internal perf |
@@ -218,9 +304,20 @@ fd = perf_event_open(&attr, getpid(), -1, -1, 0);
 
 ### Multi-thread Support
 
-With `attr.inherit=1` and `pid=getpid()`, counters automatically aggregate across
-all threads in the process (including OMP worker threads). The `derive()` function
-normalizes to per-core using the thread count:
+> **Caveat**: With benchdnn's per-shape `open()` pattern, the master fd's
+> `read()` returns events from the calling thread only — see the
+> ["What the counters actually measure"](#what-the-counters-actually-measure-important)
+> section above for the full explanation.  The notes below describe the
+> *intended* design (which is what you get on the **first** shape of a run
+> where the OMP team is spawned after `open()` and a worker happens to
+> exit before `read()`).  For multi-thread sweeps, prefer external
+> `perf stat` (see [External perf stat](#external-perf-stat-alternative-cache-events-only))
+> or set `OMP_NUM_THREADS=1`.
+
+The intent of opening with `attr.inherit=1` and `pid=getpid()` is to
+aggregate across descendant threads spawned after the open call.  Under
+that ideal model the `derive()` function normalizes ratios to per-core
+using the thread count:
 
 ```
 L2BW%m = (total_L1_misses / num_threads × 64B) / elapsed_sec / L2_peak × 100
@@ -229,20 +326,81 @@ L2BW%m = (total_L1_misses / num_threads × 64B) / elapsed_sec / L2_peak × 100
 Where `L2_peak` is architecture-specific: Zen 4 = 32 × freq, Zen 5 = 64 × freq.
 
 Ratio metrics (L1miss%, L2miss%, PF→L2/L3/DRAM, DTLB%, stall%) are already
-per-core averages since both numerator and denominator scale equally.
+per-core averages when numerator and denominator both come from the same
+counter aggregation scope, so they remain meaningful even when the
+absolute counts are master-only.
+
+### Getting accurate multi-thread numbers
+
+If you need process-wide events for a multi-threaded benchdnn run, use
+one of these alternatives instead of the `--perf-counters` flag:
+
+1. **`OMP_NUM_THREADS=1`**: removes the master-vs-workers ambiguity
+   entirely — the master is the only thread doing work, so `[PERF]`
+   numbers are accurate.
+2. **One config per benchdnn invocation**: put a single shape per input
+   file (or pass it via the command-line mode).  The first-shape
+   inheritance window then captures the OMP team for *that* shape.
+   Worker counts are still only merged on worker *exit*, so this is
+   not a complete fix — but it removes the "stale pool" issue between
+   configs.
+3. **External `perf stat ./benchdnn ...`**: the most reliable option
+   for whole-process metrics.  `perf stat` opens CPU-wide (`cpu=-1`)
+   events that capture all tasks scheduled on each CPU, so it doesn't
+   depend on the task-inheritance subtree at all.  See
+   [External perf stat](#external-perf-stat-alternative-cache-events-only)
+   below.
 
 ### Limitations
 
-1. **AMD Zen 4/5 only**: Other CPU families show `[ARCH] Unknown` and use
+1. **Single-thread visibility (read-aggregation under persistent OMP pools)**:
+   benchdnn opens a `perf_event` with `pid=getpid()` and `inherit=1`.
+   The kernel's `read()` on the master fd returns
+   `master_task_count + sum(exited_descendants)` — it does **not** walk
+   live descendants.  With persistent OMP pools
+   (`OMP_WAIT_POLICY=ACTIVE` or `KMP_BLOCKTIME>0`, libgomp / libiomp5)
+   workers spawn once and stay alive for the rest of the process, so
+   their per-thread counters are never merged back into the master fd.
+   The `[PERF]` line therefore reflects **master-thread events during
+   the enabled window**, not a true process-wide aggregation, regardless
+   of the open pattern.
+
+   On top of that, inheritance only flows *forward in time*: descendant
+   tasks must be created **after** `perf_event_open()` to be in the
+   subtree at all.  The two drivers handle this differently:
+   - **grp_matmul** opens the perf_event once at `bench()` entry,
+     before any benchdnn-side OMP parallel region.  The OMP team
+     joins the subtree during the first config's warmup and remains
+     in it for the whole sweep — inheritance is consistent across all
+     configs (even though `read()` is still master-only).
+   - **matmul** opens a fresh perf_event per shape.  Shapes 2+ open
+     *after* the OMP team has already spawned, so those workers are
+     not even in the inheritance subtree.  Matmul should be aligned
+     with grp_matmul; until then its multi-config sweeps are extra
+     unreliable.
+
+   **Mitigations** (in increasing order of accuracy for multi-thread workloads):
+   - Run with `OMP_NUM_THREADS=1` — master is the only worker, so
+     master-only counts are correct.
+   - Put a single shape per input file (one config per benchdnn
+     invocation) — removes the matmul "stale OMP pool" issue between
+     configs, even if live-descendant aggregation is still incomplete.
+   - Use external `perf stat ./benchdnn ...` (CPU-wide events) for
+     true whole-process aggregation.
+
+   A future implementation could open one `perf_event_open()` per OMP
+   worker tid (enumerable via `/proc/self/task/`) to bypass the
+   read-aggregation issue entirely.  Not currently done.
+2. **AMD Zen 4/5 only**: Other CPU families show `[ARCH] Unknown` and use
    conservative defaults (32 B/cycle L2 BW). Events may not work on non-AMD CPUs.
-2. **L3miss% is approximate**: Uses prefetcher DRAM misses as proxy.
-3. **Requires elevated privileges**: `sudo` or `perf_event_paranoid <= 1`.
-4. **Linux only**: Guarded by `#ifdef __linux__`; non-Linux builds compile but
+3. **L3miss% is approximate**: Uses prefetcher DRAM misses as proxy.
+4. **Requires elevated privileges**: `sudo` or `perf_event_paranoid <= 1`.
+5. **Linux only**: Guarded by `#ifdef __linux__`; non-Linux builds compile but
    counters are disabled.
-5. **CPU frequency**: Zen 4 uses 3.7 GHz (generic); Zen 5 uses 4.121 GHz
+6. **CPU frequency**: Zen 4 uses 3.7 GHz (generic); Zen 5 uses 4.121 GHz
    (EPYC 9B45 specific). L2BW%m accuracy depends on matching the actual
    boost frequency of the deployed SKU.
-6. **6 PMC limit**: Hardware exposes 6 programmable counters. The `tlb` and
+7. **6 PMC limit**: Hardware exposes 6 programmable counters. The `tlb` and
    `stalls` profiles fit entirely within this limit. The `cache` profile
    uses 7 events and may be multiplexed by the kernel — absolute counts
    can be noisy but ratios remain valid. Run multiple profiles sequentially
