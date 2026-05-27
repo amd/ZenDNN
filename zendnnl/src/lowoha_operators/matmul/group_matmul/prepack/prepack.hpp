@@ -80,6 +80,7 @@
 #ifndef ZENDNNL_GROUP_MATMUL_PREPACK_HPP
 #define ZENDNNL_GROUP_MATMUL_PREPACK_HPP
 
+#include <atomic>
 #include <vector>
 
 #include "common/data_types.hpp"
@@ -454,6 +455,20 @@ void clear_fingerprint_cache_for_test();
 // mutex lock — negligible vs the actual matmul body, but the API is
 // gated by the function name suffix so production callers never
 // reach for it by accident.
+//
+// CAPTURE GATE — `s_capture_last_invocation` (atomic bool, default
+// false):
+//   Production builds never set this flag, so the store path in
+//   `log_pack_probe` short-circuits on a single relaxed load of a
+//   cache-line-shared `false` value (no mutex acquire, no struct
+//   copy, no coherence traffic).  Tests arm the flag (via
+//   `LastInvocationCaptureGuard` in `moe_test_utils.hpp`) for the
+//   test's scope, in which case the gated branch DOES fire and
+//   takes the mutex + writes through to `s_last`.  Without this
+//   gate the unconditional mutex lock in `log_pack_probe` ran on
+//   every dispatcher call — measurable cost on hot fused-MoE serving
+//   paths that have no use for the test hook.  Mirror of the
+//   `s_capture_gemm_mode` gate in `group_matmul_parallel_common.hpp`.
 // ───────────────────────────────────────────────────────────────────────
 
 /// Which cross_warm regime fired alongside the primary warm.  Recorded
@@ -543,6 +558,13 @@ LastInvocationStats get_last_invocation_stats();
 /// Reset the accumulator to its default-constructed state.  Call from
 /// `SetUp()` in gtest fixtures that need a clean baseline.
 void clear_last_invocation_stats();
+
+/// Capture gate for `log_pack_probe` — see the file-level CAPTURE
+/// GATE doc-block above.  Tests flip this to `true` for the scope of
+/// the test (via `LastInvocationCaptureGuard`); production code never
+/// touches it.  `inline` so the single definition lives in the header
+/// (same pattern as `s_capture_gemm_mode`).
+inline std::atomic<bool> s_capture_last_invocation{false};
 
 } // namespace test_api
 

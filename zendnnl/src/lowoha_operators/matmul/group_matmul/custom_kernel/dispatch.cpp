@@ -40,6 +40,52 @@ bool dispatch_supported() {
   return avx512bf16_available();
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// CallContext lifecycle — `release_owned_buffers()` + `reset()`.
+//
+// The destructor + the in-place reset are the only places the
+// caller-owned packed buffers can be freed (the `disable_cache=true`
+// branch of `get_or_pack_weight_bf16()` skips the LRU singleton, so
+// no other code path knows these pointers exist).  Implementing both
+// in dispatch.cpp keeps the `<array>` member's destructor trivial
+// while routing the actual free through `free_owned_packed_weight()`
+// (pack.cpp's matched companion to `aligned_alloc` from the
+// disable-cache branch).
+// ─────────────────────────────────────────────────────────────────────
+void CallContext::release_owned_buffers() {
+  // Iterate every slot — both `owned_packed_ptrs` and `packed_ptrs`
+  // are zero-initialised on construction, so the bulk of slots cost
+  // one branch each on a typical (active_count << kMaxExperts) call.
+  // The `free_owned_packed_weight` helper itself is null-safe so the
+  // inner check is only an optimisation to skip the call entirely
+  // when the slot is empty.
+  for (auto &ptr : owned_packed_ptrs) {
+    if (ptr != nullptr) {
+      free_owned_packed_weight(ptr);
+      ptr = nullptr;
+    }
+  }
+}
+
+void CallContext::reset() {
+  // Free caller-owned packs FIRST so subsequent field zeroing does
+  // not strand the pointers.  `release_owned_buffers()` clears
+  // `owned_packed_ptrs` itself, so the loops below only need to
+  // touch the remaining state.
+  release_owned_buffers();
+  enabled       = false;
+  variant       = KernelVariant::kUnsupported;
+  pack_nr       = 0;
+  NV            = 0;
+  max_mr        = 0;
+  subtile_cols  = 0;
+  act_kind      = ActKind::none;
+  bias_kind     = BiasKind::none;
+  for (auto &fn : kfn_table) fn = nullptr;
+  packed_ptrs.fill(nullptr);
+  subtile_cols_per_expert.fill(0);
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Variant resolution — pure switch over the (src, wei, dst) dtype
 // tuple.  No I/O, no allocation, no logging — `prepare_for_call()`
@@ -178,14 +224,17 @@ status_t prepare_for_call(
   // those fields would carry over from the prior call — making any
   // future read that bypasses the `enabled` gate (a debug assert,
   // an APILOG line, or a refactor that misses the gate) silently
-  // observe a stale-but-plausible config.  `out = {}` value-init's
+  // observe a stale-but-plausible config.  `reset()` value-init's
   // every field via the in-class defaults declared in
   // `CallContext` (dispatch.hpp): `enabled = false`, `variant =
   // kUnsupported`, scalar fields = 0 / sentinel, fn-pointer table
-  // and the two `std::array` members zero-filled.  Cost: ~2 KB of
-  // zeroing once per call on the cold prep path, negligible vs
-  // the surrounding kernel work.
-  out = CallContext{};
+  // and the std::array members zero-filled.  Critically `reset()`
+  // also calls `release_owned_buffers()` BEFORE zeroing
+  // `owned_packed_ptrs` so a previous call's caller-owned packed
+  // weights (disable-cache mode) are freed rather than stranded.
+  // Cost: ~2 KB of zeroing once per call on the cold prep path,
+  // negligible vs the surrounding kernel work.
+  out.reset();
 
   // ── Refusal logging helper ───────────────────────────────────────
   // Every early return below represents a concrete dispatch-contract
@@ -250,6 +299,49 @@ status_t prepare_for_call(
   // ── Run-once invariants (CPU + dtypes + activation) ──────────────
   if (!dispatch_supported())
     return refuse("avx512bf16_not_available");
+
+  // ── Library-wide weight-cache toggle ─────────────────────────────
+  // `ZENDNNL_MATMUL_WEIGHT_CACHE` (read via
+  // `matmul_config_t::get_weight_cache()`) is the process-wide
+  // contract for "the caller is allowed to cache weight-derived
+  // packed buffers across calls".  The CK pack arena
+  // (`custom_kernel/pack.cpp::pack_cache_singleton`) is keyed on the
+  // raw user weight pointer and has eviction disabled
+  // (UINT32_MAX capacity), so when the framework mutates weight
+  // addresses between calls — exactly the scenario the env knob is
+  // designed for — a stale pointer key would collide with a fresh
+  // upload and the dispatcher would read freed memory in
+  // `dispatch_tile`.
+  //
+  // Resolution: when the toggle is non-1 we DO NOT refuse CK.
+  // Instead each per-expert pack below is routed through
+  // `get_or_pack_weight_bf16(..., disable_cache=true)`, which
+  // allocates a fresh aligned buffer, packs into it, and returns
+  // the raw pointer without touching the LRU singleton.  The raw
+  // pointers land in `out.owned_packed_ptrs[i]` AND
+  // `out.packed_ptrs[i]` (alias), so `dispatch_tile()` reads them
+  // transparently and the `CallContext` destructor /
+  // `release_owned_buffers()` frees them once the OMP region
+  // unwinds.  Cost: per-call pack work, no inter-call amortisation,
+  // no stale pointer hits — exactly the semantic the env knob
+  // promises.
+  //
+  // The matching prepack-side gate lives in
+  // `prepack/prepack_custom_kernel.cpp::warm_pack_all_custom_kernel_experts`
+  // (skip warming when the toggle is non-1 since the warmer can
+  // only populate the LRU cache, which the runtime will not
+  // consult); the prepack fingerprint
+  // (`prepack/prepack.cpp::fingerprint`) folds the toggle into its
+  // hash so flipping the env mid-process re-arms both code paths
+  // on the next call.
+  const bool cache_off =
+      (zendnnl::ops::matmul_config_t::instance().get_weight_cache() != 1);
+  if (cache_off && s_refuse_log) {
+    apilog_verbose("[GRP_MATMUL.CK NOCACHE] "
+                   "weight_cache_type != 1 — packing into per-call "
+                   "caller-owned buffers (LRU singleton bypassed)");
+  }
+
   // A / B / C dtype gate: route through `resolve_variant()` which is
   // the single source of truth for "which (src, wei, dst) tuples the
   // custom kernel can serve".  `kUnsupported` here means the caller
@@ -495,21 +587,40 @@ status_t prepare_for_call(
       || (act == grp_matmul_gated_act_t::gelu_and_mul);
   out.packed_ptrs.fill(nullptr);
   out.subtile_cols_per_expert.fill(0);
+  // `out.owned_packed_ptrs` was already zeroed by `out.reset()` at
+  // entry; only the `cache_off` branch below stores into it.
   for (int i = 0; i < num_ops; ++i) {
     if (M[i] <= 0) continue;
+    bool was_hit_unused = false;
     status_t pst = get_or_pack_weight_bf16(
         static_cast<const bfloat16_t *>(weight[i]),
         K[i], N[i], ldb[i], pack_nr,
         /*transB=*/transB[i],
         /*interleave_split_halves=*/interleave_split_halves,
-        &out.packed_ptrs[i]);
+        &out.packed_ptrs[i],
+        /*was_hit_out=*/&was_hit_unused,
+        /*disable_cache=*/cache_off);
     if (pst != status_t::success) {
       // `get_or_pack_weight_bf16` already logged the concrete reason
       // (OOM / transB mismatch) via log_error.  Attribute the
-      // refusal here so the L4 chain is self-contained.
+      // refusal here so the L4 chain is self-contained.  Note: any
+      // caller-owned buffers allocated by earlier iterations of this
+      // loop are still tracked in `out.owned_packed_ptrs[]` (set
+      // below); they will be freed by the CallContext destructor
+      // when the caller's `ctx` goes out of scope, OR by the next
+      // `prepare_for_call(ctx)`'s `out.reset()` — no leak either
+      // way.  Explicit cleanup here would be defensive duplication.
       return refuse("weight_pack_failed",
                     "get_or_pack_weight_bf16 returned failure — "
                     "see preceding log_error for OOM/arg detail");
+    }
+    // In disable-cache mode the returned pointer is a fresh
+    // aligned_alloc; record it as caller-owned so the destructor
+    // frees it.  In the default mode the pointer belongs to the
+    // LRU singleton and `owned_packed_ptrs[i]` stays null
+    // (`release_owned_buffers()` then skips it — no double-free).
+    if (cache_off) {
+      out.owned_packed_ptrs[i] = out.packed_ptrs[i];
     }
     if (per_expert_subtile) {
       out.subtile_cols_per_expert[i] =

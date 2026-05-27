@@ -1022,9 +1022,17 @@ bool group_matmul_run_parallel_dispatch(
     // checks not visible here (`transA`, `alpha`, `beta`,
     // `is_weights_const`, `ldb` min-row-stride, fused-act/bias dtype
     // matrix).  Surface as a hint, not a guarantee.
+    // Hoist `get_grp_matmul_custom_kernel()` to a named local — the
+    // value is consumed only here, but parking it up front matches
+    // the same "single read per log-line" pattern we applied to the
+    // PLAN apilog in `group_matmul_n_tile.cpp` and makes the log's
+    // read-set explicit at a glance.  The underlying getter caches
+    // its env value, so the saving is microscopic; clarity is the
+    // deliverable.
+    const int log_custom_kernel = get_grp_matmul_custom_kernel();
     const bool ck_hint =
         (use_algo == 3)
-        && get_grp_matmul_custom_kernel()
+        && log_custom_kernel
         && (params[0].dtypes.src == data_type_t::bf16)
         && (params[0].dtypes.wei == data_type_t::bf16);
     apilog_info(

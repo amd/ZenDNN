@@ -57,6 +57,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -1140,6 +1141,243 @@ inline RoundPick pick_round_strategy(const GroupNTileTopology &topo,
   return RoundPick::Multi;
 }
 
+// ── AUTO adaptive multi-tier thread allocator ──────────────────────────
+// Engaged by `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD=0`.
+//
+// Builds an asymmetric, M-skew-aware per-expert thread plan inside the
+// existing ALGO 3 ManyExperts Single-round shape.  The output is
+// written to `plan.stable_n_thr_per_expert[]` (consumed by the CK
+// executor's prefix-sum scan), exactly like the legacy single-threshold
+// path — only the way the array is populated differs.
+//
+// Three-tier policy with budget-aware compression:
+//   * `T_high = max(M_p95, M_max * 0.40)`  → up to 8 threads / expert
+//   * `T_mid  = max(M_p75, M_max * 0.20)`  → up to 4 threads / expert
+//   * `T_low  = max(M_p50, M_max * 0.10)`  → up to 2 threads / expert
+//   * everyone else                        → 1 thread / expert
+//
+// Eligibility gates (return `false` → fall back to Phase B silently):
+//   1. `num_active < kMinExpertsForTier` — too few experts to gain.
+//   2. `num_active >= num_threads` — no extras-budget at all.
+//   3. `M_max / max(1, M_mean_active) < kMinSkew` — distribution is
+//      flat; tiering would add overhead without converting threads
+//      into wall-time savings.
+//   4. `per_expert_cap_hybrid < 2` — every tier would clip to 1 thread.
+//
+// Budget math (each call):
+//   preferred_extras = n_high * 7 + n_mid * 3 + n_low * 1
+//   available_extras = num_threads - num_active_experts
+//   if preferred ≤ available: assign full target; water-fill leftover
+//                             into high tier by M-weight.
+//   else:                     scale = available / preferred; round
+//                             extras down, then M-weighted rounding
+//                             water-fill consumes the remainder.
+//
+// Per-expert cap (always enforced AFTER tier allocation):
+//   cap[e] = min(ccd_size, max_tiles, N[e] / ab_min_tile)
+//
+// Returns true iff the path applied (plan was populated and
+// `per_expert_remainder` set).  Caller is expected to short-circuit
+// the Phase B fallback in that case.
+inline bool apply_adaptive_tiers(const GroupNTileTopology &topo,
+                                 const RoundCandidates &c,
+                                 int ab_min_tile,
+                                 GroupNTilePlan &plan,
+                                 const std::vector<int> &M,
+                                 const std::vector<int> &N) {
+  // Eligibility threshold constants.  Empirically derived from the
+  // Qwen3-30B-A3B prompt sweep — values are intentionally conservative
+  // so the path stays a no-op on workloads that don't match the M-skew
+  // bottleneck pattern (e.g. decode shapes with M_max ≤ 20).
+  constexpr int    kMinExpertsForTier = 8;
+  constexpr double kMinSkew           = 2.5;     // M_max / M_mean threshold
+
+  // Decode safety guard — defence-in-depth.  The caller in
+  // `apply_round_pick` already gates the AUTO entry on
+  // `max_M > kDecodeMaxM`, but mirror the same check here so any
+  // future direct caller (test harness, alternative dispatcher) cannot
+  // engage AUTO on a decode-class shape and re-introduce the decode
+  // regression that motivated the gate.  See the comment block in
+  // `apply_round_pick` for the rationale.
+  if (topo.max_M <= kDecodeMaxM) return false;
+
+  const int nops = topo.num_ops;
+  if (nops < kMinExpertsForTier) return false;
+
+  const int per_expert_cap_hybrid =
+      std::min(topo.ccd_size, c.max_tiles);
+  if (per_expert_cap_hybrid < 2) return false;
+
+  // Build (M, e, cap) entries; count active experts and compute
+  // M_max / M_total in a single pass.
+  struct HE { int M; int e; int cap; };
+  HE pairs[GroupNTilePlan::kMaxExperts];
+  int n_active = 0;
+  int m_max    = 0;
+  int64_t m_sum = 0;
+  for (int e = 0; e < nops; ++e) {
+    const int m =
+        (e < static_cast<int>(M.size()) && M[e] > 0) ? M[e] : 0;
+    const int my_N =
+        (e < static_cast<int>(N.size())) ? N[e] : 0;
+    const int my_cap = std::min(per_expert_cap_hybrid,
+        my_N / std::max(1, ab_min_tile));
+    pairs[e].M   = m;
+    pairs[e].e   = e;
+    pairs[e].cap = std::max(1, my_cap);
+    if (m > 0) {
+      ++n_active;
+      m_sum += m;
+      if (m > m_max) m_max = m;
+    }
+  }
+  if (n_active < kMinExpertsForTier) return false;
+  // Insufficient budget: every active expert already wants 1 thread.
+  // Without extras to redistribute the tier path can't help.
+  const int extras_budget = topo.num_threads - n_active;
+  if (extras_budget <= 0) return false;
+  const double m_mean = static_cast<double>(m_sum) /
+                        static_cast<double>(n_active);
+  if (m_mean <= 0.0 ||
+      static_cast<double>(m_max) / m_mean < kMinSkew) return false;
+
+  // Sort by M descending (heavy-first); inactive (M=0) trails.
+  std::sort(pairs, pairs + nops,
+      [](const HE &a, const HE &b) {
+        if (a.M != b.M) return a.M > b.M;
+        return a.e < b.e;
+      });
+
+  // Compute percentile breakpoints over the ACTIVE experts (the first
+  // `n_active` entries of the sorted array, M-descending).  P95 is
+  // the M at index `floor(n_active * 0.05)`, etc.
+  auto pct_idx = [&](double pct) -> int {
+    int idx = static_cast<int>(std::floor(n_active * (1.0 - pct)));
+    if (idx < 0)         idx = 0;
+    if (idx >= n_active) idx = n_active - 1;
+    return idx;
+  };
+  const int M_p95 = pairs[pct_idx(0.95)].M;
+  const int M_p75 = pairs[pct_idx(0.75)].M;
+  const int M_p50 = pairs[pct_idx(0.50)].M;
+
+  // Tier thresholds — max(percentile, M_max * fraction).  The
+  // fraction guard prevents pathological cases (e.g. all-mediums-no-
+  // heavies) from sliding the tier boundaries to zero.
+  const int T_high = std::max(M_p95, static_cast<int>(m_max * 0.40));
+  const int T_mid  = std::max(M_p75, static_cast<int>(m_max * 0.20));
+  const int T_low  = std::max(M_p50, static_cast<int>(m_max * 0.10));
+
+  // Per-tier target threads (capped per-expert downstream).
+  constexpr int kTgtHigh = 8;
+  constexpr int kTgtMid  = 4;
+  constexpr int kTgtLow  = 2;
+
+  // Classify each active expert; count tier sizes.  We keep tier
+  // boundaries strict (≥), so the classification is monotone in M
+  // (high → mid → low → baseline) along the M-descending sort.
+  int tier[GroupNTilePlan::kMaxExperts] = {0};  // 3=high, 2=mid, 1=low, 0=base
+  int n_high = 0, n_mid = 0, n_low = 0;
+  for (int i = 0; i < n_active; ++i) {
+    const int m = pairs[i].M;
+    int t = 0;
+    if      (m >= T_high) { t = 3; ++n_high; }
+    else if (m >= T_mid)  { t = 2; ++n_mid; }
+    else if (m >= T_low)  { t = 1; ++n_low; }
+    tier[i] = t;
+  }
+  // If the high tier is empty AND mid tier is empty, the workload
+  // doesn't satisfy the M-skew premise of the optimisation despite
+  // passing the broad skew gate above.  Fall back to Phase B.
+  if (n_high == 0 && n_mid == 0) return false;
+
+  // Compute preferred extras (above the implicit 1-thread baseline).
+  const int preferred_extras = n_high * (kTgtHigh - 1)
+                             + n_mid  * (kTgtMid  - 1)
+                             + n_low  * (kTgtLow  - 1);
+  if (preferred_extras <= 0) return false;
+
+  // Per-tier ROUNDED extras after budget compression.  Use double
+  // arithmetic for the scaling and a single rounding pass.
+  double scale = 1.0;
+  if (preferred_extras > extras_budget) {
+    scale = static_cast<double>(extras_budget) /
+            static_cast<double>(preferred_extras);
+  }
+  const int ext_high = static_cast<int>(std::floor((kTgtHigh - 1) * scale));
+  const int ext_mid  = static_cast<int>(std::floor((kTgtMid  - 1) * scale));
+  const int ext_low  = static_cast<int>(std::floor((kTgtLow  - 1) * scale));
+
+  // Initial allocation: 1 baseline + tier extras (clipped by cap).
+  int alloc[GroupNTilePlan::kMaxExperts] = {0};
+  int used_extras = 0;
+  for (int i = 0; i < n_active; ++i) {
+    int t = tier[i];
+    int e = (t == 3) ? (1 + ext_high)
+         : (t == 2) ? (1 + ext_mid)
+         : (t == 1) ? (1 + ext_low)
+                    : 1;
+    if (e > pairs[i].cap) e = pairs[i].cap;
+    alloc[i] = e;
+    used_extras += (e - 1);
+  }
+
+  // Water-fill the rounding leftover (extras_budget - used_extras),
+  // M-weighted, longest-job-first.  Reuses the same lhs * best_rhs
+  // cross-multiply pattern as the legacy single-threshold path.
+  int remaining = extras_budget - used_extras;
+  while (remaining > 0) {
+    int     best_i   = -1;
+    int64_t best_lhs = -1;
+    int64_t best_rhs =  1;
+    for (int i = 0; i < n_active; ++i) {
+      if (alloc[i] >= pairs[i].cap) continue;
+      const int64_t lhs = static_cast<int64_t>(pairs[i].M);
+      const int64_t rhs = static_cast<int64_t>(alloc[i] + 1);
+      if (best_i < 0 || lhs * best_rhs > best_lhs * rhs) {
+        best_i   = i;
+        best_lhs = lhs;
+        best_rhs = rhs;
+      }
+    }
+    if (best_i < 0) break;        // every active expert at its cap
+    alloc[best_i] += 1;
+    remaining     -= 1;
+  }
+
+  // Commit to `stable_n_thr_per_expert[]`.  Inactive experts (M==0)
+  // keep their default-zero slot — the prefix-sum scan skips them.
+  for (int i = 0; i < n_active; ++i) {
+    plan.stable_n_thr_per_expert[pairs[i].e] =
+        static_cast<int16_t>(alloc[i]);
+  }
+  // Inactive entries (sorted last) — zero out defensively to avoid
+  // stale values from a prior populate path that ran on the same
+  // plan object before the dispatcher decided to retry.
+  for (int i = n_active; i < nops; ++i) {
+    plan.stable_n_thr_per_expert[pairs[i].e] = 0;
+  }
+  plan.per_expert_remainder = true;
+  plan.n_thr_fixed          = 0;  // executor uses per-expert scan only
+
+  static const bool s_log = apilog_info_enabled();
+  if (s_log) {
+    apilog_info(
+        "[GRP_MATMUL.PLAN.AUTO_TIER] adaptive_tiers applied"
+        " n_active=", n_active,
+        " n_high=", n_high, " n_mid=", n_mid, " n_low=", n_low,
+        " M_max=", m_max,
+        " T_high=", T_high, " T_mid=", T_mid, " T_low=", T_low,
+        " preferred_extras=", preferred_extras,
+        " available_extras=", extras_budget,
+        " scale=", scale,
+        " heaviest_alloc=", alloc[0],
+        " num_threads=", topo.num_threads,
+        " per_expert_cap=", per_expert_cap_hybrid);
+  }
+  return true;
+}
+
 inline void apply_round_pick(const GroupNTileTopology &topo,
                              const RoundCandidates &c,
                              RoundPick pick,
@@ -1155,28 +1393,64 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
       plan.batch_size  = topo.num_ops;
       plan.n_thr_fixed = c.n_thr_single;
 
-      // ── Option-A hybrid M-split (experimental, env-gated) ──────────
-      // When `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD > 0`, run an
-      // M-weighted water-fill distribution that gives heavy experts
-      // (M > threshold) up to `min(ccd_size, max_tiles, N[e]/ab_min_tile)`
-      // threads, with each ACTIVE light expert reserving exactly one
-      // thread.  See the doc-block on
-      // `get_grp_matmul_hybrid_m_heavy_threshold()` in
-      // `group_matmul_parallel_common.hpp` for the rationale and the
-      // M-skew bottleneck this addresses.
+      // ── Three-mode HYBRID dispatch (env-gated) ─────────────────────
+      // `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD` selects between:
       //
-      // Same CK-only / per-expert-cap guards as Phase B below.  When
-      // the path is active, populate `stable_n_thr_per_expert[]` AND
-      // set `plan.per_expert_remainder = true` so the executor's
-      // prefix-sum scan replaces the uniform `tid / tpe` mapping.
-      // Skip (fall through to Phase B) on degenerate splits
-      // (no heavy / no light / heavy budget < 2 per heavy).
-      const int heavy_threshold = get_grp_matmul_hybrid_m_heavy_threshold();
+      //   -1  DISABLED — skip the entire HYBRID block; fall through to
+      //                  Phase B base+1.  Default; matches the legacy
+      //                  behaviour when the env was unset.
+      //    0  AUTO     — engage `apply_adaptive_tiers()` (planner-
+      //                  driven 3-tier policy that auto-scales tier
+      //                  thresholds to M_max and budget-compresses
+      //                  per num_threads).  Falls back to Phase B on
+      //                  eligibility failure.
+      //   >0  MANUAL   — legacy single-threshold water-fill (heavy iff
+      //                  `M[e] > threshold`).  Unchanged code path
+      //                  below.
+      //
+      // All three modes share the same executor consumer
+      // (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`);
+      // only the way the array is populated differs.  Same CK-only
+      // gate (`use_custom`) and per-expert-cap precheck as Phase B.
+      //
+      // PHASE GATE (decode safety) — HYBRID is engaged ONLY on prompt-
+      // class shapes (`max_M > kDecodeMaxM`).  Decode-class calls
+      // (`max_M <= kDecodeMaxM`) bypass both AUTO and MANUAL and fall
+      // through to Phase B's base+1 remainder distribution, regardless
+      // of the env value.  Rationale:
+      //   * Qwen decode (per-expert M ≤ 28) gains nothing measurable
+      //     from giving heavies 4-8 threads — extra threads add OMP /
+      //     N-slice overhead without compute headroom (sweep shows
+      //     `HYBRID=0` ~flat, `HYBRID=8/16` ~+30-40% slower).
+      //   * Unified E2E processes set a single env for the whole run;
+      //     this gate lets `HYBRID=0` ship for prompt without
+      //     touching the decode plan.
+      // Phase B (base+1 remainder distribution further down) is NOT
+      // the HYBRID feature — it's the planner's general thread-
+      // saturation step and stays enabled for decode unconditionally.
+      const int hybrid_mode = get_grp_matmul_hybrid_m_heavy_threshold();
       const int per_expert_cap_hybrid =
           std::min(topo.ccd_size, c.max_tiles);
+      const bool is_prompt_class = (topo.max_M > kDecodeMaxM);
       bool hybrid_applied = false;
+
+      // AUTO path — planner-driven adaptive tiers.  Prompt-only.
       if (use_custom
+          && hybrid_mode == 0
+          && is_prompt_class
+          && per_expert_cap_hybrid >= 2) {
+        hybrid_applied = apply_adaptive_tiers(topo, c, ab_min_tile,
+                                              plan, M, N);
+      }
+
+      // MANUAL path — legacy single-threshold water-fill.  Prompt-only.
+      // `heavy_threshold` is local-scoped so the existing body below
+      // references it unchanged.
+      const int heavy_threshold = hybrid_mode;
+      if (!hybrid_applied
+          && use_custom
           && heavy_threshold > 0
+          && is_prompt_class
           && per_expert_cap_hybrid >= 2) {
         struct HE { int M; int e; int cap; bool heavy; };
         HE pairs[GroupNTilePlan::kMaxExperts];
@@ -1661,8 +1935,16 @@ inline GroupNTilePlan plan_group_n_tile(
   // See `kDecodeTileAbOn` in group_matmul_parallel_common.hpp for the
   // rationale.  `effective_decode_n_tile()` honors the optional
   // `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` override.
+  //
+  // Hoisted to a local so the value (and its underlying cached env
+  // probe) is computed once for this `plan_group_n_tile` call and
+  // reused at all downstream sites (currently `ab_min_tile` plus the
+  // force-decode_d HINT log).  Cheap — `effective_decode_n_tile()`
+  // already short-circuits on a cached snapshot — but the local
+  // makes the "single read per plan" intent explicit.
+  const int decode_n_tile_snapshot = effective_decode_n_tile();
   const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
-      ? effective_decode_n_tile() : kMinNTile;
+      ? decode_n_tile_snapshot : kMinNTile;
 
   // ── Force-DecodeD path (knob value 1) ──────────────────────────────
   // When the user explicitly forces DecodeD, attempt it BEFORE any
@@ -1686,7 +1968,7 @@ inline GroupNTilePlan plan_group_n_tile(
             " thr_per_expert=", plan.decode_thr_per_expert,
             " max_M=", topo.max_M,
             " max_N=", topo.max_N,
-            " decode_n_tile=", effective_decode_n_tile());
+            " decode_n_tile=", decode_n_tile_snapshot);
       }
       return plan;
     }
@@ -2088,13 +2370,27 @@ inline void execute_rounds(const GroupNTilePlan &plan,
   // (e.g., 8 threads × num_ops > 256, with N_ROUNDS=2 forcing
   // batch_multi=1) that were previously silently undefined.
   if (n_rounds > kMaxRounds) {
-    apilog_error(
-        "[execute_rounds] n_rounds=", n_rounds,
-        " exceeds kMaxRounds=", kMaxRounds,
-        " (num_ops=", num_ops, " batch_size=", batch_size, ")"
-        " — refusing to run flat_n_tile rounds path; caller's dst"
-        " is left untouched.  Increase kNTilePlanMaxExperts or route"
-        " through a different ALGO 3 strategy.");
+    // Gate the variadic argument formatting on the (cached) err-sink
+    // enable.  `apilog_error_enabled()` is defined via
+    // `LOGGER_ENABLED_MACRO(api, error)` in
+    // `zendnnl/src/common/zendnnl_global.hpp` (lines 210-213) and
+    // tracks the err level itself — gating on
+    // `apilog_warning_enabled()` would suppress ERROR logs when the
+    // user runs at `ZENDNNL_API_LOG_LEVEL=error` (warnings off).
+    // Avoids the per-arg expression evaluation when nothing is
+    // listening — a few cycles per refused dispatch in release
+    // builds, but free and consistent with the other error-path
+    // call sites we gate this commit.
+    static const bool s_err_log = apilog_error_enabled();
+    if (s_err_log) {
+      apilog_error(
+          "[execute_rounds] n_rounds=", n_rounds,
+          " exceeds kMaxRounds=", kMaxRounds,
+          " (num_ops=", num_ops, " batch_size=", batch_size, ")"
+          " — refusing to run flat_n_tile rounds path; caller's dst"
+          " is left untouched.  Increase kNTilePlanMaxExperts or route"
+          " through a different ALGO 3 strategy.");
+    }
     return;
   }
   assert(n_rounds <= kMaxRounds);
@@ -2413,21 +2709,33 @@ void flat_n_tile(
   // corruption downstream.  The gate is `fused_epilogue` (not the
   // narrower `tight_fused_epilogue`) so the wide-inferred case in
   // failure mode (2) is also caught.
+  // Single cached `apilog_error_enabled()` probe shared by both
+  // bail-out sites in this validator loop AND the alloc-fail apilog
+  // at end of function.  Gating directly on the err level (not on
+  // `apilog_warning_enabled()`) ensures ERROR-only runs
+  // (`ZENDNNL_API_LOG_LEVEL=error`) still emit these abort-class
+  // messages.  Skips the variadic argument evaluation when no
+  // sink is listening — these are abort-class paths so the cost is
+  // a one-time `mov+test` in the hot fused-MoE call.
+  static const bool s_flat_n_tile_err_log = apilog_error_enabled();
+
   if (fused_epilogue) {
     for (int e = 0; e < num_ops; ++e) {
       if (M[e] <= 0) continue;
       const bool e_is_tight = (ldc[e] < N[e]);
       if (e_is_tight != tight_fused_epilogue) {
-        apilog_error(
-            "[flat_n_tile] mixed tight/wide ldc across experts at e=", e,
-            " (ldc[e]=", ldc[e], ", N[e]=", N[e],
-            ", local=", (e_is_tight ? "tight" : "wide"), ")"
-            "; layout inferred ",
-            (tight_fused_epilogue ? "tight" : "wide"),
-            " from ldc[0]=", ldc[0], " vs N[0]=", N[0],
-            ".  Refusing to run — the caller-boundary validator "
-            "should have rejected this combination upstream.  The "
-            "caller's dst buffer(s) are unmodified by this call.");
+        if (s_flat_n_tile_err_log) {
+          apilog_error(
+              "[flat_n_tile] mixed tight/wide ldc across experts at e=", e,
+              " (ldc[e]=", ldc[e], ", N[e]=", N[e],
+              ", local=", (e_is_tight ? "tight" : "wide"), ")"
+              "; layout inferred ",
+              (tight_fused_epilogue ? "tight" : "wide"),
+              " from ldc[0]=", ldc[0], " vs N[0]=", N[0],
+              ".  Refusing to run — the caller-boundary validator "
+              "should have rejected this combination upstream.  The "
+              "caller's dst buffer(s) are unmodified by this call.");
+        }
         return;
       }
       // Tight-path divisibility precondition: the executors store
@@ -2436,11 +2744,13 @@ void flat_n_tile(
       // smaller would overrun).  Skipped on the wide path where ldc
       // simply needs to be >= N (validator-checked upstream).
       if (e_is_tight && (ldc[e] != N[e] / 2 || (N[e] % 2) != 0)) {
-        apilog_error(
-            "[flat_n_tile] tight expert e=", e, " violates the "
-            "tight-arena stride contract: ldc[e]=", ldc[e],
-            " must equal N[e]/2=", (N[e] / 2),
-            " and N[e]=", N[e], " must be even.  Refusing to run.");
+        if (s_flat_n_tile_err_log) {
+          apilog_error(
+              "[flat_n_tile] tight expert e=", e, " violates the "
+              "tight-arena stride contract: ldc[e]=", ldc[e],
+              " must equal N[e]/2=", (N[e] / 2),
+              " and N[e]=", N[e], " must be even.  Refusing to run.");
+        }
         return;
       }
     }
@@ -2886,6 +3196,17 @@ void flat_n_tile(
   // logger; no C-style formatted output.
   static const bool s_apilog = apilog_info_enabled();
   if (s_apilog) {
+    // Hoist the three env-cache getters that the variadic apilog
+    // line below references — `apilog_info(...)` evaluates each
+    // argument expression once at the call site, but parking them
+    // in named locals up front makes the call's read-set explicit
+    // (each underlying getter still costs a single relaxed atomic
+    // load now that they all cache + override, so the savings are
+    // microscopic — clarity is the deliverable).  Same hoist
+    // pattern we applied to `decode_n_tile_snapshot` in the planner.
+    const int  log_hybrid_m_threshold  = get_grp_matmul_hybrid_m_heavy_threshold();
+    const int  log_aocl_target_slots   = get_grp_matmul_aocl_target_slots();
+    const int  log_aocl_blis_nc        = get_grp_matmul_aocl_blis_nc();
     const int env_order = get_grp_matmul_n_order();
     const bool is_auto_resolved =
         (env_order == 0 && plan.auto_resolved_order >= 0);
@@ -2928,13 +3249,13 @@ void flat_n_tile(
                 " stable_n_thr[0]=",
                 static_cast<int>(plan.stable_n_thr_per_expert[0]),
                 " hybrid_m_threshold=",
-                get_grp_matmul_hybrid_m_heavy_threshold(),
+                log_hybrid_m_threshold,
                 " per_expert_remainder=",
                 (plan.per_expert_remainder ? "yes" : "no"),
                 " aocl_target_slots=",
-                get_grp_matmul_aocl_target_slots(),
+                log_aocl_target_slots,
                 " aocl_blis_nc=",
-                get_grp_matmul_aocl_blis_nc());
+                log_aocl_blis_nc);
   }
 
   switch (plan.strategy) {
@@ -2960,11 +3281,13 @@ void flat_n_tile(
   // and partial-correct output is still safer than undefined behaviour
   // on the caller's dst (which they own).
   if (alloc_fail.load(std::memory_order_relaxed) != 0) {
-    apilog_error(
-        "[flat_n_tile] per-thread scratch allocation failed in the "
-        "tight-fused-epilogue path; some dst column ranges may be "
-        "undefined.  Consider disabling internal-alloc tight mode "
-        "(ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT=0) if this recurs.");
+    if (s_flat_n_tile_err_log) {
+      apilog_error(
+          "[flat_n_tile] per-thread scratch allocation failed in the "
+          "tight-fused-epilogue path; some dst column ranges may be "
+          "undefined.  Consider disabling internal-alloc tight mode "
+          "(ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT=0) if this recurs.");
+    }
   }
 }
 

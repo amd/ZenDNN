@@ -59,6 +59,7 @@
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
+#include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 namespace moe_test_utils {
@@ -452,9 +453,17 @@ inline Tol tol_moe(bool is_bf16)   {
 // [1.f] ALGO env var RAII guard
 // ───────────────────────────────────────────────────────────────────
 
+// `get_grp_matmul_algo()` (in `group_matmul_parallel_common.hpp`)
+// now caches its env value at first call AND consults the test_api
+// override atomic `s_grp_matmul_algo_override` on every call (sentinel
+// `-1` = no override).  We set both — `setenv` keeps subprocesses /
+// any uncached readers honest, and the override atomic flips the
+// effective algo for the cached production path without source-level
+// changes at any of the dozens of `AlgoEnvGuard(N)` call sites.
 struct AlgoEnvGuard {
   std::string prev_value;
   bool had_prev = false;
+  int prev_override = -1;
   explicit AlgoEnvGuard(int algo) {
     if (const char *p = std::getenv("ZENDNNL_GRP_MATMUL_ALGO")) {
       prev_value = p;
@@ -462,8 +471,13 @@ struct AlgoEnvGuard {
     }
     std::string s = std::to_string(algo);
     setenv("ZENDNNL_GRP_MATMUL_ALGO", s.c_str(), 1);
+    prev_override =
+        zendnnl::lowoha::matmul::test_api_algo_override().exchange(
+            algo, std::memory_order_relaxed);
   }
   ~AlgoEnvGuard() {
+    zendnnl::lowoha::matmul::test_api_algo_override().store(
+        prev_override, std::memory_order_relaxed);
     if (had_prev) {
       setenv("ZENDNNL_GRP_MATMUL_ALGO", prev_value.c_str(), 1);
     }
@@ -642,17 +656,24 @@ struct AutoDecodeAlgoOverride {
   AutoDecodeAlgoOverride &operator=(AutoDecodeAlgoOverride &&) = delete;
 };
 
-// RAII guard for the experimental Option-A hybrid M-split threshold
-// (the test-only path over
-// `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`).  Same cache-bypass
-// rationale as the other Override structs.
+// RAII guard for the hybrid M-split threshold (the test-only path
+// over `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`).  Same
+// cache-bypass rationale as the other Override structs.
 //
-// Accepted values:
-//   * 0    — explicit OFF (same as unset env / default).
-//   * > 0  — threshold value; experts with `M[e] > value` are tagged
-//            heavy and receive water-fill thread allocation.
-//   * < 0  — sentinel "no override"; falls through to the cached env
-//            path (which itself defaults to 0 = OFF).
+// Accepted values — mirror the production three-mode semantic
+// documented on `s_grp_matmul_hybrid_m_heavy_threshold_override`
+// in `group_matmul_parallel_common.hpp` (lines ~458-490):
+//   * `INT_MIN`            — no override (falls through to cached
+//                            env path).  Production state; tests
+//                            should not pass this explicitly.
+//   * `-1`                 — explicit DISABLED (same as unset env).
+//   *  `0`                 — explicit AUTO; engages
+//                            `apply_adaptive_tiers()` in the planner.
+//   *  `> 0`               — explicit MANUAL single-threshold
+//                            override.  Experts with `M[e] > value`
+//                            are tagged heavy and receive water-fill
+//                            thread allocation.
+//   * `< -1` (excl. INT_MIN) — undefined; pass only documented values.
 struct HybridMHeavyThresholdOverride {
   int prev;
   explicit HybridMHeavyThresholdOverride(int value) {
@@ -827,6 +848,62 @@ struct GemmModeCaptureGuard {
   }
   GemmModeCaptureGuard(const GemmModeCaptureGuard &) = delete;
   GemmModeCaptureGuard &operator=(const GemmModeCaptureGuard &) = delete;
+};
+
+// ───────────────────────────────────────────────────────────────────
+// RAII guard for the prepack `LastInvocationStats` capture.
+//
+// Mirror of `GemmModeCaptureGuard` above, but for the prepack module's
+// `log_pack_probe` stats accumulator (declared in
+// `lowoha_operators/matmul/group_matmul/prepack/prepack.hpp`):
+//
+//   * `clear_last_invocation_stats()` on construction so the test sees
+//     a deterministic baseline regardless of what the previous test
+//     or fixture left behind (heap address reuse can otherwise sneak
+//     a stale fingerprint through).
+//   * Arms `s_capture_last_invocation` for the test's scope so the
+//     mutex-protected struct write inside `log_pack_probe` actually
+//     fires.  Production builds leave the atomic at `false` so the
+//     write path short-circuits on a single relaxed load.
+//   * Restores the prior capture state on destruction (typically
+//     `false`, but the save/restore is correctness for nested
+//     fixtures that share the same guard).
+//
+// Drop one of these onto any test fixture whose `TEST_F` bodies call
+// `prepack::test_api::get_last_invocation_stats()` and the mutex +
+// struct copy in `log_pack_probe` flips back on automatically for the
+// fixture's scope.  Outside the fixture (the production hot path of
+// `group_matmul_direct`) the capture stays off and the gated branch
+// short-circuits.
+//
+// Usage in a fixture:
+//
+//   class TestPrepackXxx : public ::testing::Test {
+//    protected:
+//     moe_test_utils::LastInvocationCaptureGuard prepack_stats_guard_;
+//   };
+//
+// And the existing `EXPECT_EQ(get_last_invocation_stats().valid, ...)`
+// call sites in `TEST_F` bodies need no change — the guard makes the
+// stats track the latest invocation exactly like they did before this
+// commit's gating.
+struct LastInvocationCaptureGuard {
+  bool prev_capture = false;
+  LastInvocationCaptureGuard() {
+    zendnnl::lowoha::matmul::group_matmul_prepack::test_api
+        ::clear_last_invocation_stats();
+    prev_capture = zendnnl::lowoha::matmul::group_matmul_prepack::test_api
+                       ::s_capture_last_invocation.exchange(
+                           true, std::memory_order_release);
+  }
+  ~LastInvocationCaptureGuard() {
+    zendnnl::lowoha::matmul::group_matmul_prepack::test_api
+        ::s_capture_last_invocation.store(
+            prev_capture, std::memory_order_release);
+  }
+  LastInvocationCaptureGuard(const LastInvocationCaptureGuard &) = delete;
+  LastInvocationCaptureGuard &operator=(
+      const LastInvocationCaptureGuard &) = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────

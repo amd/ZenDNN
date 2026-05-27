@@ -224,7 +224,8 @@ status_t get_or_pack_weight_bf16(
     bool transB,
     bool interleave_split_halves,
     const bfloat16_t **out_packed,
-    bool *was_hit_out) {
+    bool *was_hit_out,
+    bool disable_cache) {
 
   if (was_hit_out != nullptr) *was_hit_out = false;
 
@@ -258,6 +259,78 @@ status_t get_or_pack_weight_bf16(
               transB ? "K=" : "N=", min_ldb,
               " for transB=", (transB ? "true" : "false"), ")");
     return status_t::failure;
+  }
+
+  // Pack-buffer size + alignment computation — used by both the
+  // disable-cache branch immediately below and the cache-miss
+  // branch further down.  Hoisted so the two paths produce
+  // physically identical allocations (same alignment, same size,
+  // same VNNI K-pair padding).  `K_pair = (K + 1) / 2` matches the
+  // odd-K pad-by-zero contract documented at file head.
+  const int    K_pair        = (K + 1) / 2;
+  const size_t bytes         = static_cast<size_t>(N / pack_nr)
+      * K_pair * pack_nr * kVNNIPair * sizeof(bfloat16_t);
+  const size_t alignment     = 64;
+  const size_t bytes_aligned = (bytes + alignment - 1) & ~(alignment - 1);
+
+  // Cached once on first entry; zero cost per call when API log level
+  // is below verbose.  These HIT / MISS / NOCACHE lines fire per-
+  // expert and can also be amplified inside OMP regions, so they are
+  // gated on the verbose level (`ZENDNNL_API_LOG_LEVEL=4`) — info
+  // level (3) stays clean and shows only the consolidated
+  // `[GRP_MATMUL.PREPACK]` line emitted from the prepack module.
+  // Hoisted above the disable-cache branch (was previously declared
+  // inside the cache-path immediately before `find_key`) so both
+  // pack routes share the same log-gate without re-querying
+  // `apilog_verbose_enabled()` twice per call.  The
+  // `static const bool` pattern still lets the compiler treat the
+  // log-message construction as dead code in the disabled case.
+  static const bool s_pack_log = apilog_verbose_enabled();
+
+  // ── Disable-cache (caller-owned) branch ──────────────────────────
+  // Library-wide `ZENDNNL_MATMUL_WEIGHT_CACHE != 1` mode.  The
+  // dispatcher (`custom_kernel/dispatch.cpp::prepare_for_call`)
+  // walks the active experts and forwards `disable_cache=true` here
+  // when the toggle is off; the prepack-side warmer short-circuits
+  // earlier so it never reaches this path.
+  //
+  // Skip the LRU singleton entirely (no `find_key`, no `add`, no
+  // mutex acquisition) and always allocate + pack into a fresh
+  // 64-byte-aligned buffer.  Lifetime is CALLER-OWNED: the
+  // dispatcher records the raw pointer in
+  // `CallContext::owned_packed_ptrs[i]` and its destructor
+  // (`release_owned_buffers()`) routes the free through
+  // `free_owned_packed_weight()` once `dispatch_tile()` has finished
+  // consuming it.  This keeps the CK kernel math available under a
+  // weight-pointer-churning framework while paying a per-call pack
+  // cost (no inter-call amortisation).  `was_hit_out` is forced
+  // false above — the pack always runs in this mode.
+  //
+  // The mutex is intentionally NOT held here: the LRU is not
+  // touched, the user weight buffer is read-only, and the freshly
+  // allocated destination is private to this call.  Two threads
+  // packing the same (weight_ptr, K, N, ...) tuple concurrently
+  // would each get their own caller-owned buffer with identical
+  // contents — that's the expected semantic when caching is off.
+  if (disable_cache) {
+    if (s_pack_log) {
+      apilog_verbose("[GRP_MATMUL.PACK NOCACHE] weight=", weight,
+                     " K=", K, " N=", N, " ldb=", ldb,
+                     " transB=", (transB ? 1 : 0),
+                     " interleave=", (interleave_split_halves ? 1 : 0),
+                     " pack_nr=", pack_nr);
+    }
+    void *raw = std::aligned_alloc(alignment, bytes_aligned);
+    if (raw == nullptr) {
+      log_error("custom_kernel pack (disable_cache): aligned_alloc "
+                "failed for ", bytes_aligned, " bytes");
+      return status_t::failure;
+    }
+    pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                   interleave_split_halves,
+                   static_cast<bfloat16_t *>(raw));
+    *out_packed = static_cast<const bfloat16_t *>(raw);
+    return status_t::success;
   }
 
   // Canonical Key_matmul / lru_cache_t pair — same pattern AOCL DLP
@@ -352,19 +425,9 @@ status_t get_or_pack_weight_bf16(
   // rationale.
   key.ldb = static_cast<unsigned>(ldb);
 
-  // Cached once on first entry; zero cost per call when API log level
-  // is below verbose.  These HIT/MISS lines fire per-expert and can
-  // also be amplified inside OMP regions, so they are gated on the
-  // verbose level (`ZENDNNL_API_LOG_LEVEL=4`) — info level (3) stays
-  // clean and shows only the consolidated `[GRP_MATMUL.PREPACK]` line
-  // emitted from the prepack module.  Without this gate each
-  // `apilog_verbose(...)` below would still do one function call +
-  // cached-bool check per pack lookup — at ~16k lookups per MoE
-  // iteration that adds ~100 µs of pure waste when logging is off.
-  // The `static const bool` pattern lets the compiler treat the whole
-  // log-message construction as dead code in the disabled case.
-  static const bool s_pack_log = apilog_verbose_enabled();
-
+  // `s_pack_log` is hoisted above the disable-cache branch — shared
+  // by both pack routes (NOCACHE / HIT / MISS) so we never query
+  // `apilog_verbose_enabled()` twice per call.
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
   if (pack_cache.find_key(key)) {
@@ -404,12 +467,8 @@ status_t get_or_pack_weight_bf16(
                    " interleave=", (interleave_split_halves ? 1 : 0),
                    " pack_nr=", pack_nr);
   }
-  const int K_pair = (K + 1) / 2;
-  const size_t bytes = static_cast<size_t>(N / pack_nr)
-      * K_pair * pack_nr * kVNNIPair * sizeof(bfloat16_t);
-  const size_t alignment = 64;
-  const size_t bytes_aligned = (bytes + alignment - 1) & ~(alignment - 1);
-
+  // `bytes_aligned` + `alignment` are hoisted above the disable-cache
+  // branch so cached and caller-owned packs use identical allocations.
   void *raw = std::aligned_alloc(alignment, bytes_aligned);
   if (raw == nullptr) {
     log_error("custom_kernel pack: aligned_alloc failed for ",
@@ -424,6 +483,25 @@ status_t get_or_pack_weight_bf16(
 
   *out_packed = static_cast<const bfloat16_t *>(raw);
   return status_t::success;
+}
+
+// ── Caller-owned packed-weight release ───────────────────────────
+// Companion to `get_or_pack_weight_bf16(..., disable_cache=true)`.
+// The disable-cache branch above allocates via `std::aligned_alloc`
+// and returns the raw pointer without inserting into the LRU; this
+// helper free()s the same buffer.  Safe with `nullptr` so callers
+// can iterate `owned_packed_ptrs[kMaxExperts]` unconditionally.
+//
+// MUST NOT be called on cache-served pointers (`disable_cache=false`
+// path) — those are owned by the LRU singleton and freed by
+// `clear_custom_kernel_pack_cache()`.  The CallContext in
+// `dispatch.hpp` is the single authority on which array (`packed_ptrs`
+// vs `owned_packed_ptrs`) carries cache-served vs caller-owned
+// pointers, so application code never has to make this distinction
+// itself.
+void free_owned_packed_weight(const bfloat16_t *packed) {
+  if (packed == nullptr) return;
+  std::free(const_cast<bfloat16_t *>(packed));
 }
 
 // See pack.hpp for the quiescent-window safety contract.  The

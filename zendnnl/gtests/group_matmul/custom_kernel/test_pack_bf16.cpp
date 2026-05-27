@@ -38,11 +38,33 @@
 #include <gtest/gtest.h>
 
 #include "ck_test_helpers.hpp"
+#include "operators/matmul/matmul_config.hpp"
 
 namespace {
 
 namespace ck = ck_test::ck;
 namespace mt = moe_test_utils;
+
+// RAII guard for the library-wide weight-cache toggle.  Save the
+// current `matmul_config_t::get_weight_cache()` value at construction,
+// set the requested value, restore at destruction.  Allows individual
+// tests to flip the toggle without leaking state into sibling tests
+// running in the same process.  Mirrors `mt::CustomKernelNROverride`.
+class WeightCacheOverride {
+ public:
+  explicit WeightCacheOverride(int32_t value)
+      : prev_(zendnnl::ops::matmul_config_t::instance().get_weight_cache()) {
+    zendnnl::ops::matmul_config_t::instance().set_weight_cache(value);
+  }
+  ~WeightCacheOverride() {
+    zendnnl::ops::matmul_config_t::instance().set_weight_cache(prev_);
+  }
+  WeightCacheOverride(const WeightCacheOverride &)            = delete;
+  WeightCacheOverride &operator=(const WeightCacheOverride &) = delete;
+
+ private:
+  int32_t prev_;
+};
 
 // ──────────────────────────────────────────────────────────────────
 // plan_pack_nr — pure function over (K, N).  Test the truth table.
@@ -416,6 +438,147 @@ TEST(CkPackBf16, SiluGeluInterleavedPackMatchesSwigluBytes) {
       << "silu_and_mul and gelu_and_mul packs differ — they should "
          "be byte-identical for the same logical weight, since the "
          "prepack interleave is activation-agnostic.";
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ZENDNNL_MATMUL_WEIGHT_CACHE=0 (no-cache mode) contract:
+// Under `matmul_config_t::set_weight_cache(0)` (equivalent to the
+// env knob `ZENDNNL_MATMUL_WEIGHT_CACHE=0`) the runtime CK path
+// routes every per-expert pack through
+// `get_or_pack_weight_bf16(..., disable_cache=true)`, which
+// allocates a fresh aligned buffer per call without touching the
+// LRU singleton.  The buffers are owned by the `CallContext` and
+// freed by its destructor (or `release_owned_buffers()` /
+// `reset()`).  This suite pins the three invariants of that mode:
+//
+//   1) CK still ENGAGES (no refuse → no DLP fallback).
+//   2) Two prepares with the SAME (weight ptr, K, N, ldb, transB)
+//      produce DISTINCT packed pointers (the cache is bypassed —
+//      the second call cannot hit the first's entry because the
+//      first never inserted into the LRU).
+//   3) `owned_packed_ptrs[i]` aliases `packed_ptrs[i]` for every
+//      active expert (the dispatcher's contract for the destructor
+//      free path).
+//
+// These invariants are mutually exclusive with the
+// `SecondPrepareHitsCacheSamePackedPtr` test above, which asserts
+// the OPPOSITE contract under the default mode — covering the
+// flip-side explicitly here documents the design intent that the
+// two modes are functionally distinct, not just runtime-faster
+// vs slower variants of the same caching policy.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkPackBf16NoCache, CkEngagesAndAllocatesCallerOwnedPacks) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  ::reset_grp_matmul_caches();
+  WeightCacheOverride wc_off(0);
+
+  ck_test::PrepCallCase c{};
+  c.label = "ck_engages_under_weight_cache_zero";
+
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx),
+            zendnnl::error_handling::status_t::success)
+      << "prepare_for_call must succeed under WEIGHT_CACHE=0 — the "
+         "no-cache mode is supposed to switch the per-expert pack "
+         "to caller-owned buffers, NOT refuse CK entirely.";
+  EXPECT_TRUE(kctx.enabled)
+      << "kctx.enabled must remain true under WEIGHT_CACHE=0 "
+         "(no CK refusal — the runtime keeps packing, just without "
+         "the LRU singleton)";
+  EXPECT_NE(kctx.packed_ptrs[0], nullptr);
+  EXPECT_NE(kctx.owned_packed_ptrs[0], nullptr)
+      << "owned_packed_ptrs[0] must be populated under "
+         "WEIGHT_CACHE=0 so the CallContext destructor knows to "
+         "free the caller-owned buffer.";
+  EXPECT_EQ(static_cast<const void *>(kctx.packed_ptrs[0]),
+            static_cast<const void *>(kctx.owned_packed_ptrs[0]))
+      << "packed_ptrs[0] must alias owned_packed_ptrs[0] in no-cache "
+         "mode — dispatch_tile reads packed_ptrs and the destructor "
+         "frees owned_packed_ptrs; an alias mismatch would either "
+         "leak (destructor frees nothing) or use-after-free "
+         "(dispatch_tile reads a freed pointer).";
+}
+
+TEST(CkPackBf16NoCache, NoLruInsertSecondPrepareDoesNotHitCache) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  ::reset_grp_matmul_caches();
+  WeightCacheOverride wc_off(0);
+
+  ck_test::PrepCallCase c{};
+  c.label = "no_lru_insert_distinct_packs";
+
+  // Same shape + same caller-owned weight storage across both
+  // prepares.  Under WEIGHT_CACHE=1 these would HIT the LRU on the
+  // second call (covered by `SecondPrepareHitsCacheSamePackedPtr`
+  // above); under WEIGHT_CACHE=0 the first call never inserts so the
+  // second MUST allocate a fresh buffer.
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx_a, kctx_b;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx_a),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx_b),
+            zendnnl::error_handling::status_t::success);
+
+  ASSERT_NE(kctx_a.packed_ptrs[0], nullptr);
+  ASSERT_NE(kctx_b.packed_ptrs[0], nullptr);
+  EXPECT_NE(kctx_a.packed_ptrs[0], kctx_b.packed_ptrs[0])
+      << "two prepares with the same (weight ptr, K, N, ldb, transB) "
+         "produced the same packed pointer under WEIGHT_CACHE=0 — the "
+         "LRU singleton is being consulted when it should be bypassed.";
+  EXPECT_NE(kctx_a.owned_packed_ptrs[0],
+            kctx_b.owned_packed_ptrs[0])
+      << "owned_packed_ptrs must also be distinct — each prepare "
+         "owns its own freshly-allocated arena.";
+}
+
+TEST(CkPackBf16NoCache, ResetReassignsPackedAliasAfterRepack) {
+  CK_SKIP_IF_NO_BF16_ISA();
+  ::reset_grp_matmul_caches();
+  WeightCacheOverride wc_off(0);
+
+  // Reuse a single `CallContext` across two prepares.  The second
+  // prepare's implicit `reset()` frees the first prepare's owned
+  // buffer (the contract that lets long-running pipelines reuse
+  // one context per worker thread), then the per-expert pack loop
+  // populates BOTH `packed_ptrs[i]` AND `owned_packed_ptrs[i]`
+  // with the fresh alloc.
+  //
+  // Memory-recycling caveat:
+  //   `release_owned_buffers()` calls `std::free` on the first
+  //   call's buffer.  The libc allocator routinely returns the
+  //   same address on a subsequent `std::aligned_alloc` of the
+  //   same size+alignment from the same arena, so a pointer-NE
+  //   assertion across the two calls would be flaky depending on
+  //   surrounding test ordering and allocator state.  The real
+  //   invariant this test pins is the post-reset alias: after the
+  //   second prepare, `packed_ptrs[0]` must STILL equal
+  //   `owned_packed_ptrs[0]` (and both must be non-null).  A bug
+  //   that fails to re-assign `packed_ptrs[i]` in the pack loop
+  //   would leave it pointing at the freed (or recycled) first-
+  //   call buffer with NO owning slot — `dispatch_tile` would
+  //   then read freed memory and the destructor would silently
+  //   leak the second call's owning buffer.
+  ck_test::PrepCallCase c{};
+  c.label = "reset_realiases_packed_after_repack";
+
+  ck_test::PrepCallStorage s1, s2;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, s1, kctx),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_NE(kctx.owned_packed_ptrs[0], nullptr);
+
+  ASSERT_EQ(ck_test::run_prepare(c, s2, kctx),
+            zendnnl::error_handling::status_t::success);
+  ASSERT_NE(kctx.owned_packed_ptrs[0], nullptr);
+  EXPECT_EQ(static_cast<const void *>(kctx.packed_ptrs[0]),
+            static_cast<const void *>(kctx.owned_packed_ptrs[0]))
+      << "packed_ptrs[0] must alias owned_packed_ptrs[0] after the "
+         "second prepare on a reused CallContext — a mismatch "
+         "indicates the dispatcher's per-expert pack loop wrote to "
+         "packed_ptrs without updating owned_packed_ptrs (or "
+         "vice-versa), and dispatch_tile would read a stale or "
+         "freed pointer.";
 }
 
 }  // namespace

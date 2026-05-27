@@ -20,6 +20,7 @@
 
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -28,6 +29,7 @@ namespace group_matmul_prepack {
 namespace custom_kernel {
 
 using zendnnl::common::bfloat16_t;
+using zendnnl::ops::matmul_config_t;
 
 namespace ck = zendnnl::lowoha::matmul::custom_kernel;
 
@@ -85,6 +87,44 @@ status_t warm_pack_all_custom_kernel_experts(
 
   if (!ck::dispatch_supported() || total_count <= 0)
     return status_t::success;
+
+  // ── Production-cache gate ────────────────────────────────────────
+  // Mirrors the AOCL DLP warmer's entry gate
+  // (`prepack_aocl_dlp.cpp::warm_pack_all_aocl_dlp_experts`) and the
+  // library-wide weight-cache convention: when
+  // `matmul_config_t::get_weight_cache()` (driven by the env knob
+  // `ZENDNNL_MATMUL_WEIGHT_CACHE`) is not 1, no path consults the
+  // LRU pack cache, so warming would be a pure waste of CPU + memory
+  // and would also leave behind cache entries the dispatcher must
+  // not read (the CK pack arena is keyed on raw weight pointer; a
+  // framework that mutates weight addresses between calls relies on
+  // WEIGHT_CACHE=0 specifically to prevent a stale pointer hit from
+  // reading freed weights).  The matching runtime gate lives in
+  // `custom_kernel/dispatch.cpp::prepare_for_call`, which under
+  // `weight_cache_type != 1` keeps CK ENGAGED but switches the per-
+  // expert pack call to `get_or_pack_weight_bf16(..., disable_cache=
+  // true)` — allocating a fresh aligned buffer, packing, recording
+  // it in `CallContext::owned_packed_ptrs[]`, and freeing it after
+  // the run via `CallContext::release_owned_buffers()`.  The LRU is
+  // never inserted into in that mode, so warming this side would
+  // populate keys the runtime never reads.  Earlier revs refused CK
+  // outright when WEIGHT_CACHE!=1 and fell back to AOCL DLP (whose
+  // cache-off path uses fresh out-of-place reorder + per-call free
+  // at `aocl_kernel.cpp::reorderAndCacheWeights` weight_cache_type=0
+  // and the matching free at `run_dlp`'s epilogue); that fallback
+  // was relaxed by commit 63e0299c to keep CK on the hot path.
+  //
+  // Short-circuit at entry; `stats` stays zeroed so the PREPACK log
+  // line surfaces "no work attempted" rather than "all skipped".
+  // The toggle is folded into the prepack fingerprint
+  // (`prepack.cpp::fingerprint`), so a process that flips
+  // WEIGHT_CACHE=0 → 1 mid-run will re-enter this function on the
+  // new state and warm normally.
+  const int32_t weight_cache_type =
+      matmul_config_t::instance().get_weight_cache();
+  if (weight_cache_type != 1) {
+    return status_t::success;
+  }
 
   const size_t bound = std::min<size_t>({
       static_cast<size_t>(total_count),

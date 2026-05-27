@@ -758,10 +758,16 @@ TEST_F(TestPrepackFusedMoEEndToEnd, BothPassesWarmAllExperts) {
   std::vector<int>  ldb_op1(E, N1);
   std::vector<bool> transB_op1(E, false);
   prepack::custom_kernel::PackProbeStats probe_op1;
+  // Pass 1's runtime warm uses `interleave_split_halves=true` for
+  // silu_and_mul (prepack rearranges canonical [gate|up] row order
+  // to [g0,u0,g1,u1,...]).  Probe MUST mirror that flag to query
+  // the same cache key.  This test pins act = silu_and_mul so
+  // interleave is unconditionally true on the Op1 probe.
   prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
       wei1_all, K_op1_vec, N_op1_vec, ldb_op1, transB_op1,
       /*is_weights_const=*/std::vector<bool>{},
-      /*total_count=*/E, probe_op1);
+      /*total_count=*/E, probe_op1,
+      /*interleave_split_halves=*/true);
   EXPECT_EQ(probe_op1.cache_hits, E)
       << "all " << E << " Op1 weights must be in the custom-kernel cache "
       << "after Pass 1's prepack_for_algo_3 fired";
@@ -902,16 +908,31 @@ TEST_P(TestPrepackKDownSynthesis, BothPassesWarmAllExperts) {
   std::vector<int>  ldb_op1(E, N1);
   std::vector<bool> transB_op1(E, false);
   prepack::custom_kernel::PackProbeStats probe_op1;
+  // Pass 1's runtime warm uses `interleave_split_halves=true` for
+  // silu_and_mul / gelu_and_mul (the prepack rearranges canonical
+  // [gate|up] row order to [g0,u0,g1,u1,...] so the in-register
+  // pair-store epilogue applies unchanged).  The probe MUST mirror
+  // that flag to query the same cache key — otherwise the LRU
+  // lookup misses on a different (uninterleaved) key and pollutes
+  // the count with cache_misses=E.  swiglu_oai_mul + none use
+  // interleave=false (caller already provides the interleaved
+  // layout / no activation), matching the default.
+  const bool interleave_op1 = (p.act_int == 1 /*silu_and_mul*/)
+                              || (p.act_int == 2 /*gelu_and_mul*/);
   prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
       wei1_all, K_op1_vec, N_op1_vec, ldb_op1, transB_op1,
       /*is_weights_const=*/std::vector<bool>{},
-      /*total_count=*/E, probe_op1);
+      /*total_count=*/E, probe_op1, interleave_op1);
   EXPECT_EQ(probe_op1.cache_hits, E)
       << "Op1 cache must be fully warmed (act=" << p.act_int
       << " E=" << E << " N1=" << N1 << ")";
   EXPECT_EQ(probe_op1.cache_misses, 0);
 
   // ── Probe Op2: K=op2_k_for_act(N1, act), N=H ──────────────────
+  // Pass 2 runs without activation (act=none in the dispatch call;
+  // gated activation is applied by Pass 1's epilogue), so the Pass 2
+  // warm always uses `interleave_split_halves=false` regardless of
+  // the user-visible activation.  Probe with default false.
   std::vector<int>  K_op2_vec(E, K_op2);
   std::vector<int>  N_op2_vec(E, H);
   std::vector<int>  ldb_op2(E, H);
@@ -1551,14 +1572,18 @@ TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
             status_t::success);
 
   // Op1 probe: per-expert N + ldb must match the cache key the
-  // dispatcher built at runtime.
+  // dispatcher built at runtime.  Pass 1's runtime warm uses
+  // `interleave_split_halves=true` for silu_and_mul; probe must
+  // mirror or the LRU lookup misses on a different (uninterleaved)
+  // key and reports E spurious cache_misses.
   std::vector<int>  K_op1_vec(E, K_in);
   std::vector<bool> transB_vec(E, false);
   prepack::custom_kernel::PackProbeStats probe_op1;
   prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
       wei1_all, K_op1_vec, N_op1, /*ldb=*/N_op1, transB_vec,
       /*is_weights_const=*/std::vector<bool>{},
-      /*total_count=*/E, probe_op1);
+      /*total_count=*/E, probe_op1,
+      /*interleave_split_halves=*/true);
   EXPECT_EQ(probe_op1.cache_hits, E)
       << "Op1 cache must hit at per-expert (K=" << K_in << ", N[e]) "
          "key.  cache_misses>0 means Pass 1 prepack uniformised the "
@@ -1722,6 +1747,8 @@ TEST_F(TestPrepackStress, E64MultiIterationCacheStable) {
   }
 
   // Probe Op1 (full E entries, all should be cached).
+  // `run_stress_call` issues silu_and_mul, so Pass 1's runtime warm
+  // uses `interleave_split_halves=true`; probe mirrors.
   const int K_op2 = h.N1 / 2;
   std::vector<int>  K_op1_vec(E, h.K_in);
   std::vector<int>  N_op1_vec(E, h.N1);
@@ -1731,7 +1758,8 @@ TEST_F(TestPrepackStress, E64MultiIterationCacheStable) {
   prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
       h.wei1, K_op1_vec, N_op1_vec, ldb_op1_vec, transB_vec,
       /*is_weights_const=*/std::vector<bool>{},
-      /*total_count=*/E, probe_op1);
+      /*total_count=*/E, probe_op1,
+      /*interleave_split_halves=*/true);
   EXPECT_EQ(probe_op1.cache_hits, E)
       << "all 64 Op1 entries must remain cached after 5 iterations; "
          "cache_misses>0 implies the LRU evicted entries (capacity "
@@ -1772,6 +1800,8 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
 
   ASSERT_EQ(run_stress_call(h), status_t::success);
 
+  // `run_stress_call` issues silu_and_mul, so Pass 1's runtime warm
+  // uses `interleave_split_halves=true`; probe mirrors.
   const int K_op2 = h.N1 / 2;
   std::vector<int>  K_op1_vec(E, h.K_in);
   std::vector<int>  N_op1_vec(E, h.N1);
@@ -1781,7 +1811,8 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
   prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
       h.wei1, K_op1_vec, N_op1_vec, ldb_op1_vec, transB_vec,
       /*is_weights_const=*/std::vector<bool>{},
-      /*total_count=*/E, probe_op1);
+      /*total_count=*/E, probe_op1,
+      /*interleave_split_halves=*/true);
   EXPECT_EQ(probe_op1.cache_hits, E)
       << "all 256 (kNTilePlanMaxExperts) Op1 entries must be warmed "
          "post-call; an off-by-one on the upper bound truncates "
@@ -2253,7 +2284,15 @@ INSTANTIATE_TEST_SUITE_P(GrpMatmulEnvInteraction,
 //      cache is untouched).
 // ===============================================================================
 
-class TestPrepackCrossWarmRegimes : public ::testing::Test {};
+class TestPrepackCrossWarmRegimes : public ::testing::Test {
+ protected:
+  // Arms `prepack::test_api::s_capture_last_invocation` for the test's
+  // scope so the gated mutex+write inside `log_pack_probe` actually
+  // fires, and resets the stats to a clean baseline on construction.
+  // Production builds leave the atomic at `false` and short-circuit
+  // the write entirely.  See `moe_test_utils::LastInvocationCaptureGuard`.
+  moe_test_utils::LastInvocationCaptureGuard prepack_stats_guard_;
+};
 
 TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
   using namespace zendnnl::lowoha::matmul;
@@ -2593,7 +2632,12 @@ TEST_F(TestPrepackCrossWarmRegimes, CrossWarmOnAlgo1NoCustomMatchesPrimaryOnly) 
 //      via the fingerprint.
 // ===============================================================================
 
-class TestPrepackFingerprintInvariance : public ::testing::Test {};
+class TestPrepackFingerprintInvariance : public ::testing::Test {
+ protected:
+  // See note on `TestPrepackCrossWarmRegimes::prepack_stats_guard_` —
+  // same gate, scoped to each `TEST_F` body in this fixture.
+  moe_test_utils::LastInvocationCaptureGuard prepack_stats_guard_;
+};
 
 TEST_F(TestPrepackFingerprintInvariance, PermutationDoesNotRefireWarm) {
   using namespace zendnnl::lowoha::matmul;
@@ -2740,7 +2784,12 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
 //      refusal cases, and that all-good config does fire CK warm.
 // ===============================================================================
 
-class TestPrepackCkGateSymmetry : public ::testing::Test {};
+class TestPrepackCkGateSymmetry : public ::testing::Test {
+ protected:
+  // See note on `TestPrepackCrossWarmRegimes::prepack_stats_guard_` —
+  // same gate, scoped to each `TEST_F` body in this fixture.
+  moe_test_utils::LastInvocationCaptureGuard prepack_stats_guard_;
+};
 
 TEST_F(TestPrepackCkGateSymmetry, AllGatesPassEnablesCustomKernelWarm) {
   namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
@@ -3078,23 +3127,35 @@ TEST_F(TestPrepackCkGateSymmetry, FingerprintReDispatchesOnActChange) {
   prepack::prepack_for_algo_3(h.pp);
   ASSERT_TRUE(prepack::test_api::get_last_invocation_stats().valid);
 
-  // Same pool, same scheduling algo, but act flipped to silu_and_mul:
-  // ck_eligible flips false; without the act fingerprint term, the
-  // second call would hit `already_warmed` and short-circuit, leaving
-  // the (false) verdict cached.  With the fingerprint term, second
-  // call re-fires and arrives at the new (refused) verdict.
+  // Same pool, same scheduling algo, but flip act_dtype to f32 — that
+  // hits the `act != none && act_dtype != bf16` refusal in
+  // `ck_eligible` so the second call's verdict is FALSE.  Without
+  // the act/act_dtype fingerprint term, the second call would hit
+  // `already_warmed` and short-circuit, leaving the (true) verdict
+  // cached and silently warming on a path the runtime would refuse.
+  // With the fingerprint term, second call re-fires and arrives at
+  // the new (refused) verdict.
+  //
+  // Earlier rev of this test flipped to silu_and_mul + bias=none
+  // expecting refusal; the CK fused-act work
+  // (commits 677dacc6 + 8a1f378e) made silu/gelu without bias
+  // eligible, so that flip no longer triggers refusal and the test
+  // would false-fail.  act_dtype=f32 is a stable refusal lever that
+  // doesn't depend on the eligibility envelope evolving.
   prepack::test_api::clear_last_invocation_stats();
-  h.pp.act = grp_matmul_gated_act_t::silu_and_mul;
+  h.pp.act_dtype = data_type_t::f32;
   prepack::prepack_for_algo_3(h.pp);
 
   const auto stats = prepack::test_api::get_last_invocation_stats();
   EXPECT_TRUE(stats.valid)
-      << "Activation change must re-fire the prepack so ck_eligible "
-         "is re-evaluated against the current call's act";
-  // After the act flip, no new CK warm should fire (silu refused).
-  // Counters are accumulators across the second call only.
+      << "Activation-context change (act/act_dtype) must re-fire the "
+         "prepack so ck_eligible is re-evaluated against the current "
+         "call's act_dtype";
+  // After the act_dtype flip, no new CK warm should fire
+  // (act_dtype=f32 refused).  Counters are accumulators across the
+  // second call only.
   EXPECT_EQ(stats.ck.cache_misses, 0)
-      << "Second call (silu refused) must NOT warm CK arena";
+      << "Second call (act_dtype=f32 refused) must NOT warm CK arena";
 }
 
 // ────────────────────────────────────────────────────────────────

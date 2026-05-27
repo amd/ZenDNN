@@ -139,13 +139,47 @@ inline constexpr int kNRMax = 64;
 /// helper (see `warm_pack_all_custom_kernel_experts`) to report
 /// per-call HIT/MISS counts at apilog level.  Default `nullptr`
 /// preserves the pre-existing call sites unchanged.
+///
+/// `disable_cache` (default false) — library-wide weight-cache
+/// toggle.  When `false`, the function behaves as documented above:
+/// served from the per-process LRU on a hit, allocated + packed +
+/// inserted on a miss, retained for the process lifetime.  When
+/// `true`, the LRU is BYPASSED entirely: the function always
+/// allocates a fresh aligned buffer, packs into it, and returns
+/// the raw pointer to the caller WITHOUT inserting into the LRU
+/// (so no future call observes this buffer through the cache key).
+/// In disable-cache mode `*out_packed` is therefore CALLER-OWNED
+/// storage: the caller MUST free it via
+/// `free_owned_packed_weight()` once `dispatch_tile()` has finished
+/// consuming it (typical lifetime: from end of `prepare_for_call()`
+/// to right after the OMP parallel region exits).  Disable-cache
+/// mode is the runtime counterpart of the prepack-side
+/// `ZENDNNL_MATMUL_WEIGHT_CACHE != 1` gate (see
+/// `prepack/prepack_custom_kernel.cpp::warm_pack_all_custom_kernel_experts`)
+/// — together they let frameworks with churning weight addresses
+/// keep the CK kernel math while paying a per-call pack cost
+/// (no inter-call amortisation, no stale pointer hits).
+/// `was_hit_out` is forced to `false` in disable-cache mode (the
+/// pack always runs).
 status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
     bool transB,
     bool interleave_split_halves,
     const bfloat16_t **out_packed,
-    bool *was_hit_out = nullptr);
+    bool *was_hit_out = nullptr,
+    bool disable_cache = false);
+
+/// Free a packed-weight buffer returned by
+/// `get_or_pack_weight_bf16(..., disable_cache=true)`.  Safe with
+/// `nullptr`.  Use ONLY for caller-owned buffers obtained from
+/// disable-cache mode — cached pointers are owned by the LRU and
+/// MUST NOT be passed here (would double-free on
+/// `clear_custom_kernel_pack_cache()`).  The CallContext
+/// destructor in `dispatch.hpp` routes every entry it owns
+/// through this helper, so application code typically never
+/// calls it directly.
+void free_owned_packed_weight(const bfloat16_t *packed);
 
 /// Release every cached packed BF16 weight and reset the cache to
 /// empty.  Intended for weight-rotating deployments (dynamic

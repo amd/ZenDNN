@@ -239,6 +239,65 @@ struct CallContext {
   /// `prepare_for_call`; read directly in `dispatch_tile` via
   /// `packed_ptrs`-indexed `expert_idx`.  Zero for inactive experts.
   std::array<int, kMaxExperts> subtile_cols_per_expert{};
+
+  /// Caller-owned packed-weight pointers — populated only when the
+  /// library-wide weight-cache toggle is off
+  /// (`matmul_config_t::get_weight_cache() != 1`).  In that mode
+  /// `prepare_for_call()` routes each per-expert pack through
+  /// `get_or_pack_weight_bf16(..., disable_cache=true)`, which
+  /// allocates a fresh aligned buffer per call and skips the LRU
+  /// singleton; the resulting raw pointer is stored here AND
+  /// aliased into `packed_ptrs[i]` so `dispatch_tile()` reads it
+  /// transparently (the dispatcher cannot distinguish a cache-
+  /// served pointer from a caller-owned one — that's by design).
+  ///
+  /// Lifetime: owned by this `CallContext` instance.
+  /// `release_owned_buffers()` frees every non-null slot via
+  /// `free_owned_packed_weight()` and zeroes the array; the
+  /// destructor calls it unconditionally, and `prepare_for_call()`
+  /// calls it before its `out = CallContext{}` reset so a context
+  /// reused across calls does not leak the previous call's
+  /// buffers.  In the cache-enabled mode (the default) every slot
+  /// stays `nullptr` and `release_owned_buffers()` is a cheap no-op.
+  std::array<const bfloat16_t *, kMaxExperts> owned_packed_ptrs{};
+
+  /// Free every caller-owned packed buffer this context holds and
+  /// zero the `owned_packed_ptrs` array.  Idempotent and safe to
+  /// call at any time (frees only non-null slots).  Does NOT touch
+  /// `packed_ptrs` — when a slot in `owned_packed_ptrs` is non-null
+  /// the matching `packed_ptrs[i]` aliases it and becomes dangling
+  /// after this call, which is the expected post-condition: the
+  /// dispatcher must not read `packed_ptrs` after a successful
+  /// `release_owned_buffers()` unless `prepare_for_call()` has
+  /// repopulated the context.
+  void release_owned_buffers();
+
+  /// Reset every field to its post-construction default WITHOUT
+  /// leaking caller-owned packed buffers from a previous use of
+  /// the same context.  Order is important: free first (via
+  /// `release_owned_buffers()`), THEN zero the rest of the state.
+  /// Used by `prepare_for_call()` to start each call from a clean
+  /// slate when a single `CallContext` is reused across multiple
+  /// `group_matmul_direct(...)` invocations.  Replaces the
+  /// previous `out = CallContext{}` idiom that relied on a default
+  /// move-assignment operator — that operator is now deleted to
+  /// prevent silent double-frees on the owning pointer array.
+  void reset();
+
+  /// Non-copyable / non-movable.  `release_owned_buffers()` runs in
+  /// the destructor and freeing the same pointer twice would crash
+  /// the process; defaulting copy/move would silently duplicate
+  /// the owning pointers.  Callers stack-allocate a single
+  /// `CallContext` per `prepare_for_call() + dispatch_tile()`
+  /// scope (the typical idiom for both `group_matmul_direct` and
+  /// `group_matmul_fused_moe`); state reuse across calls goes
+  /// through `reset()` above.
+  CallContext() = default;
+  ~CallContext() { release_owned_buffers(); }
+  CallContext(const CallContext &)            = delete;
+  CallContext &operator=(const CallContext &) = delete;
+  CallContext(CallContext &&)                 = delete;
+  CallContext &operator=(CallContext &&)      = delete;
 };
 
 /// One-shot per-call prep (single-threaded).  See header doc for what

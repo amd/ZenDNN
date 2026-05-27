@@ -474,6 +474,15 @@ status_t group_matmul_fused_moe_execute(
   // check is free when logging is off.
   static const bool s_apilog = apilog_info_enabled();
   if (s_apilog) {
+    // Hoist `get_grp_matmul_fused_moe_tight()` into a named local so
+    // the apilog_info(...) variadic below reads `log_fused_moe_tight`
+    // instead of an inline getter call buried in the argument list —
+    // makes the log's read-set explicit and keeps a single source
+    // of truth for the value if the line ever gets duplicated /
+    // reordered.  Cached + override-backed under the hood, so even
+    // an accidental second getter call would be O(1); the win here
+    // is readability, not microseconds.
+    const int log_fused_moe_tight = get_grp_matmul_fused_moe_tight();
     const bool act_is_gated = (act != grp_matmul_gated_act_t::none);
     const char *w13_write_elems = act_is_gated
         ? (want_tight ? "I" : "2I")
@@ -502,7 +511,7 @@ status_t group_matmul_fused_moe_execute(
                 " op2_dst_reuse=",
                 (op2_internal ? "src_inplace" : "caller_dst_down"),
                 " env_algo=", env_algo_fused,
-                " env_tight=", get_grp_matmul_fused_moe_tight(),
+                " env_tight=", log_fused_moe_tight,
                 " custom_kernel_env=",
                 (custom_kernel_en ? "on" : "off"),
                 " num_ops=", (int)num_ops);

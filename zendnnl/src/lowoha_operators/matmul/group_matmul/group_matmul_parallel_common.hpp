@@ -187,17 +187,31 @@ inline bool parse_env_int_strict(const char *e, int &out) {
 }
 
 /// ZENDNNL_GRP_MATMUL_ALGO = "1".."5" force a specific ALGO, "0"/unset
-/// = auto-select.  Intentionally NOT cached — gtests toggle mid-process
-/// via AlgoEnvGuard (test_group_matmul.cpp).  Strict single-digit
-/// validation: only the literal characters `'1'..'5'` (as the FIRST
-/// byte, with no further bytes implied here) are honoured.  This is
-/// already strict — `"5xyz"` returns 5 because we only inspect the
-/// first byte, but no current ZenDNN deployment passes such values
-/// and there is no doc-promised behaviour to disagree with.  Leave
-/// as-is; documented behaviour matches code.
+/// = auto-select.  Strict single-digit validation: only the literal
+/// characters `'1'..'5'` (as the FIRST byte, with no further bytes
+/// implied here) are honoured.  This is already strict — `"5xyz"`
+/// returns 5 because we only inspect the first byte, but no current
+/// ZenDNN deployment passes such values and there is no doc-promised
+/// behaviour to disagree with.
+///
+/// Cached + override pattern (matches `get_grp_matmul_auto_prompt_algo`).
+/// The cached `static const` snapshot of `std::getenv` is taken on the
+/// first call; the override atomic `s_grp_matmul_algo_override` (sentinel
+/// `-1` = no override) lets gtests flip the effective value mid-process
+/// without paying the `std::getenv` cost on every production call.  The
+/// `AlgoEnvGuard` RAII helper in `moe_test_utils.hpp` sets BOTH the env
+/// AND the override atomic, so every existing call site that wraps with
+/// `AlgoEnvGuard(N)` continues to observe `N` without source-level changes.
+inline std::atomic<int> &test_api_algo_override();
 inline int get_grp_matmul_algo() {
-  const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
-  return (env && env[0] >= '1' && env[0] <= '5') ? (env[0] - '0') : 0;
+  const int ovr = test_api_algo_override().load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return (ovr >= 1 && ovr <= 5) ? ovr : 0;
+  static const int v = []() {
+    const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
+    return (env && env[0] >= '1' && env[0] <= '5') ? (env[0] - '0') : 0;
+  }();
+  return v;
 }
 
 // ── Auto-select per-phase overrides (consulted only under ALGO=0) ─────
@@ -441,18 +455,40 @@ inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
 inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override{-1};
 inline std::atomic<int> s_grp_matmul_auto_decode_algo_override{-1};
 
-// Sentinel `-1` = no override; falls through to the cached env path
-// (which itself applies the documented default 0 = OFF).  Settable
-// values: 0 (OFF — Phase B remainder distribution unchanged), positive
-// int (ON — heavy / light split at this M threshold).  Override
-// semantics in `get_grp_matmul_hybrid_m_heavy_threshold()`:
-//   * any negative value (including the `-1` sentinel) → fall
-//     through to the cached env path.
-//   * 0          — explicit OFF (same as unset env).
-//   * > 0        — adopted as the threshold value (heavy iff
-//                  `M[e] > value`).
-//   * Non-positive values from the env path → cached default 0 (OFF).
-inline std::atomic<int> s_grp_matmul_hybrid_m_heavy_threshold_override{-1};
+// Sentinel `-1` = no override (use cached env path).  Settable values
+// 0..5 mirror `get_grp_matmul_algo()` parse output (`0` = AUTO,
+// `1..5` = forced ALGO_N, `> 5` clamped to AUTO by the getter).  The
+// `AlgoEnvGuard` RAII helper in `gtests/group_matmul/moe_test_utils.hpp`
+// sets the env-var AND stores into this atomic so that any gtest using
+// `AlgoEnvGuard(N)` continues to flip the effective algo mid-process —
+// without paying the `std::getenv` cost on every production call site.
+inline std::atomic<int> s_grp_matmul_algo_override{-1};
+
+// Sentinel `INT_MIN` = no override; falls through to the cached env
+// path (which itself applies the documented default -1 = DISABLED).
+// `-1` is no longer usable as the "no override" marker because it
+// now carries a meaningful value (DISABLED) — see the three-mode
+// doc-block on `get_grp_matmul_hybrid_m_heavy_threshold()` below.
+//
+// Settable values:
+//   * INT_MIN   — no override (falls through to env-cache).  Tests
+//                 should never set this explicitly; it is the
+//                 production state.
+//   * -1        — explicit DISABLED.  Same as unset env.
+//   *  0        — explicit AUTO.  Engages
+//                 `apply_adaptive_tiers()` in the planner.
+//   *  > 0      — explicit MANUAL single-threshold override.  Heavy
+//                 iff `M[e] > value`.
+//   * Anything more negative than -1 → undefined.  Tests should
+//     only pass values from the documented set above.
+//
+// The RAII helper `HybridMHeavyThresholdOverride` in
+// `gtests/group_matmul/moe_test_utils.hpp` saves and restores the
+// previous value across test scopes; it must be used for any test
+// that touches this atomic to guarantee teardown ordering on test
+// failure.
+inline std::atomic<int> s_grp_matmul_hybrid_m_heavy_threshold_override{
+    std::numeric_limits<int>::min()};
 
 // Sentinel `-1` = no override.  Settable values: 0 (per-expert
 // subtile sizing OFF — use one m_max-sized `subtile_cols` for every
@@ -506,6 +542,9 @@ inline std::atomic<int> &test_api_auto_prompt_algo_override() {
 }
 inline std::atomic<int> &test_api_auto_decode_algo_override() {
   return test_api::s_grp_matmul_auto_decode_algo_override;
+}
+inline std::atomic<int> &test_api_algo_override() {
+  return test_api::s_grp_matmul_algo_override;
 }
 
 inline int get_grp_n_rounds_mode() {
@@ -757,7 +796,7 @@ inline int get_grp_matmul_fused_moe_tight() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default OFF.
+// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL = { "0", "1" } — cached, default ON.
 //   Master switch for the hand-rolled AVX-512-BF16 microkernel
 //   (custom_kernel/).  ON: ALGO 3 flat_n_tile dispatches per-tile
 //   GEMM through VDPBF16PS, with swiglu_oai_mul applied in-register
@@ -766,26 +805,27 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   through the standard AOCL DLP / BRGEMM dispatch, fused activation
 //   runs as a separate per-tile pass.
 //
-//   Why default OFF (changed from ON): the CK pack cache is keyed by
-//   the raw weight pointer (see `custom_kernel/pack.cpp`), which
-//   means a framework that frees a tensor and then allocates a new
-//   one at the same address (PyTorch's CPU allocator routinely
-//   recycles freed addresses) silently serves stale packed bytes —
-//   producing wildly wrong matmul output for the new tensor.  The
-//   pre-PR production-sweep that motivated default-ON did not
-//   exercise the recycled-pointer regime that real Python /
-//   PyTorch test sessions trigger.  Flipping the default to OFF
-//   keeps the standard AOCL DLP path as the per-tile dispatcher;
-//   that path's cache is more conservative and gated by
-//   `ZENDNNL_MATMUL_WEIGHT_CACHE` so a caller can disable it
-//   cleanly when needed.
-//
-//   To re-engage the CK path (e.g. for benchmarking on a workload
-//   where weight pointers are stable across the entire process
-//   lifetime — typical production MoE serving with a fixed model)
-//   set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1`.  Until the CK pack
-//   cache grows a content-aware invalidation hook, default-ON is
-//   not safe for arbitrary frameworks.
+//   Default ON history: an earlier revision flipped this to OFF
+//   because the CK pack cache (see `custom_kernel/pack.cpp`) is
+//   keyed by the raw weight pointer, and frameworks that recycle
+//   freed allocator addresses (e.g. PyTorch CPU allocator) could
+//   silently serve stale packed bytes for a new tensor at the
+//   same address.  That hazard is now addressed at the library
+//   level: the CK path honours `ZENDNNL_MATMUL_WEIGHT_CACHE` with
+//   the same semantics as the AOCL DLP path.
+//     - `ZENDNNL_MATMUL_WEIGHT_CACHE=1` (default): pointer-keyed
+//       LRU cache stays warm across calls (production MoE serving
+//       with a stable model — the common case).
+//     - `ZENDNNL_MATMUL_WEIGHT_CACHE=0`: per-call caller-owned
+//       packed buffers are allocated fresh and freed after the
+//       call, so a recycled pointer can never hit a stale entry.
+//       CK remains engaged, just without the cache.
+//   See `custom_kernel/dispatch.cpp::prepare_for_call` (owned-ptr
+//   path) and `prepack/prepack_custom_kernel.cpp` (warm-pack skip
+//   when WEIGHT_CACHE=0).  Default-ON is therefore safe for both
+//   stable-pointer and recycled-pointer regimes; callers that
+//   want to bypass CK entirely (e.g. parity bisection against
+//   AOCL DLP) can still set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`.
 //
 //   The dispatcher refuses cleanly and falls back to the standard
 //   AOCL DLP path for any expert that violates the CK contract
@@ -799,7 +839,7 @@ inline bool get_grp_matmul_custom_kernel() {
   if (ovr >= 0) return ovr != 0;
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL");
-    if (e == nullptr || e[0] == '\0') return false;  // default: OFF
+    if (e == nullptr || e[0] == '\0') return true;  // default: ON
     return e[0] != '0';
   }();
   return v;
@@ -1047,67 +1087,89 @@ inline int get_grp_matmul_aocl_blis_nc() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD = positive int —
-//   cached, default 0 (OFF).
+// ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD = { -1, 0, positive int } —
+//   cached, default -1 (DISABLED).
 //
-// EXPERIMENTAL — Option-A M-weighted per-expert thread distribution
-// inside the ALGO 3 ManyExperts Single-round plan.  When > 0:
+// Three-mode dispatch for asymmetric per-expert thread distribution
+// inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
+// are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
+// HYBRID entirely and stay on Phase B base+1 regardless of the env
+// value.  See `apply_round_pick` Single case for the rationale.
 //
-//   * Experts with `M[e] > threshold` are tagged HEAVY.
-//   * Each ACTIVE light expert (M > 0, M ≤ threshold) reserves
-//     exactly 1 thread.
-//   * Remaining threads (`num_threads - num_light_active`) are
-//     distributed across the heavy experts via a greedy water-fill
-//     keyed on per-expert M — the heaviest expert receives the
-//     marginal next-thread first until its per-expert cap is hit,
-//     iterating until the heavy budget is exhausted.
-//   * Per-expert thread count is capped by
-//     `min(ccd_size, max_tiles = max_N / ab_min_tile, N[e] / ab_min_tile)`.
-//     On Qwen3-30B-A3B prompt (`max_N=1536, ab_min_tile=kMinNTile=512`)
-//     that hard cap is 3 threads / expert.  To unlock higher per-
-//     expert teams (up to `ccd_size = 8`) on the same shape, ALSO
-//     set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=256` (lifts max_tiles
-//     to 6) or `=128` (lifts to 12, capped at ccd_size=8).
+//   -1  DISABLED (default — current production behavior).  Phase B
+//       base+1 only: top few experts by M get one extra thread, all
+//       others get a uniform share via `n_thr_fixed`.  Same as the
+//       legacy behaviour when the env was unset.
 //
-// Gating in `apply_round_pick` (group_matmul_n_tile.cpp):
-//   * Single round only — Multi / Balanced / DecodeD / FewExperts
-//     keep their existing distribution.
-//   * CK path only (`use_custom == true`) — the executor's CK round
-//     path consumes `stable_n_thr_per_expert[]` via the prefix-sum
-//     scan (see `execute_rounds`).  Non-custom paths don't support
-//     asymmetric per-expert teams in this code path.
-//   * Requires both heavy and light experts present — degenerate
-//     cases (all-heavy / all-light) fall through to the existing
-//     Phase B remainder distribution (`base + 1` for top-N M).
+//    0  AUTO  (prompt-only).  Planner-driven adaptive 3-tier policy.
+//       `apply_adaptive_tiers()` (group_matmul_n_tile.cpp) inspects
+//       the per-call M distribution, num_threads and num_active and
+//       builds a per-expert thread allocation with:
+//         - high   tier (M ≥ ~0.40 × M_max): target up to 8 threads
+//         - mid    tier (M ≥ ~0.20 × M_max): target up to 4 threads
+//         - low    tier (M ≥ ~0.10 × M_max): target up to 2 threads
+//         - baseline (everyone else):        1 thread
+//       Tier targets are scaled down uniformly when the
+//       `num_threads − num_active` extras-budget is tight, then
+//       water-filled by M-weight to consume any rounding leftover.
+//       Falls back silently to Phase B when the workload doesn't
+//       benefit (low skew, thread-starved, etc.).  Adapts to
+//       num_threads ∈ {64, 128, 256} automatically — no manual
+//       per-CPU tuning required.
 //
-// Intent — addresses the heaviest-M-expert × 1-thread bottleneck on
-// many-experts MoE shapes where `num_ops ≈ num_threads` and the M
-// distribution is bimodal (a few "heavy" experts with M >> mean,
-// many "light" experts with M ≈ 1-50).  On Qwen3-30B-A3B prompt
-// (max_M ≈ 3500, mean_M_active ≈ 256, skew ≈ 14×, num_ops=121,
-// num_threads=128) the current Single+Phase-B path caps the
-// heaviest expert at 2 threads (base=1 + remainder=1), leaving
-// the call wall bounded by the heavy expert's single-thread
-// compute (~200-400 ms).  This redistribution lifts the cap to
-// `min(ccd_size, max_tiles)` per heavy expert — 3 threads today
-// without `CUSTOM_KERNEL_N_TILE` tuning, up to 8 with it.
+//       Decode bypass: on `max_M ≤ kDecodeMaxM` the AUTO path
+//       returns immediately (defence-in-depth check at the top of
+//       `apply_adaptive_tiers()`) and the planner runs Phase B
+//       base+1 instead.  This means a unified-process E2E that
+//       sets `=0` once gets the prompt win and an unchanged
+//       decode plan; small per-expert M (decode regime) does not
+//       benefit from over-threading heavies and the env-knob sweep
+//       showed neutral-to-negative impact when AUTO ran on decode-
+//       like shapes.
 //
-// Sensible starting threshold: 256 (= 8 × ccd_size; gives "8 tokens
-// per thread" as the heavy/light cutoff).  Tune per workload.
-// Non-positive → OFF.
+//   >0  MANUAL single-threshold (legacy) — prompt-only.  Experts
+//       with `M[e] > value` are tagged HEAVY; each active light
+//       expert reserves exactly 1 thread; the remaining heavy-budget
+//       is water-filled across heavies by M, capped at
+//       `min(ccd_size, max_tiles, N[e] / ab_min_tile)`.
+//
+//       Validated empirical sweet spot on Qwen3-30B-A3B prompt
+//       (BS=32, i/p=128, max_M ≈ 3500): value = 1024.  Use AUTO (=0)
+//       for production once validated; this mode is retained for
+//       A/B testing, debugging, and explicit override when the AUTO
+//       heuristic's percentile breakpoints don't match a workload.
+//
+//       Same prompt-gate as AUTO: on `max_M ≤ kDecodeMaxM` MANUAL
+//       is skipped and the planner runs Phase B base+1.  Avoids
+//       the +30-40% decode regression observed on small thresholds
+//       like `=8` / `=16` (Qwen3 decode sweep, see
+//       `scripts/qwen_decode_tune.sh`).
+//
+// Invalid values (< -1, "abc", etc.) → silently treated as default
+// (-1 / DISABLED), matching the strict-parse convention of the
+// other ZENDNNL_GRP_MATMUL_* env vars.  Mid-process env changes have
+// no effect; relaunch for A/B.
+//
+// All three modes share the same executor consumer
+// (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
+// only difference is how the planner populates that array.
 inline int get_grp_matmul_hybrid_m_heavy_threshold() {
-  constexpr int kDefault = 0;  // OFF
-  // Test override (sentinel `-1` = no override).  Production keeps
-  // the static-const env-cache for branch-predictor-friendly reads.
+  constexpr int kDefault = -1;  // DISABLED
+  // Test override sentinel: INT_MIN = no override.  Cannot use `-1`
+  // any more since `-1` is now a meaningful (DISABLED) value.
+  // Production keeps the static-const env-cache for branch-
+  // predictor-friendly reads.
   const int ovr = test_api::s_grp_matmul_hybrid_m_heavy_threshold_override
       .load(std::memory_order_relaxed);
-  if (ovr >= 0) return ovr;
+  if (ovr != std::numeric_limits<int>::min()) return ovr;
   static const int v = []() {
     const char *e =
         std::getenv("ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD");
     int parsed = 0;
     if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed > 0) ? parsed : kDefault;
+    // Accept -1 (DISABLED), 0 (AUTO), positive int (MANUAL).  Reject
+    // anything more negative — silently clamp to default.
+    return (parsed >= -1) ? parsed : kDefault;
   }();
   return v;
 }

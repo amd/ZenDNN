@@ -120,6 +120,25 @@ struct PackProbeStats {
 /// entries the runtime would refuse to consult coherently.  An
 /// empty `is_weights_const` vector means "treat every entry as
 /// const" (legacy behaviour for callers that don't pass the field).
+///
+/// Production-cache gate (mirrors the AOCL DLP warmer):
+///   * `matmul_config_t::instance().get_weight_cache()` — when the
+///     environment variable `ZENDNNL_MATMUL_WEIGHT_CACHE` is not 1
+///     (e.g. set to 0 because the framework mutates weight
+///     addresses between calls and cannot tolerate a pointer-keyed
+///     cache), the CK runtime switches to caller-owned packs via
+///     `get_or_pack_weight_bf16(..., disable_cache=true)` —
+///     allocating, packing, and freeing a fresh aligned buffer
+///     per call rather than consulting the LRU singleton.  Since
+///     the warmer can ONLY populate the LRU and the runtime never
+///     reads it in that mode, warming is pure waste in cache-off
+///     mode.  This function detects the toggle at entry and short-
+///     circuits with `total_attempted = 0` so no work is wasted
+///     and no stale entry is left behind for the runtime to skip.
+///     The toggle is folded into the prepack fingerprint in
+///     `prepack.cpp::fingerprint`, so flipping the env mid-run
+///     (`set_weight_cache(1)`) re-enters this function with the
+///     new state and warms normally.
 status_t warm_pack_all_custom_kernel_experts(
     const std::vector<const void *> &weight,
     const std::vector<int>          &K,

@@ -217,14 +217,23 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
   s = mix_hash(s, static_cast<size_t>(p.bias_dtype));
   // Fold the runtime-mutable weight-cache toggle into the fingerprint.
   // `matmul_config_t::set_weight_cache(...)` can flip this mid-process
-  // and the AOCL DLP warmer's gate reads it on every call.  Without
+  // and BOTH the AOCL DLP warmer (`prepack_aocl_dlp.cpp`) AND the
+  // custom-kernel warmer (`prepack_custom_kernel.cpp`) now gate on
+  // it at entry: when the env knob `ZENDNNL_MATMUL_WEIGHT_CACHE` is
+  // not 1, neither warmer touches its respective cache.  Without
   // this hash term, a process that runs first under WEIGHT_CACHE=0
-  // (warmer no-op) and then enables it via `set_weight_cache(1)`
+  // (warmers no-op) and then enables it via `set_weight_cache(1)`
   // would short-circuit on the second call (fingerprint already
-  // present) and leave the cache permanently empty for this thread.
-  // The custom-kernel path doesn't read this knob, but folding it
-  // unconditionally keeps the hash regime simple and the cost is one
-  // singleton-load (~1 ns).
+  // present) and leave both caches permanently empty for this thread.
+  // The custom-kernel runtime in turn switches to caller-owned packs
+  // (`custom_kernel/dispatch.cpp::prepare_for_call` →
+  // `get_or_pack_weight_bf16(..., disable_cache=true)`) when the
+  // toggle is non-1, so the kernel math keeps running on a fresh
+  // per-call buffer instead of the LRU singleton; the AOCL DLP
+  // runtime independently honours the same toggle via its
+  // `weight_cache_type=0` branch (fresh reorder + free per call).
+  // Folding the toggle into the hash on every call is one
+  // singleton-load (~1 ns) and keeps the hash regime simple.
   s = mix_hash(s, static_cast<size_t>(
       zendnnl::ops::matmul_config_t::instance().get_weight_cache()));
   return s;
@@ -500,10 +509,18 @@ inline void log_pack_probe(int scheduling_algo,
                            const custom_kernel::PackProbeStats   &st_ck,
                            CrossWarmRegime regime,
                            const char *primary_label) {
-  // Always record stats — the gate below only controls the log emission,
-  // not the accumulator.  Tests benefit even when the apilog level
-  // hides the PREPACK line.  Cost: one mutex lock + struct copy, ~50 ns.
-  {
+  // Test-only stats accumulator.  Gated by the `s_capture_last_invocation`
+  // atomic so production builds short-circuit on a single relaxed load
+  // — no mutex lock, no struct copy, no coherence ping-pong on the
+  // hot fused-MoE dispatch path.  Tests opt in for the scope of the
+  // test via `LastInvocationCaptureGuard` in `moe_test_utils.hpp`; in
+  // that scope the gated branch fires, takes the mutex, and writes
+  // through to `s_last_invocation` so the existing
+  // `get_last_invocation_stats()` accessor returns the live data.
+  // Mirror of the `s_capture_gemm_mode` gate that protects
+  // `s_last_group_matmul_direct_gemm_mode` (see the doc-block on that
+  // atomic in `group_matmul_parallel_common.hpp`).
+  if (test_api::s_capture_last_invocation.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> lk(s_last_invocation_mtx);
     s_last_invocation.scheduling_algo   = scheduling_algo;
     s_last_invocation.inner_kernel      = inner_kernel;

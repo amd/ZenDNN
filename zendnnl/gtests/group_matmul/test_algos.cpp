@@ -2381,7 +2381,7 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          auto_strategy(0);
-  HybridMHeavyThresholdOverride  hybrid_off(0);   // explicit OFF
+  HybridMHeavyThresholdOverride  hybrid_off(-1);  // explicit DISABLED
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2451,18 +2451,29 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
   CustomKernelOverride           ck_on(true);
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
-  NTileStrategyOverride          auto_strategy(0);
-  HybridMHeavyThresholdOverride  hybrid_on(20);   // M > 20 = heavy
+  // MANUAL HYBRID is now prompt-only (max_M > kDecodeMaxM=32).  Force
+  // `n_tile_strategy=2` (rounds, force) to bypass the auto-mirror that
+  // would otherwise route prompt-class shapes with `num_ops <
+  // num_threads` to Sequential via the AUTO-MIRROR rule 3 — keeps the
+  // planner in ManyExperts so the Single-round HYBRID dispatch fires.
+  NTileStrategyOverride          force_rounds(2);
+  // Threshold chosen so M > 200 = heavy AND every Ms entry crosses
+  // the new `max_M > kDecodeMaxM=32` prompt gate.
+  HybridMHeavyThresholdOverride  hybrid_on(200);
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
   }
   reset_grp_matmul_caches();
 
-  // 14 experts, with M chosen so M=4 and M=6 are LIGHT (≤ 20) and
-  // M ∈ {30, 25, 24} are HEAVY (> 20).  3 heavy + 11 light.
+  // 14 experts, with M chosen so M=64 is LIGHT (≤ 200) and
+  // M ∈ {400, 320, 280} are HEAVY (> 200).  3 heavy + 11 light.
+  // All Ms are prompt-class (> kDecodeMaxM=32) so MANUAL HYBRID's
+  // new decode gate lets the path engage.  N=4096 keeps the cap
+  // arithmetic identical to the AUTO tests.
   auto s = build_hybrid_probe(/*num_threads=*/32,
-      /*Ms=*/{30, 25, 24, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4});
+      /*Ms=*/{400, 320, 280, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64},
+      /*N=*/4096);
 
   AlgoEnvGuard       algo_guard(3);
   PhaseBCaptureGuard cap;
@@ -2483,19 +2494,23 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
       << "Hybrid path MUST set n_thr_fixed=0 so the executor takes "
          "the prefix-sum scan instead of the uniform `tid/tpe` mapping.";
 
-  // Per-expert assertions.  Experts e=0..2 are heavy (M = 30, 25,
-  // 24); e=3..13 are light (M = 4).  Light experts must each
-  // receive exactly 1 thread.  Heavies must receive ≥ 1, AND the
-  // M-descending water-fill ordering implies n_thr[e=0] ≥ n_thr[e=1]
-  // ≥ n_thr[e=2].
+  // Per-expert assertions.  Experts e=0..2 are heavy (M = s.Ms[0..2],
+  // currently {400, 320, 280}); e=3..13 are light (M = s.Ms[3..13],
+  // currently 64 each).  Light experts must each receive exactly 1
+  // thread.  Heavies must receive >= 1, AND the M-descending water-
+  // fill ordering implies n_thr[e=0] >= n_thr[e=1] >= n_thr[e=2].
+  // Messages below derive the M values from `s.Ms[]` so the failure
+  // report stays correct if the probe Ms get retuned in a follow-up.
   const int n0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
   const int n1 = static_cast<int>(snap.stable_n_thr_per_expert[1]);
   const int n2 = static_cast<int>(snap.stable_n_thr_per_expert[2]);
   EXPECT_GE(n0, 1);
   EXPECT_GE(n0, n1)
-      << "Heavier expert e=0 (M=30) must receive >= threads as e=1 (M=25).";
+      << "Heavier expert e=0 (M=" << s.Ms[0] << ") must receive >= threads "
+         "as e=1 (M=" << s.Ms[1] << ").";
   EXPECT_GE(n1, n2)
-      << "Heavier expert e=1 (M=25) must receive >= threads as e=2 (M=24).";
+      << "Heavier expert e=1 (M=" << s.Ms[1] << ") must receive >= threads "
+         "as e=2 (M=" << s.Ms[2] << ").";
   // At least one heavy must receive more than the per-light
   // allocation (= 1), otherwise the path collapses to "everyone
   // gets 1 thread" which is no better than the legacy single-round
@@ -2521,6 +2536,413 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
   EXPECT_GT(sum, s.num_ops - 3 /*lights*/ + 3 /*heavies*/)
       << "Hybrid distribution should give heavies > 1 thread each; "
          "sum = " << sum << " is suspiciously low.";
+}
+
+// AUTO (env=0) → planner-driven adaptive tiers fire, producing a
+// monotone-by-M per-expert allocation with the Hybrid dispatch
+// signature (`per_expert_remainder=true`, `n_thr_fixed=0`).  Verifies
+// AUTO engages on a sufficiently-skewed prompt-class shape AND
+// produces a heaviest-first allocation distinct from Phase B base+1.
+//
+// Shape constraints to keep the planner in ManyExperts:
+//   * `max_M > kDecodeMaxM` (prompt-class) is now MANDATORY — AUTO's
+//     new decode gate (`apply_adaptive_tiers()` returns false on
+//     `max_M ≤ kDecodeMaxM`) makes the previous decode-class probe
+//     fall through to Phase B.  Use max_M=400 (firmly prompt-class).
+//   * Force `n_tile_strategy=2` (rounds) so the auto-mirror's
+//     prompt → ALGO 1 routing (`auto_select_would_pick_algo1`
+//     rule 3) does NOT fire for `num_ops < num_threads`.  Keeps
+//     the planner in ManyExperts where the Single-round HYBRID
+//     dispatch lives.
+//   * `N` chosen so `max_tiles = N/min_n_tile` lifts the per-expert
+//     cap above 2.  N=4096 with the prompt `min_n_tile=512` →
+//     max_tiles=8, cap=min(ccd_size=8, 8)=8.
+TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+#pragma omp parallel
+  {
+#pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride           ck_on(true);
+  NRoundsModeOverride            single_round(1);
+  CustomKernelNTileOverride      default_n_tile(0);
+  NTileStrategyOverride          force_rounds(2);    // bypass auto-mirror
+  HybridMHeavyThresholdOverride  hybrid_auto(0);     // AUTO mode
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  // 14 experts, PROMPT-class M (max=400 > kDecodeMaxM=32).  Skew =
+  // 400 / mean ≈ 400/107 ≈ 3.7 (well above kMinSkew=2.5).  Same
+  // tier topology as before, scaled into the prompt regime:
+  //   T_high ≈ max(M_p95, 160)  → 1 high  (M=400)
+  //   T_mid  ≈ max(M_p75, 80)   → 3 mid   (M=320, 240, 160)
+  //   T_low  ≈ max(M_p50, 40)   → 3 low   (M=120, 80, 60)
+  //   baseline                  → 7 (M ∈ {40, 40, 40, 40, 40, 40, 40})
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{400, 320, 240, 160, 120, 80, 60, 40, 40, 40, 40, 40, 40, 40},
+      /*N=*/4096);
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  EXPECT_TRUE(snap.per_expert_remainder)
+      << "AUTO_TIER must set per_expert_remainder=true so the executor "
+         "reads stable_n_thr_per_expert[].";
+  EXPECT_EQ(snap.n_thr_fixed, 0)
+      << "AUTO_TIER must set n_thr_fixed=0 (Hybrid signature, distinct "
+         "from Phase B's n_thr_fixed=base).";
+
+  // M-monotone ordering: heaviest expert (M=400, prompt-class probe
+  // shape; see the Ms vector above) must receive >= threads as any
+  // lower-M expert.  The water-fill is M-weighted so the heaviest
+  // expert always wins the marginal next-thread.
+  const int n0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+  EXPECT_GT(n0, 1)
+      << "Heaviest expert (M=400, high tier) must receive multiple "
+         "threads; AUTO_TIER didn't engage if n0 = 1.";
+  for (int e = 1; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    EXPECT_GE(n0, n)
+        << "AUTO_TIER must be M-monotone: heaviest (e=0, M=" << s.Ms[0]
+        << ") got " << n0 << " threads but e=" << e
+        << " (M=" << s.Ms[e] << ") got " << n << ".";
+  }
+
+  // Asymmetry check: high tier (e=0) must be strictly heavier than
+  // a baseline expert (last index, M=40 — the tail of the prompt-
+  // class probe).  Otherwise the tier structure collapsed and AUTO
+  // is just a no-op.
+  const int n_last =
+      static_cast<int>(snap.stable_n_thr_per_expert[s.num_ops - 1]);
+  EXPECT_GT(n0, n_last)
+      << "AUTO_TIER must produce asymmetry: high tier (n0=" << n0
+      << ") must receive strictly more threads than baseline "
+         "(n_last=" << n_last << ").";
+
+  // Total must NOT exceed num_threads (water-fill respects budget).
+  int sum = 0;
+  for (int e = 0; e < s.num_ops; ++e) {
+    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+  }
+  EXPECT_LE(sum, 32)
+      << "AUTO_TIER must not over-subscribe the OMP team; sum=" << sum;
+}
+
+// AUTO with uniform M → skew gate (M_max / M_mean < 2.5) fails;
+// path returns false; planner falls through to Phase B.  Distinguishes
+// "no skew → no engagement" from the explicit DISABLED case.
+TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsLowSkew) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+#pragma omp parallel
+  {
+#pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride           ck_on(true);
+  NRoundsModeOverride            single_round(1);
+  CustomKernelNTileOverride      default_n_tile(0);
+  NTileStrategyOverride          force_rounds(2);   // bypass auto-mirror
+  HybridMHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  // 14 experts, all M=100 → skew = 100/100 = 1.0, well below
+  // kMinSkew=2.5.  AUTO_TIER must skip on the LOW-SKEW gate (not the
+  // prompt gate); Phase B base+1 must populate the snapshot.  M=100
+  // is prompt-class so the new decode gate does NOT pre-empt the
+  // low-skew branch — this test exercises the skew filter
+  // specifically.
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100},
+      /*N=*/4096);
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  // Phase B keeps n_thr_fixed = base (= 2 here for 32t / 14 ops).
+  // AUTO would have set it to 0 — asserting non-zero pins the
+  // fallback path.
+  EXPECT_NE(snap.n_thr_fixed, 0)
+      << "AUTO_TIER must fall through to Phase B on low-skew workloads; "
+         "expected Phase B's n_thr_fixed != 0, got 0 (AUTO engaged "
+         "spuriously).";
+  // Every allocation must be base (= 2) or base+1 (= 3) — Phase B's
+  // signature, NOT the multi-tier 1/2/4/8 pattern.
+  for (int e = 0; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    EXPECT_TRUE(n == 2 || n == 3)
+        << "Uniform-M expert e=" << e
+        << " got n_thr=" << n << " (Phase B should produce 2 or 3).";
+  }
+}
+
+// AUTO with `num_threads == num_active` → extras_budget = 0 →
+// AUTO_TIER returns false; planner falls through to Phase B in the
+// same Single round case.  Models the "thread-starved" production
+// case (e.g. 64-core machine running a 64-expert MoE call where
+// every expert wants at least 1 thread and there's no headroom).
+//
+// Distinct from the legacy single-threshold path which would happily
+// engage as long as `heavy_budget >= 2 * n_heavy` — AUTO is stricter
+// because tiering with zero extras has no payoff.
+TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+#pragma omp parallel
+  {
+#pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride           ck_on(true);
+  NRoundsModeOverride            single_round(1);
+  CustomKernelNTileOverride      default_n_tile(0);
+  NTileStrategyOverride          force_rounds(2);   // bypass auto-mirror
+  HybridMHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  // 14 active experts, PROMPT-class M (max=400 > kDecodeMaxM=32) so
+  // the new prompt gate does NOT preempt the test.  Skew passes
+  // (400/107 ≈ 3.7, above kMinSkew=2.5).  Planner is told
+  // num_threads = 14 == num_active so the Single round stays
+  // feasible (`single_eligible` requires `num_threads >= num_ops`),
+  // but AUTO's `extras_budget = num_threads - num_active = 0` gate
+  // fails immediately → returns false → Phase B base+1 fires.
+  auto s = build_hybrid_probe(/*num_threads=*/14,
+      /*Ms=*/{400, 320, 240, 160, 120, 80, 60, 40, 40, 40, 40, 40, 40, 40},
+      /*N=*/4096);
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  // AUTO's signature is `(per_expert_remainder=true, n_thr_fixed=0)`.
+  // Phase B (the fallback we expect to fire here) leaves
+  // `per_expert_remainder=false` and `n_thr_fixed=base`.  Asserting
+  // BOTH negations confirms AUTO returned false and the planner took
+  // the Phase B branch instead.  `stable_n_thr_per_expert[]` is not
+  // populated in the Phase B branch (the executor uses uniform
+  // `tid / n_thr_fixed` mapping in that case), so no point asserting
+  // on its contents — they are correctly left at zero.
+  EXPECT_FALSE(snap.per_expert_remainder)
+      << "AUTO_TIER must fall through when extras_budget = 0; "
+         "expected Phase B (per_expert_remainder=false), got true "
+         "(AUTO engaged spuriously).";
+  EXPECT_NE(snap.n_thr_fixed, 0)
+      << "AUTO_TIER must fall through when extras_budget = 0; "
+         "expected Phase B's n_thr_fixed=base, got 0 (AUTO engaged).";
+}
+
+// Phase gate (decode safety) — `HYBRID=0` (AUTO) and `HYBRID=10`
+// (MANUAL) BOTH must be skipped on a decode-class shape
+// (`max_M <= kDecodeMaxM`) so the planner stays on Phase B base+1.
+// Models the unified-process E2E case where `HYBRID=0` is exported
+// once for the whole run: prompt benefits from AUTO tiering while
+// decode plans remain untouched.
+//
+// Acceptance criterion (the only signature unique to HYBRID):
+//   * `n_thr_fixed != 0`  — Phase B (including its base+1 remainder
+//                           branch) keeps `n_thr_fixed = base`,
+//                           while both HYBRID modes zero it to
+//                           tell the executor to use the prefix-
+//                           sum scan.  `per_expert_remainder` is
+//                           NOT a distinguishing signal here:
+//                           Phase B's remainder branch also sets
+//                           it to true with base/base+1 entries,
+//                           so asserting on it would create a
+//                           false alarm on this 32t/14-experts
+//                           shape (remainder = 4 → branch fires).
+//
+// Shape: 14 experts, max_M=24 (decode-class), high skew (24/8.6 ≈ 2.8
+// > kMinSkew=2.5), N=4096 (cap=8) — pre-gate this shape engaged AUTO
+// (see the pre-prompt-gate version of `AutoTierEngagesAtZero`).  After
+// the gate it must fall through unconditionally.
+TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+#pragma omp parallel
+  {
+#pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+
+  // Decode-class M, high skew — would have engaged AUTO before the
+  // prompt-only gate landed.
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{24, 20, 16, 12, 8, 6, 4, 2, 1, 1, 1, 1, 1, 1},
+      /*N=*/4096);
+
+  // Sub-case 1: AUTO (HYBRID=0) must skip on decode-class M.
+  {
+    CustomKernelOverride           ck_on(true);
+    NRoundsModeOverride            single_round(1);
+    CustomKernelNTileOverride      default_n_tile(0);
+    NTileStrategyOverride          auto_strategy(0);
+    HybridMHeavyThresholdOverride  hybrid_auto(0);
+
+    reset_grp_matmul_caches();
+    AlgoEnvGuard       algo_guard(3);
+    PhaseBCaptureGuard cap;
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                  s.gv.is_wc, s.params,
+                                  nullptr, nullptr),
+              status_t::success);
+    const auto &snap =
+        zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+    ASSERT_TRUE(snap.valid);
+    EXPECT_NE(snap.n_thr_fixed, 0)
+        << "AUTO must be skipped on decode-class shape "
+           "(max_M=24 <= kDecodeMaxM=32); expected Phase B's "
+           "n_thr_fixed=base, got 0 (AUTO engaged despite the "
+           "prompt gate).";
+    // Verify Phase B's allocation pattern, not HYBRID's water-fill.
+    // On 32t / 14 experts, Phase B yields base=2 or base+1=3 per
+    // expert; HYBRID's adaptive tiers would give the heaviest M=24
+    // expert at least 4 threads (high tier on this skew).
+    for (int e = 0; e < s.num_ops; ++e) {
+      const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+      EXPECT_TRUE(n == 0 || n == 2 || n == 3)
+          << "AUTO-skip → Phase B base+1 expected per-expert n_thr "
+             "in {0, 2, 3}; expert e=" << e << " M=" << s.Ms[e]
+          << " got n_thr=" << n
+          << " (AUTO tier values would be 4-8 on heaviest expert).";
+    }
+  }
+
+  // Sub-case 2: MANUAL (HYBRID=10, would tag heavies on this Ms)
+  // must also skip on decode-class M.
+  {
+    CustomKernelOverride           ck_on(true);
+    NRoundsModeOverride            single_round(1);
+    CustomKernelNTileOverride      default_n_tile(0);
+    NTileStrategyOverride          auto_strategy(0);
+    // Threshold=10 would tag M ∈ {24,20,16,12} as heavy on this
+    // Ms — i.e. would have engaged MANUAL on legacy semantics.
+    HybridMHeavyThresholdOverride  hybrid_manual(10);
+
+    reset_grp_matmul_caches();
+    AlgoEnvGuard       algo_guard(3);
+    PhaseBCaptureGuard cap;
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                  s.gv.is_wc, s.params,
+                                  nullptr, nullptr),
+              status_t::success);
+    const auto &snap =
+        zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+    ASSERT_TRUE(snap.valid);
+    EXPECT_NE(snap.n_thr_fixed, 0)
+        << "MANUAL must be skipped on decode-class shape "
+           "(max_M=24 <= kDecodeMaxM=32); expected Phase B's "
+           "n_thr_fixed=base, got 0 (MANUAL engaged despite the "
+           "prompt gate).";
+    // Verify Phase B's allocation pattern, not MANUAL's water-fill.
+    // MANUAL with threshold=10 would tag e=0..3 as heavy and pile
+    // most threads onto them.  Phase B distributes uniformly.
+    for (int e = 0; e < s.num_ops; ++e) {
+      const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+      EXPECT_TRUE(n == 0 || n == 2 || n == 3)
+          << "MANUAL-skip → Phase B base+1 expected per-expert "
+             "n_thr in {0, 2, 3}; expert e=" << e << " M=" << s.Ms[e]
+          << " got n_thr=" << n
+          << " (MANUAL water-fill would pile threads onto heavies).";
+    }
+  }
 }
 
 TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
