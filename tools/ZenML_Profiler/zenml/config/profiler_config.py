@@ -37,9 +37,15 @@ def load_log_info(path=None):
 
 log_info = load_log_info()
 
-SAFE_MODE_OPS = ["matmul", "batch_matmul", "inner_product", "softmax", "convolution"]
+SAFE_MODE_OPS = [
+    "matmul", "batch_matmul", "inner_product", "softmax", "convolution",
+    "group_matmul", "reorder",
+]
 
-EMBEDDING_CREATE_OPS = {"embedding_context_create", "embedding_op_create"}
+AUXILIARY_CREATE_OPS = {
+    "embedding_context_create", "embedding_op_create",
+    "reorder_context_create", "reorder_op_create",
+}
 
 
 @dataclass

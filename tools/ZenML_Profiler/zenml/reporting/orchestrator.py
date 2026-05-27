@@ -19,7 +19,10 @@ import time as time1
 from datetime import datetime
 from prettytable import PrettyTable
 from zenml.reporting.utils import non_zero_round, table_maker, print_impact_footnote
-from zenml.reporting.summary import group_dict_maker, detailed_dict_maker, embedding_summary_maker
+from zenml.reporting.summary import (
+    group_dict_maker, detailed_dict_maker, embedding_summary_maker,
+    reorder_summary_maker, grp_matmul_summary_maker,
+)
 from zenml.reporting.flops import flops_dict_maker
 from zenml.integrations.pytorch_profiler import PyTorch_Profiler_view
 
@@ -87,10 +90,10 @@ def result_generation(
         print("Total create ops :", total_count_create)
     if num == iter and iter != 1:
         print("Total Missing ops :", mis)
-    print("Total time of primivite_execute (ms): ", non_zero_round(total_time, 3))
+    print("Total time of primitive_execute (ms): ", non_zero_round(total_time, 3))
     if "create" in extras:
         print(
-            "Total time of primivite_create (ms): ",
+            "Total time of primitive_create (ms): ",
             non_zero_round(total_time_create, 3),
         )
 
@@ -135,6 +138,22 @@ def result_generation(
         emb_table, emb_df = table_maker(emb_dict, "% Impact", False, hr_val=True)
         print("\nEmbedding Summary")
         print(emb_table)
+        print_impact_footnote(t_time != "")
+
+    reo_dict, has_reo = reorder_summary_maker(op_info_dict, t_time)
+    reo_df = None
+    if has_reo:
+        reo_table, reo_df = table_maker(reo_dict, "% Impact", False, hr_val=True)
+        print("\nReorder Summary")
+        print(reo_table)
+        print_impact_footnote(t_time != "")
+
+    gm_dict, has_gm = grp_matmul_summary_maker(op_info_dict, t_time, verbose=args.verbose)
+    gm_df = None
+    if has_gm:
+        gm_table, gm_df = table_maker(gm_dict, "% Impact", False, hr_val=True)
+        print("\nGroup Matmul (MoE) Summary")
+        print(gm_table)
         print_impact_footnote(t_time != "")
 
     print("\nNOTE: Matmul dimensions are in the format MxK:KxN:MxN")
@@ -233,9 +252,9 @@ def result_generation(
         with open(csv_file, "w", newline="", encoding="utf-8") as csvfile:
             csvwriter = cs.writer(csvfile)
             table_list = [group_table, detailed_table]
-            csvwriter.writerow(["File name", args.input])
-            csvwriter.writerow(["Total Iteration", args.iter])
-            csvwriter.writerow(["Analysis Iteration", args.number])
+            csvwriter.writerow(["File name", getattr(args, f"input_{log_index + 1}", "")])
+            csvwriter.writerow(["Total Iteration", iter])
+            csvwriter.writerow(["Analysis Iteration", num])
             timestamp = time1.time()
             date_time = datetime.fromtimestamp(timestamp)
             formatted_date_time = date_time.strftime("%d-%m-%Y %H:%M:%S")
@@ -250,7 +269,7 @@ def result_generation(
                     csvwriter.writerow(row)
                 csvwriter.writerow([])
                 csvwriter.writerow([])
-    table_df_list = [group_df, detailed_df, flops_df, emb_df]
+    table_df_list = [group_df, detailed_df, flops_df, emb_df, reo_df, gm_df]
     for pr in extras["print_after_statements"]:
         print(pr)
     print("\n" + "=" * 80 + "\n")

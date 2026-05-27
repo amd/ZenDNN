@@ -63,7 +63,8 @@ logger.addHandler(handler)
 
 # Suppress DeprecationWarning / FutureWarning noise from third-party libs
 # (pandas, openpyxl) so profiler output stays clean.
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^(pandas|openpyxl)\b")
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"^(pandas|openpyxl)\b")
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ def args_parser():
                 help=f"Backend used for benchmarking while generating Log {i}",
             )
 
-        parser.add_argument("-e", "--export", default=False, help="Export the sliced logs")
+        parser.add_argument("-e", "--export", action="store_true", help="Export the sliced logs")
         parser.add_argument("--benchdnn", action="store_true", help="Enable BenchDNN support")
         parser.add_argument("--benchdnn_disp", action="store_true", help="BenchDNN display support")
         parser.add_argument(
@@ -223,7 +224,7 @@ def main():
                         )
                         backends.append("ZenDNN_5.2")
 
-                    if isinstance(num, int) and num > total_iter_list[-1]:
+                    if isinstance(num, int) and total_iter_list[-1] is not None and num > total_iter_list[-1]:
                         logging.warning(
                             f"Analysis requested for iteration {num_list[-1]}, while total iterations is given as {total_iter_list[-1]} for log {i}."
                         )

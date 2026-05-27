@@ -17,7 +17,7 @@
 import re
 import statistics
 from zenml.reporting.utils import non_zero_round
-from zenml.config.profiler_config import EMBEDDING_CREATE_OPS
+from zenml.config.profiler_config import AUXILIARY_CREATE_OPS
 
 
 def group_dict_maker(op_info_dict, t_time, summary_type):
@@ -41,7 +41,7 @@ def group_dict_maker(op_info_dict, t_time, summary_type):
     total_count = 0
     for i in op_info_dict:
         op_name = i.split(",")[0]
-        if op_name in EMBEDDING_CREATE_OPS:
+        if op_name in AUXILIARY_CREATE_OPS:
             continue
         total_count += len(op_info_dict[i])
         total_time += sum(op_info_dict[i])
@@ -81,14 +81,13 @@ def group_dict_maker(op_info_dict, t_time, summary_type):
     if t_time != "" and summary_type == "execute":
         group_dict["Backend"].append("Other")
         group_dict["Op Type"].append("-")
-        group_dict["Op Time (ms)"].append(
-            non_zero_round(float(t_time) * 1000 - total_time, 3)
-        )
+        other_time = max(float(t_time) * 1000 - total_time, 0)
+        group_dict["Op Time (ms)"].append(non_zero_round(other_time, 3))
         group_dict["Count"].append(-1)
         group_dict["% Primitive Exec Impact"].append(-1)
         e2e_ms = float(t_time) * 1000
         group_dict["% E2E Impact"].append(
-            non_zero_round((group_dict["Op Time (ms)"][-1] / e2e_ms) * 100, 2) if e2e_ms > 0 else 0
+            non_zero_round((other_time / e2e_ms) * 100, 2) if e2e_ms > 0 else 0
         )
 
     return group_dict, total_time, total_count
@@ -165,14 +164,17 @@ def detailed_dict_maker(
                         sum(temp_dict[idx]) / len(temp_dict[idx]), 3
                     )
                 prof_dict[i] = mini_prof_dict
-    total_lib_time = sum(sum(op_info_dict[k]) for k in op_info_dict)
+    total_lib_time = sum(
+        sum(op_info_dict[k]) for k in op_info_dict
+        if k.split(",")[0] not in AUXILIARY_CREATE_OPS
+    )
     if t_time != "":
         impact_denominator = float(t_time) * 1000
     else:
         impact_denominator = total_lib_time if total_lib_time > 0 else 1
     mis = 0
     for i in op_info_dict1 if num == iter and iter != 1 else op_info_dict:
-        if i.split(",")[0] in EMBEDDING_CREATE_OPS:
+        if i.split(",")[0] in AUXILIARY_CREATE_OPS:
             continue
         if i in op_info_dict:
             avg = non_zero_round(sum(op_info_dict[i]) / len(op_info_dict[i]), 3)
@@ -337,7 +339,10 @@ def embedding_summary_maker(op_info_dict, t_time):
     if not row_keys:
         return {}, False
 
-    total_lib_time = sum(sum(v) for v in op_info_dict.values())
+    total_lib_time = sum(
+        sum(v) for k, v in op_info_dict.items()
+        if k.split(",")[0] not in AUXILIARY_CREATE_OPS
+    )
     if t_time != "":
         impact_denom = float(t_time) * 1000
     else:
@@ -379,3 +384,182 @@ def embedding_summary_maker(op_info_dict, t_time):
         )
 
     return emb_dict, True
+
+
+def reorder_summary_maker(op_info_dict, t_time):
+    """Build a dedicated reorder summary grouped by (plugin_op, algo_format, dim, data_format).
+
+    Correlates reorder_context_create, reorder_op_create and reorder
+    (execute) entries from op_info_dict.  Create-phase times are
+    apportioned proportionally across dimension rows by execute count.
+
+    Returns:
+        (reo_dict, has_data) -- dict suitable for table_maker, and a bool
+        indicating whether any reorder ops were found.
+    """
+    ctx_create = {}   # algo_fmt -> {time, count}
+    op_create = {}    # (plugin_op, algo_fmt) -> {time, count}
+    execute = {}      # (plugin_op, algo_fmt, dim, data_format) -> {time, count}
+
+    for key, times in op_info_dict.items():
+        parts = key.split(",")
+        op = parts[0]
+
+        if op == "reorder_context_create":
+            algo_fmt = parts[1]
+            if algo_fmt not in ctx_create:
+                ctx_create[algo_fmt] = {"time": 0.0, "count": 0}
+            ctx_create[algo_fmt]["time"] += sum(times)
+            ctx_create[algo_fmt]["count"] += len(times)
+
+        elif op == "reorder_op_create":
+            algo_fmt = parts[1]
+            plugin_op = parts[6] if len(parts) > 6 else "NA"
+            gk = (plugin_op, algo_fmt)
+            if gk not in op_create:
+                op_create[gk] = {"time": 0.0, "count": 0}
+            op_create[gk]["time"] += sum(times)
+            op_create[gk]["count"] += len(times)
+
+        elif op == "reorder":
+            algo_fmt = parts[1]
+            plugin_op = parts[6] if len(parts) > 6 else "NA"
+            dim = parts[2]
+            data_fmt = parts[5] if len(parts) > 5 else "NA"
+            gk = (plugin_op, algo_fmt, dim, data_fmt)
+            if gk not in execute:
+                execute[gk] = {"time": 0.0, "count": 0}
+            execute[gk]["time"] += sum(times)
+            execute[gk]["count"] += len(times)
+
+    if not execute:
+        return {}, False
+
+    # Denominator excludes auxiliary create ops for consistency with all
+    # other summary tables.  Row totals include apportioned create time,
+    # which is negligible relative to execute time in practice.
+    total_lib_time = sum(
+        sum(v) for k, v in op_info_dict.items()
+        if k.split(",")[0] not in AUXILIARY_CREATE_OPS
+    )
+    if t_time != "":
+        impact_denom = float(t_time) * 1000
+    else:
+        impact_denom = total_lib_time if total_lib_time > 0 else 1
+
+    # Compute total execute counts to apportion create times proportionally.
+    # ctx_create is keyed by algo_fmt only, so apportion across ALL rows
+    # sharing that algo_fmt (regardless of plugin_op).
+    exec_count_by_af = {}
+    exec_count_by_pa = {}
+    for (po, af, _, _), ex in execute.items():
+        exec_count_by_af[af] = exec_count_by_af.get(af, 0) + ex["count"]
+        pa = (po, af)
+        exec_count_by_pa[pa] = exec_count_by_pa.get(pa, 0) + ex["count"]
+
+    reo_dict = {
+        "Plugin Op": [],
+        "Algo Format": [],
+        "Dimension": [],
+        "Data Format": [],
+        "Ctx Create (ms)": [],
+        "Ctx Cnt": [],
+        "Op Create (ms)": [],
+        "Op Cnt": [],
+        "Execute (ms)": [],
+        "Exec Cnt": [],
+        "Total (ms)": [],
+        "% Impact": [],
+    }
+
+    for (plugin_op, algo_fmt, dim, data_fmt), ex in sorted(execute.items()):
+        pa = (plugin_op, algo_fmt)
+        af_total = exec_count_by_af.get(algo_fmt, 1)
+        pa_total = exec_count_by_pa.get(pa, 1)
+        cc_frac = ex["count"] / af_total if af_total > 0 else 0
+        oc_frac = ex["count"] / pa_total if pa_total > 0 else 0
+
+        cc = ctx_create.get(algo_fmt, {"time": 0.0, "count": 0})
+        oc = op_create.get(pa, {"time": 0.0, "count": 0})
+
+        cc_share = cc["time"] * cc_frac
+        oc_share = oc["time"] * oc_frac
+
+        total = cc_share + oc_share + ex["time"]
+        reo_dict["Plugin Op"].append(plugin_op)
+        reo_dict["Algo Format"].append(algo_fmt)
+        reo_dict["Dimension"].append(dim)
+        reo_dict["Data Format"].append(data_fmt)
+        reo_dict["Ctx Create (ms)"].append(non_zero_round(cc_share, 3))
+        reo_dict["Ctx Cnt"].append(round(cc["count"] * cc_frac))
+        reo_dict["Op Create (ms)"].append(non_zero_round(oc_share, 3))
+        reo_dict["Op Cnt"].append(round(oc["count"] * oc_frac))
+        reo_dict["Execute (ms)"].append(non_zero_round(ex["time"], 3))
+        reo_dict["Exec Cnt"].append(ex["count"])
+        reo_dict["Total (ms)"].append(non_zero_round(total, 3))
+        reo_dict["% Impact"].append(
+            non_zero_round((total / impact_denom) * 100, 2)
+        )
+
+    return reo_dict, True
+
+
+def grp_matmul_summary_maker(op_info_dict, t_time, verbose=False):
+    """Build a summary for group_matmul (MoE fused matmul) ops.
+
+    Each unique (kernel, dimension, post_ops, data_format) combination
+    gets its own row.
+
+    Returns:
+        (gm_dict, has_data) -- dict suitable for table_maker, and a bool.
+    """
+    gm_entries = {}  # ind_key -> times list (only group_matmul entries)
+    for key, times in op_info_dict.items():
+        if key.split(",")[0] == "group_matmul":
+            gm_entries[key] = times
+
+    if not gm_entries:
+        return {}, False
+
+    total_lib_time = sum(
+        sum(v) for k, v in op_info_dict.items()
+        if k.split(",")[0] not in AUXILIARY_CREATE_OPS
+    )
+    if t_time != "":
+        impact_denom = float(t_time) * 1000
+    else:
+        impact_denom = total_lib_time if total_lib_time > 0 else 1
+
+    gm_dict = {
+        "Kernel": [],
+        "Dimension": [],
+        "Post Ops": [],
+        "Data Format": [],
+        "Total Time (ms)": [],
+    }
+    if verbose:
+        gm_dict["Avg Time (ms)"] = []
+        gm_dict["Min Time (ms)"] = []
+        gm_dict["Max Time (ms)"] = []
+    gm_dict["Count"] = []
+    gm_dict["% Impact"] = []
+
+    for key in sorted(gm_entries, key=lambda k: sum(gm_entries[k]), reverse=True):
+        parts = key.split(",")
+        times = gm_entries[key]
+        total = sum(times)
+        gm_dict["Kernel"].append(parts[1])
+        gm_dict["Dimension"].append(parts[2])
+        gm_dict["Post Ops"].append(parts[3])
+        gm_dict["Data Format"].append(parts[5])
+        gm_dict["Total Time (ms)"].append(non_zero_round(total, 3))
+        if verbose:
+            gm_dict["Avg Time (ms)"].append(non_zero_round(total / len(times), 3))
+            gm_dict["Min Time (ms)"].append(non_zero_round(min(times), 3))
+            gm_dict["Max Time (ms)"].append(non_zero_round(max(times), 3))
+        gm_dict["Count"].append(len(times))
+        gm_dict["% Impact"].append(
+            non_zero_round((total / impact_denom) * 100, 2)
+        )
+
+    return gm_dict, True

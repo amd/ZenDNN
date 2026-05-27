@@ -24,7 +24,7 @@ from zenml.config.profiler_config import log_info, SAFE_MODE_OPS
 # onward is foreign content (vLLM, Ray, or any other concurrent writer).
 _ANSI_INJECTION_RE = re.compile(r"\x1b\[.*")
 
-_PROF_TIME_END_RE = re.compile(r"time[=:][\d.]+ms\s*$")
+_PROF_TIME_END_RE = re.compile(r"time[=:][\d.eE+-]+ms\s*$")
 
 # Regexes for embedding sub-types
 _EMB_CTX_CREATE_RE = re.compile(
@@ -39,6 +39,40 @@ _EMB_OP_EXECUTE_RE = re.compile(
     r"indices\[(\d+),(\d+)\]:\w+:\w+:,"
     r"output\[(\d+),(\d+)\]:(\w+):\w+:,"
     r"time:([\d.]+)ms"
+)
+
+# Regexes for Reorder sub-types (3-phase: context create / op create / op execute)
+_REORDER_CTX_CREATE_RE = re.compile(
+    r"Reorder context create - algo_format:(\w+),time:([\d.eE+-]+)ms"
+)
+_REORDER_OP_CREATE_RE = re.compile(
+    r"Reorder operator create - ([^,]+),algo_format:(\w+),"
+    r":?time:([\d.eE+-]+)ms"
+)
+_REORDER_OP_EXECUTE_RE = re.compile(
+    r"Reorder operator execute - ([^,]+),"
+    r"reorder_input\[(\d+),(\d+)\]:(\w+):\w*:?,"
+    r"reorder_output\[(\d+),(\d+)\]:(\w+):\w*:?,"
+    r"algo_format:(\w+),time:([\d.eE+-]+)ms"
+)
+
+# Regex for GRP_MATMUL.CALL lines
+_GRP_MATMUL_RE = re.compile(
+    r"\[GRP_MATMUL\.CALL\]\s+"
+    r"num_ops=(\d+)\s+"
+    r"mode=(\S+)\s+"
+    r"threads=(\d+)\s+"
+    r"dtype=(\S+)\s+"
+    r"layout=(\w+(?:\(\*\))?)\s+"
+    r"transA=(\w+(?:\(\*\))?)\s+"
+    r"transB=(\w+(?:\(\*\))?)\s+"
+    r".*?"
+    r"N\[0\]=(\d+)\s+"
+    r"K\[0\]=(\d+)\s+"
+    r"M=\[([^\]]+)\]\(sum=(\d+)\)\s+"
+    r"fused=\[(.+?)\]\s+"
+    r"sequential_chain=(\d+)\s+"
+    r"time=([\d.eE+-]+)ms"
 )
 
 
@@ -96,6 +130,91 @@ def parse_embedding_line(line, backend):
         return ind, time_ms
 
     return None, None
+
+
+def parse_reorder_line(line, backend):
+    """Parse a Reorder log line and return (ind_key, op_time) or (None, None).
+
+    Three sub-types are supported:
+      - Reorder context create  -> op = reorder_context_create
+      - Reorder operator create -> op = reorder_op_create
+      - Reorder operator execute -> op = reorder
+
+    Returns the same (ind, op_time) tuple format as kv_build_ind.
+    """
+    if "Reorder" not in line:
+        return None, None
+
+    m = _REORDER_OP_EXECUTE_RE.search(line)
+    if m:
+        plugin_op = m.group(1)
+        in_r, in_c = m.group(2), m.group(3)
+        src_dtype = m.group(4)
+        dst_dtype = m.group(7)
+        algo_fmt = m.group(8)
+        time_ms = float(m.group(9))
+        dim = f"{in_r}x{in_c}"
+        data_format = f"src_{src_dtype}::dst_{dst_dtype}"
+        ind = f"reorder,{algo_fmt},{dim},NA,{backend},{data_format},{plugin_op}"
+        return ind, time_ms
+
+    m = _REORDER_CTX_CREATE_RE.search(line)
+    if m:
+        algo_fmt = m.group(1)
+        time_ms = float(m.group(2))
+        ind = f"reorder_context_create,{algo_fmt},NA,NA,{backend},NA"
+        return ind, time_ms
+
+    m = _REORDER_OP_CREATE_RE.search(line)
+    if m:
+        plugin_op = m.group(1)
+        algo_fmt = m.group(2)
+        time_ms = float(m.group(3))
+        ind = f"reorder_op_create,{algo_fmt},NA,NA,{backend},NA,{plugin_op}"
+        return ind, time_ms
+
+    return None, None
+
+
+def parse_grp_matmul_line(line, backend):
+    """Parse a [GRP_MATMUL.CALL] log line and return (ind_key, op_time) or (None, None).
+
+    The dimension is built from sum(M), K, and N as MxK:KxN:MxN (same as
+    regular matmul) where M is the total token count across all experts.
+
+    Returns the same (ind, op_time) tuple format as kv_build_ind.
+    """
+    if "GRP_MATMUL" not in line:
+        return None, None
+
+    m = _GRP_MATMUL_RE.search(line)
+    if not m:
+        return None, None
+
+    num_ops = m.group(1)
+    mode = m.group(2)
+    dtype_str = m.group(4)      # e.g. "bf16>bf16>bf16"
+    N = m.group(8)
+    K = m.group(9)
+    M_sum = m.group(11)         # sum of all M values
+    fused = m.group(12)
+    time_ms = float(m.group(14))
+
+    dim = f"{M_sum}x{K}:{K}x{N}:{M_sum}x{N}"
+
+    dtypes = dtype_str.split(">")
+    if len(dtypes) >= 3:
+        data_format = f"src_{dtypes[0]}::wei_{dtypes[1]}::dst_{dtypes[2]}"
+    else:
+        data_format = f"dtype_{dtype_str}"
+
+    ker = mode.split("(")[0] if "(" in mode else mode
+
+    base_post = fused.replace(",", ";") if fused else "NA"
+    post = f"{base_post}|num_ops={num_ops}"
+
+    ind = f"group_matmul,{ker},{dim},{post},{backend},{data_format}"
+    return ind, time_ms
 
 
 def fix_interleaved_lines(log_text):
@@ -398,19 +517,26 @@ def kv_log_parser(log, backend, safe_mode, log_type, in_sc, t_time=False, specia
                 op_info_dict[ind].append(op_time)
             matched = True
 
-        # Fallback: try embedding parser for lines not matched by KV config
-        if not matched and "Embedding" in j:
-            ind, op_time = parse_embedding_line(j, backend)
-            if ind is not None and op_time is not None:
-                op = ind.split(",")[0]
+        # Fallback: try custom parsers for lines not matched by KV config
+        if not matched:
+            fallback_ind, fallback_time = None, None
+            if "Embedding" in j:
+                fallback_ind, fallback_time = parse_embedding_line(j, backend)
+            elif "Reorder" in j:
+                fallback_ind, fallback_time = parse_reorder_line(j, backend)
+            elif "GRP_MATMUL" in j:
+                fallback_ind, fallback_time = parse_grp_matmul_line(j, backend)
+
+            if fallback_ind is not None and fallback_time is not None:
+                op = fallback_ind.split(",")[0]
                 if safe_mode and op not in SAFE_MODE_OPS:
                     continue
                 if special and op in SAFE_MODE_OPS:
                     continue
-                if ind not in op_info_dict:
-                    op_info_dict[ind] = [op_time]
+                if fallback_ind not in op_info_dict:
+                    op_info_dict[fallback_ind] = [fallback_time]
                 else:
-                    op_info_dict[ind].append(op_time)
+                    op_info_dict[fallback_ind].append(fallback_time)
 
     if t_time:
         try:
