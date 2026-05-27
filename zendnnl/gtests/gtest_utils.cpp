@@ -2241,7 +2241,6 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
           }
           if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
             EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
-            continue;
           }
         }
         id++;
@@ -2415,7 +2414,6 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
           }
           if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
             EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
-            continue;
           }
         }
         id++;

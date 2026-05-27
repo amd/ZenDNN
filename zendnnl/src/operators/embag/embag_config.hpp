@@ -181,8 +181,8 @@ class embag_config_t final : public op_config_t {
   */
   embag_config_t() = default;
 
-  embag_kernel_t embag_kernel;  /**< Embag runtime kernel. */
-  eb_thread_algo_t thread_algo; /**< Thread algorithm. */
+  embag_kernel_t embag_kernel{embag_kernel_t::none};  /**< Embag runtime kernel. */
+  eb_thread_algo_t thread_algo{eb_thread_algo_t::table_threaded}; /**< Thread algorithm. */
   data_type_t embag_accum_type{data_type_t::f32}; /**< Accumulation type for reference kernel. Default F32. */
 };
 

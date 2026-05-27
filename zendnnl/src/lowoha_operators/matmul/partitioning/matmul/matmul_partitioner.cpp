@@ -335,7 +335,7 @@ static const PreDispatchedBrgemm &get_brgemm_context_blocked(
   unsigned long long blk_stride_b = static_cast<unsigned long long>
                                     (bp.n_block_size) * bp.k_block_size * config.src_type_size;
 
-  BrgemmCachedContext ctx;
+  BrgemmCachedContext ctx{};
   ctx.pd = predispatch_brgemm_kernels(
              'N', 'N',
              bp.m_block_size, bp.m_block_rem,
