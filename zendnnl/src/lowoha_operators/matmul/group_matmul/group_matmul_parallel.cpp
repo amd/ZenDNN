@@ -281,14 +281,22 @@ void parallel_per_expert(
 // M-indexed metadata (src_scale/zp {M,1} or {M,G}; 2D binary post-ops)
 // is per-slice mutated in execute_m_tile (buff advance + dims[0]
 // rewrite to slice_M).  Dynamic-quant additionally requires the
-// source quant granularity to be row-local (dims[0] > 1, i.e.
-// {M,1} or {M,G}); per-tensor / per-column / per-channel src layouts
-// are rejected because the per-thread reorder would race on the
-// shared scale/zp buffer and use slice-local statistics.  Still
+// source quant granularity to be row-local (M-indexed): the first
+// dim of src_scale/zp must equal the per-expert `M[i]`, i.e.
+// `{M[i], 1}` per-token or `{M[i], G}` per-group on K.  Per-tensor
+// / per-column / per-channel src layouts (`{}`, `{1}`, `{1, K}`,
+// `{1, N}`, etc.) are rejected because the per-thread reorder
+// would race on the shared scale/zp buffer and produce slice-local
+// statistics instead of the full-matrix statistics those
+// granularities semantically require.  The single-row decode case
+// (`M[i] == 1` with dims `{1, 1}`) is accepted — only one thread
+// reorders that expert's one row, so there is no race and the
+// single scale equals the full-matrix statistic trivially.  Still
 // blocked: packed B (skipped GGML unpack), non-row-major layout,
 // and per-expert dtype mismatches.
 static bool check_m_tile_safe(
   const std::vector<char> &layout,
+  const std::vector<int> &M,
   const std::vector<matmul_params> &params,
   int num_ops) {
   // Iterate the active range only: when the framework signals
@@ -323,25 +331,40 @@ static bool check_m_tile_safe(
     if (params[i].packing.pack_format_b != 0) {
       return false;
     }
-    // Dynamic-quant under M-tile only works when the source quant
-    // granularity is row-local (M-indexed): each per-thread reorder
-    // operates on its slice's rows independently, writes to a
-    // disjoint slice of the scale/zp buffer, and produces stats
-    // that match the granularity contract.  Layouts where the first
-    // dim is not M — per-tensor (`{}` / `{1}` / `{1, 1}`), per-column
-    // (`{1, K}`), per-channel-on-src (`{1, N}`), etc. — would race
-    // on the shared scale/zp buffer AND each thread would compute
-    // slice-local statistics instead of the full-matrix statistics
-    // those granularities semantically require.  `offset_quant_by_row`
-    // silently no-ops on those layouts (no row dim to slice), so we
-    // must reject upstream.
+    // Dynamic-quant row-locality check.  The first dim of
+    // src_scale/zp must equal this expert's `M[i]`:
+    //
+    //   * `{M[i], 1}`  — per-token (one scale per row), the
+    //                    canonical dynamic-INT8 shape.
+    //   * `{M[i], G}`  — per-group on K (one scale per row per
+    //                    K-group), also row-local.
+    //
+    // For both shapes `offset_quant_by_row` cleanly splits the
+    // scale buffer onto disjoint per-thread slices, and each
+    // thread's reorder operates on its own rows in isolation.
+    //
+    // Rejected (first dim != M[i]):
+    //
+    //   * Per-tensor (`{}`, `{1}`, `{1, 1}` on M > 1) — every
+    //     thread would write the same global slot.
+    //   * Per-column / per-channel-on-src (`{1, K}`, `{1, N}`) —
+    //     same shared-write race, and each slice would compute
+    //     statistics over the wrong subset.
+    //
+    // Special case `M[i] == 1`: dims `{1, 1}` is BOTH per-tensor
+    // and per-token (one scale = one row).  Accepted because the
+    // M-tile executor only assigns one productive thread to a
+    // one-row expert (`slice_M = 1`); no race, and the slice's
+    // single-row max-abs IS the full-matrix max-abs.  This is the
+    // common sparse-MoE decode pattern where some experts receive
+    // exactly one token.
     if (params[i].dynamic_quant) {
       const auto &sd = params[i].quant_params.src_scale.dims;
-      if (sd.empty() || sd[0] <= 1) {
+      if (sd.empty() || sd[0] != static_cast<int64_t>(M[i])) {
         return false;
       }
       const auto &zd = params[i].quant_params.src_zp.dims;
-      if (!zd.empty() && zd[0] <= 1) {
+      if (!zd.empty() && zd[0] != static_cast<int64_t>(M[i])) {
         return false;
       }
     }
@@ -355,11 +378,14 @@ static bool check_m_tile_safe(
   return true;
 }
 
-// N-tile (ALGO 3) adds additional restrictions on top of the M-tile
-// invariants: it slices columns of B, so any quantization metadata /
-// packed-B / binary post-op buffer is disqualifying because none of
-// them can be column-sliced without a dims update we don't do here.
-// Only buffer-free element-wise post-ops (gelu, relu, swish, …) pass.
+// N-tile (ALGO 3) slices columns of B, so the executor must be able
+// to re-anchor any N-indexed metadata (weight scales / zero-points,
+// binary post-op tensors, packed-B tables) onto each thread's
+// `[col_start, col_start + n_tile)` window before the kernel call.
+// This helper enumerates which configurations the column-slicer in
+// `group_matmul_n_tile.cpp::do_tile` actually supports today and
+// rejects the rest.  Buffer-free element-wise post-ops (gelu, relu,
+// swish, …) always pass.
 //
 // SCOPE NOTE — what `n_tile_safe = false` actually does to a
 // quantised workload's routing.
@@ -374,8 +400,9 @@ static bool check_m_tile_safe(
 //       auto-select rule (see `auto_select_algo` below) picks
 //       ALGO 3 in two cases — `num_ops >= num_threads` (Qwen-style)
 //       and the M-driven decode arrow (`max_M <= kDecodeMaxM`).
-//       Both honour `n_tile_safe`; on quantised inputs both arrows
-//       collapse to ALGO 1.  (Rule 0's capacity carve-out routes
+//       Both honour `n_tile_safe`; on quantised inputs that fall
+//       outside the supported sub-set below, both arrows collapse
+//       to ALGO 1.  (Rule 0's capacity carve-out routes
 //       `num_ops > kNTilePlanMaxExperts` to ALGO 5 before either
 //       ALGO 3 arrow can fire, so it is unaffected by n_tile_safe.)
 //
@@ -384,41 +411,109 @@ static bool check_m_tile_safe(
 //       (m_tile_safe is checked separately for ALGO 2; ALGO 1/4/5
 //       have no tile-safety gate).
 //
-//   So the `*_buff != nullptr` checks below reject ALL quantised
-//   workloads (static int8 A8W8, weight-only-quant s8/s4 + bf16
-//   src, dynamic-quant s8 + bf16/f32 src driving the source-side
-//   `reorder_quantization_wrapper`) FROM the ALGO 3 candidate set
-//   only — those callers reach ALGO 1 via the auto-select redirect
-//   (any rule that would have picked ALGO 3 falls back to ALGO 1
-//   when `n_tile_safe == false`) or via the forced env=3 rejection
-//   path, OR ALGO 4 / ALGO 2 / ALGO 5 if the framework forced one
-//   of those (m_tile_safe is the gate for ALGO 2; ALGO 4 / ALGO 5
-//   have no quant guard today).
+//   What N-tile accepts today is intentionally one single shape:
+//   the per-token dynamic-INT8 deployment.  ALL of the following
+//   must hold simultaneously for ALGO 3 to be selected on a
+//   quantised call:
 //
-//   The rejection is **conservative** — per-tensor and per-token
-//   (M-axis) quant cases are actually safe under N-tile column
-//   slicing, but the executor (`do_tile` in
-//   group_matmul_n_tile.cpp) does not yet column-slice per-channel
-//   wei_scale / wei_zp by `[col_start, col_end)`, so we err on the
-//   safe side and reject the whole class.  Opening up the safe
-//   sub-set on N-tile is tracked as a separate feature item — it
-//   mirrors the M-tile work in #458 (dynamic-quant on `{M,...}`
-//   src_scale layouts) but on the column axis.  The custom BF16
-//   microkernel is bf16×bf16→bf16 only and refuses every non-bf16
-//   combo at `prepare_for_call`, so even if a future change
-//   relaxed this gate, int8 N-tile would route through AOCL DLP
-//   int8, never through the custom kernel.
+//     * `params[i].dynamic_quant == true` — runtime BF16/F32→S8
+//       source reorder is required.  Static src quant (where the
+//       caller pre-quantised src and passed `src_scale.buff`)
+//       falls back to ALGO 1.  This is a deliberate scope
+//       restriction — static src + per-channel wei works
+//       structurally, but the current deployment target is
+//       dynamic-INT8 and the static path stays on ALGO 1 until
+//       there's a reason to widen it.
 //
-//   `params[i].dynamic_quant` is rejected explicitly even though
-//   today's typical dynamic-quant deployments also carry a non-null
-//   `wei_scale.buff` (the s8 matmul kernel needs it for
-//   dequantisation) and so are rejected indirectly.  Documenting
-//   the intent at the gate keeps a future caller / dtype combo that
-//   nullifies wei_scale (e.g. a self-derived weight-scale path)
-//   from silently letting `reorder_quantization_wrapper` fire
-//   per-thread inside `execute_expert_slice` — that wrapper takes
-//   full (M, K) and would run redundantly N_threads times per call,
-//   with potential data races on any caller-shared scale buffer.
+//     * src_scale dims `{M[i], 1}` — per-token granularity (one
+//       scale per row, scalar across K).  `buff` is null on entry
+//       (the pre-OMP hoist loop in `flat_n_tile` allocates the
+//       internal scale buffer and the wrapper writes the computed
+//       per-row scales into it); the caller need only populate
+//       `src_scale.dims` and `src_scale.dt`.  The single-row
+//       decode case `{1, 1}` is accepted when `M[i] == 1` — the
+//       hoist runs the source reorder once for that expert's one
+//       row, no parallelism splitting is needed and N-tile
+//       threads share the resulting scalar scale read-only.
+//       Other row-local granularities such as `{M[i], G}`
+//       per-group on K — which `check_m_tile_safe` would accept
+//       — are rejected here.
+//
+//     * wei_scale dims `{N}` or `{1, N}` with `buff != nullptr`
+//       — per-channel granularity, statically quantised by the
+//       caller.  Per-tensor (`{}`, `{1}`) and per-group `{G, N}`
+//       wei are both rejected.  Sliced per-thread by
+//       `offset_quant_by_col` (advances `buff` by
+//       `col_start × elem_size`; rewrites the trailing dim to
+//       `n_tile`); the AOCL DLP / native int8 kernels detect
+//       per-channel via `qsize == N` and index the sliced buffer
+//       with `scale[col]` for `col ∈ [0, n_tile)`.
+//
+//     * Optional asymmetry: `src_zp` (if `buff` non-null) must
+//       be `{M[i], 1}` per-token; `wei_zp` (if `buff` non-null)
+//       must be per-channel `{N}` / `{1, N}` matching wei_scale.
+//
+//   The `params[i].dynamic_quant` flag controls the SOURCE side
+//   ONLY.  The WEIGHT side is ALWAYS statically quantised — the
+//   caller pre-quantises the weights offline and hands the
+//   library a non-null `wei_scale.buff`.  There is no "dynamic
+//   weight quant" concept in the API, and the AOCL DLP / native
+//   int8 kernels don't support one either (runtime weight
+//   reorder would have to fire on every call and re-key the
+//   weight-reorder cache against per-call scale data).
+//
+//   End-to-end this is the dynamic INT8 per-token + per-channel
+//   wei case.  `flat_n_tile`'s pre-OMP hoist loop runs the
+//   SOURCE-side reorder ONCE per expert and stashes the resulting
+//   S8 src + scale buffer in a `HoistedSrcQuant` slot; per-tile
+//   threads then read the shared S8 src + the column-sliced wei
+//   scale.  Without the hoist, the source-side reorder inside
+//   `execute_expert_slice` would race on the caller's scale
+//   buffer and duplicate the (M, K) work `num_threads` times per
+//   call.
+//
+//   What N-tile rejects (everything outside the single accepted
+//   shape):
+//
+//     A. Static source quantisation (`dynamic_quant == false`)
+//        — regardless of src / wei granularity.
+//
+//     B. Per-tensor weight or source scale (`{}`, `{1}`, or any
+//        product-1 shape).
+//
+//     C. Per-group weight scale `{G, N}` with `G > 1`.  The
+//        column slice is `G` non-contiguous strips of length
+//        `n_tile` in the original buffer; supporting it would
+//        require a per-thread `G × n_tile` repack scratch that
+//        is intentionally absent in this scope.
+//
+//     D. Per-group source scale `{M[i], G}` with `G > 1`
+//        (per-group on K).  Mechanically safe under N-tile column
+//        slicing (K is N-independent) but excluded from the
+//        current scope.
+//
+//     E. Pure WOQ S4 / U4 / S8 (caller provides wei_scale but no
+//        src_scale, and `dynamic_quant == false`).  Stays on
+//        ALGO 1.
+//
+//     F. Binary post-op tensors with non-null `buff`
+//        (`binary_add` / `binary_mul`) — these can have N-indexed
+//        layouts (`{N}`, `{1, N}`, `{M, N}`) that need the same
+//        column-slice treatment.  The slicer is not yet wired
+//        for post-ops; reject for now.
+//
+//   The `check_m_tile_safe` precondition still applies — it
+//   gates dynamic_quant to row-local granularities
+//   (`src_scale.dims[0] == M[i]`).  With the per-token-only src
+//   gate below, the only granularity that passes BOTH checks is
+//   `{M[i], 1}` (including the single-row `M[i] == 1` decode
+//   case, where `{1, 1}` is the per-token shape for a one-token
+//   expert).
+//
+//   The custom BF16 microkernel is bf16×bf16→bf16 only and refuses
+//   every non-bf16 combo at `prepare_for_call`, so int8 callers
+//   always route through AOCL DLP int8 regardless of the
+//   custom-kernel env flag.
 //
 // PRECONDITION: the caller has already run `check_m_tile_safe` and
 // confirmed it returned true.  This helper intentionally does NOT
@@ -426,35 +521,104 @@ static bool check_m_tile_safe(
 // always calls M-tile first and only invokes this when m_tile_safe is
 // true, so a second pass would just be duplicated work.
 static bool check_n_tile_extra(
+  const std::vector<int> &M,
   const std::vector<matmul_params> &params,
   int num_ops) {
+  // Per-channel weight side: dims must be exactly `{N}` (rank-1) or
+  // `{1, N}` (rank-2 with broadcast outer dim).  `buff` must be
+  // non-null (wei is always statically quantised by the caller).
+  // The column slice is a contiguous `n_tile`-long sub-array —
+  // handled by `offset_quant_by_col` in `do_tile`.
+  auto is_per_channel_wei =
+      [](const matmul_quantization_params_t::matmul_quant_t &q) -> bool {
+    if (q.buff == nullptr) return false;
+    if (q.dims.size() == 1 && q.dims[0] > 1) return true;
+    if (q.dims.size() == 2 && q.dims[0] == 1 && q.dims[1] > 1) return true;
+    return false;
+  };
+
+  // Per-token source side: dims must be exactly `{M[i], 1}`
+  // (rank-2, first dim equals this expert's row count, scalar
+  // across K).  The `M[i]` match is the key row-locality signal —
+  // it excludes per-tensor / per-column / per-channel-on-src
+  // layouts where the first dim is 1 (or empty) while accepting
+  // the single-row decode case `M[i] == 1` with dims `{1, 1}`.
+  //
+  // We only accept the dynamic-quant form, so `buff` is expected
+  // to be `nullptr` on entry — the pre-OMP hoist loop in
+  // `flat_n_tile` allocates the internal scale buffer from the
+  // dims.  A non-null `buff` would imply the caller pre-quantised
+  // src, which is the static path the scope intentionally
+  // excludes.
+  auto is_per_token_dyn_src =
+      [](const matmul_quantization_params_t::matmul_quant_t &q,
+         int M_expert) -> bool {
+    return q.dims.size() == 2
+        && q.dims[0] == static_cast<int64_t>(M_expert)
+        && q.dims[1] == 1;
+  };
+
   // Same active-range constraint as `check_m_tile_safe` above —
   // tail slots carry framework prepack metadata, not real per-call
   // state, and would falsely flip n-tile-safe to false.
   for (int i = 0; i < num_ops; ++i) {
-    // Static / WoQ: caller-provided scales / zero-points on either
-    // src or wei side.  See SCOPE NOTE above.
-    if (params[i].quant_params.wei_scale.buff != nullptr) {
-      return false;
+    const auto &qp = params[i].quant_params;
+
+    // Detect any quant intent on this expert.  If every quant field
+    // is empty AND `dynamic_quant` is false, this is a pure
+    // non-quantised call and there's nothing to gate — ALGO 3 is
+    // free to run.
+    const bool any_quant =
+        qp.wei_scale.buff != nullptr ||
+        qp.wei_zp.buff   != nullptr ||
+        qp.src_scale.buff != nullptr ||
+        qp.src_zp.buff   != nullptr ||
+        params[i].dynamic_quant;
+
+    if (any_quant) {
+      // Dynamic source quant is the ONLY src-side shape we accept.
+      // Static src (caller pre-quantised, `dynamic_quant == false`)
+      // is rejected even when src/wei dims match the per-token /
+      // per-channel layouts — keep the gate single-shape.
+      if (!params[i].dynamic_quant) {
+        return false;
+      }
+
+      // Source dims: `{M[i], 1}` per-token (including `M[i] == 1`
+      // → `{1, 1}`, the single-token-per-expert decode case).
+      // Buff is expected to be null (hoist allocates).  A non-null
+      // buff here would be a caller pre-fill on a dynamic-quant
+      // call — rare but not technically wrong; the wrapper will
+      // overwrite it anyway.  We don't gate on buff here because
+      // that nullness is a hoist-allocation contract, not a
+      // per-token-scope contract.
+      if (!is_per_token_dyn_src(qp.src_scale, M[i])) {
+        return false;
+      }
+      if (qp.src_zp.buff != nullptr &&
+          !is_per_token_dyn_src(qp.src_zp, M[i])) {
+        return false;
+      }
+
+      // Weight side: exactly per-channel `{N}` / `{1, N}` with a
+      // non-null buff.  Per-tensor and per-group `{G, N}` wei are
+      // both rejected.
+      if (!is_per_channel_wei(qp.wei_scale)) {
+        return false;
+      }
+      // wei_zp: either symmetric (`buff == nullptr`) or per-channel
+      // matching wei_scale's granularity.
+      if (qp.wei_zp.buff != nullptr && !is_per_channel_wei(qp.wei_zp)) {
+        return false;
+      }
     }
-    if (params[i].quant_params.wei_zp   .buff != nullptr) {
-      return false;
-    }
-    if (params[i].quant_params.src_scale.buff != nullptr) {
-      return false;
-    }
-    if (params[i].quant_params.src_zp   .buff != nullptr) {
-      return false;
-    }
-    // Dynamic quant: the source-side `reorder_quantization_wrapper`
-    // would fire inside every per-thread `execute_expert_slice` and
-    // operate on the full (M, K) (since N-tile shares src across
-    // column threads).  Even if all `*_buff` were null today, the
-    // wrapper would still race on caller-shared output buffers and
-    // duplicate work N_threads times.  Reject explicitly.
-    if (params[i].dynamic_quant) {
-      return false;
-    }
+
+    // Buffer-bearing post-ops (binary_add / binary_mul) may carry
+    // N-indexed layouts (`{N}`, `{1, N}`, `{M, N}`) that need the
+    // same column-slice treatment as wei_scale.  The slicer is not
+    // yet wired for post-ops; keep them rejected.  Buffer-free
+    // elementwise post-ops (gelu, relu, swish, …) have null `buff`
+    // and pass through.
     for (const auto &po : params[i].postop_) {
       if (po.buff != nullptr) {
         return false;
@@ -647,9 +811,9 @@ int select_grp_matmul_algo(
   // rather than `params.size()` (which still carries the framework's
   // prepack-extras tail).
   const int num_ops_eff = static_cast<int>(M.size());
-  const bool m_tile_safe = check_m_tile_safe(layout, params, num_ops_eff);
+  const bool m_tile_safe = check_m_tile_safe(layout, M, params, num_ops_eff);
   const bool n_tile_safe = m_tile_safe
-      && check_n_tile_extra(params, num_ops_eff);
+      && check_n_tile_extra(M, params, num_ops_eff);
 
   // Manual override: ZENDNNL_GRP_MATMUL_ALGO=1..5.
   //   ALGO 2 (M-tile): needs m_tile_safe (row-major, uniform dtypes).
@@ -675,7 +839,9 @@ int select_grp_matmul_algo(
             "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) "
             "REJECTED: m_tile unsafe (non-row-major, per-expert dtype "
             "mismatch, packed B, softmax/pooling post-op, or "
-            "dynamic-quant with non-row-local src granularity). "
+            "dynamic-quant with non-row-local src granularity — "
+            "src_scale.dims[0] must equal the per-expert M[i], "
+            "including the M[i]=1 decode case `{1, 1}`). "
             "FALLBACK algo=1 (sequential_experts).");
       }
       algo = 1;
@@ -684,12 +850,19 @@ int select_grp_matmul_algo(
       static const bool s_log = apilog_warning_enabled();
       if (s_log) {
         apilog_warning(
-            "[GRP_MATMUL.ALGO WARN] env_algo=3 (flat_n_tile) "
-            "REJECTED: n_tile unsafe (non-row-major, dtype mismatch, "
-            "quantised weights or src scales, dynamic source "
-            "quantisation, or buffer post-op).  See "
-            "`check_n_tile_extra` SCOPE NOTE for why all quantised "
-            "paths today fall back to ALGO 1.  "
+            "[GRP_MATMUL Level2 dispatch WARN] env_algo=3 (flat_n_tile) "
+            "REJECTED: n_tile unsafe.  Common rejection reasons: "
+            "non-row-major layout, per-expert dtype mismatch, "
+            "buffer post-op, or a quant configuration outside the "
+            "per-token dynamic-INT8 scope.  ALGO 3 currently "
+            "accepts ONE quant shape: `dynamic_quant=true` with "
+            "`{M[i], 1}` src (the single-row decode case "
+            "`{1, 1}` when M[i]=1 is included) + per-channel "
+            "`{1, N}` wei (statically quantised wei buff supplied "
+            "by caller).  Static src, per-tensor src/wei, "
+            "per-group `{M[i], G}` src, per-group `{G, N}` wei, "
+            "and pure WOQ workloads stay on ALGO 1.  See "
+            "`check_n_tile_extra` SCOPE NOTE for the full table.  "
             "FALLBACK algo=1 (sequential_experts).");
       }
       algo = 1;

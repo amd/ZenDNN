@@ -78,6 +78,72 @@ using zendnnl::common::bfloat16_t;
 namespace {
 
 // =====================================================================
+// Column-slice helper for per-channel weight quantization metadata
+// =====================================================================
+//
+// N-tile slices columns of B (and dst), so per-channel weight scales
+// / zero-points need to be re-anchored to each thread's column range
+// `[col_start, col_start + n_tile)` before the kernel call.
+//
+// Layouts handled here:
+//
+//   * Per-tensor (`dims = {}`, `{1}`, or any shape whose product is
+//     1) — single value applies to all columns; no-op.
+//
+//   * Per-channel (`dims = {N}` or `{1, N}`) — one value per output
+//     column, laid out contiguously.  The slice is a contiguous
+//     `n_tile`-long sub-array, so advance `buff` by
+//     `col_start * size_of(dt)` and rewrite the trailing dim to
+//     `n_tile`.  The backend (e.g. `cvt_4bit_to_bf16` in
+//     `aocl_kernel.cpp`) detects per-channel via `qsize == N`, so
+//     once we present `dims_back == n_tile` and the sliced buffer
+//     the kernel's `compute_quant_offset` returns `col`
+//     (`∈ [0, n_tile)`) and indexes the sliced buffer correctly.
+//
+// Per-group on K (`{G, N}` with `G > 1`) is NOT handled here —
+// `check_n_tile_extra` rejects it from the per-token-dynamic scope
+// the gate currently allows.  Supporting per-group would require a
+// per-thread `G × n_tile` repack scratch (because the column slice
+// is `G` non-contiguous strips in the original buffer); the
+// machinery is intentionally absent from this helper until a
+// deployment needs it.
+//
+// Other shapes silently no-op (defensive — upstream gate already
+// filters them out).
+//
+// The helper takes a non-const reference because the call site
+// operates on a `thread_local` copy of `params[e]`, never the
+// caller's shared `params[]` vector — so the in-place mutation is
+// safe.
+inline void offset_quant_by_col(
+    matmul_quantization_params_t::matmul_quant_t &q,
+    int col_start, int n_tile) {
+  if (q.buff == nullptr || q.dims.empty()) return;
+  int64_t nelems = 1;
+  for (auto d : q.dims) {
+    if (d <= 0) return;
+    nelems *= d;
+  }
+  if (nelems <= 1) return;  // Per-tensor — no slicing.
+
+  // Per-channel detection: rank-1 `{N}` or rank-2 `{1, N}`.  The
+  // back-dim carries the column count in both cases.  Any other
+  // shape is left untouched — `check_n_tile_extra` is the
+  // authoritative gate for what reaches this helper.
+  const auto &dims = q.dims;
+  const bool per_channel_1d = (dims.size() == 1);
+  const bool per_channel_2d = (dims.size() == 2 && dims[0] == 1);
+  if (!(per_channel_1d || per_channel_2d)) return;
+
+  const size_t elem = size_of(q.dt);
+  if (elem == 0) return;
+
+  q.buff = static_cast<const uint8_t *>(q.buff)
+      + static_cast<size_t>(col_start) * elem;
+  q.dims.back() = static_cast<int64_t>(n_tile);
+}
+
+// =====================================================================
 // Section A — Data structures
 // =====================================================================
 //
@@ -88,6 +154,35 @@ namespace {
 // `GroupNTileContext` stays here because it captures the caller's
 // `std::vector<…> &` inputs by reference (impl-only, owned by one
 // `flat_n_tile()` invocation).
+
+// Hoisted source-side dynamic-quant state per expert.  Populated by
+// `flat_n_tile`'s pre-OMP hoist loop for every expert that has
+// `params[e].dynamic_quant == true`: a single-shot
+// `reorder_quantization_wrapper` runs ahead of the parallel region
+// (with the full thread team driving the internal reorder kernel)
+// and the resulting S8 source + per-token / per-group scale buffer
+// are then SHARED — read-only — by every per-tile thread inside the
+// OMP region.  Without hoisting, each N-tile thread would
+// independently allocate its own M × K S8 scratch and either race
+// on the caller's scale buffer (when caller pre-allocated it) or
+// duplicate the (M, K) reorder `num_threads` times per call.
+//
+// Lifetime: the backing `reorder_quant_buffers_t` RAII vector lives
+// on `flat_n_tile`'s stack and outlives the OMP region; the OMP
+// region only reads from those buffers.  All `do_tile()` does is
+// pull the substitute `src_ptr` / `lda` / dtype / scale-and-zp out
+// of the slot and overwrite its thread-local `tile_params` so the
+// wrapper inside `execute_expert_slice` sees `dtypes.src == s8` and
+// short-circuits (its `eligible` check requires src dtype to still
+// be bf16 / f32 — the hoist has already rewritten it).
+struct HoistedSrcQuant {
+  const void *src_ptr = nullptr;
+  int lda = 0;
+  data_type_t src_dtype = data_type_t::none;
+  matmul_quantization_params_t::matmul_quant_t src_scale;
+  matmul_quantization_params_t::matmul_quant_t src_zp;
+  bool valid = false;
+};
 
 // Bundle every reference / dtype-size the executors and per-thread
 // tile primitives need.  Cuts the per-call argument list down to
@@ -157,6 +252,21 @@ struct GroupNTileContext {
   // (not owned) so the ctx struct itself stays copyable-by-reference
   // across the parallel region.
   std::atomic<int> *alloc_fail = nullptr;
+
+  // Per-expert hoisted source dynamic-quant state.  Non-null when
+  // `flat_n_tile` ran the pre-OMP hoist loop (i.e. at least one
+  // active expert has `params[e].dynamic_quant == true`); each
+  // active expert's slot is populated with `valid = true` if the
+  // wrapper successfully replaced its bf16/f32 src with an S8 buffer
+  // and computed/captured the corresponding scale (and zp) buffer.
+  // `do_tile()` and `execute_sequential()` check the per-expert
+  // `valid` flag and, when set, substitute the hoisted state into
+  // their `tile_params` / src pointer / lda before calling
+  // `execute_expert_slice` — see the struct's doc-block above for
+  // the full lifetime + correctness argument.  Pointer (not owned)
+  // because the backing vector lives on `flat_n_tile`'s stack; the
+  // OMP region only reads it.
+  const std::vector<HoistedSrcQuant> *hoisted_src_quant = nullptr;
 
   // Returns the number of threads that share the work for expert `e`
   // in a team of `team_size`.  Used by `do_tile()` (column split for
@@ -319,6 +429,49 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan,
   static thread_local matmul_params tile_params;
   tile_params = params[e];
 
+  // ── Hoisted dynamic-quant source substitution ──────────────────────
+  // When `flat_n_tile` ran the pre-OMP hoist loop for this expert,
+  // swap the bf16/f32 caller src for the shared S8 reorder result
+  // and rewrite this thread's `tile_params` so the wrapper inside
+  // `execute_expert_slice` sees `dtypes.src == s8` and short-circuits
+  // (otherwise every N-tile thread would re-run the wrapper on the
+  // full (M, K) source — racing on the caller-shared scale buffer
+  // and duplicating the reorder work `num_threads` times per call).
+  // `src_for_tile` / `lda_for_tile` default to the caller's vectors
+  // when no hoist happened (legacy bf16 / static-quant / WOQ paths).
+  const void *src_for_tile = src[e];
+  int lda_for_tile = lda[e];
+  if (hoisted_src_quant != nullptr
+      && static_cast<size_t>(e) < hoisted_src_quant->size()
+      && (*hoisted_src_quant)[e].valid) {
+    const auto &h = (*hoisted_src_quant)[e];
+    src_for_tile = h.src_ptr;
+    lda_for_tile = h.lda;
+    tile_params.dtypes.src = h.src_dtype;
+    tile_params.quant_params.src_scale = h.src_scale;
+    tile_params.quant_params.src_zp = h.src_zp;
+  }
+
+  // ── Column-slice per-channel weight quantization metadata ───────────
+  // N-tile slices columns of B; per-channel weight scales /
+  // zero-points (`{N}` or `{1, N}`) need their pointer advanced by
+  // `col_start × elem_size` and the trailing dim rewritten to
+  // `n_tile`.  Per-tensor scales are a no-op.  Per-group `{G, N}`
+  // wei is rejected by `check_n_tile_extra` (the current scope only
+  // admits dynamic INT8 per-token + per-channel wei).
+  //
+  // Source-side scales reach the kernel in one of two forms — both
+  // N-independent and untouched by this slicer:
+  //   (a) the `{M, 1}` dims left over from the caller when static
+  //       src quant was supplied (not currently in scope, but the
+  //       slicer would no-op either way);
+  //   (b) the hoisted dynamic-quant result substituted above (the
+  //       `HoistedSrcQuant` block) — also N-independent.
+  offset_quant_by_col(tile_params.quant_params.wei_scale,
+                      col_start, n_tile);
+  offset_quant_by_col(tile_params.quant_params.wei_zp,
+                      col_start, n_tile);
+
   // ── Tight-fused-epilogue path (non-custom + swiglu + tight dst) ────
   // Caller's dst is a tight [M, I]-layout buffer (ldc < N).  The
   // classic matmul-then-in-place-compact pattern can't run here (no
@@ -375,7 +528,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan,
     // arena always passes beta=0 here.
     execute_expert_slice(layout[e], transA[e], transB[e],
         M[e], n_tile, K[e], alpha[e],
-        src[e], lda[e], w, ldb[e],
+        src_for_tile, lda_for_tile, w, ldb[e],
         b, beta[e], scratch.buf, n_tile,
         is_weights_const[e], 1, tile_params, plan.algo);
 
@@ -397,14 +550,20 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan,
   auto *d = static_cast<char *>(dst[e])
       + static_cast<size_t>(col_start) * dst_elem;
 
-  // Quantization is blocked upstream by n_tile_safe (quant dims
-  // metadata cannot be safely column-sliced without updating dims
-  // to match n_tile).  Post-ops with buffers (binary_add/mul) are
-  // also blocked by n_tile_safe.  Only buffer-free element-wise
-  // activations reach this path.
+  // Per-channel weight quant (`{N}` / `{1, N}`) has already been
+  // column-sliced into `tile_params` above; per-tensor wei quant and
+  // M-indexed (`{M, *}`) src quant pass through unchanged because
+  // they have no N-axis dependency.  Dynamic source quant has
+  // already been hoisted into `src_for_tile` / `lda_for_tile` /
+  // `tile_params` above — its wrapper short-circuits inside
+  // `execute_expert_slice` (`dtypes.src` is now s8).  Per-group
+  // weight quant (`{G, N}`) and post-ops with buffers
+  // (binary_add/mul) remain blocked by `check_n_tile_extra` — they
+  // would each require additional per-thread repack machinery not
+  // present here.
   execute_expert_slice(layout[e], transA[e], transB[e],
       M[e], n_tile, K[e], alpha[e],
-      src[e], lda[e], w, ldb[e],
+      src_for_tile, lda_for_tile, w, ldb[e],
       b, beta[e], d, ldc[e],
       is_weights_const[e], 1, tile_params, plan.algo);
 }
@@ -1722,6 +1881,27 @@ inline void execute_sequential(const GroupNTilePlan &plan,
     // tight dst — a silent corruption of the activation output when
     // the planner happens to pick Sequential on a tight-caller frame
     // (typically very small M / num_ops <= 3 shapes).
+    // Hoisted dynamic-quant source substitution.  Sequential runs
+    // one expert at a time with the full thread team, so the
+    // wrapper inside `execute_expert_slice` would NOT race if we
+    // skipped this — but we honour the hoisted state when present
+    // so the planner-level decision ("dynamic-quant src has been
+    // hoisted for the entire flat_n_tile call") stays uniform across
+    // all strategies and the redundant per-expert wrapper call is
+    // saved.  Identical substitution semantics to `do_tile()`.
+    const void *src_for_call = ctx.src[e];
+    int lda_for_call = ctx.lda[e];
+    if (ctx.hoisted_src_quant != nullptr
+        && static_cast<size_t>(e) < ctx.hoisted_src_quant->size()
+        && (*ctx.hoisted_src_quant)[e].valid) {
+      const auto &h = (*ctx.hoisted_src_quant)[e];
+      src_for_call = h.src_ptr;
+      lda_for_call = h.lda;
+      local_params.dtypes.src = h.src_dtype;
+      local_params.quant_params.src_scale = h.src_scale;
+      local_params.quant_params.src_zp = h.src_zp;
+    }
+
     const bool tight_caller = plan.fused_epilogue
                               && ctx.ldc[e] < ctx.N[e];
     if (tight_caller) {
@@ -1737,7 +1917,7 @@ inline void execute_sequential(const GroupNTilePlan &plan,
       }
       execute_expert_slice(ctx.layout[e], ctx.transA[e], ctx.transB[e],
           ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e],
-          ctx.src[e], ctx.lda[e], ctx.weight[e], ctx.ldb[e],
+          src_for_call, lda_for_call, ctx.weight[e], ctx.ldb[e],
           ctx.bias[e], ctx.beta[e], scratch.buf, ctx.N[e],
           ctx.is_weights_const[e], plan.num_threads, local_params,
           plan.algo);
@@ -1774,7 +1954,7 @@ inline void execute_sequential(const GroupNTilePlan &plan,
     // Wide path (default).
     execute_expert_slice(ctx.layout[e], ctx.transA[e], ctx.transB[e],
         ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e],
-        ctx.src[e], ctx.lda[e], ctx.weight[e], ctx.ldb[e],
+        src_for_call, lda_for_call, ctx.weight[e], ctx.ldb[e],
         ctx.bias[e], ctx.beta[e], ctx.dst[e], ctx.ldc[e],
         ctx.is_weights_const[e], plan.num_threads, local_params, plan.algo);
     if (plan.fused_epilogue) {
@@ -2440,6 +2620,94 @@ void flat_n_tile(
   // stable address across the parallel region.
   std::atomic<int> alloc_fail{0};
 
+  // ── Hoisted dynamic-quant source reorder (per-expert, pre-OMP) ─────
+  // For every active expert with `params[e].dynamic_quant == true`,
+  // run `reorder_quantization_wrapper` here — ONCE, single-threaded
+  // over experts but with the full thread team driving the internal
+  // reorder kernel — and stash the resulting (S8 src, src_scale,
+  // src_zp) tuple in `hoisted[e]`.  The per-tile OMP threads inside
+  // `do_tile()` then read from those shared buffers (read-only
+  // across the team), avoiding both the caller-shared-buffer race
+  // and the `num_threads × O(M × K)` duplicated reorder work that
+  // would otherwise happen if each thread ran the wrapper inside
+  // `execute_expert_slice`.
+  //
+  // `hoist_buffers` owns the malloc'd S8 / scale / zp buffers via
+  // RAII; both vectors live on this function's stack for the entire
+  // duration of the OMP region below, so the shared reads remain
+  // valid.  When a slot stays `.valid = false` (no dynamic_quant on
+  // that expert, or the wrapper short-circuited because the dtype
+  // combo wasn't eligible), `do_tile` and `execute_sequential` fall
+  // back to the caller's original `src[e]` / `lda[e]`.
+  //
+  // Reached only when `check_n_tile_extra` accepted `dynamic_quant`,
+  // which is paired with `check_m_tile_safe`'s row-local granularity
+  // gate (`src_scale.dims[0] == M[i]`).  After both gates the only
+  // surviving src granularity is per-token `{M[i], 1}` (including
+  // the `M[i] == 1` decode case where dims are `{1, 1}` and the
+  // hoist runs a single-row reorder).  Per-tensor on M > 1 inputs,
+  // per-column, per-channel-on-src, and per-group `{M[i], G}` on K
+  // (which `check_m_tile_safe` would accept but `check_n_tile_extra`
+  // rejects) all route to ALGO 1 instead.
+  std::vector<reorder_quant_buffers_t> hoist_buffers(num_ops);
+  std::vector<HoistedSrcQuant> hoisted(num_ops);
+  bool any_hoist = false;
+  for (int e = 0; e < num_ops; ++e) {
+    if (M[e] <= 0 || !params[e].dynamic_quant) continue;
+
+    // Single-shot reorder: build a local `shadow` of `params[e]`
+    // because the wrapper mutates its `matmul_params &` argument
+    // (`dtypes.src`, `quant_params.src_scale.buff`, etc.).  We do
+    // NOT want to touch the caller's shared `params[e]` — the per-
+    // tile threads will copy from it independently and then layer
+    // the hoisted state on top via `tile_params = params[e]`
+    // followed by the `(*hoisted_src_quant)[e]` overrides.
+    matmul_params shadow = params[e];
+    const void *src_e = src[e];
+    int reordered_lda = lda[e];
+    size_t src_type_size = size_of(shadow.dtypes.src);
+    matmul_batch_params_t bp;
+    bp.Batch_A = 1;
+    bp.Batch_B = 1;
+
+    const status_t s = reorder_quantization_wrapper(
+        src_e, lda[e], reordered_lda, src_type_size,
+        shadow, bp, transA[e], M[e], K[e],
+        num_threads, hoist_buffers[e]);
+
+    if (s != status_t::success) {
+      // Validation failure (bad dims, missing required buf for an
+      // asymmetric u8 quant, etc.).  Without a usable hoisted src
+      // we cannot proceed — the per-thread wrapper inside
+      // `execute_expert_slice` would either fail the same way or
+      // race on caller buffers.  Surface the error and abort the
+      // call; the caller's dst is left untouched (no OMP work has
+      // started yet).
+      apilog_error(
+          "[flat_n_tile] hoisted dynamic-quant source reorder failed "
+          "for expert ", e, " — aborting call; caller's dst is "
+          "untouched.  See preceding `reorder_quantization_wrapper` "
+          "error for the granularity / dtype mismatch.");
+      return;
+    }
+
+    // `reorder_quantization_wrapper` returns success without doing
+    // anything when the dtype combo isn't eligible (e.g. caller set
+    // `dynamic_quant=true` but `dtypes.wei != s8`).  Detect the
+    // no-op case via the unchanged src dtype and leave the slot
+    // invalid; `do_tile` will fall through to the caller's bf16/f32
+    // src and the per-thread wrapper will short-circuit identically.
+    if (shadow.dtypes.src != params[e].dtypes.src) {
+      hoisted[e].valid     = true;
+      hoisted[e].src_ptr   = src_e;
+      hoisted[e].lda       = reordered_lda;
+      hoisted[e].src_dtype = shadow.dtypes.src;
+      hoisted[e].src_scale = shadow.quant_params.src_scale;
+      hoisted[e].src_zp    = shadow.quant_params.src_zp;
+      any_hoist = true;
+    }
+  }
+
   GroupNTileContext ctx{
       layout, transA, transB,
       M, N, K, alpha,
@@ -2448,7 +2716,8 @@ void flat_n_tile(
       fused_act, act_dtype,
       wei_elem, dst_elem, bias_elem,
       use_custom, use_custom ? &kctx : nullptr,
-      &alloc_fail
+      &alloc_fail,
+      any_hoist ? &hoisted : nullptr
   };
 
   const GroupNTileTopology topo =

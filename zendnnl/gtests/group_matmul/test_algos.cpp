@@ -1808,32 +1808,48 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulAutoSelect, TestGroupMatmulAutoSelectAlgo,
                          AutoSelectParamName);
 
 // ===============================================================================
-// [8c] TestGroupMatmulAutoSelectAlgo_DynamicQuant — explicit
-//      dynamic_quant rejection in `check_n_tile_extra` falls back
-//      to ALGO 1.
+// [8c] TestGroupMatmulAutoSelectAlgo_DynamicQuant — the single
+//      quant configuration `check_n_tile_extra` currently accepts:
+//      `dynamic_quant=true` with `{M, 1}` source + `{1, N}` per-
+//      channel weight.  ALGO 3 reaches that case via `flat_n_tile`'s
+//      pre-OMP source-reorder hoist (`HoistedSrcQuant` in
+//      `group_matmul_n_tile.cpp`); per-tile threads then share the
+//      hoisted S8 src + column-sliced wei scale.  Anything else —
+//      static src, per-tensor / per-group wei, per-group src,
+//      pure WOQ — falls back to ALGO 1.
 //
-// `check_n_tile_extra` was extended in PR #461 with an explicit
-// `params[i].dynamic_quant` rejection: previously this case was
-// rejected indirectly via `wei_scale.buff != nullptr` (any quant
-// flow with a caller-provided weight scale).  The indirect chain
-// holds for every quant deployment we have today, but a future
-// quant variant that nullifies `wei_scale.buff` would slip past
-// without the explicit gate and let the source-side
-// `reorder_quantization_wrapper` fire per-thread inside N-tile's
-// `execute_expert_slice` (with potential data races on caller-
-// shared scale buffers + N_threads × redundant quant work).
+// This test pins the four boundaries of the scope:
+//   1. Non-quantised baseline → ALGO 3 (the shape itself is
+//      N-tile-viable so the negative cases below prove the gate
+//      flipped, not the shape).
+//   2. `dynamic_quant=true` + `{M, 1}` src + `{1, N}` wei (the
+//      one accepted shape) → ALGO 3.
+//   3. Same as (2) but `dynamic_quant=false` → ALGO 1 (static
+//      src is out of scope).
+//   4. Same as (2) but `wei_scale.buff = nullptr` → ALGO 1
+//      (wei pair side is required).
 //
-// This test pins the explicit guard.  It builds a shape the
-// auto-selector picks ALGO 3 for (decode-class, wide-N, many
-// experts, ntile-viable), confirms ALGO 3 first with
-// `dynamic_quant = false`, then flips `dynamic_quant = true` on
-// every expert (with `src_scale.dims = {M, 1}` so
-// `check_m_tile_safe` doesn't reject earlier — m_tile_safe is a
-// precondition for n_tile_extra) and asserts the auto-selector
-// flips the decision to ALGO 1.
+// (The hoist path itself is exercised end-to-end by the
+// `TestGroupMatmulQuant.INT8_DYNAMIC_GEMM_*` suites, which carry
+// both sides of the per-token pair and reach `flat_n_tile` when
+// their random num_ops × num_threads combo trips auto-select's
+// rule 1 or rule 3-decode arm.)
+//
+// `check_m_tile_safe`'s row-local granularity gate
+// (`src_scale.dims[0] == M[i]`) is still a precondition; the
+// per-token gate below is stricter, so anything that fails this
+// test's `dynamic_quant=true + {M[i], 1}` requirement is also
+// caught by `m_tile_safe` for the dynamic case.
+//
+// Case 5 pins the single-row decode case (`M[i] == 1` with
+// `src_scale.dims = {1, 1}`): the gate was rewritten to compare
+// `src_scale.dims[0]` against the actual per-expert `M[i]` (it
+// previously used a brittle `dims[0] > 1` proxy that rejected
+// sparse-MoE batches where some experts get exactly one routed
+// token).
 // ===============================================================================
 
-TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, RejectsAlgo3) {
+TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
   using namespace zendnnl::lowoha::matmul;
   using namespace moe_test_utils;
 
@@ -1870,30 +1886,112 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, RejectsAlgo3) {
     params[i].packing.pack_format_b = 0;
   }
 
-  // Sanity: same shape WITHOUT dynamic_quant lands on ALGO 3
+  // Case 1 — Sanity: same shape WITHOUT any quant lands on ALGO 3
   // (decode-class + many experts + wide-N + ntile_viable).
   ASSERT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 3)
-      << "baseline shape must select ALGO 3 — otherwise the test "
-         "below cannot prove that dynamic_quant alone flipped the "
-         "decision";
+      << "baseline non-quant shape must select ALGO 3 — otherwise "
+         "the negative cases below cannot distinguish a "
+         "shape-induced fallback from a quant-gate rejection";
 
-  // Flip dynamic_quant on every expert with a row-local src
-  // granularity ({M, 1}) so check_m_tile_safe still passes (its
-  // dynamic-quant gate accepts dims[0] > 1).  All other quant
-  // metadata stays unset (`wei_scale.buff == nullptr`, etc.) so
-  // the OLD indirect rejection path would NOT fire on this case
-  // — the new explicit `dynamic_quant` rejection is the only
-  // thing keeping it out of ALGO 3.
+  // Case 2 — Accept the single in-scope shape: dynamic_quant=true
+  // with `{M, 1}` src + `{1, N}` wei.  `src_scale.buff` stays
+  // nullptr (wrapper allocates on the hoist path); `wei_scale.buff`
+  // is a stack sentinel since the gate only checks for non-nullness
+  // (it never dereferences the pointer), and using a local valid
+  // address keeps the test allocator-free.
+  alignas(float) char wei_scale_sentinel = 0;
   for (int i = 0; i < N_ops; ++i) {
-    params[i].dynamic_quant                  = true;
-    params[i].quant_params.src_scale.dims    = {M_val, 1};
-    params[i].quant_params.src_scale.dt      = data_type_t::f32;
+    params[i].dynamic_quant = true;
+    params[i].quant_params.src_scale.dims = {M_val, 1};
+    params[i].quant_params.src_scale.dt   = data_type_t::f32;
+    params[i].quant_params.wei_scale.dims = {1, N_GO};
+    params[i].quant_params.wei_scale.dt   = data_type_t::f32;
+    params[i].quant_params.wei_scale.buff = &wei_scale_sentinel;
+  }
+
+  EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 3)
+      << "dynamic_quant=true with `{M, 1}` src + `{1, N}` wei "
+         "(the only in-scope quant pair) and otherwise N-tile-"
+         "viable inputs should reach ALGO 3 via the pre-OMP hoist "
+         "path.  A regression here would indicate either that "
+         "`check_n_tile_extra` has tightened its dynamic / per-token "
+         "/ per-channel gate, or that `check_m_tile_safe`'s "
+         "row-local gate has tightened.";
+
+  // Case 3 — Static src rejection: same shape and dims, but flip
+  // `dynamic_quant=false`.  The current scope is dynamic-only; this
+  // should fall back to ALGO 1 even though the dims/buff layout
+  // looks otherwise valid for a static W8A8 per-token deployment.
+  for (int i = 0; i < N_ops; ++i) {
+    params[i].dynamic_quant = false;
+    // Static src needs a populated src buff — give the gate something
+    // realistic to look at (it'll reject before reading the pointer).
+    params[i].quant_params.src_scale.buff = &wei_scale_sentinel;
   }
 
   EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 1)
-      << "dynamic_quant=true with otherwise N-tile-viable inputs "
-         "should fall back to ALGO 1; got something else (regression "
-         "in `check_n_tile_extra` dynamic_quant gate?)";
+      << "static src quant (`dynamic_quant=false`) is intentionally "
+         "outside the current per-token-dynamic scope — even with "
+         "the otherwise-valid `{M, 1}` src + `{1, N}` wei pair, the "
+         "gate must reject and fall back to ALGO 1.  A regression "
+         "here would indicate the gate has relaxed its "
+         "`dynamic_quant=true` requirement.";
+
+  // Case 4 — Wei-missing rejection: restore `dynamic_quant=true`
+  // but drop the wei_scale entirely.  The per-token scope requires
+  // a populated wei pair, so this should fall back to ALGO 1.
+  for (int i = 0; i < N_ops; ++i) {
+    params[i].dynamic_quant = true;
+    params[i].quant_params.src_scale.buff = nullptr;  // back to hoist-alloc
+    params[i].quant_params.wei_scale.buff = nullptr;
+    params[i].quant_params.wei_scale.dims.clear();
+    params[i].quant_params.wei_scale.dt = data_type_t::none;
+  }
+
+  EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, num_threads), 1)
+      << "dynamic_quant=true with `{M, 1}` src but NO wei scale "
+         "should fall back to ALGO 1 — the per-token scope guard "
+         "in `check_n_tile_extra` requires the paired per-channel "
+         "wei.  A regression here would indicate the gate has "
+         "accidentally relaxed the wei-side requirement.";
+
+  // Case 5 — Heterogeneous-M batch with one single-row expert
+  // (`M[i] == 1`).  This is the common sparse-MoE decode pattern:
+  // most experts get a handful of tokens, one or two experts get
+  // exactly one routed token.  Previously the gates used a
+  // `src_scale.dims[0] > 1` proxy that rejected the M=1 expert
+  // and dragged the whole batch onto ALGO 1.  After the
+  // M[i]-aware fix the gate accepts `{1, 1}` when paired with
+  // M[i]=1 and the batch keeps ALGO 3 N-tile parallelism.
+  //
+  // Restore the in-scope quant configuration for every expert and
+  // shrink the last expert's M to 1 (matching `{1, 1}` src_scale
+  // dims) while keeping the other experts at M_val.  The custom
+  // mixed-M `M` vector replaces the uniform one used above; N/K
+  // stay uniform across experts because that's how MoE callers
+  // present per-expert vectors today.
+  std::vector<int> M_mixed(N_ops, M_val);
+  M_mixed.back() = 1;
+  for (int i = 0; i < N_ops; ++i) {
+    params[i].dynamic_quant = true;
+    params[i].quant_params.src_scale.buff = nullptr;
+    params[i].quant_params.src_scale.dims = {M_mixed[i], 1};
+    params[i].quant_params.src_scale.dt   = data_type_t::f32;
+    params[i].quant_params.wei_scale.dims = {1, N_GO};
+    params[i].quant_params.wei_scale.dt   = data_type_t::f32;
+    params[i].quant_params.wei_scale.buff = &wei_scale_sentinel;
+  }
+
+  EXPECT_EQ(select_grp_matmul_algo(layout, M_mixed, N, K, params,
+                                   num_threads), 3)
+      << "sparse-MoE batch with one M[i]=1 expert (`src_scale.dims "
+         "= {1, 1}`) should still reach ALGO 3 — the M[i]-aware "
+         "gate accepts the single-row decode case because the "
+         "single-thread reorder for that expert is race-free and "
+         "the per-token scale equals the full-matrix scale "
+         "trivially.  A regression here means the gate is using "
+         "the old brittle `dims[0] > 1` proxy again and will drag "
+         "every sparse-MoE decode batch onto sequential_experts.";
 }
 
 // ===============================================================================
