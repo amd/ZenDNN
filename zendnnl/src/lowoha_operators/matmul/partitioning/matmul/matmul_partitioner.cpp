@@ -141,11 +141,13 @@ static matmul_algo_t select_partition_kernel(
   }
 
   // LibXSMM matmul path (libxsmm / libxsmm_blocked) is currently supported
-  // only for the BF16 x BF16 case (src and weight both BF16). Any other
-  // src/weight dtype combination must fall back to the DLP kernel.
+  // only for the BF16_BF16 case. Any other
+  // dtype combination must fall back to the DLP kernel.
+  // TODO: Add support for other dtype combinations.
   if (config.dtypes.src != data_type_t::bf16 ||
-      config.dtypes.wei != data_type_t::bf16) {
-    apilog_info("LibXSMM kernel is only supported for BF16 x BF16 inputs, falling back to DLP");
+      config.dtypes.wei != data_type_t::bf16 ||
+      config.dtypes.dst != data_type_t::bf16) {
+    apilog_info("LibXSMM kernel is only supported for BF16_BF16 combination, falling back to DLP");
     return matmul_algo_t::aocl_dlp;
   }
 
