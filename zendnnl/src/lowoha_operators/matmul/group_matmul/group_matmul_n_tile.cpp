@@ -1142,7 +1142,7 @@ inline RoundPick pick_round_strategy(const GroupNTileTopology &topo,
 }
 
 // ── AUTO adaptive multi-tier thread allocator ──────────────────────────
-// Engaged by `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD=0`.
+// Engaged by `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD=0`.
 //
 // Builds an asymmetric, M-skew-aware per-expert thread plan inside the
 // existing ALGO 3 ManyExperts Single-round shape.  The output is
@@ -1394,7 +1394,7 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
       plan.n_thr_fixed = c.n_thr_single;
 
       // ── Three-mode HYBRID dispatch (env-gated) ─────────────────────
-      // `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD` selects between:
+      // `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD` selects between:
       //
       //   -1  DISABLED — skip the entire HYBRID block; fall through to
       //                  Phase B base+1.  Default; matches the legacy
@@ -1428,7 +1428,7 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
       // Phase B (base+1 remainder distribution further down) is NOT
       // the HYBRID feature — it's the planner's general thread-
       // saturation step and stays enabled for decode unconditionally.
-      const int hybrid_mode = get_grp_matmul_hybrid_m_heavy_threshold();
+      const int hybrid_mode = get_grp_matmul_n_tile_heavy_threshold();
       const int per_expert_cap_hybrid =
           std::min(topo.ccd_size, c.max_tiles);
       const bool is_prompt_class = (topo.max_M > kDecodeMaxM);
@@ -3204,7 +3204,7 @@ void flat_n_tile(
     // load now that they all cache + override, so the savings are
     // microscopic — clarity is the deliverable).  Same hoist
     // pattern we applied to `decode_n_tile_snapshot` in the planner.
-    const int  log_hybrid_m_threshold  = get_grp_matmul_hybrid_m_heavy_threshold();
+    const int  log_n_tile_heavy_thr    = get_grp_matmul_n_tile_heavy_threshold();
     const int  log_aocl_target_slots   = get_grp_matmul_aocl_target_slots();
     const int  log_aocl_blis_nc        = get_grp_matmul_aocl_blis_nc();
     const int env_order = get_grp_matmul_n_order();
@@ -3248,8 +3248,8 @@ void flat_n_tile(
                 is_auto_resolved ? " (auto)" : "",
                 " stable_n_thr[0]=",
                 static_cast<int>(plan.stable_n_thr_per_expert[0]),
-                " hybrid_m_threshold=",
-                log_hybrid_m_threshold,
+                " n_tile_heavy_thr=",
+                log_n_tile_heavy_thr,
                 " per_expert_remainder=",
                 (plan.per_expert_remainder ? "yes" : "no"),
                 " aocl_target_slots=",

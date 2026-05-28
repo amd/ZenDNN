@@ -611,13 +611,13 @@ struct NTileStrategyOverride {
 //   * 0    — explicit legacy 3-rule cascade pin (equivalent to
 //            setting the env to "0").  NOT equivalent to "unset env":
 //            the env-unset / sentinel-`-1` path resolves to the
-//            documented per-phase default (PROMPT=1, DECODE=3) via
+//            documented per-phase default (PROMPT=2, DECODE=3) via
 //            the cached getter, NOT to 0.
 //   * 1..5 — force the matching ALGO for that phase.
 //   * < 0  — sentinel "no override"; falls through to the cached env
 //            path (which applies the documented defaults).
 //   * > 5  — clamps to the documented per-phase default in the
-//            getter (PROMPT=1, DECODE=3), matching the env-parse
+//            getter (PROMPT=2, DECODE=3), matching the env-parse
 //            "validate or fall back to default" convention used by
 //            the other int env getters in this codebase.
 struct AutoPromptAlgoOverride {
@@ -656,12 +656,12 @@ struct AutoDecodeAlgoOverride {
   AutoDecodeAlgoOverride &operator=(AutoDecodeAlgoOverride &&) = delete;
 };
 
-// RAII guard for the hybrid M-split threshold (the test-only path
-// over `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`).  Same
+// RAII guard for the ALGO 3 N-tile heavy-threshold knob (the test-
+// only path over `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD`).  Same
 // cache-bypass rationale as the other Override structs.
 //
 // Accepted values — mirror the production three-mode semantic
-// documented on `s_grp_matmul_hybrid_m_heavy_threshold_override`
+// documented on `s_grp_matmul_n_tile_heavy_threshold_override`
 // in `group_matmul_parallel_common.hpp` (lines ~458-490):
 //   * `INT_MIN`            — no override (falls through to cached
 //                            env path).  Production state; tests
@@ -674,26 +674,142 @@ struct AutoDecodeAlgoOverride {
 //                            are tagged heavy and receive water-fill
 //                            thread allocation.
 //   * `< -1` (excl. INT_MIN) — undefined; pass only documented values.
-struct HybridMHeavyThresholdOverride {
+struct NTileHeavyThresholdOverride {
   int prev;
-  explicit HybridMHeavyThresholdOverride(int value) {
+  explicit NTileHeavyThresholdOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_hybrid_m_heavy_threshold_override.exchange(
+        ::s_grp_matmul_n_tile_heavy_threshold_override.exchange(
             value, std::memory_order_relaxed);
   }
-  ~HybridMHeavyThresholdOverride() {
+  ~NTileHeavyThresholdOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_hybrid_m_heavy_threshold_override.store(
+        ::s_grp_matmul_n_tile_heavy_threshold_override.store(
             prev, std::memory_order_relaxed);
   }
-  HybridMHeavyThresholdOverride(
-      const HybridMHeavyThresholdOverride &) = delete;
-  HybridMHeavyThresholdOverride &operator=(
-      const HybridMHeavyThresholdOverride &) = delete;
-  HybridMHeavyThresholdOverride(
-      HybridMHeavyThresholdOverride &&) = delete;
-  HybridMHeavyThresholdOverride &operator=(
-      HybridMHeavyThresholdOverride &&) = delete;
+  NTileHeavyThresholdOverride(
+      const NTileHeavyThresholdOverride &) = delete;
+  NTileHeavyThresholdOverride &operator=(
+      const NTileHeavyThresholdOverride &) = delete;
+  NTileHeavyThresholdOverride(
+      NTileHeavyThresholdOverride &&) = delete;
+  NTileHeavyThresholdOverride &operator=(
+      NTileHeavyThresholdOverride &&) = delete;
+};
+
+// RAII guard for the M-tile multi-tier hybrid env override
+// (`ZENDNNL_GRP_MATMUL_M_TILE_HYBRID`).  Same save/restore pattern
+// as `NTileHeavyThresholdOverride` above.  Settable values match
+// the documented set on `test_api::s_grp_matmul_m_tile_hybrid_override`:
+//
+//   * -1  — DISABLED (force legacy single-tier).
+//   *  0  — AUTO (engage multi-tier when shape gates pass).
+//
+// Any other value is undefined; tests should only use the
+// documented set.  The `prev` field is the previously-stored value
+// so a nested guard restores its caller's state correctly.
+struct MTileHybridOverride {
+  int prev;
+  explicit MTileHybridOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~MTileHybridOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  MTileHybridOverride(const MTileHybridOverride &) = delete;
+  MTileHybridOverride &operator=(const MTileHybridOverride &) = delete;
+  MTileHybridOverride(MTileHybridOverride &&) = delete;
+  MTileHybridOverride &operator=(MTileHybridOverride &&) = delete;
+};
+
+// RAII guards for the four M-tile heuristic-constant knobs.
+// Same save/restore pattern as `MTileHybridOverride` above.  Each
+// guard flips its atomic test override (sentinel `-1` = no
+// override) so unit tests can A/B the planner's thresholds
+// (kSliceTarget / kHybridMinMaxM / kHybridMinSkewX /
+// kLightsPerThread) without re-launching the process.  Production
+// callers continue to read the cached env-driven value; the RAII
+// drops back to that value when the guard goes out of scope.
+//
+// Accepted values: any positive int (≥ 1).  Negative / zero values
+// reset to "no override" via the getter's sentinel branch.
+struct MTileSliceTargetOverride {
+  int prev;
+  explicit MTileSliceTargetOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_slice_target_override
+        .exchange(value, std::memory_order_relaxed);
+  }
+  ~MTileSliceTargetOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_slice_target_override
+        .store(prev, std::memory_order_relaxed);
+  }
+  MTileSliceTargetOverride(const MTileSliceTargetOverride &) = delete;
+  MTileSliceTargetOverride &operator=(const MTileSliceTargetOverride &) = delete;
+  MTileSliceTargetOverride(MTileSliceTargetOverride &&) = delete;
+  MTileSliceTargetOverride &operator=(MTileSliceTargetOverride &&) = delete;
+};
+
+struct MTileHybridMinMaxMOverride {
+  int prev;
+  explicit MTileHybridMinMaxMOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_min_max_m_override
+        .exchange(value, std::memory_order_relaxed);
+  }
+  ~MTileHybridMinMaxMOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_min_max_m_override
+        .store(prev, std::memory_order_relaxed);
+  }
+  MTileHybridMinMaxMOverride(const MTileHybridMinMaxMOverride &) = delete;
+  MTileHybridMinMaxMOverride &operator=(const MTileHybridMinMaxMOverride &) = delete;
+  MTileHybridMinMaxMOverride(MTileHybridMinMaxMOverride &&) = delete;
+  MTileHybridMinMaxMOverride &operator=(MTileHybridMinMaxMOverride &&) = delete;
+};
+
+struct MTileHybridMinSkewOverride {
+  int prev;
+  explicit MTileHybridMinSkewOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_min_skew_override
+        .exchange(value, std::memory_order_relaxed);
+  }
+  ~MTileHybridMinSkewOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_min_skew_override
+        .store(prev, std::memory_order_relaxed);
+  }
+  MTileHybridMinSkewOverride(const MTileHybridMinSkewOverride &) = delete;
+  MTileHybridMinSkewOverride &operator=(const MTileHybridMinSkewOverride &) = delete;
+  MTileHybridMinSkewOverride(MTileHybridMinSkewOverride &&) = delete;
+  MTileHybridMinSkewOverride &operator=(MTileHybridMinSkewOverride &&) = delete;
+};
+
+struct MTileHybridLightsPerThreadOverride {
+  int prev;
+  explicit MTileHybridLightsPerThreadOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
+        .exchange(value, std::memory_order_relaxed);
+  }
+  ~MTileHybridLightsPerThreadOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
+        .store(prev, std::memory_order_relaxed);
+  }
+  MTileHybridLightsPerThreadOverride(
+      const MTileHybridLightsPerThreadOverride &) = delete;
+  MTileHybridLightsPerThreadOverride &operator=(
+      const MTileHybridLightsPerThreadOverride &) = delete;
+  MTileHybridLightsPerThreadOverride(
+      MTileHybridLightsPerThreadOverride &&) = delete;
+  MTileHybridLightsPerThreadOverride &operator=(
+      MTileHybridLightsPerThreadOverride &&) = delete;
 };
 
 // RAII guard for the per-expert subtile_cols knob (the test-only
@@ -848,6 +964,48 @@ struct GemmModeCaptureGuard {
   }
   GemmModeCaptureGuard(const GemmModeCaptureGuard &) = delete;
   GemmModeCaptureGuard &operator=(const GemmModeCaptureGuard &) = delete;
+};
+
+// ───────────────────────────────────────────────────────────────────
+// RAII guard for the M-tile (ALGO 2) branch-tag capture hook.
+//
+// Mirrors `GemmModeCaptureGuard` for the four-branch dispatch inside
+// `flat_m_tile` (round-based / multi-tier hybrid / wide-N fallback /
+// Phase 2 single-tier).  Resets `s_last_m_tile_path` to
+// `m_tile_path_tag::kNone` and arms `s_capture_m_tile_path` on
+// construction; disarms on scope exit (including `ASSERT_*` early-out).
+//
+// Use this around every block that reads
+// `test_api::s_last_m_tile_path` after a dispatcher invocation that
+// resolves to ALGO 2.  Construct BEFORE the call, read AFTER it, let
+// the guard fall out of scope:
+//
+//   {
+//     moe_test_utils::MTilePathCaptureGuard guard;
+//     group_matmul_direct(...);   // resolves to ALGO 2
+//     const int tag = test_api::s_last_m_tile_path.load(
+//         std::memory_order_relaxed);
+//     EXPECT_EQ(tag, test_api::m_tile_path_tag::kWideNFallback);
+//   }
+//
+// See the doc-block on `test_api::s_capture_m_tile_path` in
+// `group_matmul_parallel_common.hpp` for the production-cost rationale
+// (single relaxed-load of a cache-line-shared `false` bool, no
+// coherence traffic — same pattern as `s_capture_gemm_mode`).
+struct MTilePathCaptureGuard {
+  MTilePathCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api::s_last_m_tile_path.store(
+        zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kNone,
+        std::memory_order_relaxed);
+    zendnnl::lowoha::matmul::test_api::s_capture_m_tile_path.store(
+        true, std::memory_order_release);
+  }
+  ~MTilePathCaptureGuard() {
+    zendnnl::lowoha::matmul::test_api::s_capture_m_tile_path.store(
+        false, std::memory_order_release);
+  }
+  MTilePathCaptureGuard(const MTilePathCaptureGuard &) = delete;
+  MTilePathCaptureGuard &operator=(const MTilePathCaptureGuard &) = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────

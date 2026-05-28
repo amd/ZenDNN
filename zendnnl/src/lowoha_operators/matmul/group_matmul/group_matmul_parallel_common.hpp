@@ -233,24 +233,25 @@ inline int get_grp_matmul_algo() {
 // that captures the measured-best path per phase across the MoE
 // envelope we benchmark:
 //
-//   AUTO_PROMPT_ALGO default = 1 (sequential_experts).
-//     E2E measurement on the Qwen3-30B-A3B prompt path showed that
-//     forcing ALGO 3 (N-tile rounds + CK) with the post-`N_TILE_
-//     STRATEGY` fix landed every call on the intended fused-CK
-//     route, but the call wall time (avg ~117 ms / call) was
-//     wall-time-equivalent to legacy Sequential AOCL DLP (~122 ms /
-//     call) because the ManyExperts plan's `n_thr_fixed=1` per
-//     expert is bottlenecked by the heaviest-M expert's single
-//     thread on skewed-M prompts (max_M / mean_M_active ≈ 11×
-//     skew on Qwen3 prompt).  Until the planner gains M-weighted
-//     multi-thread-per-expert allocation, ALGO 1's full-team
-//     AOCL DLP per expert delivers the same prompt wall at lower
-//     code surface — and ALGO 1 is what auto-select's legacy
-//     Rule 3 would have picked for this shape (`num_ops <
-//     num_threads ∧ prompt`).  Set `AUTO_PROMPT_ALGO=3` to
-//     opt-in to the ALGO 3 prompt path (e.g. for Mixtral-class
-//     with `num_ops ≤ 8` + huge N where M-skew bottleneck is
-//     smaller).
+//   AUTO_PROMPT_ALGO default = 2 (flat_m_tile, the M-tile planner).
+//     With the M-tile multi-tier hybrid (engaged on Qwen3-class
+//     skewed prompts, gated by `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=0`)
+//     and the wide-N memory-bound fallback (always-on; engages on
+//     `total_need * 2 <= num_threads`), ALGO 2 covers the prompt
+//     envelope across the benchmarked MoE workloads:
+//       * Qwen3-30B-A3B prompt: multi-tier hybrid path → 2.33×
+//         heavy-cluster mean speedup (108-frame sweep @ 128t).
+//       * Mixtral / GPT-OSS prompt-light frames: wide-N fallback
+//         routes to sequential-with-full-team — equivalent to the
+//         legacy ALGO 1 path on these shapes.
+//       * Other prompt frames: ALGO 2 single-tier Phase 2
+//         (M-weighted distribution) — the existing M-tile baseline.
+//     Safety clamp: when `!m_tile_safe` the auto path falls back
+//     to ALGO 1, matching the global `ALGO=2` env path.  Set
+//     `AUTO_PROMPT_ALGO=1` to restore the legacy sequential_experts
+//     default for A/B regression testing or as an escape hatch on
+//     workloads where ALGO 2 single-tier Phase 2 is not yet
+//     validated against ALGO 1's full-team weight cache.
 //
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile / N-tile rounds path).
 //     ALGO 3 + CK rounds is the measured decode winner across every
@@ -276,22 +277,22 @@ inline int get_grp_matmul_algo() {
 // Mid-process env changes have no effect (cached static const); tests
 // override via the atomics below.
 
-// ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO = { 0, 1..5 } — cached, default 1.
+// ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO = { 0, 1..5 } — cached, default 2.
 //   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
 //   the call classifies as PROMPT (`max_M > kDecodeMaxM`).  Value 0
 //   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
 //   the prompt phase (with the same m_tile_safe / n_tile_safe safety
-//   clamps the global `ALGO` env path applies).  Default 1
-//   (sequential_experts) is the measured-best out-of-the-box prompt
-//   choice — see the doc-block on this group of envs for the
-//   rationale.
+//   clamps the global `ALGO` env path applies).  Default 2
+//   (flat_m_tile + multi-tier hybrid + wide-N fallback) is the
+//   out-of-the-box prompt choice — see the doc-block on this group
+//   of envs for the rationale.
 inline std::atomic<int> &test_api_auto_prompt_algo_override();
 inline int get_grp_matmul_auto_prompt_algo() {
   // Strict env parsing — non-numeric input falls back to the documented
-  // default 1 (sequential_experts).  Bogus values (< 0 OR > 5) also
-  // clamp to the default so a typo cannot accidentally pin an
-  // unintended algo.
-  constexpr int kDefault = 1;
+  // default 2 (flat_m_tile).  Bogus values (< 0 OR > 5) also clamp
+  // to the default so a typo cannot accidentally pin an unintended
+  // algo.
+  constexpr int kDefault = 2;
   const int ovr = test_api_auto_prompt_algo_override().load(
       std::memory_order_relaxed);
   if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
@@ -468,7 +469,7 @@ inline std::atomic<int> s_grp_matmul_algo_override{-1};
 // path (which itself applies the documented default -1 = DISABLED).
 // `-1` is no longer usable as the "no override" marker because it
 // now carries a meaningful value (DISABLED) — see the three-mode
-// doc-block on `get_grp_matmul_hybrid_m_heavy_threshold()` below.
+// doc-block on `get_grp_matmul_n_tile_heavy_threshold()` below.
 //
 // Settable values:
 //   * INT_MIN   — no override (falls through to env-cache).  Tests
@@ -482,13 +483,58 @@ inline std::atomic<int> s_grp_matmul_algo_override{-1};
 //   * Anything more negative than -1 → undefined.  Tests should
 //     only pass values from the documented set above.
 //
-// The RAII helper `HybridMHeavyThresholdOverride` in
+// The RAII helper `NTileHeavyThresholdOverride` in
 // `gtests/group_matmul/moe_test_utils.hpp` saves and restores the
 // previous value across test scopes; it must be used for any test
 // that touches this atomic to guarantee teardown ordering on test
 // failure.
-inline std::atomic<int> s_grp_matmul_hybrid_m_heavy_threshold_override{
+inline std::atomic<int> s_grp_matmul_n_tile_heavy_threshold_override{
     std::numeric_limits<int>::min()};
+
+// Sentinel `INT_MIN` = no override; falls through to the cached env
+// path (which itself applies the documented default 0 = AUTO).
+//
+// Two-mode dispatch for the M-tile (ALGO 2) planner's light/heavy
+// load balancer.  See the doc-block on
+// `get_grp_matmul_m_tile_hybrid()` below for the gating heuristic
+// and rationale.
+//
+// Settable values:
+//   * INT_MIN — no override (env-cache path).  Production state.
+//   * -1      — DISABLED.  Forces the legacy single-tier M-tile
+//               planner (floor=1 per active expert + surplus to
+//               heaviest).
+//   *  0      — AUTO (default).  Enables the multi-tier dispatch
+//               when the per-call shape matches the skewed many-
+//               expert gating.
+//   * any other value → undefined; tests should only use the
+//               documented set.
+inline std::atomic<int> s_grp_matmul_m_tile_hybrid_override{
+    std::numeric_limits<int>::min()};
+
+// ── M-tile (ALGO 2) heuristic-constant overrides ─────────────────────
+//
+// These four sentinel-`-1` atomics back the env-tunable surface for
+// the M-tile planner's hard-coded constants.  They exist so the
+// planner's baked-in thresholds can be exercised and tuned in tests
+// without editing production defaults.  Each atomic shadows a getter
+// declared below the file's main test_api block, using the same
+// "non-negative override wins; cached env otherwise" pattern as
+// `s_grp_matmul_custom_kernel_n_tile_override`.
+//
+//   * `s_grp_matmul_m_tile_slice_target_override`         → kSliceTarget=16
+//   * `s_grp_matmul_m_tile_hybrid_min_max_m_override`     → kHybridMinMaxM=256
+//   * `s_grp_matmul_m_tile_hybrid_min_skew_override`      → kHybridMinSkewX=4
+//   * `s_grp_matmul_m_tile_hybrid_lights_per_thread_override` → kLightsPerThread=8
+//
+// Settable values are positive ints; any value < 1 (including the
+// sentinel `-1`) falls through to the cached env path.  RAII helpers
+// live in `gtests/group_matmul/moe_test_utils.hpp` so tests can flip
+// these mid-process without re-launching the process.
+inline std::atomic<int> s_grp_matmul_m_tile_slice_target_override{-1};
+inline std::atomic<int> s_grp_matmul_m_tile_hybrid_min_max_m_override{-1};
+inline std::atomic<int> s_grp_matmul_m_tile_hybrid_min_skew_override{-1};
+inline std::atomic<int> s_grp_matmul_m_tile_hybrid_lights_per_thread_override{-1};
 
 // Sentinel `-1` = no override.  Settable values: 0 (per-expert
 // subtile sizing OFF — use one m_max-sized `subtile_cols` for every
@@ -529,6 +575,46 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override{-
 //   `group_matmul_n_tile.hpp`).
 inline std::atomic<bool>         s_capture_gemm_mode{false};
 inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode{nullptr};
+
+// ── M-tile (ALGO 2) branch-tag capture hook ─────────────────────────────
+//
+// `flat_m_tile` dispatches between four internal branches based on
+// workload shape:
+//   round-based            (active_ops > num_threads)
+//   multi-tier hybrid      (skewed many-expert Qwen3-class gate)
+//   wide-N memory-bound    (total_need * 2 ≤ num_threads, max_M > 1)
+//   phase-2 single-tier    (default M-weighted fallthrough)
+//
+// Tests need to assert *which* branch fired on a given shape so the
+// gating heuristic can evolve without silently regressing the
+// out-of-the-box auto policy.  This is the same capture-gated atomic
+// pattern as `s_capture_gemm_mode` / `s_last_group_matmul_direct_*`
+// above: tests arm the flag via `MTilePathCaptureGuard` in
+// `moe_test_utils.hpp` and read the tag after the dispatcher call.
+//
+// CAPTURE GATE — `s_capture_m_tile_path` (atomic bool, default false):
+//   Production builds never arm this, so the store path inside each
+//   branch short-circuits on a single relaxed load of a cache-line-
+//   shared `false` value — no coherence traffic, branch-predictable.
+//   Without this gate, four unconditional stores on the hot M-tile
+//   path would invalidate the tag's cache line on every prompt /
+//   decode call, taxing concurrent dispatcher invocations across
+//   multi-rank serving deployments that have no use for the hook.
+//
+// Tag values are exported as named constants in
+// `test_api::m_tile_path_tag::*` below so the call sites in
+// `group_matmul_m_tile.cpp` stay readable and test expectations stay
+// type-safe (no magic numbers).
+inline std::atomic<bool> s_capture_m_tile_path{false};
+inline std::atomic<int>  s_last_m_tile_path{-1};
+
+namespace m_tile_path_tag {
+inline constexpr int kNone           = -1;  // sentinel — no tag this call
+inline constexpr int kRoundBased     = 0;   // active_ops > num_threads
+inline constexpr int kMultiTier      = 1;   // multi-tier hybrid engaged
+inline constexpr int kWideNFallback  = 2;   // wide-N memory-bound fallback
+inline constexpr int kPhase2Single   = 3;   // default M-weighted Phase 2
+}  // namespace m_tile_path_tag
 }  // namespace test_api
 
 // Out-of-namespace accessors for the AUTO_*_ALGO override atomics.
@@ -1087,14 +1173,15 @@ inline int get_grp_matmul_aocl_blis_nc() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD = { -1, 0, positive int } —
+// ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD = { -1, 0, positive int } —
 //   cached, default -1 (DISABLED).
 //
 // Three-mode dispatch for asymmetric per-expert thread distribution
 // inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
 // are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
-// HYBRID entirely and stay on Phase B base+1 regardless of the env
-// value.  See `apply_round_pick` Single case for the rationale.
+// the N_TILE heavy-threshold dispatch entirely and stay on Phase B
+// base+1 regardless of the env value.  See `apply_round_pick` Single
+// case for the rationale.
 //
 //   -1  DISABLED (default — current production behavior).  Phase B
 //       base+1 only: top few experts by M get one extra thread, all
@@ -1153,23 +1240,194 @@ inline int get_grp_matmul_aocl_blis_nc() {
 // All three modes share the same executor consumer
 // (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
 // only difference is how the planner populates that array.
-inline int get_grp_matmul_hybrid_m_heavy_threshold() {
+inline int get_grp_matmul_n_tile_heavy_threshold() {
   constexpr int kDefault = -1;  // DISABLED
   // Test override sentinel: INT_MIN = no override.  Cannot use `-1`
   // any more since `-1` is now a meaningful (DISABLED) value.
   // Production keeps the static-const env-cache for branch-
   // predictor-friendly reads.
-  const int ovr = test_api::s_grp_matmul_hybrid_m_heavy_threshold_override
+  const int ovr = test_api::s_grp_matmul_n_tile_heavy_threshold_override
       .load(std::memory_order_relaxed);
   if (ovr != std::numeric_limits<int>::min()) return ovr;
   static const int v = []() {
     const char *e =
-        std::getenv("ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD");
+        std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD");
     int parsed = 0;
     if (!parse_env_int_strict(e, parsed)) return kDefault;
     // Accept -1 (DISABLED), 0 (AUTO), positive int (MANUAL).  Reject
     // anything more negative — silently clamp to default.
     return (parsed >= -1) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_M_TILE_HYBRID = {-1, 0} — cached, default 0 (AUTO).
+//
+// Two-mode toggle for the M-tile (ALGO 2) planner's multi-tier
+// load balancer.  Targets the skewed many-expert prompt regime
+// (Qwen3-30B-A3B class: 113-128 active experts on 128t with
+// `max_M/avg_M ≈ 14×`) where the legacy single-tier planner's
+// `floor=1 per active expert` rule consumes most of the thread
+// budget on tiny experts and leaves only ~2 threads for the
+// giant expert that dominates the OMP-barrier wait.
+//
+//   -1  DISABLED.  Legacy single-tier behavior: every active
+//       expert gets at least 1 thread, surplus distributed to
+//       experts with the heaviest per-thread slice.  Works well
+//       on few-expert MoE (Mixtral 8-expert, GPT-OSS 32-expert at
+//       low routing density) where `floor=1 × num_active ≪
+//       num_threads`.  Retained for A/B testing and safe
+//       fallback.
+//
+//    0  AUTO (default).  Engages an M-weighted two-tier dispatch
+//       when ALL of the following hold:
+//         * `num_active >= num_threads / 2`  (many-expert)
+//         * `max_M >= kHybridMinMaxM (=256)` (skip decode-class)
+//         * `max_M >= kHybridMinSkewX (=4) × avg_M` (skewed)
+//         * `num_light >= num_threads / 8`  (enough light to
+//                                            free meaningful
+//                                            heavy-pool budget)
+//       where `light_cut = max(8, avg_M / 4)` and `num_light`
+//       is the count of active experts with `M[e] <= light_cut`.
+//       Light experts share a small dedicated thread team
+//       (`light_pool = min(cores_per_ccd, ceil(num_light / 8))`)
+//       via round-robin (each thread runs full-M, team=1 on a
+//       stride of the light list); the remaining
+//       `num_threads − light_pool` threads run the standard
+//       M-weighted proportional-scale + decrement Phase-2 logic
+//       over heavy experts only.  Falls back silently to
+//       single-tier when the call doesn't match the gating
+//       (Mixtral 8 actives, decode shapes, low-skew, etc.).
+//
+// Invalid values (< -1, "abc", etc.) → silently treated as default
+// (0 / AUTO), matching the strict-parse convention of the other
+// ZENDNNL_GRP_MATMUL_* env vars.
+//
+// The test-override atomic
+// `test_api::s_grp_matmul_m_tile_hybrid_override` is the canonical
+// way to flip this mid-process from gtests; the static-const
+// env-cache is a one-shot read taken at first call to keep the
+// production hot path branch-predictor-friendly.
+inline int get_grp_matmul_m_tile_hybrid() {
+  constexpr int kDefault = 0;  // AUTO
+  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_override
+      .load(std::memory_order_relaxed);
+  if (ovr != std::numeric_limits<int>::min()) return ovr;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    // Accept only -1 (DISABLED) or 0 (AUTO).  Reject anything else
+    // and fall back to default.
+    return (parsed == -1 || parsed == 0) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+// ── M-tile heuristic-constant tuning knobs (F8 from the ALGO 2 review) ──
+//
+// These four getters expose the previously-hard-coded heuristic
+// constants in `group_matmul_m_tile.cpp` so production deployments
+// can A/B them on new MoE workload shapes without source edits.
+// All four use the standard cached-static-const + atomic-override
+// pattern; every call does one relaxed atomic load + branch to
+// check the test override, then returns either the override or
+// the cached static-const env value.  The env `getenv` / parse
+// happens only once on first use; every subsequent call is the
+// atomic-load + branch + cached-const read (a few nanoseconds on
+// x86_64, comfortably below noise in the planner's hot path).
+// Invalid env values (non-numeric, ≤ 0) fall back to the
+// documented default.
+//
+// Production behaviour is unchanged: every default matches the
+// original literal constant.  These knobs are tuning hatches, not
+// behavioural changes.
+//
+//   * `ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET` (default 16)
+//     Minimum rows per M-tile thread.  Raising the value gives
+//     each thread more work (better arith / memory amortisation,
+//     fewer threads engaged); lowering it spreads work thinner
+//     (better balance on shallow-M shapes).  The original
+//     `kSliceTarget = 16` matches AOCL DLP's row-block-quantum.
+//
+//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_MAX_M` (default 256)
+//     Multi-tier engagement gate: `max_M ≥ this` is required for
+//     the multi-tier hybrid to fire.  Lowering it engages
+//     multi-tier on shallower workloads; raising it restricts
+//     multi-tier to heavier shapes only.  Set very high to
+//     effectively disable multi-tier without setting
+//     `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=-1` (which also kills the
+//     code path entirely; this knob just makes the gate harder
+//     to pass).
+//
+//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_SKEW` (default 4)
+//     Multi-tier engagement gate: `max_M ≥ skew × avg_M`.  Lower
+//     values let multi-tier engage on less-skewed workloads
+//     (closer to uniform-M); higher values restrict multi-tier
+//     to extremely skewed shapes only.
+//
+//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD` (default 8)
+//     Light-pool packing density: `light_pool = min(cores_per_ccd,
+//     ceil(n_light / this))`.  Higher values pack more lights per
+//     light-pool thread (smaller light pool, larger heavy pool);
+//     lower values give the light pool more threads.
+inline int get_grp_matmul_m_tile_slice_target() {
+  constexpr int kDefault = 16;
+  const int ovr = test_api::s_grp_matmul_m_tile_slice_target_override
+      .load(std::memory_order_relaxed);
+  if (ovr >= 1) return ovr;
+  static const int v = []() {
+    const char *e =
+        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 1) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
+  constexpr int kDefault = 256;
+  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_max_m_override
+      .load(std::memory_order_relaxed);
+  if (ovr >= 1) return ovr;
+  static const int v = []() {
+    const char *e =
+        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_MAX_M");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 1) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+inline int get_grp_matmul_m_tile_hybrid_min_skew() {
+  constexpr int kDefault = 4;
+  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_skew_override
+      .load(std::memory_order_relaxed);
+  if (ovr >= 1) return ovr;
+  static const int v = []() {
+    const char *e =
+        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_SKEW");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 1) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
+  constexpr int kDefault = 8;
+  const int ovr =
+      test_api::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
+          .load(std::memory_order_relaxed);
+  if (ovr >= 1) return ovr;
+  static const int v = []() {
+    const char *e = std::getenv(
+        "ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed)) return kDefault;
+    return (parsed >= 1) ? parsed : kDefault;
   }();
   return v;
 }

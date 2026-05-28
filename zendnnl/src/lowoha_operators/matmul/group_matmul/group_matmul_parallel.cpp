@@ -636,9 +636,10 @@ static bool check_n_tile_extra(
 // ZENDNNL_GRP_MATMUL_ALGO unset.  Picks between {ALGO 1, ALGO 3,
 // ALGO 5} via the legacy 3-rule cascade, OR pins to a specific
 // ALGO per phase via the AUTO_PROMPT_ALGO / AUTO_DECODE_ALGO envs
-// (defaults: PROMPT=1 (sequential_experts) / DECODE=3 (N-tile + CK)
-// — the measured-best out-of-the-box auto policy; set the env to
-// `0` for the legacy cascade).
+// (defaults: PROMPT=2 (flat_m_tile + multi-tier hybrid + wide-N
+// fallback) / DECODE=3 (N-tile + CK) — the out-of-the-box auto
+// policy; set the env to `0` for the legacy cascade, or `1` to
+// pin the legacy sequential_experts prompt path).
 //
 // Decision precedence (tightest first):
 //
@@ -658,18 +659,21 @@ static bool check_n_tile_extra(
 //   1. PHASE ENV — `max_M ≤ kDecodeMaxM` (decode) →
 //                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
 //                  `max_M >  kDecodeMaxM` (prompt) →
-//                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (default 1)
+//                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (default 2)
 //      When the active phase env is non-zero (the default cases),
 //      that ALGO is returned directly with the same m_tile_safe /
 //      n_tile_safe clamps the global ALGO env path applies in
-//      `select_grp_matmul_algo`.  The defaults give a sensible
-//      out-of-the-box auto policy: ALGO 1 (sequential_experts) for
-//      prompt — the legacy auto-Rule-3 choice; same wall time as
-//      the post-fix ALGO 3 path on skewed-M prompt until the
-//      planner gains M-weighted multi-thread-per-expert, and lower
-//      code surface — and ALGO 3 (N-tile rounds + CK) for decode,
+//      `select_grp_matmul_algo`.  The defaults give an out-of-the-
+//      box auto policy: ALGO 2 (flat_m_tile + multi-tier hybrid +
+//      wide-N fallback) for prompt — the M-tile multi-tier captures
+//      the Qwen3-class skewed-M speedup, while the wide-N fallback
+//      keeps Mixtral / GPT-OSS light frames at parity with the
+//      legacy ALGO 1 path; safety clamp falls back to ALGO 1 when
+//      `!m_tile_safe` — and ALGO 3 (N-tile rounds + CK) for decode,
 //      the measured decode winner across every benchmarked MoE
-//      workload.  Set the env to `0` for the legacy 3-rule cascade.
+//      workload.  Set `AUTO_PROMPT_ALGO=1` to restore the legacy
+//      sequential_experts prompt path, or the env to `0` for the
+//      legacy 3-rule cascade.
 //
 //   2. LEGACY RULES (phase env == 0):
 //

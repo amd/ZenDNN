@@ -1600,7 +1600,7 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
   // prior test would shadow our expectation).  `get_grp_matmul_algo`
   // returns 0 for any non-{1..5} value, i.e. "auto-select".
   AlgoEnvGuard reset_algo(0);
-  // Explicitly disable the phase env (default PROMPT=1 / DECODE=3) so
+  // Explicitly disable the phase env (default PROMPT=2 / DECODE=3) so
   // this suite continues to assert the LEGACY 3-rule cascade outcomes
   // it was authored for.  Without these overrides, the new default
   // phase pins would shadow the cascade and break every parametrized
@@ -2089,27 +2089,28 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyQwenPrompt) {
          "num_ops≥num_threads → Rule 1 → ALGO 3)";
 }
 
-// Default (env unset → cached `1` for prompt, `3` for decode).
-// Prompt-class Mixtral shape: phase env defaults to 1 (sequential_
-// experts) — the measured-best out-of-the-box auto policy.  No
-// `Override` set; tests the cached env path's actual default value.
-TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
+// Default (env unset → cached `2` for prompt, `3` for decode).
+// Prompt-class Mixtral shape: phase env defaults to 2 (flat_m_tile)
+// — the out-of-the-box auto policy.  No `Override` set; tests the
+// cached env path's actual default value.
+TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo2) {
   using namespace zendnnl::lowoha::matmul;
   using namespace moe_test_utils;
   reset_grp_matmul_caches();
   AlgoEnvGuard reset_algo(0);
   // No AutoPromptAlgoOverride / AutoDecodeAlgoOverride — exercises
-  // the unset-env default (PROMPT=1, DECODE=3).
+  // the unset-env default (PROMPT=2, DECODE=3).
 
   // Mixtral-class prompt — with the new default the phase env picks
-  // ALGO 1 (sequential_experts).  No safety clamps apply (ALGO 1 has
-  // no m_tile_safe / n_tile_safe precondition).
+  // ALGO 2 (flat_m_tile).  Shape is m_tile_safe (row-major,
+  // uniform bf16 dtypes via build_auto_probe), so no safety clamp
+  // fires.
   auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
                             /*num_ops=*/8, /*num_threads=*/128);
   EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
                                    s.num_threads),
-            1)
-      << "AUTO_PROMPT_ALGO default (=1) must route prompt → ALGO 1";
+            2)
+      << "AUTO_PROMPT_ALGO default (=2) must route prompt → ALGO 2";
 }
 
 // Default decode: phase env defaults to 3 (N-tile rounds + CK).
@@ -2210,22 +2211,22 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvDoesNotLeakIntoPrompt) {
 // Bogus phase env values (>5 or invalid) clamp to the documented
 // default for the phase — matching the env-parse "validate or fall
 // back to default" convention used by every other int env getter in
-// this header.  PROMPT default=1, DECODE default=3.
+// this header.  PROMPT default=2, DECODE default=3.
 TEST(TestGroupMatmulAutoPhaseEnv, BogusValueFallsBackToDefault) {
   using namespace zendnnl::lowoha::matmul;
   using namespace moe_test_utils;
   reset_grp_matmul_caches();
   AlgoEnvGuard reset_algo(0);
-  AutoPromptAlgoOverride bogus_prompt(99);   // > 5, clamps to 1 (default)
+  AutoPromptAlgoOverride bogus_prompt(99);   // > 5, clamps to 2 (default)
   AutoDecodeAlgoOverride bogus_decode(99);   // > 5, clamps to 3 (default)
 
-  // Mixtral-class prompt → phase default 1 (sequential_experts).
+  // Mixtral-class prompt → phase default 2 (flat_m_tile).
   auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
                             /*num_ops=*/8, /*num_threads=*/128);
   EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
                                    s.num_threads),
-            1)
-      << "AUTO_PROMPT_ALGO=99 must clamp to default (=1)";
+            2)
+      << "AUTO_PROMPT_ALGO=99 must clamp to default (=2)";
 
   // Decode shape with n_tile_safe=true → phase default 3 (N-tile rounds).
   auto sd = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
@@ -2264,7 +2265,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowIgnoresPhaseEnv) {
 // ===============================================================================
 // [8e] TestGroupMatmulHybridMSplit — Option-A M-weighted water-fill
 //      heavy distribution under
-//      `ZENDNNL_GRP_MATMUL_HYBRID_M_HEAVY_THRESHOLD`.
+//      `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD`.
 //
 // Targets the new path inside
 // `apply_round_pick(RoundPick::Single, use_custom=true)` that fires
@@ -2381,7 +2382,7 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          auto_strategy(0);
-  HybridMHeavyThresholdOverride  hybrid_off(-1);  // explicit DISABLED
+  NTileHeavyThresholdOverride  hybrid_off(-1);  // explicit DISABLED
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2459,7 +2460,7 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
   NTileStrategyOverride          force_rounds(2);
   // Threshold chosen so M > 200 = heavy AND every Ms entry crosses
   // the new `max_M > kDecodeMaxM=32` prompt gate.
-  HybridMHeavyThresholdOverride  hybrid_on(200);
+  NTileHeavyThresholdOverride  hybrid_on(200);
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2581,7 +2582,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          force_rounds(2);    // bypass auto-mirror
-  HybridMHeavyThresholdOverride  hybrid_auto(0);     // AUTO mode
+  NTileHeavyThresholdOverride  hybrid_auto(0);     // AUTO mode
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2681,7 +2682,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsLowSkew) {
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          force_rounds(2);   // bypass auto-mirror
-  HybridMHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
+  NTileHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2761,7 +2762,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
   NRoundsModeOverride            single_round(1);
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          force_rounds(2);   // bypass auto-mirror
-  HybridMHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
+  NTileHeavyThresholdOverride  hybrid_auto(0);    // AUTO mode
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2868,7 +2869,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
     NRoundsModeOverride            single_round(1);
     CustomKernelNTileOverride      default_n_tile(0);
     NTileStrategyOverride          auto_strategy(0);
-    HybridMHeavyThresholdOverride  hybrid_auto(0);
+    NTileHeavyThresholdOverride  hybrid_auto(0);
 
     reset_grp_matmul_caches();
     AlgoEnvGuard       algo_guard(3);
@@ -2911,7 +2912,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
     NTileStrategyOverride          auto_strategy(0);
     // Threshold=10 would tag M ∈ {24,20,16,12} as heavy on this
     // Ms — i.e. would have engaged MANUAL on legacy semantics.
-    HybridMHeavyThresholdOverride  hybrid_manual(10);
+    NTileHeavyThresholdOverride  hybrid_manual(10);
 
     reset_grp_matmul_caches();
     AlgoEnvGuard       algo_guard(3);
@@ -2967,5 +2968,316 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
             1)
       << "AUTO_PROMPT_ALGO=3 with !n_tile_safe must clamp to ALGO 1 "
          "(same correctness contract as global ALGO=3 path)";
+}
+
+// ============================================================================
+// [8f] TestGroupMatmulMTileBranches — ALGO 2 (M-tile) internal branch dispatch.
+//
+// `flat_m_tile` dispatches between four internal branches based on
+// workload shape:
+//   round-based            (active_ops > num_threads)
+//   multi-tier hybrid      (Qwen3-class many-expert skewed prompt)
+//   wide-N memory-bound    (total_need * 2 ≤ num_threads, max_M > 1)
+//   phase-2 single-tier    (default M-weighted fallthrough)
+//
+// These tests pin ALGO 2 via `AlgoEnvGuard(2)`, exercise shapes that
+// should drive each branch, and assert the tag published by the
+// chosen branch (`test_api::s_last_m_tile_path`) matches expectation.
+// Adds focused coverage for the wide-N fallback and multi-tier hybrid
+// gates so silent regressions surface as failed tag asserts instead
+// of perf regressions in downstream benchmarks.
+//
+// The capture hook is gated by `s_capture_m_tile_path` (armed only
+// while `MTilePathCaptureGuard` is in scope); production builds
+// never arm it, so the per-call cost is a single relaxed load of a
+// cache-line-shared `false` bool — no coherence traffic, branch-
+// predictable.  See doc-block on `s_capture_m_tile_path` in
+// `group_matmul_parallel_common.hpp`.
+// ============================================================================
+
+// Wide-N memory-bound fallback engages when `total_need * 2 ≤ num_threads`
+// AND `max_M > 1`.  On 32 threads with 8 actives × M=8, total_need =
+// 8 × ceil(8/16) = 8; 2×8 = 16 ≤ 32 ⇒ wide-N fires.  Mirrors the Mixtral
+// prompt-light regime documented in the planner doc-block.
+TEST(TestGroupMatmulMTileBranches, WideNFallbackEngagesOnLightFrames) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  // 8 actives × M=8 × K=64 × N=1024.
+  //   total_need = 8 × ceil(8/16) = 8;  2*8 = 16 ≤ 32 ⇒ wide-N gate ✓
+  //   max_M = 8 > 1                                  ⇒ decode-exclusion clears
+  //   max_M = 8 < 256                                ⇒ multi-tier gate fails
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{8, 8, 8, 8, 8, 8, 8, 8});
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTileHybridOverride     hybrid_auto(0);
+  MTilePathCaptureGuard   cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_EQ(tag, kWideNFallback)
+      << "Wide-N fallback must engage on 8 actives × M=8 / 32t "
+         "(total_need*2 = 16 ≤ 32, max_M = 8 > 1); got tag=" << tag
+      << " (kRoundBased=0, kMultiTier=1, kWideNFallback=2, kPhase2Single=3)";
+}
+
+// Wide-N fallback MUST be excluded for pure-decode workloads (max_M==1).
+// The Phase 2 single-tier CCD-stripe layout is the latency-optimal
+// mapping for M=1 — one thread per CCD, experts parallel across CCDs.
+// Routing M=1 to wide-N would serialise each expert on the full thread
+// team and trade away the CCD-parallel decode win.
+TEST(TestGroupMatmulMTileBranches, WideNFallbackExcludesDecodeM1) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  // 8 actives × M=1.  Numerically `total_need*2 = 16 ≤ 32` would PASS
+  // the wide-N count gate; the `max_M_single_tier > 1` decode-exclusion
+  // clamp must keep wide-N off and route to Phase 2 single-tier
+  // (CCD-stripe).
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{1, 1, 1, 1, 1, 1, 1, 1});
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTileHybridOverride     hybrid_auto(0);
+  MTilePathCaptureGuard   cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_NE(tag, kWideNFallback)
+      << "Wide-N fallback MUST be excluded on decode-class max_M=1; "
+         "got wide-N (tag=" << tag << ")";
+  EXPECT_EQ(tag, kPhase2Single)
+      << "max_M=1 must fall through to Phase 2 single-tier (CCD-stripe); "
+         "got tag=" << tag;
+}
+
+// Multi-tier hybrid engages when ALL of: actives ≥ num_threads/2,
+// max_M ≥ 256, max_M ≥ 4×avg_M, n_light ≥ num_threads/8.  On 32 threads
+// the gate needs ≥ 16 actives and ≥ 4 lights.  Shape: 1 heavy at
+// M=1024 + 15 lights at M=4 — avg_M ≈ 67.75, light_cut = max(8, 16) = 16
+// (M=4 ≤ 16 ⇒ LIGHT), max_M/avg_M ≈ 15.1 ⇒ skew ✓.
+TEST(TestGroupMatmulMTileBranches, MultiTierEngagesOnSkewedPrompt) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kMultiTier;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  // 16 actives: 1 heavy (M=1024) + 15 lights (M=4).
+  //   actives = 16 ≥ 32/2                              ✓
+  //   max_M = 1024 ≥ 256                              ✓
+  //   avg_M = (1024 + 15*4) / 16 ≈ 67.75
+  //   max_M/avg_M ≈ 15.1 ≥ 4                          ✓ (skew gate)
+  //   light_cut = max(8, 67/4) = max(8, 16) = 16
+  //   n_light = 15 (every M=4 ≤ 16); n_heavy = 1     ✓
+  //   total_need = 64 + 15 = 79; 2*79 = 158 > 32     ⇒ wide-N excluded
+  std::vector<int> ms = {1024};
+  ms.insert(ms.end(), 15, 4);
+  auto s = build_hybrid_probe(/*num_threads=*/32, ms, /*N=*/1024);
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTileHybridOverride     hybrid_auto(0);
+  MTilePathCaptureGuard   cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_EQ(tag, kMultiTier)
+      << "Multi-tier hybrid must engage on 16 actives with skewed M "
+         "(1 heavy M=1024 + 15 lights M=4, skew ≈ 15×); got tag=" << tag;
+}
+
+// Multi-tier hybrid MUST stay off when `M_TILE_HYBRID=-1` (DISABLED),
+// even on a shape that would otherwise satisfy every gate.  Same
+// Qwen3-class shape as `MultiTierEngagesOnSkewedPrompt`; verifies the
+// env-disable escape hatch keeps the legacy single-tier path
+// available for A/B testing and emergency rollback.
+TEST(TestGroupMatmulMTileBranches, MultiTierDisabledViaEnvOverride) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kMultiTier;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  std::vector<int> ms = {1024};
+  ms.insert(ms.end(), 15, 4);
+  auto s = build_hybrid_probe(/*num_threads=*/32, ms, /*N=*/1024);
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTileHybridOverride     hybrid_disabled(-1);  // DISABLED escape hatch
+  MTilePathCaptureGuard   cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_NE(tag, kMultiTier)
+      << "M_TILE_HYBRID=-1 must force the legacy single-tier path "
+         "even on shapes the AUTO gate would accept; got multi-tier "
+         "(tag=" << tag << ")";
+  EXPECT_EQ(tag, kPhase2Single)
+      << "M_TILE_HYBRID=-1 + Qwen3-class skewed shape must land in "
+         "Phase 2 single-tier (the legacy M-weighted fallback); "
+         "got tag=" << tag;
+}
+
+// Multi-tier hybrid stays off (falls through to Phase 2 single-tier)
+// when the workload shape doesn't pass the skew gate.  Shape: 16
+// actives all at M=256 ⇒ max_M = avg_M = 256; max_M / avg_M = 1 < 4
+// ⇒ skew gate fails even though `actives` and `max_M ≥ 256` pass.
+TEST(TestGroupMatmulMTileBranches, MultiTierLowSkewFallsThrough) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kMultiTier;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  // 16 actives all at M=256.  actives gate ✓, max_M gate ✓, skew
+  // gate FAILS (max_M / avg_M = 1 < 4) ⇒ multi-tier must NOT engage;
+  // falls through to Phase 2 single-tier.
+  //   total_need = 16 × 16 = 256; 2×256 = 512 > 32 ⇒ wide-N excluded.
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 256), /*N=*/1024);
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTileHybridOverride     hybrid_auto(0);
+  MTilePathCaptureGuard   cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_NE(tag, kMultiTier)
+      << "Multi-tier must NOT engage on low-skew shapes "
+         "(max_M/avg_M = 1 < kHybridMinSkewX=4); got multi-tier "
+         "(tag=" << tag << ")";
+  EXPECT_EQ(tag, kPhase2Single)
+      << "Low-skew shape must fall through to Phase 2 single-tier; "
+         "got tag=" << tag;
 }
 
