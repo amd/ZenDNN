@@ -98,14 +98,9 @@ void sequential_experts(
                          bias[i], beta[i], dst[i], ldc[i],
                          is_weights_const[i], num_threads, params[i], algo);
     // Fused activation: dst[i] is hot in L3 from the GEMM that just finished.
-    // Try DLP backend first; fall back to AVX-512 / scalar kernel for
-    // activations DLP can't express (currently swiglu_oai_mul).
     if (fused_act != grp_matmul_gated_act_t::none) {
-      if (!apply_gated_act_inplace_dlp(fused_act, dst[i], 0, M[i],
-                                       N[i], ldc[i], act_dtype)) {
         apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
                                 N[i], ldc[i], act_dtype);
-      }
     }
   }
 }
@@ -199,11 +194,8 @@ void parallel_multilevel(
                              is_weights_const[i], thr_per_op[i],
                              params[i], algo);
         if (fused_act != grp_matmul_gated_act_t::none) {
-          if (!apply_gated_act_inplace_dlp(fused_act, dst[i], 0, M[i],
-                                           N[i], ldc[i], act_dtype)) {
             apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
                                     N[i], ldc[i], act_dtype);
-          }
         }
       }
     }
@@ -229,11 +221,8 @@ void parallel_multilevel(
                                bias[e], beta[e], dst[e], ldc[e],
                                is_weights_const[e], ccd_size, params[e], algo);
           if (fused_act != grp_matmul_gated_act_t::none) {
-            if (!apply_gated_act_inplace_dlp(fused_act, dst[e], 0, M[e],
-                                             N[e], ldc[e], act_dtype)) {
               apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
                                       N[e], ldc[e], act_dtype);
-            }
           }
         }
       }
@@ -286,11 +275,8 @@ void parallel_per_expert(
                          bias[i], beta[i], dst[i], ldc[i],
                          is_weights_const[i], 1, params[i], algo);
     if (fused_act != grp_matmul_gated_act_t::none) {
-      if (!apply_gated_act_inplace_dlp(fused_act, dst[i], 0, M[i],
-                                       N[i], ldc[i], act_dtype)) {
         apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
                                 N[i], ldc[i], act_dtype);
-      }
     }
   }
 }
