@@ -236,10 +236,12 @@ get_postop_metadata_cache() {
 //   - presence of each quant buffer
 //   - zp_comp_ndim
 //   - bias presence
-//   - for binary_add/binary_mul: po.dtype (drives m.stor_type) and
-//     po.leading_dim (drives m.ldm) — collisions on these between weight-
-//     tied layers would silently produce wrong results because the patch
-//     path only refreshes m.matrix.
+//   - for binary_add/binary_mul: po.dtype (drives m.stor_type),
+//     po.leading_dim (drives m.ldm), and po.dims (drives whether the cold
+//     path maps the operand to BIAS/SCALE broadcast vs MATRIX_ADD/MUL) —
+//     collisions on these between weight-tied layers would silently produce
+//     wrong results or segfaults because the patch path only refreshes
+//     mutable pointers into the slot type chosen at build time.
 //   - per-tensor vs per-token/per-channel src_scale shape
 //     (src_scale_nelems > 1): drives the is_sym_quant build-path branch,
 //     which gates whether post_op_grp is wired at all. Mixing the two on
@@ -251,7 +253,6 @@ get_postop_metadata_cache() {
 //   - po.alpha/po.beta (CLIP bounds): patched per-call via holder-owned
 //     eltwise_alpha/eltwise_beta floats.
 //   - po.buff (binary operand pointer): patched per-call.
-//   - po.dims: not read by the build path.
 //   - M: dynamic batch sizes must not invalidate per-layer cache hits.
 //   - src_scale_nelems exact value (only the per-tensor bit is folded;
 //     the per-call length is refreshed by patch_mutable_fields onto
@@ -268,6 +269,10 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
       sig = sig * 31u + static_cast<std::size_t>(po.dtype);
       sig = sig * 31u
           + static_cast<std::size_t>(static_cast<uint32_t>(po.leading_dim));
+      sig = sig * 31u + po.dims.size();
+      for (int64_t d : po.dims) {
+        sig = sig * 31u + static_cast<std::size_t>(d);
+      }
     }
   }
   sig = sig * 31u + static_cast<std::size_t>(dtypes.src);
@@ -330,7 +335,8 @@ static void setup_dlp_postops(dlp_metadata_t *md,
                               dlp_postop_metadata_holder_t *h,
                               const std::vector<matmul_post_op> &postops,
                               int &op_index, int &eltwise_index,
-                              int &matrix_add_index, int &matrix_mul_index) {
+                              int &matrix_add_index, int &matrix_mul_index,
+                              int &bias_index, int &scale_index, int n_cols) {
   // Write one ELTWISE slot. stor_type describes the storage of alpha/beta;
   // when the op carries neither, leave the field at its zero-init default
   // (DLP_INVALID) — the AOCL DLP kernel only consults stor_type when at
@@ -401,10 +407,39 @@ static void setup_dlp_postops(dlp_metadata_t *md,
       put_eltwise(MISH);
       break;
     case post_op_type_t::binary_add:
-      put_matrix(md->matrix_add, matrix_add_index, MATRIX_ADD, po);
+      if (po.dims.size() == 2 && po.dims[0] == 1 &&
+          po.dims[1] == static_cast<int>(n_cols)) {
+        md->seq_vector[op_index++] = BIAS;
+        md->bias[bias_index].bias = po.buff;
+        md->bias[bias_index].stor_type = to_dlp_type(po.dtype);
+        md->bias[bias_index].sf = nullptr;
+        md->bias[bias_index].zp = nullptr;
+        md->bias[bias_index].bias_len = po.dims[1];
+        bias_index++;
+      }
+      else {
+        put_matrix(md->matrix_add, matrix_add_index, MATRIX_ADD, po);
+      }
       break;
     case post_op_type_t::binary_mul:
-      put_matrix(md->matrix_mul, matrix_mul_index, MATRIX_MUL, po);
+      // Row-broadcast {1, N}: multiply each output column j by po.buff[j].
+      // DLP MATRIX_MUL expects a dense M×N operand; map broadcast to SCALE
+      // (per-channel multiply), same idea as matmul_aocl_dlp_utils 1D mul path.
+      if (po.dims.size() == 2 && po.dims[0] == 1 &&
+          static_cast<int>(po.dims[1]) == n_cols) {
+        md->seq_vector[op_index++] = SCALE;
+        dlp_scale_t &sc = md->scale[scale_index++];
+        sc.sf->scale_factor     = const_cast<void *>(po.buff);
+        sc.sf->scale_factor_len = n_cols;
+        sc.sf->scale_factor_type = to_dlp_type(po.dtype);
+        static int32_t bmul_bcast_zp = 0;
+        sc.zp->zero_point     = &bmul_bcast_zp;
+        sc.zp->zero_point_type = DLP_S32;
+        sc.zp->zero_point_len  = 1;
+      }
+      else {
+        put_matrix(md->matrix_mul, matrix_mul_index, MATRIX_MUL, po);
+      }
       break;
     default:
       // Skip unsupported post-ops
@@ -560,7 +595,7 @@ static void patch_mutable_fields(dlp_metadata_t *md,
                                  const matmul_params &lowoha_param,
                                  const void *bias,
                                  const matmul_data_types &dtypes,
-                                 int M, int K,
+                                 int M, int N, int K,
                                  int32_t *zp_comp_acc, int zp_comp_ndim) {
   // NOTE: keep these flag definitions in lockstep with the build path in
   // create_dlp_post_op(). The hit path mirrors the build path's per-call
@@ -614,11 +649,23 @@ static void patch_mutable_fields(dlp_metadata_t *md,
   //     /beta floats. The eltwise[i].algo.alpha/beta pointers were wired
   //     to these holder addresses at build time and are stable across
   //     cache hits.
-  //   - binary_add / binary_mul addend pointers.
-  // Other eltwise types (relu, gelu_*, sigmoid, swish, tanh, leaky_relu)
-  // have no per-call mutable fields — their alpha/beta either is unused or
-  // points at process-lifetime constexpr globals. We still advance
-  // eltwise_index for them so it stays in lockstep with the build path.
+  //   - binary_add / binary_mul operand pointers (dense M×N uses
+  //     matrix_add/matrix_mul; row-broadcast {1, N} uses BIAS/SCALE,
+  //     matching setup_dlp_postops).
+  // Other eltwise types (relu, gelu_*, sigmoid, swish, tanh, mish,
+  // leaky_relu) have no per-call mutable fields — their alpha/beta either
+  // is unused or points at process-lifetime constexpr globals. We still
+  // advance eltwise_index for them so it stays in lockstep with the build
+  // path.
+  int scale_index = 0;
+  if (is_int8 && lowoha_param.quant_params.src_scale.buff &&
+      !is_non_quant_src_int8 && !is_sym_quant && !is_bf16_f32_per_token_sym) {
+    scale_index++;
+  }
+  if (is_int8 && lowoha_param.quant_params.wei_scale.buff && !is_sym_quant) {
+    scale_index++;
+  }
+
   std::size_t eltwise_index = 0;
   for (const auto &po : lowoha_param.postop_) {
     switch (po.po_type) {
@@ -634,15 +681,32 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     case post_op_type_t::sigmoid:
     case post_op_type_t::swish:
     case post_op_type_t::tanh:
+    case post_op_type_t::mish:
       ++eltwise_index;
       break;
     case post_op_type_t::binary_add:
-      md->matrix_add[matrix_add_index].matrix = po.buff;
-      matrix_add_index++;
+      if (po.dims.size() == 2 && po.dims[0] == 1 &&
+          po.dims[1] == N) {
+        md->bias[bias_index].bias = po.buff;
+        bias_index++;
+      }
+      else {
+        md->matrix_add[matrix_add_index].matrix = po.buff;
+        matrix_add_index++;
+      }
       break;
     case post_op_type_t::binary_mul:
-      md->matrix_mul[matrix_mul_index].matrix = po.buff;
-      matrix_mul_index++;
+      if (po.dims.size() == 2 && po.dims[0] == 1 &&
+          static_cast<int>(po.dims[1]) == N) {
+        md->scale[scale_index].sf->scale_factor = const_cast<void *>(po.buff);
+        md->scale[scale_index].sf->scale_factor_len = N;
+        md->scale[scale_index].sf->scale_factor_type = to_dlp_type(po.dtype);
+        scale_index++;
+      }
+      else {
+        md->matrix_mul[matrix_mul_index].matrix = po.buff;
+        matrix_mul_index++;
+      }
       break;
     default:
       break;
@@ -760,25 +824,21 @@ static void patch_mutable_fields(dlp_metadata_t *md,
   }
 
   // Non-symmetric INT8 SCALE post-op slots refresh on cache hit.
-  // The cold path writes up to three SCALE entries into scale[]:
-  //   slot 0: src_scale  (if buff && !is_non_quant_src_int8)
-  //   slot 1: wei_scale  (if buff)
-  //   slot 2: dst_scale  (if buff) — last SCALE, placed after eltwise
+  // The cold path writes SCALE entries into scale[] in this order:
+  //   src_scale  (if buff && !is_non_quant_src_int8)
+  //   wei_scale  (if buff)
+  //   row-broadcast binary_mul {1, N} operands (one SCALE slot each)
+  //   eltwise post-ops
+  //   dst_scale  (if buff) — last SCALE, after all post-ops
   // and (when dst_scale is present and dst_zp.buff is set) also wires
   // scale[dst].zp from dst_zp. Every one of those .scale_factor / .
   // zero_point pointers is a per-call user buffer in integrator paths,
   // so they all dangle on cache hits and must be repointed.
   //
-  // The slot indices are derived analytically here from the same
-  // presence booleans the cold path uses; this is safe-by-construction
-  // because compute_postop_signature folds the same booleans
-  // (src_scale.buff != nullptr, wei_scale.buff != nullptr,
-  //  dst_scale.buff != nullptr) into the cache key — any change in
-  // presence pattern between cold build and subsequent hit would route
-  // to a different cache slot, not silently corrupt this one. The
-  // sym-quant path stays separate (post_op_grp, patched above) so we
-  // gate this whole block on (is_int8 && !is_sym_quant), mirroring the
-  // cold-path gates at lines 957, 974, 1008.
+  // src_scale / wei_scale sit before the post-op walk and use fixed
+  // leading indices; dst_scale uses scale_index after that walk so
+  // row-broadcast binary_mul SCALE slots are skipped. binary_mul bcast
+  // buffers are refreshed in the post-op loop above.
   if (is_int8 && !is_sym_quant) {
     int sidx = 0;
     if (lowoha_param.quant_params.src_scale.buff && !is_non_quant_src_int8) {
@@ -793,22 +853,25 @@ static void patch_mutable_fields(dlp_metadata_t *md,
       md->scale[sidx].sf->scale_factor = const_cast<void *>(wei_scale.buff);
       md->scale[sidx].sf->scale_factor_len = get_num_elements(wei_scale.dims);
       md->scale[sidx].sf->scale_factor_type = to_dlp_type(wei_scale.dt);
-      sidx++;
     }
     if (lowoha_param.quant_params.dst_scale.buff) {
       const auto &dst_scale = lowoha_param.quant_params.dst_scale;
-      md->scale[sidx].sf->scale_factor = const_cast<void *>(dst_scale.buff);
-      md->scale[sidx].sf->scale_factor_len = get_num_elements(dst_scale.dims);
-      md->scale[sidx].sf->scale_factor_type = to_dlp_type(dst_scale.dt);
+      md->scale[scale_index].sf->scale_factor =
+        const_cast<void *>(dst_scale.buff);
+      md->scale[scale_index].sf->scale_factor_len =
+        get_num_elements(dst_scale.dims);
+      md->scale[scale_index].sf->scale_factor_type = to_dlp_type(dst_scale.dt);
       // dst_zp shares the same slot as dst_scale in the cold path
       // (lines 1017-1023). Only patch when the caller actually supplies
       // a dst_zp buffer; the dummy-zp branch on the cold path uses a
       // process-lifetime constexpr int, so it needs no refresh.
       if (lowoha_param.quant_params.dst_zp.buff) {
         const auto &dst_zp = lowoha_param.quant_params.dst_zp;
-        md->scale[sidx].zp->zero_point = const_cast<void *>(dst_zp.buff);
-        md->scale[sidx].zp->zero_point_len = get_num_elements(dst_zp.dims);
-        md->scale[sidx].zp->zero_point_type = to_dlp_type(dst_zp.dt);
+        md->scale[scale_index].zp->zero_point =
+          const_cast<void *>(dst_zp.buff);
+        md->scale[scale_index].zp->zero_point_len =
+          get_num_elements(dst_zp.dims);
+        md->scale[scale_index].zp->zero_point_type = to_dlp_type(dst_zp.dt);
       }
     }
   }
@@ -884,7 +947,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       return nullptr;
     }
     patch_mutable_fields(&h->metadata, h, lowoha_param, bias, dtypes,
-                         M, K, zp_comp_acc, zp_comp_ndim);
+                         M, N, K, zp_comp_acc, zp_comp_ndim);
     return &h->metadata;
   }
 
@@ -989,6 +1052,16 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   if (is_int8) {
     scale_count = int8_scale_count;
   }
+  // Row-broadcast binary_mul {1, N} uses DLP SCALE (per-N multiply), not MATRIX_MUL.
+  int binary_mul_bcast_scale_count = 0;
+  for (const auto &po : lowoha_param.postop_) {
+    if (po.po_type == post_op_type_t::binary_mul &&
+        po.dims.size() == 2 && po.dims[0] == 1 &&
+        static_cast<int>(po.dims[1]) == N) {
+      binary_mul_bcast_scale_count++;
+    }
+  }
+  scale_count += binary_mul_bcast_scale_count;
 
   // Add zp_comp to appropriate count
   if (zp_comp_ndim == 1) {
@@ -1013,10 +1086,19 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       eltwise_count++;
       break;
     case post_op_type_t::binary_add:
-      matrix_add_count++;
+      if (po.dims.size() == 2 && po.dims[0] == 1 &&
+          po.dims[1] == static_cast<int>(N)) {
+        bias_count++;
+      }
+      else {
+        matrix_add_count++;
+      }
       break;
     case post_op_type_t::binary_mul:
-      matrix_mul_count++;
+      if (!(po.dims.size() == 2 && po.dims[0] == 1 &&
+            static_cast<int>(po.dims[1]) == N)) {
+        matrix_mul_count++;
+      }
       break;
     default:
       // Skip unsupported post-ops
@@ -1268,7 +1350,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   }
 
   // Add bias if present
-  if (bias && bias_count > 0) {
+  if (bias) {
     dlp_metadata->seq_vector[op_index++] = BIAS;
     dlp_metadata->bias[bias_index].bias = const_cast<void *>(bias);
 
@@ -1282,7 +1364,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
   // Add post-ops
   setup_dlp_postops(dlp_metadata, h, lowoha_param.postop_,
-                    op_index, eltwise_index, matrix_add_index, matrix_mul_index);
+                    op_index, eltwise_index, matrix_add_index, matrix_mul_index,
+                    bias_index, scale_index, N);
 
   // For INT8: Add destination scale at the end (after eltwise post-ops)
   if (is_int8 && lowoha_param.quant_params.dst_scale.buff) {

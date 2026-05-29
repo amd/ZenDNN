@@ -19,6 +19,35 @@
 namespace zendnnl {
 namespace ops {
 
+namespace {
+
+// Matmul buffer post-ops: [1, N] is row-broadcast (same semantics as 1D length N).
+// AOCL DLP distinguishes bias vs matrix_add by rank; treat [1, N] as bias, not M×N matrix.
+inline bool aocl_matmul_row_broadcast_2d(const tensor_t &t) {
+  const auto &sz = t.get_size();
+  return sz.size() == 2 && sz[0] == 1;
+}
+inline bool aocl_binary_add_uses_bias_tensor_layout(const tensor_t &t) {
+  const auto &sz = t.get_size();
+  return sz.size() == 1 || aocl_matmul_row_broadcast_2d(t);
+}
+inline bool aocl_binary_mul_uses_1d_scale_layout(const tensor_t &t) {
+  const auto &sz = t.get_size();
+  return sz.size() == 1 || aocl_matmul_row_broadcast_2d(t);
+}
+inline uint64_t aocl_binary_row_vector_len_n(const tensor_t &t) {
+  const auto &sz = t.get_size();
+  if (sz.size() == 1) {
+    return sz[0];
+  }
+  if (sz.size() == 2 && sz[0] == 1) {
+    return sz[1];
+  }
+  return 0;
+}
+
+}  // namespace
+
 inline void eltwise_init(dlp_metadata_t *&aocl_dlp_po_ptr, int eltwise_count,
                          DLP_ELT_ALGO_TYPE algo_type) {
   (aocl_dlp_po_ptr->eltwise[eltwise_count]).algo.algo_type = algo_type;
@@ -105,7 +134,7 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
       auto found_obj_mul = inputs_.find(key_mul);
       if (found_obj_mul != inputs_.end()) {
         auto mul_buff_tensor = inputs_[key_mul];
-        if (found_obj_mul->second.get_size().size() == 1 &&
+        if (aocl_binary_mul_uses_1d_scale_layout(found_obj_mul->second) &&
             aocl_dlp_po_ptr->scale != nullptr) {
           (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor  =
             mul_buff_tensor.get_raw_handle_unsafe();
@@ -117,6 +146,7 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
           mul_idx_1d++;
         }
         else if (found_obj_mul->second.get_size().size() == 2 &&
+                 !aocl_matmul_row_broadcast_2d(found_obj_mul->second) &&
                  aocl_dlp_po_ptr->matrix_mul != nullptr) {
           (aocl_dlp_po_ptr->matrix_mul + mul_idx_2d)->matrix =
             mul_buff_tensor.get_raw_handle_unsafe();
@@ -142,16 +172,18 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
       auto found_obj_add = inputs_.find(key_add);
       if (found_obj_add != inputs_.end()) {
         auto add_buff_tensor = inputs_[key_add];
-        if (found_obj_add->second.get_size().size() == 1 &&
+        if (aocl_binary_add_uses_bias_tensor_layout(found_obj_add->second) &&
             aocl_dlp_po_ptr->bias != nullptr) {
           (aocl_dlp_po_ptr->bias + add_idx_1d)->bias = (void *)
               add_buff_tensor.get_raw_handle_unsafe();
           (aocl_dlp_po_ptr->bias + add_idx_1d)->stor_type = get_aocl_store_type(
                 add_buff_tensor.get_data_type());
-          (aocl_dlp_po_ptr->bias + add_idx_1d)->bias_len = add_buff_tensor.get_size(0);
+          (aocl_dlp_po_ptr->bias + add_idx_1d)->bias_len =
+            aocl_binary_row_vector_len_n(add_buff_tensor);
           add_idx_1d++;
         }
         else if (found_obj_add->second.get_size().size() == 2 &&
+                 !aocl_matmul_row_broadcast_2d(found_obj_add->second) &&
                  aocl_dlp_po_ptr->matrix_add != nullptr) {
           (aocl_dlp_po_ptr->matrix_add + add_idx_2d)->matrix
             = add_buff_tensor.get_raw_handle_unsafe();
@@ -253,7 +285,8 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
         break;
       case post_op_type_t::binary_add: {
         auto it = inputs_.find(zen_po.binary_add_params.tensor_name);
-        if (it != inputs_.end() && it->second.get_size().size() == 1) {
+        if (it != inputs_.end() &&
+            aocl_binary_add_uses_bias_tensor_layout(it->second)) {
           num_post_ops_1d_add++;
         }
         else {
@@ -263,7 +296,7 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
       break;
       case post_op_type_t::binary_mul: {
         auto it = inputs_.find(zen_po.binary_mul_params.tensor_name);
-        if (it != inputs_.end() && it->second.get_size().size() == 1) {
+        if (it != inputs_.end() && aocl_binary_mul_uses_1d_scale_layout(it->second)) {
           num_post_ops_1d_mul++;
         }
         else {
@@ -396,7 +429,8 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     case post_op_type_t::binary_add: {
       log_info("Adding binary_add post-op");
       auto it = inputs_.find(zen_po.binary_add_params.tensor_name);
-      if (it != inputs_.end() && it->second.get_size().size() == 1) {
+      if (it != inputs_.end() &&
+          aocl_binary_add_uses_bias_tensor_layout(it->second)) {
         aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
       }
       else {
@@ -413,12 +447,12 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     case post_op_type_t::binary_mul: {
       log_info("Adding binary_mul post-op");
       auto it = inputs_.find(zen_po.binary_mul_params.tensor_name);
-      if (it != inputs_.end() && it->second.get_size().size() == 1) {
+      if (it != inputs_.end() && aocl_binary_mul_uses_1d_scale_layout(it->second)) {
         aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
         (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor = NULL;
         (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = NULL;
         (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len =
-          it->second.get_size()[0];
+          aocl_binary_row_vector_len_n(it->second);
         (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
         log_info("Adding done");
         mul_index_1d++;

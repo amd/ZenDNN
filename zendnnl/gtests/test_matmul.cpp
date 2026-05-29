@@ -84,7 +84,13 @@ TEST_P(TestMatmul,F32_F32) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 2.0);
 
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ?
+                             binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -207,7 +213,12 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
 
   // Binary tensor for post-ops if needed
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
 
   auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 :
                             data_type_t::f32;
@@ -349,7 +360,12 @@ TEST_P(TestMatmul, WOQ_BF16_U4) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
 
   // Binary tensor for post-ops if needed
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
 
   auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 :
                             data_type_t::f32;
@@ -391,7 +407,12 @@ TEST_P(TestMatmul, BF16_F32) {
                             data_type_t::bf16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -430,7 +451,12 @@ TEST_P(TestMatmul, BF16_BF16) {
                             data_type_t::bf16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -467,7 +493,12 @@ TEST_P(TestMatmul, F16_F16) {
                             data_type_t::f16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             bias_dtype, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape,
                         binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f16, 2.0);
@@ -507,7 +538,12 @@ TEST_P(TestMatmul, F16_F32) {
                             data_type_t::f16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             bias_dtype, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape,
                         binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
@@ -569,7 +605,12 @@ TEST_P(TestMatmul,F32_F32_Stride) {
                             stride_in, data_type_t::f32, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -631,7 +672,12 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
                             stride_in, data_type_t::bf16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -694,7 +740,12 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
                             stride_in, data_type_t::bf16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -755,7 +806,12 @@ TEST_P(TestMatmul, F16_F16_Stride) {
                             stride_in, data_type_t::f16, 2.0, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             bias_dtype, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape,
                         binary_dtype);
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f16, 2.0);
@@ -832,7 +888,12 @@ TEST_P(TestMatmul, INT8) {
   }
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0, false, dst_scale, dst_zp);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -908,7 +969,12 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_BF16) {
 
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n},
                            data_type_t::bf16, 2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n},
@@ -978,7 +1044,12 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
 
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n},
                            data_type_t::f32, 2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n},
@@ -1082,7 +1153,12 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
 
   auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
                      rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
 
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, out_dt,
                            2.0);
@@ -1151,7 +1227,12 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
 
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n},
                            data_type_t::bf16, 2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n},
@@ -1209,7 +1290,12 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
 
   auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n},
                            data_type_t::f32, 2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n},
@@ -1293,7 +1379,12 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
                           test_dt, 2.0, transA);
   auto bias_tensor    = tensor_factory.uniform_dist_tensor({1, n},
                         rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, test_dt,
                            2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, test_dt,
@@ -1381,7 +1472,12 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
                           test_dt, 2.0, transA);
   auto bias_tensor    = tensor_factory.uniform_dist_tensor({1, n},
                         rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, test_dt,
                            2.0);
   auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, test_dt,

@@ -281,9 +281,18 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
     s.comp_type = COMP_TYPE;
     s.out_type = OUT_TYPE;
 
-    libxsmm_meltwfunction_binary kernel =
-      libxsmm_dispatch_meltw_binary(binary_type, s,
-                                    LIBXSMM_MELTW_FLAG_BINARY_NONE);
+    // LOWOHA binary tensor {1, N}: same multiplier for every output row at column c.
+    // LibXSMM meltw stores C as out[i + j*ldo] with j = row, i = col; BCAST_ROW_IN_1
+    // indexes in1 by j (varies down rows). BCAST_COL_IN_1 indexes in1 by i only
+    // (constant along rows) — that matches a logical row vector broadcast.
+    const bool bcast_col_in1 =
+      po.dims.size() == 2 && po.dims[0] == 1;
+    const libxsmm_bitfield bflags = bcast_col_in1
+                                    ? LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_1
+                                    : LIBXSMM_MELTW_FLAG_BINARY_NONE;
+
+    libxsmm_meltwfunction_binary kernel = libxsmm_dispatch_meltw_binary(binary_type,
+                                          s, bflags);
 
     if (kernel) {
       libxsmm_meltw_binary_param param{};

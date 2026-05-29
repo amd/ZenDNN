@@ -505,6 +505,69 @@ TEST_P(TestPostopCache, BinaryMulRefreshOnHit) {
   run_binary_refresh_on_hit(post_op_type_t::binary_mul);
 }
 
+/** @brief Mutable-field regression for row-broadcast binary_mul {1, N}:
+ *         cold path maps this operand to a SCALE slot, not MATRIX_MUL.
+ *         On cache hit patch_mutable_fields must refresh scale[].sf, not
+ *         matrix_mul[]. Exercises the post-op chain that segfaulted in
+ *         Matmul/TestMatmul.F32_F32/21 (binary_mul:gelu_erf:mish). */
+TEST_P(TestPostopCache, BinaryMulBcastRefreshOnHit) {
+  if (!is_fp_path()) {
+    GTEST_SKIP() << "FP test (INT8 covered separately)";
+  }
+  if (!aocl_dlp_supports_postops_for_src()) {
+    GTEST_SKIP() << "F16 + AOCL DLP does not support binary post-ops";
+  }
+
+  const std::vector<post_op_type_t> po = {post_op_type_t::binary_mul,
+                                          post_op_type_t::gelu_erf,
+                                          post_op_type_t::mish};
+
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({k, n},
+                       src_dt, 2.0, transB);
+  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, k},
+                       src_dt, 2.0, transA);
+  auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n}, dst_dt,
+                                                          2.0);
+
+  auto binary_1 = make_binary_postop_tensors(tensor_factory, po, {1, n},
+                                             dst_dt, 2.0);
+  auto binary_2 = make_binary_postop_tensors(tensor_factory, po, {1, n},
+                                             dst_dt, 5.0);
+
+  auto out_1 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
+  auto ref_1 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
+  status_t s1 = matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                                   out_1, po, binary_1, true, algo, alpha,
+                                   beta);
+  if (s1 == status_t::isa_unsupported) {
+    GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
+  }
+  ASSERT_EQ(s1, status_t::success);
+  ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
+                                          bias_tensor, ref_1, po, binary_1,
+                                          true, algo, alpha, beta),
+            status_t::success);
+
+  auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
+  auto ref_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
+  ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                               out_2, po, binary_2, true, algo, alpha,
+                               beta), status_t::success);
+  ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
+                                          bias_tensor, ref_2, po, binary_2,
+                                          true, algo, alpha, beta),
+            status_t::success);
+
+  const auto t = tols_for_dst(dst_dt);
+  bool ok_1 = true, ok_2 = true;
+  compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
+                           t.enable_f32_relaxation, alpha);
+  compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
+                           t.enable_f32_relaxation, alpha);
+  EXPECT_TRUE(ok_1);
+  EXPECT_TRUE(ok_2);
+}
+
 /** @brief Key-distinctness regression for dtypes.bias: same weight,
  *         shapes, and post-op chain, but two different bias dtypes
  *         (bf16 vs f32). compute_postop_signature folds dtypes.bias

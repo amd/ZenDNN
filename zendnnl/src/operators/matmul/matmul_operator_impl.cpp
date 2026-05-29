@@ -54,15 +54,53 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
           return status_t::failure;
         }
         /** todo: support 1d add scale*/
-        if (tensor_size.size() == 1 && tensor_size[0] == output_size.at(1) &&
+        if (tensor_size.size() == 1 && output_size.size() == 2 &&
+            tensor_size[0] == output_size.at(1) &&
             op.binary_add_params.scale == 1.0) {
           continue;
         }
-        else if (tensor_size.size() == 2 && (tensor_size[0] == output_size.at(0) &&
-                                             tensor_size[1] == output_size.at(1))) {
+        // Row broadcast [1, N] (same as 1D length-N); only kernels that treat it as a
+        // row vector (not dense M×N matrix_add) may accept it.
+        else if (output_size.size() == 2 && tensor_size.size() == 2 &&
+                 tensor_size[0] == 1 &&
+                 tensor_size[1] == output_size.at(1) &&
+                 op.binary_add_params.scale == 1.0) {
+          if (!(forced_kernel.empty() ||
+#if ZENDNNL_DEPENDS_AOCLDLP
+                forced_kernel == "aocl_dlp" ||
+                forced_kernel == "aocl_dlp_blocked" ||
+#endif
+                forced_kernel == "onednn" || forced_kernel == "onednn_blocked" ||
+                forced_kernel == "reference")) {
+            apilog_error(add_tensor_obj->second.get_name(),
+                         " Invalid post-op: row-broadcast binary_add {1,N} is not supported for kernel ",
+                         forced_kernel, "; use a 1D length-N tensor or a supported kernel.");
+            return status_t::failure;
+          }
           continue;
         }
-        // OneDNN supports only 3D Buffer Tensor
+        else if (output_size.size() == 2 && tensor_size.size() == 2 &&
+                 tensor_size[0] == output_size.at(0) &&
+                 tensor_size[1] == output_size.at(1)) {
+          continue;
+        }
+        // Batched output [B, M, N]: full 3D operand (supported only by onednn/onednn_blocked/reference kernels).
+        else if (tensor_size.size() == 3 && output_size.size() == 3 &&
+                 tensor_size[0] == output_size.at(0) &&
+                 tensor_size[1] == output_size.at(1) &&
+                 tensor_size[2] == output_size.at(2)) {
+          if (!(forced_kernel == "onednn" ||
+                forced_kernel == "onednn_blocked" ||
+                forced_kernel == "reference")) {
+            apilog_error(add_tensor_obj->second.get_name(),
+                         " Invalid post-op: full 3D binary_add {B,M,N} is not supported for kernel ",
+                         forced_kernel,
+                         "; use onednn/onednn_blocked/reference kernel.");
+            return status_t::failure;
+          }
+          continue;
+        }
+        // OneDNN supports only 3D Buffer Tensor.
         else if (tensor_size.size() == 3 && output_size.size() == 3 &&
                  (forced_kernel == "onednn" || forced_kernel == "reference") &&
                  (tensor_size[1] == output_size.at(1) &&
@@ -110,16 +148,52 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
                        op.binary_mul_params.tensor_name, " transposed buffer not supported.");
           return status_t::failure;
         }
-        if (tensor_size.size() == 1 && tensor_size[0] == output_size.at(1) &&
+        if (tensor_size.size() == 1 && output_size.size() == 2 &&
+            tensor_size[0] == output_size.at(1) &&
             op.binary_mul_params.scale == 1.0) {
           continue;
         }
-        else if (tensor_size.size() == 2 && (tensor_size[0] == output_size.at(0) &&
-                                             tensor_size[1] == output_size.at(1))) {
+        else if (output_size.size() == 2 && tensor_size.size() == 2 &&
+                 tensor_size[0] == 1 &&
+                 tensor_size[1] == output_size.at(1) &&
+                 op.binary_mul_params.scale == 1.0) {
+          if (!(forced_kernel.empty() ||
+#if ZENDNNL_DEPENDS_AOCLDLP
+                forced_kernel == "aocl_dlp" ||
+                forced_kernel == "aocl_dlp_blocked" ||
+#endif
+                forced_kernel == "onednn" || forced_kernel == "onednn_blocked" ||
+                forced_kernel == "reference")) {
+            apilog_error(mul_tensor_obj->second.get_name(),
+                         " Invalid post-op: row-broadcast binary_mul {1,N} is not supported for kernel ",
+                         forced_kernel, "; use a 1D length-N tensor or a supported kernel.");
+            return status_t::failure;
+          }
           continue;
         }
-        /** BMM postop check, Work only for 1D, 2D mul tensor*/
-        //** Todo: support 3D add tensor*/
+        else if (output_size.size() == 2 && tensor_size.size() == 2 &&
+                 tensor_size[0] == output_size.at(0) &&
+                 tensor_size[1] == output_size.at(1)) {
+          continue;
+        }
+        else if (tensor_size.size() == 3 && output_size.size() == 3 &&
+                 tensor_size[0] == output_size.at(0) &&
+                 tensor_size[1] == output_size.at(1) &&
+                 tensor_size[2] == output_size.at(2)) {
+          if (!(forced_kernel == "onednn" ||
+                forced_kernel == "onednn_blocked" ||
+                forced_kernel == "reference")) {
+            apilog_error(mul_tensor_obj->second.get_name(),
+                         " Invalid post-op: full 3D binary_mul {B,M,N} is not supported for kernel ",
+                         forced_kernel,
+                         "; use onednn/onednn_blocked/reference kernel.");
+            return status_t::failure;
+          }
+          continue;
+        }
+        // BMM post-op broadcast checks for 3D output with 1D [N] or 2D [M, N]
+        // binary_mul tensors. Full 3D [B, M, N] binary_mul tensors are
+        // validated above (onednn/onednn_blocked/reference only).
         else if (tensor_size.size() == 1 && output_size.size()==3 &&
                  tensor_size[0] == output_size.at(2) && op.binary_mul_params.scale == 1.0) {
           continue;

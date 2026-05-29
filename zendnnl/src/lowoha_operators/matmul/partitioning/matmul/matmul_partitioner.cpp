@@ -187,8 +187,16 @@ static void apply_tile_postops(
     if ((tile_po.po_type == post_op_type_t::binary_add ||
          tile_po.po_type == post_op_type_t::binary_mul) &&
         tile_po.buff != nullptr) {
-      size_t offset = compute_postop_offset(
-                        m_start, n_start, tile_po.leading_dim, tile_po.dtype);
+      size_t offset;
+      if (tile_po.dims.size() == 2 && tile_po.dims[0] == 1) {
+        // Row vector {1, N}: only column offset applies (broadcast over rows).
+        offset = compute_postop_offset(0, n_start, tile_po.leading_dim,
+                                       tile_po.dtype);
+      }
+      else {
+        offset = compute_postop_offset(
+                   m_start, n_start, tile_po.leading_dim, tile_po.dtype);
+      }
       tile_po.buff = apply_offset(const_cast<void *>(tile_po.buff), offset);
     }
 

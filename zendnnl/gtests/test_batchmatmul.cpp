@@ -300,7 +300,12 @@ TEST_P(TestBatchMatmul,F32_3D) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -342,7 +347,12 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -392,7 +402,12 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n},
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -442,7 +457,12 @@ TEST_P(TestBatchMatmul,BF16_F32_3D) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -484,7 +504,12 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -534,7 +559,12 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -584,7 +614,12 @@ TEST_P(TestBatchMatmul,BF16_BF16_3D) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -623,7 +658,12 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -670,7 +710,12 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, 1, n}, rand() %
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n});
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -724,7 +769,12 @@ TEST_P(TestBatchMatmul, F16_3D) {
                             tensor_factory.uniform_dist_tensor({1, 1, n},
                                 bias_dtype, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape,
                         binary_dtype);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
@@ -775,7 +825,12 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
                             tensor_factory.uniform_dist_tensor({1, 1, n},
                                 bias_dtype, 2.0);
   //Binary Tensor {}
-  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types, {m, n},
+  auto binary_tensor_shape_3d = {batch_size, m, n};
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape = (use_LOWOHA &&
+                              rand() % 2 == 0) ? binary_tensor_shape_3d : binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape,
                         binary_dtype);
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
