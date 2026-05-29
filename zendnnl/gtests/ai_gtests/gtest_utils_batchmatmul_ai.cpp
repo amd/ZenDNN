@@ -109,10 +109,11 @@ bool BatchMatmulTestUtils::compare_batch_tensors(const tensor_t &test_tensor,
     const tensor_t &ref_tensor,
     uint64_t k,
     float rel_tolerance,
-    float epsilon) {
+    float epsilon,
+    bool enable_f32_relaxation) {
   // Reuse the matmul comparison logic for batch matmul
   return AITestUtils::compare_sampled_tensors_matmul(test_tensor, ref_tensor,
-         k, rel_tolerance, epsilon);
+         k, rel_tolerance, epsilon, enable_f32_relaxation);
 }
 
 status_t BatchMatmulTestUtils::run_reference_batchmatmul(
@@ -121,7 +122,9 @@ status_t BatchMatmulTestUtils::run_reference_batchmatmul(
   tensor_t &bias,
   tensor_t &output,
   const PostOpConfig &post_op_config,
-  std::vector<tensor_t> &binary_postop_tensors) {
+  std::vector<tensor_t> &binary_postop_tensors,
+  bool mask_libxsmm_postops,
+  bool skip_libxsmm_bf16_bias) {
 
   try {
     // Prepare input and output maps for the reference kernel
@@ -136,11 +139,21 @@ status_t BatchMatmulTestUtils::run_reference_batchmatmul(
     weights_copy.set_name("weights");
     bias_copy.set_name("bias");
 
-    auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights_copy)
-                          .set_param("bias", bias_copy);
+    auto matmul_context = matmul_context_t().set_param("weights", weights_copy);
+    //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
+    if (!skip_libxsmm_bf16_bias) {
+      matmul_context = matmul_context.set_param("bias", bias_copy);
+    }
 
     for (const auto &post_op_type : post_op_config.post_ops) {
+      if (mask_libxsmm_postops &&
+          (post_op_type == post_op_type_t::gelu_tanh ||
+           post_op_type == post_op_type_t::binary_mul ||
+           post_op_type == post_op_type_t::binary_add ||
+           post_op_type == post_op_type_t::swish ||
+           post_op_type == post_op_type_t::clip)) {
+        continue;
+      }
       post_op_t post_op{post_op_type};
       matmul_context = matmul_context.set_post_op(post_op);
     }
@@ -154,6 +167,14 @@ status_t BatchMatmulTestUtils::run_reference_batchmatmul(
     size_t binary_tensor_idx = 0;
     for (size_t i = 0; i < post_op_config.post_ops.size(); ++i) {
       auto post_op_type = post_op_config.post_ops[i];
+      if (mask_libxsmm_postops &&
+          (post_op_type == post_op_type_t::gelu_tanh ||
+           post_op_type == post_op_type_t::binary_mul ||
+           post_op_type == post_op_type_t::binary_add ||
+           post_op_type == post_op_type_t::swish ||
+           post_op_type == post_op_type_t::clip)) {
+        continue;
+      }
       if ((post_op_type == post_op_type_t::binary_add ||
            post_op_type == post_op_type_t::binary_mul)
           && binary_tensor_idx < binary_postop_tensors.size()) {

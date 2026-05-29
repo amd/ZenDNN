@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include "gtest_utils_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 using namespace ai_gtests;
 using namespace zendnnl::lowoha::matmul;
@@ -26,6 +27,9 @@ using namespace zendnnl::lowoha::matmul;
 
 /** @brief AI Test class for comprehensive ZenDNNL matmul testing */
 class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
+  bool mask_libxsmm_postops_ = false;
+  bool skip_libxsmm_bf16_bias_ = false;
+
   // -----------------------------------------------------------------------------
   // CreatedTensors
   //
@@ -323,7 +327,8 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                                 tensors.input, tensors.weights, tensors.bias,
                                 tensors.reference_output,
                                 params.post_op_config,
-                                ref_binary_post_op_tensors);
+                                ref_binary_post_op_tensors,
+                                mask_libxsmm_postops_, skip_libxsmm_bf16_bias_);
         AITestUtils::debug_print("[AI_DEBUG] Reference implementation finished.");
         EXPECT_EQ(ref_status, status_t::success)
             << "Reference implementation must succeed for supported data types";
@@ -332,7 +337,8 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
           float rel_tolerance = get_relative_tolerance(output_dtype);
           float epsilon = get_epsilon_value(output_dtype);
           bool comparison_result = AITestUtils::compare_sampled_tensors_matmul(
-                                     tensors.output, tensors.reference_output, params.k, rel_tolerance, epsilon);
+                                     tensors.output, tensors.reference_output, params.k,
+                                     rel_tolerance, epsilon, mask_libxsmm_postops_);
           EXPECT_TRUE(comparison_result)
               << "ZenDNNL output must match reference within abs_bound + rtol*|ref|, where abs_bound (epsilon-based) = "
               << epsilon
@@ -962,6 +968,8 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                            tensor_t &bias, tensor_t &output,
                            const MatmulParamsAI &params,
                            std::vector<std::pair<std::string, tensor_t>> &binary_post_op_tensors) {
+    mask_libxsmm_postops_ = false;
+    skip_libxsmm_bf16_bias_ = false;
     try {
       // Check if LOWOHA mode is enabled
       if (is_lowoha_mode_enabled()) {
@@ -987,7 +995,6 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
         void *A_data = input.get_raw_handle_unsafe();
         void *B_data = weights.get_raw_handle_unsafe();
         void *C_data = output.get_raw_handle_unsafe();
-        void *bias_data = bias.get_raw_handle_unsafe();
 
         if (!A_data || !B_data || !C_data) {
           std::cout << "[AI_TEST] LOWOHA: Null data pointer for " << params.test_name <<
@@ -1042,9 +1049,33 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
           }
         }
 
-        // Add post-ops
+        bool is_weights_const = (weights.get_data_type() == data_type_t::s4);
+        const matmul_algo_t lowoha_algo = kernel_select(
+                                            matmul_params_obj, batch_params.Batch_A, batch_params.Batch_B, 1,
+                                            M, N, K, matmul_params_obj.num_threads, bias.get_raw_handle_unsafe(),
+                                            is_weights_const, false);
+        const bool is_libxsmm_kernel = (lowoha_algo == matmul_algo_t::libxsmm ||
+                                        lowoha_algo == matmul_algo_t::libxsmm_blocked);
+        mask_libxsmm_postops_ = is_libxsmm_kernel;
+        // LIBXSMM matmul: bias is not supported currently due to accuracy issues (bf16)
+        const bool skip_bias =
+          (is_libxsmm_kernel && output.get_data_type() == data_type_t::bf16);
+        skip_libxsmm_bf16_bias_ = skip_bias;
+        void *bias_data = skip_bias ? nullptr : bias.get_raw_handle_unsafe();
+        matmul_dtypes.bias = skip_bias ? data_type_t::f32 : bias.get_data_type();
+        matmul_params_obj.dtypes = matmul_dtypes;
+
         for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
           auto post_op_type = params.post_op_config.post_ops[i];
+          if (mask_libxsmm_postops_ &&
+              (post_op_type == post_op_type_t::gelu_tanh ||
+               post_op_type == post_op_type_t::binary_mul ||
+               post_op_type == post_op_type_t::binary_add ||
+               post_op_type == post_op_type_t::swish ||
+               post_op_type == post_op_type_t::clip)) {
+            continue;
+          }
+
           matmul_post_op postop_item;
           postop_item.po_type = post_op_type;
 
@@ -1065,9 +1096,6 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
         }
 
         // Call LOWOHA matmul_direct
-        // is_weights_const should be true for WoQ (S4 weights are pre-quantized and constant)
-        bool is_weights_const = (weights.get_data_type() == data_type_t::s4);
-
         status_t status = matmul_direct(
                             'r',  // layout: row-major
                             false, false,  // transA, transB

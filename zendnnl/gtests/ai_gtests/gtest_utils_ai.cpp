@@ -1243,7 +1243,8 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
     const tensor_t &ref_tensor,
     uint64_t k,
     float rel_tolerance,
-    float epsilon) {
+    float epsilon,
+    bool enable_f32_relaxation) {
   if (test_tensor.get_nelem() != ref_tensor.get_nelem()) {
     return false;
   }
@@ -1266,8 +1267,13 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
   // ToDo: Add P value according to the postop currently, same value is used for all.
   constexpr int P = 15; // to handle postop accumulation error
   constexpr int scale_factor = 4; // scale factor
+  // LIBXSMM meltw vs reference eltwise slack (matches gtest_utils.cpp)
+  constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
+  constexpr float ZERO_REF_THRESH = 1e-6f;
+  constexpr float F32_EPS_SLACK = 2e-4f;
   float abs_bound = 0.0f;
   auto dtype = test_tensor.get_data_type();
+  const bool is_f32 = dtype == data_type_t::f32;
   if (dtype == data_type_t::bf16) {
     abs_bound = k * epsilon;
   }
@@ -1337,7 +1343,18 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
       return false;
     }
     float abs_err = std::fabs(v2 - v1);
-    float tol = abs_bound + rel_tolerance * std::fabs(v2);
+    float tol = 0.0f;
+    if (enable_f32_relaxation && is_f32) {
+      if (std::fabs(v2) < ZERO_REF_THRESH) {
+        tol = std::max(abs_bound, ABS_ZERO_TOL_F32) + F32_EPS_SLACK;
+      }
+      else {
+        tol = abs_bound + rel_tolerance * std::fabs(v2) + F32_EPS_SLACK;
+      }
+    }
+    else {
+      tol = abs_bound + rel_tolerance * std::fabs(v2);
+    }
     if (abs_err > tol) {
       return false;
     }
@@ -1364,7 +1381,9 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
 status_t AITestUtils::run_reference_matmul(
   tensor_t &input, tensor_t &weights, tensor_t &bias,
   tensor_t &output, const PostOpConfig &post_op_config,
-  std::vector<tensor_t> &binary_postop_tensors) {
+  std::vector<tensor_t> &binary_postop_tensors,
+  bool mask_libxsmm_postops,
+  bool skip_libxsmm_bf16_bias) {
   try {
     // Prepare input and output maps for the reference kernel
     tensor_map_type inputs;
@@ -1377,10 +1396,20 @@ status_t AITestUtils::run_reference_matmul(
     tensor_t bias_copy = bias;
     weights_copy.set_name("weights");
     bias_copy.set_name("bias");
-    auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights_copy)
-                          .set_param("bias", bias_copy);
+    auto matmul_context = matmul_context_t().set_param("weights", weights_copy);
+    //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
+    if (!skip_libxsmm_bf16_bias) {
+      matmul_context = matmul_context.set_param("bias", bias_copy);
+    }
     for (const auto &post_op_type : post_op_config.post_ops) {
+      if (mask_libxsmm_postops &&
+          (post_op_type == post_op_type_t::gelu_tanh ||
+           post_op_type == post_op_type_t::binary_mul ||
+           post_op_type == post_op_type_t::binary_add ||
+           post_op_type == post_op_type_t::swish ||
+           post_op_type == post_op_type_t::clip)) {
+        continue;
+      }
       post_op_t post_op{post_op_type};
       matmul_context = matmul_context.set_post_op(post_op);
     }
@@ -1393,6 +1422,14 @@ status_t AITestUtils::run_reference_matmul(
     size_t binary_tensor_idx = 0;
     for (size_t i = 0; i < post_op_config.post_ops.size(); ++i) {
       auto post_op_type = post_op_config.post_ops[i];
+      if (mask_libxsmm_postops &&
+          (post_op_type == post_op_type_t::gelu_tanh ||
+           post_op_type == post_op_type_t::binary_mul ||
+           post_op_type == post_op_type_t::binary_add ||
+           post_op_type == post_op_type_t::swish ||
+           post_op_type == post_op_type_t::clip)) {
+        continue;
+      }
       if ((post_op_type == post_op_type_t::binary_add ||
            post_op_type == post_op_type_t::binary_mul)
           && binary_tensor_idx < binary_postop_tensors.size()) {

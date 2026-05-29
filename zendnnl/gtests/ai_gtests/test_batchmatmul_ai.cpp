@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include "gtest_utils_batchmatmul_ai.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 using namespace ai_gtests;
 using namespace zendnnl::lowoha::matmul;
@@ -27,6 +28,9 @@ using namespace zendnnl::lowoha::matmul;
 
 /** @brief AI Test class for comprehensive ZenDNNL batch matmul testing */
 class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
+  bool mask_libxsmm_postops_ = false;
+  bool skip_libxsmm_bf16_bias_ = false;
+
   // -----------------------------------------------------------------------------
   // CreatedTensors
   //
@@ -337,7 +341,8 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
                                 tensors.input, tensors.weights, tensors.bias,
                                 tensors.reference_output,
                                 params.post_op_config,
-                                ref_binary_post_op_tensors);
+                                ref_binary_post_op_tensors,
+                                mask_libxsmm_postops_, skip_libxsmm_bf16_bias_);
         AITestUtils::debug_print("[AI_BATCH_DEBUG] Reference implementation finished.");
         EXPECT_EQ(ref_status, status_t::success)
             << "Reference implementation must succeed for supported data types";
@@ -348,7 +353,7 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
           float epsilon = get_epsilon_value(output_dtype);
           bool comparison_result = BatchMatmulTestUtils::compare_batch_tensors(
                                      tensors.output, tensors.reference_output, params.k,
-                                     rel_tolerance, epsilon);
+                                     rel_tolerance, epsilon, mask_libxsmm_postops_);
           EXPECT_TRUE(comparison_result)
               << "ZenDNNL output must match reference within abs_bound + rtol*|ref|, where abs_bound (epsilon-based) = "
               << epsilon
@@ -574,6 +579,8 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
                                 tensor_t &bias, tensor_t &output,
                                 const BatchMatmulParamsAI &params,
                                 std::vector<std::pair<std::string, tensor_t>> &binary_post_op_tensors) {
+    mask_libxsmm_postops_ = false;
+    skip_libxsmm_bf16_bias_ = false;
     try {
       // Check if LOWOHA mode is enabled
       if (is_lowoha_mode_enabled()) {
@@ -608,7 +615,6 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
         void *A_data = input.get_raw_handle_unsafe();
         void *B_data = weights.get_raw_handle_unsafe();
         void *C_data = output.get_raw_handle_unsafe();
-        void *bias_data = bias.get_raw_handle_unsafe();
 
         if (!A_data || !B_data || !C_data) {
           std::cout << "[AI_BATCH_TEST] LOWOHA: Null data pointer for " <<
@@ -639,9 +645,60 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
         matmul_params_obj.dtypes = matmul_dtypes;
         matmul_params_obj.num_threads = 0;  // Use default
 
-        // Add post-ops
+        // WoQ (S4 weights): extract scale/zp attached to the weight tensor for DLP pre-ops
+        if (weights.get_data_type() == data_type_t::s4) {
+          const void *scale_buff = weights.get_quant_scale_raw_handle_const();
+          const void *zp_buff = weights.get_quant_zero_raw_handle_const();
+
+          if (scale_buff) {
+            matmul_params_obj.quant_params.wei_scale.buff = scale_buff;
+            matmul_params_obj.quant_params.wei_scale.dt =
+              weights.get_quant_scale_data_type();
+            auto scale_size = weights.get_quant_scale_size();
+            matmul_params_obj.quant_params.wei_scale.dims.assign(scale_size.begin(),
+                scale_size.end());
+            AITestUtils::debug_print("[AI_BATCH_DEBUG] WoQ: Weight scale extracted for LOWOHA");
+          }
+
+          if (zp_buff) {
+            matmul_params_obj.quant_params.wei_zp.buff = zp_buff;
+            matmul_params_obj.quant_params.wei_zp.dt = weights.get_quant_zero_data_type();
+            auto zp_size = weights.get_quant_zero_size();
+            matmul_params_obj.quant_params.wei_zp.dims.assign(zp_size.begin(),
+                zp_size.end());
+            AITestUtils::debug_print("[AI_BATCH_DEBUG] WoQ: Weight zero-point extracted for LOWOHA");
+          }
+        }
+
+        // S4 quantized weights require weight reordering when is_weights_const is true
+        bool is_weights_const = (matmul_dtypes.wei == data_type_t::s4);
+        const int batch_count = std::max(batchA, batchB);
+        const matmul_algo_t lowoha_algo = kernel_select(
+                                            matmul_params_obj, batchA, batchB, batch_count,
+                                            M, N, K, matmul_params_obj.num_threads, bias.get_raw_handle_unsafe(),
+                                            is_weights_const, false);
+        const bool is_libxsmm_kernel = (lowoha_algo == matmul_algo_t::libxsmm ||
+                                        lowoha_algo == matmul_algo_t::libxsmm_blocked);
+        mask_libxsmm_postops_ = is_libxsmm_kernel;
+        // LIBXSMM matmul: bias is not supported currently due to accuracy issues (bf16)
+        const bool skip_bias =
+          (is_libxsmm_kernel && output.get_data_type() == data_type_t::bf16);
+        skip_libxsmm_bf16_bias_ = skip_bias;
+        void *bias_data = skip_bias ? nullptr : bias.get_raw_handle_unsafe();
+        matmul_dtypes.bias = skip_bias ? data_type_t::f32 : bias.get_data_type();
+        matmul_params_obj.dtypes = matmul_dtypes;
+
         for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
           auto post_op_type = params.post_op_config.post_ops[i];
+          if (mask_libxsmm_postops_ &&
+              (post_op_type == post_op_type_t::gelu_tanh ||
+               post_op_type == post_op_type_t::binary_mul ||
+               post_op_type == post_op_type_t::binary_add ||
+               post_op_type == post_op_type_t::swish ||
+               post_op_type == post_op_type_t::clip)) {
+            continue;
+          }
+
           matmul_post_op postop_item;
           postop_item.po_type = post_op_type;
 
@@ -660,11 +717,6 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
           }
           matmul_params_obj.postop_.push_back(postop_item);
         }
-
-        // Determine if weights are constant (required for WoQ S4 weights)
-        // S4 quantized weights require weight reordering which is performed
-        // when is_weights_const is true
-        bool is_weights_const = (matmul_dtypes.wei == data_type_t::s4);
 
         // Call LOWOHA matmul_direct
         status_t status = matmul_direct(

@@ -79,7 +79,8 @@ class BatchMatmulTestUtils {
                                     const tensor_t &ref_tensor,
                                     uint64_t k,
                                     float rel_tolerance,
-                                    float epsilon);
+                                    float epsilon,
+                                    bool enable_f32_relaxation = false);
 
   // Reference implementation for batch matmul
   static status_t run_reference_batchmatmul(
@@ -88,7 +89,9 @@ class BatchMatmulTestUtils {
     tensor_t &bias,
     tensor_t &output,
     const PostOpConfig &post_op_config,
-    std::vector<tensor_t> &binary_postop_tensors);
+    std::vector<tensor_t> &binary_postop_tensors,
+    bool mask_libxsmm_postops = false,
+    bool skip_libxsmm_bf16_bias = false);
 
   // Get expected tensor dimensions based on broadcasting
   static std::vector<uint64_t> get_input_dims(uint64_t batch_size, uint64_t m,

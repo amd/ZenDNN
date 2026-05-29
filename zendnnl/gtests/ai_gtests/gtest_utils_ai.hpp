@@ -297,7 +297,8 @@ class AITestUtils {
       const tensor_t &ref_tensor,
       uint64_t k,
       float rel_tolerance,
-      float epsilon);
+      float epsilon,
+      bool enable_f32_relaxation = false);
   // Kernel support utilities
   static bool is_aocl_kernel_supported(data_type_t input_dtype,
                                        data_type_t weight_dtype,
@@ -346,7 +347,9 @@ class AITestUtils {
                                        tensor_t &bias,
                                        tensor_t &output,
                                        const PostOpConfig &post_op_config,
-                                       std::vector<tensor_t> &binary_postop_tensors);
+                                       std::vector<tensor_t> &binary_postop_tensors,
+                                       bool mask_libxsmm_postops = false,
+                                       bool skip_libxsmm_bf16_bias = false);
 
   // Debug and logging utilities
   static void log_tensor_info(const tensor_t &tensor, const std::string &name);
