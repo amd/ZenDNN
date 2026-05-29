@@ -154,7 +154,7 @@ struct PrepackParams {
   // callers warm may still be served at runtime; the worst case
   // is the pre-fix behaviour (warm an entry the runtime never
   // reads).  Production call sites that DO have the context
-  // (`group_matmul_n_tile.cpp`, `group_matmul_parallel.cpp`) pass
+  // (`group_matmul_n_tile.cpp`, `group_matmul_dispatch.cpp`) pass
   // the vectors and get the bit-symmetric prepack/runtime contract
   // — no wasted warm on any call the runtime would refuse.
   //

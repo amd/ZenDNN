@@ -34,7 +34,7 @@
  *     `group_matmul_moe_postop_execute`, and the internal dispatch /
  *     planner plumbing) are LIBRARY-INTERNAL: they are split across
  *     multiple translation units (group_matmul_direct.cpp,
- *     group_matmul_parallel.cpp, group_matmul_moe_postop.cpp,
+ *     group_matmul_dispatch.cpp, group_matmul_moe_postop.cpp,
  *     group_matmul_fused_moe.cpp, group_matmul_moe_act.cpp) and the
  *     declarations here exist so those TUs can link against a common
  *     signature.  They are NOT part of the stable external API and are
@@ -612,6 +612,53 @@ status_t group_matmul_fused_moe_execute(
     std::vector<matmul_params> &params,
     int num_threads,
     const char **gemm_mode_out = nullptr);
+
+/**
+ * @brief Release all fused-MoE thread-local scratch held by the
+ *        current OMP thread team.
+ *
+ * Fused-MoE execution maintains two persistent thread-local surfaces
+ * per worker (the Op1 arena slab and the Op2 dispatch-metadata
+ * scratch vectors).  Each grows monotonically to the high-water
+ * footprint that worker has seen and is freed only on thread exit.
+ * For long-running model servers sharing an OMP thread pool with the
+ * host process (vLLM, zentorch, ServerSocket, etc.), this means
+ * fused-MoE scratch persists across workload phases — useful for
+ * steady-state perf but undesirable when the host wants to bound
+ * resident set size during quiescent windows.
+ *
+ * This API spawns a small OMP parallel region (`omp parallel`) so
+ * EVERY worker thread in the current pool runs the per-thread reset
+ * on its own TLS.  After return:
+ *   * Op1 arena: `posix_memalign`-allocated slab is `free()`-d on
+ *     every worker; the next fused-MoE call will re-allocate to
+ *     fit.
+ *   * Op2 scratch: every `std::vector` member's underlying allocation
+ *     is released deterministically via the "swap with empty
+ *     temporary" idiom (the temporary's dtor frees the old buffer at
+ *     end of statement).  This is preferred over `shrink_to_fit()`
+ *     because `shrink_to_fit()` is a non-binding REQUEST per the C++
+ *     standard and some libstdc++ / allocator configurations may
+ *     no-op it, which would defeat the purpose of this API.
+ *
+ * LIMITATION: the per-thread scratches inside the M-tile vertical
+ * fusion executor and the N-tile tight-fused-epilogue path (both
+ * `PerThreadScratch` instances) are FUNCTION-local statics inside
+ * OMP regions and CANNOT be reached from outside the executor without
+ * re-entering it.  They are NOT released by this API; they remain
+ * live until OMP thread exit.  For an absolute scratch reset, also
+ * tear down the OMP pool (host-application concern).
+ *
+ * Intended for single-threaded use from a host-process "quiescent
+ * window".  If called from inside an OMP parallel region it silently
+ * no-ops (detected via `omp_in_parallel()`); the impl deliberately
+ * avoids opening a nested `omp parallel` region whose semantics would
+ * depend on `OMP_NESTED` and were never the intent of this API.
+ * Thread-safe with respect to OTHER concurrent fused-MoE calls only
+ * if those calls do not also use the thread pool this function is
+ * sweeping.
+ */
+void clear_fused_moe_scratch();
 
 // --- Parallel expert dispatch ---
 

@@ -17,7 +17,7 @@
 /// Group MatMul direct — public entry point and input validation.
 ///
 /// Implementation details:
-///   - group_matmul/group_matmul_parallel.cpp — parallel expert dispatch (OMP).
+///   - group_matmul/group_matmul_dispatch.cpp — parallel expert dispatch (OMP).
 ///   - group_matmul/group_matmul_moe_postop.cpp — optional MoE weighted-reduce post-op.
 
 #include <sstream>
@@ -1038,7 +1038,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
 
     // ── Ahead-of-time weight pre-pack ─────────────────────────────────
     // Moved out of this dispatcher entirely: each scheduling ALGO's
-    // body in group_matmul_parallel.cpp / group_matmul_m_tile.cpp /
+    // body in group_matmul_dispatch.cpp / group_matmul_m_tile.cpp /
     // group_matmul_n_tile.cpp now invokes its matching
     // `group_matmul_prepack::prepack_for_algo_X(...)` as the first
     // action.  Under the uniform-eager semantic, the per-ALGO call

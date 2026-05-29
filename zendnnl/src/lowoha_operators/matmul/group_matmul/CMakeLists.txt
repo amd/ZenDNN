@@ -18,9 +18,9 @@
 # Paths are relative to lowoha_operators/matmul/ (parent listfile).
 
 set(lowoha_group_matmul_sources
-  group_matmul/group_matmul_parallel.cpp
-  group_matmul/group_matmul_m_tile.cpp
-  group_matmul/group_matmul_n_tile.cpp
+  group_matmul/group_matmul_dispatch.cpp
+  group_matmul/m_tile/group_matmul_m_tile.cpp
+  group_matmul/n_tile/group_matmul_n_tile.cpp
   group_matmul/group_matmul_moe_postop.cpp
   group_matmul/group_matmul_moe_act.cpp
   group_matmul/group_matmul_moe_act_dlp.cpp

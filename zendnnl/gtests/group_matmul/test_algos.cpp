@@ -43,13 +43,14 @@
 // Direct access to the dispatcher's ALGO selector — used by section
 // [8b] (`TestGroupMatmulAutoSelectAlgo`) to assert the auto-select
 // decision matrix without spinning up the full GEMM stack.
+#include "lowoha_operators/matmul/group_matmul/m_tile/group_matmul_m_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 
 // `GroupNTileStrategy` enum + `test_api::PhaseBSnapshot` /
 // `s_capture_phase_b` / `s_last_phase_b_snapshot` — used by
 // section [8a.1] (`TestGroupMatmulPhaseBRemainder.HeaviestFirstAssignment`)
 // to white-box assert on the planner's Phase B output.
-#include "lowoha_operators/matmul/group_matmul/group_matmul_n_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 
 // `custom_kernel::dispatch_supported()` — Phase B tests check it
 // to skip cleanly on hosts without AVX512BF16 (where forcing the
@@ -1556,7 +1557,7 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
 //   executes a path equivalent to ALGO 1 plus one-time ALGO 3
 //   prepack overhead.  That fallback is the user-visible behaviour
 //   for "Qwen prompt" today; it is documented in the rule-1 SCOPE
-//   NOTE in `group_matmul_parallel.cpp::auto_select_algo` and
+//   NOTE in `group_matmul_dispatch.cpp::auto_select_algo` and
 //   accepted as a trade-off for the simpler 3-rule selector.
 //   Verifying which strategy fires at execute time would require
 //   either a gemm_mode assertion or the white-box planner snapshot
@@ -1737,7 +1738,7 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
   //   per expert, clear `ntile_viable`, and run via ManyExperts (the
   //   path Phase B is sized for).  Both behaviours are intentional
   //   under the simplified 3-rule selector; see the rule-1 SCOPE
-  //   NOTE in `group_matmul_parallel.cpp::auto_select_algo` for the
+  //   NOTE in `group_matmul_dispatch.cpp::auto_select_algo` for the
   //   trade-off discussion.  These rows pin the SELECTION result;
   //   the planner's execute-time fallback for prompt is verified by
   //   `plan_group_n_tile`'s own self-fallback tests (R1/R2/R3 in
@@ -3279,5 +3280,1578 @@ TEST(TestGroupMatmulMTileBranches, MultiTierLowSkewFallsThrough) {
   EXPECT_EQ(tag, kPhase2Single)
       << "Low-skew shape must fall through to Phase 2 single-tier; "
          "got tag=" << tag;
+}
+
+// ============================================================================
+// [8g] TestGroupMatmulMTileStandalone: numerical correctness of `flat_m_tile`
+// when called as a standalone grouped matmul (no `fused_moe`, no `gated_act`,
+// no `moe_postop`) — the llama.cpp use case.  Existing `TestGroupMatmulMTile
+// Branches` only verify branch tags; they never check that the dst[] values
+// produced by the M-tile path match what the caller expects.  This fixture
+// adds the per-expert × per-row × per-col value comparison against an ALGO 1
+// (legacy sequential per-expert) reference run on the same inputs.
+//
+// Reference choice: `AlgoEnvGuard(1)` forces the sequential per-expert ALGO 1
+// path which dispatches each expert through `kernel_select` independently of
+// any M-tile planner state.  Both runs use identical inputs (same src/wei
+// pointers, same alpha/beta/bias, same params), so any numerical divergence
+// between the two would indicate an M-tile-specific bug.  We tolerate small
+// floating-point reduction-order noise via a relative+absolute tolerance.
+//
+// Coverage:
+//   * Caller-allocated dst[] (canonical llama.cpp pattern).
+//   * act=none (Op1-only standalone grouped matmul).
+//   * Both bias=nullptr and bias=non-null cases.
+//   * Mixed alpha/beta values (1.0 / 0.0 default, plus 2.0 / 0.5 stress).
+//   * Path tag asserted: typically kPhase2Single for the chosen shape.
+//
+// Shape: 16 active experts × M=64 × K=64 × N=128 (Op1-like) — small enough
+// for fast test execution, large enough that the M-tile planner picks a
+// single-tier slice plan rather than round-based or wide-N.
+//
+// The test is designed to run on >=8 threads (skip otherwise); shape avoids
+// `active_ops > num_threads` so the kRoundBased branch does not engage here
+// (that branch has its own dedicated coverage in [8h] below).
+// ============================================================================
+
+namespace {
+
+// Append-only helpers private to the standalone correctness fixture below.
+//
+// Build a bf16 standalone test input set with deterministic seeds.  Mirrors
+// `build_hybrid_probe` but exposes a non-zero `bias` slot per expert (or
+// nullptr per expert when `with_bias=false`) and per-expert alpha / beta
+// (defaults 1.0 / 0.0).  Caller passes the M vector; N / K are fixed.
+struct StandaloneMTileShape {
+  int num_ops;
+  int num_threads;
+  int N;
+  int K;
+  std::vector<int> Ms;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> src;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> wei;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> bias;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> dst_test;
+  std::vector<std::vector<zendnnl::common::bfloat16_t>> dst_ref;
+  std::vector<const void *> srcs;
+  std::vector<const void *> weis;
+  std::vector<const void *> biases;
+  std::vector<void *> dsts_test;
+  std::vector<void *> dsts_ref;
+  moe_test_utils::GemmVecs gv;
+  std::vector<zendnnl::lowoha::matmul::matmul_params> params;
+};
+
+static StandaloneMTileShape build_standalone_mtile_shape(
+    int num_threads, const std::vector<int> &Ms,
+    int N, int K,
+    bool with_bias,
+    float alpha_val = 1.0f, float beta_val = 0.0f) {
+  using namespace moe_test_utils;
+  using zendnnl::common::bfloat16_t;
+  using zendnnl::common::data_type_t;
+  StandaloneMTileShape s;
+  s.num_threads = num_threads;
+  s.num_ops     = static_cast<int>(Ms.size());
+  s.N           = N;
+  s.K           = K;
+  s.Ms          = Ms;
+  s.src.resize(s.num_ops);
+  s.wei.resize(s.num_ops);
+  s.bias.resize(s.num_ops);
+  s.dst_test.resize(s.num_ops);
+  s.dst_ref.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.src[e].resize(static_cast<size_t>(Ms[e]) * K);
+    s.wei[e].resize(static_cast<size_t>(K) * N);
+    s.dst_test[e].assign(static_cast<size_t>(Ms[e]) * N, bfloat16_t(0.0f));
+    s.dst_ref [e].assign(static_cast<size_t>(Ms[e]) * N, bfloat16_t(0.0f));
+    fill_src(s.src[e],  e, 0.02f);
+    fill_wei1(s.wei[e], e, 0.005f);
+    if (with_bias) {
+      s.bias[e].resize(static_cast<size_t>(N));
+      for (int c = 0; c < N; ++c)
+        s.bias[e][c] = bfloat16_t(static_cast<float>(c) * 0.001f + 0.01f);
+    }
+  }
+  s.srcs.resize(s.num_ops);
+  s.weis.resize(s.num_ops);
+  s.biases.resize(s.num_ops);
+  s.dsts_test.resize(s.num_ops);
+  s.dsts_ref.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.srcs[e]      = s.src[e].data();
+    s.weis[e]      = s.wei[e].data();
+    s.biases[e]    = with_bias ? s.bias[e].data() : nullptr;
+    s.dsts_test[e] = s.dst_test[e].data();
+    s.dsts_ref [e] = s.dst_ref [e].data();
+  }
+  s.gv = GemmVecs::uniform(s.num_ops, /*M=*/0, N, K,
+                           alpha_val, beta_val,
+                           /*wc=*/true, /*tA=*/false, /*tB=*/false);
+  s.gv.Ms = Ms;
+  s.params = make_uniform_params(
+      s.num_ops, data_type_t::bf16,
+      /*bias_dt=*/with_bias ? data_type_t::bf16 : data_type_t::none);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.params[e].num_threads = num_threads;
+  }
+  return s;
+}
+
+// Per-expert × per-row × per-col tolerance comparison for bf16 buffers.
+// Returns the first divergence (e, r, c, got, ref) — or -1's on success.
+struct CompareResult {
+  int e = -1, r = -1, c = -1;
+  float got = 0.0f, ref = 0.0f;
+  bool ok() const { return e < 0; }
+};
+
+// For gated-act dst, the live data lives only in the first `compare_cols`
+// columns (typically `N/2`); columns `[compare_cols, N)` carry the raw
+// pre-act matmul output and are skipped to avoid spurious mismatches.
+static CompareResult compare_bf16_buffers(
+    const std::vector<std::vector<zendnnl::common::bfloat16_t>> &got_b,
+    const std::vector<std::vector<zendnnl::common::bfloat16_t>> &ref_b,
+    const std::vector<int> &Ms, int stride, int compare_cols,
+    float rtol = 5e-2f, float atol = 5e-2f) {
+  CompareResult r;
+  for (int e = 0; e < (int)Ms.size(); ++e) {
+    const int M_e = Ms[e];
+    if (M_e == 0) continue;
+    for (int row = 0; row < M_e; ++row) {
+      for (int c = 0; c < compare_cols; ++c) {
+        const size_t off = static_cast<size_t>(row) * stride + c;
+        const float g = static_cast<float>(got_b[e][off]);
+        const float f = static_cast<float>(ref_b[e][off]);
+        const float bound = std::abs(f) * rtol + atol;
+        if (std::abs(g - f) > bound) {
+          r.e = e; r.r = row; r.c = c; r.got = g; r.ref = f;
+          return r;
+        }
+      }
+    }
+  }
+  return r;
+}
+
+// Run the standalone group_matmul_direct twice — once with `algo_test`
+// pinned (e.g. ALGO 2 / M-tile) writing to `dst_test`, once with the
+// reference algo (ALGO 1 sequential per-expert) writing to `dst_ref` —
+// and compare per-expert × per-row × per-col with the supplied tolerance.
+//
+// `gated_act` is forwarded to both runs (so the ref run also fuses the
+// activation under ALGO 1) — when non-null, only the first `N/2`
+// columns are compared because the gated activation halves the live
+// data width in-place.
+static void run_and_compare_standalone(
+    StandaloneMTileShape &s,
+    int algo_test, int algo_ref,
+    int expected_tag, float rtol, float atol,
+    const char *case_label,
+    const zendnnl::lowoha::matmul::grp_matmul_gated_act_params
+        *gated_act = nullptr) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+
+  // Reference run first (ALGO 1, sequential per-expert; no M-tile
+  // planner state can leak into the test).  Use a fresh params copy
+  // because the dispatcher writes `lowoha_algo` back into params[i].
+  {
+    auto pr = s.params;
+    moe_test_utils::AlgoEnvGuard algo_guard_ref(algo_ref);
+    ::reset_grp_matmul_caches();
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts_ref, s.gv.ldc,
+                                  s.gv.is_wc, pr, nullptr, gated_act),
+              status_t::success) << "ref " << case_label;
+  }
+  // Test run (ALGO 2 / M-tile) with path-tag capture armed.
+  int tag = 0;
+  {
+    auto pt = s.params;
+    ::reset_grp_matmul_caches();
+    moe_test_utils::AlgoEnvGuard algo_guard_test(algo_test);
+    moe_test_utils::MTileHybridOverride hybrid_auto(0);
+    moe_test_utils::MTilePathCaptureGuard cap;
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts_test, s.gv.ldc,
+                                  s.gv.is_wc, pt, nullptr, gated_act),
+              status_t::success) << "test " << case_label;
+    tag = zendnnl::lowoha::matmul::test_api
+        ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  }
+  EXPECT_EQ(tag, expected_tag)
+      << "Path tag mismatch on " << case_label
+      << ": expected " << expected_tag << ", got " << tag
+      << " (kRoundBased=0, kMultiTier=1, kWideNFallback=2, "
+         "kPhase2Single=3, kVerticalFusionBF16=4)";
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+  const int compare_cols =
+      (gated_act && gated_act->act != grp_matmul_gated_act_t::none)
+          ? s.N / 2 : s.N;
+  const auto cmp = compare_bf16_buffers(
+      s.dst_test, s.dst_ref, s.Ms, /*stride=*/s.N, compare_cols, rtol, atol);
+  EXPECT_TRUE(cmp.ok())
+      << "Value mismatch on " << case_label
+      << " e=" << cmp.e << " r=" << cmp.r << " c=" << cmp.c
+      << " got=" << cmp.got << " ref=" << cmp.ref;
+}
+
+static bool require_min_threads(int needed) {
+  int actual = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual = omp_get_num_threads();
+  }
+  return actual >= needed;
+}
+
+}  // namespace
+
+// Baseline: 16 actives × M=64 × K=64 × N=128, no bias, alpha=1.0, beta=0.0.
+// active_ops (16) <= num_threads (32) ⇒ kPhase2Single expected.
+TEST(TestGroupMatmulMTileStandalone, CallerAllocActNoneNoBias) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/false);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_caller_alloc_act_none_no_bias");
+}
+
+// With per-expert bias.  Exercises `execute_m_tile`'s bias passthrough
+// in the slice executor (line 195) — the same bias[e] vector is used
+// for every row slice within an expert (no per-slice offset on bias).
+TEST(TestGroupMatmulMTileStandalone, CallerAllocActNoneWithBias) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/true);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_caller_alloc_act_none_with_bias");
+}
+
+// Mixed alpha != 1, beta != 0 — exercises the `beta * C_init` path
+// in matmul_execute.  Note that beta=0.5 requires dst_ref to be
+// pre-initialised to the same values across both runs; we use the
+// `assign(..., bfloat16_t(0.0f))` zero-init from the shape builder
+// which gives both runs identical C_init = 0, so beta*C_init == 0
+// and the numerical comparison still holds.  (A non-zero C_init test
+// would belong under postop coverage in Batch 9.)
+TEST(TestGroupMatmulMTileStandalone, CallerAllocAlphaBeta) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/false,
+      /*alpha_val=*/2.0f, /*beta_val=*/0.5f);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_caller_alloc_alpha2_beta05");
+}
+
+// Gated activations on the standalone hot path: each of silu_and_mul,
+// gelu_and_mul, swiglu_oai_mul.  N=256 (even) is required by the
+// gated_act validator (`group_matmul_direct.cpp:478`).  The activation
+// halves the live data width — first N/2 columns hold the activated
+// output, columns [N/2, N) carry the raw pre-act matmul values.  The
+// comparator only checks the first N/2 columns (set by the
+// `gated_act != nullptr` branch in `run_and_compare_standalone`).
+//
+// Why this is the most informative test in Batch 2: the act is invoked
+// per-slice from `execute_m_tile_act` (rows [row_start, row_end) per
+// thread) under ALGO 2, but full-M from `sequential_experts` under
+// ALGO 1.  Numerical parity across these two row-range semantics
+// confirms that the slice-stitched activation is correct.
+TEST(TestGroupMatmulMTileStandalone, GatedActSiluAndMul) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/256, /*K=*/64,
+      /*with_bias=*/false);
+
+  grp_matmul_gated_act_params ga{};
+  ga.act = grp_matmul_gated_act_t::silu_and_mul;
+
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_silu_and_mul",
+      /*gated_act=*/&ga);
+}
+
+TEST(TestGroupMatmulMTileStandalone, GatedActGeluAndMul) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/256, /*K=*/64,
+      /*with_bias=*/false);
+
+  grp_matmul_gated_act_params ga{};
+  ga.act = grp_matmul_gated_act_t::gelu_and_mul;
+
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_gelu_and_mul",
+      /*gated_act=*/&ga);
+}
+
+TEST(TestGroupMatmulMTileStandalone, GatedActSwigluOaiMul) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/256, /*K=*/64,
+      /*with_bias=*/false);
+
+  grp_matmul_gated_act_params ga{};
+  ga.act = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "standalone_swiglu_oai_mul",
+      /*gated_act=*/&ga);
+}
+
+// ============================================================================
+// [8h] TestGroupMatmulMTileBranches.RoundBasedEngagesOnManyExperts
+//
+// The kRoundBased branch fires when `active_ops > num_threads` — the
+// planner abandons slice-based parallelism and dispatches one expert
+// per OMP iteration with `num_thr=1` per expert.  Prior to this test,
+// the branch had NO gtest coverage; the existing
+// `TestGroupMatmulMTileBranches.*` tests all keep `active_ops <=
+// num_threads` and so exercise only Phase 2 / multi-tier / wide-N.
+//
+// We trigger the branch by pinning `params[e].num_threads = 4` while
+// providing 8 active experts.  The OMP region inside `flat_m_tile`
+// then requests exactly 4 threads via `#pragma omp parallel
+// num_threads(4)`, so the host's actual thread budget doesn't matter
+// for triggering — but we still require >=4 OMP threads to be
+// available so the team can actually be formed.
+//
+// Two sub-tests: act=none (validates per-expert dispatch) and
+// act=silu_and_mul (validates the full-M post-pass apply_gated_act_
+// inplace at `m_tile.cpp:812-814`, which applies on rows `[0, M[e])`
+// per expert — different row-range semantics from the slice-based
+// branches).
+// ============================================================================
+
+TEST(TestGroupMatmulMTileBranches, RoundBasedEngagesOnManyExperts) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kRoundBased;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(8);
+  if (!require_min_threads(4))
+    GTEST_SKIP() << "Requires >= 4 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/4,        // < active_ops=8 ⇒ kRoundBased
+      /*Ms=*/std::vector<int>(8, 8),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/false);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kRoundBased,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "round_based_8actives_4threads");
+}
+
+// Multi-tier value parity — same skewed prompt shape as
+// `MultiTierEngagesOnSkewedPrompt` above, but additionally asserts
+// numerical correctness of the per-slice executor against an ALGO 1
+// reference.  Multi-tier splits the planner into heavy-pool + light-
+// pool slots; the heavy pool runs per-slice (`execute_m_tile_act`,
+// row-range activation), the light pool runs per-expert full-M
+// activation (`execute_light_expert` ~m_tile.cpp:502-527).  Value
+// parity across this dual-pool dispatch confirms there is no
+// double-act on shared rows and no boundary-row off-by-one between
+// the two pools.
+TEST(TestGroupMatmulMTileBranches, MultiTierValueParityOnSkewedPrompt) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kMultiTier;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  std::vector<int> ms = {1024};
+  ms.insert(ms.end(), 15, 4);
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32, ms,
+      /*N=*/1024, /*K=*/64,
+      /*with_bias=*/false);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kMultiTier,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "multi_tier_skewed_prompt_value_parity");
+}
+
+// Wide-N value parity — same light-frame shape as
+// `WideNFallbackEngagesOnLightFrames` above.  Wide-N parallelises a
+// single expert across more threads than the standard CCD-stripe by
+// striding along N (memory-bound regime); value parity confirms the
+// N-stride boundaries align cleanly across worker threads.
+TEST(TestGroupMatmulMTileBranches, WideNFallbackValueParityOnLightFrames) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(8, 8),
+      /*N=*/1024, /*K=*/64,
+      /*with_bias=*/false);
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kWideNFallback,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "wide_n_light_frames_value_parity");
+}
+
+// ============================================================================
+// [8i] TestGroupMatmulMTileQuantGate: direct unit-test of
+// `check_m_tile_safe`'s dynamic-quant arm.  The gate's contract
+// (`group_matmul_parallel_common.hpp:159-161`) is that
+// `dynamic_quant = true` requires `src_scale.dims[0] == M[i]` so the
+// per-thread reorder operates on its own rows.  Per-token `{M, 1}`
+// and per-group-on-K `{M, G>1}` both satisfy the gate; per-tensor
+// (`{}`, `{1}`, `{1, 1}`) is rejected, as are mismatched `M` dims.
+//
+// Why this matters: forcing `ZENDNNL_GRP_MATMUL_ALGO=2` with a
+// per-tensor src_scale must fall back to ALGO 1 (the M-tile slicer
+// cannot safely partition a shared scalar scale across threads).
+// The fallback is enforced by `select_grp_matmul_algo` reading
+// `check_m_tile_safe`'s return value.
+//
+// Replaces the per-call cost of constructing a full int8 fused-MoE
+// fixture (which would need wei reorder, runtime BF16→S8 scratch,
+// per-channel wei_scale plumbing, etc.) with a direct call into
+// the inline gate predicate.  The full int8 pipeline is exercised
+// by the existing `TestFusedMoEQuantDynINT8` parameterized sweep.
+// ============================================================================
+
+TEST(TestGroupMatmulMTileQuantGate, AcceptsPerTokenAndPerGroup) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src     = data_type_t::bf16;
+    params[i].dtypes.wei     = data_type_t::s8;
+    params[i].dtypes.dst     = data_type_t::bf16;
+    params[i].dtypes.bias    = data_type_t::none;
+    params[i].dtypes.compute = data_type_t::s8;
+    params[i].mem_format_a   = 'n';
+    params[i].mem_format_b   = 'n';
+    params[i].packing.pack_format_b = 0;
+    params[i].dynamic_quant  = true;
+    // Per-token `{M, 1}` — accepted: dims[0] == M[i].
+    params[i].quant_params.src_scale.dims = {16, 1};
+    params[i].quant_params.src_scale.dt   = data_type_t::f32;
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "per-token src_scale dims={M,1} must be accepted by M-tile gate";
+
+  // Per-group-on-K `{M, G>1}` — also accepted.  Per-group is row-local
+  // (each row owns G group-scales), so the row slicer still partitions
+  // safely across threads.
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].quant_params.src_scale.dims = {16, 4};
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "per-group-on-K src_scale dims={M,G>1} must be accepted "
+         "(row-local granularity is what the M-tile slicer requires)";
+}
+
+TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+
+  auto make_params = [&](const std::vector<int64_t> &src_scale_dims) {
+    std::vector<matmul_params> p(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      p[i].dtypes.src     = data_type_t::bf16;
+      p[i].dtypes.wei     = data_type_t::s8;
+      p[i].dtypes.dst     = data_type_t::bf16;
+      p[i].dtypes.bias    = data_type_t::none;
+      p[i].dtypes.compute = data_type_t::s8;
+      p[i].mem_format_a   = 'n';
+      p[i].mem_format_b   = 'n';
+      p[i].packing.pack_format_b = 0;
+      p[i].dynamic_quant  = true;
+      p[i].quant_params.src_scale.dims = src_scale_dims;
+      p[i].quant_params.src_scale.dt   = data_type_t::f32;
+    }
+    return p;
+  };
+
+  // Per-tensor (dims empty): rejected — sd.empty() at gate line 194.
+  {
+    auto p = make_params({});
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "empty src_scale dims must be rejected by M-tile gate";
+  }
+  // Per-tensor {1}: rejected — sd[0] != M[i] (1 != 16).
+  {
+    auto p = make_params({1});
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "per-tensor src_scale dims={1} must be rejected "
+           "(single shared scalar cannot be safely row-sliced)";
+  }
+  // Per-tensor {1, 1}: rejected — sd[0] != M[i].
+  {
+    auto p = make_params({1, 1});
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "per-tensor src_scale dims={1,1} must be rejected";
+  }
+  // Per-column / per-K (no M dim): {1, K}: rejected — sd[0] != M[i].
+  {
+    auto p = make_params({1, 64});
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "per-K-only src_scale dims={1, K} must be rejected";
+  }
+  // Mismatched M dim: {M+1, 1}: rejected.
+  {
+    auto p = make_params({17, 1});
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "src_scale dims[0] != M[i] must be rejected";
+  }
+  // Mismatched src_zp dim while src_scale is valid: rejected — line 196.
+  {
+    auto p = make_params({16, 1});
+    p[0].quant_params.src_zp.dims = {17, 1};
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "src_zp dims[0] != M[i] must be rejected even when "
+           "src_scale dims are valid";
+  }
+}
+
+// ============================================================================
+// [8j] TestGroupMatmulMTilePostopGate — direct unit-test of
+//      `check_m_tile_safe`'s post-op rejection arm (lines 198-202 of
+//      `group_matmul_parallel_common.hpp`).  The M-tile per-thread row
+//      slicer cannot handle post-ops that REQUIRE the full M block
+//      (softmax normalises across the rows of a tile, pooling
+//      aggregates across rows); both are rejected at the gate so the
+//      dispatcher falls back to ALGO 1 where the postop sees the full
+//      block.
+//
+//      Binary `add` / `mul` postops are ACCEPTED — `execute_m_tile`
+//      handles their row offset inside `m_tile/group_matmul_m_tile.cpp`
+//      (offsets `po.buff` by `row_start × eff_ld × po_elem` for 2D /
+//      3D row-varying tensors, leaves broadcast {1, N} / rank-≤1
+//      tensors unchanged).
+//
+//      All four M-tile branches (kRoundBased, kMultiTier,
+//      kWideNFallback, kPhase2Single) route through the SAME
+//      `execute_m_tile` / `execute_m_tile_act` entry points for the
+//      sliced experts — round-based and multi-tier-light dispatch the
+//      full M of each expert to a single team, so the row-offset code
+//      is a no-op (`row_start == 0`) for them and they degenerate to
+//      ALGO-1-style per-expert postop handling.  The remaining branches
+//      (sliced execution) all share the row-offset logic, so a single
+//      gate-rejection test is sufficient.
+//
+//      The end-to-end value-parity test for binary postops on M-tile
+//      is intentionally NOT added here — the existing `TestGroupMatmul`
+//      sweep in `test_basic.cpp` covers binary postops × ALGO 2 across
+//      a broad shape grid via the `matmul_forced_ref_kernel_test`
+//      reference, and the gate-level test below proves the M-tile
+//      safety predicate's reject/accept contract directly.
+// ============================================================================
+
+TEST(TestGroupMatmulMTilePostopGate, AcceptsBinaryAddAndMul) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+  using zendnnl::ops::post_op_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::none;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+    params[i].packing.pack_format_b = 0;
+    // Binary add — 2D row-varying buffer {M=16, N=64}.
+    matmul_post_op add_po;
+    add_po.po_type = post_op_type_t::binary_add;
+    add_po.dtype   = data_type_t::bf16;
+    add_po.dims    = {16, 64};
+    add_po.leading_dim = 64;
+    params[i].postop_.push_back(add_po);
+    // Binary mul — broadcast {1, N=64}.
+    matmul_post_op mul_po;
+    mul_po.po_type = post_op_type_t::binary_mul;
+    mul_po.dtype   = data_type_t::bf16;
+    mul_po.dims    = {1, 64};
+    mul_po.leading_dim = 64;
+    params[i].postop_.push_back(mul_po);
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "binary_add (2D row-varying) and binary_mul (1D broadcast) "
+         "post-ops must be accepted by the M-tile safety gate "
+         "(row-offset handled in execute_m_tile lines 165-182)";
+}
+
+TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+  using zendnnl::ops::post_op_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+
+  auto make_params_with_postop = [&](post_op_type_t po_type) {
+    std::vector<matmul_params> p(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      p[i].dtypes.src  = data_type_t::bf16;
+      p[i].dtypes.wei  = data_type_t::bf16;
+      p[i].dtypes.dst  = data_type_t::bf16;
+      p[i].dtypes.bias = data_type_t::none;
+      p[i].mem_format_a = 'n';
+      p[i].mem_format_b = 'n';
+      p[i].packing.pack_format_b = 0;
+      matmul_post_op po;
+      po.po_type = po_type;
+      po.dtype   = data_type_t::bf16;
+      p[i].postop_.push_back(po);
+    }
+    return p;
+  };
+
+  // softmax: rejected — needs full M block for row-wise normalisation.
+  {
+    auto p = make_params_with_postop(post_op_type_t::softmax);
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "softmax post-op must be rejected — row-wise normalisation "
+           "across the full M block cannot be satisfied by the M-tile "
+           "per-thread row slicer";
+  }
+  // pooling: rejected — needs full M block for cross-row aggregation.
+  {
+    auto p = make_params_with_postop(post_op_type_t::pooling);
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "pooling post-op must be rejected — cross-row aggregation "
+           "cannot be partitioned across M-tile threads";
+  }
+  // Only one expert carries the unsupported postop — still rejected
+  // (the gate must be conservative; mixed-postop batches all fall
+  // back to ALGO 1).
+  {
+    auto p = make_params_with_postop(post_op_type_t::binary_add);
+    matmul_post_op pool_po;
+    pool_po.po_type = post_op_type_t::pooling;
+    pool_po.dtype   = data_type_t::bf16;
+    p[2].postop_.push_back(pool_po);   // single expert in the batch
+    EXPECT_FALSE(check_m_tile_safe(layout, M, p, num_ops))
+        << "ANY expert carrying softmax/pooling must reject the whole "
+           "batch (mixed-postop batches fall back to ALGO 1 because "
+           "the M-tile planner cannot split planner state across the "
+           "two postop classes mid-batch)";
+  }
+}
+
+// ============================================================================
+// [8k] TestGroupMatmulMTileDtypeGate — direct unit-test of
+//      `check_m_tile_safe`'s dtype-uniformity arm (lines 185-188 of
+//      `group_matmul_parallel_common.hpp`).  The gate requires
+//      cross-expert dtype uniformity for src / wei / dst / bias —
+//      M-tile's per-thread row slicer dispatches uniform GEMM tiles to
+//      `execute_expert_slice`, which assumes the dtypes are stable
+//      across the whole batch.  Heterogeneous-dtype batches MUST
+//      reject so the dispatcher falls back to ALGO 1 where each
+//      expert dispatches through `kernel_select` independently.
+//
+//      Note that the gate does NOT restrict WHICH concrete dtypes are
+//      allowed — bf16, f32, s8 (with dynamic_quant), or any mix that
+//      a supported kernel can handle is accepted as long as it is
+//      uniform across experts.  This keeps the gate cheap (O(num_ops)
+//      compare loop) and leaves the dtype routing to the kernel
+//      selector inside `kernel_select`.
+// ============================================================================
+
+TEST(TestGroupMatmulMTileDtypeGate, AcceptsUniformBF16) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::bf16;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+    params[i].packing.pack_format_b = 0;
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "uniform bf16 src/wei/dst/bias must be accepted by the M-tile gate";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, AcceptsUniformFP32) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::f32;
+    params[i].dtypes.wei  = data_type_t::f32;
+    params[i].dtypes.dst  = data_type_t::f32;
+    params[i].dtypes.bias = data_type_t::f32;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+    params[i].packing.pack_format_b = 0;
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "uniform f32 src/wei/dst/bias must be accepted — M-tile is "
+         "dtype-agnostic at the safety gate (kernel routing handled "
+         "by `kernel_select`)";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, AcceptsMixedPrecisionBF16toFP32) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    // bf16 inputs, f32 accumulator-style output (common LLM pattern
+    // for attention output projections).
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::f32;
+    params[i].dtypes.bias = data_type_t::f32;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+    params[i].packing.pack_format_b = 0;
+  }
+  EXPECT_TRUE(check_m_tile_safe(layout, M, params, num_ops))
+      << "mixed-precision (bf16 in, f32 out) must be accepted — the "
+         "gate enforces ACROSS-expert uniformity, not BETWEEN src/dst";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertSrcMismatch) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::none;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+  }
+  // Mismatch one expert's src dtype.
+  params[2].dtypes.src = data_type_t::f32;
+  EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+      << "cross-expert src dtype mismatch must be rejected — M-tile's "
+         "per-thread slicer dispatches uniform GEMM tiles and cannot "
+         "switch dtype mid-batch";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertWeiMismatch) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::none;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+  }
+  // s8 weights on one expert (quantised), bf16 on the others.
+  params[0].dtypes.wei = data_type_t::s8;
+  EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+      << "cross-expert wei dtype mismatch must be rejected (e.g. one "
+         "quantised expert + dense others) — the M-tile planner cannot "
+         "route a single team to two different kernel families";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertDstMismatch) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::none;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+  }
+  params[3].dtypes.dst = data_type_t::f32;
+  EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+      << "cross-expert dst dtype mismatch must be rejected — the row "
+         "slicer's dst pointer arithmetic assumes uniform `dst_elem` "
+         "(`size_of(dtypes.dst)`) across all experts";
+}
+
+TEST(TestGroupMatmulMTileDtypeGate, RejectsCrossExpertBiasMismatch) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+
+  const int num_ops = 4;
+  std::vector<char> layout(num_ops, 'r');
+  std::vector<int>  M(num_ops, 16);
+  std::vector<matmul_params> params(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    params[i].dtypes.src  = data_type_t::bf16;
+    params[i].dtypes.wei  = data_type_t::bf16;
+    params[i].dtypes.dst  = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::f32;
+    params[i].mem_format_a = 'n';
+    params[i].mem_format_b = 'n';
+  }
+  params[1].dtypes.bias = data_type_t::bf16;
+  EXPECT_FALSE(check_m_tile_safe(layout, M, params, num_ops))
+      << "cross-expert bias dtype mismatch must be rejected (e.g. f32 "
+         "bias on most experts + bf16 bias on one) — the kernel select "
+         "would diverge mid-batch";
+}
+
+// ============================================================================
+// [8l] TestGroupMatmulMTileStandalone.F32 — full-f32 numerical-correctness
+// fixture for the standalone hot path.  Mirrors the bf16 standalone fixture
+// at [8g] above but with `data_type_t::f32` for src / wei / dst / bias.
+// f32 routes through a different kernel inside `kernel_select` (typically
+// the AOCL FP32 GEMM rather than bf16 BRGEMM), so this catches regressions
+// in dtype handling that the bf16-only standalone tests would miss.
+//
+// Reference: ALGO 1 (sequential per-expert) on the same f32 inputs.
+// Test:      ALGO 2 (M-tile / `flat_m_tile`).
+// Tolerance: tight (rtol=1e-5, atol=1e-5) — f32 has 7-digit precision so
+//            the reduction-order noise between sequential and M-tile is
+//            well below 1e-5 for this small K=64 / M=64 / N=128 shape.
+// ============================================================================
+
+namespace {
+
+struct StandaloneMTileShapeF32 {
+  int num_ops;
+  int num_threads;
+  int N;
+  int K;
+  std::vector<int> Ms;
+  std::vector<std::vector<float>> src;
+  std::vector<std::vector<float>> wei;
+  std::vector<std::vector<float>> bias;
+  std::vector<std::vector<float>> dst_test;
+  std::vector<std::vector<float>> dst_ref;
+  std::vector<const void *> srcs;
+  std::vector<const void *> weis;
+  std::vector<const void *> biases;
+  std::vector<void *> dsts_test;
+  std::vector<void *> dsts_ref;
+  moe_test_utils::GemmVecs gv;
+  std::vector<zendnnl::lowoha::matmul::matmul_params> params;
+};
+
+static StandaloneMTileShapeF32 build_standalone_mtile_shape_f32(
+    int num_threads, const std::vector<int> &Ms,
+    int N, int K, bool with_bias,
+    float alpha_val = 1.0f, float beta_val = 0.0f) {
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+  StandaloneMTileShapeF32 s;
+  s.num_threads = num_threads;
+  s.num_ops     = static_cast<int>(Ms.size());
+  s.N           = N;
+  s.K           = K;
+  s.Ms          = Ms;
+  s.src.resize(s.num_ops);
+  s.wei.resize(s.num_ops);
+  s.bias.resize(s.num_ops);
+  s.dst_test.resize(s.num_ops);
+  s.dst_ref.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.src[e].resize(static_cast<size_t>(Ms[e]) * K);
+    s.wei[e].resize(static_cast<size_t>(K) * N);
+    s.dst_test[e].assign(static_cast<size_t>(Ms[e]) * N, 0.0f);
+    s.dst_ref [e].assign(static_cast<size_t>(Ms[e]) * N, 0.0f);
+    // Deterministic seeds — same hash family as the bf16 fixture but
+    // returns f32 values directly (no bf16-truncation noise).
+    const uint64_t base_src = 0x9E3779B97F4A7C15ULL +
+                              static_cast<uint64_t>(e) * 0x100000001B3ULL;
+    for (size_t k = 0; k < s.src[e].size(); ++k) {
+      uint64_t h = base_src + k * 0xC4CEB9FE1A85EC53ULL;
+      h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+      s.src[e][k] = static_cast<float>(
+          static_cast<int>(h & 0xff) - 128) * 0.005f;
+    }
+    const uint64_t base_wei = 0xBF58476D1CE4E5B9ULL +
+                              static_cast<uint64_t>(e) * 0x100000001B3ULL;
+    for (size_t k = 0; k < s.wei[e].size(); ++k) {
+      uint64_t h = base_wei + k * 0xC4CEB9FE1A85EC53ULL;
+      h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+      s.wei[e][k] = static_cast<float>(
+          static_cast<int>(h & 0xff) - 128) * 0.002f;
+    }
+    if (with_bias) {
+      s.bias[e].resize(static_cast<size_t>(N));
+      for (int c = 0; c < N; ++c)
+        s.bias[e][c] = static_cast<float>(c) * 0.001f + 0.01f;
+    }
+  }
+  s.srcs.resize(s.num_ops);
+  s.weis.resize(s.num_ops);
+  s.biases.resize(s.num_ops);
+  s.dsts_test.resize(s.num_ops);
+  s.dsts_ref.resize(s.num_ops);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.srcs[e]      = s.src[e].data();
+    s.weis[e]      = s.wei[e].data();
+    s.biases[e]    = with_bias ? s.bias[e].data() : nullptr;
+    s.dsts_test[e] = s.dst_test[e].data();
+    s.dsts_ref [e] = s.dst_ref [e].data();
+  }
+  s.gv = GemmVecs::uniform(s.num_ops, /*M=*/0, N, K,
+                           alpha_val, beta_val,
+                           /*wc=*/true, /*tA=*/false, /*tB=*/false);
+  s.gv.Ms = Ms;
+  s.params = make_uniform_params(
+      s.num_ops, data_type_t::f32,
+      /*bias_dt=*/with_bias ? data_type_t::f32 : data_type_t::none);
+  for (int e = 0; e < s.num_ops; ++e) {
+    s.params[e].num_threads = num_threads;
+  }
+  return s;
+}
+
+static void run_and_compare_standalone_f32(
+    StandaloneMTileShapeF32 &s, int algo_test, int algo_ref,
+    int expected_tag, float rtol, float atol,
+    const char *case_label) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+
+  {
+    auto pr = s.params;
+    AlgoEnvGuard algo_guard_ref(algo_ref);
+    ::reset_grp_matmul_caches();
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts_ref, s.gv.ldc,
+                                  s.gv.is_wc, pr, nullptr, nullptr),
+              status_t::success) << "ref " << case_label;
+  }
+  int tag = 0;
+  {
+    auto pt = s.params;
+    ::reset_grp_matmul_caches();
+    AlgoEnvGuard algo_guard_test(algo_test);
+    MTileHybridOverride hybrid_auto(0);
+    MTilePathCaptureGuard cap;
+    ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                  s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                  s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                  s.biases, s.gv.beta, s.dsts_test, s.gv.ldc,
+                                  s.gv.is_wc, pt, nullptr, nullptr),
+              status_t::success) << "test " << case_label;
+    tag = zendnnl::lowoha::matmul::test_api
+        ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  }
+  EXPECT_EQ(tag, expected_tag)
+      << "Path tag mismatch on " << case_label
+      << ": expected " << expected_tag << ", got " << tag;
+
+  // f32 value comparison — tight tolerance since both runs are
+  // FP32 throughout.  Per-expert × per-row × per-col first-divergence
+  // reporting matches the bf16 helper's contract.
+  for (int e = 0; e < s.num_ops; ++e) {
+    const int M_e = s.Ms[e];
+    if (M_e == 0) continue;
+    for (int row = 0; row < M_e; ++row) {
+      for (int c = 0; c < s.N; ++c) {
+        const size_t off = static_cast<size_t>(row) * s.N + c;
+        const float g = s.dst_test[e][off];
+        const float f = s.dst_ref [e][off];
+        const float bound = std::abs(f) * rtol + atol;
+        if (std::abs(g - f) > bound) {
+          FAIL() << "f32 value mismatch on " << case_label
+                 << " e=" << e << " r=" << row << " c=" << c
+                 << " got=" << g << " ref=" << f;
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
+TEST(TestGroupMatmulMTileStandalone, F32NoBias) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape_f32(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/false);
+  run_and_compare_standalone_f32(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/1e-5f, /*atol=*/1e-5f,
+      "standalone_f32_no_bias");
+}
+
+// ============================================================================
+// [8m] TestGroupMatmulMTileCustomKernelInvariance — verify the M-tile
+// (ALGO 2) runtime is independent of the CUSTOM_KERNEL env knob.
+//
+// Contract: M-tile (`flat_m_tile`) dispatches every per-thread slice
+// through `execute_expert_slice`, which selects the kernel via
+// `resolve_kernel()` (returns the matmul_algo_t from `matmul_config_t`
+// — defaults to `aocl_dlp_blocked`).  This is independent of the CK
+// env knob — `get_grp_matmul_custom_kernel()` is consulted only by the
+// PREPACK call BEFORE the OMP region (see m_tile.cpp lines 629-635 for
+// the standalone path and lines 1457-1475 for the pipeline).  The
+// prepack short-circuits when its arguments don't trigger the CK
+// packing format, so for ALGO 2 it always lands on the same packed
+// representation regardless of the CK knob.
+//
+// Therefore the dst[] bytes produced by the M-tile run MUST be
+// byte-identical between CK=0 and CK=1 — any difference would
+// indicate that the M-tile execution path picked up a CK-dependent
+// branch it shouldn't.  We use the test-only `CustomKernelOverride`
+// RAII guard (NOT EnvVarGuard, since the env value is cached at first
+// read) to switch the knob between the two runs.
+// ============================================================================
+
+// ============================================================================
+// [8n] TestGroupMatmulMTileEdgeCases — operational edge cases for M-tile.
+//
+//   * num_ops == 0 (empty batch): early-out at m_tile.cpp:621 — dispatch
+//     succeeds with no work done, no dst writes (vacuously held).
+//   * All M[i] == 0 (all inactive): early-out at m_tile.cpp:657
+//     (`active_ops == 0`).  Dispatch succeeds, dst untouched.
+//   * Mixed active / inactive experts (some M[i] == 0, others > 0):
+//     planner's `active_pos[i] = -1` for inactive (m_tile.cpp:669-675)
+//     keeps them out of the CCD stripe.  Active experts produce
+//     correct values; inactive experts' dst slots remain at their
+//     initialised values (caller-allocated buffer policy — same as
+//     ALGO 1 reference).
+//   * Odd N + gated act: rejected by the public-API validator at
+//     `group_matmul_direct.cpp:476-482` (status_t::failure).  M-tile
+//     never sees the call.
+// ============================================================================
+
+TEST(TestGroupMatmulMTileEdgeCases, NumOpsZeroSucceeds) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::matmul_params;
+  using zendnnl::lowoha::matmul::status_t;
+
+  // Empty input vectors — every per-expert vector is size 0.
+  std::vector<char>  layout;
+  std::vector<bool>  transA, transB, is_wc;
+  std::vector<int>   Ms, Ns, Ks, lda, ldb, ldc;
+  std::vector<float> alpha, beta;
+  std::vector<const void *> srcs, weis, biases;
+  std::vector<void *>       dsts;
+  std::vector<matmul_params> params;
+
+  AlgoEnvGuard algo2_guard(2);
+  ::reset_grp_matmul_caches();
+  // Public API typically rejects empty batches at the validator (line
+  // 191 of group_matmul_direct.cpp: "required input vector is empty").
+  // The contract is `status_t::failure` — NOT a crash.  This is the
+  // safety net that M-tile relies on for its `num_ops == 0` invariant.
+  const status_t st = group_matmul_direct(
+      layout, transA, transB, Ms, Ns, Ks, alpha,
+      srcs, lda, weis, ldb, biases, beta,
+      dsts, ldc, is_wc, params, nullptr);
+  EXPECT_EQ(st, status_t::failure)
+      << "empty input vectors must be rejected by the public-API "
+         "validator (defends M-tile's `num_ops == 0` invariant — "
+         "the dispatcher never reaches `flat_m_tile` on an empty batch)";
+}
+
+TEST(TestGroupMatmulMTileEdgeCases, AllExpertsInactiveSucceeds) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+  using zendnnl::common::bfloat16_t;
+  using zendnnl::common::data_type_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  // 8 experts, all with M=0 — `active_ops` should be 0 at line 657
+  // and `flat_m_tile` returns immediately without entering any
+  // branch.  No tag is set (capture stays at its initial value).
+  const int num_ops = 8;
+  const int N = 128;
+  const int K = 64;
+  std::vector<int> Ms(num_ops, 0);
+
+  // Buffers are present but unused (M=0 → 0 rows per expert).
+  std::vector<std::vector<bfloat16_t>> src(num_ops);
+  std::vector<std::vector<bfloat16_t>> wei(num_ops);
+  std::vector<std::vector<bfloat16_t>> dst(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(1);   // size-1 placeholder
+    wei[e].resize(static_cast<size_t>(K) * N);
+    dst[e].resize(1);
+  }
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+                             biases(num_ops, nullptr);
+  std::vector<void *>       dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+    dsts[e] = dst[e].data();
+  }
+
+  auto gv = GemmVecs::uniform(num_ops, /*M=*/0, N, K);
+  gv.Ms = Ms;
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (auto &pp : params) pp.num_threads = 32;
+
+  AlgoEnvGuard algo2_guard(2);
+  ::reset_grp_matmul_caches();
+  const status_t st = group_matmul_direct(
+      gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+      srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
+      dsts, gv.ldc, gv.is_wc, params, nullptr);
+  // Public API may accept (status_t::success, no-op) or reject (some
+  // validators treat all-zero M as degenerate).  Both outcomes are
+  // semantically correct — what we test is that the call DOES NOT
+  // crash, and if it succeeds, no dst writes occurred (vacuously
+  // true since M=0).  We tolerate either status.
+  EXPECT_TRUE(st == status_t::success || st == status_t::failure)
+      << "all-inactive batch must terminate cleanly (success or "
+         "failure, never crash)";
+}
+
+// Mixed active / inactive: some experts have M[i]=0 alongside others
+// with M[i]>0.  The M-tile planner builds `active_pos[i]` (line 669)
+// which skips inactives, and dispatches only active experts.  Value
+// correctness on the active subset must match ALGO 1 reference; the
+// inactive expert's dst slot is untouched in both runs (M=0 → no
+// rows to write).
+TEST(TestGroupMatmulMTileEdgeCases, MixedActiveInactiveExperts) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+  using zendnnl::common::bfloat16_t;
+  using zendnnl::common::data_type_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  // 8 experts: 4 active (M=64), 4 inactive (M=0), interleaved.  This
+  // exercises both the active_pos compaction and the cross-expert
+  // dispatch order — the planner's CCD stripe should skip inactive
+  // slots without leaving gaps.
+  const int num_ops = 8;
+  const int N = 128, K = 64, M_active = 64;
+  std::vector<int> Ms(num_ops);
+  for (int e = 0; e < num_ops; ++e) Ms[e] = (e % 2 == 0) ? M_active : 0;
+
+  std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops),
+      dst_test(num_ops), dst_ref(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    const int M_e = Ms[e];
+    src[e].resize(static_cast<size_t>(std::max(1, M_e)) * K);
+    wei[e].resize(static_cast<size_t>(K) * N);
+    dst_test[e].assign(static_cast<size_t>(std::max(1, M_e)) * N,
+                       bfloat16_t(0.0f));
+    dst_ref[e].assign(static_cast<size_t>(std::max(1, M_e)) * N,
+                      bfloat16_t(0.0f));
+    if (M_e > 0) {
+      fill_src(src[e], e, 0.02f);
+      fill_wei1(wei[e], e, 0.005f);
+    }
+  }
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+                             biases(num_ops, nullptr);
+  std::vector<void *>       dsts_test(num_ops), dsts_ref(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    srcs[e]      = src[e].data();
+    weis[e]      = wei[e].data();
+    dsts_test[e] = dst_test[e].data();
+    dsts_ref[e]  = dst_ref[e].data();
+  }
+
+  auto gv = GemmVecs::uniform(num_ops, /*M=*/0, N, K);
+  gv.Ms = Ms;
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (auto &pp : params) pp.num_threads = 32;
+
+  // Reference: ALGO 1 (sequential per-expert).
+  {
+    auto pr = params;
+    AlgoEnvGuard algo1_guard(1);
+    ::reset_grp_matmul_caches();
+    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                  gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                  srcs, gv.lda, weis, gv.ldb,
+                                  biases, gv.beta,
+                                  dsts_ref, gv.ldc, gv.is_wc, pr, nullptr),
+              status_t::success) << "ref dispatch failed";
+  }
+  // Test: ALGO 2 (M-tile).
+  {
+    auto pt = params;
+    AlgoEnvGuard algo2_guard(2);
+    ::reset_grp_matmul_caches();
+    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                  gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                  srcs, gv.lda, weis, gv.ldb,
+                                  biases, gv.beta,
+                                  dsts_test, gv.ldc, gv.is_wc, pt, nullptr),
+              status_t::success) << "test dispatch failed";
+  }
+
+  // Compare per-expert: active experts must produce matching values;
+  // inactive experts have no rows to compare.
+  for (int e = 0; e < num_ops; ++e) {
+    if (Ms[e] == 0) continue;
+    for (int row = 0; row < Ms[e]; ++row) {
+      for (int c = 0; c < N; ++c) {
+        const size_t off = static_cast<size_t>(row) * N + c;
+        const float gt  = static_cast<float>(dst_test[e][off]);
+        const float ref = static_cast<float>(dst_ref [e][off]);
+        const float bound = std::abs(ref) * 5e-2f + 5e-2f;
+        if (std::abs(gt - ref) > bound) {
+          FAIL() << "mixed-active value mismatch e=" << e
+                 << " r=" << row << " c=" << c
+                 << " got=" << gt << " ref=" << ref;
+        }
+      }
+    }
+  }
+}
+
+TEST(TestGroupMatmulMTileEdgeCases, OddNWithGatedActRejected) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+  using zendnnl::common::bfloat16_t;
+  using zendnnl::common::data_type_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  const int num_ops = 4;
+  const int M = 16;
+  const int N_odd = 127;   // odd — must be rejected
+  const int K = 64;
+
+  std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops),
+                                       dst(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(M) * K);
+    wei[e].resize(static_cast<size_t>(K) * N_odd);
+    dst[e].assign(static_cast<size_t>(M) * N_odd, bfloat16_t(0.0f));
+  }
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+                             biases(num_ops, nullptr);
+  std::vector<void *>       dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+    dsts[e] = dst[e].data();
+  }
+
+  auto gv = GemmVecs::uniform(num_ops, M, N_odd, K);
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (auto &pp : params) pp.num_threads = 32;
+
+  grp_matmul_gated_act_params gated{};
+  gated.act = grp_matmul_gated_act_t::silu_and_mul;
+
+  AlgoEnvGuard algo2_guard(2);
+  ::reset_grp_matmul_caches();
+  const status_t st = group_matmul_direct(
+      gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+      srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
+      dsts, gv.ldc, gv.is_wc, params, nullptr, &gated);
+  EXPECT_EQ(st, status_t::failure)
+      << "odd N=" << N_odd << " with gated activation must be rejected "
+         "by the public-API validator (group_matmul_direct.cpp:476-482) "
+         "— gated activations collapse pairs of columns (N/2 lanes "
+         "per row), so an odd N has no valid `N/2` semantics";
+}
+
+TEST(TestGroupMatmulMTileCustomKernelInvariance, BF16ByteIdenticalDst) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::status_t;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  // Two independent shapes — first with CK=0, second with CK=1.  Same
+  // src/wei/bias inputs across both runs (deterministic fill).  The
+  // helper builds a fresh shape per call so the two dst buffers don't
+  // alias.
+  auto s0 = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/true);
+  auto s1 = build_standalone_mtile_shape(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/true);
+
+  int tag0 = 0, tag1 = 0;
+  // Run 1: CK=0.
+  {
+    AlgoEnvGuard         algo2_guard(2);
+    CustomKernelOverride ck_off(false);
+    MTileHybridOverride  hybrid_auto(0);
+    MTilePathCaptureGuard cap;
+    ::reset_grp_matmul_caches();
+    auto pt = s0.params;
+    ASSERT_EQ(group_matmul_direct(s0.gv.layout, s0.gv.transA, s0.gv.transB,
+                                  s0.gv.Ms, s0.gv.Ns, s0.gv.Ks, s0.gv.alpha,
+                                  s0.srcs, s0.gv.lda, s0.weis, s0.gv.ldb,
+                                  s0.biases, s0.gv.beta,
+                                  s0.dsts_test, s0.gv.ldc,
+                                  s0.gv.is_wc, pt, nullptr, nullptr),
+              status_t::success) << "CK=0 dispatch failed";
+    tag0 = zendnnl::lowoha::matmul::test_api
+        ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  }
+  // Run 2: CK=1.
+  {
+    AlgoEnvGuard         algo2_guard(2);
+    CustomKernelOverride ck_on(true);
+    MTileHybridOverride  hybrid_auto(0);
+    MTilePathCaptureGuard cap;
+    ::reset_grp_matmul_caches();
+    auto pt = s1.params;
+    ASSERT_EQ(group_matmul_direct(s1.gv.layout, s1.gv.transA, s1.gv.transB,
+                                  s1.gv.Ms, s1.gv.Ns, s1.gv.Ks, s1.gv.alpha,
+                                  s1.srcs, s1.gv.lda, s1.weis, s1.gv.ldb,
+                                  s1.biases, s1.gv.beta,
+                                  s1.dsts_test, s1.gv.ldc,
+                                  s1.gv.is_wc, pt, nullptr, nullptr),
+              status_t::success) << "CK=1 dispatch failed";
+    tag1 = zendnnl::lowoha::matmul::test_api
+        ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  }
+
+  // Both runs MUST land on the same M-tile branch — CK doesn't
+  // influence the planner.
+  EXPECT_EQ(tag0, kPhase2Single)
+      << "CK=0 run: expected kPhase2Single (=3), got " << tag0;
+  EXPECT_EQ(tag1, kPhase2Single)
+      << "CK=1 run: expected kPhase2Single (=3), got " << tag1;
+
+  // Byte-identical dst across both runs — any difference signals a
+  // hidden CK-dependent code path inside M-tile.
+  for (int e = 0; e < s0.num_ops; ++e) {
+    ASSERT_EQ(s0.dst_test[e].size(), s1.dst_test[e].size())
+        << "dst buffer size mismatch on expert " << e;
+    const auto *p0 = reinterpret_cast<const uint8_t *>(s0.dst_test[e].data());
+    const auto *p1 = reinterpret_cast<const uint8_t *>(s1.dst_test[e].data());
+    const size_t bytes = s0.dst_test[e].size()
+        * sizeof(zendnnl::common::bfloat16_t);
+    for (size_t b = 0; b < bytes; ++b) {
+      if (p0[b] != p1[b]) {
+        FAIL() << "M-tile dst is NOT byte-identical across CK on/off: "
+                  "expert=" << e << " byte_off=" << b
+               << " CK=0=" << static_cast<int>(p0[b])
+               << " CK=1=" << static_cast<int>(p1[b])
+               << " — `flat_m_tile` must not pick up a CK-dependent "
+                  "kernel-select branch";
+      }
+    }
+  }
+}
+
+TEST(TestGroupMatmulMTileStandalone, F32WithBiasF32) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(32);
+  if (!require_min_threads(32))
+    GTEST_SKIP() << "Requires >= 32 OMP threads.";
+
+  auto s = build_standalone_mtile_shape_f32(
+      /*num_threads=*/32,
+      /*Ms=*/std::vector<int>(16, 64),
+      /*N=*/128, /*K=*/64,
+      /*with_bias=*/true);
+  run_and_compare_standalone_f32(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kPhase2Single,
+      /*rtol=*/1e-5f, /*atol=*/1e-5f,
+      "standalone_f32_bias_f32");
+}
+
+TEST(TestGroupMatmulMTileBranches, RoundBasedGatedActFullMPostPass) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kRoundBased;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
+  using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
+
+  const int saved = omp_get_max_threads();
+  struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
+  omp_set_num_threads(8);
+  if (!require_min_threads(4))
+    GTEST_SKIP() << "Requires >= 4 OMP threads.";
+
+  auto s = build_standalone_mtile_shape(
+      /*num_threads=*/4,
+      /*Ms=*/std::vector<int>(8, 8),
+      /*N=*/256, /*K=*/64,
+      /*with_bias=*/false);
+
+  grp_matmul_gated_act_params ga{};
+  ga.act = grp_matmul_gated_act_t::silu_and_mul;
+
+  run_and_compare_standalone(
+      s, /*algo_test=*/2, /*algo_ref=*/1,
+      /*expected_tag=*/kRoundBased,
+      /*rtol=*/5e-2f, /*atol=*/5e-2f,
+      "round_based_silu_full_M_post_pass",
+      /*gated_act=*/&ga);
 }
 

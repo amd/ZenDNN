@@ -295,6 +295,22 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
     return;
   }
 
+  // Nested-OMP guard.  When this kernel is called from inside an
+  // outer parallel region (e.g. Stage 2b of the fused-MoE M-tile
+  // vertical-fusion pipeline in `group_matmul_m_tile.cpp`), nested
+  // parallelism is typically disabled — so the `#pragma omp
+  // parallel` block below would receive a 1-thread team that only
+  // covers the first (M / num_ccxs) rows of the manual CCX-strided
+  // split, leaving the rest uninitialized and producing NaN
+  // downstream once the s8 garbage feeds into the W2 matmul.  The
+  // calling outer thread already owns the slice it handed us, so
+  // process all M rows sequentially on the calling thread.
+  if (omp_in_parallel()) {
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
+    return;
+  }
+
   const int nthreads = omp_get_max_threads();
   const int cores_per_ccx = 8;
 

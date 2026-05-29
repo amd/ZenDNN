@@ -14,124 +14,185 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// ALGO 3 — N-tile parallel GEMM, internal-only data structures.
+/// ALGO 3 — N-tile planner.
 ///
-/// This header carries the planner-shaped data types that the
-/// `flat_n_tile()` translation unit (and, once we add them, planner
-/// gtests) need to share.  It is library-internal: not part of the
-/// public ZenDNN API and not meant for inclusion outside
-/// `src/lowoha_operators/matmul/group_matmul/`.
+/// =====================================================================
+/// PURPOSE
+/// =====================================================================
 ///
-/// Layout mirror of the .cpp's section banners:
+/// This header is the **single home for N-tile planning data types**
+/// — strategy enum, topology summary, the full per-call `GroupNTilePlan`,
+/// the multi-round cost-model candidate struct, and the round-pick
+/// enum.  It is the symmetric counterpart of
+/// `../m_tile/group_matmul_m_tile_planner.hpp`.
 ///
-///   Section A.0  PerThreadScratch — per-thread aligned heap buffer
-///                used by the tight-fused-epilogue path of `do_tile()`.
-///                Lives here so a future memory-audit gtest can
-///                exercise `grow_scratch()` directly.
+/// "Planning" for ALGO 3 = picking, per-call, **which execution
+/// strategy** runs (Sequential / DecodeD / FewExperts / ManyExperts),
+/// **how many threads per expert** in each round, **the round batch
+/// size**, **the expert-ordering permutation**, and a small bag of
+/// strategy-specific knobs (tight-fused-epilogue switch, AOCL strict-
+/// stable per-expert overrides, Phase B remainder-distribute flags).
+/// The output type `GroupNTilePlan` is the planner-to-executor
+/// contract — executors in `group_matmul_n_tile.cpp` consume the
+/// plan struct without ever re-deriving heuristic state.
 ///
-///   Section A.1  Strategy enum + planner-shaped types (Topology,
-///                Plan, RoundCandidates, RoundPick).  All POD-ish:
-///                only fundamental types and `std::array`, no
-///                references or owning resources.  Safe to include
-///                from gtests for planner property tests.
+/// **All future N-tile planner optimizations land in this file**:
 ///
-/// What stays in `group_matmul_n_tile.cpp`:
-///   * `GroupNTileContext`  — captures the caller's `std::vector<…> &`
-///                            inputs by reference; private impl detail
-///                            of one OMP region.
-///   * Planner functions    — pure decision logic on the structs above.
-///   * Strategy executors   — OMP-parallel matmul drivers.
-///   * `flat_n_tile()`      — public entry point (declaration lives in
-///                            `group_matmul_parallel_common.hpp` for
-///                            the dispatcher).
+///   * New fields on `GroupNTilePlan` (e.g. NUMA-aware scheduling,
+///     per-round dynamic-tile reshuffles, alternative remainder
+///     distributions).
+///   * New strategy variants (extend `GroupNTileStrategy` and the
+///     round-pick contract).
+///   * New cost-model parameters on `RoundCandidates` (the picker in
+///     `n_tile.cpp::pick_round_strategy` will follow).
+///   * New test-only diagnostic snapshots beyond `PhaseBSnapshot`
+///     (use the same one-shot capture pattern).
+///
+/// The runtime side — the executors `flat_n_tile`,
+/// `execute_sequential` / `execute_decode_d` / `execute_rounds` and
+/// the lower-level `GroupNTileContext::do_tile` — consumes the plan
+/// fields directly.  When a new planner output is added here, only
+/// the consumers in `group_matmul_n_tile.cpp` need to learn about it
+/// — no caller-side change to `flat_n_tile`'s public signature.
+///
+/// =====================================================================
+/// FILE LAYOUT
+/// =====================================================================
+///
+///   Section P.1  Strategy enum (`GroupNTileStrategy`).  One value per
+///                top-level executor branch the planner can select.
+///
+///   Section P.2  Topology summary (`GroupNTileTopology`).  Pre-digested
+///                inputs (shape stats + cluster topology) consumed by
+///                the planner's branch heuristics.
+///
+///   Section P.3  Per-call plan (`GroupNTilePlan`).  The full planner
+///                output: strategy + algo + threading parameters +
+///                expert-order permutation + per-expert thread-count
+///                array + miscellaneous strategy-specific flags.
+///                This is the only struct the executors read.
+///
+///   Section P.4  Round-scheduler types (`RoundCandidates`, `RoundPick`).
+///                Used by `pick_round_strategy()` and `apply_round_pick()`
+///                in `group_matmul_n_tile.cpp` to pick between Single /
+///                Multi / Balanced round shapes for the ManyExperts
+///                executor.
+///
+///   Section P.5  Test-only Phase-B snapshot (`test_api::PhaseBSnapshot`
+///                + `s_capture_phase_b` / `s_last_phase_b_snapshot`).
+///                One-shot capture of the planner's per-expert thread
+///                assignment for direct end-to-end verification by
+///                `test_algos.cpp`.
+///
+/// =====================================================================
+/// DEPENDENCY DIRECTION
+/// =====================================================================
+///
+///   * This header pulls only `<array>`, `<atomic>`, `<cstdint>`,
+///     `<vector>` and `../group_matmul_parallel_common.hpp` (for
+///     `kNTilePlanMaxExperts` and `matmul_algo_t` via the inline
+///     `using namespace zendnnl::ops;` in the common header).
+///   * `group_matmul_n_tile.hpp` re-includes this header so any
+///     translation unit that includes the public N-tile interface
+///     transitively gets the planner output types.
+///   * `group_matmul_n_tile.cpp` includes this header directly
+///     (alongside `group_matmul_n_tile.hpp`) and the planner
+///     function `plan_group_n_tile` (currently in the .cpp's
+///     anonymous namespace) is the canonical producer of
+///     `GroupNTilePlan`.  Future work can incrementally migrate
+///     the planner function itself and its helpers (`summarise_topology`,
+///     `build_round_candidates`, `pick_round_strategy`,
+///     `apply_round_pick`, `apply_adaptive_tiers`, etc.) into this
+///     header as inline functions — the data-type contracts they
+///     produce are already here.
+///   * gtests can include this header alone to assert on planner
+///     output structures (currently via `PhaseBSnapshot`).
 
-#ifndef ZENDNNL_GROUP_MATMUL_N_TILE_HPP
-#define ZENDNNL_GROUP_MATMUL_N_TILE_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_N_TILE_PLANNER_HPP
+#define ZENDNNL_GROUP_MATMUL_N_TILE_PLANNER_HPP
 
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <limits>
 
-#include "operators/matmul/matmul_config.hpp"  // matmul_algo_t
-#include "group_matmul_parallel_common.hpp"   // kNTilePlanMaxExperts
+#include "../group_matmul_parallel_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
 // Bring `matmul_algo_t` into scope so the `algo` field on
-// `GroupNTilePlan` reads as `matmul_algo_t` (matches the unqualified
-// usage in the rest of the group_matmul code, which gets the same
-// using-decl via `group_matmul_parallel_common.hpp`).
+// `GroupNTilePlan` (Section P.3) reads as `matmul_algo_t` — matches
+// the unqualified usage in the rest of the group_matmul code (the
+// using-decl is also brought in from `group_matmul_parallel_common.hpp`
+// via its inline `using namespace zendnnl::ops;`).
 using zendnnl::ops::matmul_algo_t;
 
 // =====================================================================
-// Section A.0 — PerThreadScratch
+// Section P.0 — N-tile shared constants
 // =====================================================================
 //
-// Per-thread aligned heap buffer used by the tight-fused-epilogue
-// path of `do_tile()`.  When `fused_epilogue=swiglu` AND the caller's
-// dst is a tight [M, I]-layout buffer (ldc < N), the classic
-// matmul-then-in-place-compact pattern no longer fits (matmul writes
-// 2I cols but dst only has I cols per row).  In that case `do_tile()`
-// switches to a per-thread scratch + out-of-place activation flow:
+// Constants specific to the ALGO 3 (N-tile) planner / executor.
+// Previously lived in `group_matmul_parallel_common.hpp`; moved here
+// (PR follow-up) so every N-tile-specific knob sits next to the
+// N-tile code it parameterises.  These MUST live in the planner
+// header — not in `group_matmul_n_tile.hpp` — because
+// `GroupNTilePlan` (Section P.3 below) sizes stack arrays from
+// `kNTilePlanMaxExperts` at struct-definition time, and the planner
+// header is the EARLIEST file in the include DAG.
 //
-//   1. matmul the thread's N-tile slice into a thread-local scratch
-//      buffer (wide, `n_tile` cols, ldc=n_tile),
-//   2. run `apply_swiglu_oai_tile_rows_oop()` from that scratch into
-//      the caller's tight dst at halved col offset `col_start / 2`.
-//
-// This is barrier-free: each thread writes to its own scratch then to
-// a disjoint column range of the caller's tight dst — no cross-thread
-// reads needed inside the fused-epilogue step.
-//
-// Lifetime: `static thread_local` inside the OMP region; monotonically
-// grows to the high-water mark this thread has seen.  Freed by the
-// destructor on thread exit.  Per-thread, so no contention.
-//
-// The buffer is 64-byte aligned so the custom kernel's `vmovdqu`
-// reads start on a cache-line boundary.
-//
-// Move/copy operations are deleted because the struct owns `buf` via
-// `std::free` in the destructor — accidental copying would leave two
-// instances pointing at the same allocation and double-free on
-// destruction.  Production use is always `static thread_local` inside
-// an OMP region (one instance per worker, fixed lifetime); the delete
-// catches misuse if a future caller or test instantiates it as a
-// stack variable and accidentally returns / passes it by value.
-struct PerThreadScratch {
-  void *buf = nullptr;
-  size_t cap = 0;
-  PerThreadScratch() = default;
-  ~PerThreadScratch() { std::free(buf); }
-  PerThreadScratch(const PerThreadScratch &)            = delete;
-  PerThreadScratch &operator=(const PerThreadScratch &) = delete;
-  PerThreadScratch(PerThreadScratch &&)                 = delete;
-  PerThreadScratch &operator=(PerThreadScratch &&)      = delete;
-};
+// Consumers (`group_matmul_n_tile.hpp` and everyone who re-includes
+// it: executor, dispatcher, gtests, fused-MoE) see these symbols
+// transparently because `group_matmul_n_tile.hpp` includes this
+// header on line ~120 of its include block.
 
-// Grow a per-thread scratch to at least `need` bytes, 64-byte aligned.
-// Returns false on alloc failure (caller signals via alloc_fail atomic
-// + post-OMP-region check).
-inline bool grow_scratch(PerThreadScratch &s, size_t need) {
-  if (need <= s.cap) return true;
-  std::free(s.buf);
-  s.buf = nullptr;
-  s.cap = 0;
-  void *tmp = nullptr;
-  if (posix_memalign(&tmp, 64, need) != 0 || tmp == nullptr) return false;
-  s.buf = tmp;
-  s.cap = need;
-  return true;
-}
+/// Default minimum per-thread N width for the decode-phase N-tile
+/// path (max_M ≤ kDecodeMaxM=32).  Used:
+///   * by `effective_decode_n_tile()` as the default outer N-tile when
+///     `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` is unset / invalid,
+///   * by the auto-selector's decode-class N-tile sizing,
+///   * by the custom-kernel dispatch as the gate for engaging the
+///     fused tile path (see `custom_kernel/dispatch.cpp`).
+/// 256 is the AVX-512 BF16 sweet spot for the inner GEMM kernel; tune
+/// only with a measured perf justification.
+inline constexpr int kDecodeNTile = 256;
+
+/// Maximum number of experts the ALGO 3 (N-tile) planner can
+/// represent.  Mirrored on `GroupNTilePlan::kMaxExperts` so the
+/// planner's stack-allocated fixed-size arrays (`expert_order`,
+/// `stable_n_thr_per_expert`) stay heap-free on the hot path.  Also
+/// used to size the heap-free temporaries in the expert-ordering
+/// helpers (`fill_ntile_expert_order`) and the round-info stack
+/// array in `execute_rounds` (group_matmul_n_tile.cpp).
+///
+/// Auto-select uses this constant in **rule 0** — the top-level
+/// capacity carve-out applied BEFORE the three policy rules.  Any
+/// shape with `num_ops > kNTilePlanMaxExperts` (regardless of how it
+/// would otherwise be routed by rules 1-3) goes to ALGO 5 (per-expert
+/// parallel) because the N-tile planner's R3 gate would silently
+/// fall back to its Sequential strategy (one expert at a time, full
+/// team each).  Sequential is materially slower than ALGO 5 for
+/// many-experts decode-class shapes — ALGO 5 fans `num_ops` over the
+/// OMP team and lets each thread own a slice of experts serially,
+/// with no fixed-size lookup arrays of its own.
+///
+/// The carve-out catches both rule-1-territory shapes
+/// (`num_ops >= num_threads`, e.g., 300 experts on 128 threads) and
+/// the rare rule-3-decode-territory shape
+/// (`kNTilePlanMaxExperts < num_ops < num_threads`, e.g., 300
+/// experts on a 512-thread host).
+///
+/// Bump only if `GroupNTilePlan` switches to heap-allocated arrays
+/// (or callers start shipping > 256-expert deployments where the
+/// N-tile planner outperforms ALGO 5 — neither situation exists
+/// today).
+inline constexpr int kNTilePlanMaxExperts = 256;
 
 // =====================================================================
-// Section A.1 — Strategy enum + planner-shaped types
+// Section P.1 — Strategy enum
 // =====================================================================
-
+//
 // Execution patterns the planner can pick.  Only DecodeD, FewExperts,
 // and ManyExperts run the actual N-tile per-tile dispatch (and route
 // through the BF16 custom kernel when its gate accepts the call) —
@@ -170,7 +231,7 @@ inline bool grow_scratch(PerThreadScratch &s, size_t need) {
 //       or skipped entirely (under value 2 → straight to Rounds).
 // Structural gates (`!ntile_viable`, R3, F3) always fire regardless
 // of the knob.  See `get_grp_n_tile_strategy()` in
-// `group_matmul_parallel_common.hpp` for the full env-knob contract.
+// `group_matmul_n_tile.hpp` for the full env-knob contract.
 enum class GroupNTileStrategy {
   // (F)  Sequential fallback.  Runs experts serially with the full
   //      thread team per kernel via `execute_expert_slice` — the
@@ -201,6 +262,10 @@ enum class GroupNTileStrategy {
   ManyExperts,
 };
 
+// =====================================================================
+// Section P.2 — Topology summary
+// =====================================================================
+//
 // Inputs / topology summary used by the planner — only what's needed
 // to decide; no expert vectors are inspected at strategy level.
 struct GroupNTileTopology {
@@ -220,6 +285,10 @@ struct GroupNTileTopology {
                          // inputs.
 };
 
+// =====================================================================
+// Section P.3 — Per-call plan
+// =====================================================================
+//
 // Knobs the strategy executors consume.  Most fields are filled only
 // for the strategy they belong to; the rest stay zero / default.
 struct GroupNTilePlan {
@@ -406,6 +475,10 @@ struct GroupNTilePlan {
   bool per_expert_remainder = false;
 };
 
+// =====================================================================
+// Section P.4 — Round-scheduler cost-model types
+// =====================================================================
+//
 // Cost-model candidate parameters for the (B) ManyExperts round
 // scheduler.  Three competing shapes — Single / Multi / Balanced —
 // share derivations (max_tiles, capped_batch) and each carry their
@@ -436,7 +509,7 @@ struct RoundCandidates {
 enum class RoundPick { Single, Multi, Balanced };
 
 // =====================================================================
-// Test-only snapshot of the planner's Phase B output
+// Section P.5 — Test-only snapshot of the planner's Phase B output
 // =====================================================================
 //
 // Locks down the heaviest-first / eligibility-filter behaviour of
@@ -478,4 +551,4 @@ inline PhaseBSnapshot     s_last_phase_b_snapshot;
 }  // namespace lowoha
 }  // namespace zendnnl
 
-#endif  // ZENDNNL_GROUP_MATMUL_N_TILE_HPP
+#endif  // ZENDNNL_GROUP_MATMUL_N_TILE_PLANNER_HPP

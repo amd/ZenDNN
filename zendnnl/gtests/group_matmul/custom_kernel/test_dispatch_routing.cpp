@@ -65,7 +65,7 @@ using mt::status_t;
 // num_threads` on a typical CI host would trip the auto-mirror
 // Rule 2 gate (`num_ops <= 8` → Sequential — see
 // `auto_select_would_pick_algo1` in
-// `group_matmul/group_matmul_n_tile.cpp`), bypassing the custom
+// `group_matmul/n_tile/group_matmul_n_tile.cpp`), bypassing the custom
 // kernel entirely.  In that case the test would silently pass via
 // the Sequential → AOCL path even if the CK refusal logic were
 // broken: both ALGO=3 (forced, with auto-mirror Sequential) and

@@ -17,51 +17,61 @@
 /// Fused MoE: Op1(gate+up) → activation → Op2(down_proj) → optional
 /// weighted-reduce post-op, all in one API call.
 ///
-/// Unified dispatch architecture:
-///   * Op1 + activation and Op2 both route through
-///     `group_matmul_run_parallel_dispatch`, which selects the ALGO
-///     via `ZENDNNL_GRP_MATMUL_ALGO` (1..5 manual, 0 auto) and the
-///     inner BLAS kernel via `ZENDNNL_MATMUL_ALGO`.  All 5 strategies
-///     remain selectable for both passes.
-///   * The activation is fused inline by the dispatcher when the
-///     chosen strategy supports it (ALGO 1/2/4/5 always; ALGO 3 for
-///     swiglu_oai_mul either when `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT=1`
-///     on wide layout, or auto-enabled on tight layout regardless of
-///     the env flag).  Otherwise a separate-pass activation runs
-///     in-place on the wide arena.
+/// This translation unit is the THIN DISPATCHER for the fused-MoE
+/// public entry point.  The public entry
+/// `group_matmul_fused_moe_execute()` is a short orchestrator that:
+///
+///   1. Detects per-side internal-alloc state (Op1 dst / Op2 dst).
+///   2. Validates inputs via `validate_fused_moe_inputs()`.
+///   3. Picks the Op1 arena layout (wide vs tight) via
+///      `pick_fused_moe_want_tight()`.
+///   4. Sets up the Op1 arena + per-expert pointers via
+///      `setup_op1_arena_and_layout()`.
+///   5. Populates the Op2 dispatch scratch via
+///      `setup_op2_dispatch_scratch()`.
+///   6. Tries vertical-fusion FIRST (M-tile pipeline; the executor
+///      accepts ONE of three regimes on both halves: BF16
+///      end-to-end, WOQ-INT4 s4/u4 weights, OR DQ-INT8 per-token-
+///      symmetric on s8 weights) via `try_flat_m_tile_pipeline_bf16()`
+///      from `group_matmul_m_tile.hpp`.  If that engages, both Op1
+///      and Op2 have been computed by the pipeline executor and the
+///      profiler `gemm_mode` reflects one of `vertical_fusion_bf16`,
+///      `vertical_fusion_woq`, or `vertical_fusion_dqint8` depending
+///      on the weight dtype + dynamic-quant flag.
+///   7. Otherwise runs the legacy two-pass via
+///      `run_fused_moe_legacy_two_pass()`: Op1+act through
+///      `group_matmul_run_parallel_dispatch` (which internally picks
+///      ALGO 1..5 / flat_n_tile / flat_m_tile / etc.), then Op2
+///      through the same dispatcher with `act=none`.
+///   8. Runs an optional MoE weighted-reduce post-op (Stage 4).
+///   9. Composes the gemm_mode string for profiler / apilog.
+///
+/// All backend-specific code lives in the per-ALGO translation units:
+///   * `group_matmul_m_tile.cpp`  — `flat_m_tile`,
+///                                   `flat_m_tile_pipeline_bf16`,
+///                                   `try_flat_m_tile_pipeline_bf16`.
+///   * `group_matmul_n_tile.cpp`  — `flat_n_tile`.
+///   * `group_matmul_dispatch.cpp`— `group_matmul_run_parallel_dispatch`
+///                                   (ALGO 1..5 routing).
+/// This file owns only the fused-MoE-specific glue: validation, arena
+/// management, Op2-dispatch-scratch population, and the dispatch fork.
 ///
 /// Adaptive arena layout (internal-alloc mode only):
 ///   * `pick_fused_moe_want_tight()` decides per call whether to
 ///     allocate a tight [M, I] arena or the classic wide [M, 2I].
-///   * Tight layout is requested when ALL of the following hold:
-///       - act is a gated activation that ALGO 3 can fuse into the
-///         per-thread epilogue — `a3_can_fuse_act(act,
-///         CUSTOM_KERNEL)` returns true.  Today that means
-///         `swiglu_oai_mul` (both CK and standard backend) and
-///         `silu_and_mul` / `gelu_and_mul` (CK only — the standard
-///         backend's `apply_swiglu_oai_tile_rows` is swiglu-only).
-///         All three activations halve the Op1 output width from
-///         2I → I, which is what makes the tight arena viable.
-///       - dispatcher would route Op1 to ALGO 3 (only flat_n_tile
-///         implements tight handling — ALGO 1/2/4/5 would overrun),
-///       - `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT` is unset (auto)
-///         or forces tight (any non-zero).  Forcing 0 selects wide.
-///   * Important: for the tight path, fused activation on ALGO 3
-///     is AUTO-ENABLED by `group_matmul_run_parallel_dispatch` when
-///     it detects `ldc < N`, independent of the
-///     `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT` env flag.  Tight layout
-///     is a correctness contract for the caller's buffer (a
-///     separate-pass gated act would overrun the [M, I] arena), so
-///     it must fuse regardless of the perf-tuning env.  This is why
-///     the auto-fuse is not a gate in `pick_fused_moe_want_tight()`.
-///     See `group_matmul_parallel.cpp::a3_fuses` for the corresponding
-///     dispatcher logic.
+///   * Tight is requested when (a) `op1_internal` is true,
+///     (b) `act` admits a fused per-thread epilogue
+///     (`a3_can_fuse_act(act, CUSTOM_KERNEL)`),
+///     (c) `env_algo ∈ {0, 3}`, (d) the env override allows it,
+///     AND (e) `select_grp_matmul_algo()` agrees to route to ALGO 3.
 ///   * When tight is selected the Op1 arena holds `sum_i M[i]·I[i]·
 ///     dst_elem` bytes (half of the wide case) and `op1_ldc[i] = I[i]`.
 ///     Op2 then reads the activated output at tight stride — halves
 ///     Op2's src DRAM traffic vs the wide layout.
-///   * When tight is NOT selected the legacy wide [M, 2I] arena is
-///     used unchanged.  Non-internal-alloc callers always run wide.
+///   * The dispatcher in `group_matmul_dispatch.cpp::a3_fuses` auto-
+///     enables fused activation when it detects `ldc < N`, regardless
+///     of the `N_TILE_FUSED_ACT` env flag — tight layout is a
+///     correctness contract, not a perf toggle.
 ///
 /// Op2 output mode (see grp_matmul_fused_moe_params doc-block in the
 /// public header for full semantics):
@@ -71,18 +81,20 @@
 ///   * Internal-alloc + src-reuse : caller leaves BOTH `dst[]` (all
 ///     nullptr / empty) AND `fused.dst_down` empty.  The library
 ///     allocates Op1 scratch in a persistent thread-local arena
-///     (sized to the high-water mark, no per-call allocator traffic
-///     on the steady state) and runs Op2 reading from the scratch
-///     and writing back into the caller's `src[]` buffer (in-place
-///     reuse).  Caller reads Op2 output from `src[]` after the call.
+///     (sized to the high-water mark) and runs Op2 reading from the
+///     scratch and writing back into the caller's `src[]` buffer.
 ///   * Mixed (one filled, one empty) is rejected by the validator.
 
+#include <cassert>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
+#include <omp.h>
+
 #include "detect_internal_alloc.hpp"
 #include "group_matmul_direct.hpp"
+#include "m_tile/group_matmul_m_tile.hpp"  // try_flat_m_tile_pipeline_bf16
 #include "group_matmul_parallel_common.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
@@ -96,12 +108,11 @@ using namespace zendnnl::ops;
 using zendnnl::common::op_instrumentation;
 using zendnnl::common::size_of;
 
-namespace {
+// ═══════════════════════════════════════════════════════════════════════
+// File-private types (persistent thread-local scratch).
+// ═══════════════════════════════════════════════════════════════════════
 
-// `op2_k_for_act(n_op1, act)` lives in `group_matmul_parallel_common.hpp`
-// (shared with the dispatcher's Phase-F validator so both apply the
-// same `ldb_down` minimum).  See the helper's doc-block there for
-// the full contract.
+namespace {
 
 // Per-thread persistent Op1 arena used by fused-MoE internal-alloc.
 // Owns a single 64-byte-aligned slab whose capacity monotonically
@@ -111,10 +122,6 @@ namespace {
 // previous expert's footprint ended).  Freed by the destructor on
 // thread exit; freed + reallocated when a call needs more than the
 // current capacity.
-//
-// Hoisted out of the dispatch function body so the persistent-arena
-// pattern is visible at file scope and can be reviewed / replaced
-// without reading the 500-line dispatch body.
 struct FusedMoEArena {
   void *buf = nullptr;
   size_t cap = 0;
@@ -143,8 +150,79 @@ struct FusedMoEScratch {
                                           // (= N[i] / 2 per expert)
 };
 
-// ──────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────
+// File-scope thread-local accessors.
+// ───────────────────────────────────────────────────────────────────────
+//
+// Both the Op1 arena (raw `posix_memalign` slab) and the Op2 dispatch
+// scratch (set of growing `std::vector`s) need to be reachable from
+// OUTSIDE `group_matmul_fused_moe_execute` so a public clear API can
+// drop them between workload phases (long-running model servers, OMP
+// pool shared with the host process, etc.).  The pre-PR layout buried
+// these as function-local statics, which made them visible ONLY to
+// the executor — there was no host-visible knob to bound the high-
+// water-mark footprint.
+//
+// Accessor pattern: a `Meyers singleton`-style returning a reference
+// to the current thread's instance.  Calling `get_…()` on a thread
+// that has not previously called it triggers the default-construct,
+// which is cheap (zeroed POD-ish state).  Side benefit: the executor
+// keeps using local references (`arena`, `scratch`) and reads the
+// same way as before — no per-call cost.
+inline FusedMoEArena &get_thread_local_arena() {
+  static thread_local FusedMoEArena arena;
+  return arena;
+}
+inline FusedMoEScratch &get_thread_local_scratch() {
+  static thread_local FusedMoEScratch scratch;
+  return scratch;
+}
+
+// Per-thread reset.  MUST be called on the SAME thread that owns the
+// scratch (TLS visibility).  The public `clear_fused_moe_scratch()`
+// API below spawns an OMP parallel region so every worker in the
+// current OMP pool hits this on its own TLS.
+//
+// Reset semantics:
+//   * Arena    : `free(buf)` + reset to nullptr/0.  Next call re-
+//                allocates from scratch (a one-shot cost).
+//   * Scratch  : swap each `std::vector` with a freshly-default-
+//                constructed empty temporary.  This is the canonical
+//                C++ "force capacity release" idiom — the temporary's
+//                destructor at end-of-scope frees the original storage
+//                deterministically.  `clear()` alone only resets
+//                logical size (capacity retained); `shrink_to_fit()`
+//                is a non-binding REQUEST per the C++ standard and
+//                some allocators / libstdc++ configurations may
+//                no-op it, defeating the purpose of this API.
+//
+// Cheap when nothing has been allocated (the arena ptr is null, the
+// vectors are empty), so it is safe to call unconditionally on every
+// worker.
+inline void reset_thread_local_fused_moe_state() {
+  FusedMoEArena &arena = get_thread_local_arena();
+  std::free(arena.buf);
+  arena.buf = nullptr;
+  arena.cap = 0;
+
+  FusedMoEScratch &s = get_thread_local_scratch();
+  // Deterministic dealloc: swap with empty temporary → temporary's
+  // dtor frees the old buffer at end of statement.  See doc-block
+  // above for why `shrink_to_fit()` is NOT used here.
+  std::vector<int>{}.swap(s.K_down);
+  std::vector<float>{}.swap(s.alpha_down);
+  std::vector<float>{}.swap(s.beta_down);
+  std::vector<bool>{}.swap(s.transA_down);
+  std::vector<const void *>{}.swap(s.src_down);
+  std::vector<matmul_params>{}.swap(s.params_down);
+  std::vector<void *>{}.swap(s.op1_dst_internal);
+  std::vector<void *>{}.swap(s.op2_dst_internal);
+  std::vector<int>{}.swap(s.op1_ldc_local);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Adaptive arena-layout picker.
+// ═══════════════════════════════════════════════════════════════════════
 //
 // Decides per call whether to request the tight [M, I] arena (half the
 // wide [M, 2I] footprint) for Op1's internal-alloc output.  Returns
@@ -154,60 +232,31 @@ struct FusedMoEScratch {
 // Correctness gates (all must pass for tight to be considered):
 //
 //   1. `op1_internal` — only when the library owns the Op1 arena.
-//      Caller-allocated Op1 paths supply their own dst[] with
-//      caller-chosen ldc; the tight arena layout is library-private,
-//      so it's never visible to caller-allocated paths.
+//      Caller-allocated Op1 paths supply their own dst[] with caller-
+//      chosen ldc; the tight arena layout is library-private.
 //
-//   2. `act` admits the per-thread fused epilogue.  Three routes
-//      reach the tight compaction safely:
-//        * `swiglu_oai_mul` — supported by both backends:
-//          - CK on:  in-register `swiglu_oai_store_pair`.
-//          - CK off: standard backend's `apply_swiglu_oai_tile_rows_oop`
-//                    OOP writer (wide scratch → tight dst).
-//        * `silu_and_mul`   — CK-only today.  Caller-side W13 is in
-//          canonical split-halves layout; the prepack permutes
-//          source columns so the CK pack arena physically matches
-//          the swiglu_oai_mul layout, and `silu_and_mul_store_pair`
-//          applies the activation in registers.  No standard-backend
-//          OOP writer exists for silu_and_mul yet, so the silu
-//          branch requires `use_custom_kernel == true`.
-//        * `gelu_and_mul`   — CK-only today.  Same prepack-permuted
-//          layout as silu; `gelu_and_mul_store_pair` applies a
-//          `gelu_tanh` polynomial approximation in registers (within
-//          BF16 tolerance of the reference's `gelu_erf`).  Same CK
-//          gate as silu via `a3_can_fuse_act`.
+//   2. `a3_can_fuse_act(act, CUSTOM_KERNEL)` — the activation admits
+//      ALGO 3's per-thread fused epilogue (in-register store_pair for
+//      CK, or the standard backend's OOP swiglu writer when CK is
+//      off).  Today: `swiglu_oai_mul` (both backends) and
+//      `silu_and_mul` / `gelu_and_mul` (CK only — the standard
+//      backend's wide-arena helper is swiglu-only).
 //
-//   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in flat_n_tile
-//      (only strategy that writes per-thread scratch + OOP swiglu into
-//      the tight arena).  A caller forcing ALGO 1/2/4/5 explicitly
-//      asked for a non-N-tile strategy; silently flipping them
-//      violates intent.
+//   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in flat_n_tile;
+//      a caller forcing ALGO 1/2/4/5 explicitly asked for a non-N-tile
+//      strategy and silently flipping them violates intent.
 //
-//      `get_grp_n_tile_fused_act()` is NOT a gate here — when the
-//      fused-MoE picker hands the dispatcher a tight destination
-//      (ldc < N), the dispatcher auto-enables ALGO 3 fused activation
-//      regardless of the env flag (tight layout is a correctness
-//      constraint, not a perf toggle).  See
-//      `group_matmul_run_parallel_dispatch` in group_matmul_parallel.cpp.
-//
-//   4. Env override: unset (auto) and force-tight request tight,
-//      force-wide (=0) rejects.
+//   4. Env override `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT`: unset (auto)
+//      and force-tight request tight, force-wide (=0) rejects.
 //
 //   5. `select_grp_matmul_algo()` actually would return 3 for this
 //      (shapes, params, num_threads).  Without this, auto-select
 //      could pick ALGO 1 (small N, non-N-tile-viable) on the tight
-//      arena and overrun it.  This is the shape-adaptive half of the
-//      picker — tight is only safe when the planner agrees.
+//      arena and overrun it.
 //
-// Performance policy once all gates pass:
-//   * env = 1 (force-tight) or unset (auto): return true.
-//   * env = 0 (force-wide): already rejected in gate (4).
-//
-// Today the auto policy is "tight whenever safe": tight halves Op2's
-// Op1-src DRAM traffic and flat_n_tile's full planner (DecodeD, pair-
-// balanced rounds, N_ORDER, multi-round batching) adapts to any
-// num_ops so there is no scheduler deficit vs the wide path.  If a
-// future shape regresses, plug a `num_ops`-keyed threshold here.
+// Today the auto policy is "tight whenever safe" — tight halves Op2's
+// Op1-src DRAM traffic and flat_n_tile's planner adapts to any num_ops.
+// If a future shape regresses, plug a `num_ops`-keyed threshold here.
 inline bool pick_fused_moe_want_tight(
     bool op1_internal,
     grp_matmul_gated_act_t act,
@@ -219,33 +268,57 @@ inline bool pick_fused_moe_want_tight(
     const std::vector<matmul_params> &params,
     int num_threads) {
   if (!op1_internal) return false;
-  // Reuse the same fusibility predicate the parallel dispatcher uses
-  // for its `a3_fuses` decision — keeps tight-engage and fuse-engage
-  // gated identically, so a tight-allocated arena is always
-  // accompanied by a fused epilogue (no silent overrun of the half-
-  // width dst by a wide GEMM that bypasses the fuse).
   if (!a3_can_fuse_act(act, get_grp_matmul_custom_kernel())) return false;
   if (env_algo != 0 && env_algo != 3) return false;
-  const int env_tight = get_grp_matmul_fused_moe_tight();
-  if (env_tight == 0) return false;
-  // env_tight == 1 (default / forced).  The getter was historically
-  // tri-state with -1 meaning "auto", but auto collapsed to the same
-  // behaviour as 1 (the dispatcher re-validates every gate below)
-  // and was merged into the default.  Confirm the dispatcher would
-  // actually route Op1 to flat_n_tile for this shape before
-  // committing to the tight layout.
+  if (get_grp_matmul_fused_moe_tight() == 0) return false;
   const int algo_would =
       select_grp_matmul_algo(layout, M, N, K, params, num_threads);
   return algo_would == 3;
 }
 
-} // namespace
-
 // ═══════════════════════════════════════════════════════════════════════
-// Primary entry: Op1+Act → Op2 (→ optional weighted reduce post-op)
+// Input validation.
 // ═══════════════════════════════════════════════════════════════════════
-
-status_t group_matmul_fused_moe_execute(
+//
+// `validate_fused_moe_inputs` runs the entire input-shape contract in
+// one place.  Three classes:
+//
+//   (1) primary-vector emptiness + per-vector size consistency — every
+//       required vector must be sized to at least `num_ops` (with the
+//       dst / ldc / dst_down / ldc_down exceptions in internal-alloc
+//       mode).  Strict equality was the original contract; relaxing
+//       to `<` accepts the prepack-extras tail layout without
+//       affecting legacy callers.
+//
+//   (2) per-expert dimension / leading-stride / required-pointer
+//       sanity for active experts — non-negative M, positive N/K,
+//       even N (required by the swiglu half-split), lda/ldb/ldc/
+//       ldb_down/ldc_down all large enough for the row-major access
+//       pattern, and non-null src/weight/down_weight pointers (plus
+//       dst/dst_down in legacy caller-allocated mode).
+//
+//   (3) internal-alloc dtype safety — cross-expert dst dtype
+//       uniformity and per-expert matched-precision (src == dst) when
+//       either side is internal-alloc.  Both feed sizing math for the
+//       Op1 arena slab.
+//
+//   (4) cross-expert N_down uniformity (only when moe_postop is
+//       engaged) — the weighted-reduce stage uses `fused.N_down[0]`
+//       as the common D for every expert; a divergent expert would
+//       cause OOB reads past its row.  Correctness-critical, always-on.
+//
+// Silent-wrong-result paths (mixed-state dst[] iteration, bias dtype
+// declaration, activation dtype bucket) run under the
+// `op_instrumentation::validate` diagnostic gate (default ON; bypassed
+// only when explicitly set to "0") because they either are already
+// covered by `group_matmul_direct`'s phase-D/F validator or produce
+// wrong numbers without corrupting memory.
+//
+// On success: writes `*out_total_M` (sum of M[i] across active
+// experts) and `*out_total_bytes_internal` (Op1 arena byte budget for
+// the wide layout — caller halves it when tight is selected).  Both
+// outputs are uninitialised on failure.
+inline status_t validate_fused_moe_inputs(
     const grp_matmul_fused_moe_params &fused,
     grp_matmul_gated_act_t act, data_type_t act_dtype,
     const std::vector<char> &layout,
@@ -256,123 +329,18 @@ status_t group_matmul_fused_moe_execute(
     const std::vector<const void *> &weight, const std::vector<int> &ldb,
     const std::vector<const void *> &bias, const std::vector<float> &beta,
     const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const     std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    const char **gemm_mode_out,
-    const group_matmul_moe_postop_params *moe_postop) {
-
+    const std::vector<bool> &is_weights_const,
+    const std::vector<matmul_params> &params,
+    const group_matmul_moe_postop_params *moe_postop,
+    bool op1_internal, bool op2_internal,
+    size_t dst_elem_internal,
+    int64_t *out_total_M,
+    size_t *out_total_bytes_internal) {
   const size_t num_ops = M.size();
 
-  // ── Always-on safety guards ─────────────────────────────────────────
-  // This function is declared in an internal header and has exactly
-  // one known caller (`group_matmul_direct`), but `group_matmul_direct`
-  // only size-checks the non-fused vectors always-on; the fused-MoE
-  // specific vectors (down_weight / N_down / ldb_down / bias_down)
-  // plus the per-expert stride invariants are nowhere else enforced
-  // outside the diagnostic path.  So this block runs always-on as
-  // the primary defense against OOB pointer arithmetic in the
-  // dispatch body below.  The three classes it covers:
-  //
-  //   (1) primary-vector emptiness — params[0] / N[0] / etc. are
-  //       dereferenced unconditionally below.
-  //   (2) per-vector size consistency — every required vector must
-  //       be sized to num_ops (with the dst / ldc / dst_down /
-  //       ldc_down exception for the internal-alloc + src-reuse
-  //       mode, where the caller leaves those empty and the library
-  //       owns Op1 dst and reuses src as Op2 output).
-  //   (3) per-expert dimension, leading-stride, and required-pointer
-  //       sanity for active experts — non-negative M, positive N/K,
-  //       even N (required by the swiglu half-split), lda/ldb/ldc/
-  //       ldb_down/ldc_down all large enough for the row-major
-  //       access pattern, and non-null src/weight/down_weight
-  //       pointers (plus dst/dst_down in legacy caller-allocated
-  //       mode).  These prevent OOB pointer arithmetic or null
-  //       dereference later.  Per-expert pointer null checks are
-  //       always-on here because no other layer validates
-  //       `fused.down_weight[i]` outside the diagnostic gate.
-  //   (4) internal-alloc dtype safety — cross-expert dst dtype
-  //       uniformity and per-expert matched-precision (src == dst).
-  //       Both feed sizing math for the single Op1 arena slab; a
-  //       divergent expert would overrun its slice or corrupt the
-  //       caller's src buffer on the Op2 in-place write.
-  //
-  //   (5) cross-expert N_down uniformity (only when moe_postop is
-  //       engaged) — the weighted-reduce stage below uses
-  //       `fused.N_down[0]` as the common D for every expert; a
-  //       divergent expert would cause OOB reads past its row.
-  //       Correctness-critical, therefore always-on.
-  //
-  // Silent-wrong-result scalars (bias dtype declaration, activation
-  // dtype bucket, mixed-state dst[] iteration when legacy mode is
-  // engaged) move under the ZENDNNL_DIAGNOSTICS_ENABLE gate below
-  // (default ON; bypassed only when explicitly set to "0") because
-  // they are either already covered by group_matmul_direct's
-  // phase-D/F validator or produce wrong numbers without corrupting
-  // memory.
-  //
-  if (num_ops == 0) return status_t::failure;
-
-  // ── Op1 / Op2 buffer-source detection — INDEPENDENT ──────────────
-  //
-  // Each side (Op1's `dst[]` for the gate+up output, Op2's
-  // `fused.dst_down[]` for the down_proj output) is detected on its
-  // own so callers can mix any of the four combinations:
-  //
-  //   dst[] supplied  | dst_down[] supplied | Op1 destination     | Op2 destination
-  //   ─────────────── | ─────────────────── | ─────────────────── | ───────────────────
-  //   no              | no                  | library Op1 arena   | in-place src reuse
-  //   no              | yes                 | library Op1 arena   | caller's dst_down
-  //   yes             | no                  | caller's dst        | in-place src reuse
-  //   yes             | yes                 | caller's dst        | caller's dst_down
-  //
-  // "Supplied" means the vector is non-empty AND every entry in the
-  // active range `[0, num_ops)` is non-null.  An empty vector or an
-  // all-null active range means library-managed (the per-side
-  // internal flag is true); any mixed null/non-null active range is
-  // a hard caller-contract break (some experts would silently route
-  // to internal-alloc, others to caller-allocated) and is rejected
-  // up front by a full O(num_ops) sweep.  Sweeping only the active
-  // range lets a prepack-extras tail (where non-fired slots are
-  // typically nullptr placeholders) coexist with caller-allocated
-  // active slots — see commit 9bb7776a for the active/total contract
-  // these helpers assume.
-  //
-  // `pick_fused_moe_want_tight()` uses only `op1_internal` (Op1
-  // arena layout depends on whether the library owns it; Op2 buffer
-  // source is orthogonal).
-  using group_matmul_internal::detect_internal_alloc;
-  using group_matmul_internal::internal_alloc_mode;
-  auto run_detect = [&](const std::vector<void *> &v,
-                        const char *name,
-                        bool *out_internal) -> status_t {
-    const status_t st = detect_internal_alloc(
-        v, num_ops, /*fused_moe_present=*/true,
-        internal_alloc_mode::sweep_active, out_internal);
-    if (st != status_t::success) {
-      log_error("group_matmul_fused_moe: ", name, " has a mixed "
-                "null/non-null state — every active entry must be "
-                "either null (library-managed) or non-null "
-                "(caller-allocated).");
-    }
-    return st;
-  };
-  bool op1_internal = false;
-  bool op2_internal = false;
-  if (run_detect(dst, "dst", &op1_internal)
-      != status_t::success) return status_t::failure;
-  if (run_detect(fused.dst_down, "fused.dst_down", &op2_internal)
-      != status_t::success) return status_t::failure;
-  // Vector sizes — must hold AT LEAST `num_ops` entries each (the
-  // active matmul-processing count).  Anything past `num_ops` is the
-  // framework's prepack-extras tail and is never read by the
-  // dispatch loops below.  Strict equality (`!=`) was the original
-  // contract; relaxing to `<` accepts the new active+extras layout
-  // without affecting legacy callers who pass exactly-sized vectors.
-  // Per-call mandatory vectors (always required regardless of which
-  // side is internal-alloc).  Down-side weight metadata is required
-  // here even when op2_internal — the dispatcher still needs the
-  // weight pointers, dimensions, and stride to drive Op2 itself.
+  // Vector sizes — must hold AT LEAST `num_ops` entries each.  Anything
+  // past `num_ops` is the framework's prepack-extras tail and is never
+  // read by the dispatch loops downstream.
   if (layout.size() < num_ops || transA.size() < num_ops
       || transB.size() < num_ops || N.size() < num_ops
       || K.size() < num_ops || src.size() < num_ops
@@ -386,23 +354,16 @@ status_t group_matmul_fused_moe_execute(
       || fused.bias_down.size() < num_ops)
     return status_t::failure;
   // Op2 weight quant is optional: empty `down_scale` / `down_zp` means
-  // "Op2 weight un-quantized" (legacy backward-compatible behaviour).
-  // When non-empty, each MUST cover every active expert — a partial
-  // vector would silently leave the tail experts un-quantized and
-  // produce wrong numerics.  `down_zp` may be empty independently of
-  // `down_scale` for the symmetric-quant case.
-  if (!fused.down_scale.empty()
-      && fused.down_scale.size() < num_ops)
+  // "Op2 weight un-quantized".  When non-empty, each MUST cover every
+  // active expert — a partial vector would silently leave the tail
+  // experts un-quantized.
+  if (!fused.down_scale.empty() && fused.down_scale.size() < num_ops)
     return status_t::failure;
-  if (!fused.down_zp.empty()
-      && fused.down_zp.size() < num_ops)
+  if (!fused.down_zp.empty() && fused.down_zp.size() < num_ops)
     return status_t::failure;
   // Op1 dst/ldc — when caller-allocated must reach `num_ops`; when
-  // library-managed (op1_internal) the vectors may be empty (library
-  // owns) or sized to at least `num_ops` (caller passed all-null
-  // placeholders, possibly with prepack-extras tail).  Reject the
-  // in-between case (non-empty AND undersized) as a malformed
-  // caller intent that would walk past the vector end below.
+  // library-managed (op1_internal) the vectors may be empty or sized
+  // to at least `num_ops` (caller passed all-null placeholders).
   if (op1_internal) {
     if (!dst.empty() && dst.size() < num_ops) return status_t::failure;
     if (!ldc.empty() && ldc.size() < num_ops) return status_t::failure;
@@ -410,129 +371,22 @@ status_t group_matmul_fused_moe_execute(
     if (dst.size() < num_ops || ldc.size() < num_ops)
       return status_t::failure;
   }
-  // Op2 dst_down/ldc_down — same shape as Op1 above, gated on
-  // op2_internal.
   if (op2_internal) {
     if (!fused.dst_down.empty() && fused.dst_down.size() < num_ops)
       return status_t::failure;
     if (!fused.ldc_down.empty() && fused.ldc_down.size() < num_ops)
       return status_t::failure;
   } else {
-    if (fused.dst_down.size() < num_ops || fused.ldc_down.size() < num_ops)
+    if (fused.dst_down.size() < num_ops
+        || fused.ldc_down.size() < num_ops)
       return status_t::failure;
   }
 
-  // Hoist the Op1 dst element-size used in two places below (arena
-  // sizing and per-expert offset computation).  Computed once after
-  // size-consistency guards above guarantee params[0] is valid.
-  // Only Op1's destination depends on this — Op2 writes either to
-  // caller-supplied dst_down or to src (in-place reuse), neither of
-  // which goes through the library arena.
-  const size_t dst_elem_internal =
-      op1_internal ? size_of(params[0].dtypes.dst) : 0;
-
-  // Cache once at entry — the same env read is consulted again inside
-  // the custom-kernel-enable APILOG below.  A single `getenv` per call
-  // instead of one-per-readsite.
-  const int env_algo_fused = get_grp_matmul_algo();
-  const bool custom_kernel_en = get_grp_matmul_custom_kernel();
-
-  // ── Adaptive layout picker (wide vs tight Op1 arena) ────────────────
-  // The picker resolves the full wide-vs-tight decision for Op1,
-  // including env-force overrides and N-tile viability.  See
-  // `pick_fused_moe_want_tight` above for the full gate list.  The
-  // decision is committed here and used for:
-  //   * Op1 arena size         — tight halves the per-expert byte budget.
-  //   * `op1_ldc[e]`           — tight sets = N[e]/2; wide keeps = N[e].
-  //   * Op2 src stride (= Op1 ldc) — flows through naturally.
-  // When tight is selected the dispatcher routes Op1 to flat_n_tile,
-  // which detects the tight caller layout from `ldc < N` and takes
-  // its per-thread-scratch + OOP swiglu branch (commit 1 of this
-  // series).
-  // Tight Op1 layout is purely an Op1-arena property — only meaningful
-  // when the library owns the Op1 destination (op1_internal).
-  const bool want_tight = pick_fused_moe_want_tight(
-      op1_internal, act, env_algo_fused,
-      layout, M, N, K, params, num_threads);
-
-  // ── EXEC APILOG: one line per fused_moe call summarising arena
-  // layout, per-side internal-alloc state, act-fusion choice, and the
-  // W13 write width that flows out of those choices.  Caller sees
-  // exactly which Op1 path was selected at `ZENDNNL_API_LOG_LEVEL=3`.
-  //
-  // W13_write_elems_per_row tells the reader how many bytes per Op1
-  // row land in the arena:
-  //   * tight  + gated act  → I  (half-width store; fused gated act
-  //                               folds gate*up into I outputs)
-  //   * loose                → 2I (full gate+up store; act applied
-  //                                as a separate vectorised pass
-  //                                downstream)
-  //   * any   + act=none    → N  (Op1 output flows verbatim into Op2;
-  //                               not gated, not halved)
-  //
-  // apilog_info_enabled() is cached after the first call so the gate
-  // check is free when logging is off.
-  static const bool s_apilog = apilog_info_enabled();
-  if (s_apilog) {
-    // Hoist `get_grp_matmul_fused_moe_tight()` into a named local so
-    // the apilog_info(...) variadic below reads `log_fused_moe_tight`
-    // instead of an inline getter call buried in the argument list —
-    // makes the log's read-set explicit and keeps a single source
-    // of truth for the value if the line ever gets duplicated /
-    // reordered.  Cached + override-backed under the hood, so even
-    // an accidental second getter call would be O(1); the win here
-    // is readability, not microseconds.
-    const int log_fused_moe_tight = get_grp_matmul_fused_moe_tight();
-    const bool act_is_gated = (act != grp_matmul_gated_act_t::none);
-    const char *w13_write_elems = act_is_gated
-        ? (want_tight ? "I" : "2I")
-        : "N";
-    // `act_in_register` reports ONLY the dispatcher-pre-known case
-    // where the tight arena guarantees the CK in-register fused
-    // epilogue runs.  When `want_tight` is false, the loose-arena
-    // path may STILL fuse the gated act inside ALGO 3 (when
-    // `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT=1` AND the dispatcher
-    // routes to ALGO 3) or run it as a separate post-pass — that
-    // distinction can't be made here, before `dispatch_op1` runs.
-    // The authoritative fusion choice for the loose path surfaces
-    // in the dispatcher's own `[GRP_MATMUL.CALL] mode=...` field
-    // (e.g. `flat_n_tile_fused_swiglu_oai_custom`) and the
-    // `[GRP_MATMUL.PLAN] flat_n_tile ... fused_epilogue=`
-    // (see `group_matmul_n_tile.cpp::gemm_mode_label` for the
-    // full mode-string set).
-    apilog_info("[GRP_MATMUL.EXEC] op=fused_moe arena=",
-                (want_tight ? "tight" : "loose"),
-                " op1_internal=", (op1_internal ? "yes" : "no"),
-                " op2_internal=", (op2_internal ? "yes" : "no"),
-                " act=", act_name(act),
-                " act_in_register=",
-                ((want_tight && act_is_gated) ? "yes" : "no"),
-                " W13_write_elems_per_row=", w13_write_elems,
-                " op2_dst_reuse=",
-                (op2_internal ? "src_inplace" : "caller_dst_down"),
-                " env_algo=", env_algo_fused,
-                " env_tight=", log_fused_moe_tight,
-                " custom_kernel_env=",
-                (custom_kernel_en ? "on" : "off"),
-                " num_ops=", (int)num_ops);
-  }
-
-  // ── Always-on: per-expert dim / stride / pointer / N-evenness sweep
-  // One pass serves three purposes:
-  //   (1) primary OOB-prevention for the dispatch body — any stride
-  //       or dim violation returns `failure` before we build pointer
-  //       offsets from it.
-  //   (2) active-expert null-pointer checks.
-  //   (3) accumulates `total_M` and (in internal-alloc mode) the Op1
-  //       slab byte budget so the all-zero short-circuit and arena
-  //       sizing below reuse those values without a second sweep.
-  // Silent-wrong-result scalars (bias dtype, act dtype) and the
-  // cross-expert uniformity re-checks move under the diagnostic gate
-  // below.
+  // Per-expert sweep — covers classes (2) and (3) above plus
+  // accumulates total_M / total_bytes_internal for the caller.
   int64_t total_M = 0;
   size_t total_bytes_internal = 0;
   for (size_t i = 0; i < num_ops; ++i) {
-    // Core dimensions.
     if (M[i] < 0 || N[i] <= 0 || K[i] <= 0) return status_t::failure;
     // N must be even ONLY when a gated activation is fused (swiglu /
     // silu / gelu_and_mul collapse pairs of cols).  For act=none Op1
@@ -541,98 +395,137 @@ status_t group_matmul_fused_moe_execute(
       return status_t::failure;
     if (fused.N_down[i] <= 0) return status_t::failure;
 
-    // Op1 leading strides (row-major).  Each row m starts at
-    // src + m*lda, weight col c starts at weight + (transB ? c*ldb : c),
-    // dst row m starts at dst + m*ldc.  These bounds prevent the
-    // GEMM kernel from indexing past the row.
     if (lda[i] < K[i]) return status_t::failure;
     if (ldb[i] < (transB[i] ? K[i] : N[i])) return status_t::failure;
-    // Op2 weight ldb — `K_down` (the row count of the down_weight
-    // matrix Op2 reads) is N/2 for gated activations, N for act=none.
-    // See `op2_k_for_act` above for the contract.
     const int K_down = op2_k_for_act(N[i], act);
     if (fused.ldb_down[i] < (transB[i] ? K_down : fused.N_down[i]))
       return status_t::failure;
 
-    // Op1 output-side check: when caller-allocated, ldc must
-    // accommodate the wide write per row.  When library-managed
-    // (op1_internal), ldc is unused — the arena writes at row width
-    // = N (wide) or N/2 (tight).
     if (!op1_internal) {
       if (ldc[i] < N[i]) return status_t::failure;
     }
-    // Op2 output-side check: when caller-allocated, ldc_down must
-    // accommodate N_down per row.  When library-managed
-    // (op2_internal), Op2 writes BACK into src with stride lda, so
-    // lda must accommodate N_down instead.
     if (!op2_internal) {
       if (fused.ldc_down[i] < fused.N_down[i]) return status_t::failure;
     } else if (M[i] > 0) {
-      if (lda[i] < fused.N_down[i]) return status_t::failure;
+      // ── op2_internal contract: src[] is REUSED as Op2's dst ────────
+      //
+      // When the caller signals `op2_internal` (empty / all-null
+      // `fused.dst_down`), Pass-2 writes its M×N_down output back
+      // into `src[i]` with row stride `lda[i]`.  The caller's
+      // allocation MUST cover `M[i] · lda[i] · src_elem` bytes —
+      // i.e. the WIDEST row stride is what bounds the allocation.
+      //
+      // Two correctness gates ZenDNN can enforce:
+      //
+      //   (G1) `lda[i] >= max(K[i], N_down[i])`.  The row stride must
+      //        be wide enough for the larger of the two passes that
+      //        write into the buffer (Op1 reads K[i] cols per row;
+      //        Op2 writes N_down[i] cols per row, both at stride
+      //        `lda[i]`).
+      //
+      //   (G2) `lda[i] == K[i]` OR the caller has explicitly opted
+      //        into the asymmetric layout by setting `lda[i] >=
+      //        max(K[i], N_down[i])`.  We can't detect under-
+      //        allocation directly — but we CAN reject the common
+      //        silent-bug shape: an asymmetric MoE (`N_down != K`)
+      //        with `op2_internal=true` AND `lda[i] == K[i]` (the
+      //        "natural Op1 stride") — that combination guarantees
+      //        Pass-2 will overrun the caller's allocation if the
+      //        caller sized src[] for Op1 only.
+      //
+      // (G1) is the legacy check (preserved verbatim below).  (G2)
+      // is new: it elevates the validator from "wide-enough stride"
+      // to "consistent stride AND wide enough", which catches the
+      // gpt-oss / Mixtral / typical-MoE silent-corruption path where
+      // K_in == hidden_dim but N_down can be smaller (rare) or
+      // larger (with bias projections / future variants).  When this
+      // gate trips, the validator emits a single `log_error` so the
+      // caller sees a clear failure instead of a downstream
+      // `std::bad_array_new_length` or a corrupted activation.
+      //
+      // OUT OF SCOPE for the validator: detecting cases where the
+      // caller passed a correctly-wide `lda` but UNDER-ALLOCATED
+      // `src[i]` (e.g. `lda[i] = N_down`, `src[i]` sized to
+      // `M*K*elem`).  No defensive check can spot that without an
+      // allocation introspection API — it remains a caller-contract
+      // requirement.
+      if (lda[i] < fused.N_down[i]) {
+        log_error("group_matmul_fused_moe: op2_internal requires "
+                  "lda[", i, "] >= fused.N_down[", i, "] (got lda=",
+                  lda[i], ", N_down=", fused.N_down[i], ").  src[",
+                  i, "] is reused as Op2's destination and is "
+                  "written with row stride lda; the stride must be "
+                  "wide enough for the Op2 output columns.  Either "
+                  "(a) widen lda and allocate src[] for "
+                  "M*lda*src_elem bytes, or (b) pass an explicit "
+                  "fused.dst_down[] (caller-allocated Op2 dst).");
+        return status_t::failure;
+      }
     }
 
     // Cross-expert dst-dtype uniformity / matched-precision are
-    // both always-on when op1_internal (Op1 arena is sized once
-    // using `dst_elem_internal` = sizeof(params[0].dtypes.dst); any
-    // larger expert dtype would overrun its per-expert slice) AND
-    // when op2_internal (Op2 writes BACK into src using the dst
-    // element size; mismatched src/dst element sizes overrun the
-    // src row pitch).  When BOTH are external-alloc, the caller
-    // owns both buffer footprints and we trust them to size things
-    // correctly per expert.
+    // always-on when either side is internal-alloc (Op1 arena slab
+    // sizing and Op2 in-place write footprint both depend on
+    // params[0].dtypes.dst).
     if ((op1_internal || op2_internal) && M[i] > 0) {
-      if (params[i].dtypes.dst != params[0].dtypes.dst) return status_t::failure;
-      if (params[i].dtypes.src != params[i].dtypes.dst) return status_t::failure;
+      if (params[i].dtypes.dst != params[0].dtypes.dst)
+        return status_t::failure;
+      if (params[i].dtypes.src != params[i].dtypes.dst)
+        return status_t::failure;
     }
 
     if (M[i] > 0) {
-      if (src[i] == nullptr || weight[i] == nullptr) return status_t::failure;
+      if (src[i] == nullptr || weight[i] == nullptr)
+        return status_t::failure;
       if (fused.down_weight[i] == nullptr) return status_t::failure;
       if (!op1_internal && dst[i] == nullptr) return status_t::failure;
       if (!op2_internal && fused.dst_down[i] == nullptr)
         return status_t::failure;
       total_M += M[i];
-      if (op1_internal)
-        total_bytes_internal +=
-            static_cast<size_t>(M[i]) * N[i] * dst_elem_internal;
+      if (op1_internal) {
+        // Overflow-safe per-expert byte computation:
+        //   per_expert_bytes = M[i] * N[i] * dst_elem_internal
+        // followed by an overflow-safe running sum into
+        // total_bytes_internal.  Both `M[i]` and `N[i]` have been
+        // validated >= 0 / > 0 above, so the casts to size_t are
+        // well-defined.  Two distinct overflow gates:
+        //   (a) per-expert product — pathological caller passing
+        //       huge M/N (e.g. INT_MAX × INT_MAX × 8 wraps size_t).
+        //   (b) running sum — a long expert list with individually
+        //       reasonable per-expert footprints whose total still
+        //       wraps (no realistic shape hits this on a 64-bit
+        //       host, but the gate is cheap and defends against a
+        //       caller bug pumping garbage).
+        // Either trip drops to `status_t::failure`; the arena is
+        // never asked to size beyond size_t-representable bytes,
+        // so `posix_memalign` cannot be fed a wrapped count that
+        // succeeds-but-is-too-small (= silent heap corruption).
+        const size_t m_sz = static_cast<size_t>(M[i]);
+        const size_t n_sz = static_cast<size_t>(N[i]);
+        size_t per_expert_bytes = 0;
+        if (__builtin_mul_overflow(m_sz, n_sz, &per_expert_bytes))
+          return status_t::failure;
+        if (__builtin_mul_overflow(per_expert_bytes, dst_elem_internal,
+                                   &per_expert_bytes))
+          return status_t::failure;
+        if (__builtin_add_overflow(total_bytes_internal, per_expert_bytes,
+                                   &total_bytes_internal))
+          return status_t::failure;
+      }
     }
   }
 
-  // Cross-expert N_down uniformity (when moe_postop is engaged) —
-  // promoted to always-on because the weighted-reduce stage
-  // downstream uses `fused.N_down[0]` as the common D for every
-  // expert.  If expert i has `N_down[i] < N_down[0]`, the moe_postop
-  // reader would stride past the end of expert i's rows → OOB read,
-  // memory corruption, or garbage in the output.  This is a
-  // correctness-critical invariant, not a silent-wrong-result path,
-  // so it stays outside the diagnostic gate.  `group_matmul_direct`
-  // has its own always-on copy of this check in phase G; the
-  // duplicate here defends the code path for any future caller that
-  // invokes `group_matmul_fused_moe_execute()` without going through
-  // `group_matmul_direct`'s validator.
+  // Cross-expert N_down uniformity (when moe_postop is engaged).  The
+  // duplicate of `group_matmul_direct`'s phase-G check defends the
+  // path for any future caller that bypasses that validator.
   if (moe_postop != nullptr) {
     for (size_t i = 1; i < num_ops; ++i)
       if (fused.N_down[i] != fused.N_down[0]) return status_t::failure;
   }
 
-  // ── Diagnostic-only full input validation ──────────────────────────
-  // These checks either (a) produce silent wrong results rather than
-  // OOB, or (b) are already covered always-on by `group_matmul_direct`
-  // phase-A guards.  Keeping them under `op_instrumentation::validate`
-  // keeps production dispatch at O(num_ops) × {few loads, branches}
-  // for the main sweep above and pays one predicted-not-taken branch
-  // for the rest.
-  status_t val = op_instrumentation::validate([&]() {
-    // Mixed-state diagnostic catch — the up-front detection above
-    // already keys on the active range; this is a defence-in-depth
-    // check that confirms the same per-side invariants when
-    // diagnostics is enabled.
-    //
-    // (Cross-expert dst dtype uniformity and matched-precision are
-    // enforced always-on in the primary sweep above — they bound
-    // the Op1 arena slab sizing and the Op2 in-place write
-    // footprint, both of which are corruption vectors rather than
-    // silent-wrong-result paths.)
+  // Diagnostic-only validators — silent-wrong-result paths only.  See
+  // doc-block on the validator above for what stays always-on.
+  const status_t val = op_instrumentation::validate([&]() {
     if (op1_internal) {
       const size_t dst_sweep = std::min<size_t>(num_ops, dst.size());
       for (size_t i = 0; i < dst_sweep; ++i)
@@ -644,53 +537,60 @@ status_t group_matmul_fused_moe_execute(
       for (size_t i = 0; i < dst_down_sweep; ++i)
         if (fused.dst_down[i] != nullptr) return status_t::failure;
     }
-    // Bias + act dtype contracts: silent-wrong-result paths.  A bias
-    // buffer without a declared dtype would be misread as FP32 by the
-    // post-op kernel; a gated activation with a non-{f32, bf16} act
-    // dtype would have its layout misinterpreted.
-    bool any_bias_down_d = false;
+    bool any_bias_down = false;
     for (size_t i = 0; i < num_ops; ++i)
-      if (fused.bias_down[i] != nullptr) { any_bias_down_d = true; break; }
-    if (any_bias_down_d && fused.bias_dt_down == data_type_t::none)
+      if (fused.bias_down[i] != nullptr) { any_bias_down = true; break; }
+    if (any_bias_down && fused.bias_dt_down == data_type_t::none)
       return status_t::failure;
     if (act != grp_matmul_gated_act_t::none
         && act_dtype != data_type_t::f32
         && act_dtype != data_type_t::bf16)
       return status_t::failure;
-    // (Cross-expert N_down uniformity for moe_postop is enforced
-    // always-on in the primary sweep above — it bounds the
-    // weighted-reduce stage's OOB-read risk, not a silent-wrong-
-    // result path.)
     return status_t::success;
   });
   if (val != status_t::success) return val;
 
-  // No active work (every expert has M=0): return success without
-  // spawning OMP regions or touching the Op2 dispatch.
-  if (total_M == 0) {
-    if (gemm_mode_out) *gemm_mode_out = "fused_moe_skip";
-    return status_t::success;
-  }
+  *out_total_M = total_M;
+  *out_total_bytes_internal = total_bytes_internal;
+  return status_t::success;
+}
 
-  // ── Arena sizing per layout ────────────────────────────────────────
-  //   wide  bytes = sum_i(M[i] · N[i]   · dst_elem)     (full [M, 2I])
-  //   tight bytes = sum_i(M[i] · N[i]/2 · dst_elem)     (post-act I only)
-  //
-  // total_bytes_internal was accumulated as the wide footprint above;
-  // halve it for the tight layout since flat_n_tile writes the
-  // activated I-wide output directly (no wide intermediate in the
-  // global arena).  N evenness is enforced by always-on validation so
-  // the divide is exact.
-  size_t arena_bytes = total_bytes_internal;
+// ═══════════════════════════════════════════════════════════════════════
+// Op1 arena + per-expert pointer / stride setup.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Sizes and (re-)allocates the persistent thread-local Op1 arena
+// (only when `op1_internal` AND we need more than the high-water
+// mark).  Then populates `scratch.op1_dst_internal[]` and (when
+// tight is requested) `scratch.op1_ldc_local[]` in a single sweep
+// over num_ops.  Returns the (op1_dst, op1_ldc) view-pair the
+// dispatch fork below will pass to the executors.
+//
+// `arena_bytes_wide` is the wide-layout budget that
+// `validate_fused_moe_inputs()` accumulated; halved here when
+// `want_tight` is set.
+//
+// On allocation failure returns `status_t::failure`; on success
+// writes the view-pair through the out-parameters.  Both views point
+// into either caller-supplied vectors or into `scratch`'s persistent
+// storage, so they stay valid until the next call on this thread.
+inline status_t setup_op1_arena_and_layout(
+    FusedMoEArena &arena,
+    FusedMoEScratch &scratch,
+    bool op1_internal,
+    bool want_tight,
+    size_t arena_bytes_wide,
+    size_t dst_elem_internal,
+    const std::vector<int> &N,
+    const std::vector<int> &M,
+    const std::vector<int> &ldc_caller,
+    const std::vector<void *> &dst_caller,
+    const std::vector<void *> *&out_op1_dst,
+    const std::vector<int>  *&out_op1_ldc) {
+  const size_t num_ops = M.size();
+
+  size_t arena_bytes = arena_bytes_wide;
   if (want_tight) arena_bytes /= 2;
-
-  // Persistent thread-local Op1 arena (internal-alloc mode) — struct
-  // is hoisted to file-scope anonymous namespace above.  Monotonically
-  // grows to the high-water mark this thread has seen; freed by its
-  // destructor on thread exit.  Worker-pool footprint:
-  //   num_threads × largest_seen_arena_bytes
-  // — bounded by the largest fused MoE call the framework ever issues.
-  static thread_local FusedMoEArena arena;
 
   if (op1_internal && arena_bytes > arena.cap) {
     std::free(arena.buf);
@@ -703,26 +603,19 @@ status_t group_matmul_fused_moe_execute(
     arena.cap = arena_bytes;
   }
 
-  // Persistent thread-local Op2 setup scratch — struct hoisted above.
-  static thread_local FusedMoEScratch scratch;
-
-  // Populate the Op1 per-expert pointer / stride scratch in ONE sweep
-  // over num_ops — the internal-alloc `op1_dst_internal` pointers and
-  // (in tight mode) the `op1_ldc_local = N/2` vector are written inside
-  // the same loop iteration, so each slot's cache lines are touched
-  // exactly once.  Per-expert row width depends on the layout:
-  //   * wide  : N[i]   cols/row (wide raw GEMM output, swiglu writes
+  // Populate Op1 per-expert pointer / stride scratch.  Per-expert row
+  // width depends on the layout:
+  //   * wide  : N[i]   cols/row (raw GEMM output; swiglu writes
   //             activated I cols into the first half in place).
-  //   * tight : N[i]/2 cols/row (already-activated I-wide output,
+  //   * tight : N[i]/2 cols/row (already-activated I-wide output via
   //             flat_n_tile's per-thread-scratch + OOP swiglu path).
-  // Inactive (M <= 0) slots get an explicit nullptr — avoids the
-  // pre-zero of every slot that `assign(num_ops, nullptr)` would do.
+  // Inactive (M <= 0) slots get an explicit nullptr.
   if (op1_internal) scratch.op1_dst_internal.resize(num_ops);
   if (want_tight)   scratch.op1_ldc_local.resize(num_ops);
   if (op1_internal || want_tight) {
     char *base = op1_internal
-        ? static_cast<char *>(arena.buf)   // may be nullptr if arena_bytes == 0
-        : nullptr;
+                     ? static_cast<char *>(arena.buf)
+                     : nullptr;
     size_t cursor = 0;
     for (size_t i = 0; i < num_ops; ++i) {
       const int row_cols = want_tight ? (N[i] / 2) : N[i];
@@ -731,116 +624,128 @@ status_t group_matmul_fused_moe_execute(
         if (M[i] <= 0 || base == nullptr) {
           scratch.op1_dst_internal[i] = nullptr;
         } else {
+          // Overflow-safe per-expert slab accumulation.  Sister to
+          // the validator's pre-flight overflow gate — that gate
+          // computed the WIDE total; here we incrementally build
+          // per-expert offsets and must independently confirm that
+          // `cursor + (M*row_cols*elem)` stays representable.  In
+          // tight mode `row_cols = N/2`, so the per-expert footprint
+          // is half the validator's wide computation — strictly
+          // smaller, but we still re-check because the multiplier
+          // chain is different.  A trip aborts with `failure` BEFORE
+          // any thread proceeds past `setup_op1_arena_and_layout`,
+          // so the executors never see a wrap-around pointer.
           scratch.op1_dst_internal[i] = base + cursor;
-          cursor += static_cast<size_t>(M[i]) * row_cols * dst_elem_internal;
+          const size_t m_sz       = static_cast<size_t>(M[i]);
+          const size_t row_sz     = static_cast<size_t>(row_cols);
+          size_t per_expert_bytes = 0;
+          if (__builtin_mul_overflow(m_sz, row_sz, &per_expert_bytes))
+            return status_t::failure;
+          if (__builtin_mul_overflow(per_expert_bytes, dst_elem_internal,
+                                     &per_expert_bytes))
+            return status_t::failure;
+          if (__builtin_add_overflow(cursor, per_expert_bytes, &cursor))
+            return status_t::failure;
         }
       }
     }
+    // The arena was sized by the validator using the same per-expert
+    // formula (wide; halved in this function for tight) — assert the
+    // invariant in debug builds.  If the planner ever produces a
+    // cursor > arena.cap, the next Op1 GEMM would write past the slab
+    // boundary, so this is correctness-critical.  In release builds
+    // the gate above + the arena-bytes math in the caller cover the
+    // same property; the assert is a belt-and-braces during develop-
+    // ment.
+    if (op1_internal) {
+      assert(cursor <= arena.cap
+             && "Op1 arena overflow: cumulative per-expert footprint "
+                "exceeds arena capacity (sizing math regression).");
+    }
   }
 
-  // Op1 dst / ldc for Pass 1 dispatch:
+  // Op1 dst / ldc views for Pass 1 dispatch:
   //   op1_internal + tight  : library arena, op1_ldc[i] = N[i]/2.
   //   op1_internal + wide   : library arena, op1_ldc[i] = N[i].
-  //   caller-allocated      : caller's dst / ldc (wide by contract —
-  //                           N >= ldc enforced by the always-on
-  //                           validator above; tight ldc would have
-  //                           been refused by `pick_fused_moe_want_tight`
-  //                           which gates tight on op1_internal).
-  const std::vector<void *> &op1_dst =
-      op1_internal ? scratch.op1_dst_internal : dst;
-  const std::vector<int> &op1_ldc =
-      want_tight ? scratch.op1_ldc_local
-                 : (op1_internal ? N : ldc);
+  //   caller-allocated      : caller's dst / ldc (wide by contract).
+  out_op1_dst = op1_internal ? &scratch.op1_dst_internal : &dst_caller;
+  out_op1_ldc = want_tight ? &scratch.op1_ldc_local
+                           : (op1_internal ? &N : &ldc_caller);
+  return status_t::success;
+}
 
-  // ── Pass 1: Op1 (gate+up) + activation ────────────────────────────
-  // Single route for all layouts:
-  //   * `group_matmul_run_parallel_dispatch` picks ALGO 1..5 (or auto)
-  //     per `ZENDNNL_GRP_MATMUL_ALGO` and the safety gates; inner BLAS
-  //     kernel honours `ZENDNNL_MATMUL_ALGO`.
-  //   * Wide layout: any of ALGO 1..5 runs; activation is fused inline
-  //     for ALGO 1/2/4/5 always, and for ALGO 3 when
-  //     `ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT=1` (otherwise a separate
-  //     pass runs below).  Env flag is a pure perf knob here — the
-  //     wide arena has room for either fused or separate-pass output.
-  //   * Tight layout: picker ensures the dispatcher will route to
-  //     ALGO 3 (flat_n_tile).  The dispatcher auto-enables fused
-  //     activation for the tight path regardless of the
-  //     `N_TILE_FUSED_ACT` env setting — the [M, I] arena has no
-  //     room for a separate-pass swiglu, so fusion is a correctness
-  //     contract, not a tuning knob.  flat_n_tile detects `ldc < N`
-  //     and engages its per-thread-scratch + OOP swiglu branch;
-  //     `act_fused` comes back true unconditionally.
-  const char *pass1_mode = nullptr;
-  const bool act_fused = group_matmul_run_parallel_dispatch(
-      layout, transA, transB, M, N, K, alpha,
-      src, lda, weight, ldb, bias, beta, op1_dst, op1_ldc,
-      is_weights_const, params, num_threads, &pass1_mode,
-      act, act_dtype);
+// ═══════════════════════════════════════════════════════════════════════
+// Op2 dispatch scratch setup.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Two-phase scratch population for zero per-call allocator traffic on
+// the steady state:
+//
+//   (1) Grow-only `resize(n, value)` for `alpha_down` / `beta_down` /
+//       `transA_down`: the Op2 constants are `1.0f / 0.0f / false`
+//       on every call.  New slots are initialised with the constant;
+//       existing slots keep the constant from earlier calls.
+//
+//   (2) Per-expert write loop for `K_down` / `src_down` / `params_down`
+//       (and `op2_dst_internal` in internal-alloc mode).
+//
+// `K_down` is sized to `N.size()` rather than `num_ops` so the Pass-2
+// prepack reads a fully-populated K vector across the prepack-extras
+// tail (otherwise the warmer truncates to `num_ops` and the tail of
+// Op2 weights never gets warmed).
+//
+// Per-call quant-field reset is essential: the persistent thread-local
+// `scratch.params_down` retains whatever was written on the previous
+// call — a stale buffer pointer from a freed caller-side scale tensor
+// would crash the next call.
+//
+// Op2 inherits Op1's `dynamic_quant` flag and `dtypes.compute` so the
+// down_proj runs through the same dispatch path as the gate+up GEMM.
+// Per-group src_scale (`dims = {M, ngroups>1}`) is rejected here
+// because Op1.K != Op2.K — ngroups can't transfer; callers must use
+// per-token (`{M, 1}`) instead.  Returns `status_t::failure` on that
+// rejection.
+inline status_t setup_op2_dispatch_scratch(
+    FusedMoEScratch &scratch,
+    const grp_matmul_fused_moe_params &fused,
+    grp_matmul_gated_act_t act,
+    size_t num_ops,
+    const std::vector<int> &N,
+    const std::vector<const void *> &src,
+    const std::vector<int> &lda,
+    const std::vector<matmul_params> &params,
+    const std::vector<void *> &op1_dst,
+    bool op2_internal) {
+  // num_ops MUST be the ACTIVE matmul count (== M.size()) — caller
+  // derives it from M.size() and passes it explicitly so this
+  // function CANNOT silently drift to params.size().  Under the
+  // framework prepack-extras contract `params` is sized to
+  // `total_matmul` (>= active), so deriving num_ops from
+  // params.size() here would walk `op1_dst` / `src` /
+  // `fused.down_scale` / `fused.down_zp` past their active-sized
+  // .size() and copy garbage `dims` vectors into `params_down`,
+  // which the next std::vector copy on the hot path turns into a
+  // `new T[garbage_size]` → `std::bad_array_new_length` crash.
+  // The K_down loop below is the ONE intentional iteration over
+  // `N.size()` (the total Op2 weight count) — see its inline comment.
 
-  // Separate-pass activation when the dispatcher cannot fuse (e.g.
-  // ALGO 3 + silu_and_mul / gelu_and_mul).  Never fires in tight mode
-  // — the picker already required ALGO 3 + swiglu + fused-act enabled.
-  if (act != grp_matmul_gated_act_t::none && !act_fused) {
-    grp_matmul_gated_act_params act_p;
-    act_p.act = act;
-    status_t act_st = group_matmul_moe_act_execute(
-        &act_p, op1_dst, M, N, op1_ldc, act_dtype, num_threads);
-    if (act_st != status_t::success) return act_st;
-  }
-
-  // ── Pass 2: Op2 (down_proj) — setup ───────────────────────────────
-  // Source = activated Op1 output in dst[:, 0:K_down] with stride ldc.
-  //
-  // Two-phase scratch setup for zero per-call allocator traffic on the
-  // steady state:
-  //
-  //   (1) Grow-only `resize(n, value)` for `alpha_down` / `beta_down` /
-  //       `transA_down`: the Op2 constants are `1.0f / 0.0f / false`
-  //       on every call.  New slots (when num_ops grows beyond the
-  //       previous high-water mark) are initialised with the constant;
-  //       existing slots keep the constant from earlier calls because
-  //       the per-expert loop below no longer writes them.
-  //
-  //   (2) Per-expert write loop for `K_down` / `src_down` / `params_down`
-  //       (and `op2_dst_internal` in internal-alloc mode).  The per-
-  //       expert data touched for slot i stays on the same cache lines
-  //       across all writes inside the iteration, so num_ops × constant
-  //       writes are linear-scan friendly.
-  //
-  // params_down policy: `resize(num_ops)` reuses existing matmul_params
-  // slots across calls (avoids the destruct + construct cost of
-  // assign(num_ops, matmul_params{}) for a type that carries postop_,
-  // quant_params, plugin_op).  We only reset the fields the Op2 dispatch
-  // could mutate (lowoha_algo) or that vary per call (dtypes,
-  // num_threads); mem_format_a / mem_format_b / dynamic_quant / postop_
-  // are left at their matmul_params() default values (see slot layout
-  // comment inside the loop below).
-  //
-  // K_down is sized to `N.size()` rather than `num_ops` so the Pass-2
-  // prepack reads a fully-populated K vector across `[0, num_ops_total)`.
-  // The per-ALGO `prepack_for_algo_X` invoked from inside
-  // `group_matmul_run_parallel_dispatch` for Pass 2 iterates
-  // `min(num_ops_total, weight.size, K.size, N.size, ldb.size, transB.size)`;
-  // every other vector (fused.down_weight / N_down / ldb_down / transB)
-  // is sized to `total_matmul` per the framework's prepack-extras
-  // contract, so K_down must match or the warmer truncates to
-  // `num_ops` and the [num_ops, num_ops_total) tail of Op2 weights
-  // never gets warmed — defeating the spike-elimination goal.
-  // The [num_ops, N.size()) tail is unused for the actual Op2
-  // dispatch (M.size() = num_ops bounds that loop) but available
-  // for the prepack iteration.
+  // `K_down` is sized to `N.size()` (the total-matmul Op2 K-vector)
+  // rather than `num_ops` so the Pass-2 prepack reads a fully-
+  // populated K vector across the prepack-extras tail (otherwise the
+  // warmer truncates to `num_ops` and the tail of Op2 weights never
+  // gets warmed).  N[i] is well-defined for all i in [0, N.size())
+  // — the framework populates N for every total-matmul slot, firing
+  // or not — so this is the only loop in this function that legally
+  // iterates the total range.  Execution never reads K_down past
+  // num_ops; the [num_ops, N.size()) tail is consumed by the
+  // prepack module only.
   scratch.K_down.resize(N.size());
   for (size_t i = 0; i < N.size(); ++i) {
     scratch.K_down[i] = op2_k_for_act(N[i], act);
   }
 
-  // alpha_down / beta_down / transA_down carry the same Op2 constants
-  // on every call (1.0f / 0.0f / false).  Use `resize(n, value)` so
-  // NEW slots are initialized with the constant; EXISTING slots keep
-  // the constant from earlier calls (the per-expert loop below no
-  // longer writes them).  After the first call these three are
-  // zero-touch per call.  These are dispatch-side-only (the prepack
-  // doesn't read them), so num_ops sizing is sufficient.
+  // Op2 dispatch-side-only constants — zero-touch per call after the
+  // first call (the per-expert loop below no longer writes them).
   scratch.alpha_down  .resize(num_ops, 1.0f);
   scratch.beta_down   .resize(num_ops, 0.0f);
   scratch.transA_down .resize(num_ops, false);
@@ -849,49 +754,11 @@ status_t group_matmul_fused_moe_execute(
   if (op2_internal) scratch.op2_dst_internal.resize(num_ops);
 
   for (size_t i = 0; i < num_ops; ++i) {
-    // Op2 src = activated Op1 output (in op1_dst at op1_ldc stride:
-    // N for wide layouts, N/2 for tight layout).
-    scratch.src_down[i]    = op1_dst[i];
+    scratch.src_down[i] = op1_dst[i];
 
-    // params_down slot layout:
-    //   * `lowoha_algo` is both an input hint (`none` = let dispatcher
-    //     pick via matmul_config) AND an output (dispatcher writes the
-    //     chosen kernel back, see lowoha_matmul_utils.cpp:753).  Must
-    //     be reset to `none` every call so a dispatcher pick from an
-    //     earlier call does not force the same kernel on the next.
-    //   * `dtypes` / `num_threads` vary per-call with caller's Op1
-    //     params + fused.bias_dt_down.
-    //   * Op2 inherits the caller's quant *scheme* knobs from Op1's
-    //     `params[i]` so the down_proj runs through the same
-    //     dispatch path as the gate+up GEMM:
-    //       - `dynamic_quant`       (false / true)
-    //       - `dtypes.compute`      (none / s8 / u8)
-    //       - `quant_params.src_scale.{dt, dims}` (per-tensor `{1}` /
-    //         `{1, 1}` or per-token `{M, 1}` only; per-group
-    //         `{M, ngroups>1}` is rejected up front below because
-    //         Op1.K != Op2.K — see the guard inside the
-    //         `if (p.dynamic_quant)` block)
-    //     The matching `buff` is left `nullptr` on Op2's src_scale
-    //     because Op2's source is the activated Op1 intermediate
-    //     (library-managed) — the kernel allocates the runtime
-    //     scratch internally from the inherited `dims`.
-    //   * The ONLY Op2-side-specific quant fields the caller provides
-    //     are `fused.down_scale[i]` (weight scale) and `fused.down_zp[i]`
-    //     (optional weight zero-point for asymmetric quant).  These
-    //     are copied straight into `params_down[i].quant_params.
-    //     wei_scale` / `wei_zp`.  Both vectors are size-validated above
-    //     to be either empty (un-quantized weight) or >= num_ops.
-    //   * Every quant field is reset per call because the persistent
-    //     thread-local `scratch.params_down` retains whatever was
-    //     written on the previous call — a stale buffer pointer from
-    //     a freed caller-side scale tensor would crash the next call.
-    //   * `mem_format_a / mem_format_b / postop_`
-    //     are NEVER mutated by the Op2 dispatch path on this scratch
-    //     (verified by grep across lowoha_operators); the slot's
-    //     default-constructed values (`'n'` / `'n'` / empty) match
-    //     the required dispatch contract, so no per-call reset is
-    //     issued here — `resize()`-grown slots are already correct
-    //     and existing slots are never dirtied.
+    // `lowoha_algo` is both input hint and output — must be reset to
+    // `none` every call so a dispatcher pick from an earlier call does
+    // not force the same kernel on the next.
     matmul_params &p = scratch.params_down[i];
     p.lowoha_algo  = matmul_algo_t::none;
     p.dtypes.src   = params[i].dtypes.dst;
@@ -899,15 +766,12 @@ status_t group_matmul_fused_moe_execute(
     p.dtypes.dst   = params[i].dtypes.dst;
     p.dtypes.bias  = fused.bias_dt_down;
     p.num_threads  = params[i].num_threads;
-    // Inherit the quant scheme knobs from Op1's params: dynamic_quant
-    // flag and dtypes.compute carry over unchanged so the
-    // reorder_quantization_wrapper eligibility gate sees the same
-    // values on Op2 as on Op1.
     p.dynamic_quant  = params[i].dynamic_quant;
     p.dtypes.compute = params[i].dtypes.compute;
-    // Op2 quant params: reset everything first, then fill in just
-    // the wei_scale / wei_zp (from the new caller-facing fields)
-    // and the inherited src_scale dims (when dynamic_quant is on).
+
+    // Reset everything first, then fill in just the wei_scale /
+    // wei_zp (from the caller-facing fields) and the inherited
+    // src_scale dims (when dynamic_quant is on).
     p.quant_params = matmul_quantization_params_t{};
     if (!fused.down_scale.empty()) {
       p.quant_params.wei_scale.buff = fused.down_scale[i].buff;
@@ -919,10 +783,6 @@ status_t group_matmul_fused_moe_execute(
       p.quant_params.wei_zp.dt   = fused.down_zp[i].dt;
       p.quant_params.wei_zp.dims = fused.down_zp[i].dims;
     }
-    // Inherit dynamic-quant source granularity for Op2 (buff stays
-    // null — kernel allocates per-call scratch).  Per-token only:
-    // per-group (dims = {M, ngroups>1}) is rejected because Op1.K
-    // != Op2.K means Op1's ngroups can't transfer.  See struct doc.
     if (p.dynamic_quant) {
       const auto &scale_dims = params[i].quant_params.src_scale.dims;
       if (scale_dims.size() == 2 && scale_dims[1] > 1) {
@@ -942,7 +802,6 @@ status_t group_matmul_fused_moe_execute(
           return status_t::failure;
         }
       }
-
       p.quant_params.src_scale.buff = nullptr;
       p.quant_params.src_scale.dt   = params[i].quant_params.src_scale.dt;
       p.quant_params.src_scale.dims = params[i].quant_params.src_scale.dims;
@@ -952,111 +811,392 @@ status_t group_matmul_fused_moe_execute(
         p.quant_params.src_zp.dims = params[i].quant_params.src_zp.dims;
       }
     }
-    // active_matmul / total_matmul propagate from the outer params
-    // so the Pass-2 per-ALGO prepack inside `group_matmul_run_parallel_dispatch`
-    // sees the full active/total contract.  Without this, the
-    // default-constructed `params_down[i]` slot has both fields = 0,
-    // `build_prepack_params` falls back to `num_ops_total = num_ops_active`,
-    // and Pass 2 warms only `num_ops_active` Op2 weights — leaving
-    // the prepack-extras tail of Op2 weights cold while the
-    // framework-hint regime warmed the full pool for Op1.  The
-    // dispatch path would then pack the missing Op2 entries
-    // on-demand on the first call that routes an inactive expert
-    // into the firing set, defeating the spike-elimination goal
-    // (and breaking the symmetry between the two passes — Op1 warm,
-    // Op2 cold).
+    // active_matmul / total_matmul propagate so the Pass-2 per-ALGO
+    // prepack sees the full active/total contract and warms the
+    // prepack-extras tail.
     p.active_matmul = params[i].active_matmul;
     p.total_matmul  = params[i].total_matmul;
 
     if (op2_internal) {
-      // Op2 writes back into the caller's `src[]` buffer (in-place
-      // reuse) with stride `lda[]`.  const_cast is well-defined
-      // because the caller signalled op2_internal by clearing
-      // fused.dst_down, which implies accepting src reuse as the
-      // Op2 output (validator already checked lda[i] >= N_down[i]).
+      // const_cast is well-defined because the caller signalled
+      // op2_internal by clearing fused.dst_down, which implies
+      // accepting src reuse as the Op2 output.
       scratch.op2_dst_internal[i] = const_cast<void *>(src[i]);
     }
   }
+  return status_t::success;
+}
 
-  const std::vector<void *> &op2_dst =
-      op2_internal ? scratch.op2_dst_internal : fused.dst_down;
-  const std::vector<int> &op2_ldc =
-      op2_internal ? lda : fused.ldc_down;
+// ═══════════════════════════════════════════════════════════════════════
+// Per-path dispatch wrappers.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The vertical-fusion wrapper `try_flat_m_tile_pipeline_bf16` lives
+// in `group_matmul_m_tile.cpp` (Section C.2) — see its doc-block
+// there for the engagement contract.  Only the legacy two-pass
+// wrapper stays here because it is ALGO-agnostic: it forwards each
+// pass through `group_matmul_run_parallel_dispatch`, which internally
+// picks ALGO 1..5 based on shape and env knobs.
 
-  // ── Pass 2: Op2 (down_proj) dispatch ────────────────────────────────
-  // Single route: `group_matmul_run_parallel_dispatch` with `act=none`.
-  // Honours `ZENDNNL_GRP_MATMUL_ALGO` (1..5) and `ZENDNNL_MATMUL_ALGO`
-  // for inner BLAS, and routes through the custom BF16 microkernel
-  // inside flat_n_tile when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
-  // the ALGO 3 path is selected.
-  //
+// Legacy two-pass MoE dispatch.  Pass 1 = Op1 (W13 + optional gated
+// activation) via `group_matmul_run_parallel_dispatch`.  Pass 2 = Op2
+// (W2 down-projection) via the same dispatcher with `act=none`.
+//
+// When Pass 1's dispatcher cannot fuse the activation (e.g. ALGO 3 +
+// silu_and_mul / gelu_and_mul on the wide arena), a separate-pass
+// activation runs between Pass 1 and Pass 2.
+inline status_t run_fused_moe_legacy_two_pass(
+    grp_matmul_gated_act_t act,
+    data_type_t act_dtype,
+    const std::vector<char> &layout,
+    const std::vector<bool> &transA, const std::vector<bool> &transB,
+    const std::vector<int> &M, const std::vector<int> &N,
+    const std::vector<int> &K, const std::vector<float> &alpha,
+    const std::vector<const void *> &src, const std::vector<int> &lda,
+    const std::vector<const void *> &weight, const std::vector<int> &ldb,
+    const std::vector<const void *> &bias, const std::vector<float> &beta,
+    const std::vector<void *> &op1_dst, const std::vector<int> &op1_ldc,
+    const grp_matmul_fused_moe_params &fused,
+    FusedMoEScratch &scratch,
+    const std::vector<void *> &op2_dst, const std::vector<int> &op2_ldc,
+    const std::vector<bool> &is_weights_const,
+    std::vector<matmul_params> &params,
+    int num_threads,
+    const char *&pass1_mode, const char *&pass2_mode) {
+  // Pass 1: Op1 (gate+up) + activation.  The dispatcher picks ALGO
+  // 1..5 (or auto) per `ZENDNNL_GRP_MATMUL_ALGO` and the safety
+  // gates; inner BLAS kernel honours `ZENDNNL_MATMUL_ALGO`.  For
+  // tight layout the dispatcher auto-enables fused activation
+  // regardless of `N_TILE_FUSED_ACT` (correctness contract).
+  const bool act_fused = group_matmul_run_parallel_dispatch(
+      layout, transA, transB, M, N, K, alpha,
+      src, lda, weight, ldb, bias, beta, op1_dst, op1_ldc,
+      is_weights_const, params, num_threads, &pass1_mode,
+      act, act_dtype);
+
+  // Separate-pass activation when the dispatcher cannot fuse (e.g.
+  // ALGO 3 + silu_and_mul / gelu_and_mul on wide arena).  Never
+  // fires in tight mode.
+  if (act != grp_matmul_gated_act_t::none && !act_fused) {
+    grp_matmul_gated_act_params act_p;
+    act_p.act = act;
+    const status_t act_st = group_matmul_moe_act_execute(
+        &act_p, op1_dst, M, N, op1_ldc, act_dtype, num_threads);
+    if (act_st != status_t::success) return act_st;
+  }
+
+  // Pass 2: Op2 (down_proj) dispatch.  Same dispatcher with `act=none`.
   // Op2's lda (= op1_ldc) per Op1 layout × activation:
-  //   wide  + gated act  — lda=N,    K_down=N/2 (reads first half;
-  //                                  skips up cols compacted by act).
-  //   wide  + act=none   — lda=N,    K_down=N   (full pass-through).
-  //   tight + gated act  — lda=N/2,  K_down=N/2 (perfectly packed).
-  //   (tight + act=none is precluded by `pick_fused_moe_want_tight`,
-  //    which gates tight on swiglu_oai_mul.)
-  const char *pass2_mode = nullptr;
+  //   wide  + gated act  — lda=N,    K_down=N/2.
+  //   wide  + act=none   — lda=N,    K_down=N.
+  //   tight + gated act  — lda=N/2,  K_down=N/2.
   group_matmul_run_parallel_dispatch(
-      layout, scratch.transA_down, transB, M, fused.N_down, scratch.K_down,
-      scratch.alpha_down,
+      layout, scratch.transA_down, transB, M, fused.N_down,
+      scratch.K_down, scratch.alpha_down,
       scratch.src_down, op1_ldc,
       fused.down_weight, fused.ldb_down,
       fused.bias_down, scratch.beta_down,
       op2_dst, op2_ldc,
       is_weights_const, scratch.params_down, num_threads, &pass2_mode,
       grp_matmul_gated_act_t::none, act_dtype);
+  return status_t::success;
+}
 
-  // ── Optional MoE post-op: weighted reduce over per-expert outputs ───
-  // The post-op is the natural "Stage 4" of the fused MoE pipeline (Op1
-  // → activation → Op2 → weighted reduce), so when the caller supplies
-  // moe_postop we run it here rather than forcing them to issue a
-  // separate call after we return.  D = fused.N_down[0] — the dispatcher
-  // already validated N_down is uniform across experts when both
-  // moe_postop and fused_moe are active.
-  if (moe_postop != nullptr) {
-    const int D_down = fused.N_down[0];
-    status_t postop_st = group_matmul_moe_postop_execute(
-        moe_postop, D_down, num_threads, params[0].dtypes.dst);
-    if (postop_st != status_t::success)
-      return postop_st;
+// ═══════════════════════════════════════════════════════════════════════
+// gemm_mode composition.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Composes a single string describing which fused-MoE path ran for
+// profiler / benchdnn / apilog readers.  Top-level tag distinguishes
+// `fused_moe_vertical` (single fused executor) from `fused_moe_2pass`
+// (Pass 1 + sep-act + Pass 2); intalloc and tight tags reflect which
+// side(s) the library managed; the trailing `(op1=…,op2=…)` reveals
+// the underlying executor identifiers reported by each pass.
+//
+// Returns a `const char *` whose lifetime is tied to a thread-local
+// `std::string` — valid until the next call to this function on the
+// same thread.
+inline const char *compose_fused_moe_gemm_mode(
+    bool vertical_fusion_engaged,
+    bool op1_internal,
+    bool op2_internal,
+    bool want_tight,
+    const char *pass1_mode,
+    const char *pass2_mode,
+    bool has_postop) {
+  static thread_local std::string mode_buf;
+  mode_buf.clear();
+  mode_buf.reserve(64);
+  mode_buf.append(vertical_fusion_engaged
+                      ? "fused_moe_vertical"
+                      : "fused_moe_2pass");
+  if (op1_internal && op2_internal) mode_buf.append("_intalloc");
+  else if (op1_internal)            mode_buf.append("_intalloc_op1");
+  else if (op2_internal)            mode_buf.append("_intalloc_op2");
+  if (want_tight)                   mode_buf.append("_tight");
+  mode_buf.append("(op1=");
+  mode_buf.append(pass1_mode != nullptr ? pass1_mode : "?");
+  mode_buf.append(",op2=");
+  mode_buf.append(pass2_mode != nullptr ? pass2_mode : "?");
+  mode_buf.append(")");
+  if (has_postop) mode_buf.append("+postop");
+  return mode_buf.c_str();
+}
+
+} // namespace (end file-private helpers)
+
+// ═══════════════════════════════════════════════════════════════════════
+// Primary entry: Op1+Act → Op2 (→ optional weighted reduce post-op)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Orchestrator only — every step is a helper above or a backend
+// executor in a sibling translation unit.  Read top-to-bottom to see
+// the fused-MoE pipeline flow.
+
+status_t group_matmul_fused_moe_execute(
+    const grp_matmul_fused_moe_params &fused,
+    grp_matmul_gated_act_t act, data_type_t act_dtype,
+    const std::vector<char> &layout,
+    const std::vector<bool> &transA, const std::vector<bool> &transB,
+    const std::vector<int> &M, const std::vector<int> &N,
+    const std::vector<int> &K, const std::vector<float> &alpha,
+    const std::vector<const void *> &src, const std::vector<int> &lda,
+    const std::vector<const void *> &weight, const std::vector<int> &ldb,
+    const std::vector<const void *> &bias, const std::vector<float> &beta,
+    const std::vector<void *> &dst, const std::vector<int> &ldc,
+    const     std::vector<bool> &is_weights_const,
+    std::vector<matmul_params> &params,
+    int num_threads,
+    const char **gemm_mode_out,
+    const group_matmul_moe_postop_params *moe_postop) {
+  const size_t num_ops = M.size();
+  if (num_ops == 0) return status_t::failure;
+
+  // ── Step 1: detect per-side internal-alloc state ───────────────────
+  // Each side is detected independently so callers can mix any of the
+  // four (op1_internal, op2_internal) combinations.  Mixed null/non-
+  // null active range on either side is rejected up front by the
+  // detector (the per-side internal flag means "all-null active range").
+  using group_matmul_internal::detect_internal_alloc;
+  using group_matmul_internal::internal_alloc_mode;
+  auto run_detect = [&](const std::vector<void *> &v,
+                        const char *name,
+                        bool *out_internal) -> status_t {
+    const status_t st = detect_internal_alloc(
+        v, num_ops, /*fused_moe_present=*/true,
+        internal_alloc_mode::sweep_active, out_internal);
+    if (st != status_t::success) {
+      log_error("group_matmul_fused_moe: ", name, " has a mixed "
+                "null/non-null state — every active entry must be "
+                "either null (library-managed) or non-null "
+                "(caller-allocated).");
+    }
+    return st;
+  };
+  bool op1_internal = false;
+  bool op2_internal = false;
+  if (run_detect(dst, "dst", &op1_internal) != status_t::success)
+    return status_t::failure;
+  if (run_detect(fused.dst_down, "fused.dst_down", &op2_internal)
+      != status_t::success)
+    return status_t::failure;
+
+  // ── Step 2: validate inputs ────────────────────────────────────────
+  const size_t dst_elem_internal =
+      op1_internal ? size_of(params[0].dtypes.dst) : 0;
+  int64_t total_M = 0;
+  size_t total_bytes_internal = 0;
+  {
+    const status_t v = validate_fused_moe_inputs(
+        fused, act, act_dtype, layout, transA, transB, M, N, K, alpha,
+        src, lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
+        params, moe_postop, op1_internal, op2_internal,
+        dst_elem_internal, &total_M, &total_bytes_internal);
+    if (v != status_t::success) return v;
   }
 
-  // Compose gemm_mode string revealing Op1 / Op2 / Op-mode / postop
-  // dispatch for profiler / apilog.  Thread-local `std::string` so
-  // the caller's `const char *` stays valid until the next call on
-  // this thread; `clear()` preserves the internal buffer capacity
-  // across calls (no re-allocation on the steady state).  C++ string
-  // `append` chain is used in place of snprintf to follow the
-  // library's "no C-style formatted output" convention.
+  // No active work (every expert has M=0): return success without
+  // spawning OMP regions or touching the Op2 dispatch.
+  if (total_M == 0) {
+    if (gemm_mode_out) *gemm_mode_out = "fused_moe_skip";
+    return status_t::success;
+  }
+
+  // ── Step 3: pick wide-vs-tight Op1 arena layout ────────────────────
+  const int env_algo_fused = get_grp_matmul_algo();
+  const bool custom_kernel_en = get_grp_matmul_custom_kernel();
+  const bool want_tight = pick_fused_moe_want_tight(
+      op1_internal, act, env_algo_fused,
+      layout, M, N, K, params, num_threads);
+
+  // EXEC APILOG — one line per fused_moe call summarising arena
+  // layout, per-side internal-alloc state, act-fusion choice, and
+  // the W13 write width.  apilog_info_enabled() is cached after the
+  // first call so the gate check is free when logging is off.
+  static const bool s_apilog = apilog_info_enabled();
+  if (s_apilog) {
+    const int log_fused_moe_tight = get_grp_matmul_fused_moe_tight();
+    const bool act_is_gated = (act != grp_matmul_gated_act_t::none);
+    const char *w13_write_elems = act_is_gated
+                                      ? (want_tight ? "I" : "2I")
+                                      : "N";
+    apilog_info("[GRP_MATMUL.EXEC] op=fused_moe arena=",
+                (want_tight ? "tight" : "loose"),
+                " op1_internal=", (op1_internal ? "yes" : "no"),
+                " op2_internal=", (op2_internal ? "yes" : "no"),
+                " act=", act_name(act),
+                " act_in_register=",
+                ((want_tight && act_is_gated) ? "yes" : "no"),
+                " W13_write_elems_per_row=", w13_write_elems,
+                " op2_dst_reuse=",
+                (op2_internal ? "src_inplace" : "caller_dst_down"),
+                " env_algo=", env_algo_fused,
+                " env_tight=", log_fused_moe_tight,
+                " custom_kernel_env=",
+                (custom_kernel_en ? "on" : "off"),
+                " num_ops=", (int)num_ops);
+  }
+
+  // ── Step 4: Op1 arena + per-expert pointer / stride setup ──────────
+  // Thread-local scratch surfaces now live in file-scope accessors so
+  // `clear_fused_moe_scratch()` can reach them via an OMP team sweep.
+  // Functional behaviour is identical to a function-local static (one
+  // instance per thread, persistent for the thread's lifetime); the
+  // indirection cost is zero after the first call on a given thread
+  // (returns by reference to a static thread_local).
+  FusedMoEArena   &arena   = get_thread_local_arena();
+  FusedMoEScratch &scratch = get_thread_local_scratch();
+  const std::vector<void *> *op1_dst_p = nullptr;
+  const std::vector<int>    *op1_ldc_p = nullptr;
+  {
+    const status_t s = setup_op1_arena_and_layout(
+        arena, scratch, op1_internal, want_tight,
+        total_bytes_internal, dst_elem_internal,
+        N, M, ldc, dst, op1_dst_p, op1_ldc_p);
+    if (s != status_t::success) return s;
+  }
+  const std::vector<void *> &op1_dst = *op1_dst_p;
+  const std::vector<int>    &op1_ldc = *op1_ldc_p;
+
+  // ── Step 5: Op2 dispatch scratch population ────────────────────────
+  {
+    // Pass `num_ops` (= M.size() = ACTIVE matmul count) explicitly so
+    // the setup loop is bounded by the active range, not by the
+    // framework's prepack-extras-tail `params.size()`.  See the
+    // doc-block on setup_op2_dispatch_scratch() for the active/total
+    // contract.
+    const status_t s = setup_op2_dispatch_scratch(
+        scratch, fused, act, num_ops,
+        N, src, lda, params, op1_dst, op2_internal);
+    if (s != status_t::success) return s;
+  }
+  const std::vector<void *> &op2_dst =
+      op2_internal ? scratch.op2_dst_internal : fused.dst_down;
+  const std::vector<int> &op2_ldc =
+      op2_internal ? lda : fused.ldc_down;
+
+  // ── Step 6: per-path dispatch fork ─────────────────────────────────
+  // Try vertical fusion FIRST.  The eligibility gate inside
+  // `try_flat_m_tile_pipeline_bf16` (defined in m_tile.cpp) checks
+  // env knob, dtype regime on both passes (BF16 end-to-end OR
+  // WOQ-INT4 s4/u4 weights OR DQ-INT8 per-token-symmetric on s8
+  // weights), supported activation set, and `check_m_tile_safe` on
+  // Op1 + synthesized Op2.  When it returns `false` NO writes have
+  // been made to op1_dst / op2_dst, so the legacy two-pass below
+  // overwrites cleanly.
+  //
+  // The three regimes share the SAME executor — see the doc-block
+  // on `flat_m_tile_pipeline_bf16` in `group_matmul_m_tile.cpp`
+  // for the per-regime memory-management notes (DQ-INT8 adds two
+  // RAII-owned `std::vector<reorder_quant_buffers_t>` allocations
+  // on the dispatcher stack: per-expert Op1 src hoist + per-thread
+  // Stage 2b re-quant scratch; both freed deterministically when
+  // the executor returns).
+  //
+  // Pre-dispatch apilog tags emitted on EACH entry so a crash inside
+  // either executor surfaces in the log immediately before the fault
+  // (the gemm_mode composition at Step 8 only runs on successful
+  // completion).  Lets triage tell VF-vs-legacy without re-running
+  // under gdb / ASAN.
+  if (s_apilog) {
+    apilog_info("[GRP_MATMUL.EXEC] op=fused_moe enter=vertical_fusion_attempt");
+  }
+  const char *pass1_mode = nullptr;
+  const char *pass2_mode = nullptr;
+  bool vertical_fusion_engaged = try_flat_m_tile_pipeline_bf16(
+      layout, transA, scratch.transA_down, transB,
+      M, N, K, alpha,
+      src, lda, weight, ldb, bias, beta,
+      op1_dst, op1_ldc, /*dst_w13_is_caller_alloc=*/!op1_internal,
+      fused.N_down, scratch.K_down, scratch.alpha_down,
+      fused.down_weight, fused.ldb_down,
+      fused.bias_down, scratch.beta_down,
+      op2_dst, op2_ldc,
+      act, act_dtype,
+      is_weights_const, params, scratch.params_down, num_threads);
+  if (vertical_fusion_engaged) {
+    if (s_apilog) {
+      apilog_info("[GRP_MATMUL.EXEC] op=fused_moe exit=vertical_fusion_ok");
+    }
+    // Differentiate BF16 end-to-end / WOQ-INT4 / DQ-INT8 in the
+    // profiler / apilog so per-route timings can be partitioned
+    // downstream.  The eligibility wrapper guarantees both halves
+    // share the same regime, so a single probe of
+    // `params[0].dtypes.wei` (with `dynamic_quant` to distinguish
+    // DQ-INT8 from a hypothetical static-INT8 placeholder) suffices.
+    const data_type_t wei0 =
+        (!params.empty()) ? params[0].dtypes.wei : data_type_t::none;
+    const bool is_woq_wei =
+        (wei0 == data_type_t::s4 || wei0 == data_type_t::u4);
+    const bool is_dqint8_wei =
+        (wei0 == data_type_t::s8)
+        && (!params.empty()) && params[0].dynamic_quant;
+    if (is_dqint8_wei)        pass1_mode = "vertical_fusion_dqint8";
+    else if (is_woq_wei)      pass1_mode = "vertical_fusion_woq";
+    else                      pass1_mode = "vertical_fusion_bf16";
+    pass2_mode = pass1_mode;
+  } else {
+    if (s_apilog) {
+      apilog_info("[GRP_MATMUL.EXEC] op=fused_moe enter=legacy_two_pass");
+    }
+    const status_t s = run_fused_moe_legacy_two_pass(
+        act, act_dtype, layout, transA, transB, M, N, K, alpha,
+        src, lda, weight, ldb, bias, beta,
+        op1_dst, op1_ldc, fused, scratch,
+        op2_dst, op2_ldc, is_weights_const, params, num_threads,
+        pass1_mode, pass2_mode);
+    if (s != status_t::success) return s;
+    if (s_apilog) {
+      apilog_info("[GRP_MATMUL.EXEC] op=fused_moe exit=legacy_two_pass_ok");
+    }
+  }
+
+  // ── Step 7: optional MoE post-op (weighted reduce) ─────────────────
+  // The post-op is the natural "Stage 4" of the fused MoE pipeline
+  // (Op1 → activation → Op2 → weighted reduce).  D = fused.N_down[0]
+  // — the validator already confirmed N_down is uniform across
+  // experts when moe_postop is engaged.
+  if (moe_postop != nullptr) {
+    const int D_down = fused.N_down[0];
+    const status_t postop_st = group_matmul_moe_postop_execute(
+        moe_postop, D_down, num_threads, params[0].dtypes.dst);
+    if (postop_st != status_t::success) return postop_st;
+  }
+
+  // ── Step 8: compose gemm_mode for profiler / apilog ────────────────
   if (gemm_mode_out != nullptr) {
-    static thread_local std::string mode_buf;
-    mode_buf.clear();
-    mode_buf.reserve(64);
-    mode_buf.append("fused_moe_2pass");
-    // intalloc tag reflects which side(s) the library is managing.
-    // Empty tag means both Op1 and Op2 are caller-allocated (the
-    // legacy "all-buffers-from-caller" path).
-    if (op1_internal && op2_internal) mode_buf.append("_intalloc");
-    else if (op1_internal)            mode_buf.append("_intalloc_op1");
-    else if (op2_internal)            mode_buf.append("_intalloc_op2");
-    if (want_tight)                   mode_buf.append("_tight");
-    mode_buf.append("(op1=");
-    mode_buf.append(pass1_mode != nullptr ? pass1_mode : "?");
-    mode_buf.append(",op2=");
-    mode_buf.append(pass2_mode != nullptr ? pass2_mode : "?");
-    mode_buf.append(")");
-    if (moe_postop != nullptr) mode_buf.append("+postop");
-    *gemm_mode_out = mode_buf.c_str();
+    *gemm_mode_out = compose_fused_moe_gemm_mode(
+        vertical_fusion_engaged, op1_internal, op2_internal,
+        want_tight, pass1_mode, pass2_mode,
+        /*has_postop=*/moe_postop != nullptr);
   }
   return status_t::success;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Legacy ABI-preserving overload (no moe_postop parameter).  Forwards to
-// the primary entry with moe_postop = nullptr.  Kept as a separate non-
-// inline exported symbol so binaries built against the pre-postop
+// Legacy ABI-preserving overload (no moe_postop parameter).  Forwards
+// to the primary entry with moe_postop = nullptr.  Kept as a separate
+// non-inline exported symbol so binaries built against the pre-postop
 // version of the library continue to find their mangled name.
 // ═══════════════════════════════════════════════════════════════════════
 status_t group_matmul_fused_moe_execute(
@@ -1079,6 +1219,37 @@ status_t group_matmul_fused_moe_execute(
       M, N, K, alpha, src, lda, weight, ldb, bias, beta,
       dst, ldc, is_weights_const, params, num_threads,
       gemm_mode_out, /*moe_postop=*/nullptr);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Public scratch-release API.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// See doc-block on the declaration in `group_matmul_direct.hpp` for
+// semantics + limitations.  Implementation orchestrates an OMP
+// parallel region so each worker in the current OMP pool calls
+// `reset_thread_local_fused_moe_state()` against its OWN TLS — there
+// is no shared-state path that one thread can use to reach another
+// thread's `thread_local` instance.
+//
+// The team size is the OMP runtime's current `max_threads` — the
+// natural sweep granularity.  If the host application configured a
+// smaller team via `omp_set_num_threads(n)`, only those `n` workers
+// will be touched; threads outside the active OMP pool retain their
+// scratch until process exit (which is the expected POSIX TLS
+// behaviour).
+//
+// SAFETY: caller MUST NOT be inside an OMP parallel region.  We
+// detect that via `omp_in_parallel()` and silently no-op in that
+// case (calling `omp parallel` from inside another would either
+// nest or serialise, depending on `OMP_NESTED`; neither is the
+// intent of this API).
+void clear_fused_moe_scratch() {
+  if (omp_in_parallel()) return;
+  #pragma omp parallel
+  {
+    reset_thread_local_fused_moe_state();
+  }
 }
 
 } // namespace matmul

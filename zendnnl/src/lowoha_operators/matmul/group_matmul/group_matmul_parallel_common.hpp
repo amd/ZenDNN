@@ -51,7 +51,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-// Match the original group_matmul_parallel.cpp using-declarations so
+// Match the original group_matmul_dispatch.cpp using-declarations so
 // source files including this header can refer to matmul_algo_t,
 // matmul_config_t, post_op_type_t, etc. without namespace prefixes.
 using namespace zendnnl::ops;
@@ -79,8 +79,20 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 // (small) from L3-tight shapes (medium) from DRAM-streaming (large).
 inline constexpr int    kDecodeMaxM   = 32;                // per-expert M ≤ this → "decode"
 inline constexpr int    kMinNTile     = 512;               // prompt-path per-thread N
-inline constexpr int    kDecodeNTile  = 256;               // decode-path per-thread N
-inline constexpr size_t kMediumWeight = 64UL * 1024UL * 1024UL;  // 64 MB / expert (referenced by N-tile planner)
+
+// NOTE: `kDecodeNTile` (decode-path per-thread N, default 256) now
+// lives in `n_tile/group_matmul_n_tile_planner.hpp` (re-included by
+// the public N-tile header `n_tile/group_matmul_n_tile.hpp`) with
+// the rest of the N-tile-specific constants.  Consumers (dispatcher,
+// N-tile executor, custom-kernel dispatch, gtests) include the
+// public N-tile header anyway to reach `flat_n_tile()`, so the
+// symbol remains visible to them transparently.
+//
+// NOTE: `kMediumWeight` (64 MB / expert, "referenced by N-tile
+// planner") was unused throughout the tree — no production or test
+// site read it on either `origin/main` or this branch — so it was
+// dropped instead of moved.  Re-introduce only with a measured
+// consumer.
 
 /// Few-experts threshold for ALGO 0 auto-select rule 2.  Workloads
 /// with `num_ops ≤ kFewExpertsAlgo1` AND `num_ops < num_threads`
@@ -97,39 +109,18 @@ inline constexpr size_t kMediumWeight = 64UL * 1024UL * 1024UL;  // 64 MB / expe
 /// hits rule 2).  An 8-expert workload on a ≤ 8-thread host (rare —
 /// only seen on local dev / single-CCD profiling) instead falls to
 /// rule 1 and routes to ALGO 3.  Documented in `auto_select_algo`'s
-/// rule precedence comment in `group_matmul_parallel.cpp`.
+/// rule precedence comment in `group_matmul_dispatch.cpp`.
 inline constexpr int    kFewExpertsAlgo1 = 8;
 
-/// Maximum number of experts the ALGO 3 (N-tile) planner can
-/// represent.  Mirrored on `GroupNTilePlan::kMaxExperts` so the
-/// planner's stack-allocated fixed-size arrays (`expert_order`,
-/// `stable_n_thr_per_expert`) stay heap-free on the hot path.  Also
-/// used to size the heap-free temporaries in the expert-ordering
-/// helpers (`fill_ntile_expert_order`) below and the round-info
-/// stack array in `execute_rounds` (group_matmul_n_tile.cpp).
-///
-/// Auto-select uses this constant in **rule 0** — the top-level
-/// capacity carve-out applied BEFORE the three policy rules.  Any
-/// shape with `num_ops > kNTilePlanMaxExperts` (regardless of how it
-/// would otherwise be routed by rules 1-3) goes to ALGO 5 (per-expert
-/// parallel) because the N-tile planner's R3 gate would silently
-/// fall back to its Sequential strategy (one expert at a time, full
-/// team each).  Sequential is materially slower than ALGO 5 for
-/// many-experts decode-class shapes — ALGO 5 fans `num_ops` over the
-/// OMP team and lets each thread own a slice of experts serially,
-/// with no fixed-size lookup arrays of its own.
-///
-/// The carve-out catches both rule-1-territory shapes
-/// (`num_ops >= num_threads`, e.g., 300 experts on 128 threads) and
-/// the rare rule-3-decode-territory shape
-/// (`kNTilePlanMaxExperts < num_ops < num_threads`, e.g., 300
-/// experts on a 512-thread host).
-///
-/// Bump only if `GroupNTilePlan` switches to heap-allocated arrays
-/// (or callers start shipping > 256-expert deployments where the
-/// N-tile planner outperforms ALGO 5 — neither situation exists
-/// today).
-inline constexpr int    kNTilePlanMaxExperts = 256;
+// NOTE: `kNTilePlanMaxExperts` (max experts the ALGO 3 N-tile planner
+// can represent, = 256) now lives in
+// `n_tile/group_matmul_n_tile_planner.hpp` (re-included by the
+// public N-tile header `n_tile/group_matmul_n_tile.hpp`) with the
+// other N-tile-specific constants.  The dispatcher and the
+// auto-selector still read it (the rule-0 capacity carve-out routes
+// `num_ops > 256` to ALGO 5); both translation units include the
+// public N-tile header directly to call `flat_n_tile()`, so the
+// symbol remains visible unchanged.
 
 // Op2's K-dimension as a function of the fused activation.  Gated
 // activations (swiglu/silu/gelu_and_mul) collapse the [gate, up] pair
@@ -149,6 +140,16 @@ inline constexpr int    kNTilePlanMaxExperts = 256;
 inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
   return (act == grp_matmul_gated_act_t::none) ? n_op1 : (n_op1 / 2);
 }
+
+// NOTE: `check_m_tile_safe` (M-tile ALGO 2 structural eligibility
+// predicate) moved to `m_tile/group_matmul_m_tile.hpp` (Section H.5)
+// so the M-tile-only gate sits next to the M-tile executor it
+// protects.  Both callers — the legacy dispatcher
+// (`group_matmul_run_parallel_dispatch`) and the MoE vertical-fusion
+// dispatcher fork (`group_matmul_fused_moe_execute`) — already
+// include `m_tile/group_matmul_m_tile.hpp` to reach `flat_m_tile()`
+// / `flat_m_tile_pipeline_bf16()`, so they see the predicate
+// unchanged.
 
 // ──────────────────────────────────────────────────────────────────────
 // Env-driven feature flags.
@@ -216,7 +217,7 @@ inline int get_grp_matmul_algo() {
 
 // ── Auto-select per-phase overrides (consulted only under ALGO=0) ─────
 //
-// The auto-selector (`auto_select_algo` in `group_matmul_parallel.cpp`)
+// The auto-selector (`auto_select_algo` in `group_matmul_dispatch.cpp`)
 // classifies every call as either DECODE (`max_M ≤ kDecodeMaxM=32`) or
 // PROMPT (otherwise) and picks an ALGO via these two phase envs.  When
 // the active phase env is `0`, the legacy 3-rule cascade fires instead
@@ -227,7 +228,7 @@ inline int get_grp_matmul_algo() {
 // ALGO=0` (auto).  When the global ALGO env is set to 1..5 the user
 // has explicitly pinned that algo for every call regardless of phase;
 // the phase envs are never read in that path (see
-// `select_grp_matmul_algo` in `group_matmul_parallel.cpp`).
+// `select_grp_matmul_algo` in `group_matmul_dispatch.cpp`).
 //
 // Defaults — chosen to give a sensible out-of-the-box auto policy
 // that captures the measured-best path per phase across the MoE
@@ -328,20 +329,9 @@ inline int get_grp_matmul_auto_decode_algo() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT = { "0", "1" } — cached, default ON.
-//   ALGO 3 folds a supported gated activation into the per-thread
-//   epilogue (saves a second OMP pass over dst).  Adds one OMP barrier
-//   between matmul-write and activation-read for correctness.  Net
-//   win on every benchmarked workload; env retained as A/B escape
-//   hatch.  Mid-process env changes have no effect (static const).
-inline bool get_grp_n_tile_fused_act() {
-  static const bool v = []() {
-    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT");
-    if (e == nullptr || e[0] == '\0') return true;  // default: ON
-    return e[0] != '0';
-  }();
-  return v;
-}
+// NOTE: `get_grp_n_tile_fused_act()` moved to
+// `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
+// the N-tile env getters.  Include that header to call it.
 
 /// True when ALGO 3 can fuse `act` into the per-thread epilogue.
 /// Extend here when new activation kinds gain epilogue support.
@@ -417,7 +407,11 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act,
 namespace test_api {
 inline std::atomic<int> s_grp_n_rounds_mode_override{-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_override{-1};
-inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override{-1};
+// NOTE: `s_grp_matmul_custom_kernel_n_tile_override` and
+// `s_grp_n_tile_strategy_override` moved to `group_matmul_n_tile.hpp`
+// (Section A.3) together with the rest of the N-tile override atoms.
+// Include that header to access them.
+
 // Sentinel `-1` = no override.  Settable values: 0 (auto / unset),
 // 32 (NR=32), 64 (NR=64).  Override semantics in
 // `get_grp_matmul_custom_kernel_nr()`:
@@ -428,14 +422,6 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override{-1};
 //     the getter, matching the env-parse "validate or treat as
 //     unset" behaviour.
 inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override{-1};
-// Sentinel `-1` = no override.  Settable values: 0 (auto, default —
-// try DecodeD if eligible, fall through to Rounds), 1 (decode —
-// prefer DecodeD when its eligibility passes; same behaviour as auto
-// today, kept distinct for explicit user intent + apilog hint), 2
-// (rounds — skip DecodeD attempt entirely, always run Rounds-based
-// FewExperts/ManyExperts).  See `get_grp_n_tile_strategy()` for the
-// production env path.
-inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
 
 // Sentinel `-1` = no override.  Settable values: 0 (explicit legacy
 // 3-rule cascade — escape hatch from the new default phase pin),
@@ -465,76 +451,20 @@ inline std::atomic<int> s_grp_matmul_auto_decode_algo_override{-1};
 // without paying the `std::getenv` cost on every production call site.
 inline std::atomic<int> s_grp_matmul_algo_override{-1};
 
-// Sentinel `INT_MIN` = no override; falls through to the cached env
-// path (which itself applies the documented default -1 = DISABLED).
-// `-1` is no longer usable as the "no override" marker because it
-// now carries a meaningful value (DISABLED) — see the three-mode
-// doc-block on `get_grp_matmul_n_tile_heavy_threshold()` below.
-//
-// Settable values:
-//   * INT_MIN   — no override (falls through to env-cache).  Tests
-//                 should never set this explicitly; it is the
-//                 production state.
-//   * -1        — explicit DISABLED.  Same as unset env.
-//   *  0        — explicit AUTO.  Engages
-//                 `apply_adaptive_tiers()` in the planner.
-//   *  > 0      — explicit MANUAL single-threshold override.  Heavy
-//                 iff `M[e] > value`.
-//   * Anything more negative than -1 → undefined.  Tests should
-//     only pass values from the documented set above.
-//
-// The RAII helper `NTileHeavyThresholdOverride` in
-// `gtests/group_matmul/moe_test_utils.hpp` saves and restores the
-// previous value across test scopes; it must be used for any test
-// that touches this atomic to guarantee teardown ordering on test
-// failure.
-inline std::atomic<int> s_grp_matmul_n_tile_heavy_threshold_override{
-    std::numeric_limits<int>::min()};
+// NOTE: `s_grp_matmul_n_tile_heavy_threshold_override` moved to
+// `group_matmul_n_tile.hpp` (Section A.3) together with the rest of
+// the N-tile override atoms.  Include that header to access it.
 
-// Sentinel `INT_MIN` = no override; falls through to the cached env
-// path (which itself applies the documented default 0 = AUTO).
-//
-// Two-mode dispatch for the M-tile (ALGO 2) planner's light/heavy
-// load balancer.  See the doc-block on
-// `get_grp_matmul_m_tile_hybrid()` below for the gating heuristic
-// and rationale.
-//
-// Settable values:
-//   * INT_MIN — no override (env-cache path).  Production state.
-//   * -1      — DISABLED.  Forces the legacy single-tier M-tile
-//               planner (floor=1 per active expert + surplus to
-//               heaviest).
-//   *  0      — AUTO (default).  Enables the multi-tier dispatch
-//               when the per-call shape matches the skewed many-
-//               expert gating.
-//   * any other value → undefined; tests should only use the
-//               documented set.
-inline std::atomic<int> s_grp_matmul_m_tile_hybrid_override{
-    std::numeric_limits<int>::min()};
-
-// ── M-tile (ALGO 2) heuristic-constant overrides ─────────────────────
-//
-// These four sentinel-`-1` atomics back the env-tunable surface for
-// the M-tile planner's hard-coded constants.  They exist so the
-// planner's baked-in thresholds can be exercised and tuned in tests
-// without editing production defaults.  Each atomic shadows a getter
-// declared below the file's main test_api block, using the same
-// "non-negative override wins; cached env otherwise" pattern as
-// `s_grp_matmul_custom_kernel_n_tile_override`.
-//
-//   * `s_grp_matmul_m_tile_slice_target_override`         → kSliceTarget=16
-//   * `s_grp_matmul_m_tile_hybrid_min_max_m_override`     → kHybridMinMaxM=256
-//   * `s_grp_matmul_m_tile_hybrid_min_skew_override`      → kHybridMinSkewX=4
-//   * `s_grp_matmul_m_tile_hybrid_lights_per_thread_override` → kLightsPerThread=8
-//
-// Settable values are positive ints; any value < 1 (including the
-// sentinel `-1`) falls through to the cached env path.  RAII helpers
-// live in `gtests/group_matmul/moe_test_utils.hpp` so tests can flip
-// these mid-process without re-launching the process.
-inline std::atomic<int> s_grp_matmul_m_tile_slice_target_override{-1};
-inline std::atomic<int> s_grp_matmul_m_tile_hybrid_min_max_m_override{-1};
-inline std::atomic<int> s_grp_matmul_m_tile_hybrid_min_skew_override{-1};
-inline std::atomic<int> s_grp_matmul_m_tile_hybrid_lights_per_thread_override{-1};
+// NOTE: The M-tile (ALGO 2) override atoms — `s_grp_matmul_m_tile_*`
+// for hybrid / slice_target / hybrid_min_max_m / hybrid_min_skew /
+// hybrid_lights_per_thread / vertical_fusion / pipeline_scratch_kb
+// — used to live here.  They moved out to
+// `group_matmul_m_tile.hpp` (Section H.1) together with the M-tile
+// path-tag capture machinery and the matching `get_grp_matmul_m_tile_*`
+// getters, so all M-tile-specific knobs live next to the executor
+// declarations they configure.  Consumers (gtests, dispatcher, fused
+// MoE entry) include `group_matmul_m_tile.hpp` directly — mirror of
+// the `group_matmul_n_tile.hpp` pattern.
 
 // Sentinel `-1` = no override.  Settable values: 0 (per-expert
 // subtile sizing OFF — use one m_max-sized `subtile_cols` for every
@@ -576,45 +506,11 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override{-
 inline std::atomic<bool>         s_capture_gemm_mode{false};
 inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode{nullptr};
 
-// ── M-tile (ALGO 2) branch-tag capture hook ─────────────────────────────
-//
-// `flat_m_tile` dispatches between four internal branches based on
-// workload shape:
-//   round-based            (active_ops > num_threads)
-//   multi-tier hybrid      (skewed many-expert Qwen3-class gate)
-//   wide-N memory-bound    (total_need * 2 ≤ num_threads, max_M > 1)
-//   phase-2 single-tier    (default M-weighted fallthrough)
-//
-// Tests need to assert *which* branch fired on a given shape so the
-// gating heuristic can evolve without silently regressing the
-// out-of-the-box auto policy.  This is the same capture-gated atomic
-// pattern as `s_capture_gemm_mode` / `s_last_group_matmul_direct_*`
-// above: tests arm the flag via `MTilePathCaptureGuard` in
-// `moe_test_utils.hpp` and read the tag after the dispatcher call.
-//
-// CAPTURE GATE — `s_capture_m_tile_path` (atomic bool, default false):
-//   Production builds never arm this, so the store path inside each
-//   branch short-circuits on a single relaxed load of a cache-line-
-//   shared `false` value — no coherence traffic, branch-predictable.
-//   Without this gate, four unconditional stores on the hot M-tile
-//   path would invalidate the tag's cache line on every prompt /
-//   decode call, taxing concurrent dispatcher invocations across
-//   multi-rank serving deployments that have no use for the hook.
-//
-// Tag values are exported as named constants in
-// `test_api::m_tile_path_tag::*` below so the call sites in
-// `group_matmul_m_tile.cpp` stay readable and test expectations stay
-// type-safe (no magic numbers).
-inline std::atomic<bool> s_capture_m_tile_path{false};
-inline std::atomic<int>  s_last_m_tile_path{-1};
-
-namespace m_tile_path_tag {
-inline constexpr int kNone           = -1;  // sentinel — no tag this call
-inline constexpr int kRoundBased     = 0;   // active_ops > num_threads
-inline constexpr int kMultiTier      = 1;   // multi-tier hybrid engaged
-inline constexpr int kWideNFallback  = 2;   // wide-N memory-bound fallback
-inline constexpr int kPhase2Single   = 3;   // default M-weighted Phase 2
-}  // namespace m_tile_path_tag
+// NOTE: The M-tile (ALGO 2) branch-tag capture hook —
+// `s_capture_m_tile_path`, `s_last_m_tile_path`, and the
+// `m_tile_path_tag::*` named constants — moved out to
+// `group_matmul_m_tile.hpp` (Section H.2).  See the file header
+// there for the same capture-gate rationale that used to live here.
 }  // namespace test_api
 
 // Out-of-namespace accessors for the AUTO_*_ALGO override atomics.
@@ -651,133 +547,11 @@ inline int get_grp_n_rounds_mode() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2 } — cached, default 2 (rounds).
-//
-// Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
-// controls whether the planner's auto-mirror perf gate fires.
-// Three values with distinct semantics:
-//
-//     0 = auto (opt-in heuristic).  Honour the planner's auto-mirror
-//         gate (route to Sequential when `auto_select_algo` would
-//         have picked ALGO 1 for this shape — Mixtral-class with
-//         num_ops ≤ 8, or prompt-class with num_ops < num_threads).
-//         If the call survives auto-mirror, try DecodeD WITH its
-//         perf-eligibility heuristic (decode-class max_M ≤ 32,
-//         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
-//         max_N / decode_n_tile ≤ team_size_est); fall through to
-//         Rounds (FewExperts / ManyExperts) when the heuristic
-//         refuses.  Retained as an opt-in for shapes where DecodeD
-//         was empirically the better path; no longer the default
-//         because DecodeD never engaged on the production workloads
-//         (GPT-OSS-20B/120B, Qwen3-30B-A3B) — its eligibility gate
-//         consistently refused — so the auto branch reduced to
-//         "Rounds with extra precondition checks" in practice.
-//
-//     1 = decode (FORCE).  SKIP the auto-mirror gate AND skip the
-//         perf-eligibility heuristic — run DecodeD on every shape
-//         where it is STRUCTURALLY feasible (`num_threads >=
-//         num_ops`; smaller teams would over-subscribe DecodeD's
-//         OMP region and collide the `tid → expert` mapping).
-//         Useful for benchmarking DecodeD on shapes the heuristic
-//         would normally route away (e.g. Qwen-30B-A3B decode with
-//         active experts > num_ccds, where eligibility's `num_ops
-//         ≤ num_ccds` gate refuses but DecodeD's executor still
-//         runs correctly with thin per-expert teams of size
-//         `num_threads / num_ops`).  Logs an apilog L3 line
-//         describing the resulting allocation, OR a fallback line
-//         if num_threads < num_ops forces a Rounds fall-through.
-//
-//     2 = rounds (DEFAULT, FORCE).  SKIP the auto-mirror gate AND
-//         the viability perf heuristic (same as 1) — when the caller
-//         (or ALGO 0 auto-pick) routed to ALGO 3 we mean to run
-//         N-tile, not silently bounce back to Sequential on a perf
-//         preference.  Skip the DecodeD attempt entirely; always run
-//         the Rounds path (FewExperts / ManyExperts).  This is the
-//         production envelope: it gives deterministic ALGO 3 = "true
-//         N-tile with rounds" behaviour across all decode and prompt
-//         shapes that survive the structural gates, which is the
-//         path validated by every in-tree MoE benchmark and gtest.
-//
-// What survives `n_tile_strategy = {1, 2}` (genuinely STRUCTURAL —
-// memory safety / kernel correctness, not perf):
-//
-//   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
-//     = 256`).  Stack-array bound on the planner; demoting to
-//     Sequential is the only safe recourse.  Auto-select rule 0 also
-//     captures this upstream by routing to ALGO 5.
-//
-//   * F3 narrow-N escape — only reachable when the strict-stable
-//     AOCL path runs (`CUSTOM_KERNEL=0 && AOCL_STABLE_NTILE=1`).
-//     When `stable * nr_align > max_N`, `aligned_n_split` cannot
-//     produce stable aligned partitions and the AOCL kernel's
-//     nr-alignment contract would be violated.  Sequential bypasses
-//     tile-level keys entirely.  Not reachable under the production
-//     default `CUSTOM_KERNEL=1`.
-//
-//   * tight split-halves CK refusal — silu_and_mul / gelu_and_mul +
-//     tight caller (`ldc < N`) when the custom kernel refuses
-//     (typically silu/gelu + bias).  Handled post-plan in
-//     `flat_n_tile`; Sequential allocates the wide [M, N] scratch +
-//     `apply_gated_act_inplace` + tight memcpy that the tight
-//     swiglu-only fast path cannot.
-//
-// What is GATED behind `!force_ntile` (auto-mode-only perf
-// heuristics — honoured under env=0, ignored under env={1,2}):
-//
-//   * `auto_mirror` — replays auto-select's ALGO 1 preference.
-//     Lets `ALGO=3` behave like `ALGO=0` on shapes the auto-picker
-//     would have routed to ALGO 1, with a distinct gemm_mode label
-//     for telemetry.
-//
-//   * `!ntile_viable` — heuristic "N too thin for a useful per-
-//     thread split".  Under explicit env=1/2 the user accepts
-//     whatever cost a thin N gives them — we run N-tile and emit a
-//     `[GRP_MATMUL.PLAN.HINT]` line so the env-honoured-over-
-//     heuristic decision is visible in the L3 trail.
-//
-// See `plan_group_n_tile` in `group_matmul_n_tile.cpp` for the
-// authoritative precedence diagram and emission sites.
-//
-// Mid-process env changes have no effect (cached static const);
-// tests should use `s_grp_n_tile_strategy_override` via the RAII
-// helper `NTileStrategyOverride` in `gtests/group_matmul/
-// moe_test_utils.hpp` to flip it deterministically inside the same
-// process.  Existing tests that pin the planner to its heuristic
-// path use `NTileStrategyOverride(0)` and continue to work — only
-// the unset / invalid default changed.
-//
-// Validation paths differ slightly between the env and the override:
-//   * Env path  — invalid values (< 0 OR > 2) parse to 2 (rounds),
-//                 matching the "unset → safe default" convention used
-//                 by the other knobs in this header.  Note this
-//                 differs from the historical default of 0 (auto)
-//                 documented in older notes.
-//   * Override path — `-1` is the sentinel for "no override" and
-//                 falls through to the cached env path; any other
-//                 negative value also falls through (so a bogus
-//                 negative typo cannot accidentally pin a strategy).
-//                 Non-negative override values > 2 clamp to 2
-//                 (rounds), mirroring the env path on the upper end.
-inline int get_grp_n_tile_strategy() {
-  // Unset / invalid → 2 (rounds): production default; ALGO 3 always
-  // runs FewExperts / ManyExperts when the structural gates pass.
-  // See the doc-block above for the rationale and the precedence
-  // diagram in `plan_group_n_tile`.  Strict env parsing — non-
-  // numeric input (e.g. `"abc"`) falls back to the documented
-  // default 2, NOT silently to mode 0 via legacy atoi-returns-0
-  // behaviour.  See `parse_env_int_strict`.
-  constexpr int kDefault = 2;
-  const int ovr = test_api::s_grp_n_tile_strategy_override.load(
-      std::memory_order_relaxed);
-  if (ovr >= 0) return (ovr <= 2) ? ovr : kDefault;
-  static const int v = []() {
-    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 0 && parsed <= 2) ? parsed : kDefault;
-  }();
-  return v;
-}
+// NOTE: `get_grp_n_tile_strategy()` (ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY)
+// moved to `group_matmul_n_tile.hpp` (Section A.4) together with the
+// rest of the N-tile env getters.  Include that header to call it.
+// The full three-mode (auto / decode-force / rounds-force) doc-block
+// lives at the new home.
 
 // `kDecodeTileAbOn` documents the production decode-tile-AB
 // behaviour as an unconditional constant: when max_M ≤ kDecodeMaxM,
@@ -793,66 +567,9 @@ inline int get_grp_n_tile_strategy() {
 // getter when needed.
 inline constexpr bool kDecodeTileAbOn = true;
 
-// ZENDNNL_GRP_MATMUL_N_ORDER = { 0..4 } — cached, default 3 (pair-balanced).
-//   Permutation of experts walked by ALGO 3 FewExperts/ManyExperts.
-//     0 = auto: shape-aware picker (auto_pick_n_order); resolved
-//         sub-mode is logged in `[GRP_MATMUL.PLAN]` APILOG.
-//     1 = ascending  — by M, lightest first.  Was the previous
-//         default for AOCL DLP cache-key stability (n_thr_fixed
-//         schedule keeps thread-id → expert mapping shape-invariant
-//         when permutation is shape-invariant too).  That rationale
-//         no longer dominates: under `CK=1` (production default)
-//         the per-tile cache is shape-keyed in the CK pack arena,
-//         not thread-id-keyed, so the ordering is free to optimise
-//         purely for load balance.
-//     2 = descending — by M, heaviest first; minimises
-//                      Σ max_M_per_round under fixed-batch rounds.
-//                      Was historically suggested for multi-round
-//                      configurations, but a CK=1 + Qwen3-30B
-//                      `N_ROUNDS={1,2,3} × N_ORDER={1,2,3,4}` cross
-//                      (16 cells × 200 frames × 200 iters) confirmed
-//                      single-round + ORDER=3 dominates the entire
-//                      matrix; descending lost by 1.6% under
-//                      single-round and was never competitive under
-//                      multi-round either.
-//     3 = pair-balanced — desc, then interleave largest with smallest
-//         (heavy/light alternation).  CURRENT DEFAULT.  Single-round
-//         wall time is bounded by the slowest thread's per-expert
-//         duty cycle; pair-balanced flattens this duty cycle across
-//         the OMP team by alternating heavy/light experts so all
-//         threads finish around the same time.  Empirical: Qwen3-
-//         30B-A3B decode (CK=1, ALGO 3, 128 threads, sum_M=256,
-//         num_active ∈ [10, 114]) was 5.4% faster (10.6% higher
-//         GFLOPS) under ORDER=3 vs ORDER=1 across 6 trials at >35σ
-//         vs the Phase 0 noise floor (CoV = 0.14%).  Reproduce with
-//         the in-tree workload
-//         `benchdnn/input/grp_matmul/moe_fused/qwen3_30b_moe_decode_fused_no_postop.txt`
-//         under `ZENDNNL_GRP_MATMUL_N_ORDER={1,2,3,4}` × N_ROUNDS={1,2,3}.
-//         Caveat: long-tailed M can still be 2-bucket sum-imbalanced;
-//         use mode 4 for those.
-//     4 = balanced-spread — prefix-sum-balanced: any K-way consecutive
-//                           split yields Σ M per chunk ≈ total / K
-//                           (heavies evenly distributed throughout).
-//                           Same sweep showed it 4.0% faster than
-//                           ascending but 1.6% slower than mode 3
-//                           on Qwen3; available for shapes with
-//                           pathological long tails where mode 3's
-//                           2-bucket residual hurts.
-//   Mid-process env changes have no effect; relaunch for A/B.
-inline int get_grp_matmul_n_order() {
-  // Default: 3 (pair-balanced).  Strict env parsing — non-numeric
-  // input (e.g. `"abc"`) falls back to the documented default 3,
-  // NOT silently to mode 0 via the legacy `std::atoi`-returns-0
-  // behaviour.  See `parse_env_int_strict`.
-  constexpr int kDefault = 3;
-  static const int v = []() {
-    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ORDER");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 0 && parsed <= 4) ? parsed : kDefault;
-  }();
-  return v;
-}
+// NOTE: `get_grp_matmul_n_order()` (ZENDNNL_GRP_MATMUL_N_ORDER) moved
+// to `group_matmul_n_tile.hpp` (Section A.4) together with the rest
+// of the N-tile env getters.  Include that header to call it.
 
 // ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT = { "0", "1" } — cached, default 1.
 //   Fused MoE Op1 → act → Op2 arena layout: tight [M, I] when 1,
@@ -1173,264 +890,19 @@ inline int get_grp_matmul_aocl_blis_nc() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD = { -1, 0, positive int } —
-//   cached, default -1 (DISABLED).
-//
-// Three-mode dispatch for asymmetric per-expert thread distribution
-// inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
-// are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
-// the N_TILE heavy-threshold dispatch entirely and stay on Phase B
-// base+1 regardless of the env value.  See `apply_round_pick` Single
-// case for the rationale.
-//
-//   -1  DISABLED (default — current production behavior).  Phase B
-//       base+1 only: top few experts by M get one extra thread, all
-//       others get a uniform share via `n_thr_fixed`.  Same as the
-//       legacy behaviour when the env was unset.
-//
-//    0  AUTO  (prompt-only).  Planner-driven adaptive 3-tier policy.
-//       `apply_adaptive_tiers()` (group_matmul_n_tile.cpp) inspects
-//       the per-call M distribution, num_threads and num_active and
-//       builds a per-expert thread allocation with:
-//         - high   tier (M ≥ ~0.40 × M_max): target up to 8 threads
-//         - mid    tier (M ≥ ~0.20 × M_max): target up to 4 threads
-//         - low    tier (M ≥ ~0.10 × M_max): target up to 2 threads
-//         - baseline (everyone else):        1 thread
-//       Tier targets are scaled down uniformly when the
-//       `num_threads − num_active` extras-budget is tight, then
-//       water-filled by M-weight to consume any rounding leftover.
-//       Falls back silently to Phase B when the workload doesn't
-//       benefit (low skew, thread-starved, etc.).  Adapts to
-//       num_threads ∈ {64, 128, 256} automatically — no manual
-//       per-CPU tuning required.
-//
-//       Decode bypass: on `max_M ≤ kDecodeMaxM` the AUTO path
-//       returns immediately (defence-in-depth check at the top of
-//       `apply_adaptive_tiers()`) and the planner runs Phase B
-//       base+1 instead.  This means a unified-process E2E that
-//       sets `=0` once gets the prompt win and an unchanged
-//       decode plan; small per-expert M (decode regime) does not
-//       benefit from over-threading heavies and the env-knob sweep
-//       showed neutral-to-negative impact when AUTO ran on decode-
-//       like shapes.
-//
-//   >0  MANUAL single-threshold (legacy) — prompt-only.  Experts
-//       with `M[e] > value` are tagged HEAVY; each active light
-//       expert reserves exactly 1 thread; the remaining heavy-budget
-//       is water-filled across heavies by M, capped at
-//       `min(ccd_size, max_tiles, N[e] / ab_min_tile)`.
-//
-//       Validated empirical sweet spot on Qwen3-30B-A3B prompt
-//       (BS=32, i/p=128, max_M ≈ 3500): value = 1024.  Use AUTO (=0)
-//       for production once validated; this mode is retained for
-//       A/B testing, debugging, and explicit override when the AUTO
-//       heuristic's percentile breakpoints don't match a workload.
-//
-//       Same prompt-gate as AUTO: on `max_M ≤ kDecodeMaxM` MANUAL
-//       is skipped and the planner runs Phase B base+1.  Avoids
-//       the +30-40% decode regression observed on small thresholds
-//       like `=8` / `=16` (Qwen3 decode sweep, see
-//       `scripts/qwen_decode_tune.sh`).
-//
-// Invalid values (< -1, "abc", etc.) → silently treated as default
-// (-1 / DISABLED), matching the strict-parse convention of the
-// other ZENDNNL_GRP_MATMUL_* env vars.  Mid-process env changes have
-// no effect; relaunch for A/B.
-//
-// All three modes share the same executor consumer
-// (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
-// only difference is how the planner populates that array.
-inline int get_grp_matmul_n_tile_heavy_threshold() {
-  constexpr int kDefault = -1;  // DISABLED
-  // Test override sentinel: INT_MIN = no override.  Cannot use `-1`
-  // any more since `-1` is now a meaningful (DISABLED) value.
-  // Production keeps the static-const env-cache for branch-
-  // predictor-friendly reads.
-  const int ovr = test_api::s_grp_matmul_n_tile_heavy_threshold_override
-      .load(std::memory_order_relaxed);
-  if (ovr != std::numeric_limits<int>::min()) return ovr;
-  static const int v = []() {
-    const char *e =
-        std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    // Accept -1 (DISABLED), 0 (AUTO), positive int (MANUAL).  Reject
-    // anything more negative — silently clamp to default.
-    return (parsed >= -1) ? parsed : kDefault;
-  }();
-  return v;
-}
+// NOTE: `get_grp_matmul_n_tile_heavy_threshold()`
+// (ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD) moved to
+// `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
+// the N-tile env getters.  Include that header to call it.  The
+// three-mode (DISABLED / AUTO / MANUAL) doc-block lives at the new
+// home.
 
-// ZENDNNL_GRP_MATMUL_M_TILE_HYBRID = {-1, 0} — cached, default 0 (AUTO).
-//
-// Two-mode toggle for the M-tile (ALGO 2) planner's multi-tier
-// load balancer.  Targets the skewed many-expert prompt regime
-// (Qwen3-30B-A3B class: 113-128 active experts on 128t with
-// `max_M/avg_M ≈ 14×`) where the legacy single-tier planner's
-// `floor=1 per active expert` rule consumes most of the thread
-// budget on tiny experts and leaves only ~2 threads for the
-// giant expert that dominates the OMP-barrier wait.
-//
-//   -1  DISABLED.  Legacy single-tier behavior: every active
-//       expert gets at least 1 thread, surplus distributed to
-//       experts with the heaviest per-thread slice.  Works well
-//       on few-expert MoE (Mixtral 8-expert, GPT-OSS 32-expert at
-//       low routing density) where `floor=1 × num_active ≪
-//       num_threads`.  Retained for A/B testing and safe
-//       fallback.
-//
-//    0  AUTO (default).  Engages an M-weighted two-tier dispatch
-//       when ALL of the following hold:
-//         * `num_active >= num_threads / 2`  (many-expert)
-//         * `max_M >= kHybridMinMaxM (=256)` (skip decode-class)
-//         * `max_M >= kHybridMinSkewX (=4) × avg_M` (skewed)
-//         * `num_light >= num_threads / 8`  (enough light to
-//                                            free meaningful
-//                                            heavy-pool budget)
-//       where `light_cut = max(8, avg_M / 4)` and `num_light`
-//       is the count of active experts with `M[e] <= light_cut`.
-//       Light experts share a small dedicated thread team
-//       (`light_pool = min(cores_per_ccd, ceil(num_light / 8))`)
-//       via round-robin (each thread runs full-M, team=1 on a
-//       stride of the light list); the remaining
-//       `num_threads − light_pool` threads run the standard
-//       M-weighted proportional-scale + decrement Phase-2 logic
-//       over heavy experts only.  Falls back silently to
-//       single-tier when the call doesn't match the gating
-//       (Mixtral 8 actives, decode shapes, low-skew, etc.).
-//
-// Invalid values (< -1, "abc", etc.) → silently treated as default
-// (0 / AUTO), matching the strict-parse convention of the other
-// ZENDNNL_GRP_MATMUL_* env vars.
-//
-// The test-override atomic
-// `test_api::s_grp_matmul_m_tile_hybrid_override` is the canonical
-// way to flip this mid-process from gtests; the static-const
-// env-cache is a one-shot read taken at first call to keep the
-// production hot path branch-predictor-friendly.
-inline int get_grp_matmul_m_tile_hybrid() {
-  constexpr int kDefault = 0;  // AUTO
-  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_override
-      .load(std::memory_order_relaxed);
-  if (ovr != std::numeric_limits<int>::min()) return ovr;
-  static const int v = []() {
-    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    // Accept only -1 (DISABLED) or 0 (AUTO).  Reject anything else
-    // and fall back to default.
-    return (parsed == -1 || parsed == 0) ? parsed : kDefault;
-  }();
-  return v;
-}
-
-// ── M-tile heuristic-constant tuning knobs (F8 from the ALGO 2 review) ──
-//
-// These four getters expose the previously-hard-coded heuristic
-// constants in `group_matmul_m_tile.cpp` so production deployments
-// can A/B them on new MoE workload shapes without source edits.
-// All four use the standard cached-static-const + atomic-override
-// pattern; every call does one relaxed atomic load + branch to
-// check the test override, then returns either the override or
-// the cached static-const env value.  The env `getenv` / parse
-// happens only once on first use; every subsequent call is the
-// atomic-load + branch + cached-const read (a few nanoseconds on
-// x86_64, comfortably below noise in the planner's hot path).
-// Invalid env values (non-numeric, ≤ 0) fall back to the
-// documented default.
-//
-// Production behaviour is unchanged: every default matches the
-// original literal constant.  These knobs are tuning hatches, not
-// behavioural changes.
-//
-//   * `ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET` (default 16)
-//     Minimum rows per M-tile thread.  Raising the value gives
-//     each thread more work (better arith / memory amortisation,
-//     fewer threads engaged); lowering it spreads work thinner
-//     (better balance on shallow-M shapes).  The original
-//     `kSliceTarget = 16` matches AOCL DLP's row-block-quantum.
-//
-//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_MAX_M` (default 256)
-//     Multi-tier engagement gate: `max_M ≥ this` is required for
-//     the multi-tier hybrid to fire.  Lowering it engages
-//     multi-tier on shallower workloads; raising it restricts
-//     multi-tier to heavier shapes only.  Set very high to
-//     effectively disable multi-tier without setting
-//     `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=-1` (which also kills the
-//     code path entirely; this knob just makes the gate harder
-//     to pass).
-//
-//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_SKEW` (default 4)
-//     Multi-tier engagement gate: `max_M ≥ skew × avg_M`.  Lower
-//     values let multi-tier engage on less-skewed workloads
-//     (closer to uniform-M); higher values restrict multi-tier
-//     to extremely skewed shapes only.
-//
-//   * `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD` (default 8)
-//     Light-pool packing density: `light_pool = min(cores_per_ccd,
-//     ceil(n_light / this))`.  Higher values pack more lights per
-//     light-pool thread (smaller light pool, larger heavy pool);
-//     lower values give the light pool more threads.
-inline int get_grp_matmul_m_tile_slice_target() {
-  constexpr int kDefault = 16;
-  const int ovr = test_api::s_grp_matmul_m_tile_slice_target_override
-      .load(std::memory_order_relaxed);
-  if (ovr >= 1) return ovr;
-  static const int v = []() {
-    const char *e =
-        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 1) ? parsed : kDefault;
-  }();
-  return v;
-}
-
-inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
-  constexpr int kDefault = 256;
-  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_max_m_override
-      .load(std::memory_order_relaxed);
-  if (ovr >= 1) return ovr;
-  static const int v = []() {
-    const char *e =
-        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_MAX_M");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 1) ? parsed : kDefault;
-  }();
-  return v;
-}
-
-inline int get_grp_matmul_m_tile_hybrid_min_skew() {
-  constexpr int kDefault = 4;
-  const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_skew_override
-      .load(std::memory_order_relaxed);
-  if (ovr >= 1) return ovr;
-  static const int v = []() {
-    const char *e =
-        std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_SKEW");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 1) ? parsed : kDefault;
-  }();
-  return v;
-}
-
-inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
-  constexpr int kDefault = 8;
-  const int ovr =
-      test_api::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
-          .load(std::memory_order_relaxed);
-  if (ovr >= 1) return ovr;
-  static const int v = []() {
-    const char *e = std::getenv(
-        "ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 1) ? parsed : kDefault;
-  }();
-  return v;
-}
+// NOTE: All `get_grp_matmul_m_tile_*` getters (hybrid /
+// slice_target / hybrid_min_max_m / hybrid_min_skew /
+// hybrid_lights_per_thread / vertical_fusion / pipeline_scratch_kb)
+// moved to `group_matmul_m_tile.hpp` (Section H.3) together with
+// the override atoms they read.  Include that header to pull them
+// in.
 
 // Per-expert thread count for the AOCL DLP / BRGEMM / oneDNN execute
 // path inside ALGO 3 flat_n_tile.  See the strict-stable doc-block
@@ -1509,42 +981,10 @@ inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE = { unset, multiple of 32 } — cached.
-//   Override the ALGO 3 outer N-tile minimum (default kDecodeNTile=256).
-//   Use 128 for high threads/num_ops (more thread participation), 512
-//   for prompt-class (wider tiles amortise kernel-call overhead).
-//   Non-multiples of 32 → ignored (silently safe vs typos).
-inline int get_grp_matmul_custom_kernel_n_tile() {
-  const int ovr =
-      test_api::s_grp_matmul_custom_kernel_n_tile_override.load(
-          std::memory_order_relaxed);
-  // Override semantics:
-  //   * `-1`  — sentinel, no test override; fall through to the
-  //             cached env / default path below.
-  //   * `0`   — explicit "no custom N-tile" override; the planner
-  //             reads 0 here and `effective_decode_n_tile()` falls
-  //             back to `kDecodeNTile` — same as an unset env.
-  //   * `> 0` AND multiple of 32 — adopted as the override value.
-  //   * any other positive value — treated as "no override" (mirrors
-  //             the `parsed > 0 && parsed % 32 == 0` validation the
-  //             env-cached path applies below; keeps the test API
-  //             noise-free against typos).
-  //
-  // The `ovr >= 0` branch covers all three "test has spoken" cases
-  // (0 and any positive value, valid or not); only `-1` falls
-  // through to the env path.
-  if (ovr >= 0) return (ovr > 0 && (ovr % 32) == 0) ? ovr : 0;
-  // Strict env parsing — non-numeric input falls back to 0
-  // (auto-pick the planner's `effective_decode_n_tile()`).
-  static const int v = []() {
-    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE");
-    int parsed = 0;
-    if (!parse_env_int_strict(e, parsed)) return 0;
-    return (parsed > 0 && (parsed % 32) == 0) ? parsed : 0;
-  }
-  ();
-  return v;
-}
+// NOTE: `get_grp_matmul_custom_kernel_n_tile()`
+// (ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE) moved to
+// `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
+// the N-tile env getters.  Include that header to call it.
 
 /// N alignment the inner kernel prefers for each per-thread slice
 /// (1 = no alignment).  ALGO 3's column partitioner (aligned_n_split)
@@ -1685,263 +1125,30 @@ inline void execute_expert_slice(
                  num_thr, kernel, params, bp, 0);
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// N-tile shared utilities (consumed by group_matmul_n_tile.cpp; kept
-// shared so a future additional N-tile executor can pick them up).
-// ──────────────────────────────────────────────────────────────────────
-
-/// Sort `indices[0..n)` by `M[idx]` (asc or desc).  Heap-free; caller
-/// owns the buffer and guarantees `indices.size() >= n` and `M.size() >= n`.
-inline void sort_indices_by_m(int *indices, int n,
-                              const std::vector<int> &M, bool ascending) {
-  for (int i = 0; i < n; ++i) {
-    indices[i] = i;
-  }
-  std::sort(indices, indices + n, [&M, ascending](int a, int b) {
-    return ascending ? (M[a] < M[b]) : (M[a] > M[b]);
-  });
-}
-
-/// Env-gated BF16 custom-microkernel engagement for an N-tile executor.
-/// Caller stack-allocates a fresh `CallContext` and reads `kctx.enabled`
-/// on return.  Default OFF (env=1 to opt in).  Even with env=1, the
-/// dispatcher's contract check (bf16, no transA, α=1, β=0, N % pack_nr,
-/// supported act/bias dtypes, is_weights_const = true / empty for every
-/// active expert) decides whether the path can actually run; caller
-/// falls back to its standard path when kctx.enabled=false.
-/// Supported `act`: none, swiglu_oai_mul (fused gate+up → halved out).
-inline void engage_ntile_custom_kernel(
-    grp_matmul_gated_act_t act,
-    data_type_t src_dtype,
-    data_type_t wei_dtype,
-    data_type_t dst_dtype,
-    data_type_t act_dtype,
-    data_type_t bias_dtype,
-    const std::vector<bool>          &transA,
-    const std::vector<bool>          &transB,
-    const std::vector<int>           &M,
-    const std::vector<int>           &N,
-    const std::vector<int>           &K,
-    const std::vector<int>           &ldb,
-    const std::vector<float>         &alpha,
-    const std::vector<float>         &beta,
-    const std::vector<const void *>  &weight,
-    const std::vector<bool>          &is_weights_const,
-    custom_kernel::CallContext       &kctx) {
-  if (!get_grp_matmul_custom_kernel()) return;
-  custom_kernel::prepare_for_call(
-      act, src_dtype, wei_dtype, dst_dtype, act_dtype, bias_dtype,
-      transA, transB, M, N, K, ldb, alpha, beta, weight,
-      is_weights_const, kctx);
-}
-
-/// Effective N-column alignment for the per-thread split:
-///   max(backend_nr, kctx.pack_nr if enabled, 2 if pair_aligned).
-/// `backend_nr` from backend_n_align(algo); `pair_aligned`=true when
-/// activation requires even col boundaries (e.g. swiglu_oai_mul must
-/// keep gate+up pairs on the same thread).
-inline int ntile_effective_nr_align(
-  int backend_nr,
-  const custom_kernel::CallContext &kctx,
-  bool pair_aligned) {
-  int a = backend_nr;
-  if (kctx.enabled) {
-    a = std::max(a, kctx.pack_nr);
-  }
-  if (pair_aligned) {
-    a = std::max(a, 2);
-  }
-  return a;
-}
-
-// `kNTileMaxExperts` previously duplicated `kNTilePlanMaxExperts` as
-// a separate `= 256` constant for the expert-ordering helpers below.
-// Removed to keep `kNTilePlanMaxExperts` (defined at the top of this
-// header) as the SINGLE source of truth for the N-tile expert
-// capacity.  Callers below now reference `kNTilePlanMaxExperts`
-// directly so a future bump cannot leave the order helpers out of
-// sync with the auto-selector and the planner's stack-array sizing.
-
-/// Auto-pick N_ORDER from num_ops.  Returns 3 (pair_balanced) or 0
-/// (walk input order); explicit modes 1/2/4 only reachable via env.
-///
-/// Rule was derived from an internal MoE-decode sweep across a wide
-/// num_ops × shape × mode grid.  Pair-balanced ordering improves
-/// throughput at the low- and high-num_ops ends of the range:
-///   * Few-experts (≤ ~kSmallExpertsCutoff): the bin-packing benefit
-///     of pair-balanced outweighs the walk-input alternative.
-///   * Many-experts (≥ ~kLargeExpertsCutoff): pair-balanced is again
-///     dominant and the alternative shows essentially no wins.
-///   * Mid-band: the two strategies trade wins/losses, so we default
-///     to walk-input (lower overhead and zero permutation cost).
-/// The cutoffs are calibrated against the dispatcher's stable-N-tile
-/// plan and should be re-evaluated together if that planner changes.
-inline int auto_pick_n_order(int num_ops) {
-  if (num_ops <= 18) {
-    return 3;  // few-experts regime — pair-balanced is the better default
-  }
-  if (num_ops >= 26) {
-    return 3;  // many-experts regime — pair-balanced is the better default
-  }
-  return 0;    // mid-band — walk input order
-}
-
-/// Write `out[0..out_size)` with expert indices ordered per
-/// `get_grp_matmul_n_order()`.  `out_size = 0` signals "walk input
-/// order, ignore out" (auto-mode resolved to no permutation).
-///
-/// Heap-free: stack array of kNTilePlanMaxExperts for the desc-sort
-/// temp; beyond that the ordering is skipped (correct, just unsorted).
-/// Mode 4 is O(num_ops²) ≤ 64K comparisons — well under 10 µs.
-///
-/// `auto_resolved_out` (optional): when env mode = 0, the resolved
-/// concrete sub-mode is written here for APILOG diagnostics.
-inline void fill_ntile_expert_order(
-  int *out, int &out_size, int max_size,
-  const std::vector<int> &M, int num_ops,
-  int *auto_resolved_out = nullptr) {
-
-  if (num_ops <= 0 || num_ops > max_size
-      || num_ops > kNTilePlanMaxExperts) {
-    out_size = 0;
-    return;
-  }
-
-  int order = get_grp_matmul_n_order();
-
-  // Mode 0 — auto: shape-aware sub-mode selection.
-  if (order == 0) {
-    order = auto_pick_n_order(num_ops);
-    if (auto_resolved_out != nullptr) {
-      *auto_resolved_out = order;
-    }
-    if (order == 0) {
-      // Auto chose walk-input; leave out empty.
-      out_size = 0;
-      return;
-    }
-  }
-
-  // Modes 1 (ascending) and 2 (descending) are direct sorts.
-  if (order == 1 || order == 2) {
-    const bool ascending = (order == 1);
-    sort_indices_by_m(out, num_ops, M, ascending);
-    out_size = num_ops;
-    return;
-  }
-
-  // Mode 3 — pair-balanced: descending sort, then interleave
-  // (largest, smallest, 2nd-largest, 2nd-smallest, …) so each round
-  // sees a mix of heavy and light experts.
-  if (order == 3) {
-    std::array<int, kNTilePlanMaxExperts> sorted_desc{};
-    sort_indices_by_m(sorted_desc.data(), num_ops, M,
-                      /*ascending=*/false);
-    int lo = 0, hi = num_ops - 1, o = 0;
-    while (lo <= hi) {
-      out[o++] = sorted_desc[lo++];
-      if (lo <= hi) {
-        out[o++] = sorted_desc[hi--];
-      }
-    }
-    out_size = num_ops;
-    return;
-  }
-
-  // Mode 4 — balanced-spread: at each output position p, pick the
-  // remaining (sorted-desc) item whose M brings the running prefix
-  // sum closest to the ideal line `y = (p + 1) * total / num_ops`.
-  //
-  // Result: for any K, splitting the output into K equal-length
-  // consecutive chunks yields Σ M per chunk ≈ total / K.  Heavy
-  // experts land at positions ≈ i × num_ops / num_heavies, so the
-  // round scheduler sees at most ONE heavy expert per CCX slot for
-  // typical (batch_size, ccd_size) choices.
-  {
-    std::array<int, kNTilePlanMaxExperts> sorted_desc{};
-    sort_indices_by_m(sorted_desc.data(), num_ops, M,
-                      /*ascending=*/false);
-
-    int64_t total = 0;
-    for (int i = 0; i < num_ops; ++i) {
-      total += M[i];
-    }
-
-    std::array<bool, kNTilePlanMaxExperts> used{};  // zero-init
-    int64_t cum = 0;
-    for (int p = 0; p < num_ops; ++p) {
-      // Error metric: |target_scaled − num_ops × new_cum| where
-      // target_scaled = (p + 1) × total.  Integer-only; scales
-      // cancel out across candidates.
-      const int64_t target_scaled =
-        static_cast<int64_t>(p + 1) * total;
-      int best_j = -1;
-      int64_t best_err = std::numeric_limits<int64_t>::max();
-      for (int j = 0; j < num_ops; ++j) {
-        if (used[j]) {
-          continue;
-        }
-        const int64_t new_cum = cum + M[sorted_desc[j]];
-        const int64_t err = std::llabs(
-                              target_scaled - static_cast<int64_t>(num_ops) * new_cum);
-        if (err < best_err) {
-          best_err = err;
-          best_j = j;
-        }
-      }
-      used[best_j] = true;
-      out[p] = sorted_desc[best_j];
-      cum += M[sorted_desc[best_j]];
-    }
-    out_size = num_ops;
-    return;
-  }
-}
+// NOTE: The N-tile shared utilities — `sort_indices_by_m`,
+// `engage_ntile_custom_kernel`, `ntile_effective_nr_align`,
+// `auto_pick_n_order`, `fill_ntile_expert_order` — moved to
+// `group_matmul_n_tile.hpp` (Section A.5) so they live alongside
+// the N-tile env knobs they read.  Include that header to call
+// them — currently only `group_matmul_n_tile.cpp` does.
 
 // ──────────────────────────────────────────────────────────────────────
 // Tile-strategy entry points — library-internal linkage; the
-// dispatcher in group_matmul_parallel.cpp forwards to these.
+// dispatcher in group_matmul_dispatch.cpp forwards to these.
 // ──────────────────────────────────────────────────────────────────────
 
-/// ALGO 2 — M-tile parallel GEMM.  Defined in group_matmul_m_tile.cpp.
-void flat_m_tile(
-  const std::vector<char> &layout,
-  const std::vector<bool> &transA, const std::vector<bool> &transB,
-  const std::vector<int> &M, const std::vector<int> &N,
-  const std::vector<int> &K, const std::vector<float> &alpha,
-  const std::vector<const void *> &src, const std::vector<int> &lda,
-  const std::vector<const void *> &weight, const std::vector<int> &ldb,
-  const std::vector<const void *> &bias, const std::vector<float> &beta,
-  const std::vector<void *> &dst, const std::vector<int> &ldc,
-  grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
-  const std::vector<bool> &is_weights_const,
-  std::vector<matmul_params> &params,
-  int num_threads);
+// NOTE: The M-tile executor forward declarations (`flat_m_tile`
+// and `flat_m_tile_pipeline_bf16`) moved to
+// `group_matmul_m_tile.hpp` (Section H.4).  Include that header to
+// call them — the dispatcher in `group_matmul_dispatch.cpp` and
+// the vertical-fusion entry in `group_matmul_fused_moe.cpp` both
+// do this.
 
-/// ALGO 3 — N-tile parallel GEMM, with optional fused-swiglu-oai
-/// epilogue.  Defined in group_matmul_n_tile.cpp.
-///
-/// `gemm_mode_out` (optional) receives a static string naming the
-/// concrete path that ran: `"flat_n_tile"`, `"flat_n_tile_custom"`,
-/// `"flat_n_tile_fused_swiglu_oai"`, or `"flat_n_tile_fused_swiglu_oai_custom"`.
-/// The caller is expected to thread this through to its own
-/// gemm_mode_out so benchdnn / profiler output reveals whether the
-/// custom BF16 microkernel engaged.
-void flat_n_tile(
-  const std::vector<char> &layout,
-  const std::vector<bool> &transA, const std::vector<bool> &transB,
-  const std::vector<int> &M, const std::vector<int> &N,
-  const std::vector<int> &K, const std::vector<float> &alpha,
-  const std::vector<const void *> &src, const std::vector<int> &lda,
-  const std::vector<const void *> &weight, const std::vector<int> &ldb,
-  const std::vector<const void *> &bias, const std::vector<float> &beta,
-  const std::vector<void *> &dst, const std::vector<int> &ldc,
-  const std::vector<bool> &is_weights_const,
-  std::vector<matmul_params> &params,
-  int num_threads,
-  grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
-  data_type_t act_dtype = data_type_t::none,
-  const char **gemm_mode_out = nullptr);
+// NOTE: The N-tile executor forward declaration (`flat_n_tile`)
+// moved to `group_matmul_n_tile.hpp` (Section A.5) together with the
+// rest of the N-tile public surface.  Include that header to call
+// it — the dispatcher in `group_matmul_dispatch.cpp` and the
+// fused-MoE legacy path in `group_matmul_fused_moe.cpp` both do this.
 
 /// Peek at the ALGO the dispatcher would pick for this call (1=seq,
 /// 2=m_tile, 3=n_tile, 4=multilevel, 5=per_expert).  Mirrors the

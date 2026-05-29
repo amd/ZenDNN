@@ -65,10 +65,10 @@
 
 #include <omp.h>
 
-#include "group_matmul_parallel_common.hpp"
-#include "group_matmul_n_tile.hpp"
-#include "custom_kernel/dispatch.hpp"
-#include "prepack/prepack.hpp"
+#include "../group_matmul_parallel_common.hpp"
+#include "group_matmul_n_tile.hpp"            // (re-includes planner header)
+#include "../custom_kernel/dispatch.hpp"
+#include "../prepack/prepack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -616,7 +616,7 @@ inline void GroupNTileContext::apply_swiglu_oai(const GroupNTilePlan &plan,
   if (local_tid >= n_thr) return;
 
   // swiglu_oai requires even N (gate+up = 2 * intermediate_dim).
-  // The dispatcher in group_matmul_parallel.cpp enforces this for
+  // The dispatcher in group_matmul_dispatch.cpp enforces this for
   // the fused path; assert defensively to catch any future caller
   // that bypasses the dispatcher (otherwise we'd silently leave the
   // odd trailing column un-compacted in the activation output).
@@ -770,7 +770,7 @@ inline int effective_decode_n_tile() {
 
 // ── Auto-select mirror ───────────────────────────────────────────────
 // Returns true when ALGO 0's auto-selector (`auto_select_algo` in
-// `group_matmul_parallel.cpp`) would have picked ALGO 1
+// `group_matmul_dispatch.cpp`) would have picked ALGO 1
 // (sequential_experts) for this shape rather than ALGO 3.  The
 // planner uses this to route to `execute_sequential` so that calls
 // pinned with `ZENDNNL_GRP_MATMUL_ALGO=3` behave identically to
@@ -1730,7 +1730,7 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 //      regardless of the strategy knob.
 //
 //   2. AUTO-MIRROR — `auto_select_algo` (the env=0 selector in
-//      `group_matmul_parallel.cpp`) would have picked ALGO 1 for
+//      `group_matmul_dispatch.cpp`) would have picked ALGO 1 for
 //      this shape rather than ALGO 3.  We mirror that decision so
 //      forced `ZENDNNL_GRP_MATMUL_ALGO=3` runs the same strategy
 //      auto-pick would have.  ONLY consulted under
@@ -1827,7 +1827,7 @@ inline GroupNTilePlan plan_group_n_tile(
   //     FIRES REGARDLESS OF `n_tile_strategy`.
   //
   //   * AUTO-MIRROR — PERF (auto mode only).  The auto-selector
-  //     (`auto_select_algo` in `group_matmul_parallel.cpp`) would
+  //     (`auto_select_algo` in `group_matmul_dispatch.cpp`) would
   //     have picked ALGO 1 for this shape if env were 0.  We mirror
   //     that decision so forced `ZENDNNL_GRP_MATMUL_ALGO=3` runs
   //     the same strategy auto-pick would have, with the gemm_mode

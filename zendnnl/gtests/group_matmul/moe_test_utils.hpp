@@ -57,7 +57,8 @@
 #include "common/bfloat16.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
-#include "lowoha_operators/matmul/group_matmul/group_matmul_n_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/m_tile/group_matmul_m_tile.hpp"
+#include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
@@ -810,6 +811,72 @@ struct MTileHybridLightsPerThreadOverride {
       MTileHybridLightsPerThreadOverride &&) = delete;
   MTileHybridLightsPerThreadOverride &operator=(
       MTileHybridLightsPerThreadOverride &&) = delete;
+};
+
+// RAII guard for the vertical-fusion dispatch knob (the test-only
+// path over `ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION`).  Same save
+// / restore pattern as `MTileHybridOverride` above.
+//
+// Accepted values match
+// `test_api::s_grp_matmul_m_tile_vertical_fusion_override`:
+//
+//   * std::numeric_limits<int>::min() — no override (env-cache).
+//   * -1 — DISABLED (force legacy two-pass).
+//   *  0 — AUTO (engage when eligibility gate passes).
+//   *  1 — FORCED (engage even when AUTO would skip).
+//
+// Any other value is undefined; tests should only use the
+// documented set.  `prev` is the previously-stored sentinel so a
+// nested guard restores its caller's state correctly.
+struct MoEVerticalFusionOverride {
+  int prev;
+  explicit MoEVerticalFusionOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_vertical_fusion_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~MoEVerticalFusionOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_vertical_fusion_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  MoEVerticalFusionOverride(const MoEVerticalFusionOverride &) = delete;
+  MoEVerticalFusionOverride &operator=(
+      const MoEVerticalFusionOverride &) = delete;
+  MoEVerticalFusionOverride(MoEVerticalFusionOverride &&) = delete;
+  MoEVerticalFusionOverride &operator=(MoEVerticalFusionOverride &&) = delete;
+};
+
+// RAII guard for the vertical-fusion per-thread scratch budget knob
+// (the test-only path over
+// `ZENDNNL_GRP_MATMUL_M_TILE_PIPELINE_SCRATCH_KB`).  Accepted values:
+//   * any positive int (in KB) — explicit budget;
+//   * -1 (`kMTilePipelineScratchKbUnbounded`) — UNBOUNDED budget, the
+//     scratch gate is disabled so vertical fusion always engages.
+// Any other value (0, < -1) is treated by the getter as invalid and
+// falls through to the cached default.  The guard restores the prior
+// override value on destruction; the getter's "no override" sentinel
+// is `std::numeric_limits<int>::min()`, so passing -1 now selects the
+// UNBOUNDED budget rather than clearing the override.
+struct MoEPipelineScratchKbOverride {
+  int prev;
+  explicit MoEPipelineScratchKbOverride(int value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.exchange(
+            value, std::memory_order_relaxed);
+  }
+  ~MoEPipelineScratchKbOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  MoEPipelineScratchKbOverride(
+      const MoEPipelineScratchKbOverride &) = delete;
+  MoEPipelineScratchKbOverride &operator=(
+      const MoEPipelineScratchKbOverride &) = delete;
+  MoEPipelineScratchKbOverride(MoEPipelineScratchKbOverride &&) = delete;
+  MoEPipelineScratchKbOverride &operator=(
+      MoEPipelineScratchKbOverride &&) = delete;
 };
 
 // RAII guard for the per-expert subtile_cols knob (the test-only

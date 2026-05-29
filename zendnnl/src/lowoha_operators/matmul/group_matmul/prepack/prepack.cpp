@@ -725,7 +725,7 @@ inline bool ck_eligible(const PrepackParams &p) {
   // All three vectors are optional (nullptr / empty = legacy caller
   // didn't supply runtime context; skip the gate — pre-PR
   // behaviour).  Production call sites in `group_matmul_n_tile.cpp`
-  // and `group_matmul_parallel.cpp` pass them explicitly.  Scope is
+  // and `group_matmul_dispatch.cpp` pass them explicitly.  Scope is
   // active experts only `[0, num_ops_active)` — under both Compact
   // (`M.size() == active_matmul`) and Padded (`M.size() ==
   // total_matmul` with `M[active..] = 0`) layouts, indices in this

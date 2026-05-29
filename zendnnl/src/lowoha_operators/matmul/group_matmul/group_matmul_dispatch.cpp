@@ -14,18 +14,37 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Parallel dispatch for group_matmul.
+/// Top-level dispatch entry-point for `group_matmul_direct`.
 ///
-/// Contains:
-///   - ALGO 1  (sequential_experts)
-///   - ALGO 4  (parallel_multilevel)
-///   - ALGO 5  (parallel_per_expert)
-///   - ALGO 0  auto-select (select_grp_matmul_algo)
-///   - group_matmul_run_parallel_dispatch  (the entry point)
+/// This translation unit owns the ALGO selection and routing logic and
+/// the ALGO implementations that are NOT large enough to warrant their
+/// own translation unit:
 ///
-/// ALGO 2 (M-tile) and ALGO 3 (N-tile) live in their own translation
-/// units (group_matmul_m_tile.cpp, group_matmul_n_tile.cpp) and are
-/// called through forward declarations in group_matmul_parallel_common.hpp.
+///   * ALGO 1  (`sequential_experts`)     — serial over experts.
+///                                          Kept here despite the file
+///                                          name "dispatch" because it
+///                                          is the universal safety
+///                                          fallback every other ALGO
+///                                          may route to under safety
+///                                          clamps.
+///   * ALGO 4  (`parallel_multilevel`)    — CCD-aware adaptive
+///                                          scheduling.
+///   * ALGO 5  (`parallel_per_expert`)    — per-expert parallel.
+///   * ALGO 0  auto-select (`auto_select_algo`) + safety clamps.
+///   * `group_matmul_run_parallel_dispatch`  — the dispatcher entry
+///                                             point itself.
+///
+/// ALGO 2 (M-tile, `flat_m_tile` + `flat_m_tile_pipeline_bf16`) and
+/// ALGO 3 (N-tile, `flat_n_tile`) live in their own folder-scoped
+/// translation units (`m_tile/group_matmul_m_tile.cpp`,
+/// `n_tile/group_matmul_n_tile.cpp`) and are called through forward
+/// declarations re-included by `m_tile/group_matmul_m_tile.hpp` and
+/// `n_tile/group_matmul_n_tile.hpp`.
+///
+/// Historical note: this file was named `group_matmul_parallel.cpp`
+/// until the PR follow-up that renamed it to `group_matmul_dispatch.cpp`
+/// (the prior name advertised "parallel" but the file's actual job is
+/// dispatch + the small serial ALGOs).
 
 #include <algorithm>
 #include <climits>
@@ -33,6 +52,8 @@
 
 #include <omp.h>
 
+#include "m_tile/group_matmul_m_tile.hpp"  // flat_m_tile + M-tile env knobs
+#include "n_tile/group_matmul_n_tile.hpp"  // flat_n_tile + N-tile env knobs
 #include "group_matmul_parallel_common.hpp"
 #include "prepack/prepack.hpp"
 
@@ -281,106 +302,14 @@ void parallel_per_expert(
   }
 }
 
-// M-tile (ALGO 2) slices rows; N-indexed metadata passes through.
-// M-indexed metadata (src_scale/zp {M,1} or {M,G}; 2D binary post-ops)
-// is per-slice mutated in execute_m_tile (buff advance + dims[0]
-// rewrite to slice_M).  Dynamic-quant additionally requires the
-// source quant granularity to be row-local (M-indexed): the first
-// dim of src_scale/zp must equal the per-expert `M[i]`, i.e.
-// `{M[i], 1}` per-token or `{M[i], G}` per-group on K.  Per-tensor
-// / per-column / per-channel src layouts (`{}`, `{1}`, `{1, K}`,
-// `{1, N}`, etc.) are rejected because the per-thread reorder
-// would race on the shared scale/zp buffer and produce slice-local
-// statistics instead of the full-matrix statistics those
-// granularities semantically require.  The single-row decode case
-// (`M[i] == 1` with dims `{1, 1}`) is accepted — only one thread
-// reorders that expert's one row, so there is no race and the
-// single scale equals the full-matrix statistic trivially.  Still
-// blocked: packed B (skipped GGML unpack), non-row-major layout,
-// and per-expert dtype mismatches.
-static bool check_m_tile_safe(
-  const std::vector<char> &layout,
-  const std::vector<int> &M,
-  const std::vector<matmul_params> &params,
-  int num_ops) {
-  // Iterate the active range only: when the framework signals
-  // `params[0].active_matmul > 0` the caller already trimmed the
-  // matmul-processing count to the active prefix, but kept
-  // `params[]` (and `layout[]`) at the framework's original size to
-  // preserve weight-side prepack metadata at the tail.  Iterating
-  // up to `params.size()` here would scan that tail and falsely
-  // reject m-tile on a uniformity mismatch among non-fired slots.
-  for (int i = 0; i < num_ops; ++i) {
-    if (layout[i] != 'r' && layout[i] != 'R') {
-      return false;
-    }
-    if (params[i].dtypes.src  != params[0].dtypes.src) {
-      return false;
-    }
-    if (params[i].dtypes.wei  != params[0].dtypes.wei) {
-      return false;
-    }
-    if (params[i].dtypes.dst  != params[0].dtypes.dst) {
-      return false;
-    }
-    if (params[i].dtypes.bias != params[0].dtypes.bias) {
-      return false;
-    }
-    if (params[i].mem_format_a != 'n') {
-      return false;
-    }
-    if (params[i].mem_format_b != 'n') {
-      return false;
-    }
-    if (params[i].packing.pack_format_b != 0) {
-      return false;
-    }
-    // Dynamic-quant row-locality check.  The first dim of
-    // src_scale/zp must equal this expert's `M[i]`:
-    //
-    //   * `{M[i], 1}`  — per-token (one scale per row), the
-    //                    canonical dynamic-INT8 shape.
-    //   * `{M[i], G}`  — per-group on K (one scale per row per
-    //                    K-group), also row-local.
-    //
-    // For both shapes `offset_quant_by_row` cleanly splits the
-    // scale buffer onto disjoint per-thread slices, and each
-    // thread's reorder operates on its own rows in isolation.
-    //
-    // Rejected (first dim != M[i]):
-    //
-    //   * Per-tensor (`{}`, `{1}`, `{1, 1}` on M > 1) — every
-    //     thread would write the same global slot.
-    //   * Per-column / per-channel-on-src (`{1, K}`, `{1, N}`) —
-    //     same shared-write race, and each slice would compute
-    //     statistics over the wrong subset.
-    //
-    // Special case `M[i] == 1`: dims `{1, 1}` is BOTH per-tensor
-    // and per-token (one scale = one row).  Accepted because the
-    // M-tile executor only assigns one productive thread to a
-    // one-row expert (`slice_M = 1`); no race, and the slice's
-    // single-row max-abs IS the full-matrix max-abs.  This is the
-    // common sparse-MoE decode pattern where some experts receive
-    // exactly one token.
-    if (params[i].dynamic_quant) {
-      const auto &sd = params[i].quant_params.src_scale.dims;
-      if (sd.empty() || sd[0] != static_cast<int64_t>(M[i])) {
-        return false;
-      }
-      const auto &zd = params[i].quant_params.src_zp.dims;
-      if (!zd.empty() && zd[0] != static_cast<int64_t>(M[i])) {
-        return false;
-      }
-    }
-    for (const auto &po : params[i].postop_) {
-      if (po.po_type == post_op_type_t::softmax
-          || po.po_type == post_op_type_t::pooling) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
+// M-tile (ALGO 2) safety predicate hoisted to
+// `group_matmul_parallel_common.hpp` as `check_m_tile_safe` (inline).
+// Both the legacy dispatcher in this TU and the MoE vertical-fusion
+// dispatcher fork in `group_matmul_fused_moe.cpp` use the same
+// predicate, so it lives next to `op2_k_for_act` in the common
+// header.  See that header's doc-block for the row-locality
+// rationale (dynamic-quant, postop softmax / pooling, etc.) and the
+// `M[i] == 1` decode-class special case.
 
 // N-tile (ALGO 3) slices columns of B, so the executor must be able
 // to re-anchor any N-indexed metadata (weight scales / zero-points,
