@@ -28,6 +28,7 @@
 // loop in this TU.
 #include "group_embag/group_embag_test_helpers.hpp"
 #include <ctime>
+#include <unordered_set>
 
 using namespace std;
 
@@ -79,8 +80,6 @@ const float SOFTMAX_BF16_TOL = 0.01;
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
-std::string cmd_post_op {};
-std::string cmd_backend {};
 std::string cmd_lowoha {};
 uint32_t cmd_num_threads = 0;
 std::string cmd_input_file {};
@@ -128,10 +127,46 @@ int main(int argc, char **argv) {
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8, data_type_t::f16};
     // Command line argument parser
     Parser parse;
-    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, ai_test_mode_str,
+    parse(argc, argv, seed, test_num, ai_test_mode_str,
           cmd_lowoha,
           cmd_num_threads, cmd_input_file, cmd_operator, ndims,
           cli_params);
+
+    static const std::unordered_set<std::string> k_input_file_ops = {
+      "matmul", "reorder", "embeddingbag", "embedding", "normalization"
+    };
+    if (!cmd_input_file.empty() && cmd_operator.empty()) {
+      commonlog_error("--input_file requires --op "
+                      "(matmul, reorder, embeddingbag, embedding, normalization).\n");
+      return 1;
+    }
+    if (!cmd_operator.empty()
+        && k_input_file_ops.find(cmd_operator) == k_input_file_ops.end()) {
+      commonlog_error("Invalid --op \"" + cmd_operator + "\". "
+                      "Supported: matmul, reorder, embeddingbag, embedding, "
+                      "normalization.\n");
+      return 1;
+    }
+    if (!cmd_operator.empty() && cmd_input_file.empty()) {
+      commonlog_error("--op requires --input_file.\n");
+      return 1;
+    }
+    if (!cmd_input_file.empty() && cmd_operator == "matmul"
+        && ndims != 2 && ndims != 3) {
+      commonlog_error("--op matmul with --input_file requires --ndims 2 or 3 "
+                      "(got " + std::to_string(ndims) + ").\n");
+      return 1;
+    }
+    if (!cmd_input_file.empty() && cmd_operator == "reorder") {
+      if (cmd_lowoha.empty()) {
+        commonlog_error("Reorder input file requires --lowoha true or --lowoha false "
+                        "(use separate files for regular vs LOWOHA suites).\n");
+        return 1;
+      }
+      if (!parse_bool_field(cmd_lowoha, "lowoha").has_value()) {
+        return 1;
+      }
+    }
 
     // Initialize AI test mode from command-line argument
     ai_gtests::initialize_test_mode(ai_test_mode_str);
@@ -142,70 +177,202 @@ int main(int argc, char **argv) {
     srand(static_cast<unsigned int>(seed));
     std::cout << "Value " << seed << " is used as seed. \n";
 
-    if (!cmd_input_file.empty() && cmd_operator == "matmul" && ndims == 2) {
+    // --input_file and --op are paired; only populate the matching parameter vector.
+    const bool input_file_mode = !cmd_input_file.empty();
+
+    if (input_file_mode && cmd_operator == "matmul" && ndims == 2) {
       std::cout << "Using input file: " << cmd_input_file << std::endl;
       auto matmul_inputs = read_matmul_inputs(cmd_input_file, ndims);
+      if (matmul_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      matmul_test.reserve(matmul_inputs.size() * test_num);
       for (const auto &input : matmul_inputs) {
-        matmul_test.push_back(MatmulType(input.mat));
+        try {
+          for (uint32_t i = 0; i < test_num; ++i) {
+            matmul_test.push_back(MatmulType(input, i, test_num));
+          }
+        }
+        catch (const std::exception &e) {
+          commonlog_error(e.what());
+        }
+      }
+      if (matmul_test.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
       }
     }
-    else {
+    else if (!input_file_mode) {
       // Creating Random parameters for Matmul
       matmul_test.resize(test_num);
       for (uint32_t i = 0; i < test_num; ++i) {
-        matmul_test[i] = MatmulType(i, test_num);
+        matmul_test[i] = MatmulType(cli_params.matmul_input, i, test_num);
       }
     }
-    // Constrained-parameter set for the quantized group-matmul fixture.
-    quant_matmul_test.resize(test_num);
-    for (uint32_t i = 0; i < test_num; ++i) {
-      quant_matmul_test[i] = GroupQuantMatmulType(i, test_num);
+    if (!input_file_mode) {
+      // Constrained-parameter set for the quantized group-matmul fixture.
+      quant_matmul_test.resize(test_num);
+      for (uint32_t i = 0; i < test_num; ++i) {
+        quant_matmul_test[i] = GroupQuantMatmulType(i, test_num);
+      }
     }
-    if (!cmd_input_file.empty() && cmd_operator == "matmul" && ndims == 3) {
+    if (input_file_mode && cmd_operator == "matmul" && ndims == 3) {
       std::cout << "Using input file: " << cmd_input_file << std::endl;
-      auto batchmatmul_inputs = read_matmul_inputs(cmd_input_file, ndims);
-      for (const auto &input : batchmatmul_inputs) {
-        batchmatmul_test.push_back(BatchMatmulType(input));
+      auto matmul_inputs = read_matmul_inputs(cmd_input_file, ndims);
+      if (matmul_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      batchmatmul_test.reserve(matmul_inputs.size() * test_num);
+      for (const auto &input : matmul_inputs) {
+        try {
+          for (uint32_t i = 0; i < test_num; ++i) {
+            batchmatmul_test.push_back(BatchMatmulType(input, i, test_num));
+          }
+        }
+        catch (const std::exception &e) {
+          commonlog_error(e.what());
+        }
+      }
+      if (batchmatmul_test.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
       }
     }
-    else {
+    else if (!input_file_mode) {
       // Creating Random parameters for BatchMatmul
       batchmatmul_test.resize(test_num);
       for (uint32_t i = 0; i < test_num; ++i) {
-        batchmatmul_test[i] = BatchMatmulType(i, test_num);
+        batchmatmul_test[i] = BatchMatmulType(cli_params.matmul_input, i, test_num);
       }
     }
-    if (!cmd_input_file.empty() && cmd_operator == "reorder") {
-      std::cout << "Using input file: " << cmd_input_file << std::endl;
-      auto reorder_inputs = read_reorder_inputs(cmd_input_file);
+    if (input_file_mode && cmd_operator == "reorder") {
+      std::cout << "Using input file: " << cmd_input_file
+                << " (lowoha=" << cmd_lowoha << ")" << std::endl;
+      const bool is_lowoha_reorder = *parse_bool_field(cmd_lowoha, "lowoha");
+      auto reorder_inputs = read_reorder_inputs(cmd_input_file, is_lowoha_reorder);
+      if (reorder_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      reorder_test.reserve(reorder_inputs.size() * test_num);
       for (const auto &input : reorder_inputs) {
-        reorder_test.push_back(input);
+        try {
+          for (uint32_t i = 0; i < test_num; ++i) {
+            reorder_test.push_back(ReorderType(input, i, test_num));
+          }
+        }
+        catch (const std::exception &e) {
+          commonlog_error(e.what());
+        }
+      }
+      if (reorder_test.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
       }
     }
-    else {
+    else if (!input_file_mode) {
       // Create reorder tests: --lowoha true = LOWOHA tests, --lowoha false = regular, omit = randomised.
       for (uint32_t i = 0; i < test_num; ++i) {
-        reorder_test.push_back(ReorderType(i, test_num));
+        reorder_test.push_back(ReorderType(cli_params.reorder_input, i, test_num));
       }
     }
-    // Creating Random parameters for Embedding Bag
-    embag_test.resize(test_num);
-    // Creating Random parameters for Embedding
-    embedding_test.resize(test_num);
-    // Creating Random parameters for Group Embedding Bag
-    group_embag_test.resize(test_num);
-    for (uint32_t i = 0; i < test_num; ++i) {
-      group_embag_test[i] = GroupEmbagType(i, test_num);
+    if (input_file_mode && cmd_operator == "embeddingbag") {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto embag_inputs = read_embag_inputs(cmd_input_file);
+      if (embag_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      embag_test.reserve(embag_inputs.size() * test_num);
+      for (const auto &input : embag_inputs) {
+        for (uint32_t i = 0; i < test_num; ++i) {
+          embag_test.push_back(EmbagType(input));
+        }
+      }
+    }
+    else if (!input_file_mode) {
+      // Creating Random parameters for Embedding Bag
+      for (uint32_t i = 0; i < test_num; ++i) {
+        embag_test.push_back(EmbagType(cli_params.embag_input));
+      }
+    }
+    if (input_file_mode && cmd_operator == "embedding") {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto embedding_inputs = read_embedding_inputs(cmd_input_file);
+      if (embedding_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      embedding_test.reserve(embedding_inputs.size() * test_num);
+      for (const auto &input : embedding_inputs) {
+        for (uint32_t i = 0; i < test_num; ++i) {
+          embedding_test.push_back(EmbeddingType(input));
+        }
+      }
+    }
+    else if (!input_file_mode) {
+      // Creating Random parameters for Embedding
+      for (uint32_t i = 0; i < test_num; ++i) {
+        embedding_test.push_back(EmbeddingType(cli_params.embedding_input));
+      }
     }
 
-    // Creating Random parameters for Normalization
-    normalization_test.resize(test_num);
+    if (!input_file_mode) {
+      // Creating Random parameters for Group Embedding Bag
+      group_embag_test.resize(test_num);
+      for (uint32_t i = 0; i < test_num; ++i) {
+        group_embag_test[i] = GroupEmbagType(i, test_num);
+      }
+    }
 
-    // Creating Random parameters for SDPA
-    sdpa_test.resize(test_num);
+    if (input_file_mode && cmd_operator == "normalization") {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto norm_inputs = read_normalization_inputs(cmd_input_file);
+      if (norm_inputs.empty()) {
+        commonlog_error("No valid test inputs parsed from --input_file \""
+                        + cmd_input_file
+                        + "\". Check the file path and line format.\n");
+        return 1;
+      }
+      normalization_test.reserve(norm_inputs.size() * test_num);
+      for (const auto &input : norm_inputs) {
+        for (uint32_t i = 0; i < test_num; ++i) {
+          normalization_test.push_back(NormalizationType(input));
+        }
+      }
+    }
+    else if (!input_file_mode) {
+      // Creating Random parameters for Normalization
+      for (uint32_t i = 0; i < test_num; ++i) {
+        normalization_test.push_back(NormalizationType(cli_params.normalization_input));
+      }
+    }
 
-    // Creating Random parameters for Softmax
-    softmax_test.resize(test_num);
+    if (!input_file_mode) {
+      // Creating Random parameters for SDPA
+      sdpa_test.resize(test_num);
+
+      // Creating Random parameters for Softmax
+      softmax_test.resize(test_num);
+    }
 
     ::testing :: InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

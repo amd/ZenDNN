@@ -75,6 +75,57 @@ using namespace zendnnl::lowoha::softmax;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
+struct MatmulInput {
+  std::optional<uint64_t> batch_size;
+  std::optional<uint64_t> m;
+  std::optional<uint64_t> k;
+  std::optional<uint64_t> n;
+  /** When set, length must be <= POST_OPS_LIMIT (enforced again in MatmulType). */
+  std::optional<std::vector<post_op_type_t>> po_types;
+  std::optional<matmul_algo_t> algo;
+  std::optional<bool> transA;
+  std::optional<bool> transB;
+  std::optional<float> alpha;
+  std::optional<float> beta;
+  std::optional<data_type_t> src_dtype;
+  std::optional<data_type_t> dst_dtype;
+  std::optional<quant_granularity_t> weight_granularity;
+};
+
+struct ReorderInput {
+  std::optional<bool> inplace_reorder;
+  MatmulInput matmul_input;
+  std::optional<uint64_t> num_groups;
+  std::optional<uint32_t> dim_choice;
+};
+
+struct NormalizationInput {
+  std::optional<norm_type_t> norm_type;
+  std::optional<std::vector<uint64_t>> norm_shape;
+  std::optional<bool> use_scale;
+  std::optional<bool> use_shift;
+  std::optional<data_type_t> gamma_dt;
+  std::optional<data_type_t> beta_dt;
+};
+
+struct EmbeddingInput {
+  std::optional<uint64_t> num_embeddings;
+  std::optional<uint64_t> embedding_dim;
+  std::optional<uint64_t> num_indices;
+  std::optional<int64_t> padding_index;
+  std::optional<bool> is_weights;
+  std::optional<data_type_t> indices_dtype;
+  std::optional<bool> fp16_scale_bias;
+  std::optional<bool> strided;
+};
+
+struct EmbagInput {
+  std::optional<uint64_t> num_bags;
+  std::optional<embag_algo_t> embag_algo;
+  std::optional<bool> include_last_offset;
+  EmbeddingInput embedding_input;
+};
+
 /** @brief Matmul Op Parameters Structure */
 struct MatmulType {
   uint64_t matmul_m;
@@ -92,7 +143,8 @@ struct MatmulType {
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
   int32_t num_threads;
-  MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1,
+  MatmulType(const MatmulInput &matmul_input = MatmulInput(),
+             uint32_t test_index = 0, uint32_t total_tests = 1,
              bool is_bmm = false);
 };
 
@@ -100,52 +152,12 @@ struct MatmulType {
 // lifted into `group_matmul/group_matmul_test_helpers.hpp` during the
 // gtests folder refactor so this header stays operator-agnostic.
 
-/** Optional CLI overrides for matmul/BMM/reorder, embag/embedding, and norm tests. Unset std::optional members are ignored; set values override defaults in the corresponding *Type constructors. */
-struct CLIParams {
-  /* Matmul, BatchMatmul and Reorder CLI params*/
-  std::optional<uint64_t> batch_size;
-  std::optional<uint64_t> m;
-  std::optional<uint64_t> k;
-  std::optional<uint64_t> n;
-  std::optional<bool> transA;
-  std::optional<bool> transB;
-  std::optional<float> alpha;
-  std::optional<float> beta;
-  std::optional<data_type_t> src_dtype;
-  std::optional<data_type_t> dst_dtype;
-  std::optional<quant_granularity_t> weight_granularity;
-  std::optional<bool> inplace_reorder;
-  std::optional<uint64_t> num_groups;
-  std::optional<uint32_t> dim_choice;
-
-  /* Embag and Embedding CLI params*/
-  std::optional<uint64_t> num_embeddings;
-  std::optional<uint64_t> embedding_dim;
-  std::optional<uint64_t> num_bags;
-  std::optional<uint64_t> num_indices;
-  std::optional<embag_algo_t> embag_algo;
-  std::optional<int64_t> padding_index;
-  std::optional<bool> include_last_offset;
-  std::optional<bool> is_weights;
-  std::optional<data_type_t> indices_dtype;
-  std::optional<bool> fp16_scale_bias;
-  std::optional<bool> strided;
-
-  /* Normalization CLI params*/
-  std::optional<norm_type_t> norm_type;
-  std::optional<std::vector<uint64_t>> norm_shape;
-  std::optional<bool> use_scale;
-  std::optional<bool> use_shift;
-  std::optional<data_type_t> gamma_dt;
-  std::optional<data_type_t> beta_dt;
-
-};
-
 /** @brief BatchMatmul Op Parameters Structure */
 struct BatchMatmulType {
   uint64_t batch_size;
   MatmulType mat{};
-  BatchMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  BatchMatmulType(const MatmulInput &matmul_input = MatmulInput(),
+                  uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 struct ReorderType {
@@ -178,7 +190,8 @@ struct ReorderType {
 
   /// @param test_index Index of current test (for partitioning)
   /// @param total_tests Total number of tests
-  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  ReorderType(const ReorderInput &reorder_input = ReorderInput(),
+              uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 /** @brief Embag Op Parameters Structure */
@@ -197,7 +210,7 @@ struct EmbagType {
   bool strided;
   bool use_LOWOHA;
   int32_t num_threads;
-  EmbagType();
+  EmbagType(const EmbagInput &embag_input = EmbagInput());
 };
 
 /** @brief Embedding Op Parameters Structure */
@@ -212,7 +225,7 @@ struct EmbeddingType {
   bool strided;
   bool use_LOWOHA;
   int32_t num_threads;
-  EmbeddingType();
+  EmbeddingType(const EmbeddingInput &embedding_input = EmbeddingInput());
 };
 
 /** @brief Normalization Op Parameters Structure */
@@ -228,7 +241,8 @@ struct NormalizationType {
   data_type_t gamma_dt;
   data_type_t beta_dt;
   uint32_t num_threads;
-  NormalizationType();
+  NormalizationType(const NormalizationInput &normalization_input =
+                      NormalizationInput());
 };
 
 /** @brief SDPA Op Parameters Structure
@@ -262,14 +276,26 @@ struct SoftmaxType {
   SoftmaxType();
 };
 
+/** Optional CLI overrides for matmul/BMM/reorder, embag/embedding, and norm tests. Unset std::optional members are ignored; set values override defaults in the corresponding *Type constructors. */
+struct CLIParams {
+  /* Matmul, BatchMatmul and Reorder CLI params*/
+  MatmulInput matmul_input;
+  ReorderInput reorder_input;
+  /* Embag and Embedding CLI params*/
+  EmbagInput embag_input;
+  EmbeddingInput embedding_input;
+  /* Normalization CLI params*/
+  NormalizationInput normalization_input;
+};
+
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
 extern const uint32_t dtype_size;
 extern int64_t seed;
-extern std::string cmd_post_op;
-extern std::string cmd_backend;
 extern std::string cmd_lowoha;
+/** @brief Parsed --lowoha value; nullopt when unset or invalid. */
+std::optional<bool> parse_cmd_lowoha();
 extern uint32_t cmd_num_threads;
 extern CLIParams cli_params;
 extern const float MATMUL_F32_TOL;
@@ -379,6 +405,9 @@ class Parser {
   void read_from_umap(const std::string &key, int64_t &num);
   void read_from_umap(const std::string &key, uint32_t &num);
   void read_from_umap(const std::string &key, std::string &num);
+  void read_from_umap(const std::string &key,
+                      std::optional<std::vector<post_op_type_t>> &out);
+  void read_from_umap(const std::string &key, std::optional<matmul_algo_t> &out);
   void read_from_umap(const std::string &key, std::optional<uint64_t> &out);
   void read_from_umap(const std::string &key, std::optional<int64_t> &out);
   void read_from_umap(const std::string &key, std::optional<bool> &out);
@@ -395,7 +424,7 @@ class Parser {
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
-                  int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
+                  int64_t &seed, uint32_t &test_num,
                   std::string &ai_test_mode,
                   std::string &lowoha, uint32_t &num_threads, std::string &input_file,
                   std::string &op, uint32_t &ndims,
@@ -517,32 +546,124 @@ void neutralize_mish_quant_int8(std::vector<post_op_type_t> &po_types);
  *  @brief Read and parse matmul test configurations from a file
  *
  *  This function reads a file containing matmul test parameters and returns
- *  a vector of BatchMatmulType configurations. It handles both 2D matmul (ndims=2)
- *  and 3D batch matmul (ndims=3) test cases from the same function.
+ *  a vector of MatmulInput configurations via a single function that handles
+ *  both 2D matmul (ndims=2) and 3D batch matmul (ndims=3) based on `ndims`.
  *
- *  For 2D matmul (ndims=2), input format: M,K,N,postOp,kernel,transA,transB,alpha,beta (9 fields)
- *  For 3D matmul (ndims=3), input format: BS,M,K,N,postOp,kernel,transA,transB,alpha,beta (10 fields)
+ *  Input format (comma-separated; empty fields are optional and use test defaults):
+ *  - 2D (ndims=2): M,K,N,postOp,kernel,transA,transB,alpha,beta,src_dtype,dst_dtype,weight_granularity (12 fields)
+ *  - 3D (ndims=3): BS,M,K,N,postOp,kernel,transA,transB,alpha,beta,src_dtype,dst_dtype,weight_granularity (13 fields)
+ *  - postOp: post-op names joined with ':' (e.g. binary_add:relu)
+ *  - transA, transB: true/1 or false/0; other values reject the line
+ *  - src_dtype, dst_dtype: f32, bf16, f16, s8, etc. (see strToDatatype)
+ *  - weight_granularity: tensor (or per_tensor), channel (or per_channel)
+ *    Group granularity is not supported for matmul input files.
  *
  *  @param file Path to the input file
  *  @param ndims Dimension of matmul operation (2 for matmul, 3 for batch matmul). Default is 2.
- *  @return std::vector<BatchMatmulType> Vector of parsed matmul configurations
+ *  @return std::vector<MatmulInput> Vector of parsed matmul configurations
  */
-std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
+std::vector<MatmulInput> read_matmul_inputs(const std::string &file,
     uint32_t ndims = 2);
-
 /** @fn read_reorder_inputs
  *  @brief Read and parse reorder test configurations from a file
  *
  *  This function reads a file containing reorder test parameters and returns
- *  a vector of ReorderType configurations. Reorder operations transform tensor
- *  layouts for optimized memory access patterns.
+ *  a vector of ReorderInput configurations. The parsed line layout depends on
+ *  @p is_lowoha_test (from `--lowoha true` or `--lowoha false` on the gtest
+ *  binary); callers must validate the flag before invoking this function.
  *
- *  Input format: M,K,N,postOp,kernel,transA,transB,inplace_reorder (8 fields)
+ *  Input format (comma-separated; empty fields are optional and use test defaults):
+ *  - Regular reorder (`--lowoha false`): M,K,N,postOp,kernel,transA,transB,inplace_reorder (8 fields)
+ *  - LOWOHA reorder (`--lowoha true`): batch_size,M,N,src_dtype,dst_dtype,weight_granularity,num_groups,dim_choice (8 fields)
+ *  - postOp: post-op names joined with ':' (e.g. relu:gelu_tanh)
+ *  - kernel: matmul backend (aocl_dlp, onednn, libxsmm, …; see strToAlgo)
+ *  - transA, transB, inplace_reorder: true/1 or false/0; other values reject the line
+ *  - src_dtype, dst_dtype: f32, bf16, f16, s8, etc. (see strToDatatype)
+ *  - weight_granularity: tensor (or per_tensor), channel (or per_channel), group (or per_group)
+ *  - num_groups: positive integer; applied only when weight_granularity is group/per_group
+ *  - dim_choice: 1–3 only (LOWOHA tensor dimensionality; invalid values reject the line)
  *
  *  @param file Path to the input file
- *  @return std::vector<ReorderType> Vector of parsed reorder configurations
+ *  @param is_lowoha_test When true, parse LOWOHA reorder lines; when false, regular reorder lines
+ *  @return std::vector<ReorderInput> Vector of parsed reorder configurations
  */
-std::vector<ReorderType> read_reorder_inputs(const std::string &file);
+std::vector<ReorderInput> read_reorder_inputs(const std::string &file,
+    bool is_lowoha_test);
+
+/** @fn read_normalization_inputs
+ *  @brief Read and parse normalization test configurations from a file
+ *
+ *  Input format (comma-separated, six fields per line):
+ *  norm_type,norm_shape,use_scale,use_shift,gamma_dt,beta_dt
+ *
+ *  - norm_type: layer, batch, rms, fusedaddrms
+ *  - norm_shape: positive dimensions joined with ':' (e.g. 2:4096, 32:64:56:56)
+ *  - use_scale, use_shift: true/1 or false/0; other values reject the line
+ *  - gamma_dt, beta_dt: optional (bf16, f32); empty fields use constructor defaults
+ *  - num_threads: use --num_threads on the command line, not the input file
+ *
+ *  @param file Path to the input file
+ *  @return std::vector<NormalizationInput> Vector of parsed normalization configurations
+ */
+std::vector<NormalizationInput> read_normalization_inputs(
+  const std::string &file);
+
+/** @fn read_embag_inputs
+ *  @brief Read and parse embedding-bag test configurations from a file
+ *
+ *  Input format (comma-separated; empty fields are optional and use test defaults):
+ *  num_embeddings,embedding_dim,num_bags,num_indices,embag_algo,padding_index,
+ *  include_last_offset,is_weights,indices_dtype,fp16_scale_bias,strided
+ *
+ *  - num_embeddings, embedding_dim, num_bags, num_indices: positive integers
+ *  - embag_algo: sum, mean, max (see strToEmbagAlgo)
+ *  - include_last_offset, is_weights, fp16_scale_bias, strided: true/1 or false/0;
+ *    other values reject the line
+ *  - indices_dtype: s32 or s64
+ *
+ *  @param file Path to the input file
+ *  @return std::vector<EmbagInput> Vector of parsed embedding-bag configurations
+ */
+std::vector<EmbagInput> read_embag_inputs(const std::string &file);
+
+/** @fn read_embedding_inputs
+ *  @brief Read and parse embedding test configurations from a file
+ *
+ *  Input format (comma-separated; empty fields are optional and use test defaults):
+ *  num_embeddings,embedding_dim,num_indices,padding_index,is_weights,indices_dtype,
+ *  fp16_scale_bias,strided
+ *
+ *  - num_embeddings, embedding_dim, num_indices: positive integers
+ *  - is_weights, fp16_scale_bias, strided: true/1 or false/0; other values reject the line
+ *  - indices_dtype: s32 or s64
+ *
+ *  @param file Path to the input file
+ *  @return std::vector<EmbeddingInput> Vector of parsed embedding configurations
+ */
+std::vector<EmbeddingInput> read_embedding_inputs(const std::string &file);
+
+/** @brief Map a normalization type string to norm_type_t (case-insensitive).
+ *
+ *  Accepted values: layer, batch, rms, fusedaddrms.
+ */
+norm_type_t strToNormType(const std::string &str);
+
+/** @brief Parse a colon-separated normalization shape (e.g. 2:4096, 32:64:56:56).
+ *
+ *  Each dimension must be a positive integer. Returns an empty vector on error.
+ */
+std::vector<uint64_t> parse_norm_shape_field(const std::string &shape_str);
+
+/** @brief Parse true/1 as true, false/0/empty as false; invalid tokens return nullopt.
+ *
+ *  When @p column is non-empty, logs "Invalid <column>: <flag>". Otherwise logs a
+ *  generic boolean error.
+ */
+std::optional<bool> parse_bool_field(const std::string &flag,
+                                     const std::string &column = {});
+
+/** @brief Parse a positive uint64 from a CSV field (digits only, no sign). */
+std::optional<uint64_t> parse_positive_uint64_field(const std::string &field);
 
 /** @fn trim
  *  @brief Remove leading and trailing whitespace from a string

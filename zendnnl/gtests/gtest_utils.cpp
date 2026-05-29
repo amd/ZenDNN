@@ -23,6 +23,7 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
@@ -92,8 +93,7 @@ void reset_grp_matmul_caches() {
   // here is what unblocks heap-address reuse across tests from
   // returning stale reordered weights (silent wrong-answer bite).
   zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache();
-  zendnnl::lowoha::matmul::group_matmul_prepack::
-  clear_fingerprint_cache_for_test();
+  zendnnl::lowoha::matmul::group_matmul_prepack::clear_fingerprint_cache_for_test();
   clear_matmul_test_caches();
 }
 
@@ -113,28 +113,27 @@ void repack_weights_q8_0(const int8_t *weight_buffer,
   }
 }
 
-MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
+MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
+                       uint32_t total_tests, bool is_bmm) {
   // Use std::mt19937 for random float generation
   std::mt19937 gen(rand());
-  matmul_m = (cli_params.m &&
-              *cli_params.m > 0) ? *cli_params.m : MATMUL_SIZE_START + rand() %
+  matmul_m = (matmul_input.m &&
+              *matmul_input.m > 0) ? *matmul_input.m : MATMUL_SIZE_START + rand() %
              MATMUL_SIZE_END;
-  matmul_k = (cli_params.k &&
-              *cli_params.k > 0) ? *cli_params.k : MATMUL_SIZE_START + rand() %
+  matmul_k = (matmul_input.k &&
+              *matmul_input.k > 0) ? *matmul_input.k : MATMUL_SIZE_START + rand() %
              MATMUL_SIZE_END;
-  matmul_n = (cli_params.n &&
-              *cli_params.n > 0) ? *cli_params.n : MATMUL_SIZE_START + rand() %
+  matmul_n = (matmul_input.n &&
+              *matmul_input.n > 0) ? *matmul_input.n : MATMUL_SIZE_START + rand() %
              MATMUL_SIZE_END;
-  transA     = cli_params.transA ? *cli_params.transA : rand() % 2;
-  transB     = cli_params.transB ? *cli_params.transB : rand() % 2;
+  transA     = matmul_input.transA ? *matmul_input.transA : rand() % 2;
+  transB     = matmul_input.transB ? *matmul_input.transB : rand() % 2;
   // Post-op selection based on command-line input or random selection
-  if (!cmd_post_op.empty()) {
-    for (const auto &po : split(cmd_post_op, ':')) {
-      po_types.push_back(strToPostOps(po));
-    }
-    if (po_types.size() > POST_OPS_LIMIT) {
+  if (matmul_input.po_types) {
+    if (matmul_input.po_types->size() > POST_OPS_LIMIT) {
       EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
     }
+    po_types = *matmul_input.po_types;
   }
   else {
     std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
@@ -145,8 +144,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   }
 
   std::uniform_real_distribution<float> dist(0.0, 10.0);
-  alpha    = cli_params.alpha ? *cli_params.alpha : dist(gen);
-  beta     = cli_params.beta ? *cli_params.beta : dist(gen);
+  alpha    = matmul_input.alpha ? *matmul_input.alpha : dist(gen);
+  beta     = matmul_input.beta ? *matmul_input.beta : dist(gen);
 
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -160,17 +159,17 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   const auto is_libxsmm_algo = [](matmul_algo_t a) {
     return a == matmul_algo_t::libxsmm || a == matmul_algo_t::libxsmm_blocked;
   };
-  bool user_specified_lowoha = !cmd_lowoha.empty();
-  use_LOWOHA = user_specified_lowoha && ((cmd_lowoha == "true") ||
-                                         (cmd_lowoha == "1"));
+  const auto parsed_lowoha = parse_cmd_lowoha();
+  const bool user_specified_lowoha = parsed_lowoha.has_value();
+  use_LOWOHA = user_specified_lowoha && *parsed_lowoha;
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
                   : matmul_config.get_algo();
   algo = static_cast<matmul_algo_t>(algo_);
 
   // Command-line specified algo if no env-var is set
-  if (algo == matmul_algo_t::none && !cmd_backend.empty()) {
-    algo = strToAlgo(cmd_backend);
+  if (algo == matmul_algo_t::none && matmul_input.algo) {
+    algo = *matmul_input.algo;
   }
   // Fail if onednn/onednn_blocked was chosen (env or --backend) but the build has no OneDNN
   if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn ||
@@ -247,11 +246,11 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   use_LOWOHA = algo_forces_lowoha ? true : use_LOWOHA;
   if (is_libxsmm_algo(algo)) {
     alpha = 1.0f;
-    if (cli_params.beta && beta != 0.0f && beta != 1.0f) {
+    if (matmul_input.beta && beta != 0.0f && beta != 1.0f) {
       log_info("Unsupported beta for LIBXSMM: ", beta,
                " (use 0 or 1); using random beta.");
     }
-    if (!cli_params.beta || (beta != 0.0f && beta != 1.0f)) {
+    if (!matmul_input.beta || (beta != 0.0f && beta != 1.0f)) {
       beta = rand() % 2;
     }
     // gelu_tanh, mish, swish and clip are not supported for LIBXSMM
@@ -279,38 +278,38 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     }
   }
 
-  if (cli_params.src_dtype &&
-      (*cli_params.src_dtype == data_type_t::s8 ||
-       *cli_params.src_dtype == data_type_t::u8)) {
-    source_dtype = *cli_params.src_dtype;
+  if (matmul_input.src_dtype &&
+      (*matmul_input.src_dtype == data_type_t::s8 ||
+       *matmul_input.src_dtype == data_type_t::u8)) {
+    source_dtype = *matmul_input.src_dtype;
   }
   else {
-    if (cli_params.src_dtype) {
-      log_info("Unsupported src_dtype: ", dtype_info(*cli_params.src_dtype),
+    if (matmul_input.src_dtype) {
+      log_info("Unsupported src_dtype: ", dtype_info(*matmul_input.src_dtype),
                " (use s8, u8); using random src_dtype.");
     }
     source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   }
 
-  if (cli_params.dst_dtype && (*cli_params.dst_dtype == data_type_t::s8 ||
-                               *cli_params.dst_dtype == data_type_t::u8 ||
-                               *cli_params.dst_dtype == data_type_t::f32 ||
-                               *cli_params.dst_dtype == data_type_t::bf16 ||
-                               *cli_params.dst_dtype == data_type_t::f16)) {
-    output_dtype = *cli_params.dst_dtype;
+  if (matmul_input.dst_dtype && (*matmul_input.dst_dtype == data_type_t::s8 ||
+                                 *matmul_input.dst_dtype == data_type_t::u8 ||
+                                 *matmul_input.dst_dtype == data_type_t::f32 ||
+                                 *matmul_input.dst_dtype == data_type_t::bf16 ||
+                                 *matmul_input.dst_dtype == data_type_t::f16)) {
+    output_dtype = *matmul_input.dst_dtype;
   }
   else {
-    if (cli_params.dst_dtype) {
-      log_info("Unsupported dst_dtype: ", dtype_info(*cli_params.dst_dtype),
+    if (matmul_input.dst_dtype) {
+      log_info("Unsupported dst_dtype: ", dtype_info(*matmul_input.dst_dtype),
                " (use s8, u8, f32, bf16, f16); using random dst_dtype.");
     }
     output_dtype = dtype_arr[rand() % dtype_size];
   }
 
-  if (cli_params.weight_granularity &&
-      (*cli_params.weight_granularity == quant_granularity_t::tensor ||
-       *cli_params.weight_granularity == quant_granularity_t::channel)) {
-    weight_granularity = *cli_params.weight_granularity;
+  if (matmul_input.weight_granularity &&
+      (*matmul_input.weight_granularity == quant_granularity_t::tensor ||
+       *matmul_input.weight_granularity == quant_granularity_t::channel)) {
+    weight_granularity = *matmul_input.weight_granularity;
   }
   else {
     weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
@@ -325,31 +324,34 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
 // re-duplication is needed here.
 
 // EmbagType constructor
-EmbagType::EmbagType() {
-  num_embeddings = (cli_params.num_embeddings && *cli_params.num_embeddings > 0)
-                   ? *cli_params.num_embeddings
-                   : (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
-  embedding_dim = (cli_params.embedding_dim && *cli_params.embedding_dim > 0)
-                  ? *cli_params.embedding_dim
-                  : (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
-  num_indices = (cli_params.num_indices && *cli_params.num_indices > 0)
-                ? *cli_params.num_indices : (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
-  num_bags = (cli_params.num_bags && *cli_params.num_bags > 0)
-             ? *cli_params.num_bags
-             : (NUM_BAGS_START + std::rand() % NUM_BAGS_END);
-  algo = cli_params.embag_algo ? *cli_params.embag_algo :
+EmbagType::EmbagType(const EmbagInput &embag_input) {
+  num_embeddings = embag_input.embedding_input.num_embeddings ?
+                   *embag_input.embedding_input.num_embeddings :
+                   (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
+  embedding_dim = embag_input.embedding_input.embedding_dim ?
+                  *embag_input.embedding_input.embedding_dim :
+                  (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
+  num_indices = embag_input.embedding_input.num_indices ?
+                *embag_input.embedding_input.num_indices :
+                (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
+  num_bags = embag_input.num_bags ? *embag_input.num_bags :
+             (NUM_BAGS_START + std::rand() % NUM_BAGS_END);
+  algo = embag_input.embag_algo ? *embag_input.embag_algo :
          static_cast<embag_algo_t>(1 + std::rand() % 3); // sum=1, mean=2, max=3
-  padding_index = cli_params.padding_index ? *cli_params.padding_index : -1;
-  include_last_offset = cli_params.include_last_offset ?
-                        *cli_params.include_last_offset : std::rand() % 2;
-  is_weights = cli_params.is_weights ? *cli_params.is_weights : std::rand() % 2;
-  if (cli_params.indices_dtype) {
-    if (*cli_params.indices_dtype == data_type_t::s32 ||
-        *cli_params.indices_dtype == data_type_t::s64) {
-      indices_dtype = *cli_params.indices_dtype;
+  padding_index = embag_input.embedding_input.padding_index ?
+                  *embag_input.embedding_input.padding_index : -1;
+  include_last_offset = embag_input.include_last_offset ?
+                        *embag_input.include_last_offset : std::rand() % 2;
+  is_weights = embag_input.embedding_input.is_weights ?
+               *embag_input.embedding_input.is_weights : std::rand() % 2;
+  if (embag_input.embedding_input.indices_dtype) {
+    if (*embag_input.embedding_input.indices_dtype == data_type_t::s32 ||
+        *embag_input.embedding_input.indices_dtype == data_type_t::s64) {
+      indices_dtype = *embag_input.embedding_input.indices_dtype;
     }
     else {
-      log_info("Unsupported indices_dtype: ", dtype_info(*cli_params.indices_dtype),
+      log_info("Unsupported indices_dtype: ",
+               dtype_info(*embag_input.embedding_input.indices_dtype),
                " (use s32, s64); using random indices_dtype.");
       indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
     }
@@ -358,12 +360,14 @@ EmbagType::EmbagType() {
     indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   }
   offsets_dtype = indices_dtype;
-  fp16_scale_bias = cli_params.fp16_scale_bias ? *cli_params.fp16_scale_bias :
+  fp16_scale_bias = embag_input.embedding_input.fp16_scale_bias ?
+                    *embag_input.embedding_input.fp16_scale_bias :
                     std::rand() % 2;
-  strided = cli_params.strided ? *cli_params.strided : std::rand() % 2;
+  strided = embag_input.embedding_input.strided ?
+            *embag_input.embedding_input.strided : std::rand() % 2;
   // LOWOHA configuration based on command-line input or random selection
-  if (!cmd_lowoha.empty()) {
-    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
+    use_LOWOHA = *parsed_lowoha;
   }
   else {
     use_LOWOHA = std::rand() % 2;
@@ -378,25 +382,27 @@ EmbagType::EmbagType() {
 }
 
 // EmbeddingType constructor
-EmbeddingType::EmbeddingType() {
-  num_embeddings = (cli_params.num_embeddings && *cli_params.num_embeddings > 0)
-                   ? *cli_params.num_embeddings
-                   : (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
-  embedding_dim = (cli_params.embedding_dim && *cli_params.embedding_dim > 0)
-                  ? *cli_params.embedding_dim
-                  : (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
-  num_indices = (cli_params.num_indices && *cli_params.num_indices > 0)
-                ? *cli_params.num_indices
-                : (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
-  padding_index = cli_params.padding_index ? *cli_params.padding_index : -1;
-  is_weights = cli_params.is_weights ? *cli_params.is_weights : std::rand() % 2;
-  if (cli_params.indices_dtype) {
-    if (*cli_params.indices_dtype == data_type_t::s32 ||
-        *cli_params.indices_dtype == data_type_t::s64) {
-      indices_dtype = *cli_params.indices_dtype;
+EmbeddingType::EmbeddingType(const EmbeddingInput &embedding_input) {
+  num_embeddings = embedding_input.num_embeddings ?
+                   *embedding_input.num_embeddings : (EMBEDDING_SIZE_START + std::rand() %
+                       EMBEDDING_SIZE_END);
+  embedding_dim = embedding_input.embedding_dim ?
+                  *embedding_input.embedding_dim : (EMBEDDING_DIM_START + std::rand() %
+                      EMBEDDING_DIM_END);
+  num_indices = embedding_input.num_indices ? *embedding_input.num_indices :
+                (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
+  padding_index = embedding_input.padding_index ? *embedding_input.padding_index :
+                  -1;
+  is_weights = embedding_input.is_weights ? *embedding_input.is_weights :
+               std::rand() % 2;
+  if (embedding_input.indices_dtype) {
+    if (*embedding_input.indices_dtype == data_type_t::s32 ||
+        *embedding_input.indices_dtype == data_type_t::s64) {
+      indices_dtype = *embedding_input.indices_dtype;
     }
     else {
-      log_info("Unsupported indices_dtype: ", dtype_info(*cli_params.indices_dtype),
+      log_info("Unsupported indices_dtype: ",
+               dtype_info(*embedding_input.indices_dtype),
                " (use s32, s64); using random indices_dtype.");
       indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
     }
@@ -404,12 +410,13 @@ EmbeddingType::EmbeddingType() {
   else {
     indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   }
-  fp16_scale_bias = cli_params.fp16_scale_bias ? *cli_params.fp16_scale_bias :
+  fp16_scale_bias = embedding_input.fp16_scale_bias ?
+                    *embedding_input.fp16_scale_bias :
                     std::rand() % 2;
-  strided = cli_params.strided ? *cli_params.strided : std::rand() % 2;
+  strided = embedding_input.strided ? *embedding_input.strided : std::rand() % 2;
   // LOWOHA configuration based on command-line input or random selection
-  if (!cmd_lowoha.empty()) {
-    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
+    use_LOWOHA = *parsed_lowoha;
   }
   else {
     use_LOWOHA = std::rand() % 2;
@@ -426,9 +433,10 @@ EmbeddingType::EmbeddingType() {
 }
 
 // NormalizationType constructor
-NormalizationType::NormalizationType() {
-  if (cli_params.norm_type) {
-    norm_type = *cli_params.norm_type;
+NormalizationType::NormalizationType(const NormalizationInput
+                                     &normalization_input) {
+  if (normalization_input.norm_type) {
+    norm_type = *normalization_input.norm_type;
   }
   else {
     int type_choice = std::rand() % 4;
@@ -450,14 +458,14 @@ NormalizationType::NormalizationType() {
 
   if (norm_type == norm_type_t::BATCH_NORM) {
     int ndims = 0;
-    if (cli_params.norm_shape) {
-      const auto &cli_shape = *cli_params.norm_shape;
-      if (cli_shape.size() < 2) {
+    if (normalization_input.norm_shape) {
+      const auto &input_shape = *normalization_input.norm_shape;
+      if (input_shape.size() < 2) {
         log_info("norm_shape for batch norm needs at least two dimensions; "
                  "using random shape.");
       }
       else {
-        shape = cli_shape;
+        shape = input_shape;
         ndims = static_cast<int>(shape.size());
       }
     }
@@ -479,13 +487,13 @@ NormalizationType::NormalizationType() {
   }
   else {
     int ndims = 0;
-    if (cli_params.norm_shape) {
-      const auto &cli_shape = *cli_params.norm_shape;
-      if (cli_shape.empty()) {
+    if (normalization_input.norm_shape) {
+      const auto &input_shape = *normalization_input.norm_shape;
+      if (input_shape.empty()) {
         log_info("norm_shape needs at least one dimension; using random shape.");
       }
       else {
-        shape = cli_shape;
+        shape = input_shape;
         ndims = static_cast<int>(shape.size());
       }
     }
@@ -527,15 +535,16 @@ NormalizationType::NormalizationType() {
   epsilon = (norm_type == norm_type_t::RMS_NORM ||
              norm_type == norm_type_t::FUSED_ADD_RMS_NORM) ? 1e-6f : 1e-5f;
 
-  use_scale = cli_params.use_scale ? *cli_params.use_scale :
+  use_scale = normalization_input.use_scale ? *normalization_input.use_scale :
               (std::rand() % 4 != 0); // 75% true
   if (norm_type == norm_type_t::LAYER_NORM ||
       norm_type == norm_type_t::BATCH_NORM) {
-    use_shift = cli_params.use_shift ? *cli_params.use_shift :
+    use_shift = normalization_input.use_shift ? *normalization_input.use_shift :
                 (std::rand() % 4 != 0); // 75% true
   }
   else {
-    use_shift = cli_params.use_shift ? *cli_params.use_shift : false;
+    use_shift = normalization_input.use_shift ? *normalization_input.use_shift :
+                false;
   }
 
   // Pick gamma_dt / beta_dt independently from {f32, bf16, f16}. f16 is only
@@ -571,8 +580,8 @@ NormalizationType::NormalizationType() {
     }
     return pick_gamma_beta_dt();
   };
-  gamma_dt = resolve_gamma_beta_dt("gamma_dt", cli_params.gamma_dt);
-  beta_dt  = resolve_gamma_beta_dt("beta_dt",  cli_params.beta_dt);
+  gamma_dt = resolve_gamma_beta_dt("gamma_dt", normalization_input.gamma_dt);
+  beta_dt  = resolve_gamma_beta_dt("beta_dt",  normalization_input.beta_dt);
 
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -617,11 +626,14 @@ SoftmaxType::SoftmaxType() {
   }
 }
 
-BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
-  batch_size = (cli_params.batch_size &&
-                *cli_params.batch_size > 0) ? *cli_params.batch_size : BATCH_START + rand() %
+BatchMatmulType::BatchMatmulType(const MatmulInput &matmul_input,
+                                 uint32_t test_index, uint32_t total_tests) {
+  batch_size = (matmul_input.batch_size &&
+                *matmul_input.batch_size > 0) ? *matmul_input.batch_size : BATCH_START + rand()
+               %
                BATCH_END;
-  mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
+  mat = MatmulType(matmul_input, test_index, total_tests,
+                   true);  //set is_bmm=true
 }
 
 // SdpaType constructor: random SDPA shape and configuration
@@ -678,10 +690,11 @@ SdpaType::SdpaType() {
 
 // @param test_index Index of current test (for partitioning)
 // @param total_tests Total number of tests
-ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
+ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
+                         uint32_t total_tests) {
 
-  if (!cmd_lowoha.empty()) {
-    is_lowoha_test = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
+    is_lowoha_test = *parsed_lowoha;
   }
   else {
     is_lowoha_test = rand() % 2;
@@ -689,28 +702,30 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 
   if (!is_lowoha_test) {
     // Initialize Regular Reorder params
-    inplace_reorder = cli_params.inplace_reorder ? *cli_params.inplace_reorder :
+    inplace_reorder = reorder_input.inplace_reorder ?
+                      *reorder_input.inplace_reorder :
                       rand() % 2;
-    mat = MatmulType(test_index, total_tests);
+    mat = MatmulType(reorder_input.matmul_input, test_index, total_tests);
     mat.use_LOWOHA = is_lowoha_test;
   }
   else {
-    M = (cli_params.m && *cli_params.m > 0)
-        ? *cli_params.m
+    M = (reorder_input.matmul_input.m && *reorder_input.matmul_input.m > 0)
+        ? *reorder_input.matmul_input.m
         : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
-    N = (cli_params.n && *cli_params.n > 0)
-        ? *cli_params.n
+    N = (reorder_input.matmul_input.n && *reorder_input.matmul_input.n > 0)
+        ? *reorder_input.matmul_input.n
         : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
     // Default batch to a 3D-capable value unless dimensionality overrides it.
-    batch = (cli_params.batch_size && *cli_params.batch_size > 0)
-            ? *cli_params.batch_size
+    batch = (reorder_input.matmul_input.batch_size &&
+             *reorder_input.matmul_input.batch_size > 0)
+            ? *reorder_input.matmul_input.batch_size
             : 2 + std::rand() % (BATCH_END - 1);
 
     // dim_choice: LOWOHA tensor rank after M/N/batch defaults. CLI --dim_choice:
     // 1 -> 1D (M=1, batch=0), 2 -> 2D (batch=1), 3 -> leave sizes (3D). If
     // omitted, random dim_choice in [0,9] gives ~20% 1D, ~50% 2D, ~30% 3D.
-    if (cli_params.dim_choice) {
-      int dim_choice = *cli_params.dim_choice;
+    if (reorder_input.dim_choice) {
+      int dim_choice = *reorder_input.dim_choice;
       if (dim_choice == 1) {
         M = 1;
         batch = 0;
@@ -731,14 +746,17 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
         batch = 1;
       }
       else {
-        batch = (cli_params.batch_size &&
-                 *cli_params.batch_size > 0) ? *cli_params.batch_size : 2 + std::rand() %
+        batch = (reorder_input.matmul_input.batch_size &&
+                 *reorder_input.matmul_input.batch_size > 0) ?
+                *reorder_input.matmul_input.batch_size : 2 + std::rand() %
                 (BATCH_END - 1);
       }
     }
     // Default data types (will be overridden by individual TEST_P tests)
-    src_dtype = cli_params.src_dtype ? *cli_params.src_dtype : data_type_t::f32;
-    dst_dtype = cli_params.dst_dtype ? *cli_params.dst_dtype : data_type_t::s8;
+    src_dtype = reorder_input.matmul_input.src_dtype ?
+                *reorder_input.matmul_input.src_dtype : data_type_t::f32;
+    dst_dtype = reorder_input.matmul_input.dst_dtype ?
+                *reorder_input.matmul_input.dst_dtype : data_type_t::s8;
     use_strided_src = false;
     lowoha_algo = reorder_algo_t::native;
 
@@ -751,10 +769,11 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
       num_threads = 1 + (std::rand() % max_threads);
     }
 
-    if (cli_params.weight_granularity) {
-      granularity = *cli_params.weight_granularity;
+    if (reorder_input.matmul_input.weight_granularity) {
+      granularity = *reorder_input.matmul_input.weight_granularity;
       if (granularity == quant_granularity_t::group) {
-        num_groups = cli_params.num_groups.has_value() ? *cli_params.num_groups : 1;
+        num_groups = reorder_input.num_groups.has_value() ? *reorder_input.num_groups :
+                     1;
         const bool group_ok = (batch != 0) && (num_groups >= 1) &&
                               (M % num_groups == 0);
         if (!group_ok) {
@@ -1448,7 +1467,7 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
-                        uint32_t &tests, std::string &po, std::string &backend,
+                        uint32_t &tests,
                         std::string &ai_test_mode, std::string &lowoha,
                         uint32_t &num_threads, std::string &input_file, std::string &op,
                         uint32_t &ndims,
@@ -1462,45 +1481,56 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   }
   read_from_umap("seed", seed);
   read_from_umap("test", tests);
-  read_from_umap("postop", po);
-  read_from_umap("backend", backend);
+  read_from_umap("postop", cli_params.matmul_input.po_types);
+  read_from_umap("backend", cli_params.matmul_input.algo);
   read_from_umap("ai_test_mode", ai_test_mode);
   read_from_umap("lowoha", lowoha);
   read_from_umap("num_threads", num_threads);
   read_from_umap("input_file", input_file);
   read_from_umap("op", op);
   read_from_umap("ndims", ndims);
-  read_from_umap("batch_size", cli_params.batch_size);
-  read_from_umap("m", cli_params.m);
-  read_from_umap("k", cli_params.k);
-  read_from_umap("n", cli_params.n);
-  read_from_umap("transA", cli_params.transA);
-  read_from_umap("transB", cli_params.transB);
-  read_from_umap("alpha", cli_params.alpha);
-  read_from_umap("beta", cli_params.beta);
-  read_from_umap("src_dtype", cli_params.src_dtype);
-  read_from_umap("dst_dtype", cli_params.dst_dtype);
-  read_from_umap("weight_granularity", cli_params.weight_granularity);
-  read_from_umap("inplace_reorder", cli_params.inplace_reorder);
-  read_from_umap("num_groups", cli_params.num_groups);
-  read_from_umap("dim_choice", cli_params.dim_choice);
-  read_from_umap("num_embeddings", cli_params.num_embeddings);
-  read_from_umap("embedding_dim", cli_params.embedding_dim);
-  read_from_umap("num_bags", cli_params.num_bags);
-  read_from_umap("num_indices", cli_params.num_indices);
-  read_from_umap("embag_algo", cli_params.embag_algo);
-  read_from_umap("padding_index", cli_params.padding_index);
-  read_from_umap("include_last_offset", cli_params.include_last_offset);
-  read_from_umap("is_weights", cli_params.is_weights);
-  read_from_umap("indices_dtype", cli_params.indices_dtype);
-  read_from_umap("fp16_scale_bias", cli_params.fp16_scale_bias);
-  read_from_umap("strided", cli_params.strided);
-  read_from_umap("norm_type", cli_params.norm_type);
-  read_from_umap("norm_shape", cli_params.norm_shape);
-  read_from_umap("use_scale", cli_params.use_scale);
-  read_from_umap("use_shift", cli_params.use_shift);
-  read_from_umap("gamma_dt", cli_params.gamma_dt);
-  read_from_umap("beta_dt", cli_params.beta_dt);
+  read_from_umap("batch_size", cli_params.matmul_input.batch_size);
+  read_from_umap("m", cli_params.matmul_input.m);
+  read_from_umap("k", cli_params.matmul_input.k);
+  read_from_umap("n", cli_params.matmul_input.n);
+  read_from_umap("transA", cli_params.matmul_input.transA);
+  read_from_umap("transB", cli_params.matmul_input.transB);
+  read_from_umap("alpha", cli_params.matmul_input.alpha);
+  read_from_umap("beta", cli_params.matmul_input.beta);
+  read_from_umap("src_dtype", cli_params.matmul_input.src_dtype);
+  read_from_umap("dst_dtype", cli_params.matmul_input.dst_dtype);
+  read_from_umap("weight_granularity",
+                 cli_params.matmul_input.weight_granularity);
+  read_from_umap("inplace_reorder", cli_params.reorder_input.inplace_reorder);
+  read_from_umap("num_groups", cli_params.reorder_input.num_groups);
+  read_from_umap("dim_choice", cli_params.reorder_input.dim_choice);
+  read_from_umap("num_embeddings", cli_params.embedding_input.num_embeddings);
+  read_from_umap("embedding_dim", cli_params.embedding_input.embedding_dim);
+  read_from_umap("num_bags", cli_params.embag_input.num_bags);
+  read_from_umap("num_indices", cli_params.embedding_input.num_indices);
+  read_from_umap("embag_algo", cli_params.embag_input.embag_algo);
+  read_from_umap("padding_index", cli_params.embedding_input.padding_index);
+  read_from_umap("include_last_offset",
+                 cli_params.embag_input.include_last_offset);
+  read_from_umap("is_weights", cli_params.embedding_input.is_weights);
+  read_from_umap("indices_dtype", cli_params.embedding_input.indices_dtype);
+  read_from_umap("fp16_scale_bias", cli_params.embedding_input.fp16_scale_bias);
+  read_from_umap("strided", cli_params.embedding_input.strided);
+  read_from_umap("norm_type", cli_params.normalization_input.norm_type);
+  read_from_umap("norm_shape", cli_params.normalization_input.norm_shape);
+  read_from_umap("use_scale", cli_params.normalization_input.use_scale);
+  read_from_umap("use_shift", cli_params.normalization_input.use_shift);
+  read_from_umap("gamma_dt", cli_params.normalization_input.gamma_dt);
+  read_from_umap("beta_dt", cli_params.normalization_input.beta_dt);
+
+  // Propagate matmul CLI params into reorder (same MatmulInput type).
+  cli_params.reorder_input.matmul_input = cli_params.matmul_input;
+
+  // Propagate shared embag CLI fields into embedding (EmbeddingInput is a
+  // subset of EmbagInput; embag-only fields like num_bags / embag_algo omitted).
+  // In random mode, shared flags affect both embag and embedding suites — see Readme.
+  cli_params.embag_input.embedding_input = cli_params.embedding_input;
+
   return;
 }
 
@@ -1581,6 +1611,47 @@ void Parser::read_from_umap(const std::string &key,
     else {
       log_info("Invalid argument for ", key,
                ", expected a positive integer; ignored.");
+    }
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<std::vector<post_op_type_t>> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    std::vector<post_op_type_t> parsed;
+    for (const auto &po : split(val, ':')) {
+      try {
+        parsed.push_back(strToPostOps(po));
+      }
+      catch (const std::exception &) {
+        commonlog_error("Invalid post-op token '", po, "' for ", key, "; ignored.");
+        return;
+      }
+    }
+    if (parsed.size() > POST_OPS_LIMIT) {
+      commonlog_error("Post-op chain length exceeds POST_OPS_LIMIT for ", key,
+                      "; ignored.");
+      return;
+    }
+    out = std::move(parsed);
+    log_info("Using ", key, "=", val);
+  }
+}
+
+void Parser::read_from_umap(const std::string &key,
+                            std::optional<matmul_algo_t> &out) {
+  out.reset();
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    try {
+      out = strToAlgo(val);
+      log_info("Using ", key, "=", val);
+    }
+    catch (const std::exception &) {
+      log_info("Invalid algorithm for ", key, " ('", val, "'); ignored.");
+      return;
     }
   }
 }
@@ -1981,6 +2052,23 @@ data_type_t strToDatatype(const std::string &str) {
   EXCEPTION("Unknown data type string '" + str + "'");
 }
 
+quant_granularity_t strToQuantGranularity(const std::string &str) {
+  std::string val = str;
+  std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (val == "tensor" || val == "per_tensor") {
+    return quant_granularity_t::tensor;
+  }
+  if (val == "channel" || val == "per_channel") {
+    return quant_granularity_t::channel;
+  }
+  if (val == "group" || val == "per_group") {
+    return quant_granularity_t::group;
+  }
+  EXCEPTION("Unknown weight granularity string '" + str + "'");
+}
+
 embag_algo_t strToEmbagAlgo(std::string str) {
   if (str == "sum") {
     return embag_algo_t::sum;
@@ -2140,7 +2228,11 @@ void neutralize_mish_quant_int8(std::vector<post_op_type_t> &po_types) {
 }
 
 void trim(std::string &str) {
-  str.erase(std::remove_if(str.begin(), str.end(), ::isspace), str.end());
+  const auto not_space = [](unsigned char c) {
+    return !std::isspace(c);
+  };
+  str.erase(str.begin(), std::find_if(str.begin(), str.end(), not_space));
+  str.erase(std::find_if(str.rbegin(), str.rend(), not_space).base(), str.end());
 }
 std::vector<std::string> split(const std::string &str, char delimiter) {
   std::vector<std::string> tokens;
@@ -2153,199 +2245,186 @@ std::vector<std::string> split(const std::string &str, char delimiter) {
     start = end + 1;
   }
 
-  std:: string token = str.substr(start);
+  std::string token = str.substr(start);
   trim(token);
   tokens.emplace_back(token);  // last token (even if empty)
   return tokens;
 }
 
-std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
+std::vector<MatmulInput> read_matmul_inputs(const std::string &file,
     uint32_t ndims) {
-  std::vector<BatchMatmulType> inputs;
+  std::vector<MatmulInput> inputs;
   std::ifstream infile(file);
   if (infile.is_open()) {
     std::string line;
-    // Parse each line of the input file
     while (std::getline(infile, line)) {
       if (line.empty()) {
         continue;
       }
-      // Split the line into fields and validate
       auto fields = split(line, ',');
-
-      int fields_size = fields.size();
-      // input fields after M,K,N: postOp, kernel name, transA, transB, alpha, beta
-      const int NUM_MATMUL_CONFIG_FIELDS = 6;
-      int expected_fields_cnt = ndims + 1 + NUM_MATMUL_CONFIG_FIELDS;
-      if (fields_size != expected_fields_cnt) {
-        commonlog_error(
-          "Invalid line (expected ", expected_fields_cnt, " fields): [",
-          (ndims > 2) ? "bs, " : "",
-          "m, k, n, postOp, ",
-          "kernel name, isTransA, isTransB, alpha, beta]");
+      size_t expected_fields = (ndims == 3) ? 13 : 12;
+      if (fields.size() != expected_fields) {
+        if (ndims == 3) {
+          commonlog_error("Invalid line (expected ", expected_fields,
+                          " fields, got ", fields.size(),
+                          "): [batch_size, M, K, N, postOp, kernel, transA, transB, alpha, beta, src_dtype, dst_dtype, weight_granularity]");
+        }
+        else {
+          commonlog_error("Invalid line (expected ", expected_fields,
+                          " fields, got ", fields.size(),
+                          "): [M, K, N, postOp, kernel, transA, transB, alpha, beta, src_dtype, dst_dtype, weight_granularity]");
+        }
         continue;
       }
-
-      BatchMatmulType cfg;
+      MatmulInput cfg;
       try {
         int id = 0;
-        std::mt19937 gen(rand());
-
-        // Parse batch_size for 3D case, default to 1 for 2D case
         if (ndims == 3) {
-          if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
-            cfg.batch_size = BATCH_START + rand() % BATCH_END;
-          }
-          else {
-            cfg.batch_size = std::stoi(fields[id]);
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid batch size: " + fields[id]);
+              continue;
+            }
+            cfg.batch_size = *parsed;
           }
           id++;
         }
-        else {
-          cfg.batch_size = 1; // Default for 2D matmul
-        }
-
-        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
-          cfg.mat.matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_m = std::stoi(fields[id]);
-        }
-        id++;
-        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
-          cfg.mat.matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_k = std::stoi(fields[id]);
-        }
-        id++;
-        if (fields[id].empty()) {
-          cfg.mat.matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_n = std::stoi(fields[id]);
-        }
-        id++;
-
-        cfg.mat.po_types.clear();
-        if (fields[id].empty()) {
-          std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
-          int num_po_local = num_po(gen);
-          for (int i = 0; i < num_po_local; ++i) {
-            cfg.mat.po_types.push_back(post_op_arr[rand() % (po_size + 1)]);
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid M: " + fields[id]);
+            continue;
           }
+          cfg.m = *parsed;
         }
-        else {
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid K: " + fields[id]);
+            continue;
+          }
+          cfg.k = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid N: " + fields[id]);
+            continue;
+          }
+          cfg.n = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          std::vector<post_op_type_t> parsed;
+          bool post_op_ok = true;
           for (const auto &po : split(fields[id], ':')) {
-            cfg.mat.po_types.push_back(strToPostOps(po));
-          }
-          if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
-            EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
-          }
-        }
-        id++;
-
-        if (fields[id].empty()) {
-          matmul_config_t &matmul_config = matmul_config_t::instance();
-          int32_t algo_;
-          if (ndims > 2) {
-            algo_ = matmul_config.get_bmm_algo();
-          }
-          else {
-            algo_ = matmul_config.get_algo();
-          }
-          cfg.mat.algo = static_cast<matmul_algo_t>(algo_);
-          if (cfg.mat.algo == matmul_algo_t::none) {
-            // Random algorithm selection
-            int algo_range_max = 6; // 6 algorithms in total
-            std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
-            cfg.mat.algo = static_cast<matmul_algo_t>(algo_dist(gen));
-            if (!ZENDNNL_DEPENDS_ONEDNN && (cfg.mat.algo == matmul_algo_t::onednn ||
-                                            cfg.mat.algo == matmul_algo_t::onednn_blocked)) {
-              cfg.mat.algo = matmul_algo_t::aocl_dlp;
+            try {
+              parsed.push_back(strToPostOps(po));
+            }
+            catch (const std::exception &) {
+              commonlog_error("Invalid postOp token '" + po +
+                              "' in line: " + line);
+              post_op_ok = false;
+              break;
             }
           }
-        }
-        else {
-          cfg.mat.algo = strToAlgo(fields[id]);
+          if (!post_op_ok) {
+            continue;
+          }
+          if (parsed.size() > POST_OPS_LIMIT) {
+            commonlog_error("Post-op chain length exceeds POST_OPS_LIMIT.");
+            continue;
+          }
+          cfg.po_types = std::move(parsed);
         }
         id++;
-
-        std::string transA_flag = fields[id];
-        if (transA_flag.empty()) {
-          cfg.mat.transA = rand() % 2;
-        }
-        else {
-          std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
-                         ::tolower);
-          if (transA_flag == "true" || transA_flag == "1") {
-            cfg.mat.transA = true;
+        if (!fields[id].empty()) {
+          try {
+            cfg.algo = strToAlgo(fields[id]);
           }
-          else {
-            cfg.mat.transA = false;
-          }
-        }
-        id++;
-
-        std::string transB_flag = fields[id];
-        if (transB_flag.empty()) {
-          cfg.mat.transB = rand() % 2;
-        }
-        else {
-          std::transform(transB_flag.begin(), transB_flag.end(), transB_flag.begin(),
-                         ::tolower);
-          if (transB_flag == "true" || transB_flag == "1") {
-            cfg.mat.transB = true;
-          }
-          else {
-            cfg.mat.transB = false;
+          catch (const std::exception &) {
+            commonlog_error("Invalid kernel: " + fields[id]);
+            continue;
           }
         }
         id++;
-        std::uniform_real_distribution<float> dist(0.0, 10.0);
-        cfg.mat.alpha = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "transA");
+          if (!parsed) {
+            continue;
+          }
+          cfg.transA = *parsed;
+        }
         id++;
-        cfg.mat.beta = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
-
-        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
-            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
-          cfg.mat.use_LOWOHA = true;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "transB");
+          if (!parsed) {
+            continue;
+          }
+          cfg.transB = *parsed;
         }
-        else if (!cmd_lowoha.empty()) {
-          cfg.mat.use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
-        }
-        else {
-          cfg.mat.use_LOWOHA = rand() % 2;
-        }
-        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
-            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
-          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
-            if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
-                cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
-                cfg.mat.po_types[i] == post_op_type_t::binary_add ||
-                cfg.mat.po_types[i] == post_op_type_t::swish ||
-                cfg.mat.po_types[i] == post_op_type_t::clip) {
-              cfg.mat.po_types[i] = post_op_type_t::none;
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            size_t parsed_len = 0;
+            cfg.alpha = std::stof(fields[id], &parsed_len);
+            if (parsed_len != fields[id].size()) {
+              throw std::invalid_argument("trailing characters");
             }
           }
-        }
-        // mish has no LIBXSMM or native (gemm/brgemm) implementation; map it
-        // to none so file-driven tests on those algos don't silently mismatch.
-        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
-            cfg.mat.algo == matmul_algo_t::libxsmm_blocked ||
-            cfg.mat.algo == matmul_algo_t::native_gemm ||
-            cfg.mat.algo == matmul_algo_t::native_brgemm) {
-          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
-            if (cfg.mat.po_types[i] == post_op_type_t::mish) {
-              cfg.mat.po_types[i] = post_op_type_t::none;
-            }
+          catch (const std::exception &) {
+            commonlog_error("Invalid alpha: " + fields[id]);
+            continue;
           }
         }
-        cfg.mat.source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
-        cfg.mat.output_dtype = dtype_arr[rand() % dtype_size];
-        cfg.mat.weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
-                                     quant_granularity_t::channel;
-
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            size_t parsed_len = 0;
+            cfg.beta = std::stof(fields[id], &parsed_len);
+            if (parsed_len != fields[id].size()) {
+              throw std::invalid_argument("trailing characters");
+            }
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid beta: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            cfg.src_dtype = strToDatatype(fields[id]);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid src_dtype: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            cfg.dst_dtype = strToDatatype(fields[id]);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid dst_dtype: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            cfg.weight_granularity = strToQuantGranularity(fields[id]);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid weight_granularity: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
         inputs.push_back(cfg);
       }
       catch (const std::exception &e) {
@@ -2360,153 +2439,206 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
   return inputs;
 }
 
-std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
-  std::vector<ReorderType> inputs;
+std::vector<ReorderInput> read_reorder_inputs(const std::string &file,
+    bool is_lowoha_test) {
+  std::vector<ReorderInput> inputs;
   std::ifstream infile(file);
   if (infile.is_open()) {
     std::string line;
-    // Parse each line of the input file
     while (std::getline(infile, line)) {
       if (line.empty()) {
         continue;
       }
-      // Split the line into fields and validate
       auto fields = split(line, ',');
-      ReorderType cfg;
+      ReorderInput cfg;
       try {
-        int id = 0;
-        std::mt19937 gen(rand());
-
-        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
-          cfg.mat.matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_m = std::stoi(fields[id]);
-        }
-        id++;
-        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
-          cfg.mat.matmul_k = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_k = std::stoi(fields[id]);
-        }
-        id++;
-        if (fields[id].empty()) {
-          cfg.mat.matmul_n = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-        }
-        else {
-          cfg.mat.matmul_n = std::stoi(fields[id]);
-        }
-        id++;
-
-        // Parse post-op: search for the string in po_arr and assign its index
-        cfg.mat.po_types.clear();
-        if (fields[id].empty()) {
-          std::uniform_int_distribution<int> num_po(1, POST_OPS_LIMIT);
-          int num_po_local = num_po(gen);
-          for (int i = 0; i < num_po_local; ++i) {
-            cfg.mat.po_types.push_back(post_op_arr[rand() % (po_size + 1)]);
+        if (!is_lowoha_test) { // Regular reorder test
+          int id = 0;
+          const int expected_fields = 8;
+          if (fields.size() != static_cast<size_t>(expected_fields)) {
+            commonlog_error("Invalid line (expected ", expected_fields,
+                            " fields, got ", fields.size(),
+                            "): [M, K, N, postOp, kernel, transA, transB, inplace_reorder]");
+            continue;
           }
-        }
-        else {
-          for (const auto &po : split(fields[id], ':')) {
-            cfg.mat.po_types.push_back(strToPostOps(po));
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid M: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.m = *parsed;
           }
-          if (cfg.mat.po_types.size() > POST_OPS_LIMIT) {
-            EXCEPTION("Post-op chain length exceeds POST_OPS_LIMIT.");
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid K: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.k = *parsed;
           }
-        }
-        id++;
-
-        // Parse kernel name (default to 'aocl_dlp' if empty)
-        if (fields[id].empty()) {
-          matmul_config_t &matmul_config = matmul_config_t::instance();
-          int32_t algo_ = matmul_config.get_algo();
-          cfg.mat.algo = static_cast<matmul_algo_t>(algo_);
-          if (cfg.mat.algo == matmul_algo_t::none) {
-            // Random algorithm selection
-            int algo_range_max = 6; // 6 algorithms in total
-            std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
-            cfg.mat.algo = static_cast<matmul_algo_t>(algo_dist(gen));
-            if (!ZENDNNL_DEPENDS_ONEDNN && (cfg.mat.algo == matmul_algo_t::onednn ||
-                                            cfg.mat.algo == matmul_algo_t::onednn_blocked)) {
-              cfg.mat.algo = matmul_algo_t::aocl_dlp;
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid N: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.n = *parsed;
+          }
+          id++;
+          if (!fields[id].empty()) {
+            std::vector<post_op_type_t> parsed;
+            bool post_op_ok = true;
+            for (const auto &po : split(fields[id], ':')) {
+              try {
+                parsed.push_back(strToPostOps(po));
+              }
+              catch (const std::exception &) {
+                commonlog_error("Invalid postOp token '" + po +
+                                "' in line: " + line);
+                post_op_ok = false;
+                break;
+              }
+            }
+            if (!post_op_ok) {
+              continue;
+            }
+            if (parsed.size() > POST_OPS_LIMIT) {
+              commonlog_error("Post-op chain length exceeds POST_OPS_LIMIT.");
+              continue;
+            }
+            cfg.matmul_input.po_types = std::move(parsed);
+          }
+          id++;
+          if (!fields[id].empty()) {
+            try {
+              cfg.matmul_input.algo = strToAlgo(fields[id]);
+            }
+            catch (const std::exception &) {
+              commonlog_error("Invalid kernel: " + fields[id]);
+              continue;
             }
           }
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_bool_field(fields[id], "transA");
+            if (!parsed) {
+              continue;
+            }
+            cfg.matmul_input.transA = *parsed;
+          }
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_bool_field(fields[id], "transB");
+            if (!parsed) {
+              continue;
+            }
+            cfg.matmul_input.transB = *parsed;
+          }
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_bool_field(fields[id], "inplace_reorder");
+            if (!parsed) {
+              continue;
+            }
+            cfg.inplace_reorder = *parsed;
+          }
+          id++;
         }
         else {
-          cfg.mat.algo = strToAlgo(fields[id]);
-        }
-        id++;
-
-        std::string transA_flag = fields[id];
-        if (transA_flag.empty()) {
-          cfg.mat.transA = rand() % 2;
-        }
-        else {
-          std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
-                         ::tolower);
-          if (transA_flag == "true" || transA_flag == "1") {
-            cfg.mat.transA = true;
+          // LOWOHA reorder test
+          int id = 0;
+          const int expected_fields = 8;
+          if (fields.size() != static_cast<size_t>(expected_fields)) {
+            commonlog_error("Invalid line (expected ", expected_fields,
+                            " fields, got ", fields.size(),
+                            "): [batch_size, M, N, src_dtype, dst_dtype, weight_granularity, num_groups, dim_choice]");
+            continue;
           }
-          else {
-            cfg.mat.transA = false;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid batch size: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.batch_size = *parsed;
           }
-        }
-        id++;
-
-        std::string transB_flag = fields[id];
-        if (transB_flag.empty()) {
-          cfg.mat.transB = rand() % 2;
-        }
-        else {
-          std::transform(transB_flag.begin(), transB_flag.end(), transB_flag.begin(),
-                         ::tolower);
-          if (transB_flag == "true" || transB_flag == "1") {
-            cfg.mat.transB = true;
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid M: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.m = *parsed;
           }
-          else {
-            cfg.mat.transB = false;
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid N: " + fields[id]);
+              continue;
+            }
+            cfg.matmul_input.n = *parsed;
           }
-        }
-        id++;
-        if (fields[id].empty()) {
-          cfg.inplace_reorder = rand() % 2;
-        }
-        else {
-          std::string inplace_flag = fields[id];
-          std::transform(inplace_flag.begin(), inplace_flag.end(), inplace_flag.begin(),
-                         ::tolower);
-          if (inplace_flag == "true" || inplace_flag == "1") {
-            cfg.inplace_reorder = true;
-          }
-          else {
-            cfg.inplace_reorder = false;
-          }
-        }
-        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
-            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
-          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
-            if (cfg.mat.po_types[i] == post_op_type_t::gelu_tanh ||
-                cfg.mat.po_types[i] == post_op_type_t::binary_mul ||
-                cfg.mat.po_types[i] == post_op_type_t::binary_add ||
-                cfg.mat.po_types[i] == post_op_type_t::swish ||
-                cfg.mat.po_types[i] == post_op_type_t::clip) {
-              cfg.mat.po_types[i] = post_op_type_t::none;
+          id++;
+          if (!fields[id].empty()) {
+            try {
+              cfg.matmul_input.src_dtype = std::optional<data_type_t>(
+                                             strToDatatype(fields[id]));
+            }
+            catch (const std::exception &) {
+              commonlog_error("Invalid src_dtype: " + fields[id]);
+              continue;
             }
           }
-        }
-        // mish has no LIBXSMM or native (gemm/brgemm) implementation; map it
-        // to none so file-driven tests on those algos don't silently mismatch.
-        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
-            cfg.mat.algo == matmul_algo_t::libxsmm_blocked ||
-            cfg.mat.algo == matmul_algo_t::native_gemm ||
-            cfg.mat.algo == matmul_algo_t::native_brgemm) {
-          for (uint32_t i = 0; i < cfg.mat.po_types.size(); ++i) {
-            if (cfg.mat.po_types[i] == post_op_type_t::mish) {
-              cfg.mat.po_types[i] = post_op_type_t::none;
+          id++;
+          if (!fields[id].empty()) {
+            try {
+              cfg.matmul_input.dst_dtype = std::optional<data_type_t>(
+                                             strToDatatype(fields[id]));
+            }
+            catch (const std::exception &) {
+              commonlog_error("Invalid dst_dtype: " + fields[id]);
+              continue;
             }
           }
+          id++;
+          if (!fields[id].empty()) {
+            try {
+              cfg.matmul_input.weight_granularity =
+                std::optional<quant_granularity_t>(strToQuantGranularity(fields[id]));
+            }
+            catch (const std::exception &) {
+              commonlog_error("Invalid weight_granularity: " + fields[id]);
+              continue;
+            }
+          }
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid num groups: " + fields[id]);
+              continue;
+            }
+            cfg.num_groups = *parsed;
+          }
+          id++;
+          if (!fields[id].empty()) {
+            const auto parsed = parse_positive_uint64_field(fields[id]);
+            if (!parsed) {
+              commonlog_error("Invalid dim choice: " + fields[id]);
+              continue;
+            }
+            if (*parsed < 1U || *parsed > 3U) {
+              commonlog_error("Invalid dim choice (must be 1, 2, or 3): " + fields[id]);
+              continue;
+            }
+            cfg.dim_choice = std::optional<uint32_t>(static_cast<uint32_t>(*parsed));
+          }
+          id++;
         }
         inputs.push_back(cfg);
       }
@@ -2520,6 +2652,452 @@ std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
     testlog_error("Error: Cannot open file ", file);
   }
   return inputs;
+}
+
+std::vector<EmbagInput> read_embag_inputs(const std::string &file) {
+  std::vector<EmbagInput> inputs;
+  std::ifstream infile(file);
+  if (infile.is_open()) {
+    std::string line;
+    while (std::getline(infile, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      auto fields = split(line, ',');
+      const int expected_fields = 11;
+      if (fields.size() != static_cast<size_t>(expected_fields)) {
+        commonlog_error("Invalid line (expected ", expected_fields,
+                        " fields, got ", fields.size(),
+                        "): [num_embeddings, embedding_dim, num_bags, num_indices, embag_algo, padding_index, include_last_offset, is_weights, indices_dtype, fp16_scale_bias, strided]");
+        continue;
+      }
+      EmbagInput cfg;
+      try {
+        int id = 0;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid num embeddings: " + fields[id]);
+            continue;
+          }
+          cfg.embedding_input.num_embeddings = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid embedding dim: " + fields[id]);
+            continue;
+          }
+          cfg.embedding_input.embedding_dim = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid num bags: " + fields[id]);
+            continue;
+          }
+          cfg.num_bags = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid num indices: " + fields[id]);
+            continue;
+          }
+          cfg.embedding_input.num_indices = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            cfg.embag_algo = std::optional<embag_algo_t>(strToEmbagAlgo(fields[id]));
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid embag_algo: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            size_t parsed_len = 0;
+            int64_t padding_index = std::stoll(fields[id], &parsed_len);
+            if (parsed_len != fields[id].size()) {
+              commonlog_error("Invalid padding_index: " + fields[id]);
+              continue;
+            }
+            cfg.embedding_input.padding_index = std::optional<int64_t>(padding_index);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid padding_index: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "include_last_offset");
+          if (!parsed) {
+            continue;
+          }
+          cfg.include_last_offset = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "is_weights");
+          if (!parsed) {
+            continue;
+          }
+          cfg.embedding_input.is_weights = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          if (fields[id] == "s32") {
+            cfg.embedding_input.indices_dtype = data_type_t::s32;
+          }
+          else if (fields[id] == "s64") {
+            cfg.embedding_input.indices_dtype = data_type_t::s64;
+          }
+          else {
+            commonlog_error("Invalid indices_dtype: " + fields[id]
+                            + " (expected s32 or s64)");
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "fp16_scale_bias");
+          if (!parsed) {
+            continue;
+          }
+          cfg.embedding_input.fp16_scale_bias = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "strided");
+          if (!parsed) {
+            continue;
+          }
+          cfg.embedding_input.strided = *parsed;
+        }
+        inputs.push_back(cfg);
+      }
+      catch (const std::exception &e) {
+        commonlog_error(e.what());
+        continue;
+      }
+    }
+  }
+  else {
+    testlog_error("Error: Cannot open file ", file);
+  }
+  return inputs;
+}
+
+std::vector<EmbeddingInput> read_embedding_inputs(const std::string &file) {
+  std::vector<EmbeddingInput> inputs;
+  std::ifstream infile(file);
+  if (infile.is_open()) {
+    std::string line;
+    while (std::getline(infile, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      auto fields = split(line, ',');
+      const int expected_fields = 8;
+      if (fields.size() != static_cast<size_t>(expected_fields)) {
+        commonlog_error("Invalid line (expected ", expected_fields,
+                        " fields, got ", fields.size(),
+                        "): [num_embeddings, embedding_dim, num_indices, padding_index, is_weights, indices_dtype, fp16_scale_bias, strided]");
+        continue;
+      }
+      EmbeddingInput cfg;
+      try {
+        int id = 0;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid num embeddings: " + fields[id]);
+            continue;
+          }
+          cfg.num_embeddings = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid embedding dim: " + fields[id]);
+            continue;
+          }
+          cfg.embedding_dim = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_positive_uint64_field(fields[id]);
+          if (!parsed) {
+            commonlog_error("Invalid num indices: " + fields[id]);
+            continue;
+          }
+          cfg.num_indices = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          try {
+            size_t parsed_len = 0;
+            int64_t padding_index = std::stoll(fields[id], &parsed_len);
+            if (parsed_len != fields[id].size()) {
+              commonlog_error("Invalid padding_index: " + fields[id]);
+              continue;
+            }
+            cfg.padding_index = std::optional<int64_t>(padding_index);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid padding_index: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "is_weights");
+          if (!parsed) {
+            continue;
+          }
+          cfg.is_weights = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          if (fields[id] == "s32") {
+            cfg.indices_dtype = data_type_t::s32;
+          }
+          else if (fields[id] == "s64") {
+            cfg.indices_dtype = data_type_t::s64;
+          }
+          else {
+            commonlog_error("Invalid indices_dtype: " + fields[id]
+                            + " (expected s32 or s64)");
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "fp16_scale_bias");
+          if (!parsed) {
+            continue;
+          }
+          cfg.fp16_scale_bias = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "strided");
+          if (!parsed) {
+            continue;
+          }
+          cfg.strided = *parsed;
+        }
+        inputs.push_back(cfg);
+      }
+      catch (const std::exception &e) {
+        commonlog_error(e.what());
+        continue;
+      }
+    }
+  }
+  else {
+    testlog_error("Error: Cannot open file ", file);
+  }
+  return inputs;
+}
+
+std::vector<NormalizationInput> read_normalization_inputs(
+  const std::string &file) {
+  std::vector<NormalizationInput> inputs;
+  std::ifstream infile(file);
+  if (infile.is_open()) {
+    std::string line;
+    while (std::getline(infile, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      auto fields = split(line, ',');
+      const int expected_fields = 6;
+      if (fields.size() != static_cast<size_t>(expected_fields)) {
+        commonlog_error("Invalid line (expected ", expected_fields,
+                        " fields, got ", fields.size(),
+                        "): [norm_type, norm_shape, use_scale, use_shift, gamma_dt, beta_dt]");
+        continue;
+      }
+      NormalizationInput cfg;
+      try {
+        int id = 0;
+        if (!fields[id].empty()) {
+          try {
+            cfg.norm_type = strToNormType(fields[id]);
+          }
+          catch (const std::exception &) {
+            commonlog_error("Invalid norm_type: " + fields[id]);
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          auto parsed_norm_shape = parse_norm_shape_field(fields[id]);
+          if (parsed_norm_shape.empty()) {
+            continue;
+          }
+          cfg.norm_shape = std::move(parsed_norm_shape);
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "use_scale");
+          if (!parsed) {
+            continue;
+          }
+          cfg.use_scale = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          const auto parsed = parse_bool_field(fields[id], "use_shift");
+          if (!parsed) {
+            continue;
+          }
+          cfg.use_shift = *parsed;
+        }
+        id++;
+        if (!fields[id].empty()) {
+          if (fields[id] == "bf16") {
+            cfg.gamma_dt = data_type_t::bf16;
+          }
+          else if (fields[id] == "f32") {
+            cfg.gamma_dt = data_type_t::f32;
+          }
+          else {
+            commonlog_error("Invalid gamma_dt: " + fields[id]
+                            + " (expected bf16 or f32)");
+            continue;
+          }
+        }
+        id++;
+        if (!fields[id].empty()) {
+          if (fields[id] == "bf16") {
+            cfg.beta_dt = data_type_t::bf16;
+          }
+          else if (fields[id] == "f32") {
+            cfg.beta_dt = data_type_t::f32;
+          }
+          else {
+            commonlog_error("Invalid beta_dt: " + fields[id]
+                            + " (expected bf16 or f32)");
+            continue;
+          }
+        }
+        id++;
+        inputs.push_back(cfg);
+      }
+      catch (const std::exception &e) {
+        commonlog_error(e.what());
+        continue;
+      }
+    }
+  }
+  else {
+    testlog_error("Error: Cannot open file ", file);
+  }
+  return inputs;
+}
+
+norm_type_t strToNormType(const std::string &str) {
+  std::string s = str;
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (s == "layer") {
+    return norm_type_t::LAYER_NORM;
+  }
+  if (s == "batch") {
+    return norm_type_t::BATCH_NORM;
+  }
+  if (s == "rms") {
+    return norm_type_t::RMS_NORM;
+  }
+  if (s == "fusedaddrms") {
+    return norm_type_t::FUSED_ADD_RMS_NORM;
+  }
+  EXCEPTION("Unknown norm_type '" + str + "'");
+}
+
+std::optional<uint64_t> parse_positive_uint64_field(const std::string &field) {
+  if (field.empty()) {
+    return std::nullopt;
+  }
+  for (const char c : field) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) {
+      return std::nullopt;
+    }
+  }
+  try {
+    size_t parsed_len = 0;
+    const uint64_t value = std::stoull(field, &parsed_len);
+    if (parsed_len != field.size() || value == 0U) {
+      return std::nullopt;
+    }
+    return value;
+  }
+  catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+std::vector<uint64_t> parse_norm_shape_field(const std::string &shape_str) {
+  std::vector<uint64_t> shape;
+  for (const auto &dim : split(shape_str, ':')) {
+    std::string t = dim;
+    trim(t);
+    if (t.empty()) {
+      commonlog_error("shape contains an empty dimension");
+      return std::vector<uint64_t>();
+    }
+    const auto parsed = parse_positive_uint64_field(t);
+    if (!parsed) {
+      commonlog_error("invalid shape dimension: " + t);
+      return std::vector<uint64_t>();
+    }
+    shape.push_back(*parsed);
+  }
+  if (shape.empty()) {
+    commonlog_error("shape must contain at least one dimension");
+    return std::vector<uint64_t>();
+  }
+  return shape;
+}
+
+std::optional<bool> parse_bool_field(const std::string &flag,
+                                     const std::string &column) {
+  std::string s = flag;
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (s == "true" || s == "1") {
+    return true;
+  }
+  if (s.empty() || s == "false" || s == "0") {
+    return false;
+  }
+  if (!column.empty()) {
+    commonlog_error("Invalid " + column + ": " + flag);
+  }
+  else {
+    commonlog_error("Unknown boolean value '" + flag
+                    + "', expected true/false or 1/0");
+  }
+  return std::nullopt;
+}
+
+std::optional<bool> parse_cmd_lowoha() {
+  if (cmd_lowoha.empty()) {
+    return std::nullopt;
+  }
+  return parse_bool_field(cmd_lowoha, "lowoha");
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,

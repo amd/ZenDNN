@@ -107,40 +107,47 @@ const char *algo_str(embag_algo_t algo) {
 // drawn within the EMBEDDING_* / NUM_* / NUM_BAGS_* envelopes defined
 // in `gtest_utils.hpp`.
 GroupEmbagType::GroupEmbagType(uint32_t test_index, uint32_t total_tests) {
-  num_embeddings = (cli_params.num_embeddings && *cli_params.num_embeddings > 0)
-                   ? *cli_params.num_embeddings
+  num_embeddings = (cli_params.embag_input.embedding_input.num_embeddings &&
+                    *cli_params.embag_input.embedding_input.num_embeddings > 0)
+                   ? *cli_params.embag_input.embedding_input.num_embeddings
                    : (EMBEDDING_SIZE_START + std::rand() % EMBEDDING_SIZE_END);
-  embedding_dim  = (cli_params.embedding_dim && *cli_params.embedding_dim > 0)
-                   ? *cli_params.embedding_dim
+  embedding_dim  = (cli_params.embag_input.embedding_input.embedding_dim &&
+                    *cli_params.embag_input.embedding_input.embedding_dim > 0)
+                   ? *cli_params.embag_input.embedding_input.embedding_dim
                    : (EMBEDDING_DIM_START + std::rand() % EMBEDDING_DIM_END);
-  num_indices    = (cli_params.num_indices && *cli_params.num_indices > 0)
-                   ? *cli_params.num_indices
+  num_indices    = (cli_params.embag_input.embedding_input.num_indices &&
+                    *cli_params.embag_input.embedding_input.num_indices > 0)
+                   ? *cli_params.embag_input.embedding_input.num_indices
                    : (NUM_INDICES_START + std::rand() % NUM_INDICES_END);
-  num_bags       = (cli_params.num_bags && *cli_params.num_bags > 0)
-                   ? *cli_params.num_bags
+  num_bags       = (cli_params.embag_input.num_bags &&
+                    *cli_params.embag_input.num_bags > 0)
+                   ? *cli_params.embag_input.num_bags
                    : (NUM_BAGS_START + std::rand() % NUM_BAGS_END);
 
-  algo = cli_params.embag_algo
-         ? *cli_params.embag_algo
+  algo = cli_params.embag_input.embag_algo
+         ? *cli_params.embag_input.embag_algo
          : static_cast<embag_algo_t>(1 + std::rand() % 3); // sum / mean / max
 
-  padding_index       = cli_params.padding_index ? *cli_params.padding_index : -1;
-  include_last_offset = cli_params.include_last_offset
-                        ? *cli_params.include_last_offset
+  padding_index       = cli_params.embag_input.embedding_input.padding_index ?
+                        *cli_params.embag_input.embedding_input.padding_index : -1;
+  include_last_offset = cli_params.embag_input.include_last_offset
+                        ? *cli_params.embag_input.include_last_offset
                         : (std::rand() % 2);
-  is_weights = cli_params.is_weights ? *cli_params.is_weights : (std::rand() % 2);
+  is_weights = cli_params.embag_input.embedding_input.is_weights ?
+               *cli_params.embag_input.embedding_input.is_weights : (std::rand() % 2);
 
-  if (cli_params.indices_dtype &&
-      (*cli_params.indices_dtype == data_type_t::s32 ||
-       *cli_params.indices_dtype == data_type_t::s64)) {
-    indices_dtype = *cli_params.indices_dtype;
+  if (cli_params.embag_input.embedding_input.indices_dtype &&
+      (*cli_params.embag_input.embedding_input.indices_dtype == data_type_t::s32 ||
+       *cli_params.embag_input.embedding_input.indices_dtype == data_type_t::s64)) {
+    indices_dtype = *cli_params.embag_input.embedding_input.indices_dtype;
   }
   else {
     indices_dtype = (std::rand() % 2 == 0) ? data_type_t::s32 : data_type_t::s64;
   }
   offsets_dtype = indices_dtype;
 
-  fp16_scale_bias = cli_params.fp16_scale_bias ? *cli_params.fp16_scale_bias :
+  fp16_scale_bias = cli_params.embag_input.embedding_input.fp16_scale_bias ?
+                    *cli_params.embag_input.embedding_input.fp16_scale_bias :
                     (std::rand() % 2);
 
   // 2..5 tables — realistic deployment range, also where the four
