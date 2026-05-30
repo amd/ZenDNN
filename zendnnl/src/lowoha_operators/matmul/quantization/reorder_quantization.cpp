@@ -19,6 +19,7 @@
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 
+#include <algorithm>
 #include <vector>
 
 // Per-token bf16/f32 + s8 source path selector (manual source toggle):
@@ -289,6 +290,169 @@ status_t reorder_quantization_wrapper(
               "falling back to original path");
   }
 
+  return status_t::success;
+}
+
+status_t group_reorder_quantization_wrapper(
+    const std::vector<const void *> &src,
+    const std::vector<int> &lda,
+    const std::vector<bool> &transA,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const int num_threads,
+    std::vector<matmul_params> &params,
+    std::vector<const void *> &quantized_src,
+    std::vector<int> &quantized_lda,
+    group_reorder_quant_buffers_t &buffers,
+    bool &quantized) {
+  quantized = false;
+
+  const size_t num_ops = M.size();
+  if (num_ops == 0) return status_t::success;
+  if (src.size() < num_ops || lda.size() < num_ops ||
+      transA.size() < num_ops || K.size() < num_ops ||
+      params.size() < num_ops) {
+    return status_t::success;
+  }
+  const std::vector<const void *> active_src(
+      src.begin(),
+      src.begin() + static_cast<std::vector<const void *>::difference_type>(
+                        num_ops));
+  const std::vector<int> active_K(
+      K.begin(),
+      K.begin() + static_cast<std::vector<int>::difference_type>(num_ops));
+  std::vector<std::vector<int64_t>> active_src_strides(num_ops);
+
+  const data_type_t src_dtype = params[0].dtypes.src;
+  const data_type_t compute_dtype = params[0].dtypes.compute;
+  const data_type_t scale_dtype = params[0].quant_params.src_scale.dt;
+  const bool requires_dynamic_quant =
+      group_reorder_quantization_required(params, num_ops);
+  auto fallback_per_expert = [&]() -> status_t {
+    buffers.fallback_buf.resize(num_ops);
+    quantized_src.resize(num_ops);
+    quantized_lda.resize(num_ops);
+    for (size_t i = 0; i < num_ops; ++i) {
+      const void *src_i = active_src[i];
+      int reordered_lda = lda[i];
+      size_t src_type_size = size_of(params[i].dtypes.src);
+      matmul_batch_params_t bp;
+      bp.Batch_A = 1;
+      bp.Batch_B = 1;
+      const status_t st = reorder_quantization_wrapper(
+          src_i, lda[i], reordered_lda, src_type_size, params[i], bp,
+          transA[i], M[i], active_K[i], num_threads,
+          buffers.fallback_buf[i]);
+      if (st != status_t::success) return st;
+      quantized_src[i] = src_i;
+      quantized_lda[i] = reordered_lda;
+      if (params[i].dtypes.src == params[i].dtypes.compute) {
+        params[i].dynamic_quant = false;
+      }
+    }
+    quantized = true;
+    return status_t::success;
+  };
+
+  if (!requires_dynamic_quant) {
+    return status_t::success;
+  }
+  if (src_dtype != data_type_t::bf16 && src_dtype != data_type_t::f32) {
+    return status_t::success;
+  }
+  if (compute_dtype != data_type_t::s8) {
+    return fallback_per_expert();
+  }
+  if (scale_dtype != data_type_t::f32 && scale_dtype != data_type_t::bf16) {
+    return fallback_per_expert();
+  }
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (M[i] < 0 || active_K[i] <= 0 || lda[i] < active_K[i]) {
+      return fallback_per_expert();
+    }
+    if (lda[i] != active_K[i]) {
+      active_src_strides[i] = {static_cast<int64_t>(lda[i]), 1};
+    }
+    if (!params[i].dynamic_quant ||
+        params[i].dtypes.wei != data_type_t::s8 ||
+        params[i].dtypes.src != src_dtype ||
+        params[i].dtypes.compute != compute_dtype ||
+        params[i].quant_params.src_scale.dt != scale_dtype ||
+        transA[i]) {
+      return fallback_per_expert();
+    }
+    if (params[i].quant_params.src_zp.buff != nullptr ||
+        params[i].quant_params.src_zp.dt != data_type_t::none) {
+      return fallback_per_expert();
+    }
+    const std::vector<int64_t> logical_shape = {
+        static_cast<int64_t>(M[i]), static_cast<int64_t>(active_K[i])};
+    if (get_single_granularity(params[i].quant_params.src_scale.dims,
+                               logical_shape) !=
+        granularity_type_t::per_token) {
+      return fallback_per_expert();
+    }
+  }
+
+  buffers.src_buf.assign(num_ops, nullptr);
+  buffers.scale_buf.assign(num_ops, nullptr);
+  std::vector<void *> dst(num_ops, nullptr);
+  std::vector<std::vector<int64_t>> dst_strides(num_ops);
+  std::vector<void *> scale(num_ops, nullptr);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    const size_t src_bytes =
+        static_cast<size_t>(std::max(0, M[i])) *
+        static_cast<size_t>(active_K[i]);
+    if (src_bytes > 0) {
+      buffers.src_buf[i] = static_cast<uint8_t *>(malloc(src_bytes));
+      if (!buffers.src_buf[i]) {
+        log_error("Group reorder quantization: failed to allocate source buffer");
+        return status_t::failure;
+      }
+    }
+    dst[i] = buffers.src_buf[i];
+
+    void *scale_buff =
+        const_cast<void *>(params[i].quant_params.src_scale.buff);
+    if (!scale_buff) {
+      const size_t scale_bytes =
+          static_cast<size_t>(std::max(0, M[i])) * size_of(scale_dtype);
+      if (scale_bytes > 0) {
+        buffers.scale_buf[i] = static_cast<uint8_t *>(malloc(scale_bytes));
+        if (!buffers.scale_buf[i]) {
+          log_error("Group reorder quantization: failed to allocate scale buffer");
+          return status_t::failure;
+        }
+        scale_buff = buffers.scale_buf[i];
+      }
+    }
+    scale[i] = scale_buff;
+  }
+
+  zendnnl::lowoha::reorder::group_dynamic_quant_params_t gparams;
+  gparams.src_dtype = src_dtype;
+  gparams.dst_dtype = compute_dtype;
+  gparams.scale_dtype = scale_dtype;
+  gparams.num_threads = num_threads;
+
+  const status_t st = zendnnl::lowoha::reorder::group_dynamic_quant(
+      active_src, M, active_K, active_src_strides, dst, dst_strides,
+      scale, gparams);
+  if (st != status_t::success) return st;
+
+  quantized_src.resize(num_ops);
+  quantized_lda.resize(num_ops);
+  for (size_t i = 0; i < num_ops; ++i) {
+    quantized_src[i] = dst[i];
+    quantized_lda[i] = active_K[i];
+    params[i].dtypes.src = compute_dtype;
+    params[i].dynamic_quant = false;
+    params[i].quant_params.src_scale.buff = scale[i];
+  }
+
+  quantized = true;
   return status_t::success;
 }
 

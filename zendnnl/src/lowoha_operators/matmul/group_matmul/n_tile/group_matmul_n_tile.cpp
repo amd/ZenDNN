@@ -68,6 +68,7 @@
 #include "../group_matmul_parallel_common.hpp"
 #include "group_matmul_n_tile.hpp"            // (re-includes planner header)
 #include "../custom_kernel/dispatch.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "../prepack/prepack.hpp"
 
 namespace zendnnl {

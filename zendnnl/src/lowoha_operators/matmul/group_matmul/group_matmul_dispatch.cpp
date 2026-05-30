@@ -408,8 +408,9 @@ void parallel_per_expert(
 //   What N-tile rejects (everything outside the single accepted
 //   shape):
 //
-//     A. Static source quantisation (`dynamic_quant == false`)
-//        — regardless of src / wei granularity.
+//     A. Static source quantisation with a non-S8 source, or without
+//        per-token src_scale.  The grouped dynamic-quant path produces
+//        S8 src + `{M[i], 1}` src_scale and is accepted.
 //
 //     B. Per-tensor weight or source scale (`{}`, `{1}`, or any
 //        product-1 shape).
@@ -477,12 +478,10 @@ static bool check_n_tile_extra(
   // layouts where the first dim is 1 (or empty) while accepting
   // the single-row decode case `M[i] == 1` with dims `{1, 1}`.
   //
-  // We only accept the dynamic-quant form, so `buff` is expected
-  // to be `nullptr` on entry — the pre-OMP hoist loop in
-  // `flat_n_tile` allocates the internal scale buffer from the
-  // dims.  A non-null `buff` would imply the caller pre-quantised
-  // src, which is the static path the scope intentionally
-  // excludes.
+  // Dynamic-quant input reaches this gate with `buff == nullptr` and
+  // is hoisted by flat_n_tile. Grouped dynamic-quant reaches this gate
+  // after pre-quantizing to S8, so `buff != nullptr` and the same
+  // per-token dims describe the ready-to-use scale buffer.
   auto is_per_token_dyn_src =
       [](const matmul_quantization_params_t::matmul_quant_t &q,
          int M_expert) -> bool {
@@ -509,23 +508,26 @@ static bool check_n_tile_extra(
         params[i].dynamic_quant;
 
     if (any_quant) {
-      // Dynamic source quant is the ONLY src-side shape we accept.
-      // Static src (caller pre-quantised, `dynamic_quant == false`)
-      // is rejected even when src/wei dims match the per-token /
-      // per-channel layouts — keep the gate single-shape.
-      if (!params[i].dynamic_quant) {
+      // Source side: accept either (a) dynamic BF16/F32 input that
+      // flat_n_tile will hoist, or (b) already grouped-quantized S8
+      // input with a ready per-token source scale buffer.
+      const bool grouped_s8_src =
+          !params[i].dynamic_quant &&
+          params[i].dtypes.src == data_type_t::s8 &&
+          qp.src_scale.buff != nullptr;
+      if (!params[i].dynamic_quant && !grouped_s8_src) {
         return false;
       }
 
       // Source dims: `{M[i], 1}` per-token (including `M[i] == 1`
       // → `{1, 1}`, the single-token-per-expert decode case).
-      // Buff is expected to be null (hoist allocates).  A non-null
-      // buff here would be a caller pre-fill on a dynamic-quant
-      // call — rare but not technically wrong; the wrapper will
-      // overwrite it anyway.  We don't gate on buff here because
-      // that nullness is a hoist-allocation contract, not a
-      // per-token-scope contract.
+      // For grouped_s8_src the scale buffer must be non-null (checked
+      // above). For dynamic input, nullness is a hoist-allocation
+      // contract, not a per-token-scope contract.
       if (!is_per_token_dyn_src(qp.src_scale, M[i])) {
+        return false;
+      }
+      if (grouped_s8_src && qp.src_zp.buff != nullptr) {
         return false;
       }
       if (qp.src_zp.buff != nullptr &&

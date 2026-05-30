@@ -99,6 +99,7 @@
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -766,6 +767,10 @@ inline status_t setup_op2_dispatch_scratch(
     p.dtypes.dst   = params[i].dtypes.dst;
     p.dtypes.bias  = fused.bias_dt_down;
     p.num_threads  = params[i].num_threads;
+    // Inherit the quant scheme knobs from Op1's params: dynamic_quant
+    // flag and dtypes.compute carry over unchanged so both the grouped
+    // source-quantization gate AND the per-expert fallback see the same
+    // values on Op2 as on Op1.
     p.dynamic_quant  = params[i].dynamic_quant;
     p.dtypes.compute = params[i].dtypes.compute;
 
@@ -845,6 +850,19 @@ inline status_t setup_op2_dispatch_scratch(
 // When Pass 1's dispatcher cannot fuse the activation (e.g. ALGO 3 +
 // silu_and_mul / gelu_and_mul on the wide arena), a separate-pass
 // activation runs between Pass 1 and Pass 2.
+//
+// Source dynamic quantization is selected by ZENDNNL_ENABLE_GROUP_DQ:
+//   * on (default): each pass group-quantizes its source up front via
+//     `group_reorder_quantization_wrapper`, rewriting the per-pass
+//     params copy to s8 + clearing dynamic_quant, so the per-expert
+//     `reorder_quantization_wrapper` inside `execute_expert_slice`
+//     short-circuits to a no-op (no double quant).
+//   * off: the grouped pre-pass is skipped and dynamic quant flows
+//     through the per-expert path inside `execute_expert_slice`
+//     (legacy behaviour).
+// This is the NON-vertical-fusion fallback path; the vertical-fusion
+// executor (tried first by the caller) does its own in-pipeline quant
+// and is never reached when it engages.
 inline status_t run_fused_moe_legacy_two_pass(
     grp_matmul_gated_act_t act,
     data_type_t act_dtype,
@@ -863,15 +881,41 @@ inline status_t run_fused_moe_legacy_two_pass(
     std::vector<matmul_params> &params,
     int num_threads,
     const char *&pass1_mode, const char *&pass2_mode) {
+  const bool enable_group_dq = get_grp_matmul_enable_group_dq();
+
+  // Pass 1 source group dynamic quant (opt-in; default on).  Quantizes
+  // every expert's BF16/F32 src to S8 in one grouped pass (with a
+  // per-expert fallback for shapes the grouped kernel doesn't cover)
+  // and rewrites the `pass1_params` COPY — the caller's `params` stays
+  // intact so the Op2 scratch (already built from it) is unaffected.
+  std::vector<const void *> pass1_quant_src;
+  std::vector<int> pass1_quant_lda;
+  std::vector<matmul_params> pass1_params = params;
+  group_reorder_quant_buffers_t pass1_quant_buffers;
+  bool pass1_group_quantized = false;
+  if (enable_group_dq) {
+    const status_t pass1_quant_st = group_reorder_quantization_wrapper(
+        src, lda, transA, M, K, num_threads, pass1_params,
+        pass1_quant_src, pass1_quant_lda, pass1_quant_buffers,
+        pass1_group_quantized);
+    if (pass1_quant_st != status_t::success) return pass1_quant_st;
+  }
+
   // Pass 1: Op1 (gate+up) + activation.  The dispatcher picks ALGO
   // 1..5 (or auto) per `ZENDNNL_GRP_MATMUL_ALGO` and the safety
   // gates; inner BLAS kernel honours `ZENDNNL_MATMUL_ALGO`.  For
   // tight layout the dispatcher auto-enables fused activation
-  // regardless of `N_TILE_FUSED_ACT` (correctness contract).
+  // regardless of `N_TILE_FUSED_ACT` (correctness contract).  When
+  // grouped DQ did not run, `params` still carries dynamic_quant and
+  // `execute_expert_slice` quantizes per expert.
   const bool act_fused = group_matmul_run_parallel_dispatch(
       layout, transA, transB, M, N, K, alpha,
-      src, lda, weight, ldb, bias, beta, op1_dst, op1_ldc,
-      is_weights_const, params, num_threads, &pass1_mode,
+      pass1_group_quantized ? pass1_quant_src : src,
+      pass1_group_quantized ? pass1_quant_lda : lda,
+      weight, ldb, bias, beta, op1_dst, op1_ldc,
+      is_weights_const,
+      pass1_group_quantized ? pass1_params : params,
+      num_threads, &pass1_mode,
       act, act_dtype);
 
   // Separate-pass activation when the dispatcher cannot fuse (e.g.
@@ -885,19 +929,46 @@ inline status_t run_fused_moe_legacy_two_pass(
     if (act_st != status_t::success) return act_st;
   }
 
-  // Pass 2: Op2 (down_proj) dispatch.  Same dispatcher with `act=none`.
+  // Pass 2 source group dynamic quant (same opt-in gate).  Runs AFTER
+  // Op1 + activation so the activated Op1 output (`scratch.src_down`,
+  // read at `op1_ldc` stride) is the source being quantized.  When
+  // disabled, Op2 dynamic quant is handled per-expert in
+  // `execute_expert_slice` (params_down still carries dynamic_quant).
+  std::vector<const void *> pass2_quant_src;
+  std::vector<int> pass2_quant_lda;
+  std::vector<matmul_params> pass2_params = scratch.params_down;
+  group_reorder_quant_buffers_t pass2_quant_buffers;
+  bool pass2_group_quantized = false;
+  if (enable_group_dq) {
+    const status_t pass2_quant_st = group_reorder_quantization_wrapper(
+        scratch.src_down, op1_ldc, scratch.transA_down, M, scratch.K_down,
+        num_threads, pass2_params, pass2_quant_src, pass2_quant_lda,
+        pass2_quant_buffers, pass2_group_quantized);
+    if (pass2_quant_st != status_t::success) return pass2_quant_st;
+  }
+
+  // ── Pass 2: Op2 (down_proj) dispatch ────────────────────────────────
+  // Single route: `group_matmul_run_parallel_dispatch` with `act=none`.
+  // Honours `ZENDNNL_GRP_MATMUL_ALGO` (1..5) and `ZENDNNL_MATMUL_ALGO`
+  // for inner BLAS, and routes through the custom BF16 microkernel
+  // inside flat_n_tile when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
+  // the ALGO 3 path is selected.
+  //
   // Op2's lda (= op1_ldc) per Op1 layout × activation:
   //   wide  + gated act  — lda=N,    K_down=N/2.
   //   wide  + act=none   — lda=N,    K_down=N.
   //   tight + gated act  — lda=N/2,  K_down=N/2.
   group_matmul_run_parallel_dispatch(
-      layout, scratch.transA_down, transB, M, fused.N_down,
-      scratch.K_down, scratch.alpha_down,
-      scratch.src_down, op1_ldc,
+      layout, scratch.transA_down, transB, M, fused.N_down, scratch.K_down,
+      scratch.alpha_down,
+      pass2_group_quantized ? pass2_quant_src : scratch.src_down,
+      pass2_group_quantized ? pass2_quant_lda : op1_ldc,
       fused.down_weight, fused.ldb_down,
       fused.bias_down, scratch.beta_down,
       op2_dst, op2_ldc,
-      is_weights_const, scratch.params_down, num_threads, &pass2_mode,
+      is_weights_const,
+      pass2_group_quantized ? pass2_params : scratch.params_down,
+      num_threads, &pass2_mode,
       grp_matmul_gated_act_t::none, act_dtype);
   return status_t::success;
 }

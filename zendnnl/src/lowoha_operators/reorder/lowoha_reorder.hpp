@@ -18,6 +18,7 @@
 #define _LOWOHA_REORDER_HPP
 
 #include <cstddef>
+#include <vector>
 
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 
@@ -101,6 +102,29 @@ using zendnnl::memory::data_type_t;
 status_t reorder_direct(const void *src, void *dst,
                         reorder_params_t &params);
 
+/**
+ * @brief Grouped per-token dynamic quantization for MoE/group GEMM sources.
+ *
+ * Treats the rows from all active source matrices as one logical collection
+ * for scheduling. Each source matrix may live at a different base address, but
+ * each row must be contiguous. Strides follow the same convention as
+ * reorder_direct: empty means contiguous, otherwise 2D strides are
+ * `{row_stride, col_stride}` in elements. For this per-token path
+ * `col_stride` must be 1 and `row_stride >= K[i]`. Scale buffers are
+ * per-expert and indexed by local row: `scale[i][m]`.
+ *
+ * Current implementation supports symmetric per-token bf16/f32 -> s8 dynamic
+ * quantization. Callers own all destination and scale buffers.
+ */
+status_t group_dynamic_quant(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<std::vector<int64_t>> &src_strides,
+    const std::vector<void *> &dst,
+    const std::vector<std::vector<int64_t>> &dst_strides,
+    const std::vector<void *> &scale,
+    const group_dynamic_quant_params_t &params);
 
 } // namespace reorder
 } // namespace lowoha

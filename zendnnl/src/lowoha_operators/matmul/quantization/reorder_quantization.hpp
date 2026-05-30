@@ -19,6 +19,7 @@
 
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include <cstdlib>
+#include <vector>
 
 namespace zendnnl {
 namespace lowoha {
@@ -50,6 +51,22 @@ struct reorder_quant_buffers_t {
     }
     return *this;
   }
+};
+
+struct group_reorder_quant_buffers_t {
+  std::vector<uint8_t *> src_buf;
+  std::vector<uint8_t *> scale_buf;
+  std::vector<reorder_quant_buffers_t> fallback_buf;
+
+  group_reorder_quant_buffers_t() = default;
+  ~group_reorder_quant_buffers_t() {
+    for (auto *p : src_buf) free(p);
+    for (auto *p : scale_buf) free(p);
+  }
+
+  group_reorder_quant_buffers_t(const group_reorder_quant_buffers_t &) = delete;
+  group_reorder_quant_buffers_t &operator=(
+      const group_reorder_quant_buffers_t &) = delete;
 };
 
 /**
@@ -90,6 +107,28 @@ status_t reorder_quantization_wrapper(
     matmul_params &params, matmul_batch_params_t &batch_params,
     const bool transA, const int M, const int K, const int num_threads,
     reorder_quant_buffers_t &buffers);
+
+status_t group_reorder_quantization_wrapper(
+    const std::vector<const void *> &src,
+    const std::vector<int> &lda,
+    const std::vector<bool> &transA,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const int num_threads,
+    std::vector<matmul_params> &params,
+    std::vector<const void *> &quantized_src,
+    std::vector<int> &quantized_lda,
+    group_reorder_quant_buffers_t &buffers,
+    bool &quantized);
+
+inline bool group_reorder_quantization_required(
+    const std::vector<matmul_params> &params, size_t num_ops) {
+  if (params.size() < num_ops) return false;
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (is_dynamic_quant_config(params[i])) return true;
+  }
+  return false;
+}
 
 } // namespace matmul
 } // namespace lowoha

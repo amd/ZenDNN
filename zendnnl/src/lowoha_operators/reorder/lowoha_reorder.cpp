@@ -27,6 +27,8 @@
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <sstream>
 
 namespace zendnnl {
@@ -269,6 +271,109 @@ status_t reorder_direct(const void *src, void *dst,
     profiler.tbp_stop();
     profilelog_verbose(log_str, ", time=", profiler.tbp_elapsedtime(),
                        profiler.get_res_str());
+  }
+
+  return status_t::success;
+}
+
+status_t group_dynamic_quant(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<std::vector<int64_t>> &src_strides,
+    const std::vector<void *> &dst,
+    const std::vector<std::vector<int64_t>> &dst_strides,
+    const std::vector<void *> &scale,
+    const group_dynamic_quant_params_t &params) {
+  std::vector<int> src_row_stride;
+  std::vector<int> dst_row_stride;
+
+  const size_t num_ops = M.size();
+  if (num_ops == 0) {
+    log_error("group_dynamic_quant: M vector is empty");
+    return status_t::failure;
+  }
+  if (src.size() != num_ops || K.size() != num_ops ||
+      dst.size() != num_ops ||
+      (!src_strides.empty() && src_strides.size() != num_ops) ||
+      (!dst_strides.empty() && dst_strides.size() != num_ops) ||
+      scale.size() != num_ops) {
+    log_error("group_dynamic_quant: vector size mismatch");
+    return status_t::failure;
+  }
+  if (params.dst_dtype != data_type_t::s8) {
+    log_error("group_dynamic_quant: only s8 destination is supported");
+    return status_t::failure;
+  }
+  if (params.src_dtype != data_type_t::bf16 &&
+      params.src_dtype != data_type_t::f32) {
+    log_error("group_dynamic_quant: only bf16/f32 source is supported");
+    return status_t::failure;
+  }
+  if (params.scale_dtype != data_type_t::f32 &&
+      params.scale_dtype != data_type_t::bf16) {
+    log_error("group_dynamic_quant: scale dtype must be f32 or bf16");
+    return status_t::failure;
+  }
+  src_row_stride.resize(num_ops);
+  dst_row_stride.resize(num_ops);
+  for (size_t i = 0; i < num_ops; ++i) {
+    int64_t src_stride_m = K[i];
+    if (!src_strides.empty() && !src_strides[i].empty()) {
+      if (src_strides[i].size() != 2 || src_strides[i][1] != 1) {
+        log_error("group_dynamic_quant: src_strides[", i,
+                  "] must be empty or {row_stride, 1}");
+        return status_t::failure;
+      }
+      src_stride_m = src_strides[i][0];
+    }
+    int64_t dst_stride_m = K[i];
+    if (!dst_strides.empty() && !dst_strides[i].empty()) {
+      if (dst_strides[i].size() != 2 || dst_strides[i][1] != 1) {
+        log_error("group_dynamic_quant: dst_strides[", i,
+                  "] must be empty or {row_stride, 1}");
+        return status_t::failure;
+      }
+      dst_stride_m = dst_strides[i][0];
+    }
+
+    if (M[i] < 0 || K[i] <= 0 || src_stride_m < K[i] ||
+        dst_stride_m < K[i] ||
+        src_stride_m > std::numeric_limits<int>::max() ||
+        dst_stride_m > std::numeric_limits<int>::max()) {
+      log_error("group_dynamic_quant: invalid shape/stride at op ", i,
+                " (M=", M[i], ", K=", K[i],
+                ", src_row_stride=", src_stride_m,
+                ", dst_row_stride=", dst_stride_m, ")");
+      return status_t::failure;
+    }
+    src_row_stride[i] = static_cast<int>(src_stride_m);
+    dst_row_stride[i] = static_cast<int>(dst_stride_m);
+    if (M[i] == 0) continue;
+    if (src[i] == nullptr || dst[i] == nullptr || scale[i] == nullptr) {
+      log_error("group_dynamic_quant: null active buffer at op ", i);
+      return status_t::failure;
+    }
+  }
+
+  int64_t total_rows = 0;
+  for (int m : M) total_rows += std::max(0, m);
+  if (total_rows == 0) return status_t::success;
+
+  if (apilog_info_enabled()) {
+    apilog_info("LOWOHA group_dynamic_quant: num_ops=", M.size(),
+                ", total_rows=", total_rows,
+                ", src_dtype=", reorder_data_type_to_string(params.src_dtype),
+                ", dst_dtype=", reorder_data_type_to_string(params.dst_dtype),
+                ", scale_dtype=",
+                reorder_data_type_to_string(params.scale_dtype),
+                ", granularity=per_token");
+  }
+
+  if (!dispatch_group_dynamic_per_token(
+          src, M, K, src_row_stride, dst, dst_row_stride, scale, params)) {
+    log_error("group_dynamic_quant: no native grouped per-token kernel matched");
+    return status_t::failure;
   }
 
   return status_t::success;

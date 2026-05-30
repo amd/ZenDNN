@@ -513,7 +513,7 @@ inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
 }
 
 // ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION = { -1, 0, 1 } — cached,
-// default 0 (AUTO).
+// default -1 (DISABLED).
 //
 // Three-mode dispatch for the MoE FFN vertical-fusion (W13 → gated
 // act → W2 per M-tile slice) path.  See the doc-block on
@@ -523,13 +523,13 @@ inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
 // back to the documented default (NOT silently mode-0 via legacy
 // atoi-returns-0-for-junk).
 //
-// Production callers should leave this unset (AUTO).  Setting
+// Production callers should leave this unset (DISABLED).  Setting
 // `ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION=-1` is the kill switch
 // when a per-shape regression is discovered in the field; setting
 // `=1` is reserved for testing the FORCED engagement against the
 // planner's AUTO heuristic.
 inline int get_grp_matmul_m_tile_vertical_fusion() {
-  constexpr int kDefault = 0;  // AUTO
+  constexpr int kDefault = -1;  // DISABLED
   const int ovr = test_api::s_grp_matmul_m_tile_vertical_fusion_override
       .load(std::memory_order_relaxed);
   if (ovr != std::numeric_limits<int>::min()) return ovr;

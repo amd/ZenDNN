@@ -338,6 +338,30 @@ struct reorder_params_t {
 };
 
 /**
+ * @brief Parameters for grouped per-token dynamic quantization.
+ *
+ * The grouped API processes independently-contiguous source matrices as one
+ * logical row collection. This is intended for grouped MoE GEMMs where each
+ * expert owns a separate [M_i, K_i] source buffer, but all rows should share a
+ * single OpenMP schedule.
+ *
+ * Current implementation scope:
+ *   - per-token symmetric dynamic quantization only
+ *   - bf16/f32 source to s8 destination
+ *   - scale dtype f32 or bf16
+ */
+struct group_dynamic_quant_params_t {
+  data_type_t src_dtype;
+  data_type_t dst_dtype;
+  data_type_t scale_dtype;
+  int32_t num_threads;
+
+  group_dynamic_quant_params_t()
+      : src_dtype(data_type_t::none), dst_dtype(data_type_t::none),
+        scale_dtype(data_type_t::f32), num_threads(0) {}
+};
+
+/**
  * @brief Get dynamic quantization per-token algorithm override
  *
  * Reads ZENDNNL_DYNAMIC_QUANT_ALGO environment variable once on first call.

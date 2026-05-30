@@ -1106,6 +1106,14 @@ inline void execute_expert_slice(
   bp.Batch_B = 1;
   matmul_algo_t kernel = algo;
 
+  // Per-expert dynamic-quant fallback path.  This fires only when the
+  // source is still bf16/f32 and `params.dynamic_quant == true` (the
+  // wrapper's own eligibility gate).  When the caller already ran the
+  // grouped `group_dynamic_quant` pre-pass (ZENDNNL_ENABLE_GROUP_DQ on),
+  // it rewrote `params.dtypes.src` to s8 and cleared `dynamic_quant`, so
+  // this wrapper short-circuits to a no-op and no double-quant occurs.
+  // When grouped DQ is disabled (env off) this is the active per-expert
+  // quantization path, preserving the legacy behaviour.
   int         reordered_lda = lda;
   size_t      src_type_size = size_of(params.dtypes.src);
   reorder_quant_buffers_t quant_buffers;
@@ -1123,6 +1131,19 @@ inline void execute_expert_slice(
                  is_weights_const, src_type_size,
                  size_of(params.dtypes.dst),
                  num_thr, kernel, params, bp, 0);
+}
+
+/// ZENDNNL_ENABLE_GROUP_DQ — opt-in/out for the grouped dynamic-quant
+/// pre-pass (`group_dynamic_quant`).  Default ON (unset or any value
+/// other than a literal "0").  When OFF, group matmul skips the grouped
+/// source-quant pre-pass and dynamic quantization falls back to the
+/// per-expert `reorder_quantization_wrapper` inside `execute_expert_slice`
+/// (legacy path).  Intentionally NOT cached so gtests can flip it
+/// per-scope via setenv; the getenv cost is negligible next to a GEMM.
+inline bool get_grp_matmul_enable_group_dq() {
+  const char *env = std::getenv("ZENDNNL_ENABLE_GROUP_DQ");
+  if (env == nullptr || env[0] == '\0') return true;     // default ON
+  return !(env[0] == '0' && env[1] == '\0');             // "0" => OFF
 }
 
 // NOTE: The N-tile shared utilities — `sort_indices_by_m`,

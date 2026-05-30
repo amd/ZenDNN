@@ -2612,8 +2612,23 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
 
   {
     std::vector<matmul_params> p_test(num_ops);
-    for (int i = 0; i < num_ops; ++i)
+    for (int i = 0; i < num_ops; ++i) {
       p_test[i] = build_params_dynamic_int8(src_t[i], w1_s8_t[i]);
+      // Pin the fused team to one thread per expert so the M-tile
+      // vertical-fusion gate math clears deterministically on ANY host
+      // core count, making the path honour ONLY the
+      // ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION env flag:
+      //   * round-based gate  : active_ops(E) <= num_threads(E)      ✓
+      //   * wide-N over-shard : total_need*2 = 2*E*ceil(M/16) > E    ✓
+      //   * slice_M == M >= 16 keeps the BF16->S8 per-slice reorder valid.
+      // With this pin, `=1` engages
+      // (mode=fused_moe_vertical(op1=vertical_fusion_dqint8,...)) and
+      // `=-1` falls back (mode=fused_moe_2pass(...)).  Without it, a
+      // many-thread host over-shards these tiny shapes and bails to
+      // two-pass even when fusion is enabled.  num_threads is plumbed
+      // through resolve_num_threads, which honours non-zero requests.
+      p_test[i].num_threads = num_ops;
+    }
     ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
                                   gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
                                   srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
@@ -2655,6 +2670,156 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
       << " E="   << num_ops;
   verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
                        tol_fused(is_bf16), lbl.str());
+}
+
+TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+
+  constexpr int dim = 32;
+  constexpr int H = 32;
+  constexpr int M = 32;
+  constexpr int num_ops = 4;
+  constexpr int N_gate_up = 2 * dim;
+  constexpr int K_in = H;
+  constexpr int K_down = dim;
+  constexpr bool is_bf16 = true;
+  const auto act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+  for (int algo : {0, 1, 2, 3, 4, 5, 6}) {
+    reset_grp_matmul_caches();
+    AlgoEnvGuard algo_guard(algo);
+
+    tensor_factory_t factory{};
+    std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      src_scale_t[i] = factory.zero_tensor({M, 1}, data_type_t::f32);
+      src_t[i] = factory.uniform_dist_tensor({M, K_in}, data_type_t::bf16,
+                                             2.0, false, src_scale_t[i],
+                                             tensor_t{});
+    }
+
+    std::vector<tensor_t> w1_s8_t(num_ops), w1_scale_t(num_ops), w1_zp_t(num_ops);
+    std::vector<tensor_t> w2_s8_t(num_ops), down_scale_t(num_ops), down_zp_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      auto w1_ref = factory.uniform_dist_tensor({K_in, N_gate_up},
+                                                data_type_t::bf16, 2.0);
+      ASSERT_EQ(quant_params_compute(factory, w1_ref, data_type_t::bf16,
+                                     data_type_t::s8, {1, N_gate_up},
+                                     data_type_t::f32, w1_scale_t[i],
+                                     w1_zp_t[i], &w1_s8_t[i]),
+                status_t::success);
+
+      auto w2_ref = factory.uniform_dist_tensor({K_down, H},
+                                                data_type_t::bf16, 2.0);
+      ASSERT_EQ(quant_params_compute(factory, w2_ref, data_type_t::bf16,
+                                     data_type_t::s8, {1, H},
+                                     data_type_t::f32, down_scale_t[i],
+                                     down_zp_t[i], &w2_s8_t[i]),
+                status_t::success);
+    }
+
+    std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      srcs[i] = src_t[i].get_raw_handle_unsafe();
+      wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+      wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+    }
+
+    TypedBuffers d1_ref, d2_ref, d2_test, d1_unused;
+    d1_ref.alloc(num_ops, static_cast<size_t>(M) * N_gate_up, is_bf16);
+    d2_ref.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    d2_test.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    d1_unused.alloc(num_ops, static_cast<size_t>(M) * N_gate_up, is_bf16);
+    auto d1_ref_p = d1_ref.ptrs(is_bf16);
+    auto d2_ref_p = d2_ref.ptrs(is_bf16);
+    auto d2_test_p = d2_test.ptrs(is_bf16);
+    auto d1_unused_p = d1_unused.ptrs(is_bf16);
+    std::vector<const void *> no_bias(num_ops, nullptr);
+
+    auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+    auto gv_op2 = GemmVecs::uniform(num_ops, M, H, K_down);
+    gv_op2.lda.assign(num_ops, N_gate_up);
+    gv_op1.is_wc.assign(num_ops, true);
+    gv_op2.is_wc.assign(num_ops, true);
+
+    auto build_params_dynamic_int8 =
+        [&](const tensor_t &src_tensor, const tensor_t &wei_tensor) {
+      auto p_slot = make_uniform_params(1, data_type_t::bf16)[0];
+      p_slot.dtypes.src = data_type_t::bf16;
+      p_slot.dtypes.wei = data_type_t::s8;
+      p_slot.dtypes.dst = data_type_t::bf16;
+      p_slot.dtypes.compute = data_type_t::s8;
+      p_slot.dynamic_quant = true;
+      copy_attached_scale(src_tensor, p_slot.quant_params.src_scale);
+      copy_attached_scale(wei_tensor, p_slot.quant_params.wei_scale);
+      copy_attached_zp(wei_tensor, p_slot.quant_params.wei_zp);
+      return p_slot;
+    };
+
+    std::vector<matmul_params> p_ref_op1(num_ops);
+    for (int i = 0; i < num_ops; ++i)
+      p_ref_op1[i] = build_params_dynamic_int8(src_t[i], w1_s8_t[i]);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_ref_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_ref_op1),
+              status_t::success) << "algo=" << algo << " ref Op1";
+
+    for (int e = 0; e < num_ops; ++e)
+      apply_ref_gated_act(d1_ref.bf16[e], M, N_gate_up, N_gate_up, act_type);
+
+    std::vector<matmul_params> p_ref_op2(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      p_ref_op2[i] = make_uniform_params(1, data_type_t::bf16)[0];
+      p_ref_op2[i].dtypes.src = data_type_t::bf16;
+      p_ref_op2[i].dtypes.wei = data_type_t::s8;
+      p_ref_op2[i].dtypes.dst = data_type_t::bf16;
+      p_ref_op2[i].dtypes.compute = data_type_t::s8;
+      p_ref_op2[i].dynamic_quant = true;
+      p_ref_op2[i].quant_params.src_scale.dt = data_type_t::f32;
+      p_ref_op2[i].quant_params.src_scale.dims = {M, 1};
+      copy_attached_scale(w2_s8_t[i], p_ref_op2[i].quant_params.wei_scale);
+      copy_attached_zp(w2_s8_t[i], p_ref_op2[i].quant_params.wei_zp);
+    }
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e) srcs2[e] = d1_ref_p[e];
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+                                  gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha,
+                                  srcs2, gv_op2.lda, wei2_p, gv_op2.ldb, no_bias,
+                                  gv_op2.beta, d2_ref_p, gv_op2.ldc,
+                                  gv_op2.is_wc, p_ref_op2),
+              status_t::success) << "algo=" << algo << " ref Op2";
+
+    grp_matmul_gated_act_params act{};
+    act.act = act_type;
+    auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+    fused.dst_down = d2_test_p;
+    fused.ldc_down = std::vector<int>(num_ops, H);
+    fused.down_scale.resize(num_ops);
+    fused.down_zp.resize(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      copy_attached_scale(w2_s8_t[i], fused.down_scale[i]);
+      copy_attached_zp(w2_s8_t[i], fused.down_zp[i]);
+    }
+
+    std::vector<matmul_params> p_test(num_ops);
+    for (int i = 0; i < num_ops; ++i)
+      p_test[i] = build_params_dynamic_int8(src_t[i], w1_s8_t[i]);
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                                  gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                                  srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                                  gv_op1.beta, d1_unused_p, gv_op1.ldc,
+                                  gv_op1.is_wc, p_test, nullptr, &act, &fused),
+              status_t::success) << "algo=" << algo << " fused";
+
+    verify_per_expert_2d(d2_test, H, d2_ref, H, num_ops, M, H, is_bf16,
+                         tol_fused(is_bf16),
+                         "Dynamic_INT8_BothPasses_AllAlgos algo=" +
+                             std::to_string(algo));
+  }
 }
 
 // One INSTANTIATE_TEST_SUITE_P per fixture subclass, each binding

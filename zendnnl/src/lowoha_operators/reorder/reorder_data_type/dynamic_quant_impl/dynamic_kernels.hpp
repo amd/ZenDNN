@@ -20,6 +20,7 @@
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace zendnnl {
 namespace lowoha {
@@ -91,6 +92,28 @@ void dynamic_per_token_quant_f32_u8_unfused_native(const float *src,
                                                     int32_t *zps,
                                                     int64_t M, int64_t N);
 
+// Grouped per-token BF16/F32 -> S8 symmetric dynamic quantization.
+// Sources are independent [M_i, K_i] matrices; destinations are packed
+// [M_i, K_i]. One global row loop schedules across sum(M_i).
+void dynamic_per_token_group_quant_bf16_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int num_threads);
+void dynamic_per_token_group_quant_f32_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int num_threads);
+
 // Dynamic dispatch functions (moved from lowoha_reorder.cpp)
 bool dispatch_fused_per_token(const void *src, void *dst,
                                const reorder_params_t &params,
@@ -101,6 +124,15 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
 bool dispatch_fused_per_group(const void *src, void *dst,
                                const reorder_params_t &params,
                                int64_t M, int64_t K);
+bool dispatch_group_dynamic_per_token(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<void *> &scale,
+    const group_dynamic_quant_params_t &params);
 
 } // namespace reorder
 } // namespace lowoha

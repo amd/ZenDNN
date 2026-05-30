@@ -29,6 +29,7 @@
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -1099,10 +1100,35 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     } else {
       // Non-fused path: Op1 + activation (fused where possible) followed
       // by separate Op2 / moe_postop as needed.
+      //
+      // Source dynamic quantization is gated by ZENDNNL_ENABLE_GROUP_DQ
+      // (default on).  When on, the grouped pre-pass quantizes all expert
+      // sources up front (rewriting `params_dispatch` to s8 + clearing
+      // dynamic_quant) so `execute_expert_slice` does not re-quant.  When
+      // off, the pre-pass is skipped and dynamic quant flows through the
+      // per-expert `reorder_quantization_wrapper` inside
+      // `execute_expert_slice` (legacy behaviour).
+      std::vector<const void *> quantized_src;
+      std::vector<int> quantized_lda;
+      std::vector<matmul_params> params_dispatch = params;
+      group_reorder_quant_buffers_t group_quant_buffers;
+      bool group_quantized = false;
+      if (get_grp_matmul_enable_group_dq()) {
+        status_t group_quant_st = group_reorder_quantization_wrapper(
+            src, lda, transA, M_eff, K, num_threads, params_dispatch,
+            quantized_src, quantized_lda, group_quant_buffers,
+            group_quantized);
+        if (group_quant_st != status_t::success) return group_quant_st;
+      }
+
       const bool act_fused = group_matmul_run_parallel_dispatch(
           layout, transA, transB, M_eff, N, K, alpha,
-          src, lda, weight, ldb, bias, beta, dst, ldc,
-          is_weights_const, params, num_threads, &gemm_mode,
+          group_quantized ? quantized_src : src,
+          group_quantized ? quantized_lda : lda,
+          weight, ldb, bias, beta, dst, ldc,
+          is_weights_const,
+          group_quantized ? params_dispatch : params,
+          num_threads, &gemm_mode,
           run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
           act_dtype);
 

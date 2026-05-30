@@ -23,6 +23,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <vector>
 #include <omp.h>
 
 namespace zendnnl {
@@ -378,8 +379,8 @@ void dynamic_per_token_quant_f32_s8_native(const float *src, int8_t *dst,
                                             int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  #pragma omp parallel for schedule(static)
-  for (int64_t m = 0; m < M; ++m) {
+
+  auto row_loop = [&](int64_t m) __attribute__((target("avx512f"))) {
     const float *row_src = src + m * N;
     int8_t      *row_dst = dst + m * N;
 
@@ -458,6 +459,52 @@ void dynamic_per_token_quant_f32_s8_native(const float *src, int8_t *dst,
       q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
+  };
+
+  if (M == 1) {
+    row_loop(0);
+    return;
+  }
+
+  // Nested-OMP guard.  When this kernel is called from inside an outer
+  // parallel region (e.g. the per-expert dynamic-quant fallback in
+  // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+  // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
+  // typically disabled — so the `#pragma omp parallel` block below
+  // would receive a 1-thread team that only covers the first
+  // (M / num_ccxs) rows of the manual CCX-strided split, leaving the
+  // rest uninitialized and producing garbage s8 downstream.  The
+  // calling outer thread already owns the slice it handed us, so
+  // process all M rows sequentially on the calling thread.
+  if (omp_in_parallel()) {
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
+    return;
+  }
+
+  const int nthreads = omp_get_max_threads();
+  const int cores_per_ccx = 8;
+
+  if (nthreads >= cores_per_ccx && M < nthreads) {
+    const int num_ccxs = std::max(1, nthreads / cores_per_ccx);
+
+    #pragma omp parallel
+    {
+      const int tid      = omp_get_thread_num();
+      const int ccx_id   = tid / cores_per_ccx;
+      const int local_id = tid % cores_per_ccx;
+
+      const int64_t rows_per_ccx = (M + num_ccxs - 1) / num_ccxs;
+      const int64_t ccx_start    = ccx_id * rows_per_ccx;
+      const int64_t ccx_end      = std::min(ccx_start + rows_per_ccx, M);
+
+      for (int64_t m = ccx_start + local_id; m < ccx_end; m += cores_per_ccx)
+        row_loop(m);
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
   }
 }
 
@@ -507,8 +554,8 @@ void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                                              int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  #pragma omp parallel for schedule(static)
-  for (int64_t m = 0; m < M; ++m) {
+
+  auto row_loop = [&](int64_t m) __attribute__((target("avx512f"))) {
     const uint16_t *row_src = src + m * N;
     uint8_t        *row_dst = dst + m * N;
 
@@ -624,6 +671,52 @@ void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
     }
+  };
+
+  if (M == 1) {
+    row_loop(0);
+    return;
+  }
+
+  // Nested-OMP guard.  When this kernel is called from inside an outer
+  // parallel region (e.g. the per-expert dynamic-quant fallback in
+  // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+  // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
+  // typically disabled — so the `#pragma omp parallel` block below
+  // would receive a 1-thread team that only covers the first
+  // (M / num_ccxs) rows of the manual CCX-strided split, leaving the
+  // rest uninitialized and producing garbage s8 downstream.  The
+  // calling outer thread already owns the slice it handed us, so
+  // process all M rows sequentially on the calling thread.
+  if (omp_in_parallel()) {
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
+    return;
+  }
+
+  const int nthreads = omp_get_max_threads();
+  const int cores_per_ccx = 8;
+
+  if (nthreads >= cores_per_ccx && M < nthreads) {
+    const int num_ccxs = std::max(1, nthreads / cores_per_ccx);
+
+    #pragma omp parallel
+    {
+      const int tid      = omp_get_thread_num();
+      const int ccx_id   = tid / cores_per_ccx;
+      const int local_id = tid % cores_per_ccx;
+
+      const int64_t rows_per_ccx = (M + num_ccxs - 1) / num_ccxs;
+      const int64_t ccx_start    = ccx_id * rows_per_ccx;
+      const int64_t ccx_end      = std::min(ccx_start + rows_per_ccx, M);
+
+      for (int64_t m = ccx_start + local_id; m < ccx_end; m += cores_per_ccx)
+        row_loop(m);
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
   }
 }
 
@@ -669,8 +762,8 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  #pragma omp parallel for schedule(static)
-  for (int64_t m = 0; m < M; ++m) {
+
+  auto row_loop = [&](int64_t m) __attribute__((target("avx512f"))) {
     const float *row_src = src + m * N;
     uint8_t     *row_dst = dst + m * N;
 
@@ -774,6 +867,52 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
     }
+  };
+
+  if (M == 1) {
+    row_loop(0);
+    return;
+  }
+
+  // Nested-OMP guard.  When this kernel is called from inside an outer
+  // parallel region (e.g. the per-expert dynamic-quant fallback in
+  // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+  // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
+  // typically disabled — so the `#pragma omp parallel` block below
+  // would receive a 1-thread team that only covers the first
+  // (M / num_ccxs) rows of the manual CCX-strided split, leaving the
+  // rest uninitialized and producing garbage s8 downstream.  The
+  // calling outer thread already owns the slice it handed us, so
+  // process all M rows sequentially on the calling thread.
+  if (omp_in_parallel()) {
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
+    return;
+  }
+
+  const int nthreads = omp_get_max_threads();
+  const int cores_per_ccx = 8;
+
+  if (nthreads >= cores_per_ccx && M < nthreads) {
+    const int num_ccxs = std::max(1, nthreads / cores_per_ccx);
+
+    #pragma omp parallel
+    {
+      const int tid      = omp_get_thread_num();
+      const int ccx_id   = tid / cores_per_ccx;
+      const int local_id = tid % cores_per_ccx;
+
+      const int64_t rows_per_ccx = (M + num_ccxs - 1) / num_ccxs;
+      const int64_t ccx_start    = ccx_id * rows_per_ccx;
+      const int64_t ccx_end      = std::min(ccx_start + rows_per_ccx, M);
+
+      for (int64_t m = ccx_start + local_id; m < ccx_end; m += cores_per_ccx)
+        row_loop(m);
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t m = 0; m < M; ++m)
+      row_loop(m);
   }
 }
 
@@ -1287,6 +1426,100 @@ void dynamic_per_token_quant_f32_u8_unfused_native(const float *src,
       begin = row_end;
     }
   });
+}
+
+//==============================================================================
+// GROUPED FUSED PER-TOKEN:  BF16/F32 -> S8 Symmetric Dynamic Quantization
+//==============================================================================
+//
+// Each source matrix is individually row-contiguous, but the matrices are not
+// adjacent to one another. Build a prefix over expert rows and schedule one
+// OpenMP loop across sum(M_i), so small experts share the same thread team.
+// Per-row work reuses the single-row fast path from the native per-token kernel
+// (M == 1 avoids nested OpenMP inside that function).
+//==============================================================================
+
+template <typename RowFn>
+static void dynamic_per_token_group_quant_s8_impl(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<float *> &scales,
+    int num_threads,
+    RowFn row_fn) {
+  const size_t num_ops = M.size();
+  std::vector<int64_t> row_prefix(num_ops);
+  int64_t total_rows = 0;
+  for (size_t i = 0; i < num_ops; ++i) {
+    total_rows += std::max(0, M[i]);
+    row_prefix[i] = total_rows;
+  }
+  if (total_rows <= 0) return;
+
+  const int nt = std::min<int64_t>(omp_team_size(num_threads), total_rows);
+  #pragma omp parallel num_threads(nt)
+  {
+    const int tid = omp_get_thread_num();
+    const int nthr = omp_get_num_threads();
+    const int64_t begin = total_rows * tid / nthr;
+    const int64_t end = total_rows * (tid + 1) / nthr;
+
+    for (int64_t global_m = begin; global_m < end; ++global_m) {
+      const auto it = std::upper_bound(row_prefix.begin(), row_prefix.end(),
+                                       global_m);
+      const size_t op = static_cast<size_t>(it - row_prefix.begin());
+      const int64_t op_row_base = (op == 0) ? 0 : row_prefix[op - 1];
+      const int64_t local_m = global_m - op_row_base;
+
+      row_fn(op, local_m);
+    }
+  }
+}
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_group_quant_bf16_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int num_threads) {
+  dynamic_per_token_group_quant_s8_impl(
+      src, M, K, lda, dst, scales, num_threads,
+      [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
+        const uint16_t *row_src =
+            static_cast<const uint16_t *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst =
+            static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        dynamic_per_token_quant_bf16_s8_native(
+            row_src, row_dst, scales[op] + local_m, 1, K[op]);
+      });
+}
+
+__attribute__((target("avx512f")))
+void dynamic_per_token_group_quant_f32_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int num_threads) {
+  dynamic_per_token_group_quant_s8_impl(
+      src, M, K, lda, dst, scales, num_threads,
+      [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
+        const float *row_src =
+            static_cast<const float *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst =
+            static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        dynamic_per_token_quant_f32_s8_native(
+            row_src, row_dst, scales[op] + local_m, 1, K[op]);
+      });
 }
 
 } // namespace reorder
