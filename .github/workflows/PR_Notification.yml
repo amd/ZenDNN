@@ -16,7 +16,7 @@ permissions:
 jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
-    timeout-minutes: 60
+    timeout-minutes: 120
     if: github.actor != 'github-actions[bot]'
     
     steps:
@@ -380,7 +380,7 @@ jobs:
 
             let result = await checkAllWorkflows();
             let attempts = 0;
-            const maxAttempts = 30;  // ✅ Increased to 30 minutes max wait
+            const maxAttempts = 90;  // 90 minutes max wait for cross-repo builds
             
             console.log(`\n🔍 INITIAL CHECK RESULTS:`);
             console.log(`Found ${result.total_count} workflows, ${result.running_count} still running`);
