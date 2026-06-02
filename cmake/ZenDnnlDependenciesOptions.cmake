@@ -13,38 +13,14 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
+
+# Consume-only sanity checks and messages for ZENDNNL_DEPENDS_*. Values come
+# from Defaults.cmake (build time) or zendnnl-config.cmake @VAR@ baking (consumer).
+
 include_guard(GLOBAL)
-include(CMakeDependentOption)
 
-set(ZENDNNL_DEPENDS_AOCLDLP ON CACHE BOOL "Add AOCL DLP as a dependency")
-set(ZENDNNL_DEPENDS_ONEDNN  ON CACHE BOOL "Add ONEDNN as a dependency")
-set(ZENDNNL_DEPENDS_LIBXSMM  ON CACHE BOOL "Add LIBXSMM as a dependency")
-set(ZENDNNL_DEPENDS_PARLOOPER  OFF CACHE BOOL "Add PARLOOPER as a dependency")
-set(ZENDNNL_DEPENDS_FBGEMM  ON CACHE BOOL "Add FBGEMM as a dependency")
-
-set(ZENDNNL_DEPENDS_AOCLUTILS ON
-  CACHE BOOL "Use aocl utils for hardware identification" FORCE)
-set(ZENDNNL_DEPENDS_JSON ON
-  CACHE BOOL "Use JSON script for configuration" FORCE)
-
-cmake_dependent_option(ZENDNNL_DEPENDS_AMDBLIS "Add AMDBLIS as a dependency" OFF
-  "ZENDNNL_DEPENDS_AOCLDLP" ON)
-
-cmake_dependent_option(ZENDNNL_LOCAL_AMDBLIS "use local AMDBLIS" OFF
-  "ZENDNNL_DEPENDS_AMDBLIS" OFF)
-cmake_dependent_option(ZENDNNL_LOCAL_AOCLDLP "use local AOCLDLP" OFF
-  "ZENDNNL_DEPENDS_AOCLDLP" OFF)
-cmake_dependent_option(ZENDNNL_LOCAL_ONEDNN "use local ONEDNN" OFF
-  "ZENDNNL_DEPENDS_ONEDNN" OFF)
-cmake_dependent_option(ZENDNNL_LOCAL_LIBXSMM "use local LIBXSMM" OFF
-  "ZENDNNL_DEPENDS_LIBXSMM" OFF)
-cmake_dependent_option(ZENDNNL_LOCAL_PARLOOPER "use local PARLOOPER" OFF
-  "ZENDNNL_DEPENDS_PARLOOPER" OFF)
-cmake_dependent_option(ZENDNNL_LOCAL_FBGEMM "use local FBGEMM" OFF
-  "ZENDNNL_DEPENDS_FBGEMM" OFF)
-
-set(ZENDNNL_LOCAL_AOCLUTILS   OFF CACHE BOOL "use local AOCLUTILS")
-set(ZENDNNL_LOCAL_JSON        OFF CACHE BOOL "use local JSON")
+# Present at build time, absent in install — OPTIONAL covers both.
+include(ZenDnnlDependenciesDefaults OPTIONAL)
 
 # sanity check on dependencies
 if((NOT ZENDNNL_DEPENDS_AMDBLIS) AND (NOT ZENDNNL_DEPENDS_AOCLDLP))
