@@ -439,7 +439,7 @@ struct grp_matmul_fused_moe_params {
   // Op2 reduces over `op2_k_for_act(N[i], act)` (= K_down), and
   // K_in != K_down in general — so Op1's ngroups cannot transfer
   // to Op2 verbatim (the documented invariant at
-  // `docs/operator/lowoha_matmul_operator.md:227` requires
+  // `docs/operator/low_overhead_operator/lowoha_matmul_operator.md:227` requires
   // source-side and weight-side ngroups to match along K *per
   // pass*).  Use per-token granularity instead — it is K-
   // independent and works on both passes.

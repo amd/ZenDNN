@@ -100,7 +100,7 @@ The primary interface for LowOHA Reorder is the `reorder_direct` function:
 status_t reorder_direct(
   const void *src,                      // Pointer to source data buffer
   void *dst,                            // Pointer to destination data buffer (nullptr allowed for dynamic quant compute-only)
-  reorder_params_t params        // Reorder parameters
+  reorder_params_t &params              // Reorder parameters (non-const reference)
 );
 ```
 
@@ -166,7 +166,7 @@ Source strides enable reading from non-contiguous source memory:
 
 #### Destination Strides (`dst_strides`)
 
-**Note:** `dst_strides` is reserved for future implementation and is **currently not supported**. The destination is always written in contiguous format. Providing `dst_strides` will result in an error.
+**Note:** `dst_strides` is reserved for future implementation and is **currently not supported** — the destination is always written in contiguous format. The field is currently **ignored** (it is not validated), so populating it has no effect rather than raising an error.
 
 
 ### Supported Data Type Combinations
@@ -247,9 +247,9 @@ The `dims` field determines the quantization granularity. **dims is mandatory** 
 | Per-group-row | `{G, N}` | G × N | G groups across rows, each with N values |
 | Per-group-col | `{M, G}` | M × G | G groups across columns, each row has G values |
 
-**Per-group-row constraint:** M must be divisible by G (M % G == 0)
+**Per-group-row constraint:** M must be divisible by G (M % G == 0), and G must be a proper divisor — `1 < G < M` (G = 1 is per-tensor and G = M is per-row)
 
-**Per-group-col constraint:** N must be divisible by G (N % G == 0)
+**Per-group-col constraint:** N must be divisible by G (N % G == 0), and G must be a proper divisor — `1 < G < N` (G = 1 is per-tensor and G = N is per-col)
 
 ### 3D Tensor (shape = [batch, M, N])
 
@@ -261,9 +261,9 @@ The `dims` field determines the quantization granularity. **dims is mandatory** 
 | Per-group-row | `{1, G, N}` | G × N | G groups across rows, each with N values |
 | Per-group-col | `{1, M, G}` | M × G | G groups across columns, each row has G values |
 
-**Per-group-row constraint:** M must be divisible by G (M % G == 0)
+**Per-group-row constraint:** M must be divisible by G (M % G == 0), and G must be a proper divisor — `1 < G < M` (G = 1 is per-tensor and G = M is per-row)
 
-**Per-group-col constraint:** N must be divisible by G (N % G == 0)
+**Per-group-col constraint:** N must be divisible by G (N % G == 0), and G must be a proper divisor — `1 < G < N` (G = 1 is per-tensor and G = N is per-col)
 
 ### Index Calculation
 
@@ -377,7 +377,7 @@ Only **AOCL DLP blocked** is supported:
 | `matmul_algo_t::onednn_blocked`   | ❌ No  | OneDNN's blocked layout depends on (M, K, N, dtypes, post-ops, ISA) — the prepack can't reproduce the matmul-time layout. |
 | Anything else                     | ❌ No  | Non-blocked variants consume raw weights; no prepack needed. |
 
-Anything other than `aocl_dlp_blocked` returns `status_t::unimplemented` with a clear error in the log.
+Anything other than `aocl_dlp_blocked` is rejected at validation: `weight_prepack_size` returns `0` and the `reorder_direct` prepack path returns `status_t::failure` (with a clear error in the log). `status_t::unimplemented` is reserved for an unsupported `wei_dtype` inside the AOCL DLP backend.
 
 ### Two-Step Caller Workflow
 
@@ -1539,7 +1539,7 @@ The operator performs the following validations:
 6. **Zero-point validation:** Zero-point values may be any `int32`; during quantization they are clamped to the valid range of the destination type, which can increase saturation and reduce dequantization accuracy if the specified zero-point lies outside that range.
 7. **Dims validation:** Must match tensor dimensionality and follow granularity rules
 8. **Per-group validation:** M must be divisible by G (row groups) or N must be divisible by G (column groups)
-9. **Destination strides:** dst_strides must be empty (strided destination not currently supported)
+9. **Destination strides:** strided destination is not currently supported; `dst_strides` is ignored and the destination is always written contiguously. (Note: this is not currently enforced by a validation check — a populated `dst_strides` is silently ignored rather than rejected.)
 
 ### Dynamic Quantization Validation (when `dynamic_quant = true`)
 
@@ -1557,7 +1557,7 @@ The operator performs the following validations:
 18. **Null pointer checks:** `weights` and `dst` buffers must not be null
 19. **Dimensions:** `prepack.K > 0` and `prepack.N > 0`
 20. **Leading dimension:** `prepack.ldb` must be ≥ `prepack.K` (transposed) or ≥ `prepack.N` (non-transposed)
-21. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` (any other value returns `status_t::unimplemented` / `weight_prepack_size` returns 0)
+21. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` (any other value is rejected at validation: `reorder_direct` returns `status_t::failure` and `weight_prepack_size` returns `0`)
 22. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_prepack_size(params)` bytes. The library does **not** verify this; an undersized buffer causes silent out-of-bounds writes.
 
 

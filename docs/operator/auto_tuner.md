@@ -132,7 +132,7 @@ The AutoTuner operates in three distinct phases:
 - **Purpose**: Warm up CPU caches and stabilize system performance
 - **Duration**: Configurable via `ZENDNNL_MATMUL_SKIP_ITER` (default: 2 iterations)
 - **Behavior**: Executes operations using the different algorithms
-- **No Measurements**: Performance data is not collected during this phase
+- **No Measurements (one v1 exception)**: Timing is generally not collected during warmup. In **v1**, the very first time a workload key is observed the initial `onednn_blocked` run is timed and seeded into the cache; all subsequent skip iterations run untimed.
 
 ### Phase 2: Evaluation Phase
 - **Purpose**: Benchmark all available algorithms and collect timing data
@@ -182,6 +182,8 @@ The AutoTuner operates in three distinct phases:
                 v
     Unique workload identifier
     Used for cache lookup
+
+> **Implementation note:** The struct is `Key_matmul` (`zendnnl/src/lowoha_operators/matmul/lru_cache/zendnnl_key.hpp`). The actual field names differ from the friendly labels above: `transA` → `transpose_inp`, `transB` → `transpose_weights`, `M/K/N` → `m/k/n`. It also carries an `extra_input_hash` field (post-op / dtype disambiguation) not shown here. In v1 the key is built with a *binned* M (`get_binned_m`), so nearby M values share a cache entry.
 
 ## AutoTuner Versions
 
@@ -299,7 +301,7 @@ The AutoTuner behavior can be controlled through various environment variables, 
 # Enable the AutoTuner
 export ZENDNNL_MATMUL_ALGO=auto
 
-# Select AutoTuner version (optional, default: 2)
+# Select AutoTuner version (optional, default: 1)
 export ZENDNNL_AUTO_TUNER_TYPE=1/2
 
 # Set Skip Iterations (optional, default: 2)

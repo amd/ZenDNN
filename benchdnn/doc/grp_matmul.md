@@ -34,7 +34,7 @@ with independent memory layouts.
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | `0` / `1` | Standard weight-reorder cache for AOCL DLP / BRGEMM.  Setting `0` disables both lazy and prepack populations (every call re-reorders). |
 | `OMP_NUM_THREADS` | integer | Number of OpenMP threads. |
 
-For the full operator-side semantics of these knobs, see `docs/operator/lowoha_group_matmul_operator.md` (sections **Environment variables** and **Weight caching, prepack, and memory**) and `docs/runtime_env.md` (section **Group MatMul Configuration**).
+For the full operator-side semantics of these knobs, see `docs/operator/low_overhead_operator/lowoha_group_matmul_operator.md` (sections **Environment variables** and **Weight caching, prepack, and memory**) and `docs/runtime_env.md` (section **Group MatMul Configuration**).
 
 ## Input file format
 

@@ -208,7 +208,7 @@ struct matmul_params {
   //
   // The eager prepack is gated by the `ZENDNNL_GRP_MATMUL_PREPACK`
   // environment variable (default ON).  See
-  // `docs/operator/lowoha_group_matmul_operator.md` for the full
+  // `docs/operator/low_overhead_operator/lowoha_group_matmul_operator.md` for the full
   // contract and worked example.
   uint32_t total_matmul;                       ///< Total expert weight slots present in the call (>= active_matmul).
   uint32_t active_matmul;                      ///< Count of firing experts (the leading prefix of all weight-side vectors).

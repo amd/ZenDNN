@@ -25,7 +25,7 @@ A decision tree is a hierarchical structure of conditional rules that evaluates 
 ```text
               ┌──────────────────────────────────────────────┐
               │         Runtime Execution (ZenDNN)           │
-              │         Input: M, N, K, BS                   │
+              │         Input: M, N, K                       │
               └──────────────────────────────────────────────┘
                                      │
                                      ▼
@@ -69,6 +69,8 @@ The Decision Tree currently picks one of the following high-performance backends
    - AMD-optimized implementation leveraging AOCL libraries
    - Tailored for AMD CPU architectures
    - Excellent performance for specific problem sizes and data layouts
+
+> **Scope note:** The two backends above are what the ML-generated 2D BF16 tree (`select_algo_by_heuristics_bf16_mm`) chooses between. `ZENDNNL_MATMUL_ALGO=0` (`dynamic_dispatch`) is a broader router that also covers batched (BMM), weight-only-quant (S4/U4), and GEMV shapes via separate hand-written heuristics, so it can additionally resolve to `aocl_dlp`, `libxsmm`, `libxsmm_blocked`, or the native BRGEMM kernel. The ML tree described here governs the BF16 2D matmul case and runs on the LowOHA `matmul_direct` path (group-matmul does not route through it).
 
 ---
 
@@ -130,7 +132,7 @@ The ML pipeline transforms raw performance data into optimized C++ decision logi
 
 **Train/Test Split**: A 70/30 stratified split maintains class distribution across both performance ratio groups and target algorithms.
 
-**Feature Engineering**: Matrix dimensions (M, N, K, BS) serve as input features, with the target variable being the optimal algorithm choice based on performance ratios.
+**Feature Engineering**: Matrix dimensions (M, N, K) serve as input features for the integrated 2D matmul tree, with the target variable being the optimal algorithm choice based on performance ratios.
 
 **Hyperparameter Optimization**: Grid search performs exhaustive exploration over hyperparameter combinations.
 
@@ -161,7 +163,7 @@ The trained decision tree is automatically converted to C++ conditional statemen
 
 ```text
     ┌─────────────────────────────────────────────────────────────────────────┐
-    │                         Data_processing.sh                              │
+    │                         csv_generator.py                                │
     │  ┌───────────────────────────────────────────────────────────────────┐  │
     │  │                      Data Collection                              │  │
     │  │  ┌─────────────────────────────────────────────────────────────┐  │  │
@@ -176,7 +178,7 @@ The trained decision tree is automatically converted to C++ conditional statemen
     │  │                      Process the Data                             │  │
     │  │  ┌─────────────────────────────────────────────────────────────┐  │  │
     │  │  │ - Extract performance ratios                                │  │  │
-    │  │  │ - Format dataset (M, N, K, BS → optimal algo)               │  │  │
+    │  │  │ - Format dataset (M, N, K → optimal algo)                   │  │  │
     │  │  │ - Prepare ML training dataset                               │  │  │
     │  │  └─────────────────────────────────────────────────────────────┘  │  │
     │  └───────────────────────────────────────────────────────────────────┘  │
@@ -184,12 +186,12 @@ The trained decision tree is automatically converted to C++ conditional statemen
                                      │
                                      ▼
     ┌─────────────────────────────────────────────────────────────────────────┐
-    │                       DT_Automation_pipeline.py                         │
+    │                       run_pipeline.py                                   │
     │  ┌───────────────────────────────────────────────────────────────────┐  │
     │  │                      Preprocess the Data                          │  │
     │  │  ┌─────────────────────────────────────────────────────────────┐  │  │
     │  │  │ - 70/30 stratified train/test split                         │  │  │
-    │  │  │ - Feature engineering (M, N, K, BS)                         │  │  │
+    │  │  │ - Feature engineering (M, N, K)                             │  │  │
     │  │  │ - Target: optimal algorithm selection                       │  │  │
     │  │  └─────────────────────────────────────────────────────────────┘  │  │
     │  └───────────────────────────────────────────────────────────────────┘  │
@@ -232,6 +234,8 @@ The trained decision tree is automatically converted to C++ conditional statemen
               │  └────────────────────────────────────────┘  │
               └──────────────────────────────────────────────┘
 ```
+**Pipeline location**: The stages above live under `tools/Decision_Tree_Pipeline/` (the flowchart box names are conceptual). Data collection / CSV build is driven by `csv_generator.py` (with `data_collection/`), and model training plus C++ code generation by `run_pipeline.py` (`ml_pipeline/core/code_generator.py` emits the `decision_tree.cpp` if-else function).
+
 **Note**: This entire process is performed offline during development. The final C++ code is integrated into ZenDNN for runtime use.
 
 ---

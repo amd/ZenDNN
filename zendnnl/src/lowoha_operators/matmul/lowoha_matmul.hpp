@@ -175,7 +175,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  *                         legacy contract: every per-expert vector must be
  *                         exactly `num_ops = M.size()` long and every
  *                         supplied weight fires.  See
- *                         `docs/operator/lowoha_group_matmul_operator.md`
+ *                         `docs/operator/low_overhead_operator/lowoha_group_matmul_operator.md`
  *                         (Framework prepack-extras contract) for a worked
  *                         example.
  * @param moe_postop       Optional MoE weighted-reduce over pre-gathered expert rows;

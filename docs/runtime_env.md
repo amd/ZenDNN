@@ -19,10 +19,12 @@ This document lists all environment variables available for configuring ZenDNNL 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
 | `ZENDNNL_MATMUL_ALGO` | Selects the MatMul algorithm/kernel to use for 2D matrix multiplication | `none` (auto-select) | `-1` (none)<br>`auto` (auto_tuner)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`3` (libxsmm_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`8` (auto_tuner)<br>`9` (reference) |
-| `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `4` (aocl_dlp) | Integer ID or name. `-1` (none, falls back to default 4)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | Enable/disable weight caching for blocked algorithms | `0` (disabled), `1` for blocked/auto-tuner algos | `0` (disabled)<br>`1` (enabled) |
-| `ZENDNNL_ZP_COMP_CACHE` | Enable/disable zero-point compensation caching for quantized operations | `0` (disabled) | `0` (disabled)<br>non-zero (enabled) |
+| `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `-1` (none); see note below | Integer ID or name. `-1` (none / unset)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | Weight-reorder caching mode for blocked / auto-tuner algorithms | `1` (out-of-place, enabled) | `0` (disabled)<br>`1` (out-of-place, enabled)<br>`2` (in-place: reuse the user weight buffer as the reorder destination when the layout is safe; auto-downgraded to `1` under auto_tuner / dynamic_dispatch) |
+| `ZENDNNL_ZP_COMP_CACHE` | Enable/disable zero-point compensation caching for quantized operations | `1` (enabled) | `0` (disabled)<br>non-zero (enabled) |
 | `ZENDNNL_ENABLE_POSTOP_CACHE` | Enable/disable AOCL DLP post-op metadata caching for the matmul fast path. When ON, the per-call build of post-op metadata (bias, binary_add, binary_mul, sum scales, src/wei/dst quant scales) is memoized and reused on subsequent calls with the same shape, dtypes, and post-op chain; mutable fields (data pointers, dynamic scale buffers) are refreshed on every hit. When OFF, the cache is cleared on every call and the cold path runs each time. Cached on first read. Recognized spellings are case-insensitive; unrecognized or empty values leave the default untouched. | `1` (enabled) | `1`/`true`/`on`/`yes` (enabled)<br>`0`/`false`/`off`/`no` (disabled) |
+
+> **`ZENDNNL_BMM_ALGO` default is path-dependent.** The stored config value when the variable is unset is `none` (`-1`). The effective fallback then depends on the dispatch path: the operator (`matmul`) path resolves `none` to `aocl_dlp` (4), while the LowOHA `matmul_direct` batched path resolves `none` to `libxsmm` (6). Set the variable explicitly to pin one backend across both paths.
 
 ### Algorithm Details
 
@@ -42,11 +44,11 @@ This document lists all environment variables available for configuring ZenDNNL 
 
 ## Group MatMul Configuration
 
-User-facing knob for `group_matmul_direct` (the grouped GEMM dispatcher used by MoE expert layers and other parallel-GEMM workloads).  See `docs/operator/lowoha_group_matmul_operator.md` for full operator semantics.
+User-facing knob for `group_matmul_direct` (the grouped GEMM dispatcher used by MoE expert layers and other parallel-GEMM workloads).  See `docs/operator/low_overhead_operator/lowoha_group_matmul_operator.md` for full operator semantics.
 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
-| `ZENDNNL_GRP_MATMUL_ALGO` | Selects the parallel scheduling strategy.  `0` (auto) lets the library pick per call based on expert count, per-expert M, and N — the measured-best choice across the supported MoE envelope (Qwen3-30B-A3B, GPT-OSS-20B, Mixtral-8x7B).  `1..5` pin a specific scheduler for the whole process (use only for A/B benchmarking or workaround / regression isolation).  Re-read on every call so production deployments can flip the strategy between phases without restart. | `0` (auto) | `0` (auto), `1` (sequential), `2` (flat M-tile), `3` (flat N-tile), `4` (multilevel CCD), `5` (per-expert) |
+| `ZENDNNL_GRP_MATMUL_ALGO` | Selects the parallel scheduling strategy.  `0` (auto) lets the library pick per call based on expert count, per-expert M, and N — the measured-best choice across the supported MoE envelope (Qwen3-30B-A3B, GPT-OSS-20B, Mixtral-8x7B).  `1..5` pin a specific scheduler for the whole process (use only for A/B benchmarking or workaround / regression isolation).  Read once and cached on first reference (set it before the first `group_matmul_direct` call; mid-process changes have no effect). | `0` (auto) | `0` (auto), `1` (sequential), `2` (flat M-tile), `3` (flat N-tile), `4` (multilevel CCD), `5` (per-expert) |
 
 > Internal tuning knobs (planner thresholds, custom-kernel sub-knobs,
 > prepack-cache sizing, etc.) live inside the implementation and are
@@ -76,7 +78,7 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
-| `ZENDNNL_AUTO_TUNER_TYPE` | Selects the auto-tuner version/strategy | `2` | `1` (v1 strategy), `2` (v2 strategy) |
+| `ZENDNNL_AUTO_TUNER_TYPE` | Selects the auto-tuner version/strategy | `1` | `1` (v1 strategy), `2` (v2 strategy) |
 | `ZENDNNL_MATMUL_SKIP_ITER` | Number of warmup iterations before algorithm evaluation begins | `2` | Positive integer |
 | `ZENDNNL_MATMUL_EVAL_ITER` | Number of evaluation iterations to benchmark each algorithm | `3` | Positive integer |
 
@@ -99,7 +101,7 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
-| `ZENDNNL_EMBAG_THREAD_ALGO` | Selects the Embedding Bag threading algorithm to use | `1` (table_threaded) | `0` (batch_threaded), `1`  (table_threaded), `2` (ccd_threaded), `3` (hybrid_threaded)
+| `ZENDNNL_EMBAG_THREAD_ALGO` | Selects the Embedding Bag threading algorithm to use | `1` (table_threaded) | `0` (dynamic_dispatch), `1` (table_threaded), `2` (batch_threaded), `3` (ccd_threaded), `4` (hybrid_threaded), `5` or `auto` (auto_tuner). The integer maps directly to the `eb_thread_algo_t` enum; `dynamic_dispatch` and `auto_tuner` both fall back to `table_threaded` at execution time.
 ---
 
 ## Logging Configuration
@@ -257,6 +259,6 @@ export ZENDNNL_PROFILE_LOG_LEVEL=4
 ## See Also
 
 - `config/zendnnl_user_config.json` - Example JSON configuration file
-- `src/common/config_manager.cpp` - Configuration manager implementation
-- `src/operators/matmul/matmul_config.cpp` - MatMul configuration implementation
+- `zendnnl/src/common/config_manager.cpp` - Configuration manager implementation
+- `zendnnl/src/operators/matmul/matmul_config.cpp` - MatMul configuration implementation
 

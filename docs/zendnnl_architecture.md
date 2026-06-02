@@ -106,15 +106,15 @@ The Low Overhead API path exposes direct, function-based APIs for a growing set 
 
 | Operation | Description | Documentation |
 |-----------|-------------|---------------|
-| **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul via `matmul_direct` with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
-| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op; optional gated activation post-op (silu_and_mul, gelu_and_mul, swiglu_oai_mul); optional fused MoE via a single-call interface (currently two-pass internally in V1: Op1(gate+up)+activation, then Op2(down_proj); a future deep single-pass fusion is anticipated). | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
-| **SDPA** | Scaled Dot-Product (flash) attention via `sdpa_direct`; tiled O(S) memory, runtime SIMD dispatch, OpenMP parallelization; self- and cross-attention. | [lowoha_sdpa_operator.md](operator/lowoha_sdpa_operator.md) |
-| **Normalization** | LayerNorm, RMSNorm, and FusedAddRMSNorm via a single direct entry point; AVX-512 / AVX-512-FP16 vectorized kernels. | [lowoha_normalization_operator.md](operator/lowoha_normalization_operator.md) |
-| **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
-| **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |
-| **Conv2D** | Low overhead 2D convolution. | [lowoha_conv2d_operator.md](operator/lowoha_conv2d_operator.md) |
-| **Pooling** | Low overhead pooling operations. | [lowoha_pooling_operator.md](operator/lowoha_pooling_operator.md) |
-| **Softmax** | Low overhead softmax. | [lowoha_softmax_operator.md](operator/lowoha_softmax_operator.md) |
+| **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul via `matmul_direct` with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/low_overhead_operator/lowoha_matmul_operator.md) |
+| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op; optional gated activation post-op (silu_and_mul, gelu_and_mul, swiglu_oai_mul); optional fused MoE via a single-call interface (currently two-pass internally in V1: Op1(gate+up)+activation, then Op2(down_proj); a future deep single-pass fusion is anticipated). | [lowoha_group_matmul_operator.md](operator/low_overhead_operator/lowoha_group_matmul_operator.md) |
+| **SDPA** | Scaled Dot-Product (flash) attention via `sdpa_direct`; tiled O(S) memory, runtime SIMD dispatch, OpenMP parallelization; self- and cross-attention. | [lowoha_sdpa_operator.md](operator/low_overhead_operator/lowoha_sdpa_operator.md) |
+| **Normalization** | LayerNorm, RMSNorm, and FusedAddRMSNorm via a single direct entry point; AVX-512 / AVX-512-FP16 vectorized kernels. | [lowoha_normalization_operator.md](operator/low_overhead_operator/lowoha_normalization_operator.md) |
+| **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/low_overhead_operator/lowoha_reorder_operator.md) |
+| **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/tensor_operator/embedding_bag_operator.md) |
+| **Conv2D** | Low overhead 2D convolution. | [lowoha_conv2d_operator.md](operator/low_overhead_operator/lowoha_conv2d_operator.md) |
+| **Pooling** | Low overhead pooling operations. | [lowoha_pooling_operator.md](operator/low_overhead_operator/lowoha_pooling_operator.md) |
+| **Softmax** | Low overhead softmax. | [lowoha_softmax_operator.md](operator/low_overhead_operator/lowoha_softmax_operator.md) |
 
 
 ## Core Design Principles: Tensor Operator API

@@ -95,7 +95,9 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 | Condition | Mode | Description |
 |-----------|------|-------------|
 | `src.size() == 1` | Sequential | Chain: `dst[i-1]` feeds op `i` |
-| `src.size() > 1` | Parallel | Independent GEMMs + optional MoE post-op |
+| `src.size() == num_ops` (`> 1`) | Parallel | Independent GEMMs + optional MoE post-op |
+
+`src.size()` must be exactly `1` (sequential) or `num_ops` (parallel); any other size is rejected up front with `status_t::failure`.
 
 ## Parallel strategy selection (`ZENDNNL_GRP_MATMUL_ALGO`)
 
@@ -110,18 +112,27 @@ Per-op vectors must all have length `num_ops = M.size()`, except `src` whose len
 
 ### Auto-select decision tree (ALGO=0)
 
+Auto-select classifies each call by its largest per-expert M into a **decode** or **prompt** phase, then routes to a per-phase default, with a couple of structural guards on top:
+
 ```
-num_ops ≤ 4                            → ALGO 1 (sequential)
-num_ops ≥ 32, max_M ≥ 8               → ALGO 3 (N-tile)
-num_ops ≥ 32, max_M < 8, max_N ≤ 2048 → ALGO 3 (N-tile, small B fits L3)
-num_ops ≥ 32, max_M < 8, max_N > 2048 → ALGO 2 (adaptive tile)
-num_ops ≥ 8, max_M ≥ 8                → ALGO 3 (N-tile)
-num_ops ≥ 16, max_M < 8               → ALGO 2 (adaptive tile)
-num_ops ≥ 8, max_M ≤ 1                → ALGO 2 (adaptive tile)
-fallback                               → ALGO 1 (sequential)
+num_threads ≤ 1  OR  num_ops == 0      → ALGO 1 (sequential)
+num_ops > 256                          → ALGO 5 (per-expert; N-tile planner capacity ceiling)
+max_M ≤ 32   (decode phase)            → ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO  (default 3, N-tile)
+max_M > 32   (prompt phase)            → ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO  (default 2, M-tile)
 ```
 
-Tiled algos (2/3) require row-major layout, uniform per-expert dtypes, and standard unpacked A and B (`mem_format_a=='n'`, `mem_format_b=='n'`, `pack_format_b==0`). ALGO 2 (M-tile, env-only) additionally supports the full quantization stack (WOQ, static W8A8, and dynamic INT8 with row-local src granularity — `{M, 1}` per-token or `{M, G}` per-group) and most post-ops; it rejects packed B, softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor / per-column / per-channel). ALGO 3 (N-tile) accepts **one** quant configuration: `params[i].dynamic_quant=true` with `{M, 1}` per-token source scale and per-channel `{1, N}` (or `{N}`) weight scale (statically quantised weight buffer supplied by the caller). The source-side reorder runs once per expert in `flat_n_tile`'s pre-OMP hoist (`HoistedSrcQuant` in `n_tile/group_matmul_n_tile.cpp`); per-tile threads then read the shared S8 src + column-sliced wei scale. Everything else — static src quant, per-tensor src/wei, per-group `{G, N}` wei, per-group `{M, G}` src, pure WOQ S4/U4/S8, and buffer-bearing post-ops — stays on ALGO 1. See `check_n_tile_extra`'s SCOPE NOTE for the boundaries. Auto-select never picks ALGO 2 — reach it via the env override — and falls back to ALGO 1 when the safety gate fails.
+Each phase knob accepts `0` or `1..5`. A value of `1..5` pins that ALGO for the phase (subject to the safety clamps below); a value of `0` defers to the legacy 3-rule cascade:
+
+```
+num_ops ≥ num_threads                  → ALGO 3 (N-tile)
+num_ops ≤ 8                            → ALGO 1 (sequential)
+prompt (max_M > 32)                    → ALGO 1 (sequential)
+decode (max_M ≤ 32)                    → ALGO 3 (N-tile)
+```
+
+**Safety clamps:** when the chosen tiled algo is not legal for the call, auto-select falls back to ALGO 1 — ALGO 2 requires `m_tile_safe`, ALGO 3 requires `n_tile_safe`. Because the default prompt policy is ALGO 2, **auto-select picks ALGO 2 by default on prompt-phase shapes** (whenever `m_tile_safe` holds). The per-phase knobs (`ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO`, `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO`) are internal tuning overrides; production deployments normally leave them unset.
+
+Tiled algos (2/3) require row-major layout, uniform per-expert dtypes, and standard unpacked A and B (`mem_format_a=='n'`, `mem_format_b=='n'`, `pack_format_b==0`). ALGO 2 (M-tile) additionally supports the full quantization stack (WOQ, static W8A8, and dynamic INT8 with row-local src granularity — `{M, 1}` per-token or `{M, G}` per-group) and most post-ops; it rejects packed B, softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor / per-column / per-channel). ALGO 3 (N-tile) accepts **one** quant configuration: `params[i].dynamic_quant=true` with `{M, 1}` per-token source scale and per-channel `{1, N}` (or `{N}`) weight scale (statically quantised weight buffer supplied by the caller). The source-side reorder runs once per expert in `flat_n_tile`'s pre-OMP hoist (`HoistedSrcQuant` in `n_tile/group_matmul_n_tile.cpp`); per-tile threads then read the shared S8 src + column-sliced wei scale. Everything else — static src quant, per-tensor src/wei, per-group `{G, N}` wei, per-group `{M, G}` src, pure WOQ S4/U4/S8, and buffer-bearing post-ops — stays on ALGO 1. See `check_n_tile_extra`'s SCOPE NOTE for the boundaries. Auto-select routes prompt-phase shapes to ALGO 2 by default (when `m_tile_safe` holds) and falls back to ALGO 1 when the safety gate fails.
 
 Set the strategy via environment variable: `ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5`.
 
@@ -178,28 +189,12 @@ status_t st = group_matmul_direct(
 
 ## Environment variables
 
-User-facing knobs that affect `group_matmul_direct` behaviour.  All are read once and cached on first reference (except `ZENDNNL_GRP_MATMUL_ALGO`, intentionally re-read per call so production runs can flip ALGO between phases without restart).  Set them before the first `group_matmul_direct` call.
+User-facing knobs that affect `group_matmul_direct` behaviour.  All are read once and cached on first reference (including `ZENDNNL_GRP_MATMUL_ALGO`).  Set them before the first `group_matmul_direct` call; mid-process changes have no effect.
 
 | Variable | Default | Effect |
 |---|---|---|
 | `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto) | Force a parallel strategy. `0` = auto, `1`-`5` = ALGO 1-5. See the table above. |
-| `ZENDNNL_GRP_MATMUL_PREPACK` | `1` (ON) | Master switch for ahead-of-time weight prepack. When ON the dispatcher eagerly populates the inner-kernel weight cache for `max(M.size(), total_matmul)` experts on first reference, eliminating per-expert reorder spikes during inference. Set `0` to fall back to lazy on-first-touch reorder (lower first-call latency, but cache-miss spikes are visible during steady-state when a fresh expert routes). |
-| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `0` (OFF) | Enables an in-house BF16-only AVX-512 microkernel for ALGO 3 (N-tile). Wins on single- and few-thread workloads; can lose to AOCL DLP at high thread counts on large MoE shapes. Falls back to the standard backend when the contract fails (non-BF16, transA, alpha != 1, ...). |
-| `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | `1` (ON) | Pin ALGO 3's per-expert thread count to a `num_threads`-only formula so the AOCL DLP weight-reorder cache key is stable across MoE routing variation (active-expert filtering, batch-size shifts, ...). Disable only for A/B comparison; the fully-relaxed planner can degrade cache hit-rate under churn. |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | `1` (ON) | Standard weight-reorder cache for AOCL DLP / BRGEMM. Setting `0` disables both lazy and prepack populations — prepack short-circuits to a no-op rather than wasting CPU on entries that won't be cached. |
-
-### Weight caching, prepack, and memory
-
-When `ZENDNNL_GRP_MATMUL_PREPACK=1` (default), each firing call eagerly reorders weights for **all** `total_matmul` experts (or `M.size()` experts in legacy mode) on the **first** invocation that observes that configuration.  Subsequent calls short-circuit via a per-thread fingerprint cache (~100 ns overhead) and benefit from warm caches.
-
-Trade-offs by deployment scenario:
-
-| Scenario | Behaviour | Recommendation |
-|---|---|---|
-| Production MoE inference (32 experts, BF16, ALGO 3) | First call: ~325 ms one-time reorder cost. Steady state: warm caches, no per-token spikes. ~2 GB persistent weight cache (held for process lifetime). | Default `PREPACK=1` is the right choice. The first-call cost lands inside warm-up. |
-| Latency-critical first-call (interactive serving without warm-up) | The ~325 ms first-call latency is unacceptable. | Set `ZENDNNL_GRP_MATMUL_PREPACK=0`. Falls back to lazy reorder — first call ~10 ms parallel, subsequent calls add a per-fresh-expert reorder spike. |
-| Memory-bounded (multi-tenant, container quota < 4 GB) | Eager prepack populates ~2 GB of LRU per process for gpt-oss-20B-class shapes. | Either `ZENDNNL_GRP_MATMUL_PREPACK=0` (no eager warm), or `ZENDNNL_MATMUL_WEIGHT_CACHE=0` (kills both lazy and prepack — every call re-reorders, lowest memory but slowest steady-state). |
-| Single-shot inference (eg. unit tests) | First-call cost dominates; no steady-state benefit. | `PREPACK=0` is fine. Default `1` is also fine — the cost is bounded and the test path itself is dominated by gtest fixture overhead. |
 
 ## MoE post-op (parallel mode only)
 
@@ -448,7 +443,7 @@ Cross-cutting constraints:
 
 #### Per-token-only constraint on dynamic source quant
 
-Op1 reduces over `K[i]` (= `K_in`); Op2 reduces over `K_down = op2_k_for_act(N[i], act)` (= `N[i]/2` for gated activations, `N[i]` for `act=none`).  The two K values are typically different, so a per-group `src_scale.dims = {M, ngroups_op1}` on `params[i]` does **not** transfer to Op2 verbatim — the documented contract (`docs/operator/lowoha_matmul_operator.md:227`: *"the number of groups (G) must match between source and weight"*) is K-dependent and applies independently per pass.
+Op1 reduces over `K[i]` (= `K_in`); Op2 reduces over `K_down = op2_k_for_act(N[i], act)` (= `N[i]/2` for gated activations, `N[i]` for `act=none`).  The two K values are typically different, so a per-group `src_scale.dims = {M, ngroups_op1}` on `params[i]` does **not** transfer to Op2 verbatim — the documented contract (`docs/operator/low_overhead_operator/lowoha_matmul_operator.md:227`: *"the number of groups (G) must match between source and weight"*) is K-dependent and applies independently per pass.
 
 The fused-MoE dispatcher therefore **rejects** any per-group dynamic source quant up front with a clear `log_error` and `status_t::failure`, before any kernel work is done.  The same check is applied to `src_zp.dims` when asymmetric source quant is enabled.
 
@@ -571,7 +566,7 @@ Self-contained example showing **dynamic INT8 on BOTH Op1 and Op2** through a si
 | Op2 (down_proj) | BF16 src (activated Op1 dst) + S8 wei → BF16 dst | dynamic INT8 on Op2 (runtime BF16→S8 reorder of the intermediate) | Op2 inherits `dynamic_quant`, `dtypes.compute`, `src_scale.dims` from `params[i]`.  Only the down_weight scale is per-pass — carried via `fused.down_scale[i]` (and optional `fused.down_zp[i]`). |
 
 Pre-conditions:
-- `M[i] >= 16` per expert.  Per-token `{M, 1}` src_scale dims are rejected for very small M by the BF16-INT8 reorder kernel — see [test_quant.cpp::INT8_DYNAMIC_GEMM_BF16](../../zendnnl/gtests/group_matmul/test_quant.cpp) for the same constraint at the single-matmul level.
+- `M[i] >= 16` per expert.  Per-token `{M, 1}` src_scale dims are rejected for very small M by the BF16-INT8 reorder kernel — see [test_quant.cpp::INT8_DYNAMIC_GEMM_BF16](../../../zendnnl/gtests/group_matmul/test_quant.cpp) for the same constraint at the single-matmul level.
 - `K_in` (= `H`) and `N_gate_up` (= `2 * dim`) multiples of 4 for clean S8 K-blocking.
 - All experts share the same dtype tuple (BF16 src, S8 wei, BF16 dst).
 
@@ -771,8 +766,5 @@ Set `ZENDNNL_API_LOG_LEVEL=3` to see the dispatch trail; the per-call summary wi
 3. **Parallel independence**: Each op uses its own `src[i]`, `weight[i]`, `dst[i]`.
 4. **MoE**: Pass `nullptr` when not needed. When enabled, provide `row_ptrs` (built during scatter) and `topk_weights`.
 5. **Gated activation**: Pass `nullptr` when not needed. When enabled, N must be even and dst dtype must be FP32 or BF16.  Applied after GEMM, before MoE weighted-reduce.
-6. **Weight caching and prepack**: `is_weights_const[i] == true` enables caching for op `i`.  By default (`ZENDNNL_GRP_MATMUL_PREPACK=1`) the library *eagerly* warms the cache on the first observation of a configuration; subsequent calls hit warm caches with negligible overhead.  See [Weight caching, prepack, and memory](#weight-caching-prepack-and-memory) for the trade-offs (~325 ms first-call cost vs no per-token spikes; ~2 GB persistent cache for 32-expert MoE).
 7. **Fused-MoE Op2 quantization**: Op2 (down_proj) uses the **same** quant scheme as Op1 by construction — the dispatcher inherits `dynamic_quant`, `dtypes.compute`, and `quant_params.src_scale.{dt, dims}` from `params[i]` into Op2's internal `params_down[i]`.  The only Op2-specific quant artefact is the down_weight scale (because `down_weight[i]` is a different tensor from Op1's `weight[i]`), carried via the new optional `fused.down_scale` and `fused.down_zp` vectors (see [Op2 quantization](#op2-quantization-optional)).  Both default to empty for backward compatibility.  Use WOQ-S4 or dynamic INT8 on Op2 — pure WOQ-S8 (BF16 src + S8 wei + only `wei_scale`) is rejected by AOCL DLP's `is_woq` gate (s4 / u4 only).
 8. **Tiled algos (2/3)**: Both require row-major layout, uniform per-expert dtypes, and standard unpacked A/B. ALGO 2 (M-tile, `m_tile_safe`) additionally supports the full quantization stack — weight-only (S4 sym, U4 asym), static W8A8 (per-tensor / per-channel / per-group / per-token), and **dynamic INT8** (BF16/F32 source quantised at runtime; per-token `{M, 1}` and per-group `{M, G}` activation scales only) — and most post-ops. It blocks: packed B (GGML Q8_0), softmax/pooling, and dynamic-quant with non-row-local src granularity (per-tensor `{}` / `{1}` / `{1, 1}`, per-column `{1, K}`, per-channel-on-src `{1, N}`) because the per-thread reorder would race on the shared scale/zp buffer and use slice-local statistics. M-indexed source-quant metadata (`src_scale` / `src_zp`) is row-offset and dim-sliced per thread inside `m_tile/group_matmul_m_tile.cpp::offset_quant_by_row` so the dynamic-quant per-group reorder dispatch sees a slice-shaped `src_shape × dims`. ALGO 3 (N-tile, `n_tile_safe`) is stricter: only buffer-free element-wise post-ops (relu, gelu, swish, etc.) are safe under column slicing, and any non-null quant scale/zero-point buffer disables it. Falls back to ALGO 1 automatically when the required safety check fails.
-9. **Errors**: On failure, check logs for dimension / dtype / MoE / gated-act validation messages.
-10. **Environment variables**: Strategy override (`ZENDNNL_GRP_MATMUL_ALGO`), prepack toggle (`ZENDNNL_GRP_MATMUL_PREPACK`), and other knobs are listed in the [Environment variables](#environment-variables) section above.  See `docs/runtime_env.md` for the master env-var reference.
