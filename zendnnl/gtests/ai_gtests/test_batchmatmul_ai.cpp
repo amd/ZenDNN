@@ -157,7 +157,13 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
   // Called automatically before each test runs.
   // -----------------------------------------------------------------------------
   virtual void SetUp() override {
-    // Add specific setup code here if needed
+    // LOWOHA-only mode: tests are masked when the user explicitly selects the
+    // regular (non-LOWOHA) API. Skip with a message asking the user to use the
+    // LOA (LOWOHA) API.
+    if (is_lowoha_explicitly_disabled()) {
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
+    }
   }
 
   // -----------------------------------------------------------------------------

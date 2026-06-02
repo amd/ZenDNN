@@ -85,7 +85,12 @@ class TestGemvAI : public ::testing::TestWithParam<MatmulParamsAI> {
   }
 
  protected:
-  void SetUp() override {}
+  void SetUp() override {
+    if (is_lowoha_explicitly_disabled()) {
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
+    }
+  }
   void TearDown() override {
     // Clear all weight caches between test cases so stale pointer-keyed
     // entries from freed weight tensors don't cause incorrect results.

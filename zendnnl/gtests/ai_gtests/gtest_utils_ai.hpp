@@ -95,9 +95,24 @@ void initialize_test_mode(const std::string &mode_str);
 // Stores the flag value for use in AI tests
 void initialize_lowoha_mode(const std::string &lowoha_flag);
 
-// Check if LOWOHA mode is enabled
-// Returns true if --lowoha flag is set to "true" or "1"
+// Check if LOWOHA mode is enabled.
+// LOWOHA-only mode: defaults to true (when --lowoha is not provided).
+// Returns false whenever the user passes a --lowoha value that does not parse
+// as true/1 (case-insensitive) -- this covers "false"/"0" as well as any
+// invalid non-empty token (e.g. --lowoha maybe, --lowoha 2). The
+// case-insensitive comparison matches the non-AI fixtures' `parse_bool_field()`
+// semantics in gtest_utils.cpp, so `--lowoha True`/`--lowoha TRUE` behave
+// identically across AI and non-AI suites. See the matching definition in
+// gtest_utils_ai.cpp for the full contract.
 bool is_lowoha_mode_enabled();
+
+// Returns true when the user provided a non-empty --lowoha value that does
+// not enable LOWOHA (explicit false/0 or any invalid token such as
+// "maybe"). AI test fixtures use this to skip with the "Please use LOA API"
+// message; this matches the non-AI fixtures' use_LOWOHA evaluation (both use
+// case-insensitive parsing) so the LOWOHA-only guarantee holds for any
+// non-empty --lowoha that isn't true/1.
+bool is_lowoha_explicitly_disabled();
 
 // Standalone function to initialize nightly test configuration
 // Sets MaxTestCases values for nightly mode (10x base values)

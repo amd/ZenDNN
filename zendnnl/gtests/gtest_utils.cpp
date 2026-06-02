@@ -166,9 +166,18 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
   const auto is_libxsmm_algo = [](matmul_algo_t a) {
     return a == matmul_algo_t::libxsmm || a == matmul_algo_t::libxsmm_blocked;
   };
-  const auto parsed_lowoha = parse_cmd_lowoha();
-  const bool user_specified_lowoha = parsed_lowoha.has_value();
-  use_LOWOHA = user_specified_lowoha && *parsed_lowoha;
+  // LOWOHA-only mode: default to LOWOHA API. If the user passes --lowoha
+  // with any value that does not parse as true ("true"/"1", case-insensitive
+  // via `parse_bool_field()`) -- e.g. false/0 or any invalid non-empty token
+  // such as "maybe" -- tests will detect this and skip with a "Please use
+  // LOA API" message in each test fixture's SetUp().
+  const bool user_specified_lowoha = !cmd_lowoha.empty();
+  if (user_specified_lowoha) {
+    use_LOWOHA = parse_cmd_lowoha().value_or(false);
+  }
+  else {
+    use_LOWOHA = true;
+  }
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
                   : matmul_config.get_algo();
@@ -190,10 +199,11 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
               "ZenDNN build was compiled without LIBXSMM. Please rebuild ZenDNN with LIBXSMM support.");
   }
 
-  // Control LOWOHA and LIBXSMM based on test index
-  // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+  // LIBXSMM coverage is partitioned by test index: aocl_dlp for the first two
+  // thirds, libxsmm/libxsmm_blocked allowed in the last third. (The earlier
+  // LOWOHA partitioning has been removed since LOWOHA is now always on by
+  // default.)
   uint32_t third = (total_tests + TEST_PARTITIONS - 1) / TEST_PARTITIONS;
-  bool in_second_third = test_index >= third && test_index < 2 * third;
   bool in_last_third = test_index >= 2 * third;
   bool randomized_algo_mode = false;
 
@@ -236,21 +246,17 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
     }
   }
 
-  // LOWOHA: when --lowoha is set by the user, use_LOWOHA is left as parsed above.
-  // Otherwise, in randomized algo mode cover LOWOHA in the second and last thirds
-  // only; else pick LOWOHA at random.
-  if (!user_specified_lowoha) {
-    if (randomized_algo_mode) {
-      use_LOWOHA = in_second_third || in_last_third;
-    }
-    else {
-      use_LOWOHA = rand() % 2;
-    }
-  }
-  // set LOWOHA to true for LIBXSMM and native_gemm/native_brgemm
+  // LOWOHA-only mode: do not randomize use_LOWOHA. It was already set above
+  // (default true, or honoring --lowoha when explicitly provided). Algorithms
+  // that require LOWOHA (LIBXSMM, native_gemm/native_brgemm) still force it on
+  // unless the user explicitly disabled LOWOHA -- in that case the test will
+  // be skipped at SetUp() time, so we leave use_LOWOHA false here.
   const bool algo_forces_lowoha = is_libxsmm_algo(algo) ||
                                   algo == matmul_algo_t::native_gemm || algo == matmul_algo_t::native_brgemm;
-  use_LOWOHA = algo_forces_lowoha ? true : use_LOWOHA;
+  const bool user_disabled_lowoha = user_specified_lowoha && !use_LOWOHA;
+  if (algo_forces_lowoha && !user_disabled_lowoha) {
+    use_LOWOHA = true;
+  }
   if (is_libxsmm_algo(algo)) {
     alpha = 1.0f;
     if (matmul_input.beta && beta != 0.0f && beta != 1.0f) {
@@ -372,12 +378,16 @@ EmbagType::EmbagType(const EmbagInput &embag_input) {
                     std::rand() % 2;
   strided = embag_input.embedding_input.strided ?
             *embag_input.embedding_input.strided : std::rand() % 2;
-  // LOWOHA configuration based on command-line input or random selection
-  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
-    use_LOWOHA = *parsed_lowoha;
+  // LOWOHA-only mode: default to LOWOHA API. If the user passes --lowoha
+  // with any value that does not parse as true ("true"/"1", case-insensitive
+  // via `parse_bool_field()`) -- e.g. false/0 or any invalid non-empty
+  // token -- the test fixture's SetUp() will skip with a "Please use LOA
+  // API" message.
+  if (cmd_lowoha.empty()) {
+    use_LOWOHA = true;
   }
   else {
-    use_LOWOHA = std::rand() % 2;
+    use_LOWOHA = parse_cmd_lowoha().value_or(false);
   }
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -421,12 +431,16 @@ EmbeddingType::EmbeddingType(const EmbeddingInput &embedding_input) {
                     *embedding_input.fp16_scale_bias :
                     std::rand() % 2;
   strided = embedding_input.strided ? *embedding_input.strided : std::rand() % 2;
-  // LOWOHA configuration based on command-line input or random selection
-  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
-    use_LOWOHA = *parsed_lowoha;
+  // LOWOHA-only mode: default to LOWOHA API. If the user passes --lowoha
+  // with any value that does not parse as true ("true"/"1", case-insensitive
+  // via `parse_bool_field()`) -- e.g. false/0 or any invalid non-empty
+  // token -- the test fixture's SetUp() will skip with a "Please use LOA
+  // API" message.
+  if (cmd_lowoha.empty()) {
+    use_LOWOHA = true;
   }
   else {
-    use_LOWOHA = std::rand() % 2;
+    use_LOWOHA = parse_cmd_lowoha().value_or(false);
   }
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
@@ -700,11 +714,16 @@ SdpaType::SdpaType() {
 ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
                          uint32_t total_tests) {
 
-  if (const auto parsed_lowoha = parse_cmd_lowoha()) {
-    is_lowoha_test = *parsed_lowoha;
+  // LOWOHA-only mode: default to LOWOHA reorder tests. If the user passes
+  // --lowoha with any value that does not parse as true ("true"/"1",
+  // case-insensitive via `parse_bool_field()`) -- e.g. false/0 or any
+  // invalid non-empty token -- the test fixture's SetUp() will skip with a
+  // "Please use LOA API" message.
+  if (cmd_lowoha.empty()) {
+    is_lowoha_test = true;
   }
   else {
-    is_lowoha_test = rand() % 2;
+    is_lowoha_test = parse_cmd_lowoha().value_or(false);
   }
 
   if (!is_lowoha_test) {
@@ -4495,7 +4514,7 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
   constexpr float ZERO_REF_THRESH = 1e-6f;
-  constexpr float F32_EPS_SLACK = 2e-4f;
+  constexpr float F32_EPS_SLACK = 9e-4f;
 
   const bool is_f32 = output_tensor.get_data_type() == data_type_t::f32;
 

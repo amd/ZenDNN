@@ -33,29 +33,16 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
     ReorderType params = GetParam();
     use_LOWOHA = params.is_lowoha_test;
 
+    // LOWOHA-only mode: tests are masked when the user explicitly selects the
+    // regular (non-LOWOHA) API. Skip with a message asking the user to use the
+    // LOA (LOWOHA) API. GTEST_SKIP() returns from SetUp(), so the LOWOHA
+    // initialization below only executes on the LOWOHA path.
     if (!use_LOWOHA) {
-      // Initialize regular reorder parameters
-      m        = params.mat.matmul_m;
-      n        = params.mat.matmul_n;
-      k        = params.mat.matmul_k;
-      transA   = params.mat.transA;
-      transB   = params.mat.transB;
-      po_types = params.mat.po_types;
-      algo = matmul_algo_t::aocl_dlp;
-      inplace_reorder = params.inplace_reorder;
-      source_dtype = params.mat.source_dtype;
-      num_threads = params.mat.num_threads;
-      omp_set_num_threads(num_threads);
-      log_info("m: ", m, " k: ", k, " n: ", n," postops: ",
-               postOpTypesToStr(po_types),
-               " reorder: ", inplace_reorder ? "In Place" : "Out of Place", " num_threads: ",
-               num_threads);
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
     }
-    else {
-      // Initialize LOWOHA params
-      lowoha_params = params;
-      omp_set_num_threads(lowoha_params.num_threads);
-    }
+    lowoha_params = params;
+    omp_set_num_threads(lowoha_params.num_threads);
   }
 
   /** @brief TearDown is used to free resource used in test */

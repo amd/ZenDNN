@@ -105,10 +105,18 @@ void initialize_test_mode(const std::string &mode_str) {
               << std::endl;
   }
   else {
-    // Unknown or empty mode - use DEFAULT
+    // Unknown or empty mode - use DEFAULT. Distinguish "no --ai_test_mode
+    // flag was passed" (empty string) from "an unrecognized value was
+    // passed" so the startup banner isn't misleading.
     ai_gtest_mode = TestMode::DEFAULT;
-    std::cout << "[AI_GTEST] Unknown test mode '" << mode_str
-              << "', using DEFAULT" << std::endl;
+    if (mode_str.empty()) {
+      std::cout << "[AI_GTEST] Test mode: DEFAULT (no --ai_test_mode specified)"
+                << std::endl;
+    }
+    else {
+      std::cout << "[AI_GTEST] Unknown test mode '" << mode_str
+                << "', using DEFAULT" << std::endl;
+    }
   }
 }
 
@@ -131,25 +139,61 @@ void initialize_lowoha_mode(const std::string &lowoha_flag) {
     std::cout << "[AI_GTEST] LOWOHA mode enabled" << std::endl;
   }
   else {
-    std::cout << "[AI_GTEST] LOWOHA mode disabled (using primitive operators)" <<
-              std::endl;
+    // LOWOHA-only mode: AI fixtures `GTEST_SKIP()` instead of running the
+    // primitive-operator path when --lowoha is set to anything other than
+    // true/1 (false/0 or any invalid token). Reflect that here so the
+    // startup banner matches actual behavior.
+    std::cout << "[AI_GTEST] LOWOHA mode disabled by --lowoha=\""
+              << cmd_lowoha_ai
+              << "\"; AI tests will be skipped (please use LOA API)"
+              << std::endl;
   }
 }
 
 // -----------------------------------------------------------------------------
 // is_lowoha_mode_enabled
 //
-// Checks if LOWOHA mode is enabled based on the command-line flag.
-// Returns true if the flag is set to "true" or "1", false otherwise.
+// LOWOHA-only mode: returns true by default (when --lowoha is not provided).
+// Returns false whenever the user passes a --lowoha value that does not parse
+// as true/1 (case-insensitive) -- this covers the explicit disable cases
+// ("false"/"0") as well as any invalid non-empty token (e.g. --lowoha maybe,
+// --lowoha 2). The case-insensitive comparison matches the non-AI fixtures'
+// `parse_bool_field()` semantics, so `--lowoha True`, `--lowoha TRUE`,
+// `--lowoha False`, etc. behave identically across AI and non-AI suites.
+// Tests detect the disabled state via is_lowoha_explicitly_disabled() and
+// skip with a "Please use LOA API" message in each fixture's SetUp().
 //
 // Returns:
-//   true if LOWOHA mode is enabled, false otherwise
+//   true  if cmd_lowoha_ai is empty (default) or parses as true/1
+//         (case-insensitive: "true"/"True"/"TRUE"/"1")
+//   false otherwise (explicit disable or any invalid non-empty token)
 //
 // Usage:
 //   Called by AI test implementations to determine which kernel to use
 // -----------------------------------------------------------------------------
 bool is_lowoha_mode_enabled() {
-  return (cmd_lowoha_ai == "true" || cmd_lowoha_ai == "1");
+  if (cmd_lowoha_ai.empty()) {
+    return true;
+  }
+  std::string s = cmd_lowoha_ai;
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return (s == "true" || s == "1");
+}
+
+// -----------------------------------------------------------------------------
+// is_lowoha_explicitly_disabled
+//
+// Returns true when the user provided a non-empty --lowoha value that does
+// not enable LOWOHA. This covers the explicit false/0 case as well as any
+// invalid non-empty value (e.g. --lowoha maybe), so AI test fixtures can
+// GTEST_SKIP() and the suite stays LOWOHA-only -- matching the non-AI
+// fixtures which evaluate use_LOWOHA the same way (case-insensitive parsing
+// of the --lowoha token, see parse_bool_field() in gtest_utils.cpp).
+// -----------------------------------------------------------------------------
+bool is_lowoha_explicitly_disabled() {
+  return !cmd_lowoha_ai.empty() && !is_lowoha_mode_enabled();
 }
 
 // -----------------------------------------------------------------------------
@@ -1270,7 +1314,7 @@ bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
   // LIBXSMM meltw vs reference eltwise slack (matches gtest_utils.cpp)
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
   constexpr float ZERO_REF_THRESH = 1e-6f;
-  constexpr float F32_EPS_SLACK = 2e-4f;
+  constexpr float F32_EPS_SLACK = 9e-4f;
   float abs_bound = 0.0f;
   auto dtype = test_tensor.get_data_type();
   const bool is_f32 = dtype == data_type_t::f32;

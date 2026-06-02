@@ -33,6 +33,17 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
    * */
   virtual void SetUp() {
     MatmulType params = GetParam();
+    use_LOWOHA = params.use_LOWOHA;
+    // LOWOHA-only mode: tests are masked when the user explicitly selects the
+    // regular (non-LOWOHA) API. Skip with a message asking the user to use the
+    // LOA (LOWOHA) API. Run this guard *before* any global side effects
+    // (e.g. srand(), omp_set_num_threads) so skipped tests don't mutate
+    // process state (RNG, OMP thread count) that subsequent test suites
+    // rely on.
+    if (!use_LOWOHA) {
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
+    }
     srand(static_cast<unsigned int>(seed));
     m            = params.matmul_m;
     k            = params.matmul_k;
@@ -45,7 +56,6 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     output_dtype = params.output_dtype;
     weight_granularity = params.weight_granularity;
     po_types = params.po_types;
-    use_LOWOHA = params.use_LOWOHA;
     algo = params.algo;
     num_threads = params.num_threads;
     omp_set_num_threads(num_threads);

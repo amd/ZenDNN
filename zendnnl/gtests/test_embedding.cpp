@@ -38,6 +38,15 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
     fp16_scale_bias    = params.fp16_scale_bias;
     strided            = params.strided;
     use_LOWOHA         = params.use_LOWOHA;
+    // LOWOHA-only mode: tests are masked when the user explicitly selects the
+    // regular (non-LOWOHA) API. Skip with a message asking the user to use the
+    // LOA (LOWOHA) API. Run this guard *before* any global side effects
+    // (e.g. omp_set_num_threads) so skipped tests don't mutate process state
+    // that subsequent test suites rely on.
+    if (!use_LOWOHA) {
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
+    }
     num_threads        = params.num_threads;
     omp_set_num_threads(num_threads);
 

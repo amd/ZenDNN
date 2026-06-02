@@ -30,6 +30,17 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
    * */
   virtual void SetUp() {
     BatchMatmulType params = GetParam();
+    use_LOWOHA = params.mat.use_LOWOHA;
+    // LOWOHA-only mode: tests are masked when the user explicitly selects the
+    // regular (non-LOWOHA) API. Skip with a message asking the user to use the
+    // LOA (LOWOHA) API. Run this guard *before* any global side effects
+    // (e.g. srand(), omp_set_num_threads) so skipped tests don't mutate
+    // process state (RNG, OMP thread count) that subsequent test suites
+    // rely on.
+    if (!use_LOWOHA) {
+      GTEST_SKIP() << "Skipping: please use LOA (LOWOHA) API. "
+                   << "Omit --lowoha or pass --lowoha true to run these tests.";
+    }
     srand(static_cast<unsigned int>(seed));
     batch_size = params.batch_size;
     m          = params.mat.matmul_m;
@@ -41,7 +52,6 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     beta       = params.mat.beta;
     po_types = params.mat.po_types;
     algo = params.mat.algo;
-    use_LOWOHA = params.mat.use_LOWOHA;
     if (algo == matmul_algo_t::aocl_dlp_blocked) {
       algo = matmul_algo_t::aocl_dlp;
     }
