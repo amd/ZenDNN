@@ -427,3 +427,57 @@ TEST_P(TestNormalization, F32_F16) {
  */
 INSTANTIATE_TEST_SUITE_P(Normalization, TestNormalization,
                          ::testing::ValuesIn(normalization_test));
+
+/** @brief Deterministic norm_size values that are NOT multiples of 32.
+ *
+ *  These force the masked AVX512-FP16 tail path in the F16 normalization
+ *  kernels (f16x32_load_tail_typed / f16x32_store_tail_typed, which route
+ *  through the f16_maskz_loadu_vec / f16_mask_storeu_vec shims). The set
+ *  covers tail-only (1, 31), single-block + tail (33, 47, 63), and
+ *  multi-block + tail (95, 129) cases so every loop remainder branch is
+ *  exercised. The random `normalization_test` instantiation above only hits
+ *  these sizes by chance; this instantiation makes the coverage guaranteed.
+ */
+static std::vector<NormalizationType> make_norm_tail_cases() {
+  const std::vector<uint64_t> tail_sizes = {1, 31, 33, 47, 63, 95, 129};
+  const std::vector<norm_type_t> norm_types = {
+    norm_type_t::RMS_NORM,
+    norm_type_t::LAYER_NORM,
+    norm_type_t::FUSED_ADD_RMS_NORM};
+
+  std::vector<NormalizationType> cases;
+  cases.reserve(norm_types.size() * tail_sizes.size());
+  for (norm_type_t nt : norm_types) {
+    for (uint64_t ns : tail_sizes) {
+      // Default-construct then fully override every field, so the result is
+      // deterministic regardless of the constructor's internal randomization.
+      NormalizationType c;
+      c.norm_type    = nt;
+      c.batch        = 4;            // multiple rows over the tail dimension
+      c.norm_size    = ns;
+      c.num_channels = 0;            // unused for non-batch-norm
+      c.shape        = {c.batch, ns};
+      c.epsilon      = (nt == norm_type_t::RMS_NORM ||
+                        nt == norm_type_t::FUSED_ADD_RMS_NORM) ? 1e-6f : 1e-5f;
+      c.use_scale    = true;
+      c.use_shift    = (nt == norm_type_t::LAYER_NORM);
+      // Keep gamma/beta f32: the F32_F32/BF16 fixture variants don't skip on
+      // missing F16 ISA, so f16 gamma/beta there would fail on non-F16 hosts.
+      // The masked shim is still exercised via the f16 src/dst variants.
+      c.gamma_dt     = data_type_t::f32;
+      c.beta_dt      = data_type_t::f32;
+      c.num_threads  = 2;
+      cases.push_back(c);
+    }
+  }
+  return cases;
+}
+
+/** @fn INSTANTIATE_TEST_SUITE_P
+ *  @brief Guaranteed masked-tail coverage for the F16 normalization kernels.
+ *         Reuses the same fixture (and its F16 isa_unsupported GTEST_SKIP),
+ *         so on non-F16 hosts the F16_* variants skip and the F32/BF16
+ *         variants still validate the tail handling for those dtypes.
+ */
+INSTANTIATE_TEST_SUITE_P(NormalizationTail, TestNormalization,
+                         ::testing::ValuesIn(make_norm_tail_cases()));

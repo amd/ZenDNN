@@ -66,6 +66,7 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 endif()
 
 # include zendnnl files
+include(CheckCXXSourceCompiles)
 include(ZenDnnlMacros)
 include(ZenDnnlDependenciesInfo)
 
@@ -74,6 +75,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mavx512f -mavx512vl -mavx512bf16")
+endif()
+
+check_cxx_source_compiles("
+  #include <immintrin.h>
+  __attribute__((target(\"avx512f,avx512vl,avx512bw,avx512fp16\")))
+  void test(const void *src, void *dst, __mmask32 k, __m512h v) {
+    (void)_mm512_maskz_loadu_ph(k, src);
+    _mm512_mask_storeu_ph(dst, k, v);
+  }
+  int main() { return 0; }
+" ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
+
+if(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
+  add_compile_definitions(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
 endif()
 
 # find common packages

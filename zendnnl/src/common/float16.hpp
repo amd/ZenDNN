@@ -186,7 +186,8 @@ class float16_t {
   static void f32_to_f16(const float *f32_buf, float16_t *f16_buf,
                          int64_t size_);
 
-#if defined(__GNUC__) && (__GNUC__ >= 12)
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) || \
+    (defined(__GNUC__) && (__GNUC__ >= 12))
   //===--------------------------------------------------------------------===//
   // SIMD vector conversions (AVX-512 + AVX-512-FP16)
   //
@@ -222,33 +223,33 @@ class float16_t {
   uint16_t raw_bits_; /*!< float16 raw bits (IEEE 754 half-precision) */
 };
 
-#if defined(__GNUC__) && (__GNUC__ >= 12)
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) || \
+    (defined(__GNUC__) && (__GNUC__ >= 12))
 //===----------------------------------------------------------------------===//
 // AVX-512-FP16 masked load/store shims
 //
-// GCC 12 and 13 ship AVX-512-FP16 intrinsics but are missing
-// _mm512_maskz_loadu_ph and _mm512_mask_storeu_ph (added in GCC 14).
-// Both lower to the same VMOVDQU16 instruction as their epi16
-// counterparts, so on GCC < 14 we forward to the epi16 form. On
-// GCC >= 14, the real intrinsics are used. Defined inline in this
-// header so they always inline at the call site.
+// Some compilers ship AVX-512-FP16 intrinsics but do not expose
+// _mm512_maskz_loadu_ph and _mm512_mask_storeu_ph. Both lower to the
+// same VMOVDQU16 instruction as their epi16 counterparts, so fall back
+// to the epi16 form only when the native PH intrinsics are unavailable.
+// Defined inline in this header so they always inline at the call site.
 //===----------------------------------------------------------------------===//
 
 __attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
 static inline __m512h f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
-#if (__GNUC__ < 14)
-  return (__m512h)_mm512_maskz_loadu_epi16(k, addr);
-#else
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
   return _mm512_maskz_loadu_ph(k, addr);
+#else
+  return (__m512h)_mm512_maskz_loadu_epi16(k, addr);
 #endif
 }
 
 __attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
 static inline void f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
-#if (__GNUC__ < 14)
-  _mm512_mask_storeu_epi16(addr, k, (__m512i)val);
-#else
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
   _mm512_mask_storeu_ph(addr, k, val);
+#else
+  _mm512_mask_storeu_epi16(addr, k, (__m512i)val);
 #endif
 }
 
@@ -432,7 +433,7 @@ static inline float reduce_add_ph_to_fp32(__m512h v) {
   return _mm512_reduce_add_ps(_mm512_add_ps(lo32, hi32));
 }
 
-#endif  // __GNUC__ >= 12
+#endif  // ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS || __GNUC__ >= 12
 
 }//namespace common
 

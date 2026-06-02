@@ -230,7 +230,8 @@ void float16_t::f32_to_f16(const float *f32_buf, float16_t *f16_buf,
 // SIMD vector conversions
 //===----------------------------------------------------------------------===//
 
-#if defined(__GNUC__) && (__GNUC__ >= 12)
+#if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS) || \
+    (defined(__GNUC__) && (__GNUC__ >= 12))
 
 __attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
 __m512h float16_t::cvt_f32_to_f16_vec(__m512 lo, __m512 hi) {
@@ -249,7 +250,7 @@ void float16_t::cvt_f16_to_f32_vec(__m512h val, __m512 &lo, __m512 &hi) {
   hi = _mm512_cvtph_ps(hi_half);
 }
 
-#endif  // __GNUC__ >= 12
+#endif  // ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS || __GNUC__ >= 12
 
 }//namespace common
 }//namespace zendnnl

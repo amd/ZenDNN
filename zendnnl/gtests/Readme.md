@@ -923,6 +923,37 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ./install/gtests/gtests --gtest_filter=Normalization/* --num_threads 8
 ```
 
+### Normalization Tail Coverage Tests
+ - A second instantiation, **`NormalizationTail`**, reuses the same
+   `TestNormalization` fixture and its seven dtype testcases but feeds them a
+   **deterministic** set of `norm_size` values that are **not** multiples of 32:
+   `1, 31, 33, 47, 63, 95, 129`. These force the masked AVX512-FP16 tail path in
+   the F16 kernels (`f16_maskz_loadu_vec` / `f16_mask_storeu_vec`), covering
+   tail-only, single-block + tail, and multi-block + tail remainders.
+ - Sizes are exercised across RMSNorm, LayerNorm, and FusedAddRMSNorm.
+ - It exists as a **separate instantiation prefix** (not a new testcase) because
+   in GoogleTest the test name (`TEST_P`) selects a *behavior* while the
+   instantiation prefix selects the *set of parameter values*; the random
+   `Normalization` prefix is bound to one CLI-driven value vector, so guaranteed
+   tail sizes require their own value generator. This keeps the coverage
+   deterministic, always present regardless of CLI args, and independently
+   filterable.
+ - On non-AVX512-FP16 hosts the F16 variants skip at runtime; the F32/BF16
+   variants still validate tail handling for those dtypes.
+
+1. Run all tail-coverage cases:
+``` bash
+./install/gtests/gtests --gtest_filter='NormalizationTail/*'
+```
+2. Run only the F16 tail-coverage cases (the masked-shim path):
+``` bash
+./install/gtests/gtests --gtest_filter='NormalizationTail/TestNormalization.F16*'
+```
+3. List the registered tail-coverage cases without running them:
+``` bash
+./install/gtests/gtests --gtest_list_tests --gtest_filter='NormalizationTail/*'
+```
+
 ### OMP API Tests
  - OMP API TestSuite validates the OpenMP thread-control utilities in `omp_thread_control.hpp`
  - Uses fixed `TEST_F` tests (not parameterized) since each test targets a specific code path or contract
