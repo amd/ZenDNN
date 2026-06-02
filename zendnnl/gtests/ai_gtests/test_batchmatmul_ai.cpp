@@ -837,12 +837,72 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
       return false;
     }
 
-    // Check that output is not all zeros (basic sanity check)
+    // Check that output is not all zeros (basic sanity check).
+    //
+    // Note: when a post-op that asymptotes to (or saturates at) zero on the
+    // negative side is fused AND the output is very small, the entire output
+    // can legitimately be at or below the non-zero threshold. Examples:
+    //   - relu: x <= 0 -> exactly 0
+    //   - gelu_erf / gelu_tanh: x -> -inf gives output -> 0
+    //     (|gelu_erf(-4.5)| ~ 1.4e-5, below the bf16 1e-4 threshold)
+    //   - sigmoid: x -> -inf gives output -> 0
+    //   - swish (x*sigmoid(x)): x -> -inf gives output -> 0
+    //   - mish (x*tanh(softplus(x))): x -> -inf gives output -> 0
+    // For tiny outputs (e.g. 1, 3, or 8 elements produced from small-k
+    // random inputs) the pre-activation can plausibly land in that tail and
+    // produce sub-threshold output, which the "must contain at least one
+    // non-zero element" heuristic then flags as a failure even though the
+    // kernel is correct (see b3_m1_n1_k5 / b1_m1_n8_k1 with relu,
+    // b1_m1_n1_k6 with gelu_erf). For those configurations we replace the
+    // heuristic with a NaN/Inf check, which still catches real kernel
+    // breakage. For outputs above the threshold, an all-sub-threshold
+    // result is astronomically unlikely, so we keep the original strict
+    // check.
+    constexpr size_t kSaturationRelaxNelemThreshold = 8;
+
+    bool has_saturating_post_op = false;
+    for (const auto &po_type : params.post_op_config.post_ops) {
+      if (po_type == post_op_type_t::relu
+          || po_type == post_op_type_t::gelu_erf
+          || po_type == post_op_type_t::gelu_tanh
+          || po_type == post_op_type_t::sigmoid
+          || po_type == post_op_type_t::swish
+          || po_type == post_op_type_t::mish) {
+        has_saturating_post_op = true;
+        break;
+      }
+    }
+    bool can_saturate_to_zero =
+        has_saturating_post_op
+        && output.get_nelem() <= kSaturationRelaxNelemThreshold;
+
     if (output.get_nelem() > 0) {
       auto dtype = output.get_data_type();
-      bool has_non_zero = false;
       auto sample_indices = AITestUtils::get_sample_indices(output.get_nelem(), 100);
 
+      if (can_saturate_to_zero) {
+        if (dtype == data_type_t::f32) {
+          const float *data = static_cast<const float *>(output.get_raw_handle_const());
+          for (size_t idx : sample_indices) {
+            if (std::isnan(data[idx]) || std::isinf(data[idx])) {
+              return false;
+            }
+          }
+        }
+        else if (dtype == data_type_t::bf16) {
+          const bfloat16_t *data = static_cast<const bfloat16_t *>
+                                   (output.get_raw_handle_const());
+          for (size_t idx : sample_indices) {
+            float v = static_cast<float>(data[idx]);
+            if (std::isnan(v) || std::isinf(v)) {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
+
+      bool has_non_zero = false;
       if (dtype == data_type_t::f32) {
         const float *data = static_cast<const float *>(output.get_raw_handle_const());
         for (size_t idx : sample_indices) {
@@ -1006,6 +1066,25 @@ TEST_P(TestBatchMatmulAI, ComprehensiveBatchMatmulTest) {
     // This is expected for invalid tests
     if (params.category != TestCategory::INVALID) {
       GTEST_SKIP() << "Invalid broadcasting configuration for non-invalid test";
+      return;
+    }
+  }
+
+  // S4/U4 weights are always physically 2D (the [K,N] layout is the only one
+  // the AOCL DLP S4/U4 reorder accepts — there is no per-batch S4 weight
+  // tensor), regardless of the params.broadcast_weights flag.  When
+  // broadcast_input is also true the input is 2D as well, so the BMM has no
+  // 3D operand to carry the batch dimension and the kernel rejects the call
+  // with "input, weight or output size is not valid".  Skip the case at the
+  // test layer instead of routing it into the kernel: BMM contractually
+  // requires at least one of {input, weight} to be 3D.
+  if (params.broadcast_input &&
+      params.category != TestCategory::INVALID) {
+    const auto wdt = AITestUtils::get_weight_dtype(params.data_types);
+    if (wdt == data_type_t::s4 || wdt == data_type_t::u4) {
+      GTEST_SKIP() << "BatchMatMul requires at least one of {input, weight} "
+                      "to be 3D; S4/U4 weights are always 2D and "
+                      "broadcast_input=true makes the input 2D too";
       return;
     }
   }
