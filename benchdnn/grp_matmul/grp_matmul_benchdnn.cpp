@@ -18,7 +18,8 @@
 ///
 /// Input file format (CSV, one line per config):
 ///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup
-///       [, moe_topk[, gated_act[, N_down[, use_internal_alloc[, total_experts]]]]]
+///       [, moe_topk[, gated_act[, N_down[, use_internal_alloc[,
+///          total_experts[, dynamic_quant[, compute_dt]]]]]]]
 ///
 /// M can be a single int (all experts same) or colon-separated per-expert:
 ///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50                    <- plain GEMM
@@ -26,6 +27,8 @@
 ///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096        <- fused (caller-alloc)
 ///   8, 4, 4096, 28672, 200, bf16:bf16:bf16, true, 50, 2, 1, 4096, 1     <- fused (lib-alloc)
 ///   4, 32, 2880, 5760,  200, bf16:bf16:bf16, true, 50, 4, 3, 2880, 1, 32 <- prepack-extras (4/32)
+///   8, 4, 4096, 14336, 200, bf16:s8:bf16,    true, 50, 0, 0, 0,    0, 0, 1, s8  <- DQ-INT8 sym
+///   8, 4, 4096, 14336, 200, bf16:s8:bf16,    true, 50, 0, 0, 0,    0, 0, 1, u8  <- DQ-INT8 asym
 ///
 /// moe_topk (optional, default 0): 0 = no MoE post-op, >0 = fused weighted-reduce.
 /// gated_act (optional, default 0): 0 = off, 1 = silu_and_mul, 2 = gelu_and_mul,
@@ -54,12 +57,28 @@
 ///   GEMMs and pre-warms the cache for all `total_experts` slots.
 ///   Mirrors the production MoE rotating-experts use case.  Rejected
 ///   if < num_ops.
+/// dynamic_quant (optional, default 0): 0 = bf16 path, 1 = DQ-INT8 path
+///   (the N-tile / custom-kernel int8 family).  Sets
+///   `params[i].dynamic_quant=true` and populates the per-channel
+///   `wei_scale` buffer (length N, dims = {1, N}, f32) on every active
+///   expert + every prepack-extras slot.  The per-token `src_scale` is
+///   left null; the library's pre-OMP source-reorder hoist allocates and
+///   fills it at runtime — same contract as production callers.
+///   Requires src:wei:dst == bf16:s8:bf16 and K%4==0; the parser
+///   refuses configurations that don't satisfy these preconditions.
+/// compute_dt (optional, default s8 when dynamic_quant=1): the int8
+///   compute discriminator on `params[i].dtypes.compute`:
+///     "s8" → kS8_S8_BF16_SYM (symmetric; no src zero-point)
+///     "u8" → kU8_S8_BF16_ASYM (asymmetric; hoist allocates src_zp)
+///   Ignored when dynamic_quant=0.
 ///
 /// Env vars (all read by the library, not parsed by this driver):
 ///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
 ///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert
 ///   ZENDNNL_GRP_MATMUL_PREPACK=0|1      - master switch for ahead-of-time weight prepack (default 1)
-///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0|1 - in-house BF16 microkernel for ALGO 3 (default 0)
+///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0|1 - in-house custom kernel for ALGO 3 (default 1)
+///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0|1 - DQ-INT8 sub-kernel toggle inside the master CK (default 1)
+///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=N - per-thread N-tile floor override (0 = use default)
 ///   ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=0|1 - stable AOCL DLP cache key under MoE churn (default 1)
 ///   ZENDNNL_MATMUL_ALGO=N               - select inner kernel (default: aocl_dlp_blocked)
 ///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1     - global weight-reorder cache toggle (default 1)
@@ -302,6 +321,82 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
         // legacy.
         params[i].active_matmul = static_cast<uint32_t>(n);
         params[i].total_matmul  = static_cast<uint32_t>(total);
+    }
+
+    // ── DQ-INT8 wiring ────────────────────────────────────────────────
+    // When `cfg.dynamic_quant` is set (CSV column 14), populate the
+    // CK DQ-INT8 contract on every active expert:
+    //
+    //   * `params[i].dynamic_quant = true` — flips the
+    //     `resolve_variant()` truth table from the bf16 family to
+    //     the int8 family; mirrored on the auto-select gate
+    //     (`check_n_tile_extra` in
+    //     `group_matmul_parallel_common.hpp`).
+    //   * `params[i].dtypes.compute = s8` (sym) or `u8` (asym),
+    //     selected by `cfg.compute_dt`.  Drives the kernel-variant
+    //     resolution: s8 → kS8_S8_BF16_SYM, u8 → kU8_S8_BF16_ASYM.
+    //   * `params[i].quant_params.wei_scale` populated with a per-
+    //     expert per-channel f32 buffer of length `N` (dims = {1, N}).
+    //     Filled from `fill_quant_scale_f32` with values clustered
+    //     around 1/127, the magnitude a real symmetric-quant
+    //     `max(|w|) / 127` would produce for bf16 weights in
+    //     [-1, 1].  The wei_scale buffer is required by the gate;
+    //     test_algos.cpp::TestGroupMatmulAutoSelectAlgo_DynamicQuant
+    //     case 4 confirms the gate refuses with a null wei_scale.
+    //   * `params[i].quant_params.src_scale.buff = nullptr` — the
+    //     library's pre-OMP source-reorder hoist
+    //     (`HoistedSrcQuant` in `n_tile/group_matmul_n_tile.cpp`)
+    //     allocates and fills the per-token scale at runtime.
+    //     Caller leaves the buffer null and only sets the dims +
+    //     dtype so the gate sees a properly-shaped descriptor.
+    //
+    // wei_scale is only attached to the ACTIVE experts ([0, n)).  The
+    // prepack-extras tail ([n, total)) has no `params` slot at all
+    // (`params` is sized `n`); prepack warms those tail weights from the
+    // `total`-sized weight-side metadata vectors (wei_ptrs / Kv / Nv /
+    // ldb / transB / wconst), not from a per-expert wei_scale.  So
+    // allocating/filling tail scales would just be dead memory + fill
+    // time — restrict both to the active prefix.
+    std::vector<AlignedBuffer> wei_scale_buf(n);
+    if (cfg.dynamic_quant) {
+        // Allocate + fill wei_scale for the active experts only.  Per-
+        // channel along N (dims = {1, N}), f32, length `N`.  Seed
+        // offsets keep the per-expert scales distinct so cache aliasing
+        // on a hash-keyed prepack lookup would surface as a measurable
+        // regression rather than a silent hit.
+        for (int e = 0; e < n; ++e) {
+            wei_scale_buf[e].alloc(static_cast<size_t>(cfg.N) * sizeof(float));
+            fill_quant_scale_f32(static_cast<float *>(wei_scale_buf[e].ptr),
+                                 static_cast<size_t>(cfg.N),
+                                 311 + e * 13);
+        }
+        for (int i = 0; i < n; ++i) {
+            params[i].dynamic_quant = true;
+            params[i].dtypes.compute = cfg.compute_dt;
+            // src_scale: per-token {M, 1}, f32; buff stays nullptr —
+            // hoist-allocates at call time.
+            params[i].quant_params.src_scale.buff = nullptr;
+            params[i].quant_params.src_scale.dims = {cfg.M_per_op[i], 1};
+            params[i].quant_params.src_scale.dt   = data_type_t::f32;
+            // wei_scale: per-channel {1, N}, f32; buff is the per-
+            // expert allocation above.  `matmul_quant_t::buff` is a
+            // `const void *`, so the `void *` arena pointer converts
+            // implicitly (no cast needed; read-only on the library side).
+            params[i].quant_params.wei_scale.buff = wei_scale_buf[i].ptr;
+            params[i].quant_params.wei_scale.dims =
+                {1, static_cast<int64_t>(cfg.N)};
+            params[i].quant_params.wei_scale.dt   = data_type_t::f32;
+            // Asym: src_zp dims/dt populated but buff stays null —
+            // the hoist allocates the per-token zp alongside the
+            // s8/u8 reorder when `compute_dt = u8`.  For sym we
+            // leave the field default-constructed (all-null), which
+            // resolve_variant() reads as "no asym correction".
+            if (cfg.compute_dt == data_type_t::u8) {
+                params[i].quant_params.src_zp.buff = nullptr;
+                params[i].quant_params.src_zp.dims = {cfg.M_per_op[i], 1};
+                params[i].quant_params.src_zp.dt   = data_type_t::s32;
+            }
+        }
     }
 
     // Build MoE post-op when moe_topk > 0.
@@ -628,6 +723,15 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     } else {
         fused_str = "off";
     }
+    // DQ-INT8 column — surfaces the variant on the console / CSV so
+    // a sweep that mixes bf16 and int8 lines is visually self-
+    // describing.  "bf16" is the default (no DQ-INT8); "dq8s" / "dq8u"
+    // distinguish sym vs asym so a tuning script can plot the two
+    // families separately without re-reading the input file.
+    std::string quant_str = "bf16";
+    if (cfg.dynamic_quant) {
+        quant_str = (cfg.compute_dt == data_type_t::u8) ? "dq8u" : "dq8s";
+    }
 
     // Console
     std::cout << std::setw(4) << n << "  "
@@ -637,6 +741,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
               << std::setw(5) << cfg.iters << "  "
               << std::setw(6) << cfg.warmup << "  "
               << std::setw(14) << dtypes << "  "
+              << std::setw(5) << quant_str << "  "
               << std::setw(10) << moe_str << "  "
               << std::setw(13) << fused_str << "  "
               << std::fixed << std::setprecision(3)
@@ -670,6 +775,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // gap = wall - sum_iter ≈ flush_cache + chrono overhead)
     csv << n << "," << m_str << "," << cfg.K << "," << cfg.N << ","
         << cfg.iters << "," << cfg.warmup << "," << dtypes << ","
+        << quant_str << ","
         << (cfg.is_weights_const ? "true" : "false") << ","
         << cfg.moe_topk << "," << cfg.gated_act << "," << cfg.N_down << ","
         << cfg.use_internal_alloc << ","
@@ -711,7 +817,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     const char *omp_env = std::getenv("OMP_NUM_THREADS");
 
     std::ofstream csv(out_filename);
-    csv << "num_ops,M,K,N,iters,warmup,dtypes,is_weights_const,moe_topk,"
+    csv << "num_ops,M,K,N,iters,warmup,dtypes,quant,is_weights_const,moe_topk,"
            "gated_act,N_down,use_internal_alloc,wall_ms,sum_iter_ms,"
            "avg_ms,min_ms,GFLOPS_avg,GFLOPS_peak\n";
 
@@ -725,10 +831,12 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     std::cout << "================================================================"
               << std::endl;
     std::cout << " ops             M       K       N  iters warmup          dtypes"
-                 "        moe          fused      avg_ms      min_ms  GFLOPS_a  GFLOPS_p"
+                 "  quant         moe          fused      avg_ms      min_ms  GFLOPS_a  GFLOPS_p"
               << std::endl;
     std::cout << "  (fused column: 'N_down=X' = caller-allocated, "
-                 "'N_down=X*' = library-allocated + src-reuse)"
+                 "'N_down=X*' = library-allocated + src-reuse;\n"
+                 "   quant column: bf16 = standard bf16 path, "
+                 "dq8s/dq8u = DQ-INT8 sym/asym custom kernel)"
               << std::endl;
 
     // ── HW perf counters: open once per process ─────────────────────

@@ -132,6 +132,7 @@
 #include "common/error_status.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "ukernel/bf16_microkernel.hpp"
+#include "ukernel/int8_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -157,28 +158,84 @@ bool dispatch_supported();
 // from the dtype tuple via `resolve_variant()`; read by
 // `dispatch_tile()` to switch between kernel paths.
 //
-// `kBF16_BF16_BF16` and `kBF16_BF16_F32` are the variants the kernel
-// currently serves.  Any tuple outside that set resolves to
+// `kBF16_BF16_BF16` and `kBF16_BF16_F32` are the bf16-family
+// variants; `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM` (bf16 dst) and
+// `kS8_S8_F32_SYM` / `kU8_S8_F32_ASYM` (f32 dst, act=none only) are
+// the DQ-INT8 variants.  Any tuple outside these six resolves to
 // `kUnsupported` and the caller falls back to DLP.
 enum class KernelVariant : uint8_t {
-  kUnsupported     = 0,  ///< Not supported by the custom kernel; caller falls back to DLP.
-  kBF16_BF16_BF16  = 1,  ///< `bf16:bf16:bf16`.
-  kBF16_BF16_F32   = 2,  ///< `bf16:bf16:f32`.
+  kUnsupported       = 0,  ///< Not supported by the custom kernel; caller falls back to DLP.
+  kBF16_BF16_BF16    = 1,  ///< `bf16:bf16:bf16`.
+  kBF16_BF16_F32     = 2,  ///< `bf16:bf16:f32`.
+  kS8_S8_BF16_SYM    = 3,  ///< DQ-INT8 symmetric: src(hoisted s8) × wei(s8) → bf16.
+  kU8_S8_BF16_ASYM   = 4,  ///< DQ-INT8 asymmetric: src(hoisted u8) × wei(s8) → bf16.
+  kS8_S8_F32_SYM     = 5,  ///< DQ-INT8 symmetric: src(hoisted s8) × wei(s8) → f32.
+  kU8_S8_F32_ASYM    = 6,  ///< DQ-INT8 asymmetric: src(hoisted u8) × wei(s8) → f32.
 };
 
-/// Map a (src, wei, dst) dtype tuple to a `KernelVariant`.  Returns
-/// `kUnsupported` for any combination the custom kernel cannot
-/// handle (caller then falls back to DLP).
+/// Predicate: is this variant in the DQ-INT8 family?
+///
+/// Useful at call sites that branch on bf16 vs DQ-INT8 ahead of the
+/// `dispatch_tile()` call (e.g. the N-tile `do_tile()` body in
+/// `group_matmul_n_tile.cpp` that builds the per-tile `src_scale` /
+/// `src_zp` / `wei_scale` pointer triple only for the int8 path,
+/// leaving them `nullptr` on the bf16 path).  Kept `noexcept` so the
+/// optimiser folds it into a single `cmp + or` at every callsite.
+inline bool is_int8_variant(KernelVariant v) noexcept {
+  return v == KernelVariant::kS8_S8_BF16_SYM
+      || v == KernelVariant::kU8_S8_BF16_ASYM
+      || v == KernelVariant::kS8_S8_F32_SYM
+      || v == KernelVariant::kU8_S8_F32_ASYM;
+}
+
+/// Map a (src, wei, dst, dynamic_quant, compute_dtype) tuple to a
+/// `KernelVariant`.  Returns `kUnsupported` for any combination the
+/// custom kernel cannot handle (caller then falls back to DLP).
 ///
 /// Truth table:
-///   `(bf16, bf16, bf16)`  → `kBF16_BF16_BF16`
-///   `(bf16, bf16, f32 )`  → `kBF16_BF16_F32`
-///   any other tuple       → `kUnsupported`
+///
+///   * BF16 family (`dynamic_quant == false`):
+///     `(bf16, bf16, bf16, _, _)`            → `kBF16_BF16_BF16`
+///     `(bf16, bf16, f32 , _, _)`            → `kBF16_BF16_F32`
+///
+///   * DQ-INT8 family — accepted in TWO equivalent src forms:
+///       1. Runtime hoist (legacy): `src == bf16 && dynamic_quant ==
+///          true`; the N-tile executor reorder-quantises bf16 → s8/u8
+///          (per-token src_scale) before `dispatch_tile`.
+///       2. Grouped pre-quant (`ZENDNNL_ENABLE_GROUP_DQ`, default on):
+///          the `group_dynamic_quant` pre-pass already produced an s8
+///          src and CLEARED `dynamic_quant`, so `src == s8` arrives
+///          directly (dynamic_quant may be false here).
+///     `wei` is always `s8`; `compute_dtype` discriminates sym (s8, no
+///     src_zp) vs asym (u8, with src_zp); `dst` selects the store dtype.
+///     Writing `s8*` for "s8 (hoist) or bf16+dynamic_quant (runtime)":
+///       bf16 dst:
+///         `(s8*, s8, bf16, _, s8)`           → `kS8_S8_BF16_SYM`
+///         `(s8*, s8, bf16, _, u8)`           → `kU8_S8_BF16_ASYM`
+///       f32 dst (Act = none only):
+///         `(s8*, s8, f32 , _, s8)`           → `kS8_S8_F32_SYM`
+///         `(s8*, s8, f32 , _, u8)`           → `kU8_S8_F32_ASYM`
+///
+///   * any other tuple                        → `kUnsupported`
 ///
 /// `noexcept` because it's a pure switch over POD enums — no
 /// allocation, no I/O.
 KernelVariant resolve_variant(data_type_t src, data_type_t wei,
-                              data_type_t dst) noexcept;
+                              data_type_t dst,
+                              bool        dynamic_quant,
+                              data_type_t compute_dtype) noexcept;
+
+/// BF16-only legacy overload — kept for callers that have not been
+/// updated to thread the `dynamic_quant` / `compute_dtype`
+/// discriminators yet.  Internally calls the 5-arg form with
+/// `dynamic_quant = false` and `compute_dtype = none`, which
+/// reduces to the original two-row truth table.
+inline KernelVariant resolve_variant(data_type_t src, data_type_t wei,
+                                     data_type_t dst) noexcept {
+  return resolve_variant(src, wei, dst,
+                         /*dynamic_quant=*/false,
+                         /*compute_dtype=*/data_type_t::none);
+}
 
 /// Pick the pack/microkernel NR for one (K, N) shape.  Returns either
 /// `kNRMin` (32), `kNRMax` (64), or `0` when no supported NR divides N.
@@ -199,9 +256,9 @@ struct CallContext {
 
   /// Resolved kernel variant for this call.  Set by
   /// `prepare_for_call()` via `resolve_variant()`.  On the success
-  /// path it is `kBF16_BF16_BF16` or `kBF16_BF16_F32`.
-  /// `dispatch_tile()` reads this to route to the correct kernel
-  /// instantiation.
+  /// path it is one of the six served variants (bf16 bf16/f32 dst, or
+  /// DQ-INT8 sym/asym × bf16/f32 dst).  `dispatch_tile()` reads this
+  /// to route to the correct kernel instantiation.
   KernelVariant variant = KernelVariant::kUnsupported;
 
   /// Pack/microkernel NR (32 or 64).  The caller reads this for the
@@ -220,16 +277,47 @@ struct CallContext {
   int            subtile_cols  = 0;
   ActKind        act_kind      = ActKind::none;
   BiasKind       bias_kind     = BiasKind::none;  // resolved from bias_dtype
+  /// DQ-INT8 quant flavour — set by `prepare_for_call()` to
+  /// `kU8_Asym` for the asymmetric variants (bf16- or f32-dst) and
+  /// `kS8_Sym` otherwise; ignored on the bf16 path.  Baked into the
+  /// single `kfn_table_int8` per-MR table by `fill_kfn_table_int8`
+  /// (there is one table, not separate sym/asym tables), so the
+  /// inner loop does not re-touch the variant discriminator.
+  IntCompute     compute_int   = IntCompute::kS8_Sym;
+  /// Dtype of the src/wei scale buffers the microkernel will read.
+  /// Set by the N-tile hoist (the dispatcher cannot see the scale
+  /// dtype): `kBf16` when the raw bf16 scales are passed straight
+  /// through (swiglu_oai_mul / none — the common gpt-oss path, kernel
+  /// converts on load), `kF32` when the scales are already f32 OR were
+  /// converted+permuted to f32 by the silu/gelu interleave pre-pass.
+  /// Ignored on the bf16 (non-quant) path.
+  ScaleKind      scale_kind    = ScaleKind::kF32;
   // Per-MR microkernel function pointers.  Slot 0 is unused (MR=0
   // would be a no-op); slots 1..kMaxMR hold the selected specializations.
   // Sized via `kMaxMR` so any future max_mr bump only needs a constant
   // update in `ukernel/bf16_microkernel.hpp`.
-  ukernel_fn_t   kfn_table[kMaxMR + 1] = {};
+  //
+  // BF16 family uses `kfn_table`; DQ-INT8 family uses
+  // `kfn_table_int8` (one entry per MR, already specialised on
+  // `compute_int` + `act_kind` at `prepare_for_call` time).  Only
+  // one of the two tables is populated per call (the other stays
+  // zero-initialised); `dispatch_tile()` reads the right table
+  // off `variant`.
+  ukernel_fn_t       kfn_table[kMaxMR + 1]      = {};
+  int8_ukernel_fn_t  kfn_table_int8[kMaxMR + 1] = {};
 
   /// Maximum experts per call we cache packed pointers for.  Must
   /// match (or exceed) each caller's own expert-count cap.
   static constexpr int kMaxExperts = 256;
   std::array<const bfloat16_t *, kMaxExperts> packed_ptrs{};
+  /// DQ-INT8 packed-weight pointers (signed `int8_t *`).  Populated
+  /// when the variant is `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM`;
+  /// stays all-null on the bf16 path.  Layout per o-block is
+  /// `[K_pad/4][pack_nr][4]` weight bytes followed by `[pack_nr]
+  /// int32` per-column compensation (see pack.hpp); `dispatch_tile()`
+  /// passes the raw `int8_t *` to the microkernel which reads the
+  /// compensation row by byte arithmetic.
+  std::array<const int8_t *, kMaxExperts> packed_ptrs_int8{};
 
   /// Per-expert L2-friendly N-chunk width (cols).  Sized individually
   /// so small-M experts (low A footprint) get a wider subtile with
@@ -260,6 +348,12 @@ struct CallContext {
   /// buffers.  In the cache-enabled mode (the default) every slot
   /// stays `nullptr` and `release_owned_buffers()` is a cheap no-op.
   std::array<const bfloat16_t *, kMaxExperts> owned_packed_ptrs{};
+  /// DQ-INT8 sibling of `owned_packed_ptrs` — caller-owned int8
+  /// packed-weight pointers, used in the `weight_cache_type != 1`
+  /// branch.  Freed via `free_owned_packed_weight_int8()`.  Same
+  /// lifetime contract as the bf16 array; the destructor /
+  /// `release_owned_buffers()` zero both on exit.
+  std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_int8{};
 
   /// Free every caller-owned packed buffer this context holds and
   /// zero the `owned_packed_ptrs` array.  Idempotent and safe to
@@ -383,6 +477,21 @@ struct CallContext {
 ///
 /// On failure `out.enabled` is left false and the caller takes its
 /// standard path (e.g. `execute_expert_slice` + separate activation).
+/// `dynamic_quant` + `compute_dtype` discriminate the DQ-INT8
+/// family from the BF16 family.  Both default to "off / none" so
+/// existing callers that haven't been ported to the int8 path
+/// continue to engage the bf16 microkernel unchanged.
+///
+/// DQ-INT8 acceptance (mirrored from `resolve_variant`):
+///   * `(src=bf16, wei=s8, dst=bf16, dynamic_quant=true,
+///      compute_dtype=s8)` → `kS8_S8_BF16_SYM` (per-token
+///      symmetric — no src_zp expected at dispatch time).
+///   * `(src=bf16, wei=s8, dst=bf16, dynamic_quant=true,
+///      compute_dtype=u8)` → `kU8_S8_BF16_ASYM` (per-token
+///      asymmetric — caller will pass a non-null `src_zp` to
+///      `dispatch_tile()`).
+/// Any other (dynamic_quant=true) tuple falls through to
+/// `kUnsupported` and the caller's standard path takes over.
 status_t prepare_for_call(
     grp_matmul_gated_act_t act,
     data_type_t src_dtype,
@@ -400,7 +509,9 @@ status_t prepare_for_call(
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
     const std::vector<bool>          &is_weights_const,
-    CallContext &out);
+    CallContext &out,
+    bool         dynamic_quant   = false,
+    data_type_t  compute_dtype   = data_type_t::none);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the
@@ -427,6 +538,20 @@ status_t prepare_for_call(
 ///                    context was prepared with act=swiglu_oai_mul
 ///                    this is the halved [M, N/2] tight arena;
 ///                    otherwise it is the wide [M, N] destination.
+/// `src_scale` / `src_zp` / `wei_scale` are consumed only on the
+/// DQ-INT8 path (`ctx.variant ∈ {kS8_S8_BF16_SYM, kU8_S8_BF16_ASYM}`).
+/// On the BF16 path they must be `nullptr` (the caller can either
+/// omit the args entirely — they default to `nullptr` — or pass
+/// `nullptr` explicitly).  Layout contract (DQ-INT8 only):
+///   * `src_scale` — `M` floats (one per row of the expert's A).
+///                   The dispatcher slices to the per-call MR
+///                   window before invoking the microkernel.
+///   * `src_zp`    — `M` int32s, OR nullptr for symmetric calls.
+///                   Required when variant is `kU8_S8_BF16_ASYM`,
+///                   ignored when variant is `kS8_S8_BF16_SYM`.
+///   * `wei_scale` — `N` floats (one per output column).  The
+///                   dispatcher slices to the per-(o-block) NR
+///                   window before invoking the microkernel.
 void dispatch_tile(
     const CallContext &ctx,
     int   expert_idx,
@@ -434,7 +559,10 @@ void dispatch_tile(
     int   n_tile, int col_start,
     const void *src,  int lda,
     const void *bias,           // per `ctx.bias_kind`; nullptr when BiasKind::none
-    void       *tight_dst, int tight_ldc);
+    void       *tight_dst, int tight_ldc,
+    const void    *src_scale  = nullptr,
+    const int32_t *src_zp     = nullptr,
+    const void    *wei_scale  = nullptr);
 
 
 } // namespace custom_kernel

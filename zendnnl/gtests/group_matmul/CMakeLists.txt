@@ -39,6 +39,11 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_prepare_for_call.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_bf16.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_bf16.cpp
+    # DQ-INT8 sibling suites — mirror the bf16 set 1:1 (microkernel
+    # direct-surface correctness + pack module coverage with K/4
+    # interleave + compensation row).
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_int8.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_int8.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
 )

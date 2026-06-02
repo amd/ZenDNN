@@ -382,9 +382,11 @@ void parallel_per_expert(
 //       per-channel via `qsize == N` and index the sliced buffer
 //       with `scale[col]` for `col ∈ [0, n_tile)`.
 //
-//     * Optional asymmetry: `src_zp` (if `buff` non-null) must
-//       be `{M[i], 1}` per-token; `wei_zp` (if `buff` non-null)
-//       must be per-channel `{N}` / `{1, N}` matching wei_scale.
+//     * Optional SOURCE asymmetry only: `src_zp` (if `buff`
+//       non-null) must be `{M[i], 1}` per-token.  WEIGHT zero-points
+//       are NOT supported — a non-null `wei_zp` rejects ALGO 3
+//       outright (the CK microkernel and AOCL sym-quant fallback are
+//       both symmetric-weight), so the call falls back to ALGO 1.
 //
 //   The `params[i].dynamic_quant` flag controls the SOURCE side
 //   ONLY.  The WEIGHT side is ALWAYS statically quantised — the
@@ -444,10 +446,22 @@ void parallel_per_expert(
 //   case, where `{1, 1}` is the per-token shape for a one-token
 //   expert).
 //
-//   The custom BF16 microkernel is bf16×bf16→bf16 only and refuses
-//   every non-bf16 combo at `prepare_for_call`, so int8 callers
-//   always route through AOCL DLP int8 regardless of the
-//   custom-kernel env flag.
+//   The custom microkernel family covers two compute regimes:
+//
+//     * BF16 — bf16×bf16→bf16, no quant.  Refuses every quantised
+//       combo at `prepare_for_call`.
+//     * DQ-INT8 — s8×s8→bf16 (symmetric) or u8×s8→bf16 (asymmetric);
+//       per-token src scale + optional src_zp, per-channel wei scale
+//       (weight zero-points are NOT supported on the N-tile DQ-INT8
+//       path — a non-null wei_zp rejects ALGO 3, see below), all four
+//       gated activations.
+//
+//   When `dynamic_quant=true` with `src=bf16, wei=s8, dst=bf16` and
+//   the shape passes `plan_pack_nr_int8(rep_K, rep_N) ∈ {32, 64}`,
+//   the call routes through the DQ-INT8 custom microkernel.  Calls
+//   that fall outside both regimes (e.g., static src quant, S4/U4
+//   WOQ, per-group on K) fall back to AOCL DLP int8 via the
+//   `s8s8s32obf16_sym_quant` reorder cache as before.
 //
 // PRECONDITION: the caller has already run `check_m_tile_safe` and
 // confirmed it returned true.  This helper intentionally does NOT
@@ -494,6 +508,14 @@ static bool check_n_tile_extra(
   // tail slots carry framework prepack metadata, not real per-call
   // state, and would falsely flip n-tile-safe to false.
   for (int i = 0; i < num_ops; ++i) {
+    // Inactive experts (M==0) do no compute.  The grouped / fallback DQ
+    // pre-pass clears their `dynamic_quant` and leaves the original bf16
+    // src (no per-token src_scale), so evaluating them here would hit the
+    // `!dynamic_quant && !grouped_s8_src` source-side reject below and
+    // veto ALGO 3 for the WHOLE call — even though every ACTIVE expert is
+    // a valid grouped-s8 / dynamic-INT8 shape.  Skip them (matches the
+    // first-active reference in `check_m_tile_safe`).
+    if (M[i] == 0) continue;
     const auto &qp = params[i].quant_params;
 
     // Detect any quant intent on this expert.  If every quant field
@@ -541,9 +563,14 @@ static bool check_n_tile_extra(
       if (!is_per_channel_wei(qp.wei_scale)) {
         return false;
       }
-      // wei_zp: either symmetric (`buff == nullptr`) or per-channel
-      // matching wei_scale's granularity.
-      if (qp.wei_zp.buff != nullptr && !is_per_channel_wei(qp.wei_zp)) {
+      // Weight zero-point is NOT supported anywhere on the N-tile
+      // DQ-INT8 path: the CK microkernel assumes symmetric weights
+      // (its compensation row only folds the src +128 / src_zp bias),
+      // and the AOCL sym-quant fallback is likewise symmetric.  A
+      // non-null wei_zp must therefore reject ALGO 3 entirely so the
+      // call falls back to ALGO 1 (general AOCL DLP) instead of
+      // silently dropping the weight zero-point.
+      if (qp.wei_zp.buff != nullptr) {
         return false;
       }
     }
@@ -652,7 +679,7 @@ static int auto_select_algo(
   bool n_tile_safe) {
   (void)N;        // Kept in the signature for symmetry with the M-tile
   (void)K;        // / N-tile safety helpers and to ease future heuristic
-  (void)params;   // refinements that re-introduce shape/dtype tests.
+                  // refinements that re-introduce shape/dtype tests.
 
   const int num_ops = static_cast<int>(M.size());
   if (num_threads <= 1 || num_ops == 0) {
@@ -664,6 +691,35 @@ static int auto_select_algo(
   // otherwise reach the N-tile planner's R3 Sequential fallback.
   if (num_ops > kNTilePlanMaxExperts) {
     return 5;
+  }
+
+  const int max_M = *std::max_element(M.begin(), M.end());
+  const bool is_decode = (max_M <= kDecodeMaxM);
+
+  // Rule 0.5 — FEW-EXPERTS ALGO 2 PREFERENCE (Mixtral-class default).
+  // TOTAL expert count (framework `total_matmul` when set, else the
+  // active op count) ≤ kFewExpertsAlgo2Pref → ALGO 2 for BOTH phases.
+  // ALGO 2 (flat_m_tile) is the measured winner on Mixtral-8x* prompt
+  // AND decode, so fold that benefit into the out-of-the-box AUTO
+  // policy.  This is a DEFAULT refinement: it fires only when the
+  // phase env relevant to THIS call is NOT explicitly pinned — an
+  // explicit `AUTO_{PROMPT,DECODE}_ALGO` (including `=0` for the legacy
+  // cascade) still wins via Rule 1 below.  Honours the m_tile_safe
+  // clamp (non-row-major / dtype-mismatch / unsafe quant → ALGO 1).
+  // `total_matmul` is only meaningful under the framework opt-in
+  // (`active_matmul > 0`); a legacy caller may leave it stale, so read it
+  // only then and only when it exceeds the active count (padded/extras
+  // layout).  Otherwise the active op count IS the total.
+  int total_experts = num_ops;
+  if (!params.empty() && params[0].active_matmul > 0 &&
+      params[0].total_matmul > static_cast<uint32_t>(total_experts)) {
+    total_experts = static_cast<int>(params[0].total_matmul);
+  }
+  const bool phase_env_pinned = is_decode
+      ? grp_matmul_auto_decode_algo_is_set()
+      : grp_matmul_auto_prompt_algo_is_set();
+  if (total_experts <= kFewExpertsAlgo2Pref && !phase_env_pinned) {
+    return m_tile_safe ? 2 : 1;
   }
 
   // Rule 1 — PHASE ENV.  Single-line phase classification (decode iff
@@ -678,8 +734,6 @@ static int auto_select_algo(
   // the same algo on the same unsafe shape — emitting the WARN twice
   // would be confusing.  Operators see the clamp via the
   // `[GRP_MATMUL.ALGO]` line's `chosen=ALGO_X reason=auto_phase_env_clamp`.
-  const int max_M = *std::max_element(M.begin(), M.end());
-  const bool is_decode = (max_M <= kDecodeMaxM);
   const int phase_algo = is_decode
       ? get_grp_matmul_auto_decode_algo()
       : get_grp_matmul_auto_prompt_algo();
@@ -892,7 +946,20 @@ bool group_matmul_run_parallel_dispatch(
     const int max_M_v = *std::max_element(M.begin(), M.end());
     const int max_N_v = *std::max_element(N.begin(), N.end());
     const int max_K_v = *std::max_element(K.begin(), K.end());
-    const size_t wei_elem_b = size_of(params[0].dtypes.wei);
+    // Representative expert for the quant-mode hint fields below.  In MoE
+    // decode a LEADING expert is often inactive (M==0), and the grouped /
+    // fallback DQ pre-pass rewrites ONLY active experts to s8 + cleared
+    // dynamic_quant + per-token src_scale.  Reading params[0] blindly
+    // would mislabel the log (ck_family=none / dynamic_quant=no) even when
+    // CK int8 runs on every active tile.  Pick the first ACTIVE expert
+    // (mirrors flat_n_tile's routing classifier); fall back to 0 when all
+    // inactive.  wei dtype is uniform across active/inactive, so the
+    // wei/expert(MB) telemetry below is unaffected by the choice.
+    size_t rep = 0;
+    for (size_t i = 0; i < M.size() && i < params.size(); ++i) {
+      if (M[i] > 0) { rep = i; break; }
+    }
+    const size_t wei_elem_b = size_of(params[rep].dtypes.wei);
     const size_t wei_per_expert_mb =
         (static_cast<size_t>(max_K_v) * max_N_v * wei_elem_b) >> 20;
     // Phase + per-phase env values for telemetry.  The phase
@@ -951,11 +1018,51 @@ bool group_matmul_run_parallel_dispatch(
     // its env value, so the saving is microscopic; clarity is the
     // deliverable.
     const int log_custom_kernel = get_grp_matmul_custom_kernel();
-    const bool ck_hint =
+    const int log_custom_kernel_int8 = get_grp_matmul_custom_kernel_int8();
+    // BF16 family hint — same gate as before.
+    const bool ck_hint_bf16 =
         (use_algo == 3)
         && log_custom_kernel
-        && (params[0].dtypes.src == data_type_t::bf16)
-        && (params[0].dtypes.wei == data_type_t::bf16);
+        && (params[rep].dtypes.src == data_type_t::bf16)
+        && (params[rep].dtypes.wei == data_type_t::bf16)
+        && !params[rep].dynamic_quant;
+    // B.6 hardening — DQ-INT8 family hint.  Mirrors the upstream
+    // `ck_eligible_int8` predicate (in prepack/prepack.cpp) so the
+    // PLAN apilog surfaces both regimes.  Evaluating either family
+    // independently lets a level-3 reader see at a glance whether
+    // a DQ-INT8 call is structurally CK-eligible (separate from
+    // master env knob + INT8 sub-knob cascade).  The runtime
+    // `prepare_for_call` adds shape / pack_nr / per-expert checks
+    // not visible here; the hint is informational, not a guarantee.
+    // Two structural forms reach the DQ-INT8 CK microkernel, both with
+    // wei=s8, dst=bf16, compute=s8/u8 (mirrors `resolve_variant`):
+    //   1. runtime hoist  — dynamic_quant=true with a bf16 src that the
+    //      N-tile executor quantizes to s8 before dispatch_tile.
+    //   2. grouped pre-quant — the group_dynamic_quant pre-pass already
+    //      produced an s8 src + per-token src_scale and CLEARED
+    //      dynamic_quant.  Without this branch the hint mislabelled the
+    //      grouped decode path as ck_family=none / dynamic_quant=no even
+    //      though CK runs on 100% of tiles.
+    const bool ck_int8_shapes =
+        (use_algo == 3)
+        && log_custom_kernel
+        && log_custom_kernel_int8
+        && (params[rep].dtypes.wei == data_type_t::s8)
+        && (params[rep].dtypes.dst == data_type_t::bf16)
+        && (params[rep].dtypes.compute == data_type_t::s8
+            || params[rep].dtypes.compute == data_type_t::u8);
+    const bool ck_hint_int8 =
+        ck_int8_shapes
+        && ((params[rep].dynamic_quant
+             && params[rep].dtypes.src == data_type_t::bf16)
+            || (params[rep].dtypes.src == data_type_t::s8
+                && params[rep].quant_params.src_scale.buff != nullptr));
+    const bool ck_hint = ck_hint_bf16 || ck_hint_int8;
+    const char *ck_family =
+        ck_hint_bf16  ? "bf16"
+      : ck_hint_int8  ? (params[rep].dtypes.compute == data_type_t::u8
+                            ? "int8_asym" : "int8_sym")
+      :                 "none";
     apilog_info(
         "[GRP_MATMUL.ALGO] chosen=ALGO_", use_algo,
         " env_algo=", env_algo,
@@ -966,6 +1073,8 @@ bool group_matmul_run_parallel_dispatch(
         " act=", act_name(fused_act),
         " act_fused=", (act_fused ? "yes" : "no"),
         " ck_eligible_hint=", (ck_hint ? "yes" : "no"),
+        " ck_family=", ck_family,
+        " dynamic_quant=", (params[rep].dynamic_quant ? "yes" : "no"),
         " num_ops=", static_cast<int>(M.size()),
         " num_threads=", num_threads,
         " max_M=", max_M_v,

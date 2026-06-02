@@ -556,6 +556,52 @@ struct CustomKernelOverride {
   CustomKernelOverride &operator=(CustomKernelOverride &&) = delete;
 };
 
+// RAII guard for the decode M-proportional A/B knob
+// (`ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`).  `true` forces the
+// proportional split ON, `false` forces uniform Phase B base+1.  Same
+// save/restore-on-scope-exit contract as `CustomKernelOverride`.
+struct DecodeProportionalOverride {
+  int prev;
+  explicit DecodeProportionalOverride(bool value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_decode_proportional_override.exchange(
+            value ? 1 : 0, std::memory_order_relaxed);
+  }
+  ~DecodeProportionalOverride() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_decode_proportional_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  DecodeProportionalOverride(const DecodeProportionalOverride &) = delete;
+  DecodeProportionalOverride &operator=(
+      const DecodeProportionalOverride &) = delete;
+  DecodeProportionalOverride(DecodeProportionalOverride &&) = delete;
+  DecodeProportionalOverride &operator=(
+      DecodeProportionalOverride &&) = delete;
+};
+
+// Sibling guard for the DQ-INT8 sub-knob — sets / restores
+// `s_grp_matmul_custom_kernel_int8_override` over a single scope.
+// Used by the int8 dispatch / pack / e2e gtests to flip the int8
+// CK path on and off without disturbing the master CK switch.
+struct CustomKernelInt8Override {
+  int prev;
+  explicit CustomKernelInt8Override(bool value) {
+    prev = zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_int8_override.exchange(
+            value ? 1 : 0, std::memory_order_relaxed);
+  }
+  ~CustomKernelInt8Override() {
+    zendnnl::lowoha::matmul::test_api
+        ::s_grp_matmul_custom_kernel_int8_override.store(
+            prev, std::memory_order_relaxed);
+  }
+  CustomKernelInt8Override(const CustomKernelInt8Override &) = delete;
+  CustomKernelInt8Override &operator=(const CustomKernelInt8Override &) = delete;
+  CustomKernelInt8Override(CustomKernelInt8Override &&) = delete;
+  CustomKernelInt8Override &operator=(CustomKernelInt8Override &&) = delete;
+};
+
 struct NRoundsModeOverride {
   int prev;
   explicit NRoundsModeOverride(int value) {

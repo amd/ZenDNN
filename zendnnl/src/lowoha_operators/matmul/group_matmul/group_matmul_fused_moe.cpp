@@ -258,23 +258,21 @@ inline void reset_thread_local_fused_moe_state() {
 // Today the auto policy is "tight whenever safe" — tight halves Op2's
 // Op1-src DRAM traffic and flat_n_tile's planner adapts to any num_ops.
 // If a future shape regresses, plug a `num_ops`-keyed threshold here.
+// `resolved_algo` is the ALREADY-resolved (and safety-clamped) ALGO for
+// this call — `select_grp_matmul_algo(...)`'s output — passed in by the
+// caller so it is computed exactly once per fused-MoE call and shared
+// with the vertical-fusion gate (avoids a second O(num_ops) selection
+// pass and a duplicate `[GRP_MATMUL.ALGO WARN]` on clamped shapes).
 inline bool pick_fused_moe_want_tight(
     bool op1_internal,
     grp_matmul_gated_act_t act,
     int env_algo,
-    const std::vector<char> &layout,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<matmul_params> &params,
-    int num_threads) {
+    int resolved_algo) {
   if (!op1_internal) return false;
   if (!a3_can_fuse_act(act, get_grp_matmul_custom_kernel())) return false;
   if (env_algo != 0 && env_algo != 3) return false;
   if (get_grp_matmul_fused_moe_tight() == 0) return false;
-  const int algo_would =
-      select_grp_matmul_algo(layout, M, N, K, params, num_threads);
-  return algo_would == 3;
+  return resolved_algo == 3;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1096,9 +1094,16 @@ status_t group_matmul_fused_moe_execute(
   // ── Step 3: pick wide-vs-tight Op1 arena layout ────────────────────
   const int env_algo_fused = get_grp_matmul_algo();
   const bool custom_kernel_en = get_grp_matmul_custom_kernel();
+  // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
+  // both the tight-arena decision below and the vertical-fusion gate at
+  // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
+  // env algo (1..5) is clamped by m_tile_safe / n_tile_safe inside
+  // `select_grp_matmul_algo`, so e.g. a pinned ALGO 2 on an m-tile-unsafe
+  // shape resolves to 1 and vertical fusion must NOT engage.
+  const int resolved_algo =
+      select_grp_matmul_algo(layout, M, N, K, params, num_threads);
   const bool want_tight = pick_fused_moe_want_tight(
-      op1_internal, act, env_algo_fused,
-      layout, M, N, K, params, num_threads);
+      op1_internal, act, env_algo_fused, resolved_algo);
 
   // EXEC APILOG — one line per fused_moe call summarising arena
   // layout, per-side internal-alloc state, act-fusion choice, and
@@ -1189,22 +1194,40 @@ status_t group_matmul_fused_moe_execute(
   // (the gemm_mode composition at Step 8 only runs on successful
   // completion).  Lets triage tell VF-vs-legacy without re-running
   // under gdb / ASAN.
-  if (s_apilog) {
-    apilog_info("[GRP_MATMUL.EXEC] op=fused_moe enter=vertical_fusion_attempt");
-  }
+  // Vertical fusion is an M-tile (ALGO 2) executor, NOT a separate
+  // ALGO — it slots into the M-tile branch.  Only engage it when the
+  // RESOLVED algo for this call is ALGO 2: under a pinned env algo
+  // (1..5) that is exactly the pinned value; under AUTO (env 0) it is
+  // the auto-selector's per-phase choice (prompt -> 2, decode -> 3 by
+  // default).  This keeps vertical fusion inside the ALGO-2 decision
+  // tree and stops it from overriding a pinned ALGO 1/3/4/5 (e.g. an
+  // ALGO-3 N-tile decode run, where it previously still *attempted*
+  // before falling through to legacy two-pass).  Uses the same
+  // resolver `pick_fused_moe_want_tight` consults for its ALGO-3 tight
+  // check, so the gate agrees with the per-GEMM dispatch the legacy
+  // two-pass below will pick.  `resolved_algo` was computed once at
+  // Step 3 (reused here — same safety-clamped value).
+  const bool vf_algo_allowed = (resolved_algo == 2);
+
   const char *pass1_mode = nullptr;
   const char *pass2_mode = nullptr;
-  bool vertical_fusion_engaged = try_flat_m_tile_pipeline_bf16(
-      layout, transA, scratch.transA_down, transB,
-      M, N, K, alpha,
-      src, lda, weight, ldb, bias, beta,
-      op1_dst, op1_ldc, /*dst_w13_is_caller_alloc=*/!op1_internal,
-      fused.N_down, scratch.K_down, scratch.alpha_down,
-      fused.down_weight, fused.ldb_down,
-      fused.bias_down, scratch.beta_down,
-      op2_dst, op2_ldc,
-      act, act_dtype,
-      is_weights_const, params, scratch.params_down, num_threads);
+  bool vertical_fusion_engaged = false;
+  if (vf_algo_allowed) {
+    if (s_apilog) {
+      apilog_info("[GRP_MATMUL.EXEC] op=fused_moe enter=vertical_fusion_attempt");
+    }
+    vertical_fusion_engaged = try_flat_m_tile_pipeline_bf16(
+        layout, transA, scratch.transA_down, transB,
+        M, N, K, alpha,
+        src, lda, weight, ldb, bias, beta,
+        op1_dst, op1_ldc, /*dst_w13_is_caller_alloc=*/!op1_internal,
+        fused.N_down, scratch.K_down, scratch.alpha_down,
+        fused.down_weight, fused.ldb_down,
+        fused.bias_down, scratch.beta_down,
+        op2_dst, op2_ldc,
+        act, act_dtype,
+        is_weights_const, params, scratch.params_down, num_threads);
+  }
   if (vertical_fusion_engaged) {
     if (s_apilog) {
       apilog_info("[GRP_MATMUL.EXEC] op=fused_moe exit=vertical_fusion_ok");

@@ -175,6 +175,65 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
     int                              nr_align,
     AoclDlpPackProbeStats           &stats);
 
+/// DQ-INT8 symmetric-quant full-weight warmer (Gap B — int8/bf16
+/// cross-warm parity).  Sibling of `warm_pack_all_aocl_dlp_experts`
+/// for the `wei_dtype == s8` per-token symmetric dynamic-quant path
+/// (`aocl_gemm_s8s8s32obf16_sym_quant`).  Used by ALGO 3's
+/// decode -> prompt cross-warm so the first post-CK ALGO 1 prompt call
+/// no longer pays the lazy sym-quant reorder on a cache miss.
+///
+/// Populates the dedicated sym-quant LRU (`get_aocl_symquant_weight_cache`
+/// inside `aocl_kernel.cpp`) with a key byte-identical to what the
+/// runtime `run_dlp(...)` builds for the per-token symmetric shape:
+///   * `extra_input_hash = std::hash<int64_t>(src_grp)` with
+///     `src_grp == K[i]` for per-token scales (`run_src_scale_nelems
+///     == M`), the only DQ-INT8 shape the N-tile path accepts.
+///   * the reorder runs through `aocl_reorder_s8s8s32os32_sym_quant`
+///     with `DLP_SYMM_STAT_QUANT::group_size = K[i]`.
+///
+/// `compute_dtype` (s8 / u8) is NOT a key input on the AOCL sym-quant
+/// reorder — the packed s8 layout is identical for sym and asym — so
+/// this warmer covers both compute families.  Same production-parity
+/// gates as the bf16 full-weight warmer (weight-cache type,
+/// min-ldb, is_weights_const).  No-op (counts skips) when
+/// `wei_dtype != s8` or AOCL DLP is not compiled in.
+status_t warm_pack_all_aocl_dlp_experts_sym_quant(
+    const std::vector<const void *> &weight,
+    const std::vector<int>          &K,
+    const std::vector<int>          &N,
+    const std::vector<int>          &ldb,
+    const std::vector<bool>         &transB,
+    const std::vector<bool>         &is_weights_const,
+    int                              total_count,
+    data_type_t                      wei_dtype,
+    AoclDlpPackProbeStats           &stats);
+
+/// DQ-INT8 symmetric-quant PER-TILE warmer — per-tile sibling of
+/// `warm_pack_all_aocl_dlp_experts_sym_quant`, and the sym-quant
+/// analogue of `warm_pack_all_aocl_dlp_experts_n_tile`.  Used by ALGO 3
+/// (flat_n_tile) when the int8 custom kernel is OFF / CK-ineligible and
+/// the decode path falls back to the AOCL DLP `s8s8s32os32_sym_quant`
+/// reorder per N-tile.  Shares the EXACT strict-stable per-tile
+/// N-decomposition of the bf16 `..._n_tile` warmer (`stable` /
+/// `nr_align` / `aligned_n_split` / per-expert `N[i]/nr_align` clamp);
+/// differs only in the s8 dtype gate, 1-byte element size for the
+/// per-tile pointer slice, the `s8s8s32os32_sym_quant` reorder, and the
+/// `extra_input_hash = hash(K[i])` per-token key.  No-op (counts skips)
+/// when `wei_dtype != s8` or AOCL DLP is not compiled in.
+status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+    const std::vector<const void *> &weight,
+    const std::vector<int>          &K,
+    const std::vector<int>          &N,
+    const std::vector<int>          &ldb,
+    const std::vector<bool>         &transB,
+    const std::vector<bool>         &is_weights_const,
+    int                              total_count,
+    data_type_t                      wei_dtype,
+    int                              num_threads,
+    int                              stable,
+    int                              nr_align,
+    AoclDlpPackProbeStats           &stats);
+
 } // namespace aocl_dlp
 } // namespace group_matmul_prepack
 } // namespace matmul

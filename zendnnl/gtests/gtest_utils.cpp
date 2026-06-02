@@ -93,6 +93,13 @@ void reset_grp_matmul_caches() {
   // here is what unblocks heap-address reuse across tests from
   // returning stale reordered weights (silent wrong-answer bite).
   zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache();
+  // The INT8 CK pack cache is a SEPARATE singleton from the BF16 one
+  // (`pack_cache_singleton_int8`).  It must be cleared too, otherwise
+  // its pointer-keyed entries survive across tests and heap-address
+  // reuse returns a stale packed weight built from a prior test's
+  // (now-freed) buffer — an order-dependent silent wrong-answer bite
+  // identical to the one the BF16 clear above guards against.
+  zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_int8();
   zendnnl::lowoha::matmul::group_matmul_prepack::clear_fingerprint_cache_for_test();
   clear_matmul_test_caches();
 }

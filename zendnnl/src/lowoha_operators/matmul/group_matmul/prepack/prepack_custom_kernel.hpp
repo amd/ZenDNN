@@ -139,6 +139,22 @@ struct PackProbeStats {
 ///     `prepack.cpp::fingerprint`, so flipping the env mid-run
 ///     (`set_weight_cache(1)`) re-enters this function with the
 ///     new state and warms normally.
+/// `dtype_family` selects which pack family the warmer should call
+/// per-expert:
+///   * `kBF16` (default) — warm via `get_or_pack_weight_bf16` (the
+///     legacy K-pair VNNI pack).
+///   * `kINT8`           — warm via `get_or_pack_weight_int8` (the
+///     K-quad VNNI pack + per-column compensation row).  The
+///     caller is responsible for ensuring `weight[i]` points to s8
+///     bytes; the warmer casts unconditionally.
+/// The two families pack into DISJOINT LRU singletons (see
+/// pack.cpp), so a process that warms both for the same model
+/// pays one warm per family.
+enum class WarmDtypeFamily : uint8_t {
+  kBF16 = 0,
+  kINT8 = 1,
+};
+
 status_t warm_pack_all_custom_kernel_experts(
     const std::vector<const void *> &weight,
     const std::vector<int>          &K,
@@ -148,7 +164,9 @@ status_t warm_pack_all_custom_kernel_experts(
     const std::vector<bool>         &is_weights_const,
     int                              total_count,
     PackProbeStats                  &stats,
-    bool                             interleave_split_halves = false);
+    bool                             interleave_split_halves = false,
+    WarmDtypeFamily                  dtype_family =
+                                       WarmDtypeFamily::kBF16);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

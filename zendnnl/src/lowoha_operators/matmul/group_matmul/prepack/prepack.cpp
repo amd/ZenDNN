@@ -215,6 +215,18 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
   s = mix_hash(s, static_cast<size_t>(p.act));
   s = mix_hash(s, static_cast<size_t>(p.act_dtype));
   s = mix_hash(s, static_cast<size_t>(p.bias_dtype));
+  // DQ-INT8 discriminators — a DQ-INT8 warm and a bf16-only warm
+  // share `(weight_ptr, K, N, transB)` but pack into PHYSICALLY
+  // DIFFERENT arenas (K/4 VNNI-quad + compensation row vs K/2 VNNI
+  // pair) keyed by separate LRU singletons.  Without folding both
+  // bits into the fingerprint, a process that runs first under
+  // bf16 (warms regime 3 with `get_or_pack_weight_bf16`) and then
+  // under DQ-INT8 (would have called `get_or_pack_weight_int8`)
+  // would short-circuit the second call on the bf16 fingerprint
+  // and never warm the int8 pack cache.  Fold both terms here so
+  // the two regimes are independent fingerprints from the start.
+  s = mix_hash(s, static_cast<size_t>(p.dynamic_quant ? 1u : 0u));
+  s = mix_hash(s, static_cast<size_t>(p.compute_dtype));
   // Fold the runtime-mutable weight-cache toggle into the fingerprint.
   // `matmul_config_t::set_weight_cache(...)` can flip this mid-process
   // and BOTH the AOCL DLP warmer (`prepack_aocl_dlp.cpp`) AND the
@@ -328,16 +340,34 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
 // Used by ALGOs 1, 2, 4, 5 (no column tiling) and by ALGO 3's
 // fallback paths (STABLE_NTILE off, narrow-N escape, missing thread
 // context).  Returns the `packed_ok` count for the apilog probe line.
+// Resolve the `is_weights_const` vector for a warm-pack call.  An
+// absent vector (`nullptr`) is the documented "treat every expert as
+// const" sentinel; forward a shared empty vector so the warmer's
+// per-expert gate stays correct.  Shared by all warm_* wrappers.
+inline const std::vector<bool> &warm_iwc(const PrepackParams &p) {
+  static const std::vector<bool> kEmptyIsConst;
+  return (p.is_weights_const != nullptr) ? *p.is_weights_const
+                                         : kEmptyIsConst;
+}
+
 inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(const PrepackParams &p) {
   aocl_dlp::AoclDlpPackProbeStats st;
-  // Empty `is_weights_const` is the documented "treat as const"
-  // sentinel — we forward an empty vector when the caller didn't
-  // supply one so the warmer's gate stays correct.
-  static const std::vector<bool> kEmptyIsConst;
-  const std::vector<bool> &iwc =
-      (p.is_weights_const != nullptr) ? *p.is_weights_const : kEmptyIsConst;
   aocl_dlp::warm_pack_all_aocl_dlp_experts(
-      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, iwc,
+      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, warm_iwc(p),
+      p.num_ops_total, p.wei_dtype, st);
+  return st;
+}
+
+// DQ-INT8 sym-quant backend wrapper (Gap B).  Calls the s8 sym-quant
+// full-weight warmer with the per-call vectors from `PrepackParams`,
+// populating the dedicated sym-quant LRU so ALGO 3 decode -> ALGO 1
+// prompt cross-warm no longer leaves the first prompt call paying the
+// lazy sym-quant reorder.
+inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_sym_quant(
+    const PrepackParams &p) {
+  aocl_dlp::AoclDlpPackProbeStats st;
+  aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(
+      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, warm_iwc(p),
       p.num_ops_total, p.wei_dtype, st);
   return st;
 }
@@ -355,14 +385,43 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(const PrepackParams &p) {
 inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile(
     const PrepackParams &p, int stable, int nr_align_eff) {
   aocl_dlp::AoclDlpPackProbeStats st;
-  static const std::vector<bool> kEmptyIsConst;
-  const std::vector<bool> &iwc =
-      (p.is_weights_const != nullptr) ? *p.is_weights_const : kEmptyIsConst;
   aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(
-      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, iwc,
+      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, warm_iwc(p),
       p.num_ops_total, p.wei_dtype,
       p.num_threads, stable, nr_align_eff, st);
   return st;
+}
+
+// DQ-INT8 sym-quant PER-TILE wrapper — the int8 sibling of
+// `warm_aocl_n_tile`.  Used by ALGO 3 (and its cross-warm) when the
+// call is DQ-INT8 (`wei == s8`) and the custom kernel is OFF /
+// CK-ineligible, so decode falls back to the AOCL DLP sym-quant
+// reorder per N-tile.  Same `stable` / `nr_align_eff` pre-validation
+// contract as `warm_aocl_n_tile`.
+inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile_sym_quant(
+    const PrepackParams &p, int stable, int nr_align_eff) {
+  aocl_dlp::AoclDlpPackProbeStats st;
+  aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+      *p.weight, *p.K, *p.N, *p.ldb, *p.transB, warm_iwc(p),
+      p.num_ops_total, p.wei_dtype,
+      p.num_threads, stable, nr_align_eff, st);
+  return st;
+}
+
+// Predicate: is this an int8 AOCL-DLP sym-quant warm candidate?  The
+// AOCL `s8s8s32os32_sym_quant` reorder is selected by an s8 weight with
+// an s8/u8 compute dtype — the DQ-INT8 path whether the src arrives as
+// bf16 (runtime hoist, `dynamic_quant=true`) or already-s8
+// (`group_dynamic_quant` pre-pass, which CLEARS `dynamic_quant`).  Key
+// on `wei==s8 && compute∈{s8,u8}`, NOT on `dynamic_quant` (false post-
+// group-DQ — the default production path).  `compute_dtype` is set for
+// both forms by `build_prepack_params`.  Used at every AOCL warm site
+// to pick the sym-quant warmer over the bf16 one; independent of CK
+// eligibility (the caller already decided AOCL, not CK, is the path).
+inline bool int8_aocl_warm_candidate(const PrepackParams &p) {
+  return p.wei_dtype == data_type_t::s8
+      && (p.compute_dtype == data_type_t::s8
+          || p.compute_dtype == data_type_t::u8);
 }
 
 // Compute max(N[i]) over `[0, num_ops_total)`.  Mirrors what the
@@ -399,15 +458,28 @@ inline int compute_max_n(const PrepackParams &p) {
 // kernel's activation math differs.
 inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
   custom_kernel::PackProbeStats st;
-  static const std::vector<bool> kEmptyIsConst;
-  const std::vector<bool> &iwc =
-      (p.is_weights_const != nullptr) ? *p.is_weights_const : kEmptyIsConst;
+  const std::vector<bool> &iwc = warm_iwc(p);
   const bool interleave_split_halves =
       (p.act == grp_matmul_gated_act_t::silu_and_mul)
       || (p.act == grp_matmul_gated_act_t::gelu_and_mul);
+  // Family selection — DQ-INT8 fingerprint includes `dynamic_quant`
+  // and `compute_dtype`, so this branch is fingerprint-aware and a
+  // single process can warm both families across distinct calls
+  // (e.g. a bf16-only layer followed by a DQ-INT8 layer) without
+  // either warm aliasing the other.  Use the same int8 discriminator
+  // as `ck_eligible_int8` / `int8_aocl_warm_candidate`
+  // (`wei==s8 && compute in {s8,u8}`) — NOT `dynamic_quant`, which the
+  // group_dynamic_quant pre-pass CLEARS (default production path).
+  // Keying on `dynamic_quant` here routed grouped-s8 (src=s8,
+  // dynamic_quant=false) to the bf16 pack arena, so the int8 CK pack
+  // LRU was never warmed for the production decode path.
+  const custom_kernel::WarmDtypeFamily family =
+      int8_aocl_warm_candidate(p)
+          ? custom_kernel::WarmDtypeFamily::kINT8
+          : custom_kernel::WarmDtypeFamily::kBF16;
   custom_kernel::warm_pack_all_custom_kernel_experts(
       *p.weight, *p.K, *p.N, *p.ldb, *p.transB, iwc,
-      p.num_ops_total, st, interleave_split_halves);
+      p.num_ops_total, st, interleave_split_halves, family);
   return st;
 }
 
@@ -424,10 +496,12 @@ static test_api::LastInvocationStats s_last_invocation;
 // emitter and the `next_HIT_for=[...]` helper below.
 inline const char *cross_warm_regime_name(CrossWarmRegime r) {
   switch (r) {
-  case CrossWarmRegime::none:               return "none";
-  case CrossWarmRegime::aocl_full_weight:   return "aocl_full_weight";
-  case CrossWarmRegime::custom_kernel_pack: return "custom_kernel_pack";
-  case CrossWarmRegime::aocl_per_tile:      return "aocl_per_tile";
+  case CrossWarmRegime::none:                       return "none";
+  case CrossWarmRegime::aocl_full_weight:           return "aocl_full_weight";
+  case CrossWarmRegime::custom_kernel_pack:         return "custom_kernel_pack";
+  case CrossWarmRegime::aocl_per_tile:              return "aocl_per_tile";
+  case CrossWarmRegime::aocl_full_weight_sym_quant: return "aocl_full_weight_sym_quant";
+  case CrossWarmRegime::aocl_per_tile_sym_quant:    return "aocl_per_tile_sym_quant";
   }
   return "?";
 }
@@ -451,22 +525,39 @@ inline const char *next_hit_for_label(const char *primary,
                                       CrossWarmRegime cross) {
   if (primary == nullptr) return "[]";
   if (std::strcmp(primary, "ck_pack") == 0) {
-    return (cross == CrossWarmRegime::aocl_full_weight)
-        ? "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]"
-        : "[ALGO_3+CK_decode]";
+    // BF16 CK pack + bf16 AOCL full-weight cross-warm
+    //   → both decode (ALGO 3 CK) and prompt (ALGO 1 DLP) hit.
+    // DQ-INT8 CK pack + sym-quant AOCL full-weight cross-warm
+    //   → decode hits (ALGO 3 CK pack) AND prompt hits (the
+    //     sym-quant LRU is now eagerly warmed via `warm_aocl_sym_quant`
+    //     — see the `aocl_full_weight_sym_quant` branch in
+    //     `cross_warm`).
+    if (cross == CrossWarmRegime::aocl_full_weight
+        || cross == CrossWarmRegime::aocl_full_weight_sym_quant) {
+      return "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]";
+    }
+    return "[ALGO_3+CK_decode]";
   }
-  if (std::strcmp(primary, "aocl_full_weight") == 0) {
+  // Full-weight primary — bf16 and the DQ-INT8 sym-quant sibling share
+  // the same next-hit semantics (the DLP prompt path that hits is the
+  // bf16 LRU resp. the sym-quant LRU).
+  if (std::strcmp(primary, "aocl_full_weight") == 0
+      || std::strcmp(primary, "aocl_full_weight_sym_quant") == 0) {
     switch (cross) {
     case CrossWarmRegime::custom_kernel_pack:
       return "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]";
     case CrossWarmRegime::aocl_per_tile:
+    case CrossWarmRegime::aocl_per_tile_sym_quant:
       return "[ALGO_3+DLP_decode, ALGO_1+DLP_prompt]";
     default:
       return "[ALGO_1+DLP_prompt]";
     }
   }
-  if (std::strcmp(primary, "aocl_per_tile") == 0) {
-    return (cross == CrossWarmRegime::aocl_full_weight)
+  // Per-tile primary — bf16 and the DQ-INT8 sym-quant sibling alike.
+  if (std::strcmp(primary, "aocl_per_tile") == 0
+      || std::strcmp(primary, "aocl_per_tile_sym_quant") == 0) {
+    return (cross == CrossWarmRegime::aocl_full_weight
+            || cross == CrossWarmRegime::aocl_full_weight_sym_quant)
         ? "[ALGO_3+DLP_decode, ALGO_1+DLP_prompt]"
         : "[ALGO_3+DLP_decode]";
   }
@@ -580,9 +671,18 @@ inline void log_pack_probe_skip(int scheduling_algo,
 
 // Eligibility for the BF16 custom-kernel pack (ALGO 3 only).  Mirrors
 // the *static-knowable* refusal gates in
-// `custom_kernel/dispatch.cpp::prepare_for_call`; if any of those
-// fail the runtime falls back to AOCL DLP per-tile and lazily reorders
-// the same expert set we'd otherwise prefill into the CK pack arena.
+// `custom_kernel/dispatch.cpp::prepare_for_call` for the BF16 family
+// only — DQ-INT8 eligibility goes through the sibling
+// `ck_eligible_int8` below.  The outer `ck_eligible(p)` ORs the
+// two so a call eligible under either family warms the
+// corresponding CK pack arena; the two families pack into
+// PHYSICALLY DIFFERENT arenas (K/2 pair vs K/4 quad +
+// compensation row) keyed on disjoint LRU singletons, so no
+// alias-by-cache is possible.
+//
+// If any of the static-knowable gates fail the runtime falls back
+// to AOCL DLP per-tile and lazily reorders the same expert set we'd
+// otherwise prefill into the CK pack arena.
 //
 // Asymmetry matters because the warm-pack module commits memory
 // up-front: warming CK under a refused-by-runtime call wastes a
@@ -638,8 +738,11 @@ inline void log_pack_probe_skip(int scheduling_algo,
 // considered acceptable noise floor.  Frameworks that hit per-expert
 // refusals will still see a runtime APILOG `[GRP_MATMUL.CK REFUSED]
 // reason=...` line (verbose level) at the first refused call.
-inline bool ck_eligible(const PrepackParams &p) {
+inline bool ck_eligible_bf16(const PrepackParams &p) {
   if (!p.custom_kernel_on) return false;
+  // BF16 family requires `dynamic_quant == false`.  A
+  // dynamic_quant=true call routes to `ck_eligible_int8` instead.
+  if (p.dynamic_quant) return false;
   if (p.src_dtype != data_type_t::bf16) return false;
   if (p.wei_dtype != data_type_t::bf16) return false;
   // dst ∈ {bf16, f32} — mirrors `resolve_variant`'s acceptance of
@@ -807,6 +910,149 @@ inline bool ck_eligible(const PrepackParams &p) {
   return true;
 }
 
+// Eligibility for the DQ-INT8 custom-kernel pack (ALGO 3 only).
+// Mirrors the static-knowable refusal gates that
+// `custom_kernel/dispatch.cpp::prepare_for_call` will apply when
+// invoked with `dynamic_quant=true` plus the matching
+// `compute_dtype`.  Same asymmetry argument as `ck_eligible_bf16`
+// applies: warming an int8 arena the runtime would refuse wastes
+// memory and disables Fix-B on regime 2.
+//
+// Mirrored gates (each refusal in `prepare_for_call`'s int8 branch
+// is matched here):
+//   * Master + sub-knob: `custom_kernel_on` AND
+//     `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = 1` (a Phase-1 user
+//     who wants only bf16 CK can flip the sub-knob off and the
+//     warmer will not commit an int8 arena).
+//   * dtype tuple: src=bf16, wei=s8, dst=bf16, dynamic_quant=true,
+//     compute ∈ {s8, u8}.
+//   * Activation: same four (none / swiglu_oai_mul / silu_and_mul
+//     / gelu_and_mul) as bf16, with the silu/gelu + bias refusal
+//     mirrored.
+//   * bias_dtype ∈ {none, bf16, f32}.
+//   * pack_nr ∈ {32, 64} divides the representative N (uses
+//     `plan_pack_nr` from dispatch.cpp — single source of truth
+//     shared with the bf16 family).
+//   * Per-expert gates (transA / alpha / beta / is_weights_const)
+//     applied identically to the bf16 sibling.
+//
+// Phase 1 DOES NOT mirror the per-expert quant-granularity gate
+// (`check_n_tile_extra`'s per-token src_scale + per-channel
+// wei_scale check).  That gate runs in the outer dispatcher and
+// is the single source of truth on quant shape; replicating it
+// here would couple the prepack module to the quant_params layout
+// without reducing the false-positive window meaningfully (the
+// runtime CK refusal `weight_pack_failed` would surface
+// immediately).
+inline bool ck_eligible_int8(const PrepackParams &p) {
+  if (!p.custom_kernel_on) return false;
+  if (!get_grp_matmul_custom_kernel_int8()) return false;
+  // Two int8 entry forms reach the CK microkernel (mirror
+  // resolve_variant in custom_kernel/dispatch.cpp):
+  //   * runtime hoist     — `dynamic_quant=true` with bf16 src;
+  //   * grouped pre-quant — `group_dynamic_quant` produced an s8 src
+  //     and CLEARED `dynamic_quant` (the default-on production path).
+  // Keying on `dynamic_quant && src==bf16` alone missed the grouped
+  // form, so the prepack never warmed the int8 CK pack for it.
+  const bool dq_int8_form =
+      (p.dynamic_quant && p.src_dtype == data_type_t::bf16)
+      || (p.src_dtype == data_type_t::s8);
+  if (!dq_int8_form) return false;
+  if (p.wei_dtype != data_type_t::s8) return false;
+  if (p.dst_dtype != data_type_t::bf16) return false;
+  if (p.compute_dtype != data_type_t::s8
+      && p.compute_dtype != data_type_t::u8) return false;
+  // Activation gate — same four (none / swiglu_oai_mul /
+  // silu_and_mul / gelu_and_mul) as bf16; silu_and_mul / gelu_and_mul
+  // + bias is refused identically.
+  const bool split_halves_no_bias =
+      (p.act == grp_matmul_gated_act_t::silu_and_mul
+       || p.act == grp_matmul_gated_act_t::gelu_and_mul)
+      && (p.bias_dtype == data_type_t::none);
+  if (p.act != grp_matmul_gated_act_t::swiglu_oai_mul
+      && p.act != grp_matmul_gated_act_t::none
+      && !split_halves_no_bias) {
+    return false;
+  }
+  if (p.act != grp_matmul_gated_act_t::none
+      && p.act_dtype != data_type_t::bf16) {
+    return false;
+  }
+  if (p.bias_dtype != data_type_t::none
+      && p.bias_dtype != data_type_t::bf16
+      && p.bias_dtype != data_type_t::f32) {
+    return false;
+  }
+  // Per-expert runtime-gate mirroring — identical to ck_eligible_bf16.
+  // The compiler folds the two duplicated bodies; readability wins.
+  const int n_active = p.num_ops_active;
+  for (int i = 0; i < n_active; ++i) {
+    if (p.transA != nullptr
+        && i < static_cast<int>(p.transA->size())
+        && (*p.transA)[i]) {
+      return false;
+    }
+    if (p.alpha != nullptr
+        && i < static_cast<int>(p.alpha->size())
+        && (*p.alpha)[i] != 1.0f) {
+      return false;
+    }
+    if (p.beta != nullptr
+        && i < static_cast<int>(p.beta->size())
+        && (*p.beta)[i] != 0.0f) {
+      return false;
+    }
+    if (p.is_weights_const != nullptr
+        && !p.is_weights_const->empty()
+        && i < static_cast<int>(p.is_weights_const->size())
+        && !(*p.is_weights_const)[i]) {
+      return false;
+    }
+  }
+  // Pack-NR planner — shared with the bf16 family.
+  namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
+  if (p.K == nullptr || p.K->empty()) return false;
+  if (p.N == nullptr || p.N->empty()) return false;
+  int rep_K = (*p.K)[0];
+  int rep_N = (*p.N)[0];
+  if (p.M != nullptr) {
+    const int sweep = std::min<int>(
+        n_active,
+        static_cast<int>(std::min({p.K->size(), p.N->size(),
+                                   p.M->size()})));
+    for (int i = 0; i < sweep; ++i) {
+      if ((*p.M)[i] > 0) {
+        rep_K = (*p.K)[i];
+        rep_N = (*p.N)[i];
+        break;
+      }
+    }
+  }
+  // DQ-INT8 CK additionally requires K divisible by 4 (the VNNI K-quad).
+  // The packed weight is zero-padded to a K-quad but the hoisted src row
+  // is exactly K bytes, so a `K % 4 != 0` tail would over-read src — the
+  // runtime dispatcher refuses CK for unaligned K and falls back to AOCL
+  // DLP sym-quant (see `custom_kernel/dispatch.cpp::prepare_for_call`,
+  // the `int8_K_not_multiple_of_4` gate).  Mirror it here so prepack does
+  // NOT mark the call CK-eligible and skip the AOCL warm — otherwise the
+  // runtime AOCL fallback would run on a cold cache.  (bf16's K-pair pack
+  // is unaffected; this gate is int8-only, hence in `ck_eligible_int8`.)
+  if ((rep_K % ck::kVNNIInt8Quad) != 0) return false;
+  const int pack_nr = ck::plan_pack_nr(rep_K, rep_N);
+  if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) return false;
+  return true;
+}
+
+// Outer `ck_eligible` — true when either the BF16 family or the
+// DQ-INT8 family is eligible.  Callers continue to consult this
+// single predicate; the family choice is implicit in the fingerprint
+// (folded via `dynamic_quant` + `compute_dtype`) and in the
+// downstream warmer's per-call dtype switch (see
+// `warm_pack_all_custom_kernel_experts` in prepack_custom_kernel.cpp).
+inline bool ck_eligible(const PrepackParams &p) {
+  return ck_eligible_bf16(p) || ck_eligible_int8(p);
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Cross-warm helper
 //
@@ -858,8 +1104,67 @@ inline void cross_warm(const PrepackParams                  &p,
   if (inner_kernel != matmul_algo_t::aocl_dlp_blocked)       return;
 
   if (current_algo == 3) {
-    // ALGO 3 → cross-warm regime 1 (full-weight AOCL) for the
-    // upcoming ALGO 1 prompt path.  Skip if `prepack_for_algo_3`'s
+    // Pinned-ALGO-3 short-circuit: when the user has forced
+    // `ZENDNNL_GRP_MATMUL_ALGO=3`, EVERY call (prompt and decode) runs
+    // ALGO 3 / CK — there is no ALGO 1 prompt path to cross-warm for, so
+    // eagerly packing the AOCL full-weight / sym-quant LRU is pure
+    // warm-up waste (the runtime never consults it).  Only cross-warm
+    // the ALGO-1 path when the algo is AUTO (env==0), where the phase
+    // selector may legitimately route a future prompt call to ALGO 1.
+    // Decode→ALGO-3 prepack of the CK pack cache itself is handled by
+    // the per-ALGO primary body, not here.
+    if (get_grp_matmul_algo() == 3) {
+      return;
+    }
+    // ALGO 3 → cross-warm the upcoming ALGO 1 prompt path's full-
+    // weight AOCL reorder cache.  Family selection:
+    //
+    //   * BF16 family (default) — `warm_aocl(p)` warms the standard
+    //     bf16 AOCL DLP LRU; matches the runtime
+    //     `aocl_reorder_bf16bf16f32of32` cache key.
+    //   * DQ-INT8 family — the upcoming ALGO 1 prompt under
+    //     `dynamic_quant=true` warms the dedicated AOCL sym-quant LRU
+    //     (`aocl_reorder_s8s8s32os32_sym_quant`), NOT the bf16 LRU.
+    //     `warm_aocl_sym_quant(p)` builds a key byte-identical to the
+    //     runtime per-token symmetric shape (`src_grp == K` =>
+    //     `extra_input_hash = hash(K)`, `group_size = K`), so the
+    //     first post-CK ALGO 1 prompt call hits the warmed slot
+    //     instead of paying the lazy reorder.  This brings int8
+    //     decode -> prompt cross-warm to bf16 parity (Gap B).
+    if (ck_eligible_int8(p)) {
+      out_regime = CrossWarmRegime::aocl_full_weight_sym_quant;
+      const auto st_extra = warm_aocl_sym_quant(p);
+      st_aocl.total_attempted += st_extra.total_attempted;
+      st_aocl.packed_ok       += st_extra.packed_ok;
+      st_aocl.skipped_invalid += st_extra.skipped_invalid;
+      static const bool s_ck_int8_warm = apilog_info_enabled();
+      if (s_ck_int8_warm) {
+        apilog_info(
+            "[GRP_MATMUL.PREPACK CROSS_WARM] regime="
+            "aocl_full_weight_sym_quant: int8 CK regime — warmed AOCL "
+            "sym-quant LRU eagerly (packed_ok=", st_extra.packed_ok,
+            " skipped=", st_extra.skipped_invalid,
+            ").  First post-CK ALGO 1 prompt call hits the cache.");
+      }
+      return;
+    }
+    // M4 — CK-OFF DQ-INT8: the int8 CK branch above did not fire
+    // (`ck_eligible_int8` is false when the int8 sub-knob is off or a
+    // per-expert gate refuses), but the upcoming ALGO 1 prompt still
+    // reorders the full weight through the AOCL DLP sym-quant path —
+    // NOT the bf16 LRU.  Warm the sym-quant full-weight LRU (unless the
+    // primary's narrow-N escape already did via M3).
+    if (int8_aocl_warm_candidate(p)) {
+      if (!primary_did_aocl_fw) {
+        const auto st_extra = warm_aocl_sym_quant(p);
+        st_aocl.total_attempted += st_extra.total_attempted;
+        st_aocl.packed_ok       += st_extra.packed_ok;
+        st_aocl.skipped_invalid += st_extra.skipped_invalid;
+        out_regime = CrossWarmRegime::aocl_full_weight_sym_quant;
+      }
+      return;
+    }
+    // BF16 family — unchanged.  Skip if `prepack_for_algo_3`'s
     // narrow-N escape already ran the full-weight warmer.
     if (!primary_did_aocl_fw) {
       const auto st_extra = warm_aocl(p);
@@ -893,12 +1198,18 @@ inline void cross_warm(const PrepackParams                  &p,
     const int stable          = aocl_stable_n_thr(p.num_threads, max_N);
     const int max_align_slots = std::max(1, max_N / nr_align_cross);
     if (max_N > 0 && stable > 0 && stable <= max_align_slots) {
-      const auto st_extra =
-          warm_aocl_n_tile(p, stable, nr_align_cross);
+      // M5 — DQ-INT8 (CK off): the upcoming ALGO 3 decode falls to the
+      // AOCL DLP sym-quant reorder per N-tile, so warm the sym-quant
+      // per-tile LRU; bf16 otherwise.
+      const bool int8_dlp = int8_aocl_warm_candidate(p);
+      const auto st_extra = int8_dlp
+          ? warm_aocl_n_tile_sym_quant(p, stable, nr_align_cross)
+          : warm_aocl_n_tile(p, stable, nr_align_cross);
       st_aocl.total_attempted += st_extra.total_attempted;
       st_aocl.packed_ok       += st_extra.packed_ok;
       st_aocl.skipped_invalid += st_extra.skipped_invalid;
-      out_regime = CrossWarmRegime::aocl_per_tile;
+      out_regime = int8_dlp ? CrossWarmRegime::aocl_per_tile_sym_quant
+                            : CrossWarmRegime::aocl_per_tile;
     }
   }
 }
@@ -912,10 +1223,19 @@ inline void cross_warm(const PrepackParams                  &p,
 // the modular contract holds and per-ALGO specialisation is a
 // drop-in change, not a refactor.
 // ─────────────────────────────────────────────────────────────────────
-void prepack_for_algo_1(const PrepackParams &p) {
-  auto pre = prelude(p, /*scheduling_algo=*/1);
+// Shared body for the AOCL-only scheduling ALGOs (1, 2, 4, 5).  These
+// have no per-tile / custom-kernel primary warm of their own: they
+// warm the full-weight AOCL DLP cache when the inner kernel is
+// `aocl_dlp_blocked`, then defer to `cross_warm` to prefill whatever
+// the upcoming decode (ALGO 3) will need.  Only the `scheduling_algo`
+// tag differs between them — factored here so the four entry points
+// are one-line forwarders (ALGO 3 keeps its own body for the CK
+// eligibility logic).
+static void prepack_aocl_only_algo(const PrepackParams &p,
+                                   int scheduling_algo) {
+  auto pre = prelude(p, scheduling_algo);
   if (pre.skip) {
-    log_pack_probe_skip(/*scheduling_algo=*/1, p, pre.skip_reason);
+    log_pack_probe_skip(scheduling_algo, p, pre.skip_reason);
     return;
   }
   aocl_dlp::AoclDlpPackProbeStats st_aocl;
@@ -923,39 +1243,33 @@ void prepack_for_algo_1(const PrepackParams &p) {
   bool primary_did_aocl_fw = false;
   const char *primary_label = "none";
   if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
-    st_aocl = warm_aocl(p);
+    if (int8_aocl_warm_candidate(p)) {
+      // M1 — DQ-INT8 prompt (ALGO 1/2/4/5) reorders the full weight
+      // through the AOCL DLP `s8s8s32os32_sym_quant` path, NOT the bf16
+      // LRU.  This holds even when the int8 CK is ON, because CK is
+      // N-tile / ALGO-3 only — the prompt phase always uses AOCL DLP.
+      st_aocl = warm_aocl_sym_quant(p);
+      primary_label = "aocl_full_weight_sym_quant";
+    } else {
+      st_aocl = warm_aocl(p);
+      primary_label = "aocl_full_weight";
+    }
     primary_did_aocl_fw = true;
-    primary_label = "aocl_full_weight";
   }
   CrossWarmRegime cwr = CrossWarmRegime::none;
-  cross_warm(p, pre.inner_kernel, /*current_algo=*/1,
+  cross_warm(p, pre.inner_kernel, scheduling_algo,
              primary_did_aocl_fw, /*primary_did_custom=*/false,
              st_aocl, st_ck, cwr);
-  log_pack_probe(/*scheduling_algo=*/1, p, pre.inner_kernel, st_aocl, st_ck,
+  log_pack_probe(scheduling_algo, p, pre.inner_kernel, st_aocl, st_ck,
                  cwr, primary_label);
 }
 
+void prepack_for_algo_1(const PrepackParams &p) {
+  prepack_aocl_only_algo(p, /*scheduling_algo=*/1);
+}
+
 void prepack_for_algo_2(const PrepackParams &p) {
-  auto pre = prelude(p, /*scheduling_algo=*/2);
-  if (pre.skip) {
-    log_pack_probe_skip(/*scheduling_algo=*/2, p, pre.skip_reason);
-    return;
-  }
-  aocl_dlp::AoclDlpPackProbeStats st_aocl;
-  custom_kernel::PackProbeStats   st_ck;
-  bool primary_did_aocl_fw = false;
-  const char *primary_label = "none";
-  if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
-    st_aocl = warm_aocl(p);
-    primary_did_aocl_fw = true;
-    primary_label = "aocl_full_weight";
-  }
-  CrossWarmRegime cwr = CrossWarmRegime::none;
-  cross_warm(p, pre.inner_kernel, /*current_algo=*/2,
-             primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck, cwr);
-  log_pack_probe(/*scheduling_algo=*/2, p, pre.inner_kernel, st_aocl, st_ck,
-                 cwr, primary_label);
+  prepack_aocl_only_algo(p, /*scheduling_algo=*/2);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1046,15 +1360,29 @@ void prepack_for_algo_3(const PrepackParams &p) {
     const int max_align_slots = std::max(1, max_N / nr_align_eff);
     if (max_N > 0 && stable > 0 && stable <= max_align_slots) {
       // Strict-stable ManyExperts: per-tile decomposition matches
-      // the runtime cache key.
-      st_aocl = warm_aocl_n_tile(p, stable, nr_align_eff);
-      primary_label = "aocl_per_tile";
+      // the runtime cache key.  M2 — for DQ-INT8 (CK off / ineligible,
+      // gated by `!eligible_ck` above) decode falls to the AOCL DLP
+      // sym-quant reorder per N-tile, so warm the sym-quant per-tile
+      // LRU, not the bf16 one.
+      if (int8_aocl_warm_candidate(p)) {
+        st_aocl = warm_aocl_n_tile_sym_quant(p, stable, nr_align_eff);
+        primary_label = "aocl_per_tile_sym_quant";
+      } else {
+        st_aocl = warm_aocl_n_tile(p, stable, nr_align_eff);
+        primary_label = "aocl_per_tile";
+      }
     } else {
       // Narrow-N escape (`stable * nr_align > max_N`): planner
-      // routes to Sequential which uses the full-weight key.
-      st_aocl = warm_aocl(p);
+      // routes to Sequential which uses the full-weight key.  M3 —
+      // sym-quant full-weight for DQ-INT8, bf16 otherwise.
+      if (int8_aocl_warm_candidate(p)) {
+        st_aocl = warm_aocl_sym_quant(p);
+        primary_label = "aocl_full_weight_sym_quant";
+      } else {
+        st_aocl = warm_aocl(p);
+        primary_label = "aocl_full_weight";
+      }
       primary_did_aocl_fw = true;
-      primary_label = "aocl_full_weight";
     }
   }
   // else: AOCL DLP warm intentionally skipped.  Reasons (in order):
@@ -1093,49 +1421,11 @@ void prepack_for_algo_3(const PrepackParams &p) {
 }
 
 void prepack_for_algo_4(const PrepackParams &p) {
-  auto pre = prelude(p, /*scheduling_algo=*/4);
-  if (pre.skip) {
-    log_pack_probe_skip(/*scheduling_algo=*/4, p, pre.skip_reason);
-    return;
-  }
-  aocl_dlp::AoclDlpPackProbeStats st_aocl;
-  custom_kernel::PackProbeStats   st_ck;
-  bool primary_did_aocl_fw = false;
-  const char *primary_label = "none";
-  if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
-    st_aocl = warm_aocl(p);
-    primary_did_aocl_fw = true;
-    primary_label = "aocl_full_weight";
-  }
-  CrossWarmRegime cwr = CrossWarmRegime::none;
-  cross_warm(p, pre.inner_kernel, /*current_algo=*/4,
-             primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck, cwr);
-  log_pack_probe(/*scheduling_algo=*/4, p, pre.inner_kernel, st_aocl, st_ck,
-                 cwr, primary_label);
+  prepack_aocl_only_algo(p, /*scheduling_algo=*/4);
 }
 
 void prepack_for_algo_5(const PrepackParams &p) {
-  auto pre = prelude(p, /*scheduling_algo=*/5);
-  if (pre.skip) {
-    log_pack_probe_skip(/*scheduling_algo=*/5, p, pre.skip_reason);
-    return;
-  }
-  aocl_dlp::AoclDlpPackProbeStats st_aocl;
-  custom_kernel::PackProbeStats   st_ck;
-  bool primary_did_aocl_fw = false;
-  const char *primary_label = "none";
-  if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
-    st_aocl = warm_aocl(p);
-    primary_did_aocl_fw = true;
-    primary_label = "aocl_full_weight";
-  }
-  CrossWarmRegime cwr = CrossWarmRegime::none;
-  cross_warm(p, pre.inner_kernel, /*current_algo=*/5,
-             primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck, cwr);
-  log_pack_probe(/*scheduling_algo=*/5, p, pre.inner_kernel, st_aocl, st_ck,
-                 cwr, primary_label);
+  prepack_aocl_only_algo(p, /*scheduling_algo=*/5);
 }
 
 void clear_fingerprint_cache_for_test() {

@@ -37,6 +37,7 @@
 #include "gtest_utils.hpp"
 #include "group_matmul_test_helpers.hpp"
 #include "moe_test_utils.hpp"
+#include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 
 // ============================================================================
 // [9] TestGroupMatmulQuant: dedicated fixture for quantized group-matmul
@@ -1097,4 +1098,223 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmulQuant, TestGroupMatmulQuant,
                          ::testing::ValuesIn(quant_matmul_test));
+
+// ============================================================================
+// [9b] TestGroupDynamicQuant: direct unit tests for the grouped dynamic-quant
+//      pre-pass (`group_reorder_quantization_wrapper`).  Focus on the M<=1
+//      per-tensor granularity acceptance — the production decode case where a
+//      single-token expert has a {1,1} src_scale that classifies as
+//      per_tensor (not per_token).  The grouped FAST path allocates a single
+//      `buffers.src_arena`; the slow per-expert fallback uses
+//      `buffers.fallback_buf` and leaves `src_arena == nullptr`, so the arena
+//      pointer is a clean observable for "which path ran".
+// ============================================================================
+namespace {
+
+// Build E experts of dynamic-quant DQ-INT8 params with the given per-expert M
+// and src_scale dims.  bf16 src (caller-owned), s8 wei, compute=s8.  Scale
+// buffers are left null so the wrapper allocates its own.
+struct GroupDqProbe {
+  std::vector<std::vector<bfloat16_t>>  src_banks;
+  std::vector<const void *>             src;
+  std::vector<int>                      lda, M, K;
+  std::vector<bool>                     transA;
+  std::vector<zendnnl::lowoha::matmul::matmul_params> params;
+};
+
+GroupDqProbe make_group_dq_probe(
+    const std::vector<int> &Ms, int K_v,
+    const std::vector<int64_t> &scale_dims_for_active) {
+  using zendnnl::common::data_type_t;
+  GroupDqProbe p;
+  const int E = static_cast<int>(Ms.size());
+  p.src_banks.resize(E);
+  p.src.resize(E);
+  p.M = Ms;
+  p.K.assign(E, K_v);
+  p.lda.assign(E, K_v);
+  p.transA.assign(E, false);
+  p.params.resize(E);
+  for (int e = 0; e < E; ++e) {
+    const int m = std::max(0, Ms[e]);
+    p.src_banks[e].assign(static_cast<size_t>(m) * K_v, bfloat16_t(0.05f));
+    p.src[e] = p.src_banks[e].empty() ? nullptr : p.src_banks[e].data();
+    auto &mp = p.params[e];
+    mp.dtypes.src     = data_type_t::bf16;
+    mp.dtypes.wei     = data_type_t::s8;
+    mp.dtypes.compute = data_type_t::s8;
+    mp.dynamic_quant  = true;
+    mp.quant_params.src_scale.dt   = data_type_t::f32;
+    mp.quant_params.src_scale.dims = scale_dims_for_active;  // e.g. {M,1}
+    mp.quant_params.src_scale.buff = nullptr;  // wrapper allocates
+  }
+  return p;
+}
+
+}  // namespace
+
+TEST(TestGroupDynamicQuant, M1PerTensorTakesGroupedFastPath) {
+  using namespace zendnnl::lowoha::matmul;
+  // 4 experts, each M=1 -> src_scale dims {1,1} (per-token == per-tensor for
+  // a single row).  The granularity fix must accept this on the grouped FAST
+  // path instead of forcing the whole group onto the per-expert fallback.
+  auto pr = make_group_dq_probe(/*Ms=*/{1, 1, 1, 1}, /*K=*/64,
+                                /*scale_dims=*/{1, 1});
+  std::vector<const void *> qsrc;
+  std::vector<int> qlda;
+  group_reorder_quant_buffers_t buffers;
+  bool quantized = false;
+  ASSERT_EQ(group_reorder_quantization_wrapper(
+                pr.src, pr.lda, pr.transA, pr.M, pr.K, /*num_threads=*/8,
+                pr.params, qsrc, qlda, buffers, quantized),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_TRUE(quantized);
+  EXPECT_NE(buffers.src_arena, nullptr)
+      << "M=1 {1,1} per-tensor scale MUST take the grouped fast path "
+         "(single arena), not the per-expert fallback.";
+  EXPECT_TRUE(buffers.fallback_buf.empty())
+      << "grouped fast path must not populate the per-expert fallback buffers";
+  for (size_t e = 0; e < pr.params.size(); ++e) {
+    EXPECT_FALSE(pr.params[e].dynamic_quant) << "e=" << e;
+    EXPECT_EQ(pr.params[e].dtypes.src, zendnnl::common::data_type_t::s8)
+        << "e=" << e;
+  }
+}
+
+TEST(TestGroupDynamicQuant, M2PerTokenTakesGroupedFastPath) {
+  using namespace zendnnl::lowoha::matmul;
+  // M=2 -> {2,1} is unambiguously per_token; grouped fast path as well.
+  auto pr = make_group_dq_probe(/*Ms=*/{2, 2, 2, 2}, /*K=*/64,
+                                /*scale_dims=*/{2, 1});
+  std::vector<const void *> qsrc;
+  std::vector<int> qlda;
+  group_reorder_quant_buffers_t buffers;
+  bool quantized = false;
+  ASSERT_EQ(group_reorder_quantization_wrapper(
+                pr.src, pr.lda, pr.transA, pr.M, pr.K, /*num_threads=*/8,
+                pr.params, qsrc, qlda, buffers, quantized),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_TRUE(quantized);
+  EXPECT_NE(buffers.src_arena, nullptr);
+}
+
+TEST(TestGroupDynamicQuant, MixedActiveInactiveExpertsSucceed) {
+  using namespace zendnnl::lowoha::matmul;
+  // M=0 (inactive) experts interleaved with M=1 active ones must not force
+  // the whole group to fallback nor crash (the granularity gate skips M==0).
+  auto pr = make_group_dq_probe(/*Ms=*/{1, 0, 1, 0}, /*K=*/64,
+                                /*scale_dims=*/{1, 1});
+  // Give the inactive experts a non-null sentinel src so we can assert the
+  // grouped path forwards the ORIGINAL pointer (not the null arena slice).
+  int dummy_a = 0, dummy_b = 0;
+  pr.src[1] = &dummy_a;
+  pr.src[3] = &dummy_b;
+  pr.lda[1] = 64;
+  pr.lda[3] = 64;
+  std::vector<const void *> qsrc;
+  std::vector<int> qlda;
+  group_reorder_quant_buffers_t buffers;
+  bool quantized = false;
+  ASSERT_EQ(group_reorder_quantization_wrapper(
+                pr.src, pr.lda, pr.transA, pr.M, pr.K, /*num_threads=*/8,
+                pr.params, qsrc, qlda, buffers, quantized),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_TRUE(quantized);
+  EXPECT_NE(buffers.src_arena, nullptr)
+      << "active M=1 experts take the grouped fast path even with M=0 "
+         "experts interleaved";
+  // Inactive experts publish their ORIGINAL src/lda (non-null) and keep the
+  // original src dtype — only dynamic_quant is cleared.  Active experts are
+  // quantized to s8 with a non-null arena slice.
+  for (size_t e = 0; e < pr.params.size(); ++e) {
+    EXPECT_FALSE(pr.params[e].dynamic_quant) << "e=" << e;
+    if (pr.M[e] == 0) {
+      EXPECT_EQ(qsrc[e], pr.src[e]) << "inactive e=" << e
+          << " must forward the original src pointer, not the null slice";
+      EXPECT_EQ(pr.params[e].dtypes.src, zendnnl::common::data_type_t::bf16)
+          << "inactive e=" << e << " src dtype must stay unquantized";
+    } else {
+      EXPECT_NE(qsrc[e], nullptr) << "active e=" << e;
+      EXPECT_EQ(pr.params[e].dtypes.src, zendnnl::common::data_type_t::s8)
+          << "active e=" << e;
+    }
+  }
+}
+
+TEST(TestGroupDynamicQuant, FallbackSkipsInactiveExperts) {
+  using namespace zendnnl::lowoha::matmul;
+  // per_channel src_scale on active experts forces the per-expert fallback.
+  // M=0 experts must not call reorder (zero-dim shape fails `is_shaped()`).
+  auto pr = make_group_dq_probe(/*Ms=*/{1, 0, 1, 0}, /*K=*/64,
+                                /*scale_dims=*/{1, 64});
+  std::vector<const void *> qsrc;
+  std::vector<int> qlda;
+  group_reorder_quant_buffers_t buffers;
+  bool quantized = false;
+  ASSERT_EQ(group_reorder_quantization_wrapper(
+                pr.src, pr.lda, pr.transA, pr.M, pr.K, /*num_threads=*/8,
+                pr.params, qsrc, qlda, buffers, quantized),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_TRUE(quantized);
+  EXPECT_EQ(buffers.src_arena, nullptr)
+      << "per_channel scale must use per-expert fallback, not grouped arena";
+  EXPECT_EQ(buffers.fallback_buf.size(), 4u);
+  for (size_t e = 0; e < pr.params.size(); ++e) {
+    EXPECT_FALSE(pr.params[e].dynamic_quant) << "e=" << e;
+    if (pr.M[e] > 0) {
+      EXPECT_EQ(pr.params[e].dtypes.src, zendnnl::common::data_type_t::s8)
+          << "active e=" << e;
+      EXPECT_NE(qsrc[e], nullptr) << "active e=" << e;
+    } else {
+      EXPECT_EQ(pr.params[e].dtypes.src, zendnnl::common::data_type_t::bf16)
+          << "inactive e=" << e << " was not reordered";
+      EXPECT_EQ(qsrc[e], pr.src[e]) << "inactive e=" << e;
+    }
+  }
+}
+
+// Leading-inactive layout: expert 0 routes no tokens while later experts
+// fire.  The grouped pre-pass rewrites ONLY active experts to the s8 +
+// per-token-src_scale family, so `params[0]` is NOT representative of the
+// call's quant mode.  The N-tile routing
+// (group_matmul_n_tile.cpp::flat_n_tile) must therefore classify from the
+// FIRST ACTIVE expert; this test pins the precondition that fix relies on
+// — the first active expert (index 1) carries the s8 dtype + a non-null
+// src_scale that the representative scan will find, while the leading
+// inactive expert at index 0 does not.
+TEST(TestGroupDynamicQuant, LeadingInactiveExpertFirstActiveIsRepresentative) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+  auto pr = make_group_dq_probe(/*Ms=*/{0, 1, 0, 1}, /*K=*/64,
+                                /*scale_dims=*/{1, 1});
+  std::vector<const void *> qsrc;
+  std::vector<int> qlda;
+  group_reorder_quant_buffers_t buffers;
+  bool quantized = false;
+  ASSERT_EQ(group_reorder_quantization_wrapper(
+                pr.src, pr.lda, pr.transA, pr.M, pr.K, /*num_threads=*/8,
+                pr.params, qsrc, qlda, buffers, quantized),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_TRUE(quantized);
+  EXPECT_NE(buffers.src_arena, nullptr) << "active experts take grouped path";
+
+  // params[0] is the leading INACTIVE expert — left at its pre-quant bf16
+  // dtype, so a blind params[0] read would misclassify the call.
+  EXPECT_EQ(pr.params[0].dtypes.src, data_type_t::bf16)
+      << "leading inactive expert keeps its pre-quant dtype";
+
+  // The FIRST ACTIVE expert (index 1) is the valid representative: s8 src,
+  // dynamic_quant cleared, and a non-null per-token src_scale — exactly
+  // what flat_n_tile's first-active scan keys the DQ-INT8 routing off.
+  size_t rep = pr.params.size();
+  for (size_t e = 0; e < pr.M.size(); ++e) {
+    if (pr.M[e] > 0) { rep = e; break; }
+  }
+  ASSERT_EQ(rep, 1u);
+  EXPECT_EQ(pr.params[rep].dtypes.src, data_type_t::s8);
+  EXPECT_FALSE(pr.params[rep].dynamic_quant);
+  EXPECT_NE(pr.params[rep].quant_params.src_scale.buff, nullptr)
+      << "first active expert must carry the per-token src_scale the "
+         "grouped-prequant routing branch requires";
+}
 

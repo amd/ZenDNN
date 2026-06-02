@@ -68,6 +68,14 @@ using zendnnl::error_handling::status_t;
 /// VNNI K-pair multiplicity (= 2: two consecutive K-rows per VDPBF16PS lane).
 inline constexpr int kVNNIPair = 2;
 
+/// VNNI K-quad multiplicity (= 4: four consecutive K-rows per
+/// VPDPBUSD lane).  Mirror constant for the int8 pack family; the
+/// int8 microkernel header re-uses this name and the two declarations
+/// MUST stay in sync (compile-time consistency enforced indirectly
+/// by the pack ↔ microkernel layout contract, see
+/// `int8_microkernel.{hpp,cpp}`).
+inline constexpr int kVNNIInt8Quad = 4;
+
 /// Supported pack widths.  Match the `bf16_brgemm_ukernel.cpp` set
 /// minus NR=16 (gated activation needs at least 32 cols for one
 /// (gate, up) pair to fit in a single (acc_lo, acc_hi) zmm pair).
@@ -181,6 +189,76 @@ status_t get_or_pack_weight_bf16(
 /// calls it directly.
 void free_owned_packed_weight(const bfloat16_t *packed);
 
+// ── DQ-INT8 pack ────────────────────────────────────────────────
+// Adaptive INT8 weight pack with a per-column compensation row.
+// Used by the INT8 microkernel (custom_kernel/ukernel/
+// int8_microkernel.{hpp,cpp}) for the s8 × {s8, u8} → bf16
+// fast path on bf16 src reorder-quantised down to s8 / u8.
+//
+// PACK LAYOUT (per o-block of `pack_nr` cols):
+//
+//     [O/pack_nr][
+//        [K_pad/4][pack_nr][4]    ← VNNI-quad packed weight bytes
+//        [pack_nr] int32_t         ← per-column compensation row
+//                                    (sum_k wei_s8[k, col])
+//     ]
+//
+// `pack_nr` is a runtime parameter, supported values 32 and 64
+// (shared with the bf16 pack).  `K_pad = ceil(K / 4) * 4`.  The
+// trailing K-quad is zero-padded so a 4-byte VPDPBUSD broadcast
+// is always safe.  Compensation is computed at pack time from
+// the FULL K column (no zero-pad contribution since wei_s8[K_pad-1
+// down to K] is zero) and stored as one int32 per column —
+// `comp[v_col] = sum_{k=0}^{K-1} wei_s8[k, v_col]`.
+//
+// Cache: SEPARATE singleton from the BF16 pack — different value
+// type (`int8_t *`) and different cache-key marker bit prevent
+// collision.  The cache-key `extra_hash` ORs `kCustomKernelInt8Marker`
+// (a distinct constant from `kCustomKernelAlgoMarker`) so a bf16
+// pack and an int8 pack for the same weight pointer occupy
+// disjoint LRU entries.
+
+/// Look up the pre-packed INT8 weight for one
+/// (weight, K, N, pack_nr, transB) tuple, packing on the first
+/// miss and caching for subsequent calls.
+///
+/// Contract is the same as `get_or_pack_weight_bf16` (see above)
+/// with three differences:
+///   * `weight` is `int8_t *` (signed); the pack writes raw s8
+///     bytes into the VNNI-quad slab plus an `int32_t` compensation
+///     row at the tail of each o-block.
+///   * `interleave_split_halves` carries the same semantic as in
+///     the bf16 path — `silu_and_mul` / `gelu_and_mul` callers
+///     present canonical split-halves `[gate_cols | up_cols]`
+///     weight and the pack re-orders source columns into the
+///     interleaved `[g0, u0, g1, u1, ...]` layout the in-register
+///     pair-pack epilogues expect.  Compensation is computed
+///     AFTER re-ordering so the per-column sums match the
+///     re-permuted output column index.
+///   * Output is `int8_t *` — the caller / dispatcher will read it
+///     as the VNNI-quad slab and then the int32 compensation row
+///     using byte arithmetic; see int8_microkernel.cpp for the
+///     consumer side.
+///
+/// `disable_cache` (default false) behaves identically to the
+/// bf16 sibling: when true, allocate a fresh aligned buffer per
+/// call, skip the LRU singleton, and let the caller free via
+/// `free_owned_packed_weight_int8()`.
+status_t get_or_pack_weight_int8(
+    const int8_t *weight,
+    int K, int N, int ldb, int pack_nr,
+    bool transB,
+    bool interleave_split_halves,
+    const int8_t **out_packed,
+    bool *was_hit_out = nullptr,
+    bool disable_cache = false);
+
+/// Free a packed-weight buffer returned by
+/// `get_or_pack_weight_int8(..., disable_cache=true)`.  Safe with
+/// `nullptr`.  Same lifetime contract as
+/// `free_owned_packed_weight` (the bf16 sibling).
+void free_owned_packed_weight_int8(const int8_t *packed);
+
 /// Release every cached packed BF16 weight and reset the cache to
 /// empty.  Intended for weight-rotating deployments (dynamic
 /// LoRA hot-swap, retraining loops, recompile / redeploy cycles)
@@ -208,6 +286,13 @@ void free_owned_packed_weight(const bfloat16_t *packed);
 /// After return the cache is empty and future calls to
 /// `get_or_pack_weight_bf16()` pay the repack cost on first miss.
 void clear_custom_kernel_pack_cache();
+
+/// Release every cached packed INT8 weight and reset the cache to
+/// empty.  Mirror of `clear_custom_kernel_pack_cache()` for the
+/// disjoint INT8 LRU singleton.  See the warning above — same
+/// quiescence contract applies (no in-flight INT8 CK dispatch on
+/// any thread).
+void clear_custom_kernel_pack_cache_int8();
 
 } // namespace custom_kernel
 } // namespace matmul

@@ -38,10 +38,13 @@
 ///      only inner kernel this module knows about today; oneDNN /
 ///      libxsmm / native are no-ops, preserving "old functionality"
 ///      for those backends.
-///   4. ALGO 3 additionally warms the BF16 custom-kernel pack cache
-///      when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and the dtype
-///      triple is BF16/BF16/BF16 — flat_n_tile picks between custom
-///      and AOCL per call, so we warm both caches.
+///   4. ALGO 3 additionally warms the custom-kernel pack cache when
+///      `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and the call is CK-
+///      eligible — BF16/BF16/BF16 (bf16 pack family) or DQ-INT8
+///      bf16:s8:bf16 with `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=1`
+///      (int8 pack family).
+///      flat_n_tile picks between custom and AOCL per call, so we
+///      warm both caches.
 ///
 /// Uniform-eager semantic (PR change-log):
 ///
@@ -233,6 +236,25 @@ struct PrepackParams {
   // runtime never reads.  Default `none` is the safe no-bias case.
   data_type_t bias_dtype = data_type_t::none;
 
+  // DQ-INT8 discriminators — mirror of the runtime
+  // `prepare_for_call` parameters (custom_kernel/dispatch.{hpp,cpp}).
+  // Both default to "off / none" so legacy callers and bf16 dispatch
+  // paths see no behaviour change.
+  //
+  //   * `dynamic_quant` — true iff the call is DQ-INT8 (per-token
+  //     reorder-quantises bf16 src to s8/u8 at runtime).
+  //   * `compute_dtype` — `s8` for symmetric (no src_zp), `u8` for
+  //     asymmetric (with src_zp); ignored when
+  //     `dynamic_quant == false`.
+  //
+  // Folded into the fingerprint by `prepack.cpp::fingerprint` so a
+  // bf16-only warmed config does not alias a DQ-INT8 one at the
+  // same `(weight, K, N, scheduling_algo)`.  Read by
+  // `ck_eligible_bf16` / `ck_eligible_int8` to decide which family
+  // (if any) is engaged.
+  bool        dynamic_quant = false;
+  data_type_t compute_dtype = data_type_t::none;
+
   // Per-call OMP team size — taken straight from the dispatcher's
   // entry-API `num_threads` argument.  Only consumed by
   // `prepack_for_algo_3` to compute
@@ -315,7 +337,15 @@ inline PrepackParams build_prepack_params(
     // the corresponding checks — same as pre-PR behaviour.
     const std::vector<bool>         *transA = nullptr,
     const std::vector<float>        *alpha  = nullptr,
-    const std::vector<float>        *beta   = nullptr) {
+    const std::vector<float>        *beta   = nullptr,
+    // DQ-INT8 discriminators — default off / none preserves the bf16
+    // contract for every caller that hasn't been ported.  Caller
+    // typically reads them from `params[0].dynamic_quant` and
+    // `params[0].quant_params.src_scale` granularity (compute=s8 vs
+    // u8 follows the src_zp presence on the runtime side and the
+    // wei dtype on the warm side).
+    bool                             dynamic_quant = false,
+    data_type_t                      compute_dtype = data_type_t::none) {
   PrepackParams p;
   p.weight           = &weight;
   p.K                = &K;
@@ -388,6 +418,50 @@ inline PrepackParams build_prepack_params(
   p.nr_align         = nr_align;
   p.act              = act;
   p.act_dtype        = act_dtype;
+
+  // DQ-INT8 discriminators (Gap A — int8/bf16 cross-warm parity).
+  //
+  // Derive `dynamic_quant` + `compute_dtype` from the per-call
+  // `params[0]` whenever a params vector is present.  Doing it HERE
+  // means EVERY ALGO entry point (1/2/4/5 as well as 3) reaches
+  // `ck_eligible_int8` and cross-warms the int8 CK pack family the
+  // same way bf16 does — without each call site having to forward the
+  // flags.  This guarantees the prompt-phase (ALGO 1/2) prepack
+  // fingerprint matches the decode (ALGO 3) fingerprint for the same
+  // DQ-INT8 model, so cross-warm actually hits.  The explicit trailing
+  // args remain a fallback for synthetic callers that pass an empty
+  // params vector.
+  //
+  // CRITICAL — sym/asym MUST be keyed off `params[0].dtypes.compute`
+  // (s8 vs u8), the EXACT field the runtime resolver reads
+  // (`flat_n_tile` `ck_compute_dtype`), for BOTH DQ-INT8 forms:
+  //   * runtime hoist  (`dynamic_quant=true`, src still bf16), and
+  //   * grouped prequant (`dynamic_quant=false`, src already s8).
+  // It must NOT be keyed off `src_zp.buff`: `src_zp` is an OUTPUT the
+  // hoist allocates, so at warm time (before the hoist runs) it is
+  // null even for an asym (compute=u8) call.  Keying on it here would
+  // fingerprint every asym call as sym, splitting it from the decode
+  // fingerprint and missing cross-warm (the same trap the runtime
+  // resolver's comment in `group_matmul_n_tile.cpp` documents).
+  if (!params.empty()) {
+    p.dynamic_quant = params[0].dynamic_quant;
+    const bool is_dq_int8 =
+        params[0].dynamic_quant
+        || (params[0].dtypes.wei == data_type_t::s8
+            && (params[0].dtypes.compute == data_type_t::s8
+                || params[0].dtypes.compute == data_type_t::u8));
+    // DQ-INT8 (either form): carry the runtime compute dtype so the
+    // fingerprint marks it int8 (not bf16) and `ck_eligible_int8` /
+    // `int8_aocl_warm_candidate` recognise it.  Plain bf16 (or a
+    // non-DQ s8 combo we don't warm) forces `none` so a stale trailing
+    // `compute_dtype` can't skew the fingerprint and split the bf16
+    // cache.
+    p.compute_dtype = is_dq_int8 ? params[0].dtypes.compute
+                                 : data_type_t::none;
+  } else {
+    p.dynamic_quant = dynamic_quant;
+    p.compute_dtype = compute_dtype;
+  }
   return p;
 }
 
@@ -498,10 +572,27 @@ void clear_fingerprint_cache_for_test();
 ///                            ALGO 3 + DLP decode path (per-tile cache
 ///                            with nr_align=1).
 enum class CrossWarmRegime {
-  none               = 0,
-  aocl_full_weight   = 1,
-  custom_kernel_pack = 2,
-  aocl_per_tile      = 3,
+  none                         = 0,
+  aocl_full_weight             = 1,
+  custom_kernel_pack           = 2,
+  aocl_per_tile                = 3,
+  /// DQ-INT8 sibling of `aocl_full_weight`.  Fired from the ALGO 3
+  /// cross-warm when the call's `ck_eligible_int8(p)` holds: the
+  /// upcoming ALGO 1 prompt path under DQ-INT8 uses the AOCL
+  /// `s8s8s32os32_sym_quant` reorder cache (a distinct LRU from the
+  /// bf16 AOCL cache used by `aocl_full_weight`).  This regime now
+  /// EAGERLY warms that sym-quant LRU via `warm_aocl_sym_quant`
+  /// (key byte-identical to the runtime per-token symmetric shape),
+  /// so the first post-decode prompt call hits the cache instead of
+  /// paying the lazy reorder.
+  aocl_full_weight_sym_quant   = 4,
+  /// DQ-INT8 sibling of `aocl_per_tile`.  Fired when an int8 call runs
+  /// with the custom kernel OFF / CK-ineligible: the upcoming ALGO 3
+  /// decode falls back to the AOCL DLP `s8s8s32os32_sym_quant` reorder
+  /// per N-tile, so this warms the per-tile sym-quant LRU (key
+  /// byte-identical to the runtime sliced per-token symmetric shape)
+  /// via `warm_aocl_n_tile_sym_quant`.
+  aocl_per_tile_sym_quant      = 5,
 };
 
 namespace test_api {

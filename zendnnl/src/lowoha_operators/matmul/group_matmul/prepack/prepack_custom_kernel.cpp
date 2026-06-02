@@ -83,10 +83,27 @@ status_t warm_pack_all_custom_kernel_experts(
     const std::vector<bool>         &is_weights_const,
     int                              total_count,
     PackProbeStats                  &stats,
-    bool                             interleave_split_halves) {
+    bool                             interleave_split_halves,
+    WarmDtypeFamily                  dtype_family) {
 
-  if (!ck::dispatch_supported() || total_count <= 0)
+  if (total_count <= 0)
     return status_t::success;
+  // Per-family ISA gate — mirrors the split gate in
+  // `custom_kernel/dispatch.cpp::prepare_for_call`.  bf16 pack warming
+  // needs AVX-512 BF16 (VDPBF16PS); the DQ-INT8 family needs AVX-512
+  // VNNI (VPDPBUSD).  On Zen 4/5 VNNI is a superset of BF16, but on
+  // broader x86 (Cascade Lake / Ice Lake) VNNI exists WITHOUT BF16, so
+  // gating the int8 warm on `dispatch_supported()` (BF16) would make
+  // the int8 fast path unreachable on a host that can actually run it.
+  // Refuse the whole warm only when the family's own ISA is absent —
+  // warming an arena the runtime cannot consume is pure waste, and the
+  // runtime would refuse the matching call identically.
+  if (dtype_family == WarmDtypeFamily::kINT8) {
+    if (!ck::avx512vnni_available())
+      return status_t::success;
+  } else if (!ck::dispatch_supported()) {  // bf16 family needs AVX-512 BF16
+    return status_t::success;
+  }
 
   // ── Production-cache gate ────────────────────────────────────────
   // Mirrors the AOCL DLP warmer's entry gate
@@ -170,13 +187,32 @@ status_t warm_pack_all_custom_kernel_experts(
       continue;
     }
 
+    // Dtype-switch — bf16 and int8 packs share the identical
+    // contract (same `(weight, K, N, ldb, pack_nr, transB,
+    // interleave_split_halves)` interface), so the warm loop is
+    // straight-line except for which pack function to call.  The
+    // pack functions populate disjoint LRU singletons keyed by
+    // disjoint cache-key markers (see pack.cpp's
+    // `kCustomKernelAlgoMarker` vs `kCustomKernelInt8Marker`); a
+    // process that warms both families on the same model pays one
+    // warm per family with no alias risk.
     bool was_hit = false;
-    const bfloat16_t *packed_ignored = nullptr;
-    status_t pst = ck::get_or_pack_weight_bf16(
-        static_cast<const bfloat16_t *>(weight[i]),
-        K[i], N[i], ldb[i], pack_nr, transB[i],
-        /*interleave_split_halves=*/interleave_split_halves,
-        &packed_ignored, &was_hit);
+    status_t pst = status_t::success;
+    if (dtype_family == WarmDtypeFamily::kINT8) {
+      const int8_t *packed_ignored = nullptr;
+      pst = ck::get_or_pack_weight_int8(
+          static_cast<const int8_t *>(weight[i]),
+          K[i], N[i], ldb[i], pack_nr, transB[i],
+          /*interleave_split_halves=*/interleave_split_halves,
+          &packed_ignored, &was_hit);
+    } else {
+      const bfloat16_t *packed_ignored = nullptr;
+      pst = ck::get_or_pack_weight_bf16(
+          static_cast<const bfloat16_t *>(weight[i]),
+          K[i], N[i], ldb[i], pack_nr, transB[i],
+          /*interleave_split_halves=*/interleave_split_halves,
+          &packed_ignored, &was_hit);
+    }
 
     if (pst == status_t::success) {
       ++stats.packed_ok;

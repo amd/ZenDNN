@@ -409,6 +409,232 @@ TEST(CkPrepareForCallProperties, SiluGeluAcceptedNoBias) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// [Property] DQ-INT8 prepare_for_call — the int8 variants are
+// accepted through `prepare_for_call` exactly when their (src, wei,
+// dst, dynamic_quant, compute_dtype) tuple matches the int8 truth
+// table in `resolve_variant`.  These tests run only on hosts where
+// AVX-512 VNNI is available (the dispatcher refuses the int8 family
+// at its ISA gate otherwise — the BF16-only ISA gate is not enough).
+//
+// Coverage:
+//   * Symmetric (`compute=s8`)   + bf16 dst + act=none → accept.
+//   * Asymmetric (`compute=u8`)  + bf16 dst + act=none → accept.
+//   * Each int8 variant ×
+//       (silu_and_mul, gelu_and_mul, swiglu_oai_mul) → accept.
+//   * `wei=s8` without `dynamic_quant=true`           → refuse
+//     (the static-quant path is not served by the CK).
+//   * `wei=s8` + `dynamic_quant=true` + `compute=bf16`→ refuse
+//     (compute_dtype must be s8 or u8).
+// ──────────────────────────────────────────────────────────────────
+TEST(CkPrepareForCallInt8, AcceptsSymmetricBaseline) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = baseline("int8_sym_baseline");
+  c.src_dt        = data_type_t::bf16;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = true;
+  c.compute_dt    = data_type_t::s8;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+  EXPECT_TRUE(kctx.enabled);
+  EXPECT_EQ(kctx.variant, ck::KernelVariant::kS8_S8_BF16_SYM);
+}
+
+TEST(CkPrepareForCallInt8, AcceptsGroupedPreQuantS8Sym) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  // group_dynamic_quant pre-pass form reaching prepare_for_call: src is
+  // ALREADY s8 and dynamic_quant has been CLEARED.  prepare_for_call
+  // must still engage the int8 CK (the production decode default path).
+  auto c = baseline("int8_grouped_s8_sym");
+  c.src_dt        = data_type_t::s8;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = false;
+  c.compute_dt    = data_type_t::s8;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+  EXPECT_TRUE(kctx.enabled);
+  EXPECT_EQ(kctx.variant, ck::KernelVariant::kS8_S8_BF16_SYM);
+}
+
+TEST(CkPrepareForCallInt8, AcceptsGroupedPreQuantS8Asym) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = baseline("int8_grouped_s8_asym");
+  c.src_dt        = data_type_t::s8;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = false;
+  c.compute_dt    = data_type_t::u8;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+  EXPECT_TRUE(kctx.enabled);
+  EXPECT_EQ(kctx.variant, ck::KernelVariant::kU8_S8_BF16_ASYM);
+}
+
+TEST(CkPrepareForCallInt8, AcceptsAsymmetricBaseline) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = baseline("int8_asym_baseline");
+  c.src_dt        = data_type_t::bf16;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = true;
+  c.compute_dt    = data_type_t::u8;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+  EXPECT_TRUE(kctx.enabled);
+  EXPECT_EQ(kctx.variant, ck::KernelVariant::kU8_S8_BF16_ASYM);
+}
+
+TEST(CkPrepareForCallInt8, AcceptsAllGatedActsSymmetric) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
+                   grp_matmul_gated_act_t::gelu_and_mul,
+                   grp_matmul_gated_act_t::swiglu_oai_mul}) {
+    auto c = baseline("int8_sym_act");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::bf16;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::s8;
+    c.act           = act;
+    // No bias — gated-act + int8 + bias has the same restriction as
+    // the BF16 family today; the dispatcher refuses cleanly.
+    c.bias_dt       = data_type_t::none;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success)
+        << "DQ-INT8 sym + gated activation must be accepted";
+    EXPECT_TRUE(kctx.enabled);
+    EXPECT_EQ(kctx.variant, ck::KernelVariant::kS8_S8_BF16_SYM);
+  }
+}
+
+TEST(CkPrepareForCallInt8, AcceptsAllGatedActsAsymmetric) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  for (auto act : {grp_matmul_gated_act_t::silu_and_mul,
+                   grp_matmul_gated_act_t::gelu_and_mul,
+                   grp_matmul_gated_act_t::swiglu_oai_mul}) {
+    auto c = baseline("int8_asym_act");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::bf16;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::u8;
+    c.act           = act;
+    c.bias_dt       = data_type_t::none;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success)
+        << "DQ-INT8 asym + gated activation must be accepted";
+    EXPECT_TRUE(kctx.enabled);
+    EXPECT_EQ(kctx.variant, ck::KernelVariant::kU8_S8_BF16_ASYM);
+  }
+}
+
+TEST(CkPrepareForCallInt8, RefusesStaticQuantS8) {
+  // Intentionally NOT ISA-gated: this is a refusal test.  The combo
+  // resolves to kUnsupported before any per-variant ISA gate, and the
+  // run-once invariant only refuses (still status::failure) when NEITHER
+  // AVX-512 BF16 nor VNNI is present — so the expected failure holds on
+  // every host, including non-AVX512 ones.  Keeping it unconditional
+  // exercises the refusal across all CPU configurations.
+  auto c = baseline("int8_no_dq_refused", /*expect_success=*/false);
+  c.src_dt        = data_type_t::bf16;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = false;
+  c.compute_dt    = data_type_t::none;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8, RefusesInvalidComputeDtype) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  for (auto bad_compute : {data_type_t::bf16, data_type_t::f32,
+                           data_type_t::s32, data_type_t::s4}) {
+    auto c = baseline("int8_bad_compute", /*expect_success=*/false);
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::bf16;
+    c.dynamic_quant = true;
+    c.compute_dt    = bad_compute;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure)
+        << "compute_dtype=" << ck_test::dt_name(bad_compute)
+        << " must be refused by prepare_for_call";
+    EXPECT_FALSE(kctx.enabled);
+  }
+}
+
+TEST(CkPrepareForCallInt8, ResolvedComputeIntFlagMatchesVariant) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  // Symmetric path → compute_int = kS8_Sym.
+  {
+    auto c = baseline("int8_compute_int_sym");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::bf16;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::s8;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+    EXPECT_EQ(kctx.compute_int, ck::IntCompute::kS8_Sym);
+  }
+  // Asymmetric path → compute_int = kU8_Asym.
+  {
+    auto c = baseline("int8_compute_int_asym");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::bf16;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::u8;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+    EXPECT_EQ(kctx.compute_int, ck::IntCompute::kU8_Asym);
+  }
+  // F32-dst asymmetric path must ALSO resolve compute_int = kU8_Asym
+  // (regression guard for the bug where only the bf16-dst asym variant
+  // was mapped, so f32-dst asym silently selected the sym microkernels
+  // and ignored src_zp).
+  {
+    auto c = baseline("int8_compute_int_f32_asym");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::f32;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::u8;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+    EXPECT_EQ(kctx.variant, ck::KernelVariant::kU8_S8_F32_ASYM);
+    EXPECT_EQ(kctx.compute_int, ck::IntCompute::kU8_Asym);
+  }
+  // F32-dst symmetric → kS8_Sym.
+  {
+    auto c = baseline("int8_compute_int_f32_sym");
+    c.src_dt        = data_type_t::bf16;
+    c.wei_dt        = data_type_t::s8;
+    c.dst_dt        = data_type_t::f32;
+    c.dynamic_quant = true;
+    c.compute_dt    = data_type_t::s8;
+    ck_test::PrepCallStorage storage;
+    ck::CallContext kctx;
+    ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+    EXPECT_EQ(kctx.variant, ck::KernelVariant::kS8_S8_F32_SYM);
+    EXPECT_EQ(kctx.compute_int, ck::IntCompute::kS8_Sym);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
 // [Property] On a successful call, the resolved `kctx.variant` matches
 // what `resolve_variant()` returns for the same (src, wei, dst).  This
 // keeps the per-call gate's behaviour aligned with the routing-table
@@ -427,6 +653,123 @@ TEST(CkPrepareForCallProperties, VariantFieldMatchesResolveVariant) {
     EXPECT_EQ(kctx.variant,
               ck::resolve_variant(c.src_dt, c.wei_dt, c.dst_dt));
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// C.3 — DQ-INT8 refusal tests.  Hits seven gates that the existing
+// int8 acceptance tests do not exercise: transA, alpha, beta, ldb
+// minimum, N-not-multiple-of-pack_nr, non-const weight, null weight
+// in an active expert.  Every cell pins the expected refusal so a
+// future relaxation (e.g. async-prepack accepting non-const) gets
+// caught instead of silently routing through.
+// ──────────────────────────────────────────────────────────────────
+namespace {
+
+inline ck_test::PrepCallCase int8_baseline(const std::string &label) {
+  ck_test::PrepCallCase c;
+  c.label         = label;
+  c.src_dt        = data_type_t::bf16;
+  c.wei_dt        = data_type_t::s8;
+  c.dst_dt        = data_type_t::bf16;
+  c.dynamic_quant = true;
+  c.compute_dt    = data_type_t::s8;
+  c.M             = 16;
+  c.K             = 64;
+  c.N             = 256;     // multiple of pack_nr=32 AND 64
+  c.alpha         = 1.0f;
+  c.beta          = 0.0f;
+  return c;
+}
+
+}  // namespace
+
+TEST(CkPrepareForCallInt8Refusal, RefusesTransA) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_transA_refused");
+  c.transA = true;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesAlphaNotOne) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_alpha_refused");
+  c.alpha = 2.0f;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesBetaNotZero) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_beta_refused");
+  c.beta = 1.0f;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesLdbBelowMinimum) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_ldb_refused");
+  // For transB=false the minimum row stride is N (=256).  Setting
+  // ldb=128 forces the dispatcher's min-row-stride gate to fire.
+  c.transB       = false;
+  c.ldb_override = c.N / 2;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesNNotMultipleOfPackNR) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_N_not_pack_aligned_refused");
+  // pack_nr is 32 or 64; N=200 is divisible by neither.
+  c.N = 200;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesNonConstWeight) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_nonconst_weight_refused");
+  c.is_wc = false;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesNullWeightInActiveExpert) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  auto c = int8_baseline("int8_null_weight_refused");
+  c.num_ops_override   = 2;
+  c.null_second_weight = true;
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
+}
+
+TEST(CkPrepareForCallInt8Refusal, RefusesKNotMultipleOfFour) {
+  CK_SKIP_IF_NO_INT8_ISA();
+  // The int8 microkernel reads src in 4-byte K-quad broadcasts; a K
+  // that is not a multiple of 4 would over-read the hoisted src row,
+  // so the CK path must refuse (and the call falls back to AOCL DLP).
+  // bf16 (K-pair) has no such constraint.
+  auto c = int8_baseline("int8_K_not_mult4_refused");
+  c.K = 2882;  // not divisible by 4 (kVNNIInt8Quad)
+  ck_test::PrepCallStorage storage;
+  ck::CallContext kctx;
+  EXPECT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::failure);
+  EXPECT_FALSE(kctx.enabled);
 }
 
 }  // namespace

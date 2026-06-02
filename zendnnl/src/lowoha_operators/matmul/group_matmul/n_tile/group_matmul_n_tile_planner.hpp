@@ -158,6 +158,15 @@ using zendnnl::ops::matmul_algo_t;
 /// only with a measured perf justification.
 inline constexpr int kDecodeNTile = 256;
 
+/// DQ-INT8 sibling of `kDecodeNTile`.  Today set equal to the bf16
+/// constant so the dtype-aware split is a structural no-op — final
+/// values are baked from the D.1 tuning sweep
+/// (`scripts/int8_ntile_tune.sh`) once a workload-class measurement
+/// is available.  Keep this constant near `kDecodeNTile` so a future
+/// change that retunes either family can flip both in one place if
+/// the measurement says so.
+inline constexpr int kDecodeNTileInt8 = 256;
+
 /// Maximum number of experts the ALGO 3 (N-tile) planner can
 /// represent.  Mirrored on `GroupNTilePlan::kMaxExperts` so the
 /// planner's stack-allocated fixed-size arrays (`expert_order`,
@@ -283,6 +292,12 @@ struct GroupNTileTopology {
                          // (round batch sizing under the L3 budget)
                          // don't each re-derive it from the three
                          // inputs.
+  bool   is_int8;        // true when the call resolved a DQ-INT8 CK
+                         // variant (dynamic_quant + wei=s8).  Drives
+                         // the planner's variant-aware per-thread N
+                         // floor selection (kDecodeNTileInt8 /
+                         // kMinNTileInt8 via *_for_variant helpers).
+                         // bf16 / static / WOQ paths leave it false.
 };
 
 // =====================================================================

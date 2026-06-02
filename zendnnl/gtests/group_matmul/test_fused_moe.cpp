@@ -2822,6 +2822,133 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
   }
 }
 
+// Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ=1, the production default —
+// group_dynamic_quant converts src to s8 and engages the grouped-s8 CK)
+// must produce the SAME fused-MoE output as the legacy runtime-hoist
+// path (ENABLE_GROUP_DQ=0, per-expert reorder inside execute_expert_slice).
+// This pins the grouped-s8 e2e path against its predecessor end-to-end.
+TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDqVsRuntimeHoistParity) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+  // DQ-INT8 CK only needs AVX-512 VNNI (the bf16-dst store uses a manual
+  // f32->bf16 round, not vcvtneps2bf16), so gate on VNNI — not BF16 —
+  // to keep the int8 path covered on VNNI-only hosts.
+  if (!custom_kernel::avx512vnni_available()) {
+    GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the DQ-INT8 "
+                    "custom-kernel path.";
+  }
+
+  constexpr int dim = 32, H = 32, M = 32, num_ops = 4;
+  constexpr int N_gate_up = 2 * dim, K_in = H, K_down = dim;
+  constexpr bool is_bf16 = true;
+  const auto act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+  AlgoEnvGuard algo_guard(3);  // decode N-tile path where grouped-s8 engages
+
+  tensor_factory_t factory{};
+  std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    src_scale_t[i] = factory.zero_tensor({M, 1}, data_type_t::f32);
+    src_t[i] = factory.uniform_dist_tensor({M, K_in}, data_type_t::bf16,
+                                           2.0, false, src_scale_t[i],
+                                           tensor_t{});
+  }
+  std::vector<tensor_t> w1_s8_t(num_ops), w1_scale_t(num_ops), w1_zp_t(num_ops);
+  std::vector<tensor_t> w2_s8_t(num_ops), down_scale_t(num_ops), down_zp_t(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    auto w1_ref = factory.uniform_dist_tensor({K_in, N_gate_up},
+                                              data_type_t::bf16, 2.0);
+    ASSERT_EQ(quant_params_compute(factory, w1_ref, data_type_t::bf16,
+                                   data_type_t::s8, {1, N_gate_up},
+                                   data_type_t::f32, w1_scale_t[i],
+                                   w1_zp_t[i], &w1_s8_t[i]),
+              status_t::success);
+    auto w2_ref = factory.uniform_dist_tensor({K_down, H},
+                                              data_type_t::bf16, 2.0);
+    ASSERT_EQ(quant_params_compute(factory, w2_ref, data_type_t::bf16,
+                                   data_type_t::s8, {1, H},
+                                   data_type_t::f32, down_scale_t[i],
+                                   down_zp_t[i], &w2_s8_t[i]),
+              status_t::success);
+  }
+  std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    srcs[i] = src_t[i].get_raw_handle_unsafe();
+    wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+    wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+  }
+
+  TypedBuffers d2_groupdq, d2_hoist, d1_unused;
+  d2_groupdq.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+  d2_hoist  .alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+  d1_unused .alloc(num_ops, static_cast<size_t>(M) * N_gate_up, is_bf16);
+  auto d1_unused_p = d1_unused.ptrs(is_bf16);
+  std::vector<const void *> no_bias(num_ops, nullptr);
+
+  auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+  gv_op1.is_wc.assign(num_ops, true);
+
+  auto build_p = [&](const tensor_t &s, const tensor_t &w) {
+    auto p = make_uniform_params(1, data_type_t::bf16)[0];
+    p.dtypes.src = data_type_t::bf16;
+    p.dtypes.wei = data_type_t::s8;
+    p.dtypes.dst = data_type_t::bf16;
+    p.dtypes.compute = data_type_t::s8;
+    p.dynamic_quant = true;
+    copy_attached_scale(s, p.quant_params.src_scale);
+    copy_attached_scale(w, p.quant_params.wei_scale);
+    copy_attached_zp(w, p.quant_params.wei_zp);
+    return p;
+  };
+
+  auto run_fused = [&](const std::vector<void *> &dst_down_p) {
+    grp_matmul_gated_act_params act{};
+    act.act = act_type;
+    auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+    fused.dst_down = dst_down_p;
+    fused.ldc_down = std::vector<int>(num_ops, H);
+    fused.down_scale.resize(num_ops);
+    fused.down_zp.resize(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+      copy_attached_scale(w2_s8_t[i], fused.down_scale[i]);
+      copy_attached_zp(w2_s8_t[i], fused.down_zp[i]);
+    }
+    std::vector<matmul_params> p(num_ops);
+    for (int i = 0; i < num_ops; ++i) p[i] = build_p(src_t[i], w1_s8_t[i]);
+    return group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                               gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha,
+                               srcs, gv_op1.lda, wei1_p, gv_op1.ldb, no_bias,
+                               gv_op1.beta, d1_unused_p, gv_op1.ldc,
+                               gv_op1.is_wc, p, nullptr, &act, &fused);
+  };
+
+  // Path A: grouped pre-quant (production default).
+  {
+    EnvVarGuard group_dq_on("ZENDNNL_ENABLE_GROUP_DQ", "1");
+    reset_grp_matmul_caches();
+    ASSERT_EQ(run_fused(d2_groupdq.ptrs(is_bf16)), status_t::success)
+        << "fused with ENABLE_GROUP_DQ=1";
+  }
+  // Path B: legacy per-expert runtime hoist.
+  {
+    EnvVarGuard group_dq_off("ZENDNNL_ENABLE_GROUP_DQ", "0");
+    reset_grp_matmul_caches();
+    ASSERT_EQ(run_fused(d2_hoist.ptrs(is_bf16)), status_t::success)
+        << "fused with ENABLE_GROUP_DQ=0";
+  }
+
+  // Both paths quantize the same bf16 src per-token to s8; outputs must
+  // match within the fused bf16 tolerance.
+  double sum = 0.0;
+  for (int e = 0; e < num_ops; ++e)
+    for (size_t k = 0; k < d2_groupdq.bf16[e].size(); ++k)
+      sum += std::abs(static_cast<float>(d2_groupdq.bf16[e][k]));
+  ASSERT_GT(sum, 1e-3) << "grouped-DQ path produced all-zero output";
+  verify_per_expert_2d(d2_groupdq, H, d2_hoist, H, num_ops, M, H, is_bf16,
+                       tol_fused(is_bf16), "GroupDqVsRuntimeHoistParity");
+}
+
 // One INSTANTIATE_TEST_SUITE_P per fixture subclass, each binding
 // the scheme to its kernel-supported grid (`make_woq_quant_params`
 // covers all four M values; `make_dyn_int8_quant_params` drops

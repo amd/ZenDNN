@@ -69,6 +69,23 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
     }                                                                  \
   } while (0)
 
+// DQ-INT8 ISA gate — needed for tests that exercise the int8 variant
+// resolution through `prepare_for_call`.  The int8 microkernel uses
+// VPDPBUSD (AVX-512 VNNI), which on Zen 4+ is a strict superset of
+// AVX-512-BF16 but on broader x86 silicon is an independent feature
+// flag.  Tests that probe the int8 path call this macro instead of
+// (or in addition to) `CK_SKIP_IF_NO_BF16_ISA`.
+#define CK_SKIP_IF_NO_INT8_ISA()                                       \
+  do {                                                                 \
+    if (!::ck_test::ck::avx512vnni_available()) {                      \
+      GTEST_SKIP()                                                     \
+          << "AVX-512 VNNI not available on this host; the DQ-INT8 "   \
+             "custom kernel cannot run, so any per-tile or "           \
+             "prepare_for_call probe of the int8 variants would "      \
+             "refuse cleanly at the ISA gate";                         \
+    }                                                                  \
+  } while (0)
+
 // ──────────────────────────────────────────────────────────────────
 // PrepCallCase — minimal valid inputs for `prepare_for_call`.
 //
@@ -97,6 +114,26 @@ struct PrepCallCase {
   bool                  is_wc         = true;
   bool                  transA        = false;
   bool                  transB        = false;
+  // DQ-INT8 discriminators threaded through to `prepare_for_call`.
+  // Defaults keep the BF16-only behaviour (`dynamic_quant=false`,
+  // `compute_dtype=none`) so existing tests are unaffected; int8
+  // cases set these explicitly along with `wei_dt=s8`.
+  bool                  dynamic_quant = false;
+  data_type_t           compute_dt    = data_type_t::none;
+  // Linear-form modifiers and ldb override.  Defaults are the
+  // identity (alpha=1, beta=0) and `ldb=auto` so the existing
+  // positive cases are unchanged; the new int8 refusal cells set
+  // these explicitly to probe the corresponding gates.
+  float                 alpha         = 1.0f;
+  float                 beta          = 0.0f;
+  int                   ldb_override  = -1;          // -1 → auto from K/N
+  // When >0, override num_ops to drive multi-expert refusal cases
+  // (e.g. null weight in second expert, all-M-zero with N>1).
+  int                   num_ops_override = 1;
+  // When true, the second expert (only used if num_ops_override>=2)
+  // gets a null weight pointer.  Drives the
+  // `null_weight_in_active_expert` refusal.
+  bool                  null_second_weight = false;
   std::string           label;                       // human-readable
   bool                  expect_success = true;
 };
@@ -106,6 +143,7 @@ struct PrepCallCase {
 // each vector individually.
 struct PrepCallStorage {
   std::vector<bfloat16_t>     wei_storage;
+  std::vector<int8_t>         wei_int8_storage;
   std::vector<bfloat16_t>     bias_bf16_storage;
   std::vector<float>          bias_f32_storage;
 };
@@ -118,11 +156,20 @@ struct PrepCallStorage {
 inline status_t run_prepare(const PrepCallCase &c,
                             PrepCallStorage   &storage,
                             ck::CallContext   &kctx) {
-  // Weights are bf16 by contract on the supported variants; for
-  // negative dtype tests we still allocate as bf16 so the storage is
-  // valid (the dispatcher refuses before reading the bytes).
-  storage.wei_storage.assign(static_cast<size_t>(c.K) * c.N,
-                             bfloat16_t(0.05f));
+  // Pick the weight storage based on wei_dt — int8 cases need a
+  // K×N region of `int8_t`, every other case (including negative
+  // dtype probes) gets bf16 storage and the dispatcher refuses
+  // before reading the bytes.
+  const void *wei_ptr = nullptr;
+  if (c.wei_dt == data_type_t::s8) {
+    storage.wei_int8_storage.assign(
+        static_cast<size_t>(c.K) * c.N, static_cast<int8_t>(1));
+    wei_ptr = storage.wei_int8_storage.data();
+  } else {
+    storage.wei_storage.assign(
+        static_cast<size_t>(c.K) * c.N, bfloat16_t(0.05f));
+    wei_ptr = storage.wei_storage.data();
+  }
 
   void *bias_ptr = nullptr;
   if (c.bias_dt == data_type_t::bf16) {
@@ -133,16 +180,35 @@ inline status_t run_prepare(const PrepCallCase &c,
     bias_ptr = storage.bias_f32_storage.data();
   }
 
-  std::vector<bool>  transA_v{c.transA};
-  std::vector<bool>  transB_v{c.transB};
-  std::vector<int>   M_v{c.M};
-  std::vector<int>   N_v{c.N};
-  std::vector<int>   K_v{c.K};
-  std::vector<int>   ldb_v{c.transB ? c.K : c.N};
-  std::vector<float> alpha_v{1.0f};
-  std::vector<float> beta_v{0.0f};
-  std::vector<const void *> weight_v{storage.wei_storage.data()};
-  std::vector<bool>  is_wc_v{c.is_wc};
+  std::vector<bool>  transA_v;
+  std::vector<bool>  transB_v;
+  std::vector<int>   M_v;
+  std::vector<int>   N_v;
+  std::vector<int>   K_v;
+  std::vector<int>   ldb_v;
+  std::vector<float> alpha_v;
+  std::vector<float> beta_v;
+  std::vector<const void *> weight_v;
+  std::vector<bool>  is_wc_v;
+  const int auto_ldb = c.transB ? c.K : c.N;
+  const int eff_ldb  = (c.ldb_override > 0) ? c.ldb_override : auto_ldb;
+  const int num_ops  = (c.num_ops_override < 1) ? 1 : c.num_ops_override;
+  for (int i = 0; i < num_ops; ++i) {
+    transA_v.push_back(c.transA);
+    transB_v.push_back(c.transB);
+    M_v.push_back(c.M);
+    N_v.push_back(c.N);
+    K_v.push_back(c.K);
+    ldb_v.push_back(eff_ldb);
+    alpha_v.push_back(c.alpha);
+    beta_v.push_back(c.beta);
+    is_wc_v.push_back(c.is_wc);
+    if (i == 1 && c.null_second_weight) {
+      weight_v.push_back(nullptr);
+    } else {
+      weight_v.push_back(wei_ptr);
+    }
+  }
 
   (void)bias_ptr;  // bias buffer is per-tile; prepare_for_call only
                    // consults bias_dtype at the dispatcher level.
@@ -150,7 +216,8 @@ inline status_t run_prepare(const PrepCallCase &c,
   return ck::prepare_for_call(c.act, c.src_dt, c.wei_dt, c.dst_dt,
                               c.act_dt, c.bias_dt, transA_v, transB_v,
                               M_v, N_v, K_v, ldb_v, alpha_v, beta_v,
-                              weight_v, is_wc_v, kctx);
+                              weight_v, is_wc_v, kctx,
+                              c.dynamic_quant, c.compute_dt);
 }
 
 // Pretty-name a data_type_t for TestParam labels.  Must return a

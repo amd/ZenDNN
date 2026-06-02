@@ -413,6 +413,109 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranchSkippedOnNonBF16) {
 // per-expert clamp `min(stable, N[e]/nr_align)` collapses to a single
 // constant.
 
+// ── DQ-INT8 sym-quant AOCL DLP warmers (full-weight + per-tile) ──────
+// Direct unit tests for `warm_pack_all_aocl_dlp_experts_sym_quant` and
+// `warm_pack_all_aocl_dlp_experts_n_tile_sym_quant` — the int8 siblings
+// of the bf16 full-weight / per-tile warmers above.  s8 weights built
+// inline (make_harness is bf16-only).
+namespace {
+struct Int8WeightHarness {
+  std::vector<std::vector<int8_t>> banks;
+  std::vector<const void *> weight;
+  std::vector<int> K, N, ldb;
+  std::vector<bool> transB, is_weights_const;
+};
+inline Int8WeightHarness make_int8_weights(int E, int K_v, int N_v,
+                                           int8_t base) {
+  Int8WeightHarness h;
+  h.banks.resize(E);
+  h.weight.resize(E);
+  for (int e = 0; e < E; ++e) {
+    h.banks[e].assign(static_cast<size_t>(K_v) * N_v,
+                      static_cast<int8_t>(base + e));
+    h.weight[e] = h.banks[e].data();
+  }
+  h.K.assign(E, K_v);
+  h.N.assign(E, N_v);
+  h.ldb.assign(E, N_v);
+  h.transB.assign(E, false);
+  h.is_weights_const.assign(E, true);
+  return h;
+}
+}  // namespace
+
+TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileTotalAttemptedCount) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  reset_grp_matmul_caches();
+
+  // 4 experts, K=64, N=128, num_threads=64 -> stable=4, nr_align=1 ->
+  // n_thr_e=4 per expert -> 4 experts x 4 tiles = 16 attempts.  Same
+  // decomposition as the bf16 per-tile warmer, sym-quant reorder.
+  auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/7);
+  prepack::aocl_dlp::AoclDlpPackProbeStats st;
+  ASSERT_EQ(
+      prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+          h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+          /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
+          /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+      status_t::success);
+  EXPECT_EQ(st.total_attempted, 16);
+  EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
+}
+
+TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileSkipsNonS8) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  reset_grp_matmul_caches();
+  // wei_dtype=bf16 to the sym-quant warmer -> every reachable entry
+  // counted as skipped (the sym-quant reorder only serves s8).
+  auto h = make_int8_weights(/*E=*/3, /*K=*/64, /*N=*/128, /*base=*/3);
+  prepack::aocl_dlp::AoclDlpPackProbeStats st;
+  ASSERT_EQ(
+      prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+          h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+          /*total_count=*/3, /*wei_dtype=*/data_type_t::bf16,
+          /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+      status_t::success);
+  EXPECT_EQ(st.skipped_invalid, st.total_attempted);
+  EXPECT_EQ(st.packed_ok, 0);
+}
+
+TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileSkipsNonConstExperts) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  reset_grp_matmul_caches();
+  auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/2);
+  h.is_weights_const[1] = false;
+  h.is_weights_const[3] = false;
+  prepack::aocl_dlp::AoclDlpPackProbeStats st;
+  ASSERT_EQ(
+      prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+          h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+          /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
+          /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
+      status_t::success);
+  // Experts 1 + 3 (non-const) are skipped at the expert level (1 skip
+  // each); experts 0 + 2 contribute 4 tiles each.
+  EXPECT_EQ(st.skipped_invalid, 2);
+}
+
+TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantFullWeightPacks) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  reset_grp_matmul_caches();
+  auto h = make_int8_weights(/*E=*/4, /*K=*/64, /*N=*/128, /*base=*/9);
+  prepack::aocl_dlp::AoclDlpPackProbeStats st;
+  ASSERT_EQ(
+      prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(
+          h.weight, h.K, h.N, h.ldb, h.transB, h.is_weights_const,
+          /*total_count=*/4, /*wei_dtype=*/data_type_t::s8, st),
+      status_t::success);
+  EXPECT_EQ(st.total_attempted, 4);  // one full-weight reorder per expert
+  EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
+}
+
 TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileTotalAttemptedCount) {
   using namespace zendnnl::lowoha::matmul;
   namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
@@ -2449,6 +2552,117 @@ TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo3CrossWarmsRegime1) {
 // from the regime-1-only contribution of `N=4`.
 // ───────────────────────────────────────────────────────────────────────
 
+// ── Grouped-s8 (group_dynamic_quant) prepack integration ────────────
+// The production-default int8 form reaching prepack: src ALREADY s8,
+// dynamic_quant CLEARED, wei=s8, compute=s8.  Builds PrepackParams via
+// build_prepack_params (which must mark it int8 via compute_dtype) and
+// drives prepack_for_algo_3 / _1, asserting (a) D1 fix: the int8 CK
+// pack LRU is warmed (not bf16), and (b) the int8 sym-quant cross-warm
+// regimes fire.
+namespace {
+inline group_matmul_prepack::PrepackParams build_grouped_s8_pp(
+    const std::vector<const void *> &weight,
+    const std::vector<int> &K, const std::vector<int> &N,
+    const std::vector<int> &ldb, const std::vector<bool> &transB,
+    const std::vector<bool> &iwc, const std::vector<int> &M,
+    std::vector<matmul_params> &params,
+    const std::vector<bool> &transA, const std::vector<float> &alpha,
+    const std::vector<float> &beta, data_type_t compute, int nr_align) {
+  for (auto &p : params) {
+    p.dtypes.src     = data_type_t::s8;    // already quantized
+    p.dtypes.wei     = data_type_t::s8;
+    p.dtypes.dst     = data_type_t::bf16;
+    p.dtypes.compute = compute;
+    p.dynamic_quant  = false;              // group DQ cleared it
+  }
+  return group_matmul_prepack::build_prepack_params(
+      weight, K, N, ldb, transB, iwc, params, M,
+      /*custom_kernel_on=*/1, /*num_threads=*/64, nr_align,
+      grp_matmul_gated_act_t::none, data_type_t::bf16,
+      &transA, &alpha, &beta);
+}
+}  // namespace
+
+TEST_F(TestPrepackCrossWarmRegimes, GroupedS8Algo3WarmsInt8CkAndCrossWarmsSymQuant) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  // DQ-INT8 CK only needs AVX-512 VNNI (not BF16) — gate on VNNI so the
+  // int8 path stays covered on VNNI-only hosts.
+  if (!custom_kernel::avx512vnni_available()) {
+    GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the DQ-INT8 "
+                    "custom-kernel path.";
+  }
+  prepack::clear_fingerprint_cache_for_test();
+  reset_grp_matmul_caches();
+  prepack::test_api::clear_last_invocation_stats();
+  moe_test_utils::CustomKernelOverride     ck_on(true);
+  moe_test_utils::CustomKernelInt8Override int8_on(true);
+
+  constexpr int E = 4, K = 64, N = 128;
+  auto h = make_int8_weights(E, K, N, /*base=*/11);
+  std::vector<int> Ms(E, 16);
+  std::vector<bool> transA(E, false);
+  std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+  std::vector<matmul_params> params(E);
+  auto pp = build_grouped_s8_pp(h.weight, h.K, h.N, h.ldb, h.transB,
+                                h.is_weights_const, Ms, params, transA,
+                                alpha, beta, data_type_t::s8, /*nr_align=*/1);
+  ASSERT_EQ(pp.compute_dtype, data_type_t::s8)
+      << "build_prepack_params must mark grouped-s8 as int8 (compute=s8)";
+
+  prepack::prepack_for_algo_3(pp);
+  auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.scheduling_algo, 3);
+  // D1 fix: int8 CK pack warmed (family routed to int8 LRU, not bf16).
+  EXPECT_GT(stats.ck.cache_misses, 0)
+      << "grouped-s8 ALGO3 must warm the int8 CK pack (D1 regression "
+         "guard: warm_custom family must follow wei=s8, not dynamic_quant)";
+  // CK-on int8 ALGO3 cross-warms the upcoming ALGO1 prompt sym-quant LRU.
+  EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(
+                prepack::CrossWarmRegime::aocl_full_weight_sym_quant));
+}
+
+TEST_F(TestPrepackCrossWarmRegimes, GroupedS8Algo1CrossWarmsSymQuantPerTile) {
+  using namespace zendnnl::lowoha::matmul;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  // DQ-INT8 CK only needs AVX-512 VNNI (not BF16) — gate on VNNI so the
+  // int8 path stays covered on VNNI-only hosts.
+  if (!custom_kernel::avx512vnni_available()) {
+    GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the DQ-INT8 "
+                    "custom-kernel path.";
+  }
+  prepack::clear_fingerprint_cache_for_test();
+  reset_grp_matmul_caches();
+  prepack::test_api::clear_last_invocation_stats();
+  moe_test_utils::CustomKernelOverride     ck_on(true);
+  moe_test_utils::CustomKernelInt8Override int8_off(false);  // int8 CK OFF
+
+  constexpr int E = 4, K = 64, N = 128;
+  auto h = make_int8_weights(E, K, N, /*base=*/13);
+  std::vector<int> Ms(E, 16);
+  std::vector<bool> transA(E, false);
+  std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+  std::vector<matmul_params> params(E);
+  auto pp = build_grouped_s8_pp(h.weight, h.K, h.N, h.ldb, h.transB,
+                                h.is_weights_const, Ms, params, transA,
+                                alpha, beta, data_type_t::s8, /*nr_align=*/1);
+
+  // ALGO 1 (prompt) primary = sym-quant full-weight (M1); cross-warm of
+  // the upcoming ALGO 3 decode (CK int8 OFF -> AOCL DLP per-tile) =
+  // aocl_per_tile_sym_quant (M5).
+  prepack::prepack_for_algo_1(pp);
+  auto stats = prepack::test_api::get_last_invocation_stats();
+  ASSERT_TRUE(stats.valid);
+  EXPECT_EQ(stats.scheduling_algo, 1);
+  EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(
+                prepack::CrossWarmRegime::aocl_per_tile_sym_quant));
+  // No CK pack warmed (int8 sub-knob off).
+  EXPECT_EQ(stats.ck.cache_misses, 0);
+}
+
 TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOnAlgo3SkipsRegime2Warm) {
   using namespace zendnnl::lowoha::matmul;
   namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
@@ -3547,3 +3761,364 @@ TEST_F(TestPrepackBuildParamsContract, EmptyParamsFallsBackToMSize) {
   EXPECT_EQ(pp.num_ops_active, 5);
   EXPECT_EQ(pp.num_ops_total,  5);
 }
+
+// ===============================================================================
+// [Int8WarmDtypeFamily] PREPACK warmer dtype-family dispatch
+//
+// `warm_pack_all_custom_kernel_experts(..., dtype_family=kINT8)`
+// must route to `get_or_pack_weight_int8` (K/4 VNNI + compensation
+// row) and populate the int8 LRU singleton, NOT the bf16 LRU.
+// Tests:
+//   1. INT8 warm followed by INT8 probe sees `cache_hits == E`
+//      (the int8 LRU was populated and the probe hits it).
+//   2. INT8 warm followed by BF16 probe sees `cache_misses == E`
+//      (the bf16 LRU was NOT polluted — the families are disjoint).
+//   3. `clear_custom_kernel_pack_cache_int8()` evicts
+//      ONLY the int8 LRU; the bf16 LRU remains intact.
+// ===============================================================================
+namespace {
+namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+// Per-expert s8 weight buffers — unique pointers so the LRU key
+// (which is the raw pointer) sees one entry per expert.
+class TestPrepackInt8WarmDtypeFamily : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (!ck::avx512vnni_available()) {
+      GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    reset_grp_matmul_caches();
+  }
+};
+
+TEST_F(TestPrepackInt8WarmDtypeFamily, Int8WarmHitsInt8Probe) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  constexpr int E = 6;
+  constexpr int K_in = 64, N1 = 128;
+
+  // Allocate per-expert s8 weight buffers — unique pointers ensure
+  // each expert gets its own cache key.
+  std::vector<std::vector<int8_t>> wei_s8(E);
+  for (int e = 0; e < E; ++e) {
+    wei_s8[e].assign(static_cast<size_t>(K_in) * N1,
+                     static_cast<int8_t>((e * 7) % 127 - 64));
+  }
+  std::vector<const void *> wei_ptrs(E);
+  for (int e = 0; e < E; ++e) {
+    wei_ptrs[e] = wei_s8[e].data();
+  }
+
+  std::vector<int>  Ks(E, K_in);
+  std::vector<int>  Ns(E, N1);
+  std::vector<int>  ldbs(E, N1);
+  std::vector<bool> transBs(E, false);
+
+  prepack::custom_kernel::PackProbeStats warm_stats;
+  ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                wei_ptrs, Ks, Ns, ldbs, transBs,
+                /*is_weights_const=*/std::vector<bool>{},
+                /*total_count=*/E, warm_stats,
+                /*interleave_split_halves=*/false,
+                prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_EQ(warm_stats.cache_hits + warm_stats.cache_misses, E)
+      << "warm must visit every expert (or short-circuit cleanly)";
+
+  // Second probe at the same shape: every key should hit now.
+  prepack::custom_kernel::PackProbeStats probe_stats;
+  ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                wei_ptrs, Ks, Ns, ldbs, transBs,
+                /*is_weights_const=*/std::vector<bool>{},
+                /*total_count=*/E, probe_stats,
+                /*interleave_split_halves=*/false,
+                prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_EQ(probe_stats.cache_hits, E)
+      << "second int8 warm probe must hit every entry seeded by the "
+         "first pass — confirms `dtype_family=kINT8` writes the int8 "
+         "LRU singleton and reads it back on the next call";
+  EXPECT_EQ(probe_stats.cache_misses, 0);
+}
+
+TEST_F(TestPrepackInt8WarmDtypeFamily, Int8WarmDoesNotPolluteBf16Cache) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  constexpr int E = 4;
+  constexpr int K_in = 64, N1 = 128;
+
+  // s8 weights for the int8 warm.
+  std::vector<std::vector<int8_t>> wei_s8(E);
+  std::vector<const void *> wei_ptrs(E);
+  for (int e = 0; e < E; ++e) {
+    wei_s8[e].assign(static_cast<size_t>(K_in) * N1, static_cast<int8_t>(e));
+    wei_ptrs[e] = wei_s8[e].data();
+  }
+
+  std::vector<int>  Ks(E, K_in);
+  std::vector<int>  Ns(E, N1);
+  std::vector<int>  ldbs(E, N1);
+  std::vector<bool> transBs(E, false);
+
+  prepack::custom_kernel::PackProbeStats int8_stats;
+  ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                wei_ptrs, Ks, Ns, ldbs, transBs,
+                /*is_weights_const=*/std::vector<bool>{},
+                /*total_count=*/E, int8_stats,
+                /*interleave_split_halves=*/false,
+                prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            zendnnl::error_handling::status_t::success);
+
+  // Now probe the bf16 LRU for the SAME pointers + shapes.  Since
+  // the int8 warm wrote a disjoint singleton, the bf16 probe must
+  // miss every entry — populating bf16 entries as a side effect of
+  // the probe (warm-on-miss).  The key property tested is the FIRST
+  // bf16 probe's cache_misses count: it must equal E (no spurious
+  // hits from cross-family pollution).
+  prepack::custom_kernel::PackProbeStats bf16_stats;
+  ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                wei_ptrs, Ks, Ns, ldbs, transBs,
+                /*is_weights_const=*/std::vector<bool>{},
+                /*total_count=*/E, bf16_stats,
+                /*interleave_split_halves=*/false,
+                prepack::custom_kernel::WarmDtypeFamily::kBF16),
+            zendnnl::error_handling::status_t::success);
+  EXPECT_EQ(bf16_stats.cache_hits, 0)
+      << "bf16 warm following an int8 warm at the same (pointer, "
+         "K, N) MUST see zero hits — the two families have disjoint "
+         "LRU singletons and cross-family aliasing would silently "
+         "feed an int8 microkernel a bf16 pack (or vice-versa) at "
+         "runtime";
+  EXPECT_EQ(bf16_stats.cache_misses, E);
+}
+
+TEST_F(TestPrepackInt8WarmDtypeFamily, ClearInt8CacheDoesNotEvictBf16) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  constexpr int E = 3;
+  constexpr int K_in = 64, N1 = 64;
+
+  // Materialise both an int8 weight pool and a bf16 weight pool at
+  // disjoint pointers (so the LRU keys can't collide across
+  // families even by accident).
+  std::vector<std::vector<int8_t>>    wei_s8(E);
+  std::vector<std::vector<bfloat16_t>> wei_bf16(E);
+  std::vector<const void *> wei_ptrs_int8(E), wei_ptrs_bf16(E);
+  for (int e = 0; e < E; ++e) {
+    wei_s8[e].assign(static_cast<size_t>(K_in) * N1, static_cast<int8_t>(e));
+    wei_bf16[e].assign(static_cast<size_t>(K_in) * N1, bfloat16_t(0.01f * e));
+    wei_ptrs_int8[e] = wei_s8[e].data();
+    wei_ptrs_bf16[e] = wei_bf16[e].data();
+  }
+  std::vector<int>  Ks(E, K_in), Ns(E, N1), ldbs(E, N1);
+  std::vector<bool> transBs(E, false);
+
+  // Warm both families.
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_int8, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kINT8),
+              zendnnl::error_handling::status_t::success);
+  }
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_bf16, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kBF16),
+              zendnnl::error_handling::status_t::success);
+  }
+
+  // Clear ONLY the int8 LRU.
+  ck::clear_custom_kernel_pack_cache_int8();
+
+  // After clear: bf16 probe still hits, int8 probe misses.
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_bf16, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kBF16),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s.cache_hits, E)
+        << "bf16 entries must survive `clear_custom_kernel_pack_cache_int8` — "
+           "the per-family clear hooks must be disjoint, otherwise a "
+           "DQ-INT8 runtime config change would silently evict every "
+           "bf16 pack and force a re-warm storm";
+    EXPECT_EQ(s.cache_misses, 0);
+  }
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_int8, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kINT8),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s.cache_misses, E)
+        << "int8 entries must be evicted by `clear_custom_kernel_pack_cache_int8`";
+    EXPECT_EQ(s.cache_hits, 0);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// C.7 — fingerprint trio.  bf16, DQ-INT8 sym and DQ-INT8 asym must
+// produce three distinct fingerprints when running through
+// `prepack_for_algo_3`.  Otherwise a process that runs the families
+// in sequence would short-circuit on the second call's already-
+// seen fingerprint and leave the second family's cache cold.
+// We verify by:
+//   (1) clearing both fingerprint cache + custom-kernel cache,
+//   (2) running prepack with each tuple in turn,
+//   (3) probing each family's LRU and asserting every probe HITS
+//       (the cache for that family was indeed populated by the
+//       prepack pass — the fingerprint did not collapse onto a
+//       previously-seen value).
+// ──────────────────────────────────────────────────────────────────
+TEST_F(TestPrepackInt8WarmDtypeFamily, FingerprintTrioDistinct) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  prepack::clear_fingerprint_cache_for_test();
+  reset_grp_matmul_caches();
+
+  constexpr int E = 4;
+  constexpr int K_in = 64, N1 = 128;
+
+  std::vector<std::vector<bfloat16_t>> wei_bf16(E);
+  std::vector<const void *> wei_ptrs_bf16(E);
+  for (int e = 0; e < E; ++e) {
+    wei_bf16[e].assign(static_cast<size_t>(K_in) * N1,
+                       bfloat16_t(0.01f * (e + 1)));
+    wei_ptrs_bf16[e] = wei_bf16[e].data();
+  }
+  std::vector<std::vector<int8_t>> wei_s8(E);
+  std::vector<const void *> wei_ptrs_s8(E);
+  for (int e = 0; e < E; ++e) {
+    wei_s8[e].assign(static_cast<size_t>(K_in) * N1,
+                     static_cast<int8_t>((e + 1) * 7));
+    wei_ptrs_s8[e] = wei_s8[e].data();
+  }
+
+  std::vector<int>  Ks(E, K_in), Ns(E, N1), ldbs(E, N1), Ms(E, 16);
+  std::vector<bool> transBs(E, false), transAs(E, false);
+  std::vector<float> alphas(E, 1.0f), betas(E, 0.0f);
+  std::vector<bool> is_const(E, true);
+  std::vector<matmul_params> params(E);
+
+  auto make_params = [&](data_type_t wei_dt, bool dq, data_type_t cmp,
+                          const std::vector<const void *> &weights) {
+    for (auto &p : params) {
+      p.dtypes.src     = data_type_t::bf16;
+      p.dtypes.wei     = wei_dt;
+      p.dtypes.dst     = data_type_t::bf16;
+      p.dtypes.compute = cmp;
+      p.dynamic_quant  = dq;
+    }
+    return prepack::build_prepack_params(
+        weights, Ks, Ns, ldbs, transBs, is_const, params, Ms,
+        /*custom_kernel_env=*/1,
+        /*num_threads=*/4,
+        /*nr_align=*/1,
+        /*fused_act=*/grp_matmul_gated_act_t::none,
+        /*act_dtype=*/data_type_t::bf16,
+        /*transA=*/&transAs,
+        /*alpha=*/&alphas,
+        /*beta=*/&betas,
+        /*dynamic_quant=*/dq,
+        /*compute_dtype=*/cmp);
+  };
+
+  prepack::prepack_for_algo_3(make_params(
+      data_type_t::bf16, false, data_type_t::none, wei_ptrs_bf16));
+  prepack::prepack_for_algo_3(make_params(
+      data_type_t::s8, true, data_type_t::s8, wei_ptrs_s8));
+  prepack::prepack_for_algo_3(make_params(
+      data_type_t::s8, true, data_type_t::u8, wei_ptrs_s8));
+
+  // Probe the bf16 family — must hit (warmed by call #1).
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_bf16, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kBF16),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s.cache_hits, E)
+        << "bf16 family must have been warmed by the first prepack "
+           "pass (fingerprint distinct from int8)";
+  }
+  // Probe the int8 family — must hit (warmed by call #2 OR #3;
+  // both share the int8 LRU singleton, so a single probe suffices).
+  {
+    prepack::custom_kernel::PackProbeStats s;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs_s8, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s,
+                  /*interleave_split_halves=*/false,
+                  prepack::custom_kernel::WarmDtypeFamily::kINT8),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s.cache_hits, E)
+        << "int8 family must have been warmed by the int8 prepack "
+           "pass(es); if cache_hits=0 the fingerprint trio is "
+           "collapsing onto a single fingerprint";
+  }
+  prepack::clear_fingerprint_cache_for_test();
+}
+
+// ──────────────────────────────────────────────────────────────────
+// C.7 — All four activation flavours warm successfully.  At the
+// pack layer the activation reduces to a single bit
+// (`interleave_split_halves`): silu_and_mul + gelu_and_mul both
+// set the bit (and produce byte-identical packs per C.2 cell #5);
+// none + swiglu_oai_mul leave it false.  Verify both regimes warm
+// the int8 LRU correctly and that a follow-up probe hits every
+// entry.
+// ──────────────────────────────────────────────────────────────────
+TEST_F(TestPrepackInt8WarmDtypeFamily, WarmCoversAllFourActivations) {
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+  reset_grp_matmul_caches();
+
+  constexpr int E = 4;
+  constexpr int K_in = 64, N1 = 128;
+  std::vector<std::vector<int8_t>> wei_s8(E);
+  std::vector<const void *> wei_ptrs(E);
+  for (int e = 0; e < E; ++e) {
+    wei_s8[e].assign(static_cast<size_t>(K_in) * N1,
+                     static_cast<int8_t>((e * 5) - 4));
+    wei_ptrs[e] = wei_s8[e].data();
+  }
+  std::vector<int>  Ks(E, K_in), Ns(E, N1), ldbs(E, N1);
+  std::vector<bool> transBs(E, false);
+
+  for (bool interleave : {false, true}) {
+    ck::clear_custom_kernel_pack_cache_int8();
+    prepack::custom_kernel::PackProbeStats s_warm;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s_warm,
+                  /*interleave_split_halves=*/interleave,
+                  prepack::custom_kernel::WarmDtypeFamily::kINT8),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s_warm.cache_hits + s_warm.cache_misses, E);
+    prepack::custom_kernel::PackProbeStats s_probe;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                  wei_ptrs, Ks, Ns, ldbs, transBs,
+                  std::vector<bool>{}, E, s_probe,
+                  /*interleave_split_halves=*/interleave,
+                  prepack::custom_kernel::WarmDtypeFamily::kINT8),
+              zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(s_probe.cache_hits, E)
+        << "second probe at interleave=" << (interleave ? "true" : "false")
+        << " must hit every entry";
+    EXPECT_EQ(s_probe.cache_misses, 0);
+  }
+  ck::clear_custom_kernel_pack_cache_int8();
+}
+
+}  // namespace

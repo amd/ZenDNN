@@ -219,7 +219,10 @@ TEST(CkResolveVariantProperties, F16IsAlwaysUnsupportedToday) {
 }
 
 TEST(CkResolveVariantProperties, U8IsAlwaysUnsupportedToday) {
-  // U8 has no instantiated variant.
+  // U8 has no instantiated variant on the 3-arg (BF16-only) overload.
+  // The 5-arg `dynamic_quant=true, compute=u8` form is the DQ-INT8
+  // ASYM path; that one is tested separately in
+  // `CkResolveVariantInt8.AcceptsAsymmetric` below.
   for (auto dt1 : kAllDtypes) {
     for (auto dt2 : kAllDtypes) {
       EXPECT_EQ(ck::resolve_variant(data_type_t::u8, dt1, dt2),
@@ -230,6 +233,137 @@ TEST(CkResolveVariantProperties, U8IsAlwaysUnsupportedToday) {
                 ck::KernelVariant::kUnsupported);
     }
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// DQ-INT8 truth table — the 5-arg `resolve_variant` overload that
+// the int8 dispatcher consults.  Two positive rows + a sweep that
+// asserts everything else (including `dynamic_quant=true` with a
+// non-s8 wei or non-bf16 src/dst) resolves to `kUnsupported`.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkResolveVariantInt8, AcceptsSymmetric) {
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::bf16,
+                                /*dynamic_quant=*/true,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S8_BF16_SYM);
+}
+
+TEST(CkResolveVariantInt8, AcceptsAsymmetric) {
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::bf16,
+                                /*dynamic_quant=*/true,
+                                /*compute_dtype=*/data_type_t::u8),
+            ck::KernelVariant::kU8_S8_BF16_ASYM);
+}
+
+TEST(CkResolveVariantInt8, AcceptsF32Dst) {
+  // FP32 dst is a served int8 variant (ukernel_f32dst): src=bf16,
+  // wei=s8, dst=f32, dynamic_quant=true, compute=s8/u8.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::f32, /*dynamic_quant=*/true,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S8_F32_SYM);
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::f32, /*dynamic_quant=*/true,
+                                /*compute_dtype=*/data_type_t::u8),
+            ck::KernelVariant::kU8_S8_F32_ASYM);
+}
+
+TEST(CkResolveVariantInt8, AcceptsGroupedPreQuantS8SrcSym) {
+  // group_dynamic_quant pre-pass form: the src is ALREADY s8 and the
+  // dynamic_quant flag has been CLEARED.  resolve_variant accepts
+  // src==s8 directly (mirror of dispatch.cpp's grouped-s8 acceptance),
+  // independent of the dynamic_quant flag.  compute=s8 -> symmetric.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::bf16, /*dynamic_quant=*/false,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S8_BF16_SYM);
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::f32, /*dynamic_quant=*/false,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S8_F32_SYM);
+  // Also accepted when dynamic_quant happens to still be true (the
+  // discriminator is src==s8, not the flag).
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::bf16, /*dynamic_quant=*/true,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kS8_S8_BF16_SYM);
+}
+
+TEST(CkResolveVariantInt8, AcceptsGroupedPreQuantS8SrcAsym) {
+  // compute=u8 -> asymmetric, for both bf16 and f32 dst.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::bf16, /*dynamic_quant=*/false,
+                                /*compute_dtype=*/data_type_t::u8),
+            ck::KernelVariant::kU8_S8_BF16_ASYM);
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::f32, /*dynamic_quant=*/false,
+                                /*compute_dtype=*/data_type_t::u8),
+            ck::KernelVariant::kU8_S8_F32_ASYM);
+}
+
+TEST(CkResolveVariantInt8, GroupedPreQuantS8RequiresValidComputeAndShape) {
+  // s8 src still needs wei=s8, dst in {bf16,f32}, compute in {s8,u8}.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::bf16, false, data_type_t::none),
+            ck::KernelVariant::kUnsupported)
+      << "compute=none (no DQ-INT8 contract) must reject";
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::bf16,
+                                data_type_t::bf16, false, data_type_t::s8),
+            ck::KernelVariant::kUnsupported)
+      << "wei!=s8 must reject";
+  EXPECT_EQ(ck::resolve_variant(data_type_t::s8, data_type_t::s8,
+                                data_type_t::s32, false, data_type_t::s8),
+            ck::KernelVariant::kUnsupported)
+      << "dst outside {bf16,f32} must reject";
+}
+
+TEST(CkResolveVariantInt8, RejectsDynamicQuantWithoutInt8WeiPathway) {
+  // dynamic_quant=true is the trigger for the int8 path, but the
+  // routing still requires src=bf16, wei=s8, dst ∈ {bf16, f32}; any
+  // deviation must reject.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::f32, data_type_t::s8,
+                                data_type_t::bf16, true,
+                                data_type_t::s8),
+            ck::KernelVariant::kUnsupported)
+      << "non-bf16 src must not resolve to the int8 path";
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::bf16,
+                                data_type_t::bf16, true,
+                                data_type_t::s8),
+            ck::KernelVariant::kUnsupported)
+      << "non-s8 wei must not resolve to the int8 path";
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::s32, true,
+                                data_type_t::s8),
+            ck::KernelVariant::kUnsupported)
+      << "dst outside {bf16, f32} must not resolve to the int8 path";
+}
+
+TEST(CkResolveVariantInt8, RejectsUnknownComputeDtype) {
+  // compute_dtype must be s8 or u8; anything else (e.g. bf16, f32,
+  // s32) is a contract violation and must resolve to kUnsupported.
+  for (auto bad : {data_type_t::f32, data_type_t::bf16,
+                   data_type_t::s32, data_type_t::s4,
+                   data_type_t::s16}) {
+    EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                  data_type_t::bf16, true, bad),
+              ck::KernelVariant::kUnsupported)
+        << "compute_dtype=" << ck_test::dt_name(bad)
+        << " must not resolve to the int8 path";
+  }
+}
+
+TEST(CkResolveVariantInt8, DynamicQuantFlagIsRequired) {
+  // (bf16, s8, bf16) without `dynamic_quant=true` must NOT match
+  // the int8 path — that combination is the static-quant case
+  // which N-tile / CK does not handle, and `resolve_variant` should
+  // refuse cleanly so the call falls back to AOCL DLP.
+  EXPECT_EQ(ck::resolve_variant(data_type_t::bf16, data_type_t::s8,
+                                data_type_t::bf16,
+                                /*dynamic_quant=*/false,
+                                /*compute_dtype=*/data_type_t::s8),
+            ck::KernelVariant::kUnsupported);
 }
 
 TEST(CkResolveVariantProperties, NoExceptOnEverything) {
@@ -244,6 +378,94 @@ TEST(CkResolveVariantProperties, NoExceptOnEverything) {
                     data_type_t::bf16, data_type_t::bf16,
                     data_type_t::bf16)),
                 "resolve_variant must be noexcept");
+}
+
+// ──────────────────────────────────────────────────────────────────
+// C.5 — Exhaustive 5-arg negative sweep.  The 5-arg
+// `resolve_variant` MUST accept exactly four positive rows:
+//   * (bf16, s8, bf16, dynamic_quant=true, compute=s8) → kS8_S8_BF16_SYM
+//   * (bf16, s8, bf16, dynamic_quant=true, compute=u8) → kU8_S8_BF16_ASYM
+//   * (bf16, s8, f32 , dynamic_quant=true, compute=s8) → kS8_S8_F32_SYM
+//   * (bf16, s8, f32 , dynamic_quant=true, compute=u8) → kU8_S8_F32_ASYM
+// Everything else in the (data_type_t)^3 × {true,false} ×
+// (data_type_t) space must resolve to kUnsupported.  Sweeping
+// the full Cartesian product locks the truth table so any future
+// new dtype enum value or new variant accidentally weakens the
+// gate gets caught by this test instead of leaking into a runtime
+// silent misroute.
+// ──────────────────────────────────────────────────────────────────
+TEST(CkResolveVariantInt8, ExhaustiveNegativeSweep) {
+  int n_int8_accepted = 0;
+  int n_rejected = 0;
+  for (auto src : kAllDtypes) {
+    for (auto wei : kAllDtypes) {
+      for (auto dst : kAllDtypes) {
+        for (bool dq : {false, true}) {
+          for (auto cmp : kAllDtypes) {
+            const auto v = ck::resolve_variant(src, wei, dst, dq, cmp);
+            // The DQ-INT8 family reaches the CK int8 microkernel via TWO
+            // src forms (mirror of `resolve_variant`'s grouped-s8
+            // acceptance):
+            //   * runtime hoist     — src=bf16 with dynamic_quant=true;
+            //   * grouped pre-quant — src=s8 (any dynamic_quant, since
+            //     group_dynamic_quant CLEARS the flag).
+            // Both require wei=s8, dst in {bf16,f32}, compute in {s8,u8}.
+            const bool dq_int8_src =
+                (src == data_type_t::bf16 && dq)
+                || (src == data_type_t::s8);
+            const bool int8_family =
+                dq_int8_src
+                && (wei == data_type_t::s8)
+                && (dst == data_type_t::bf16 || dst == data_type_t::f32)
+                && (cmp == data_type_t::s8 || cmp == data_type_t::u8);
+            if (int8_family) {
+              const auto expected = (dst == data_type_t::bf16)
+                  ? (cmp == data_type_t::s8
+                         ? ck::KernelVariant::kS8_S8_BF16_SYM
+                         : ck::KernelVariant::kU8_S8_BF16_ASYM)
+                  : (cmp == data_type_t::s8
+                         ? ck::KernelVariant::kS8_S8_F32_SYM
+                         : ck::KernelVariant::kU8_S8_F32_ASYM);
+              EXPECT_EQ(v, expected)
+                  << "int8 family must accept src=" << ck_test::dt_name(src)
+                  << " wei=" << ck_test::dt_name(wei)
+                  << " dst=" << ck_test::dt_name(dst)
+                  << " dq=" << dq << " cmp=" << ck_test::dt_name(cmp);
+              ++n_int8_accepted;
+            } else if (!dq) {
+              // Non-int8-family with dynamic_quant=false must mirror the
+              // 3-arg overload exactly (compute is ignored off the int8
+              // path → bf16/bf16 family or kUnsupported).
+              const auto v3 = ck::resolve_variant(src, wei, dst);
+              EXPECT_EQ(v, v3)
+                  << "dynamic_quant=false non-int8 must mirror the 3-arg "
+                     "overload; src=" << ck_test::dt_name(src)
+                  << " wei=" << ck_test::dt_name(wei)
+                  << " dst=" << ck_test::dt_name(dst)
+                  << " cmp=" << ck_test::dt_name(cmp);
+              if (v == ck::KernelVariant::kUnsupported) ++n_rejected;
+            } else {
+              // dynamic_quant=true, not int8 family → must reject.
+              EXPECT_EQ(v, ck::KernelVariant::kUnsupported)
+                  << "dynamic_quant=true must reject "
+                  << ck_test::dt_name(src) << ","
+                  << ck_test::dt_name(wei) << ","
+                  << ck_test::dt_name(dst) << ",cmp="
+                  << ck_test::dt_name(cmp);
+              ++n_rejected;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Served int8 set = {dst in (bf16,f32)} x {cmp in (s8,u8)} = 4 shapes,
+  // reached by 3 (src,dq) forms — (bf16,dq=true), (s8,dq=true),
+  // (s8,dq=false) — so 4 x 3 = 12 accepts (4 runtime-hoist + 8 grouped).
+  EXPECT_EQ(n_int8_accepted, 12)
+      << "Truth table should accept the 4 int8 shapes via the 3 "
+         "(src,dynamic_quant) forms (runtime-hoist + grouped pre-quant)";
+  EXPECT_GT(n_rejected, 0);
 }
 
 }  // namespace

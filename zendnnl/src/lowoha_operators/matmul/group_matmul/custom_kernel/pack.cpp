@@ -14,21 +14,27 @@
  * limitations under the License.
  *******************************************************************************/
 
-// Note: the `[b0, b1, b2, b3, ...]` interleaved-pair pack format
-// implemented below is BF16-specific.  It assumes 16-bit elements and
-// the AVX-512-BF16 VDPBF16PS instruction's expectation of a pair-
-// interleaved K layout.  Adding int8 support in the future will
-// require a different K-interleave stride (4 int8 elements per
-// VPDPBUSD lane vs the BF16 pair) and additional packed state
-// (per-tensor / per-row / per-group scales and optional zero-points);
-// when that lands, this file can either grow a per-dtype packer
-// family or be paired with a sibling `pack_int8.cpp`.  The file
-// currently stays at `custom_kernel/pack.cpp` because BF16 is the
-// only dtype variant.
+// Note: this file holds BOTH the BF16 K-pair VNNI pack (the
+// VDPBF16PS-friendly 16-bit pack family) and the DQ-INT8 K-quad
+// VNNI pack (the VPDPBUSD-friendly 8-bit pack family).  The two
+// share the file because they share the cache template
+// `lru_cache_t<Key_matmul, void *>`, the cache-key discriminator
+// scheme (`kCustomKernelAlgoMarker | variant_bits`), the alignment
+// + apilog gating policy, and the disable-cache / caller-owned
+// branch — keeping them side-by-side lets reviewers verify those
+// invariants once instead of cross-checking two near-duplicate
+// files.  Each pack still owns a SEPARATE singleton + mutex pair
+// + cache-key marker bit so an int8 pack and a bf16 pack for the
+// same weight pointer cannot collide.  The K-stride (2 vs 4) and
+// per-block compensation row differences are isolated to the
+// `pack_*_vnni_impl` template and the `bytes_per_oblock`
+// expression of each `get_or_pack_weight_*` function.
 
 #include "pack.hpp"
 
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
 
@@ -212,6 +218,166 @@ lru_cache_t<Key_matmul, void *> &pack_cache_singleton() {
   return pack_cache;
 }
 std::mutex &pack_mutex_singleton() {
+  static std::mutex pack_mutex;
+  return pack_mutex;
+}
+
+// ── INT8 K-quad VNNI pack ─────────────────────────────────────────
+// Lays out caller's [K, N] (transB=false) or [N, K] (transB=true)
+// signed s8 weight as a sequence of `O / pack_nr` o-blocks.  Each
+// o-block holds:
+//   * `K_quad × pack_nr × 4` bytes of K-quad-interleaved weight,
+//     where `K_quad = ceil(K / 4)` and the trailing K-quad is
+//     zero-padded so a 4-byte VPDPBUSD broadcast on the source
+//     side is always safe.
+//   * `pack_nr × 4` bytes (= `pack_nr` × `int32_t`) of per-column
+//     compensation.  Entry `v_col` carries
+//     `sum_{k=0}^{K-1} wei_s8[k, v_col]` — the running column sum
+//     consumed by the int8 microkernel epilogue to undo the
+//     XOR-by-0x80 (sym) or src-zp (asym) input bias.  The pad rows
+//     contribute zero, so the sum is the same whether you walk K
+//     or K_pad.
+//
+// `Interleave` parameter has the same gate / silu / gelu semantic
+// as the bf16 sibling: when true, pack output column `2i+0` reads
+// canonical column `i` (gate i) and pack output column `2i+1`
+// reads canonical column `I + i` (up i) with `I = N / 2`.  The
+// compensation row is computed AFTER the permutation, so
+// `comp[v_col]` always matches the WEIGHT byte stream at the same
+// `v_col` slot.
+template <bool Interleave>
+inline void pack_int8_vnni_impl(const int8_t *weight, int K, int N,
+                                int ldb, int pack_nr, bool transB,
+                                int8_t *packed) {
+  const int K_quad   = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
+  const int n_blocks = N / pack_nr;
+  const size_t ldb_z = static_cast<size_t>(ldb);
+  const int I        = N / 2;
+  if constexpr (!Interleave) (void)I;
+
+  // Stride between successive K-quad rows inside one o-block, in
+  // bytes.  Mirrors the K-pair stride in the bf16 sibling
+  // (`pack_nr * kVNNIPair`) — both express "one B-load worth of
+  // packed weight bytes".
+  const size_t kq_stride_bytes =
+      static_cast<size_t>(pack_nr) * kVNNIInt8Quad;
+  // Per-o-block byte footprint: weight bytes + compensation row
+  // (`pack_nr * sizeof(int32_t)` = `pack_nr * 4`).  The kernel
+  // reads compensation as `int32_t *(Bpacked + weight_bytes)` so
+  // any change here must move in lockstep with the consumer
+  // expression in int8_microkernel.cpp.
+  const size_t weight_bytes_in_oblock =
+      static_cast<size_t>(K_quad) * kq_stride_bytes;
+  const size_t comp_bytes_in_oblock =
+      static_cast<size_t>(pack_nr) * sizeof(int32_t);
+  const size_t bytes_per_oblock =
+      weight_bytes_in_oblock + comp_bytes_in_oblock;
+
+  for (int o_blk = 0; o_blk < n_blocks; ++o_blk) {
+    int8_t *blk_base = packed
+        + static_cast<size_t>(o_blk) * bytes_per_oblock;
+    const int n_base = o_blk * pack_nr;
+
+    // Walk K in quads.  For the final quad when K is not a multiple
+    // of 4, only `K_tail = K - (K_quad - 1) * 4` rows carry real
+    // weight; the rest are zero-padded.  We materialise the zeros
+    // via an explicit branch in the inner loop — the compiler
+    // unrolls the kernel and the branch becomes a hoist outside
+    // the `n` loop.
+    for (int kq = 0; kq < K_quad; ++kq) {
+      const int k_base = kq * kVNNIInt8Quad;
+      int8_t *kq_base = blk_base
+          + static_cast<size_t>(kq) * kq_stride_bytes;
+      const int k_remain = K - k_base;  // ≥1 since kq < K_quad
+
+      for (int n = 0; n < pack_nr; ++n) {
+        const int col_pack = n_base + n;
+        const int col_canon = Interleave
+            ? ((col_pack & 1) ? (I + (col_pack >> 1)) : (col_pack >> 1))
+            : col_pack;
+        int8_t *quad_dst = kq_base + static_cast<size_t>(n) * kVNNIInt8Quad;
+        // Four source bytes for this (kq, col_canon) tile.  Branch
+        // chosen by `k_remain` — fully unrolled by the compiler
+        // since `kVNNIInt8Quad == 4` is a compile-time constant.
+        if (k_remain >= kVNNIInt8Quad) {
+          if (transB) {
+            // [N, K] caller layout — four consecutive K-bytes live
+            // contiguously at `weight + col_canon * ldb + k_base`.
+            const size_t off =
+                static_cast<size_t>(col_canon) * ldb_z + k_base;
+            std::memcpy(quad_dst, weight + off, kVNNIInt8Quad);
+          } else {
+            // [K, N] caller layout — four consecutive K-rows are
+            // stride-`ldb` apart, sharing column `col_canon`.
+            for (int q = 0; q < kVNNIInt8Quad; ++q) {
+              const size_t off =
+                  static_cast<size_t>(k_base + q) * ldb_z + col_canon;
+              quad_dst[q] = weight[off];
+            }
+          }
+        } else {
+          // Tail quad: copy `k_remain` (1..3) real rows, zero-pad
+          // the rest.  Same row-order semantic as above.
+          for (int q = 0; q < kVNNIInt8Quad; ++q) {
+            if (q < k_remain) {
+              const size_t off = transB
+                  ? static_cast<size_t>(col_canon) * ldb_z + (k_base + q)
+                  : static_cast<size_t>(k_base + q) * ldb_z + col_canon;
+              quad_dst[q] = weight[off];
+            } else {
+              quad_dst[q] = 0;
+            }
+          }
+        }
+      }
+    }
+
+    // Compensation row: one int32 per packed column.  Walk the
+    // packed bytes we just wrote (which already encode the
+    // Interleave permutation) and sum the s8 values per column.
+    // Equivalent to summing the source weight column directly, but
+    // avoids re-applying the permutation logic and naturally
+    // ignores the zero-padded tail.
+    int32_t *comp_row = reinterpret_cast<int32_t *>(
+        blk_base + weight_bytes_in_oblock);
+    for (int n = 0; n < pack_nr; ++n) {
+      int32_t sum = 0;
+      for (int kq = 0; kq < K_quad; ++kq) {
+        const int8_t *quad = blk_base
+            + static_cast<size_t>(kq) * kq_stride_bytes
+            + static_cast<size_t>(n) * kVNNIInt8Quad;
+        sum += static_cast<int32_t>(quad[0])
+             + static_cast<int32_t>(quad[1])
+             + static_cast<int32_t>(quad[2])
+             + static_cast<int32_t>(quad[3]);
+      }
+      comp_row[n] = sum;
+    }
+  }
+}
+
+void pack_int8_vnni(const int8_t *weight, int K, int N, int ldb,
+                    int pack_nr, bool transB,
+                    bool interleave_split_halves,
+                    int8_t *packed) {
+  if (interleave_split_halves) {
+    pack_int8_vnni_impl<true>(weight, K, N, ldb, pack_nr, transB, packed);
+  } else {
+    pack_int8_vnni_impl<false>(weight, K, N, ldb, pack_nr, transB, packed);
+  }
+}
+
+// Separate singleton from the BF16 pack — different LRU instance
+// so int8 entries cannot drift into a bf16 lookup and vice-versa
+// even if the cache-key marker logic ever regressed.  Type stays
+// `void *` so both caches share the same `lru_cache_t` template
+// instantiation — the per-pack getter casts on input / output.
+lru_cache_t<Key_matmul, void *> &pack_cache_singleton_int8() {
+  static lru_cache_t<Key_matmul, void *> pack_cache(
+      std::numeric_limits<uint32_t>::max());
+  return pack_cache;
+}
+std::mutex &pack_mutex_singleton_int8() {
   static std::mutex pack_mutex;
   return pack_mutex;
 }
@@ -532,6 +698,194 @@ void clear_custom_kernel_pack_cache() {
   static const bool s_pack_log = apilog_verbose_enabled();
   if (s_pack_log) {
     apilog_verbose("[GRP_MATMUL.PACK cleared] Pack cache cleared");
+  }
+}
+
+// ── INT8 pack get / free / clear (mirror of BF16 trio) ────────────
+// Same shape as `get_or_pack_weight_bf16` / `free_owned_packed_weight`
+// / `clear_custom_kernel_pack_cache`.  Differences vs the bf16
+// sibling are isolated and tagged below:
+//   * Cache singleton + mutex: SEPARATE instances
+//     (`pack_cache_singleton_int8` / `pack_mutex_singleton_int8`).
+//   * Cache-key marker: `kCustomKernelInt8Marker` instead of
+//     `kCustomKernelAlgoMarker` so a bf16 pack and an int8 pack
+//     for the same `(weight, K, N, ldb, transB, pack_nr)` tuple
+//     occupy disjoint LRU entries — even though the singletons are
+//     also disjoint, this gives a second line of defence in case
+//     a future refactor unifies the singletons.
+//   * Buffer footprint: `O/pack_nr * (K_quad * pack_nr * 4 +
+//     pack_nr * sizeof(int32_t))` bytes — VNNI quad weight slab
+//     plus per-column compensation row.  See
+//     `pack_int8_vnni_impl` above for the layout contract.
+//
+// Eviction, alignment, log gating, and disable-cache behaviour
+// are identical to the bf16 sibling; the comments there apply
+// verbatim here and are not duplicated.
+status_t get_or_pack_weight_int8(
+    const int8_t *weight,
+    int K, int N, int ldb, int pack_nr,
+    bool transB,
+    bool interleave_split_halves,
+    const int8_t **out_packed,
+    bool *was_hit_out,
+    bool disable_cache) {
+
+  if (was_hit_out != nullptr) *was_hit_out = false;
+
+  if (weight == nullptr || K <= 0 || N <= 0
+      || (pack_nr != kNRMin && pack_nr != kNRMax)
+      || (N % pack_nr) != 0
+      || ldb <= 0
+      || out_packed == nullptr) {
+    log_error("custom_kernel pack int8: invalid arg "
+              "(weight, K, N, ldb must be valid; pack_nr in {",
+              kNRMin, ",", kNRMax, "}; N %% pack_nr == 0)");
+    return status_t::failure;
+  }
+  if (interleave_split_halves && (N & 1)) {
+    log_error("custom_kernel pack int8: interleave_split_halves "
+              "requires even N (got N=", N, ")");
+    return status_t::failure;
+  }
+  const int min_ldb = transB ? K : N;
+  if (ldb < min_ldb) {
+    log_error("custom_kernel pack int8: ldb=", ldb,
+              " smaller than minimum row stride (",
+              transB ? "K=" : "N=", min_ldb,
+              " for transB=", (transB ? "true" : "false"), ")");
+    return status_t::failure;
+  }
+
+  // Buffer size: weight slab + compensation row per o-block.  Mirror
+  // of the bf16 K_pair × pack_nr × 2 formula, scaled to K_quad ×
+  // pack_nr × 4 (= same byte volume per K-element since 4 × 1B
+  // = 2 × 2B) plus the per-block `pack_nr` int32 comp row.
+  const int    K_quad        = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
+  const int    n_blocks      = N / pack_nr;
+  const size_t weight_bytes_per_oblock =
+      static_cast<size_t>(K_quad) * pack_nr * kVNNIInt8Quad;
+  const size_t comp_bytes_per_oblock =
+      static_cast<size_t>(pack_nr) * sizeof(int32_t);
+  const size_t bytes         = static_cast<size_t>(n_blocks)
+      * (weight_bytes_per_oblock + comp_bytes_per_oblock);
+  const size_t alignment     = 64;
+  const size_t bytes_aligned = (bytes + alignment - 1) & ~(alignment - 1);
+
+  static const bool s_pack_log = apilog_verbose_enabled();
+
+  if (disable_cache) {
+    if (s_pack_log) {
+      apilog_verbose("[GRP_MATMUL.PACK NOCACHE INT8] weight=", weight,
+                     " K=", K, " N=", N, " ldb=", ldb,
+                     " transB=", (transB ? 1 : 0),
+                     " interleave=", (interleave_split_halves ? 1 : 0),
+                     " pack_nr=", pack_nr);
+    }
+    void *raw = std::aligned_alloc(alignment, bytes_aligned);
+    if (raw == nullptr) {
+      log_error("custom_kernel pack int8 (disable_cache): "
+                "aligned_alloc failed for ", bytes_aligned, " bytes");
+      return status_t::failure;
+    }
+    pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
+                   interleave_split_halves,
+                   static_cast<int8_t *>(raw));
+    *out_packed = static_cast<const int8_t *>(raw);
+    return status_t::success;
+  }
+
+  auto &pack_cache = pack_cache_singleton_int8();
+
+  // Cache-key marker for the INT8 family.  Picked from the same
+  // "clear-bit" zone of the previous bf16 marker (0xC0DE0000) to
+  // make collision review trivial — the only nibble that differs
+  // is the variant zone, here repurposed for an INT8 sentinel.
+  // `0xC0DE8000` is 0xC0DE0000 with bit 15 set; bit 15 is in the
+  // low all-clear nibble of the bf16 marker so the two markers
+  // are distinguishable in any single bit-position comparison and
+  // neither marker collides with the variant bits
+  // (pack_nr ≤ 64 → bits 0..6; transB → bit 16; interleave →
+  // bit 24).
+  static constexpr uint32_t kCustomKernelInt8Marker   = 0xC0DE8000U;
+  static constexpr uint32_t kTransBMarker             = 0x00010000U;
+  static constexpr uint32_t kInterleaveSplitMarker    = 0x01000000U;
+  static_assert(
+      (kCustomKernelInt8Marker & kTransBMarker) == 0u,
+      "kTransBMarker collides with kCustomKernelInt8Marker — pick "
+      "a clear bit (positions 0-14, 16, 21, or 24-29).");
+  static_assert(
+      (kCustomKernelInt8Marker & kInterleaveSplitMarker) == 0u,
+      "kInterleaveSplitMarker collides with kCustomKernelInt8Marker "
+      "— pick a clear bit (positions 0-14, 16, 21, or 24-29).");
+  // Compile-time check that the bf16 and int8 markers cannot alias
+  // even if a future refactor merges the LRU singletons.  Any non-
+  // zero result means the two pack families could collide on the
+  // same `(weight_ptr, K, N, ldb, transB, pack_nr)` tuple.
+  static constexpr uint32_t kCustomKernelAlgoMarkerBF16 = 0xC0DE0000U;
+  static_assert(
+      kCustomKernelInt8Marker != kCustomKernelAlgoMarkerBF16,
+      "INT8 cache-key marker must differ from BF16 marker so the "
+      "two pack families never alias.");
+  const uint32_t variant_bits =
+      static_cast<uint32_t>(pack_nr)
+      | (transB ? kTransBMarker : 0u)
+      | (interleave_split_halves ? kInterleaveSplitMarker : 0u);
+  const size_t extra_hash = static_cast<size_t>(
+      kCustomKernelInt8Marker | variant_bits);
+  Key_matmul key(weight, static_cast<unsigned>(N),
+                 static_cast<unsigned>(K), extra_hash);
+  key.ldb = static_cast<unsigned>(ldb);
+
+  std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
+
+  if (pack_cache.find_key(key)) {
+    *out_packed = static_cast<const int8_t *>(pack_cache.get(key));
+    if (was_hit_out != nullptr) *was_hit_out = true;
+    if (s_pack_log) {
+      apilog_verbose("[GRP_MATMUL.PACK HIT INT8] weight=", weight,
+                     " K=", K, " N=", N, " ldb=", ldb,
+                     " transB=", (transB ? 1 : 0),
+                     " interleave=", (interleave_split_halves ? 1 : 0),
+                     " pack_nr=", pack_nr);
+    }
+    return status_t::success;
+  }
+
+  if (s_pack_log) {
+    apilog_verbose("[GRP_MATMUL.PACK MISS INT8] weight=", weight,
+                   " K=", K, " N=", N, " ldb=", ldb,
+                   " transB=", (transB ? 1 : 0),
+                   " interleave=", (interleave_split_halves ? 1 : 0),
+                   " pack_nr=", pack_nr);
+  }
+  void *raw = std::aligned_alloc(alignment, bytes_aligned);
+  if (raw == nullptr) {
+    log_error("custom_kernel pack int8: aligned_alloc failed for ",
+              bytes_aligned, " bytes");
+    return status_t::failure;
+  }
+
+  pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
+                 interleave_split_halves,
+                 static_cast<int8_t *>(raw));
+  pack_cache.add(key, raw);
+
+  *out_packed = static_cast<const int8_t *>(raw);
+  return status_t::success;
+}
+
+void free_owned_packed_weight_int8(const int8_t *packed) {
+  if (packed == nullptr) return;
+  std::free(const_cast<int8_t *>(packed));
+}
+
+void clear_custom_kernel_pack_cache_int8() {
+  std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
+  auto &pack_cache = pack_cache_singleton_int8();
+  pack_cache.clear();
+  static const bool s_pack_log = apilog_verbose_enabled();
+  if (s_pack_log) {
+    apilog_verbose("[GRP_MATMUL.PACK cleared INT8] Pack cache cleared");
   }
 }
 

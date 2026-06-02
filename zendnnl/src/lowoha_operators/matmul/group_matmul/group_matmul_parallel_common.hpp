@@ -80,6 +80,13 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 inline constexpr int    kDecodeMaxM   = 32;                // per-expert M ≤ this → "decode"
 inline constexpr int    kMinNTile     = 512;               // prompt-path per-thread N
 
+// DQ-INT8 sibling of `kMinNTile`.  Today set equal to the bf16
+// value so the dtype-aware split is a structural no-op; final
+// value baked from the D.1 tuning sweep.  Independent constants
+// let D.1 retune the int8 family without perturbing bf16 prompt
+// thresholds.
+inline constexpr int    kMinNTileInt8 = 512;
+
 // NOTE: `kDecodeNTile` (decode-path per-thread N, default 256) now
 // lives in `n_tile/group_matmul_n_tile_planner.hpp` (re-included by
 // the public N-tile header `n_tile/group_matmul_n_tile.hpp`) with
@@ -111,6 +118,19 @@ inline constexpr int    kMinNTile     = 512;               // prompt-path per-th
 /// rule 1 and routes to ALGO 3.  Documented in `auto_select_algo`'s
 /// rule precedence comment in `group_matmul_dispatch.cpp`.
 inline constexpr int    kFewExpertsAlgo1 = 8;
+
+/// Few-experts threshold for the ALGO 0 default-policy ALGO 2 preference.
+/// When the GLOBAL ALGO env is auto (0) AND neither active phase env is
+/// explicitly pinned, a workload whose TOTAL expert count (framework
+/// `total_matmul` when set, else the active op count) is `≤
+/// kFewExpertsAlgo2Pref` routes to ALGO 2 (flat_m_tile) for BOTH prompt
+/// and decode — overriding the per-phase defaults (prompt 2 / decode 3).
+/// Targets Mixtral-8x*-class deployments (8 experts), where ALGO 2 is the
+/// measured winner across prompt AND decode.  An explicit
+/// `AUTO_{PROMPT,DECODE}_ALGO` pin (including `=0` to request the legacy
+/// cascade) still wins — this is a DEFAULT refinement, not a hard clamp.
+/// Falls back to ALGO 1 when the shape is not m_tile_safe.
+inline constexpr int    kFewExpertsAlgo2Pref = 8;
 
 // NOTE: `kNTilePlanMaxExperts` (max experts the ALGO 3 N-tile planner
 // can represent, = 256) now lives in
@@ -329,6 +349,36 @@ inline int get_grp_matmul_auto_decode_algo() {
   return v;
 }
 
+// True when the operator has EXPLICITLY chosen a prompt phase algo —
+// either via the test override atomic (`>= 0`) or a parseable
+// `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` env value (including `0`, the
+// explicit "legacy cascade" request).  Lets the default-policy few-
+// experts ALGO 2 preference defer to an explicit pin while still firing
+// out-of-the-box.  Env presence is cached on first call (same pattern as
+// the value getter); test overrides read the live atomic.
+inline bool grp_matmul_auto_prompt_algo_is_set() {
+  if (test_api_auto_prompt_algo_override().load(std::memory_order_relaxed) >= 0)
+    return true;
+  static const bool s = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO");
+    int parsed = 0;
+    return parse_env_int_strict(e, parsed);
+  }();
+  return s;
+}
+
+// Decode counterpart of `grp_matmul_auto_prompt_algo_is_set()`.
+inline bool grp_matmul_auto_decode_algo_is_set() {
+  if (test_api_auto_decode_algo_override().load(std::memory_order_relaxed) >= 0)
+    return true;
+  static const bool s = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO");
+    int parsed = 0;
+    return parse_env_int_strict(e, parsed);
+  }();
+  return s;
+}
+
 // NOTE: `get_grp_n_tile_fused_act()` moved to
 // `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
 // the N-tile env getters.  Include that header to call it.
@@ -407,6 +457,10 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act,
 namespace test_api {
 inline std::atomic<int> s_grp_n_rounds_mode_override{-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_override{-1};
+// DQ-INT8 CK sub-knob — independent from the master CK switch so
+// tests / deployments can A/B the int8 fast path without
+// disturbing the bf16 path.  Sentinel `-1` = no override (env / default).
+inline std::atomic<int> s_grp_matmul_custom_kernel_int8_override{-1};
 // NOTE: `s_grp_matmul_custom_kernel_n_tile_override` and
 // `s_grp_n_tile_strategy_override` moved to `group_matmul_n_tile.hpp`
 // (Section A.3) together with the rest of the N-tile override atoms.
@@ -648,6 +702,44 @@ inline bool get_grp_matmul_custom_kernel() {
   return v;
 }
 
+// ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = { "0", "1" } — cached, default ON.
+//   Independent sub-switch for the hand-rolled AVX-512 VNNI int8
+//   microkernel (`custom_kernel/ukernel/int8_microkernel.{hpp,cpp}`).
+//   Lets deployments A/B the DQ-INT8 fast path against the AOCL DLP
+//   `aocl_gemm_s8s8s32obf16_sym_quant` reference without affecting
+//   the bf16 CK path.
+//
+//   Cascade with the master `_CUSTOM_KERNEL` switch:
+//     * `_CUSTOM_KERNEL=0`                       → both regimes off
+//                                                  (every CK route falls
+//                                                  back to standard DLP /
+//                                                  BRGEMM dispatch).
+//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_INT8=0` → bf16 CK on,
+//                                                  int8 CK off (DQ-INT8
+//                                                  N-tile calls fall back
+//                                                  to AOCL DLP sym_quant).
+//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_INT8=1` → both on (default).
+//
+//   Implemented as a STATIC sub-knob: even if the master `_CUSTOM_KERNEL`
+//   knob is on, eligibility code paths that route a DQ-INT8 call to
+//   CK first consult this getter — when it returns false the call
+//   routes to the AOCL DLP sym-quant fallback exactly as it does
+//   under `_CUSTOM_KERNEL=0`.
+//
+//   Tests can pin the value via `s_grp_matmul_custom_kernel_int8_override`
+//   (sentinel `-1` = no override).
+inline bool get_grp_matmul_custom_kernel_int8() {
+  const int ovr = test_api::s_grp_matmul_custom_kernel_int8_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return ovr != 0;
+  static const bool v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8");
+    if (e == nullptr || e[0] == '\0') return true;  // default: ON
+    return e[0] != '0';
+  }();
+  return v;
+}
+
 // ZENDNNL_GRP_MATMUL_CROSS_WARM = { "0", "1" } — cached, default ON.
 //   When ON, each `prepack_for_algo_X` opportunistically populates the
 //   cache regime that auto-select would route the OTHER phase to in the
@@ -664,9 +756,10 @@ inline bool get_grp_matmul_custom_kernel() {
 //                  + cross-warm regime 1 (full-weight AOCL)
 //       Memory cost on many-experts MoE at high thread counts is
 //       sizeable (full-weight + custom-kernel pack).  Regime 2
-//       (per-tile AOCL) is still populated by `prepack_for_algo_3` if
-//       `STABLE_NTILE=1` — Fix B (a separate planned commit) skips
-//       it when CK is on.
+//       (per-tile AOCL) is populated by `prepack_for_algo_3` when
+//       `STABLE_NTILE=1` AND the custom kernel is not eligible; when
+//       CK is eligible the per-tile AOCL warm is skipped (the runtime
+//       takes the CK path, so those entries would never be queried).
 //
 //     * `CK=0` (AOCL DLP for both phases):
 //         - prompt → ALGO 1 (full-weight AOCL)

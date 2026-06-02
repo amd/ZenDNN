@@ -17,6 +17,7 @@
 #include "prepack_aocl_dlp.hpp"
 
 #include <algorithm>
+#include <functional>
 
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
@@ -201,6 +202,127 @@ status_t warm_pack_all_aocl_dlp_experts(
         /*weight_cache_type=*/1);
     ++stats.packed_ok;
   }
+
+  return status_t::success;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DQ-INT8 symmetric-quant full-weight warm-pack (Gap B).
+//
+// Mirrors `warm_pack_all_aocl_dlp_experts` but targets the sym-quant
+// LRU (`get_aocl_symquant_weight_cache` in aocl_kernel.cpp) used by
+// the per-token symmetric DQ-INT8 fallback
+// (`aocl_gemm_s8s8s32obf16_sym_quant`).  Key + reorder primitives
+// mirror the runtime `run_dlp(...)` sym-quant branch
+// (aocl_kernel.cpp:621-674):
+//   * `is_s8_sym_quant_scales` per-token shape => `src_grp == K`,
+//     so `extra_input_hash = std::hash<int64_t>(K[i])` and
+//     `DLP_SYMM_STAT_QUANT::group_size = K[i]`.
+//   * reorder via `aocl_reorder_s8s8s32os32_sym_quant`.
+//
+// The packed s8 sym-quant layout does not depend on compute_dtype
+// (sym vs asym share it), so this single warmer covers both.
+// ─────────────────────────────────────────────────────────────────────
+status_t warm_pack_all_aocl_dlp_experts_sym_quant(
+    const std::vector<const void *> &weight,
+    const std::vector<int>          &K,
+    const std::vector<int>          &N,
+    const std::vector<int>          &ldb,
+    const std::vector<bool>         &transB,
+    const std::vector<bool>         &is_weights_const,
+    int                              total_count,
+    data_type_t                      wei_dtype,
+    AoclDlpPackProbeStats           &stats) {
+
+  if (total_count <= 0) return status_t::success;
+
+  // Production-cache gate — same as the bf16 full-weight warmer.
+  const int32_t weight_cache_type =
+      matmul_config_t::instance().get_weight_cache();
+  if (weight_cache_type != 1) {
+    return status_t::success;
+  }
+
+  const size_t bound = std::min<size_t>({
+      static_cast<size_t>(total_count),
+      weight.size(),
+      K.size(),
+      N.size(),
+      ldb.size(),
+      transB.size()});
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+  // Only the s8 sym-quant family is wired here; any other dtype counts
+  // every reachable entry as skipped so the PROBE line stays accurate.
+  if (wei_dtype != data_type_t::s8) {
+    stats.total_attempted += static_cast<int>(bound);
+    stats.skipped_invalid += static_cast<int>(bound);
+    return status_t::success;
+  }
+
+  for (size_t i = 0; i < bound; ++i) {
+    ++stats.total_attempted;
+
+    if (weight[i] == nullptr || K[i] <= 0 || N[i] <= 0 || ldb[i] <= 0) {
+      ++stats.skipped_invalid;
+      continue;
+    }
+
+    // Minimum-row-stride gate — same rationale as the bf16 warmer.
+    const int min_ldb = transB[i] ? K[i] : N[i];
+    if (ldb[i] < min_ldb) {
+      ++stats.skipped_invalid;
+      continue;
+    }
+
+    // is_weights_const gate — sym-quant caching only engages for const
+    // weights (aocl_kernel.cpp:631-632).
+    if (!is_weights_const.empty()
+        && i < is_weights_const.size()
+        && !is_weights_const[i]) {
+      ++stats.skipped_invalid;
+      continue;
+    }
+
+    // Cache key matches `run_dlp(...)` (aocl_kernel.cpp:621-628) for
+    // the per-token symmetric shape: src_grp == K, so
+    // extra_input_hash = hash(K[i]).
+    const size_t cache_extra_hash =
+        std::hash<int64_t>{}(static_cast<int64_t>(K[i]));
+    Key_matmul key(transB[i], K[i], N[i], ldb[i], weight[i],
+                   static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+                   cache_extra_hash);
+
+    DLP_SYMM_STAT_QUANT symq_meta;
+    symq_meta.group_size = K[i];
+
+    void *reordered_unused = nullptr;
+    // `reorderAndCacheWeightsSymQuant` returns `true` when the entry was
+    // warmed (cache miss → reorder+insert; or a cache hit, which under
+    // `weight_cache_type=1` also falls through to `return true`).  It
+    // only returns `false` on an `aligned_alloc` failure in the
+    // weight_cache_type 0/2 branches — paths this warmer does not take
+    // (it always passes `weight_cache_type=1`), so today this is always
+    // `true`.  Honour the return anyway so a transient reorder failure
+    // (or a future cache-mode change) is reported as `skipped_invalid`
+    // instead of being silently counted as a successful pack.
+    const bool warmed = reorderAndCacheWeightsSymQuant<int8_t>(
+        key, weight[i], reordered_unused, K[i], N[i], ldb[i],
+        /*order=*/'r',
+        /*trans=*/(transB[i] ? 't' : 'n'),
+        /*mem_format_b=*/'n',
+        aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+        aocl_reorder_s8s8s32os32_sym_quant,
+        &symq_meta, /*weight_cache_type=*/1);
+    if (warmed) ++stats.packed_ok;
+    else        ++stats.skipped_invalid;
+  }
+#else
+  // AOCL DLP not compiled in — count every reachable entry as skipped.
+  (void)wei_dtype;
+  stats.total_attempted += static_cast<int>(bound);
+  stats.skipped_invalid += static_cast<int>(bound);
+#endif
 
   return status_t::success;
 }
@@ -392,6 +514,162 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
       ++stats.packed_ok;
     }
   }
+
+  return status_t::success;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DQ-INT8 per-tile AOCL DLP warm-pack — sym-quant sibling of
+// `warm_pack_all_aocl_dlp_experts_n_tile`.
+//
+// Used by ALGO 3 (flat_n_tile) when the int8 custom kernel is OFF /
+// CK-ineligible and the decode path falls back to the AOCL DLP
+// `s8s8s32os32_sym_quant` reorder per N-tile.  It is the per-tile
+// analogue of `warm_pack_all_aocl_dlp_experts_sym_quant` (full-weight)
+// and shares the EXACT per-tile N-decomposition of the bf16
+// `..._n_tile` warmer above (the N-slicing is dtype-agnostic — it is
+// the planner's strict-stable tile split), differing only in:
+//   * dtype gate: `wei_dtype == s8` (vs bf16);
+//   * element size: s8 weight is 1 byte/elem (vs 2 for bf16) — used
+//     for the per-tile pointer slice arithmetic;
+//   * reorder: `reorderAndCacheWeightsSymQuant<int8_t>` with the
+//     `s8s8s32os32_sym_quant` buf-size / reorder fns + a
+//     `DLP_SYMM_STAT_QUANT{group_size=K[i]}`;
+//   * cache key: `extra_input_hash = hash(K[i])` (matching the runtime
+//     per-token symmetric shape `src_grp == K`), vs 0 for bf16.
+// The (K, n_tile, ldb, w_tile, transB) portion of the key is identical
+// to the bf16 per-tile key, so it lines up with what `do_tile()` /
+// `run_dlp()` build at run time for the sliced sym-quant reorder.
+status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
+    const std::vector<const void *> &weight,
+    const std::vector<int>          &K,
+    const std::vector<int>          &N,
+    const std::vector<int>          &ldb,
+    const std::vector<bool>         &transB,
+    const std::vector<bool>         &is_weights_const,
+    int                              total_count,
+    data_type_t                      wei_dtype,
+    int                              num_threads,
+    int                              stable,
+    int                              nr_align,
+    AoclDlpPackProbeStats           &stats) {
+
+  if (total_count <= 0 || num_threads <= 0
+      || stable <= 0 || nr_align <= 0) {
+    return status_t::success;
+  }
+
+  const int32_t weight_cache_type =
+      matmul_config_t::instance().get_weight_cache();
+  if (weight_cache_type != 1) {
+    return status_t::success;
+  }
+
+  const size_t bound = std::min<size_t>({
+      static_cast<size_t>(total_count),
+      weight.size(),
+      K.size(),
+      N.size(),
+      ldb.size(),
+      transB.size()});
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+  // s8 sym-quant family only; any other dtype counts every reachable
+  // entry as skipped so the PROBE line stays accurate (per-expert
+  // granularity, matching the bf16 `..._n_tile` skip path).
+  if (wei_dtype != data_type_t::s8) {
+    stats.total_attempted += static_cast<int>(bound);
+    stats.skipped_invalid += static_cast<int>(bound);
+    return status_t::success;
+  }
+
+  // s8 weight is 1 byte/elem (vs 2 for the bf16 per-tile warmer).
+  const size_t wei_elem = sizeof(int8_t);
+
+  for (size_t i = 0; i < bound; ++i) {
+    if (weight[i] == nullptr || K[i] <= 0 || N[i] <= 0 || ldb[i] <= 0) {
+      ++stats.total_attempted;
+      ++stats.skipped_invalid;
+      continue;
+    }
+    const int min_ldb = transB[i] ? K[i] : N[i];
+    if (ldb[i] < min_ldb) {
+      ++stats.total_attempted;
+      ++stats.skipped_invalid;
+      continue;
+    }
+    if (!is_weights_const.empty()
+        && i < is_weights_const.size()
+        && !is_weights_const[i]) {
+      ++stats.total_attempted;
+      ++stats.skipped_invalid;
+      continue;
+    }
+
+    // Per-expert participating-thread count — identical decomposition
+    // to the bf16 `..._n_tile` warmer (planner strict-stable split).
+    const int align_cap =
+        std::max(1, N[i] / std::max(1, nr_align));
+    const int n_thr_e =
+        std::max(1, std::min(stable, align_cap));
+
+    for (int tid = 0; tid < n_thr_e; ++tid) {
+      const auto split = aligned_n_split(N[i], n_thr_e, tid, nr_align);
+      const int col_start = split.first;
+      const int col_end   = split.second;
+      const int n_tile    = col_end - col_start;
+
+      ++stats.total_attempted;
+
+      if (n_tile <= 0) {
+        ++stats.skipped_invalid;
+        continue;
+      }
+
+      const size_t wei_off = transB[i]
+          ? static_cast<size_t>(col_start) * ldb[i] * wei_elem
+          : static_cast<size_t>(col_start) * wei_elem;
+      const void *w_tile =
+          static_cast<const char *>(weight[i]) + wei_off;
+
+      // Sym-quant per-tile key: same (transB, K, n_tile, ldb, w_tile)
+      // as the bf16 per-tile key, plus `extra_input_hash = hash(K[i])`
+      // (per-token symmetric `src_grp == K`) to match the runtime
+      // `run_dlp(...)` sym-quant key.
+      const size_t cache_extra_hash =
+          std::hash<int64_t>{}(static_cast<int64_t>(K[i]));
+      Key_matmul key(transB[i], K[i], n_tile, ldb[i], w_tile,
+                     static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+                     cache_extra_hash);
+
+      DLP_SYMM_STAT_QUANT symq_meta;
+      symq_meta.group_size = K[i];
+
+      void *reordered_unused = nullptr;
+      // See the full-weight sym-quant warmer above: `false` is only
+      // reachable on the alloc-failure paths of weight_cache_type 0/2
+      // (unused here), so this is always `true` today.  Honour it so a
+      // future failure is counted as `skipped_invalid`, not packed_ok.
+      const bool warmed = reorderAndCacheWeightsSymQuant<int8_t>(
+          key, w_tile, reordered_unused, K[i], n_tile, ldb[i],
+          /*order=*/'r',
+          /*trans=*/(transB[i] ? 't' : 'n'),
+          /*mem_format_b=*/'n',
+          aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+          aocl_reorder_s8s8s32os32_sym_quant,
+          &symq_meta, /*weight_cache_type=*/1);
+      if (warmed) ++stats.packed_ok;
+      else        ++stats.skipped_invalid;
+    }
+  }
+#else
+  (void)wei_dtype;
+  (void)num_threads;
+  (void)stable;
+  (void)nr_align;
+  stats.total_attempted += static_cast<int>(bound);
+  stats.skipped_invalid += static_cast<int>(bound);
+#endif
 
   return status_t::success;
 }

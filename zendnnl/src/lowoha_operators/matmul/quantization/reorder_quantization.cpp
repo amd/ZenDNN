@@ -314,14 +314,15 @@ status_t group_reorder_quantization_wrapper(
       params.size() < num_ops) {
     return status_t::success;
   }
-  const std::vector<const void *> active_src(
-      src.begin(),
-      src.begin() + static_cast<std::vector<const void *>::difference_type>(
-                        num_ops));
-  const std::vector<int> active_K(
-      K.begin(),
-      K.begin() + static_cast<std::vector<int>::difference_type>(num_ops));
-  std::vector<std::vector<int64_t>> active_src_strides(num_ops);
+  // No trimmed `active_src` / `active_K` copies: every internal use is
+  // indexed in [0, num_ops) and `src` / `K` are guaranteed at least that
+  // long by the guard above, so we read them directly.  Trimmed views
+  // are materialised lazily ONLY for the `group_dynamic_quant` call
+  // (which requires exact size == num_ops) and ONLY when the caller
+  // passed oversized vectors.  `active_src_strides` stays empty unless
+  // some expert is strided (lda != K); group_dynamic_quant treats an
+  // empty strides vector as "all rows contiguous".
+  std::vector<std::vector<int64_t>> active_src_strides;
 
   const data_type_t src_dtype = params[0].dtypes.src;
   const data_type_t compute_dtype = params[0].dtypes.compute;
@@ -329,11 +330,33 @@ status_t group_reorder_quantization_wrapper(
   const bool requires_dynamic_quant =
       group_reorder_quantization_required(params, num_ops);
   auto fallback_per_expert = [&]() -> status_t {
+    // Release any grouped-path arenas a PRIOR call left on a reused
+    // `buffers` object and drop their per-expert views.  The fallback
+    // path owns its memory via `fallback_buf` and never reads
+    // `src_arena` / `scale_arena` / `src_buf` / `scale_buf`, so leaving
+    // them would retain large allocations until destruction and keep
+    // stale pointers that no longer describe the current state.
+    free(buffers.src_arena);
+    free(buffers.scale_arena);
+    buffers.src_arena   = nullptr;
+    buffers.scale_arena = nullptr;
+    buffers.src_buf.clear();
+    buffers.scale_buf.clear();
     buffers.fallback_buf.resize(num_ops);
     quantized_src.resize(num_ops);
     quantized_lda.resize(num_ops);
     for (size_t i = 0; i < num_ops; ++i) {
-      const void *src_i = active_src[i];
+      // Inactive experts (M==0): skip reorder — a zero row count makes
+      // `reorder_params_t::is_shaped()` fail and would break MoE decode
+      // batches where most experts are unrouted.  Still publish pointers
+      // and clear `dynamic_quant` so downstream sees a uniform post-pass.
+      if (M[i] == 0) {
+        quantized_src[i] = src[i];
+        quantized_lda[i] = lda[i];
+        params[i].dynamic_quant = false;
+        continue;
+      }
+      const void *src_i = src[i];
       int reordered_lda = lda[i];
       size_t src_type_size = size_of(params[i].dtypes.src);
       matmul_batch_params_t bp;
@@ -341,7 +364,7 @@ status_t group_reorder_quantization_wrapper(
       bp.Batch_B = 1;
       const status_t st = reorder_quantization_wrapper(
           src_i, lda[i], reordered_lda, src_type_size, params[i], bp,
-          transA[i], M[i], active_K[i], num_threads,
+          transA[i], M[i], K[i], num_threads,
           buffers.fallback_buf[i]);
       if (st != status_t::success) return st;
       quantized_src[i] = src_i;
@@ -368,12 +391,38 @@ status_t group_reorder_quantization_wrapper(
   }
 
   for (size_t i = 0; i < num_ops; ++i) {
-    if (M[i] < 0 || active_K[i] <= 0 || lda[i] < active_K[i]) {
+    // Basic shape/stride validity applies to EVERY expert — active OR
+    // inactive.  `group_dynamic_quant` validates `K>0` and
+    // `row_stride >= K` for ALL ops BEFORE its own `if (M[i]==0)
+    // continue;` (see lowoha_reorder.cpp), so a degenerate/stale `K<=0`
+    // or `lda<K` on an UNROUTED expert would still make the grouped call
+    // hard-fail.  Gate it here first and route the whole group to the
+    // (shape-tolerant) per-expert fallback instead of erroring out.
+    //
+    // NEGATIVE dims are NOT a fallback case: `reorder_quantization_wrapper`
+    // sizes its allocation as `batch * rows * cols` and a negative M/K casts
+    // to a huge `size_t`, risking an oversized allocation / OOM.  Treat them
+    // as a hard error before they can reach either path.
+    if (M[i] < 0 || K[i] < 0) {
+      log_error("Group reorder quantization: negative dimension at op ", i,
+                " (M=", M[i], ", K=", K[i], ")");
+      return status_t::failure;
+    }
+    if (K[i] == 0 || lda[i] < K[i]) {
       return fallback_per_expert();
     }
-    if (lda[i] != active_K[i]) {
+    if (lda[i] != K[i]) {
+      if (active_src_strides.empty()) active_src_strides.resize(num_ops);
       active_src_strides[i] = {static_cast<int64_t>(lda[i]), 1};
     }
+    // Inactive experts (M==0, routed no tokens): `group_dynamic_quant`
+    // skips them right after the shape check above, so their per-expert
+    // QUANT metadata (scale dims/dtype, zp, granularity) is never read.
+    // Skip ONLY those quant-config gates for them — otherwise a single
+    // unrouted expert carrying stale/degenerate scale dims (e.g. a
+    // granularity that is neither per_token nor M<=1 per_tensor) would
+    // needlessly force the WHOLE group onto the slow per-expert fallback.
+    if (M[i] == 0) continue;
     if (!params[i].dynamic_quant ||
         params[i].dtypes.wei != data_type_t::s8 ||
         params[i].dtypes.src != src_dtype ||
@@ -386,11 +435,24 @@ status_t group_reorder_quantization_wrapper(
         params[i].quant_params.src_zp.dt != data_type_t::none) {
       return fallback_per_expert();
     }
+    // Per-token granularity gate.  CRITICAL decode case: when an expert
+    // routes a single token (M == 1) the per-token scale buffer is
+    // {1, 1}, which `get_single_granularity` classifies as `per_tensor`
+    // (one row ⇒ one scale ⇒ per-token and per-tensor are identical).
+    // Accept that degenerate form so a single 1-token expert does not
+    // force the WHOLE group onto the slow per-expert fallback — in MoE
+    // decode most experts route 1 token, so a strict per_token check
+    // here disabled the grouped fast path on essentially every call.
+    // per_channel / per_group stay rejected (genuinely K-varying scales
+    // the grouped per-token kernel cannot serve).
     const std::vector<int64_t> logical_shape = {
-        static_cast<int64_t>(M[i]), static_cast<int64_t>(active_K[i])};
-    if (get_single_granularity(params[i].quant_params.src_scale.dims,
-                               logical_shape) !=
-        granularity_type_t::per_token) {
+        static_cast<int64_t>(M[i]), static_cast<int64_t>(K[i])};
+    const granularity_type_t gran = get_single_granularity(
+        params[i].quant_params.src_scale.dims, logical_shape);
+    const bool per_token_ok =
+        gran == granularity_type_t::per_token
+        || (gran == granularity_type_t::per_tensor && M[i] <= 1);
+    if (!per_token_ok) {
       return fallback_per_expert();
     }
   }
@@ -398,19 +460,93 @@ status_t group_reorder_quantization_wrapper(
   buffers.src_buf.assign(num_ops, nullptr);
   buffers.scale_buf.assign(num_ops, nullptr);
   std::vector<void *> dst(num_ops, nullptr);
-  std::vector<std::vector<int64_t>> dst_strides(num_ops);
   std::vector<void *> scale(num_ops, nullptr);
 
+  // Pass 1: size the two arenas.  The s8 dst is 1 byte/elem (M*K); the
+  // scale arena only covers experts whose caller supplied no scale
+  // buffer (per-token => M elements of `scale_dtype`).
+  // Sizes use checked arithmetic (`__builtin_*_overflow`, mirroring the
+  // fused-MoE arena sizing in group_matmul_fused_moe.cpp): an unchecked
+  // M*K or running sum could wrap on a pathological shape and yield an
+  // undersized malloc that the Pass 2 slices then overrun.  Fail early on
+  // overflow instead.
+  const size_t scale_elem = size_of(scale_dtype);
+  size_t src_total = 0, scale_total = 0;
+  for (size_t i = 0; i < num_ops; ++i) {
+    const size_t m_sz = static_cast<size_t>(std::max(0, M[i]));
+    const size_t k_sz = static_cast<size_t>(K[i]);
+    size_t src_bytes = 0;
+    if (__builtin_mul_overflow(m_sz, k_sz, &src_bytes) ||
+        __builtin_add_overflow(src_total, src_bytes, &src_total)) {
+      log_error("Group reorder quantization: source arena size overflow");
+      return status_t::failure;
+    }
+    if (params[i].quant_params.src_scale.buff == nullptr) {
+      size_t scale_bytes = 0;
+      if (__builtin_mul_overflow(m_sz, scale_elem, &scale_bytes) ||
+          __builtin_add_overflow(scale_total, scale_bytes, &scale_total)) {
+        log_error("Group reorder quantization: scale arena size overflow");
+        return status_t::failure;
+      }
+    }
+  }
+  // Allocate into locals and commit to `buffers` only once BOTH arenas
+  // succeed.  This (a) avoids leaking the src arena if the scale arena
+  // fails, and (b) avoids leaking any arenas a prior call left on a
+  // REUSED `buffers` object (we free the stale ones at commit time).
+  uint8_t *new_src_arena = nullptr;
+  uint8_t *new_scale_arena = nullptr;
+  if (src_total > 0) {
+    new_src_arena = static_cast<uint8_t *>(malloc(src_total));
+    if (!new_src_arena) {
+      log_error("Group reorder quantization: failed to allocate source arena");
+      return status_t::failure;
+    }
+  }
+  if (scale_total > 0) {
+    new_scale_arena = static_cast<uint8_t *>(malloc(scale_total));
+    if (!new_scale_arena) {
+      log_error("Group reorder quantization: failed to allocate scale arena");
+      free(new_src_arena);  // release the src arena taken just above
+      return status_t::failure;
+    }
+  }
+  // Commit: drop any stale arenas from a prior reuse (free(nullptr) is a
+  // no-op), then adopt the freshly-sized ones.  The per-expert
+  // `src_buf` / `scale_buf` views were already reset to null above, so
+  // they cannot dangle into the old arenas.
+  free(buffers.src_arena);
+  free(buffers.scale_arena);
+  buffers.src_arena   = new_src_arena;
+  buffers.scale_arena = new_scale_arena;
+
+  // Release any per-expert fallback buffers a PRIOR fallback call left on
+  // this reused `buffers` object.  The grouped fast path never reads
+  // `fallback_buf`, so retaining it would keep the previous per-expert
+  // allocations alive until destruction and grow peak memory across
+  // alternating fallback/grouped call patterns (mirror of the arena
+  // cleanup `fallback_per_expert` does for the inverse transition).
+  buffers.fallback_buf.clear();
+
+  // Pass 2: hand each expert a slice of the arenas (no per-expert malloc).
+  // Byte counts recompute the SAME products Pass 1 validated, so they
+  // cannot overflow here; the `<= total` bounds checks are defensive
+  // guards ensuring no slice steps past the committed arena even if the
+  // two passes ever drift out of sync.
+  size_t src_off = 0, scale_off = 0;
   for (size_t i = 0; i < num_ops; ++i) {
     const size_t src_bytes =
         static_cast<size_t>(std::max(0, M[i])) *
-        static_cast<size_t>(active_K[i]);
+        static_cast<size_t>(K[i]);
     if (src_bytes > 0) {
-      buffers.src_buf[i] = static_cast<uint8_t *>(malloc(src_bytes));
-      if (!buffers.src_buf[i]) {
-        log_error("Group reorder quantization: failed to allocate source buffer");
+      // Subtraction-based bound (no `src_off + src_bytes` which could wrap
+      // size_t on a pathological total) — keeps the guard overflow-safe.
+      if (src_off > src_total || src_bytes > src_total - src_off) {
+        log_error("Group reorder quantization: source slice exceeds arena");
         return status_t::failure;
       }
+      buffers.src_buf[i] = buffers.src_arena + src_off;
+      src_off += src_bytes;
     }
     dst[i] = buffers.src_buf[i];
 
@@ -418,13 +554,16 @@ status_t group_reorder_quantization_wrapper(
         const_cast<void *>(params[i].quant_params.src_scale.buff);
     if (!scale_buff) {
       const size_t scale_bytes =
-          static_cast<size_t>(std::max(0, M[i])) * size_of(scale_dtype);
+          static_cast<size_t>(std::max(0, M[i])) * scale_elem;
       if (scale_bytes > 0) {
-        buffers.scale_buf[i] = static_cast<uint8_t *>(malloc(scale_bytes));
-        if (!buffers.scale_buf[i]) {
-          log_error("Group reorder quantization: failed to allocate scale buffer");
+        // Subtraction-based bound (see the src_buf guard above) so the
+        // check cannot wrap size_t on a pathological scale total.
+        if (scale_off > scale_total || scale_bytes > scale_total - scale_off) {
+          log_error("Group reorder quantization: scale slice exceeds arena");
           return status_t::failure;
         }
+        buffers.scale_buf[i] = buffers.scale_arena + scale_off;
+        scale_off += scale_bytes;
         scale_buff = buffers.scale_buf[i];
       }
     }
@@ -437,16 +576,52 @@ status_t group_reorder_quantization_wrapper(
   gparams.scale_dtype = scale_dtype;
   gparams.num_threads = num_threads;
 
+  // group_dynamic_quant requires src/K vectors of EXACTLY num_ops; pass
+  // the caller's vectors directly when already that size (the common
+  // fused-MoE case), else materialise trimmed copies.  dst is contiguous
+  // (lda == K), so dst_strides stays empty.
+  const std::vector<const void *> *src_arg = &src;
+  const std::vector<int> *K_arg = &K;
+  std::vector<const void *> src_trimmed;
+  std::vector<int> K_trimmed;
+  if (src.size() != num_ops) {
+    src_trimmed.assign(
+        src.begin(),
+        src.begin() +
+            static_cast<std::vector<const void *>::difference_type>(num_ops));
+    src_arg = &src_trimmed;
+  }
+  if (K.size() != num_ops) {
+    K_trimmed.assign(
+        K.begin(),
+        K.begin() + static_cast<std::vector<int>::difference_type>(num_ops));
+    K_arg = &K_trimmed;
+  }
+  const std::vector<std::vector<int64_t>> dst_strides;
+
   const status_t st = zendnnl::lowoha::reorder::group_dynamic_quant(
-      active_src, M, active_K, active_src_strides, dst, dst_strides,
+      *src_arg, M, *K_arg, active_src_strides, dst, dst_strides,
       scale, gparams);
   if (st != status_t::success) return st;
 
   quantized_src.resize(num_ops);
   quantized_lda.resize(num_ops);
   for (size_t i = 0; i < num_ops; ++i) {
+    // Inactive experts (M==0) got no arena slice, so `dst[i]` is null and
+    // `group_dynamic_quant` produced no s8 rows / scale for them.  A null
+    // `quantized_src` can trip pointer validation in downstream kernels
+    // that loop over ALL ops without an M>0 guard (e.g. ALGO 1).  Publish
+    // the ORIGINAL src/lda (non-null, matches the fallback path) and leave
+    // the source dtype unchanged — only clear `dynamic_quant` for uniform
+    // downstream state.  The 0-row expert does no real compute either way.
+    if (M[i] == 0) {
+      quantized_src[i] = src[i];
+      quantized_lda[i] = lda[i];
+      params[i].dynamic_quant = false;
+      continue;
+    }
     quantized_src[i] = dst[i];
-    quantized_lda[i] = active_K[i];
+    quantized_lda[i] = K[i];
     params[i].dtypes.src = compute_dtype;
     params[i].dynamic_quant = false;
     params[i].quant_params.src_scale.buff = scale[i];

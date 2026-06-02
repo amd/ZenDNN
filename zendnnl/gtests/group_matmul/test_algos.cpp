@@ -801,6 +801,388 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulAlgoCustom, TestGroupMatmulAlgoCustom,
                          ::testing::ValuesIn(make_algo_custom_params()), AlgoCustomParamName);
 
 // ===============================================================================
+// [8c] TestGroupMatmulInt8AlgoCustom — DQ-INT8 N-tile CK env-knob matrix
+//
+// Mirrors [8] (TestGroupMatmulAlgoCustom) but exercises the
+// DQ-INT8 N-tile custom kernel added in Phase 1
+// (zenai-grp-matmul-ntile-dqint8-ck-phase1).  The diff covers:
+//
+//   * Per-token symmetric (compute=s8, no src_zp) DQ-INT8.  The
+//     asymmetric (compute=u8) path is covered at the microkernel,
+//     pack, dispatcher and prepare_for_call layers in the
+//     `gtests/group_matmul/custom_kernel/test_ukernel_int8.cpp`,
+//     `test_pack_int8.cpp`, and `test_prepare_for_call.cpp` suites;
+//     the existing tensor-factory plumbing in
+//     `group_matmul_kernel_test` always sets `compute = s8` (it does
+//     not consume an `s32 src_zp` annotation on the tensor), so an
+//     e2e differential through that helper would silently route
+//     into the symmetric kernel path for both runs and yield a
+//     zero-information assertion.  Threading the `compute = u8`
+//     metadata through the helper is its own follow-up.
+//   * All four gated activations the CK admits today:
+//     `none / silu_and_mul / gelu_and_mul / swiglu_oai_mul`.
+//   * ALGO 3 forced (the only executor that engages the int8 CK).
+//   * Reference: the same call run with the new
+//     `_CUSTOM_KERNEL_INT8` env knob FORCED OFF — that path falls
+//     back to AOCL DLP `aocl_gemm_s8s8s32obf16_sym_quant`, which
+//     existing INT8 tests already validate against a scalar
+//     reference.  Comparing the CK-on output against the CK-off
+//     output keeps the test self-contained (no separate scalar
+//     model) while still asserting end-to-end correctness through
+//     the new microkernel + pack + dispatch + prepack stack.
+//   * BF16 dst is the only Phase 1 supported dst dtype, so we don't
+//     sweep dst.
+//
+// The fixture skips automatically on hosts without AVX-512 VNNI —
+// `prepare_for_call` already refuses cleanly in that case, but
+// running the differential would still spend wall-time so we cut
+// it off at the gate.
+// ===============================================================================
+
+struct Int8AlgoCustomParam {
+  int  act_int;           // 0=none, 1=silu, 2=gelu, 3=swiglu_oai
+  int  M, num_ops, dim;   // dim = single-half output width; N_op1 = 2*dim for gated
+};
+
+static std::string Int8AlgoCustomParamName(
+  const ::testing::TestParamInfo<Int8AlgoCustomParam> &info) {
+  static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
+  const auto &p = info.param;
+  std::string name = "sym_";
+  name += act_names[p.act_int];
+  name += "_M" + std::to_string(p.M)
+        + "_E" + std::to_string(p.num_ops)
+        + "_d" + std::to_string(p.dim);
+  return name;
+}
+
+class TestGroupMatmulInt8AlgoCustom
+  : public ::testing::TestWithParam<Int8AlgoCustomParam> {};
+
+// Build per-expert (src, wei_s8, scale) tensors for the int8 DQ
+// symmetric path.  The src is bf16 with attached per-token
+// src_scale; the weight is s8 with per-channel wei_scale.  Returns
+// the assembled tensor vectors and the dst buffer for the run.
+// Caller invokes `group_matmul_kernel_test` twice — once with
+// CK_INT8 OFF (reference) and once ON (test) — without rebuilding
+// the inputs between runs.
+static void build_int8_dq_inputs(
+    tensor_factory_t &tf,
+    const Int8AlgoCustomParam &p,
+    int N_op1, int K,
+    std::vector<tensor_t> &src_tensors,
+    std::vector<tensor_t> &wei_tensors,
+    std::vector<tensor_t> &bias_tensors,
+    std::vector<tensor_t> &dst_tensors,
+    // Scale dtype for BOTH the per-channel wei_scale and the per-token
+    // src_scale.  Defaults to f32 (the original coverage); pass bf16 to
+    // exercise the reorder's native bf16 scale output, which the CK
+    // microkernel must materialise to f32 before consuming (reading a
+    // bf16 scale buffer as f32 would silently corrupt every output —
+    // see the f32-scale-view materialisation in flat_n_tile).
+    data_type_t scale_dt = data_type_t::f32) {
+  src_tensors.assign(p.num_ops, tensor_t{});
+  wei_tensors.assign(p.num_ops, tensor_t{});
+  bias_tensors.assign(p.num_ops, tensor_t{});
+  dst_tensors.assign(p.num_ops, tensor_t{});
+
+  // Per-channel wei_scale, per-token src_scale — the granularity
+  // Phase 1's CK admits.  Scale dtype is f32 or bf16 (see `scale_dt`).
+  const std::vector<int64_t>  wei_scale_dims{1, N_op1};
+  const std::vector<uint64_t> src_scale_shape{
+      static_cast<uint64_t>(p.M),
+      static_cast<uint64_t>(1)};
+
+  for (int e = 0; e < p.num_ops; ++e) {
+    auto wei_ref = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(K), static_cast<uint64_t>(N_op1)},
+        data_type_t::bf16, /*range=*/2.0);
+    tensor_t wei_s8, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(
+                  tf, wei_ref, data_type_t::bf16, data_type_t::s8,
+                  wei_scale_dims, scale_dt, wei_scale, wei_zp,
+                  &wei_s8),
+              status_t::success)
+        << "DQ-INT8 weight quant setup failed";
+    wei_tensors[e] = wei_s8;
+
+    auto src_scale = tf.zero_tensor(src_scale_shape, scale_dt);
+    src_tensors[e] = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(p.M), static_cast<uint64_t>(K)},
+        data_type_t::bf16, /*range=*/2.0, /*trans=*/false,
+        src_scale, tensor_t());
+
+    // Bias is intentionally OMITTED — Phase 1 refuses gated-act +
+    // bias for both bf16 and int8 CK paths, so a bias-free baseline
+    // keeps every act cell inside the kernel envelope.
+    bias_tensors[e] = tensor_t{};
+
+    dst_tensors[e] = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(p.M), static_cast<uint64_t>(N_op1)},
+        data_type_t::bf16, /*range=*/2.0);
+  }
+}
+
+// Run one pass with `_CUSTOM_KERNEL_INT8` forced to `int8_on` (the
+// master `_CUSTOM_KERNEL` knob stays ON for both runs — only the
+// int8 sub-knob flips).  `dst_out` receives a deep copy of the
+// per-expert dst buffers so callers can compare across passes.
+static void run_int8_dq_pass(
+    bool int8_on,
+    std::vector<tensor_t> &src_tensors,
+    std::vector<tensor_t> &wei_tensors,
+    std::vector<tensor_t> &bias_tensors,
+    std::vector<tensor_t> &dst_tensors,
+    grp_matmul_gated_act_t act_type,
+    std::vector<std::vector<bfloat16_t>> &dst_out,
+    int M, int N_op1) {
+  using namespace moe_test_utils;
+  CustomKernelOverride       ck_master(true);
+  CustomKernelInt8Override   ck_int8(int8_on);
+
+  grp_matmul_gated_act_params act_params{};
+  act_params.act = act_type;
+  const grp_matmul_gated_act_params *act_ptr =
+      (act_type != grp_matmul_gated_act_t::none) ? &act_params : nullptr;
+
+  ASSERT_EQ(group_matmul_kernel_test(
+                src_tensors, wei_tensors, bias_tensors, dst_tensors,
+                matmul_algo_t::aocl_dlp_blocked, /*alpha=*/1.0f,
+                /*beta=*/0.0f, /*moe_postop=*/nullptr, act_ptr),
+            status_t::success)
+      << "DQ-INT8 ALGO 3 kernel call failed (int8_on=" << int8_on << ")";
+
+  // Snapshot dst buffers into plain bf16 vectors for later compare.
+  dst_out.assign(dst_tensors.size(),
+                 std::vector<bfloat16_t>(
+                     static_cast<size_t>(M) * N_op1, bfloat16_t(0.0f)));
+  for (size_t e = 0; e < dst_tensors.size(); ++e) {
+    const auto *p = static_cast<const bfloat16_t *>(
+        dst_tensors[e].get_raw_handle_unsafe());
+    std::memcpy(dst_out[e].data(), p,
+                static_cast<size_t>(M) * N_op1 * sizeof(bfloat16_t));
+  }
+}
+
+TEST_P(TestGroupMatmulInt8AlgoCustom, Correctness) {
+  using namespace moe_test_utils;
+  namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+  if (!ck::avx512vnni_available()) {
+    GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+  }
+
+  reset_grp_matmul_caches();
+
+  const auto &p = GetParam();
+  const auto  act_type =
+      static_cast<grp_matmul_gated_act_t>(p.act_int);
+
+  // N_op1 is the Op1 GEMM output width.  For act=none the output is
+  // `dim` cols wide; for any gated activation the GEMM produces
+  // 2*dim cols and the activation compacts to [0:dim].
+  const int N_op1 = (p.act_int == 0) ? p.dim : 2 * p.dim;
+  const int K     = 64;
+
+  // The int8 CK requires N % pack_nr ∈ {32, 64}.  Skip params that
+  // wouldn't engage CK on either run — the differential would be
+  // meaningless because both runs would take the AOCL DLP path.
+  if (N_op1 % 32 != 0) {
+    GTEST_SKIP() << "N_op1=" << N_op1
+                 << " not a multiple of 32; CK would refuse";
+  }
+
+  tensor_factory_t tf;
+  std::vector<tensor_t> src, wei, bias, dst;
+  ASSERT_NO_FATAL_FAILURE(
+      build_int8_dq_inputs(tf, p, N_op1, K, src, wei, bias, dst));
+
+  AlgoEnvGuard algo_guard(3);
+
+  std::vector<std::vector<bfloat16_t>> dst_ref, dst_test;
+
+  // Reference pass: int8 CK OFF → AOCL DLP sym_quant runs.
+  ASSERT_NO_FATAL_FAILURE(
+      run_int8_dq_pass(/*int8_on=*/false, src, wei, bias, dst,
+                       act_type, dst_ref, p.M, N_op1));
+
+  // Rebuild the dst tensors so the second pass starts from a clean
+  // slate (zero-out buffers; reuse src/wei/bias which are unchanged).
+  for (auto &d : dst) {
+    auto *raw = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+    std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
+              bfloat16_t(0.0f));
+  }
+
+  // Test pass: int8 CK ON → new microkernel + pack path runs.
+  ASSERT_NO_FATAL_FAILURE(
+      run_int8_dq_pass(/*int8_on=*/true, src, wei, bias, dst,
+                       act_type, dst_test, p.M, N_op1));
+
+  // Comparison band: BF16 tolerance from the gated/non-gated helper
+  // in `moe_test_utils` — same tolerance pair the existing
+  // TestGroupMatmulAlgoCustom uses, since the activation post-pass
+  // is the same scalar formula and the quant rounding deltas are
+  // already within that band.
+  const auto tol  = tol_act(/*is_bf16=*/true);
+  const int  cmpN = (p.act_int == 0) ? N_op1 : p.dim;
+  for (int e = 0; e < p.num_ops; ++e) {
+    for (int m = 0; m < p.M; ++m) {
+      for (int n = 0; n < cmpN; ++n) {
+        const size_t idx =
+            static_cast<size_t>(m) * N_op1 + n;
+        const float ref_v  = static_cast<float>(dst_ref[e][idx]);
+        const float test_v = static_cast<float>(dst_test[e][idx]);
+        ASSERT_NEAR(test_v, ref_v,
+                    std::abs(ref_v) * tol.rel + tol.abs)
+            << "int8 sym act=" << p.act_int
+            << " e=" << e << " m=" << m << " n=" << n;
+      }
+    }
+  }
+}
+
+static std::vector<Int8AlgoCustomParam> make_int8_algo_custom_params() {
+  std::vector<Int8AlgoCustomParam> out;
+  // Four activations × two shapes.  We keep the grid tight — the
+  // per-cell signal is fully redundant with the microkernel-level
+  // coverage in test_ukernel_int8.cpp, so the e2e fixture only
+  // needs enough variety to catch dispatch / pack / prepack
+  // integration regressions.
+  for (int act : {0, 1, 2, 3}) {
+    // (M=4, num_ops=8, dim=32) — N_op1 = 32 (act=none) or 64
+    // (gated) → both clean multiples of pack_nr=32.
+    out.push_back({act, /*M=*/4, /*num_ops=*/8, /*dim=*/32});
+    // (M=16, num_ops=4, dim=64) — N_op1 = 64 or 128 → exercises
+    // the kNRMax=64 branch and multi-tile splitting on >2 threads.
+    out.push_back({act, /*M=*/16, /*num_ops=*/4, /*dim=*/64});
+  }
+  // C.6 — decode (M=1) and prompt (M=64) shapes covering the
+  // edge of the M-dimension envelope:
+  //   * M=1 hits the single-row hoist path inside
+  //     `reorder_quantization_wrapper` and the int8 microkernel's
+  //     MR=1 instantiation.
+  //   * M=64 hits the multi-MR-band split with deep K-quad
+  //     accumulation pressure (decode/prompt parity).
+  //   * dim=128 (NV=4 / kNRMax=64) at M=8 exercises the
+  //     pack_nr=64 cache key and the wider register kernel.
+  // Activation cycles through {none, swiglu} to keep the new
+  // matrix small (silu/gelu are byte-identical to swiglu at the
+  // pack layer per C.2.5; their epilogues are covered by the
+  // microkernel param sweep).
+  for (int act : {0, 3}) {
+    out.push_back({act, /*M=*/1,  /*num_ops=*/8, /*dim=*/32});  // decode
+    out.push_back({act, /*M=*/64, /*num_ops=*/4, /*dim=*/64});  // prompt
+    out.push_back({act, /*M=*/8,  /*num_ops=*/4, /*dim=*/128}); // NR=128
+  }
+  return out;
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8AlgoCustom,
+                         TestGroupMatmulInt8AlgoCustom,
+                         ::testing::ValuesIn(make_int8_algo_custom_params()),
+                         Int8AlgoCustomParamName);
+
+// ===============================================================================
+// [8c-bf16] TestGroupMatmulInt8AlgoCustomBf16Scale — DQ-INT8 with BF16 scales
+//
+// Regression guard for the bf16-scale stitching bug: the dynamic-quant
+// reorder emits the per-token src_scale (and the caller supplies the
+// per-channel wei_scale) in BF16, but the int8 microkernel loads scales
+// with `_mm512_loadu_ps` / `_mm512_set1_ps` (f32-only).  Before the
+// f32-scale-view materialisation in `flat_n_tile`, the CK reinterpreted
+// the bf16 scale bytes as f32 and produced systematic garbage (zero
+// accuracy on real bf16 models), while the AOCL DLP fallback consumed
+// the declared bf16 dtype correctly.  The whole class was invisible to
+// the suite because every other int8 test uses f32 scales.
+//
+// Mechanism: identical CK-OFF (AOCL DLP sym_quant, the bf16-scale-aware
+// reference) vs CK-ON (new microkernel) differential as [8c], but with
+// `scale_dt = bf16`.  act=none is used because it is the activation that
+// reliably engages the int8 CK (gated int8 currently routes to the AOCL
+// separate-activation path); act=none also matches the down-proj GEMM
+// where the production bug first surfaced.
+// ===============================================================================
+class TestGroupMatmulInt8AlgoCustomBf16Scale
+  : public ::testing::TestWithParam<Int8AlgoCustomParam> {};
+
+TEST_P(TestGroupMatmulInt8AlgoCustomBf16Scale, Correctness) {
+  using namespace moe_test_utils;
+  namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+  if (!ck::avx512vnni_available()) {
+    GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+  }
+
+  reset_grp_matmul_caches();
+
+  const auto &p = GetParam();
+  const auto  act_type =
+      static_cast<grp_matmul_gated_act_t>(p.act_int);
+
+  const int N_op1 = (p.act_int == 0) ? p.dim : 2 * p.dim;
+  const int K     = 64;
+  if (N_op1 % 32 != 0) {
+    GTEST_SKIP() << "N_op1=" << N_op1
+                 << " not a multiple of 32; CK would refuse";
+  }
+
+  tensor_factory_t tf;
+  std::vector<tensor_t> src, wei, bias, dst;
+  ASSERT_NO_FATAL_FAILURE(
+      build_int8_dq_inputs(tf, p, N_op1, K, src, wei, bias, dst,
+                           /*scale_dt=*/data_type_t::bf16));
+
+  AlgoEnvGuard algo_guard(3);
+
+  std::vector<std::vector<bfloat16_t>> dst_ref, dst_test;
+
+  // Reference: int8 CK OFF → AOCL DLP sym_quant (bf16-scale aware).
+  ASSERT_NO_FATAL_FAILURE(
+      run_int8_dq_pass(/*int8_on=*/false, src, wei, bias, dst,
+                       act_type, dst_ref, p.M, N_op1));
+
+  for (auto &d : dst) {
+    auto *raw = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+    std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
+              bfloat16_t(0.0f));
+  }
+
+  // Test: int8 CK ON → must materialise the bf16 scales to f32 and
+  // match the reference (pre-fix this produced garbage).
+  ASSERT_NO_FATAL_FAILURE(
+      run_int8_dq_pass(/*int8_on=*/true, src, wei, bias, dst,
+                       act_type, dst_test, p.M, N_op1));
+
+  const auto tol  = tol_act(/*is_bf16=*/true);
+  const int  cmpN = (p.act_int == 0) ? N_op1 : p.dim;
+  for (int e = 0; e < p.num_ops; ++e) {
+    for (int m = 0; m < p.M; ++m) {
+      for (int n = 0; n < cmpN; ++n) {
+        const size_t idx = static_cast<size_t>(m) * N_op1 + n;
+        const float ref_v  = static_cast<float>(dst_ref[e][idx]);
+        const float test_v = static_cast<float>(dst_test[e][idx]);
+        ASSERT_NEAR(test_v, ref_v, std::abs(ref_v) * tol.rel + tol.abs)
+            << "int8 bf16-scale act=" << p.act_int
+            << " e=" << e << " m=" << m << " n=" << n;
+      }
+    }
+  }
+}
+
+// act=none across decode (M=1), small-batch (M=4) and prompt (M=64)
+// shapes at both pack_nr widths (dim=32 → NR=32, dim=64 → NR=64).
+INSTANTIATE_TEST_SUITE_P(
+    GroupMatmulInt8AlgoCustomBf16Scale,
+    TestGroupMatmulInt8AlgoCustomBf16Scale,
+    ::testing::Values(
+        Int8AlgoCustomParam{/*act=*/0, /*M=*/1,  /*num_ops=*/8, /*dim=*/32},
+        Int8AlgoCustomParam{/*act=*/0, /*M=*/4,  /*num_ops=*/8, /*dim=*/32},
+        Int8AlgoCustomParam{/*act=*/0, /*M=*/16, /*num_ops=*/4, /*dim=*/64},
+        Int8AlgoCustomParam{/*act=*/0, /*M=*/64, /*num_ops=*/4, /*dim=*/64}),
+    Int8AlgoCustomParamName);
+
+// ===============================================================================
 // [8a] TestGroupMatmulPhaseBRemainder — CK Single-round + non-zero-remainder
 //
 // Targets the planner+executor path that
@@ -1190,6 +1572,9 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
   NRoundsModeOverride         single_round(1);
   CustomKernelNTileOverride   default_n_tile(0);
   NTileStrategyOverride       auto_strategy(0);
+  // Decode M-proportional split is OFF by default; this test asserts the
+  // proportional contract (heaviest-first, capacity-clamped), so pin it ON.
+  DecodeProportionalOverride  prop_on(true);
 
   // Defence-in-depth: env overrides force the PLANNER's intent to
   // take the CK path, but `prepare_for_call` separately refuses CK
@@ -1285,48 +1670,36 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
          "(Single round picked by N_ROUNDS=1 + use_custom).";
   EXPECT_EQ(snap.num_ops_active, num_ops);
 
-  // 32 threads / 14 ops → base = 2, remainder = 4.
-  // All 14 experts have N=1024 so all are eligible
-  // (`N / ab_min_tile = 1024/256 = 4 ≥ base+1 = 3`).
-  // After heaviest-first sort, the first 4 sorted experts are
-  // e=0(M=16), e=1(M=12), e=2(M=10), e=3(M=8) — these get base+1=3.
-  // The remaining 10 experts get base=2.
-  const int base      = 2;
-  const int remainder = 4;
-  EXPECT_EQ(snap.n_thr_fixed, base)
-      << "n_thr_fixed should be the integer-division base.";
+  // 32 threads / 14 ops, max_M=16 <= kDecodeMaxM=32 → decode-class, so
+  // the CK Single round uses the M-PROPORTIONAL thread split (the new
+  // decode default), NOT the legacy uniform Phase B base/base+1.  The
+  // "heaviest-first" intent is preserved: proportional allocates threads
+  // in proportion to M (clamped to each expert's N-tile capacity
+  // cap=N/ab_min_tile=1024/256=4), so the M-heaviest experts receive the
+  // most threads.  Assert that contract rather than the old {2,3}.
+  EXPECT_NE(snap.n_thr_fixed, 0)
+      << "proportional leaves n_thr_fixed at base (HYBRID clears to 0).";
 
-  int got_base_plus_one = 0;
-  int got_base          = 0;
-  for (int e = 0; e < num_ops; ++e) {
-    const int n =
-        static_cast<int>(snap.stable_n_thr_per_expert[e]);
-    if (e < remainder) {
-      // First `remainder` experts (M-heaviest) MUST get base+1.
-      EXPECT_EQ(n, base + 1)
-          << "expected M-heaviest expert e=" << e
-          << " (M=" << Ms[e] << ") to receive base+1=" << (base + 1)
-          << " threads under heaviest-first; got " << n;
-      ++got_base_plus_one;
-    } else {
-      EXPECT_EQ(n, base)
-          << "expected non-heaviest expert e=" << e
-          << " (M=" << Ms[e] << ") to receive base=" << base
-          << " threads; got " << n;
-      ++got_base;
-    }
-  }
-  EXPECT_EQ(got_base_plus_one, remainder);
-  EXPECT_EQ(got_base, num_ops - remainder);
-
-  // Total threads must equal the OMP team size.
   int sum = 0;
   for (int e = 0; e < num_ops; ++e) {
-    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    if (Ms[e] > 0) {
+      EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
+    }
+    EXPECT_LE(n, 4) << "expert e=" << e
+                    << " exceeds N-tile capacity cap=4 (N=1024/256)";
+    sum += n;
   }
   EXPECT_EQ(sum, 32)
-      << "Phase B should saturate the full thread team; "
+      << "M-proportional should saturate the full thread team; "
          "sum(stable_n_thr_per_expert) = " << sum;
+  // Heaviest-first: the M-heaviest expert (e=0, M=16) gets a
+  // proportional share above the uniform base (2) and >= every other
+  // expert; the lightest (M=4) experts get strictly fewer.
+  const int n_heavy = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+  EXPECT_GE(n_heavy, 3) << "heaviest expert (M=16) under-allocated";
+  EXPECT_GT(n_heavy, static_cast<int>(snap.stable_n_thr_per_expert[13]))
+      << "heaviest expert must outrank the lightest under proportional";
 }
 
 // ===============================================================================
@@ -1389,6 +1762,9 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
   // ManyExperts and skip Phase B — see
   // `CkSingleRoundRemainderCorrectness` for the full rationale.
   NTileStrategyOverride       auto_strategy(0);
+  // Decode M-proportional split is OFF by default; this test verifies the
+  // proportional split's per-expert capacity-cap clamp, so pin it ON.
+  DecodeProportionalOverride  prop_on(true);
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
@@ -1475,52 +1851,38 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
             static_cast<int>(GroupNTileStrategy::ManyExperts));
   EXPECT_EQ(snap.num_ops_active, num_ops);
 
-  // 32 threads / 14 ops → base=2, remainder=4.  e=0 is INELIGIBLE
-  // (M=16 but N=512), so the 4 extras go to the M-heaviest of the
-  // 13 eligible experts: e=1 (M=12), e=2 (M=10), e=3 (M=8), e=4
-  // (M=6).
-  const int base      = 2;
-  const int remainder = 4;
-  EXPECT_EQ(snap.n_thr_fixed, base);
-
-  // Slot-by-slot expectation.  Recipients are exactly e=1..4
-  // (heaviest eligible); everyone else (including e=0 the
-  // M-heaviest but ineligible expert) gets `base`.
-  const std::array<int, 14> expected_n_thr =
-      {2, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2};
-  for (int e = 0; e < num_ops; ++e) {
-    const int got =
-        static_cast<int>(snap.stable_n_thr_per_expert[e]);
-    EXPECT_EQ(got, expected_n_thr[e])
-        << "expert e=" << e
-        << " (M=" << Ms[e] << ", N=" << Ns[e] << ") "
-        << "expected " << expected_n_thr[e]
-        << " threads, got " << got
-        << ((e == 0)
-            ? "  — INELIGIBLE expert MUST NOT receive base+1 "
-              "even though it sorts first by M; check the "
-              "`pairs[e].eligible` branch in apply_round_pick()"
-            : "");
-  }
+  // Decode-class (max_M=16 <= kDecodeMaxM) → M-proportional split.  The
+  // eligibility/capacity intent is PRESERVED by proportional's per-expert
+  // cap clamp `cap[e] = N[e] / ab_min_tile`: e=0 has N=512 → cap=2, so
+  // despite being the M-heaviest it CANNOT exceed 2 threads, while the
+  // full-N (1024 → cap=4) eligible experts absorb the surplus.  Assert
+  // the cap contract rather than the legacy uniform {2,3} slot pattern.
+  EXPECT_NE(snap.n_thr_fixed, 0);
 
   int sum = 0;
   for (int e = 0; e < num_ops; ++e) {
-    sum += static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    if (Ms[e] > 0) {
+      EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
+    }
+    sum += n;
   }
   EXPECT_EQ(sum, 32)
-      << "Phase B should saturate the full thread team even when "
-         "one heavy expert is ineligible; sum=" << sum;
+      << "M-proportional should saturate the full thread team even with "
+         "one capacity-capped heavy expert; sum=" << sum;
 
-  // Sanity bound — `extras = min(remainder, eligible_count)` should
-  // give exactly `remainder` recipients here (eligible_count = 13,
-  // remainder = 4 → extras = 4).
-  int got_base_plus_one = 0;
-  for (int e = 0; e < num_ops; ++e) {
-    if (snap.stable_n_thr_per_expert[e] == base + 1)
-      ++got_base_plus_one;
-  }
-  EXPECT_EQ(got_base_plus_one, remainder)
-      << "Exactly `remainder` experts should receive base+1.";
+  // KEY: e=0 (M-heaviest but N=512) is clamped to its N-tile capacity
+  // cap=2 and must NOT receive more, even though it sorts first by M.
+  const int n_e0 = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+  EXPECT_LE(n_e0, 2)
+      << "INELIGIBLE/capacity-capped expert e=0 (M=16, N=512, cap=2) "
+         "must not exceed its N-tile capacity; got " << n_e0
+      << " — check the cap[e] clamp in apply_round_pick()'s "
+         "proportional split.";
+  // A full-N eligible heavy (e=1, M=12, N=1024, cap=4) outranks the
+  // capacity-capped e=0.
+  EXPECT_GT(static_cast<int>(snap.stable_n_thr_per_expert[1]), n_e0)
+      << "full-capacity heavy e=1 should outrank capacity-capped e=0.";
 }
 
 // ===============================================================================
@@ -2169,6 +2531,140 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvForcesAlgo1OnGptOssDecode) {
          "for the decode phase";
 }
 
+// Few-experts default policy: with NO phase env pinned, a Mixtral-class
+// 8-expert DECODE shape routes to ALGO 2 (Rule 0.5), overriding the
+// decode phase default of ALGO 3.  Prompt already defaults to ALGO 2, so
+// this is the decode-side benefit folded into the out-of-the-box policy.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeDefaultRoutesToAlgo2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  // No phase-env overrides — exercises the unset-env default policy.
+
+  // Mixtral-class decode: 8 experts, decode-class M (≤ kDecodeMaxM).
+  auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            2)
+      << "≤8-expert decode must take the few-experts ALGO 2 preference "
+         "(Rule 0.5) instead of the decode default ALGO 3";
+}
+
+// The few-experts ALGO 2 preference is a DEFAULT refinement: an explicit
+// decode phase pin still wins.  AUTO_DECODE_ALGO=3 on the same 8-expert
+// decode shape must yield ALGO 3, not the Rule 0.5 ALGO 2.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride no_prompt(0);
+  AutoDecodeAlgoOverride force_decode(3);  // explicit decode pin
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "explicit AUTO_DECODE_ALGO=3 must win over the few-experts "
+         "ALGO 2 default preference";
+}
+
+// Rule 0.5 counts the TOTAL experts (framework `total_matmul`), not the
+// active op count.  An active-4 / total-16 decode shape exceeds the ≤8
+// threshold, so it falls through to the decode default ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // 4 ACTIVE experts but 16 TOTAL (framework opt-in: active_matmul=4,
+  // total_matmul=16).  total=16 > 8 → Rule 0.5 must NOT fire.
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+                            /*num_ops=*/4, /*num_threads=*/64);
+  s.params[0].active_matmul = 4;
+  s.params[0].total_matmul  = 16;
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
+         "decode default ALGO 3";
+
+  // Same active count but total=8 → Rule 0.5 fires → ALGO 2.
+  s.params[0].total_matmul = 8;
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            2)
+      << "total=8 (≤ threshold) must take the few-experts ALGO 2 "
+         "preference even with only 4 active experts";
+}
+
+// Grouped-s8 post-quant call with INACTIVE experts must NOT be vetoed to
+// ALGO 1.  The grouped/fallback DQ pre-pass leaves inactive (M==0)
+// experts at bf16 + dynamic_quant=false while active experts are s8 +
+// per-token src_scale.  check_m_tile_safe / check_n_tile_extra must skip
+// the inactive experts (and key dtype uniformity off the first active
+// one) so a >8-expert decode shape still routes to ALGO 3.  >8 experts
+// keeps Rule 0.5 (the ≤8 ALGO 2 preference) out of the picture so this
+// isolates the n_tile/m_tile eligibility veto.
+TEST(TestGroupMatmulAutoPhaseEnv, GroupedS8WithInactiveExpertsKeepsAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // 16 experts (>8), decode-class M=16, n_tile-safe shape (K%4==0).
+  constexpr int num_ops = 16, M_active = 16, K = 2880, N = 5760;
+  auto s = build_auto_probe(M_active, K, N, num_ops, /*num_threads=*/64);
+
+  // Mark a LEADING (index 0) and an interior (index 8) expert inactive.
+  s.M[0] = 0;
+  s.M[8] = 0;
+
+  // Persistent non-null scale buffers (never dereferenced for the
+  // classification, but the gates require non-null + correct dims).
+  static std::vector<std::vector<float>> src_scales(num_ops);
+  static std::vector<std::vector<float>> wei_scales(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    auto &p = s.params[i];
+    p.dtypes.wei     = data_type_t::s8;
+    p.dtypes.dst     = data_type_t::bf16;
+    p.dtypes.compute = data_type_t::s8;
+    p.dynamic_quant  = false;
+    // Per-channel wei scale {1, N} is set on EVERY expert (the caller
+    // supplies static weight scales for active + inactive alike).
+    wei_scales[i].assign(static_cast<size_t>(N), 1.0f / 127.0f);
+    p.quant_params.wei_scale.dims = {1, static_cast<int64_t>(N)};
+    p.quant_params.wei_scale.dt   = data_type_t::f32;
+    p.quant_params.wei_scale.buff = wei_scales[i].data();
+    if (s.M[i] > 0) {
+      // Active expert: grouped-prequant post-state — s8 src + per-token
+      // src_scale {M, 1}.
+      p.dtypes.src = data_type_t::s8;
+      src_scales[i].assign(static_cast<size_t>(s.M[i]), 1.0f / 127.0f);
+      p.quant_params.src_scale.dims = {static_cast<int64_t>(s.M[i]), 1};
+      p.quant_params.src_scale.dt   = data_type_t::f32;
+      p.quant_params.src_scale.buff = src_scales[i].data();
+    } else {
+      // Inactive expert: left at pre-quant bf16, no src_scale (exactly
+      // what group_reorder_quantization_wrapper publishes for M==0).
+      p.dtypes.src = data_type_t::bf16;
+      p.quant_params.src_scale = {};
+    }
+  }
+
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "grouped-s8 decode with inactive experts must still route to "
+         "ALGO 3 — inactive (bf16) experts must not veto m_tile/n_tile "
+         "eligibility";
+}
+
 // Phase env isolation: setting AUTO_PROMPT_ALGO=3 must NOT affect
 // decode-class calls, and vice versa.
 TEST(TestGroupMatmulAutoPhaseEnv, PromptEnvDoesNotLeakIntoDecode) {
@@ -2384,6 +2880,11 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
   CustomKernelNTileOverride      default_n_tile(0);
   NTileStrategyOverride          auto_strategy(0);
   NTileHeavyThresholdOverride  hybrid_off(-1);  // explicit DISABLED
+  // Decode M-proportional split is OFF by default; this test asserts the
+  // proportional contract (heaviest expert gets > uniform base+1), so pin
+  // it ON explicitly.  The knob under test here is the PROMPT-only hybrid
+  // threshold, which must NOT fire on decode regardless of this.
+  DecodeProportionalOverride   prop_on(true);
 
   if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
     GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
@@ -2409,18 +2910,33 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
       zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
   ASSERT_TRUE(snap.valid);
   EXPECT_TRUE(snap.per_expert_remainder);
-  // Phase B keeps `n_thr_fixed = base` (=2 here); the hybrid path
-  // sets it to 0.  Asserting non-zero pins the Phase-B branch.
+  // The prompt-only HYBRID water-fill keeps n_thr_fixed=0; the decode
+  // M-proportional split (and legacy Phase B) leave it at base.  A
+  // non-zero value confirms the HYBRID gate did NOT fire.
   EXPECT_NE(snap.n_thr_fixed, 0)
-      << "Hybrid gate must NOT fire when threshold env is 0; "
-         "expected Phase B's `n_thr_fixed=base`, got 0 (hybrid).";
-  // Every allocation must be `base` (=2) or `base + 1` (=3).
+      << "Hybrid gate must NOT fire on decode; got n_thr_fixed=0.";
+  // ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD is a PROMPT-ONLY knob
+  // (default -1 = DISABLED); it does NOT govern decode.  The decode
+  // CK Single-round path now uses the UNCONDITIONAL M-proportional
+  // thread split regardless of this knob, so even with the hybrid
+  // threshold explicitly disabled (-1) decode still load-balances by
+  // M.  Assert the proportional contract (not the legacy uniform
+  // base/base+1): per_expert_remainder set, no active expert starved,
+  // total <= num_threads, and the heaviest expert (M=16) gets a
+  // proportional share above the uniform base+1 (=3).
+  int sum_thr = 0;
   for (int e = 0; e < s.num_ops; ++e) {
     const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
-    EXPECT_TRUE(n == 2 || n == 3)
-        << "expert e=" << e << " M=" << s.Ms[e]
-        << " got n_thr=" << n << " (Phase B should produce 2 or 3).";
+    if (s.Ms[e] > 0) {
+      EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
+    }
+    sum_thr += n;
   }
+  EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
+  EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+      << "heaviest expert (M=16) should get a proportional share "
+         "(> uniform base+1=3); got "
+      << static_cast<int>(snap.stable_n_thr_per_expert[0]);
 }
 
 // Hybrid ON → water-fill distribution: heavier-M experts receive
@@ -2429,6 +2945,135 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
 // executor to use prefix-sum mapping; `sum(stable_n_thr) <=
 // num_threads` (water-fill may leave a tail of idle threads when
 // every heavy hits its per-expert cap).
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=0 (the default) disables the
+// decode M-proportional split; decode CK Single-round uses the uniform
+// Phase B base/base+1 distribution.
+TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOffUsesUniformPhaseB) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride        ck_on(true);
+  NRoundsModeOverride         single_round(1);
+  CustomKernelNTileOverride   default_n_tile(0);
+  NTileStrategyOverride       auto_strategy(0);
+  DecodeProportionalOverride  prop_off(false);  // knob under test
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4});
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params, nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  EXPECT_TRUE(snap.per_expert_remainder);
+  EXPECT_NE(snap.n_thr_fixed, 0)
+      << "proportional OFF keeps n_thr_fixed at base (not the hybrid 0).";
+  // With proportional disabled every active expert gets base (2) or
+  // base+1 (3) only — NO M-weighted spread.
+  for (int e = 0; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    if (s.Ms[e] > 0) {
+      EXPECT_TRUE(n == 2 || n == 3)
+          << "proportional OFF -> uniform Phase B; expert e=" << e
+          << " M=" << s.Ms[e] << " got n_thr=" << n;
+    }
+  }
+}
+
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=1 (opt-in; default is OFF)
+// gives the M-weighted split: heavier experts get a proportional share
+// above the uniform base+1, light experts the floor.
+TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOnUsesMWeightedSplit) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(32);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 32) {
+    GTEST_SKIP() << "Requires >= 32 OMP threads; have " << actual_team_size;
+  }
+
+  CustomKernelOverride        ck_on(true);
+  NRoundsModeOverride         single_round(1);
+  CustomKernelNTileOverride   default_n_tile(0);
+  NTileStrategyOverride       auto_strategy(0);
+  DecodeProportionalOverride  prop_on(true);  // knob under test
+
+  if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+    GTEST_SKIP() << "Requires AVX512BF16 / CK dispatch support.";
+  }
+  reset_grp_matmul_caches();
+
+  auto s = build_hybrid_probe(/*num_threads=*/32,
+      /*Ms=*/{16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4});
+
+  AlgoEnvGuard       algo_guard(3);
+  PhaseBCaptureGuard cap;
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params, nullptr, nullptr),
+            status_t::success);
+  const auto &snap =
+      zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+  ASSERT_TRUE(snap.valid);
+  EXPECT_TRUE(snap.per_expert_remainder);
+  int sum_thr = 0;
+  for (int e = 0; e < s.num_ops; ++e) {
+    const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
+    if (s.Ms[e] > 0) {
+      EXPECT_GE(n, 1) << "active expert e=" << e << " starved";
+    }
+    sum_thr += n;
+  }
+  EXPECT_LE(sum_thr, 32);
+  // Heaviest (M=16) gets a proportional share > uniform base+1 (=3),
+  // and strictly more than the lightest (M=4) experts.
+  const int n_heavy = static_cast<int>(snap.stable_n_thr_per_expert[0]);
+  EXPECT_GE(n_heavy, 4)
+      << "proportional ON: heaviest expert under-allocated (" << n_heavy << ")";
+  EXPECT_GT(n_heavy, static_cast<int>(snap.stable_n_thr_per_expert[13]));
+}
+
 TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
   using namespace moe_test_utils;
   using zendnnl::lowoha::matmul::group_matmul_direct;
@@ -2871,6 +3516,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
     CustomKernelNTileOverride      default_n_tile(0);
     NTileStrategyOverride          auto_strategy(0);
     NTileHeavyThresholdOverride  hybrid_auto(0);
+    // Proportional split is OFF by default; pin it ON so the proportional
+    // contract asserted below holds.  The tier-skip assertion
+    // (n_thr_fixed != 0) is independent of this knob.
+    DecodeProportionalOverride   prop_on(true);
 
     reset_grp_matmul_caches();
     AlgoEnvGuard       algo_guard(3);
@@ -2886,22 +3535,35 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
     EXPECT_NE(snap.n_thr_fixed, 0)
-        << "AUTO must be skipped on decode-class shape "
-           "(max_M=24 <= kDecodeMaxM=32); expected Phase B's "
-           "n_thr_fixed=base, got 0 (AUTO engaged despite the "
-           "prompt gate).";
-    // Verify Phase B's allocation pattern, not HYBRID's water-fill.
-    // On 32t / 14 experts, Phase B yields base=2 or base+1=3 per
-    // expert; HYBRID's adaptive tiers would give the heaviest M=24
-    // expert at least 4 threads (high tier on this skew).
+        << "AUTO adaptive-tiers must be skipped on decode-class shape "
+           "(max_M=24 <= kDecodeMaxM=32); tiers clear n_thr_fixed to 0, "
+           "so a non-zero value confirms tiers did NOT engage.  The "
+           "decode M-proportional split (which DOES run here) leaves "
+           "n_thr_fixed at base.";
+    // Decode now uses the M-proportional thread split (commit:
+    // "static M-proportional thread allocation for CK decode") instead
+    // of the legacy uniform Phase B base/base+1.  That is still NOT the
+    // adaptive-tier water-fill (n_thr_fixed stays != 0, asserted above).
+    // Assert the proportional contract rather than the old {0,2,3}:
+    //   - per_expert_remainder set (prefix-sum executor path),
+    //   - every active expert gets >= 1 thread (no starvation),
+    //   - total allocation <= num_threads,
+    //   - the heaviest expert (M=24) gets a proportional share > the
+    //     uniform base+1 (=3) — distinguishes proportional from Phase B.
+    EXPECT_TRUE(snap.per_expert_remainder);
+    int sum_thr = 0;
     for (int e = 0; e < s.num_ops; ++e) {
       const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
-      EXPECT_TRUE(n == 0 || n == 2 || n == 3)
-          << "AUTO-skip → Phase B base+1 expected per-expert n_thr "
-             "in {0, 2, 3}; expert e=" << e << " M=" << s.Ms[e]
-          << " got n_thr=" << n
-          << " (AUTO tier values would be 4-8 on heaviest expert).";
+      if (s.Ms[e] > 0) {
+        EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
+      }
+      sum_thr += n;
     }
+    EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
+    EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+        << "heaviest expert (M=24) should get a proportional share "
+           "(> uniform base+1=3); got "
+        << static_cast<int>(snap.stable_n_thr_per_expert[0]);
   }
 
   // Sub-case 2: MANUAL (HYBRID=10, would tag heavies on this Ms)
@@ -2914,6 +3576,10 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
     // Threshold=10 would tag M ∈ {24,20,16,12} as heavy on this
     // Ms — i.e. would have engaged MANUAL on legacy semantics.
     NTileHeavyThresholdOverride  hybrid_manual(10);
+    // Proportional split is OFF by default; pin it ON so the proportional
+    // contract asserted below holds.  The tier-skip assertion
+    // (n_thr_fixed != 0) is independent of this knob.
+    DecodeProportionalOverride   prop_on(true);
 
     reset_grp_matmul_caches();
     AlgoEnvGuard       algo_guard(3);
@@ -2929,21 +3595,28 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
     ASSERT_TRUE(snap.valid);
     EXPECT_NE(snap.n_thr_fixed, 0)
-        << "MANUAL must be skipped on decode-class shape "
-           "(max_M=24 <= kDecodeMaxM=32); expected Phase B's "
-           "n_thr_fixed=base, got 0 (MANUAL engaged despite the "
-           "prompt gate).";
-    // Verify Phase B's allocation pattern, not MANUAL's water-fill.
-    // MANUAL with threshold=10 would tag e=0..3 as heavy and pile
-    // most threads onto them.  Phase B distributes uniformly.
+        << "MANUAL adaptive-tiers must be skipped on decode-class shape "
+           "(max_M=24 <= kDecodeMaxM=32); tiers clear n_thr_fixed to 0, "
+           "so a non-zero value confirms the MANUAL water-fill did NOT "
+           "engage.  The decode M-proportional split runs instead.";
+    // As in sub-case 1: decode uses the M-proportional split, not the
+    // MANUAL adaptive-tier water-fill.  threshold=10 (!= -1) keeps the
+    // proportional split enabled; only an explicit -1 disable would
+    // restore uniform Phase B.  Assert the proportional contract.
+    EXPECT_TRUE(snap.per_expert_remainder);
+    int sum_thr = 0;
     for (int e = 0; e < s.num_ops; ++e) {
       const int n = static_cast<int>(snap.stable_n_thr_per_expert[e]);
-      EXPECT_TRUE(n == 0 || n == 2 || n == 3)
-          << "MANUAL-skip → Phase B base+1 expected per-expert "
-             "n_thr in {0, 2, 3}; expert e=" << e << " M=" << s.Ms[e]
-          << " got n_thr=" << n
-          << " (MANUAL water-fill would pile threads onto heavies).";
+      if (s.Ms[e] > 0) {
+        EXPECT_GE(n, 1) << "active expert e=" << e << " starved (0 thr)";
+      }
+      sum_thr += n;
     }
+    EXPECT_LE(sum_thr, 32) << "M-proportional over-allocated threads";
+    EXPECT_GE(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+        << "heaviest expert (M=24) should get a proportional share "
+           "(> uniform base+1=3); got "
+        << static_cast<int>(snap.stable_n_thr_per_expert[0]);
   }
 }
 

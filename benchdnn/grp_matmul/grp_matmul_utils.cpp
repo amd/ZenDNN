@@ -95,6 +95,47 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
         // `lowoha_common.hpp` for the library-side contract.
         std::string total_str = next();
         if (!total_str.empty()) cfg.total_experts = std::stoi(total_str);
+        // 14th column (optional): dynamic_quant toggle for the DQ-INT8
+        // family.  Accepted forms:
+        //   "0" / "false" / "off" / empty   → bf16 path (default)
+        //   "1" / "true" / "on" / "dq_int8" → DQ-INT8 path
+        // Validation against the (src, wei, dst) tuple and the K%4
+        // microkernel constraint happens below, after total_experts
+        // is settled, so a single message can refer to all settled
+        // fields.
+        std::string dq_str = next();
+        if (!dq_str.empty()) {
+            if (dq_str == "0" || dq_str == "false" || dq_str == "off") {
+                cfg.dynamic_quant = 0;
+            } else if (dq_str == "1" || dq_str == "true" || dq_str == "on"
+                       || dq_str == "dq_int8" || dq_str == "dynamic_quant") {
+                cfg.dynamic_quant = 1;
+            } else {
+                std::cerr << "parse_config: dynamic_quant='" << dq_str
+                          << "' must be one of {0,1,false,true,off,on,"
+                             "dq_int8,dynamic_quant}.\n";
+                return false;
+            }
+        }
+        // 15th column (optional): compute_dt for the DQ-INT8 family.
+        // Drives the sym vs asym discriminator on
+        // `params[i].dtypes.compute`:
+        //   "s8" (default)        → kS8_S8_BF16_SYM
+        //   "u8" / "asym"         → kU8_S8_BF16_ASYM
+        // Ignored when dynamic_quant == 0 so legacy bf16 input lines
+        // (which never carry this column) keep the same defaults.
+        std::string cdt_str = next();
+        if (!cdt_str.empty()) {
+            if (cdt_str == "u8" || cdt_str == "asym")
+                cfg.compute_dt = data_type_t::u8;
+            else if (cdt_str == "s8" || cdt_str == "sym")
+                cfg.compute_dt = data_type_t::s8;
+            else {
+                std::cerr << "parse_config: compute_dt='" << cdt_str
+                          << "' must be one of {s8, u8, sym, asym}.\n";
+                return false;
+            }
+        }
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) {
         return false;
@@ -129,6 +170,42 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
                   << " < num_ops=" << cfg.num_ops
                   << " is invalid (total must include all firing experts)\n";
         return false;
+    }
+
+    // DQ-INT8 contract — the resolve_variant() truth table in
+    // custom_kernel/dispatch.cpp accepts dynamic_quant=true ONLY for
+    // (src=bf16, wei=s8, dst=bf16) with compute ∈ {s8, u8}.  Refuse
+    // here so the driver fails fast with a precise message instead
+    // of dispatching a config the library will silently fall back
+    // off the CK path for.  Also enforce the K%4 microkernel
+    // alignment up front (mirrors the `sym_k = (k/4)*4` clamp in
+    // test_quant.cpp::INT8_DYNAMIC_GEMM_BF16).
+    if (cfg.dynamic_quant) {
+        if (cfg.src_dt != data_type_t::bf16
+            || cfg.wei_dt != data_type_t::s8
+            || cfg.dst_dt != data_type_t::bf16) {
+            std::cerr << "parse_config: dynamic_quant=1 requires "
+                         "src:wei:dst = bf16:s8:bf16 (CK DQ-INT8 truth "
+                         "table); got "
+                      << datatypeToStr(cfg.src_dt) << ":"
+                      << datatypeToStr(cfg.wei_dt) << ":"
+                      << datatypeToStr(cfg.dst_dt) << "\n";
+            return false;
+        }
+        if (cfg.compute_dt != data_type_t::s8
+            && cfg.compute_dt != data_type_t::u8) {
+            std::cerr << "parse_config: dynamic_quant=1 compute_dt must "
+                         "be s8 (sym) or u8 (asym); got "
+                      << datatypeToStr(cfg.compute_dt) << "\n";
+            return false;
+        }
+        if ((cfg.K & 3) != 0) {
+            std::cerr << "parse_config: dynamic_quant=1 requires K%4==0 "
+                         "(int8 microkernel reduces in 4-byte VPDPBUSD "
+                         "lanes); got K="
+                      << cfg.K << "\n";
+            return false;
+        }
     }
     return true;
 }
@@ -167,8 +244,42 @@ void fill_buffer(void *buf, size_t elems, data_type_t dt, uint32_t seed) {
             p[i] = static_cast<float>(static_cast<int>(state >> 16) % 200 - 100)
                     * 0.01f;
         }
+    } else if (dt == data_type_t::s8) {
+        // Symmetric int8 weight — uniform in [-127, 127].  -128 is
+        // intentionally avoided so a future asym-corrupt sanity
+        // pass cannot detect the [-128] all-bits-set sentinel as an
+        // accidental wraparound.
+        auto *p = static_cast<int8_t *>(buf);
+        uint32_t state = seed;
+        for (size_t i = 0; i < elems; ++i) {
+            state = state * 1103515245u + 12345u;
+            int v = static_cast<int>(state >> 16) % 255 - 127;
+            p[i] = static_cast<int8_t>(v);
+        }
+    } else if (dt == data_type_t::u8) {
+        auto *p = static_cast<uint8_t *>(buf);
+        uint32_t state = seed;
+        for (size_t i = 0; i < elems; ++i) {
+            state = state * 1103515245u + 12345u;
+            p[i] = static_cast<uint8_t>((state >> 16) & 0xFF);
+        }
     } else {
         std::memset(buf, 0, elems * size_of(dt));
+    }
+}
+
+void fill_quant_scale_f32(float *buf, size_t elems, uint32_t seed) {
+    // Real per-channel / per-token scales for bf16 inputs in
+    // [-1, 1] are roughly `max(|x|) / 127 ≈ 7.87e-3`.  We sample in
+    // [4e-3, 1.2e-2] to keep the signed accumulator within ±2^23
+    // for K up to ~16k (avoids spurious saturation on the int8
+    // matmul output that would otherwise mask perf regressions
+    // behind the dst clamp).
+    uint32_t state = seed;
+    for (size_t i = 0; i < elems; ++i) {
+        state = state * 1103515245u + 12345u;
+        const float u = static_cast<float>((state >> 16) & 0xFFFF) / 65535.0f;
+        buf[i] = 4.0e-3f + u * 8.0e-3f;  // [4e-3, 12e-3]
     }
 }
 

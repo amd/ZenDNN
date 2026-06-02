@@ -778,16 +778,30 @@ inline bool check_m_tile_safe(
     const std::vector<int> &M,
     const std::vector<matmul_params> &params,
     int num_ops) {
+  // Dtype-uniformity reference = the FIRST ACTIVE expert, not params[0].
+  // The grouped / per-expert fallback DQ pre-pass rewrites ONLY active
+  // experts to s8 (inactive M==0 experts keep their pre-quant bf16/f32
+  // dtype), so a leading inactive expert at index 0 would otherwise become
+  // a bf16 reference that every active s8 expert mismatches — falsely
+  // flipping m_tile_safe to false and vetoing ALGO 2/3 on the common MoE
+  // decode case.  Fall back to 0 when all experts are inactive (no
+  // compute, so the result is irrelevant).
+  int ref = 0;
+  for (int i = 0; i < num_ops; ++i) { if (M[i] > 0) { ref = i; break; } }
+
   // Iterate the active range only — the framework may pad params[]
   // (and layout[]) past `num_ops` for prepack-extras tail metadata
   // that the matmul-processing loop never reaches.  See doc-block
   // on `params[i].active_matmul` / `total_matmul` for the contract.
   for (int i = 0; i < num_ops; ++i) {
+    // Inactive experts (M==0) do no compute and carry no rewritten quant
+    // metadata; skip them so they cannot veto the whole call.
+    if (M[i] == 0) continue;
     if (layout[i] != 'r' && layout[i] != 'R') return false;
-    if (params[i].dtypes.src  != params[0].dtypes.src)  return false;
-    if (params[i].dtypes.wei  != params[0].dtypes.wei)  return false;
-    if (params[i].dtypes.dst  != params[0].dtypes.dst)  return false;
-    if (params[i].dtypes.bias != params[0].dtypes.bias) return false;
+    if (params[i].dtypes.src  != params[ref].dtypes.src)  return false;
+    if (params[i].dtypes.wei  != params[ref].dtypes.wei)  return false;
+    if (params[i].dtypes.dst  != params[ref].dtypes.dst)  return false;
+    if (params[i].dtypes.bias != params[ref].dtypes.bias) return false;
     if (params[i].mem_format_a != 'n') return false;
     if (params[i].mem_format_b != 'n') return false;
     if (params[i].packing.pack_format_b != 0) return false;

@@ -82,6 +82,44 @@ struct GrpMatmulConfig {
                                  ///< `params[i].active_matmul == total_matmul`
                                  ///< — legacy-equivalent behaviour.
 
+    /// DQ-INT8 (dynamic-quant) toggle.  When non-zero the driver
+    /// drives the N-tile / custom-kernel int8 path instead of the
+    /// bf16 path:
+    ///   * `params[i].dynamic_quant = true`
+    ///   * `params[i].dtypes.compute = s8` (sym) or `u8` (asym),
+    ///     selected by `compute_dt` below.
+    ///   * `params[i].quant_params.wei_scale` populated with a per-
+    ///     expert per-channel f32 buffer of length `N`.
+    ///   * `params[i].quant_params.src_scale.buff = nullptr` —
+    ///     the library's pre-OMP hoist (`HoistedSrcQuant` in
+    ///     `n_tile/group_matmul_n_tile.cpp`) allocates and fills
+    ///     the per-token scale at runtime, so the caller leaves it
+    ///     null (matches the production DQ-INT8 contract; see
+    ///     gtests/group_matmul/test_algos.cpp::TestGroupMatmulAuto
+    ///     SelectAlgo_DynamicQuant).
+    ///
+    /// Requires:
+    ///   * src_dt=bf16, wei_dt=s8, dst_dt=bf16
+    ///     (CK's `resolve_variant()` truth table — see
+    ///     custom_kernel/dispatch.cpp:resolve_variant).
+    ///   * K % 4 == 0 (the int8 microkernel reduces along the K-
+    ///     axis in 4-byte VPDPBUSD lanes; mirrored by the
+    ///     `sym_k = (k/4)*4` clamp in test_quant.cpp).
+    /// Refused at parse time when these preconditions are violated.
+    int dynamic_quant = 0;       ///< 0 = bf16 path (default), 1 = DQ-INT8
+
+    /// Compute dtype for the DQ-INT8 family (ignored when
+    /// `dynamic_quant == 0`).  Drives `params[i].dtypes.compute`:
+    ///   * data_type_t::s8 (default) — symmetric kernel
+    ///     (`kS8_S8_BF16_SYM`), no src_zp produced by the hoist.
+    ///   * data_type_t::u8           — asymmetric kernel
+    ///     (`kU8_S8_BF16_ASYM`); the hoist additionally allocates
+    ///     and fills a per-token src_zp.
+    /// Stored as the underlying `data_type_t` enum so the driver
+    /// passes it straight through; the parser accepts the strings
+    /// "s8" / "u8" for human-friendly input files.
+    data_type_t compute_dt = data_type_t::s8;
+
     int max_M() const { return *std::max_element(M_per_op.begin(), M_per_op.end()); }
     int total_M() const { return std::accumulate(M_per_op.begin(), M_per_op.end(), 0); }
     bool is_uniform_M() const {
@@ -104,6 +142,14 @@ void fill_bf16_random(void *buf, size_t elems, uint32_t seed);
 
 /// Fill buffer with random data appropriate for the given data type.
 void fill_buffer(void *buf, size_t elems, data_type_t dt, uint32_t seed);
+
+/// Fill an f32 buffer with positive scales clustered around 1/127 —
+/// matches the magnitude a real per-token / per-channel quant scale
+/// produced by `max(|x|) / 127` would have for bf16 inputs in
+/// [-1, 1].  Used by the benchdnn DQ-INT8 path to populate
+/// `params[i].quant_params.wei_scale.buff`; the per-token src_scale
+/// is hoist-allocated by the library so the driver does not fill it.
+void fill_quant_scale_f32(float *buf, size_t elems, uint32_t seed);
 
 } // namespace grp_matmul
 } // namespace benchdnn

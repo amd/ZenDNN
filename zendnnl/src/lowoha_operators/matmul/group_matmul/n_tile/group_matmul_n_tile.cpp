@@ -184,7 +184,82 @@ struct HoistedSrcQuant {
   matmul_quantization_params_t::matmul_quant_t src_scale;
   matmul_quantization_params_t::matmul_quant_t src_zp;
   bool valid = false;
+
+  // Scale views handed to the DQ-INT8 microkernel.  The kernel reads
+  // src/wei scales as bf16 OR f32, converting bf16→f32 on load in the
+  // epilogue (cheap, off the hot K-loop — `kctx.scale_kind` tells it
+  // which).  So the COMMON path (swiglu_oai_mul / none, interleave=
+  // false) passes the caller's RAW scale buffers straight through with
+  // NO pre-conversion.  Only silu/gelu (interleave=true) needs a
+  // pre-pass: the pack permutes weight columns to packed order and the
+  // caller's canonical wei_scale must be permuted to match — and the
+  // kernel's contiguous load can't gather — so for that path (and any
+  // src/wei scale-dtype mismatch) we convert+permute BOTH scales to f32
+  // here and set `kctx.scale_kind = kF32`.  `*_view` points at either
+  // the raw caller buffer (no copy) or the owned f32 copy; a null view
+  // means "cannot serve" and `do_tile` falls back to AOCL.
+  std::vector<float> src_scale_f32_owned;
+  std::vector<float> wei_scale_f32_owned;
+  const void *src_scale_view = nullptr;
+  const void *wei_scale_view = nullptr;
 };
+
+// Return an f32 view of a quant-scale buffer of `count` elements.
+//   * f32 source  → alias the source buffer directly (no copy).
+//   * bf16 source → convert into `owned` and return its `.data()`.
+//   * anything else (incl. null buff / non-positive count) → nullptr,
+//     which the CK int8 path treats as "unsupported on the f32-only
+//     kernel" and routes back to the AOCL fallback.
+static const float *materialise_f32_scale(
+    const void *buff, data_type_t dt, int count,
+    std::vector<float> &owned) {
+  if (buff == nullptr || count <= 0) return nullptr;
+  if (dt == data_type_t::f32) {
+    return static_cast<const float *>(buff);
+  }
+  if (dt == data_type_t::bf16) {
+    owned.resize(static_cast<size_t>(count));
+    const auto *src = static_cast<const bfloat16_t *>(buff);
+    for (int i = 0; i < count; ++i) {
+      owned[static_cast<size_t>(i)] = static_cast<float>(src[i]);
+    }
+    return owned.data();
+  }
+  return nullptr;
+}
+
+// f32 view of the per-channel wei_scale.  Like `materialise_f32_scale`
+// but additionally applies the silu/gelu split-halves interleave
+// permutation when `interleave` is set.  Rationale: for silu_and_mul /
+// gelu_and_mul the pack permutes the weight columns into the
+// `[g0, u0, g1, u1, ...]` interleaved arena and computes the
+// compensation row in that PACKED order, but the caller supplies
+// wei_scale in CANONICAL `[gate | up]` order.  The microkernel loads
+// wei_scale contiguously in PACKED column order, so without a matching
+// permutation each packed column would be dequantised with the wrong
+// channel's scale.  Place the canonical channel's scale at its packed
+// position using the EXACT map `pack_int8_vnni` uses:
+//   col_canon(c) = (c & 1) ? (N/2 + c/2) : (c/2)
+// `swiglu_oai_mul` / `none` keep `interleave == false` (caller-side
+// interleaved or non-gated), where this reduces to a plain f32 view.
+static const float *materialise_f32_wei_scale(
+    const void *buff, data_type_t dt, int N, bool interleave,
+    std::vector<float> &owned) {
+  if (!interleave) {
+    return materialise_f32_scale(buff, dt, N, owned);
+  }
+  if (buff == nullptr || N <= 0) return nullptr;
+  if (dt != data_type_t::f32 && dt != data_type_t::bf16) return nullptr;
+  const int half = N / 2;
+  owned.resize(static_cast<size_t>(N));
+  for (int c = 0; c < N; ++c) {
+    const int canon = (c & 1) ? (half + (c >> 1)) : (c >> 1);
+    owned[static_cast<size_t>(c)] = (dt == data_type_t::f32)
+        ? static_cast<const float *>(buff)[canon]
+        : static_cast<float>(static_cast<const bfloat16_t *>(buff)[canon]);
+  }
+  return owned.data();
+}
 
 // Bundle every reference / dtype-size the executors and per-thread
 // tile primitives need.  Cuts the per-call argument list down to
@@ -405,13 +480,99 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan,
     // bias[e] is passed as `const void *` — the dispatcher resolves
     // the dtype via `kctx->bias_kind` (bf16 or fp32) and branches
     // the load path inside the ukernel.
-    custom_kernel::dispatch_tile(
-        *kctx, e,
-        M[e], K[e], n_tile, col_start,
-        src[e], lda[e],
-        bias[e],
-        static_cast<bfloat16_t *>(dst[e]), ldc[e]);
-    return;
+    //
+    // ── DQ-INT8 quant args ──────────────────────────────────────────
+    // When the CK was prepared for the DQ-INT8 family, the dispatcher
+    // needs the per-row src scale (+ optional per-row src_zp) and the
+    // per-channel wei_scale.  The N-tile pre-OMP hoist loop owns those
+    // buffers in `(*hoisted_src_quant)[e]`; per-channel wei_scale
+    // comes straight from the caller's params and is sliced by the
+    // dispatcher off `col_start`.
+    //
+    // BF16 family stays nullptr and the dispatcher asserts so in
+    // debug builds (release silently ignores them).  Use the runtime
+    // variant on `kctx` rather than the `dynamic_quant` flag at
+    // `flat_n_tile` entry so a refusal inside `prepare_for_call`
+    // (e.g. shape doesn't fit pack_nr) which leaves `kctx.enabled =
+    // false` cannot end up here.
+    const void    *src_scale_ptr = nullptr;
+    const int32_t *src_zp_ptr    = nullptr;
+    const void    *wei_scale_ptr = nullptr;
+    // For the DQ-INT8 family the CK ukernel consumes an s8/u8 byte
+    // stream — the bf16 caller src must be substituted with the
+    // hoisted s8 reorder result that `flat_n_tile`'s pre-OMP loop
+    // produced in `(*hoisted_src_quant)[e]`.  Without this swap the
+    // microkernel would read bf16 bytes as if they were s8, which
+    // silently corrupts every accumulator without any contract
+    // refusal upstream (the dispatcher has no way to inspect the
+    // raw pointer's dtype).  BF16 family keeps the caller src
+    // unchanged.
+    const void *ck_src_ptr = src[e];
+    int         ck_src_lda = lda[e];
+    // B.1 hardening — int8 CK requires a successful hoist of the
+    // caller's bf16 src to s8/u8.  If the hoist did not produce a
+    // valid buffer for this expert (rare but observable on shape
+    // edge cases where reorder_quantization_wrapper short-circuits)
+    // the int8 microkernel would otherwise consume the caller's
+    // bf16 byte stream as if it were s8 — silently corrupting every
+    // accumulator with no upstream refusal.  Fall back to the AOCL
+    // path below by toggling `int8_hoist_ok = false` and skipping
+    // dispatch_tile.  The standard path's hoisted-src substitution
+    // block (`src_for_tile = h.src_ptr` further down) handles the
+    // re-quant via execute_expert_slice's wrapper invocation, so
+    // correctness is preserved even when the pre-OMP hoist failed.
+    bool int8_hoist_ok = true;
+    if (custom_kernel::is_int8_variant(kctx->variant)) {
+      // The hoist sets the src/wei scale VIEWS — either the caller's raw
+      // bf16/f32 buffers (kernel converts on load) or owned f32 copies
+      // (silu/gelu interleave / dtype-mismatch path).  A null view
+      // (scale dtype the kernel can't serve) falls the expert back to
+      // AOCL rather than feeding a mistyped buffer.  `kctx->scale_kind`
+      // (set above) tells the kernel how to read them.
+      //
+      // Asym (u8) additionally feeds the kernel a per-token src_zp it
+      // reads as int32 (`_mm512_set1_epi32(src_zp[m])`).  The reorder
+      // emits zp in the caller's declared dtype, so only an s32 zp is
+      // safe to hand through verbatim; any other dtype (or a missing
+      // buffer) routes the expert to AOCL rather than mis-reading the
+      // zp bytes.  Sym leaves src_zp null and skips this check.
+      const bool asym_zp_ok =
+          kctx->compute_int != custom_kernel::IntCompute::kU8_Asym
+          || (hoisted_src_quant != nullptr
+              && static_cast<size_t>(e) < hoisted_src_quant->size()
+              && (*hoisted_src_quant)[e].src_zp.buff != nullptr
+              && (*hoisted_src_quant)[e].src_zp.dt == data_type_t::s32);
+      if (hoisted_src_quant != nullptr
+          && static_cast<size_t>(e) < hoisted_src_quant->size()
+          && (*hoisted_src_quant)[e].valid
+          && (*hoisted_src_quant)[e].src_scale_view != nullptr
+          && (*hoisted_src_quant)[e].wei_scale_view != nullptr
+          && asym_zp_ok) {
+        const auto &h = (*hoisted_src_quant)[e];
+        src_scale_ptr = h.src_scale_view;
+        src_zp_ptr    = static_cast<const int32_t *>(h.src_zp.buff);
+        ck_src_ptr    = h.src_ptr;
+        ck_src_lda    = h.lda;
+        wei_scale_ptr = h.wei_scale_view;
+      } else {
+        int8_hoist_ok = false;
+      }
+    }
+    if (int8_hoist_ok) {
+      custom_kernel::dispatch_tile(
+          *kctx, e,
+          M[e], K[e], n_tile, col_start,
+          ck_src_ptr, ck_src_lda,
+          bias[e],
+          static_cast<bfloat16_t *>(dst[e]), ldc[e],
+          src_scale_ptr, src_zp_ptr, wei_scale_ptr);
+      return;
+    }
+    // Fall through to AOCL path.  The flat_n_tile pre-OMP hoist
+    // loop emits a single `[CK INT8 BAD HOIST]` apilog warn for
+    // observability when this branch fires, so per-tile logging
+    // here is unnecessary (and would be way too noisy from inside
+    // the OMP region).
   }
 
   // Weight: slice columns of op(B).  Shared by both the wide path
@@ -654,9 +815,11 @@ inline void GroupNTileContext::apply_swiglu_oai(const GroupNTilePlan &plan,
 // is also precomputed so downstream helpers don't each re-derive it.
 inline GroupNTileTopology summarise_topology(
     const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, int num_threads, size_t wei_elem) {
+    const std::vector<int> &K, int num_threads, size_t wei_elem,
+    bool is_int8 = false) {
   GroupNTileTopology t{};
   t.num_ops = static_cast<int>(M.size());
+  t.is_int8 = is_int8;
   t.num_threads = num_threads;
   t.ccd_size = std::min(8, num_threads);
   // Ceiling so a partial last CCD (e.g., 126 threads → 16 CCDs, last
@@ -764,9 +927,41 @@ inline void fill_sorted_expert_order(GroupNTilePlan &plan,
 // values (e.g. 128) increase subtile-pass count per thread for small
 // num_ops / large thread pools; larger values (e.g. 512) reduce
 // kernel invocation overhead on wider per-thread N-slices.
+inline int effective_decode_n_tile_for_variant(bool is_int8);
+
 inline int effective_decode_n_tile() {
+  // bf16 default; delegates to the variant-aware helper so the env
+  // override + constant selection live in exactly one place.
+  return effective_decode_n_tile_for_variant(/*is_int8=*/false);
+}
+
+// Variant-aware sibling.  When the runtime knows the int8 family is
+// engaged on this call (`flat_n_tile` after `engage_ntile_custom_kernel`
+// resolved an int8 variant), use this overload so the planner's
+// per-thread N floor reflects the int8 byte model rather than the
+// bf16 byte model — see B.3 in
+// `analysis_scratch/int8_ntile_audit.md` for the rationale and
+// `kDecodeNTileInt8` in the planner header for the constant.
+//
+// Today `kDecodeNTileInt8 == kDecodeNTile` so the two overloads
+// return identical values; a future D.1 sweep can flip the int8
+// value without touching the bf16 callers.  The env override
+// (`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE`) is shared between
+// families: when set, both overloads honour it, which matches the
+// existing single-knob deployment story.
+inline int effective_decode_n_tile_for_variant(bool is_int8) {
   const int ov = get_grp_matmul_custom_kernel_n_tile();
-  return (ov > 0) ? ov : kDecodeNTile;
+  if (ov > 0) return ov;
+  return is_int8 ? kDecodeNTileInt8 : kDecodeNTile;
+}
+
+// Variant-aware prompt-class min-tile.  Same one-source-of-truth
+// pattern as `effective_decode_n_tile_for_variant`.  The env
+// override knob does not currently apply to the prompt-class
+// floor (`kMinNTile` is hard-coded today); when D.1 surfaces a
+// distinct optimum, plumb a new env knob here.
+inline int min_n_tile_for_variant(bool is_int8) {
+  return is_int8 ? kMinNTileInt8 : kMinNTile;
 }
 
 // ── Auto-select mirror ───────────────────────────────────────────────
@@ -852,7 +1047,9 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
   // (zero-N callers are rejected upstream by the dispatcher).
   if (team_size_est <= 1) return topo.max_N > 0;
   const int viability_min_tile =
-      (topo.max_M <= kDecodeMaxM) ? effective_decode_n_tile() : kMinNTile;
+      (topo.max_M <= kDecodeMaxM)
+          ? effective_decode_n_tile_for_variant(topo.is_int8)
+          : min_n_tile_for_variant(topo.is_int8);
   const int tiles_available = topo.max_N / viability_min_tile;
   const int min_useful = (topo.num_ops > topo.num_ccds)
       ? std::max(1, topo.ccd_size / 2)
@@ -872,7 +1069,7 @@ inline bool ntile_viable(const GroupNTileTopology &topo) {
 inline bool try_decode_d_plan(const GroupNTileTopology &topo,
                               GroupNTilePlan &plan) {
   if (topo.max_M > kDecodeMaxM) return false;
-  const int decode_n_tile = effective_decode_n_tile();
+  const int decode_n_tile = effective_decode_n_tile_for_variant(topo.is_int8);
   const int team_size_est = topo.num_threads / std::max(1, topo.num_ops);
   const int skew_ratio = (topo.min_M_active > 0)
       ? (topo.max_M / topo.min_M_active) : topo.max_M;
@@ -921,7 +1118,7 @@ inline bool try_decode_d_plan(const GroupNTileTopology &topo,
 inline bool force_decode_d_plan(const GroupNTileTopology &topo,
                                 GroupNTilePlan &plan) {
   if (topo.num_threads < topo.num_ops) return false;
-  const int decode_n_tile = effective_decode_n_tile();
+  const int decode_n_tile = effective_decode_n_tile_for_variant(topo.is_int8);
   const int thr_per_expert = std::max(1,
       topo.num_threads / std::max(1, topo.num_ops));
   plan.strategy = GroupNTileStrategy::DecodeD;
@@ -1617,11 +1814,90 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
       // surplus to experts that can productively use them" semantics
       // and avoids re-introducing the very thread-idleness Phase B
       // exists to eliminate.
+      // ── Decode: static M-proportional thread allocation ──────────
+      // On a skewed-M decode batch the uniform per-expert team
+      // (`base = n_thr_single`) makes the heaviest expert's N-split
+      // threads do ~M_heavy/M_light more work than the light experts'
+      // threads, which then idle at the round barrier (see
+      // `execute_rounds`).  Allocate threads to each ACTIVE expert in
+      // proportion to its M (N is uniform per op in MoE, so
+      // M-proportional == work-proportional), clamped to
+      // [1, N[e]/ab_min_tile] (its N-tile capacity), summing to
+      // <= num_threads.  The executor's `per_expert_remainder`
+      // prefix-sum path consumes the non-uniform vector directly (no
+      // executor change), and `participating_n_thr`'s CK clamp
+      // `min(team_size, N[e]/min_n_tile)` equals the per-expert value
+      // (`plan.min_n_tile == ab_min_tile` here), so no thread is
+      // clamped away.  Allocation is a pure function of
+      // (M, N, num_threads) -> deterministic / cache-key stable.
+      // Decode-only (`max_M <= kDecodeMaxM`); the non-decode CK Single
+      // case keeps the `+1` remainder distribution below.  This is an
+      // opt-in for decode CK Single-round (both dtypes): OFF by default
+      // (decode uses the uniform Phase B base+1, measured faster on the
+      // evaluated decode MoE shapes), turned ON only via the dedicated
+      // A/B knob ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=1.  It is
+      // INDEPENDENT of ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD, which is
+      // prompt-only.
+      bool proportional_applied = false;
+      if (use_custom && topo.max_M <= kDecodeMaxM
+          && get_grp_matmul_decode_proportional()) {
+        const int nops     = topo.num_ops;
+        const int nthreads = topo.num_threads;
+        long long sum_M    = 0;
+        int       n_active = 0;
+        for (int e = 0; e < nops; ++e) {
+          const int me =
+              (e < static_cast<int>(M.size()) && M[e] > 0) ? M[e] : 0;
+          if (me > 0) { sum_M += me; ++n_active; }
+        }
+        // Need >= 1 thread per active expert (else an expert maps to no
+        // tid and its output is skipped) and real work to balance.
+        if (n_active > 0 && n_active <= nthreads && sum_M > 0) {
+          int    thr[GroupNTilePlan::kMaxExperts];
+          int    cap[GroupNTilePlan::kMaxExperts];
+          double want[GroupNTilePlan::kMaxExperts];
+          for (int e = 0; e < nops; ++e) {
+            const int me =
+                (e < static_cast<int>(M.size()) && M[e] > 0) ? M[e] : 0;
+            if (me <= 0) { thr[e] = 0; cap[e] = 0; want[e] = 0.0; continue; }
+            const int my_N = (e < static_cast<int>(N.size())) ? N[e] : 0;
+            cap[e]  = std::max(1, my_N / std::max(1, ab_min_tile));
+            want[e] = static_cast<double>(nthreads)
+                      * static_cast<double>(me)
+                      / static_cast<double>(sum_M);
+            thr[e]  = 1;  // floor: every active expert runs
+          }
+          // Largest-remainder fill: each remaining thread goes to the
+          // active, not-yet-capped expert furthest below its
+          // proportional target `want[e]`.  Strict `>` keeps the lowest
+          // expert index on ties, so the result is deterministic.
+          int used = n_active;
+          while (used < nthreads) {
+            int    best     = -1;
+            double best_def = 0.0;
+            for (int e = 0; e < nops; ++e) {
+              if (thr[e] <= 0 || thr[e] >= cap[e]) continue;
+              const double def = want[e] - static_cast<double>(thr[e]);
+              if (best < 0 || def > best_def) { best = e; best_def = def; }
+            }
+            if (best < 0) break;  // every active expert at its N-tile cap
+            ++thr[best];
+            ++used;
+          }
+          for (int e = 0; e < nops; ++e) {
+            plan.stable_n_thr_per_expert[e] = static_cast<int16_t>(thr[e]);
+          }
+          plan.per_expert_remainder = true;
+          proportional_applied = true;
+        }
+      }
+
       const int base = c.n_thr_single;
       const int total_used = base * topo.num_ops;
       const int remainder = topo.num_threads - total_used;
       const int per_expert_cap = std::min(topo.ccd_size, c.max_tiles);
-      if (use_custom
+      if (!proportional_applied
+          && use_custom
           && remainder > 0
           && remainder < topo.num_ops
           && (base + 1) <= per_expert_cap) {
@@ -1943,9 +2219,10 @@ inline GroupNTilePlan plan_group_n_tile(
   // force-decode_d HINT log).  Cheap — `effective_decode_n_tile()`
   // already short-circuits on a cached snapshot — but the local
   // makes the "single read per plan" intent explicit.
-  const int decode_n_tile_snapshot = effective_decode_n_tile();
+  const int decode_n_tile_snapshot =
+      effective_decode_n_tile_for_variant(topo.is_int8);
   const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
-      ? decode_n_tile_snapshot : kMinNTile;
+      ? decode_n_tile_snapshot : min_n_tile_for_variant(topo.is_int8);
 
   // ── Force-DecodeD path (knob value 1) ──────────────────────────────
   // When the user explicitly forces DecodeD, attempt it BEFORE any
@@ -2804,16 +3081,118 @@ void flat_n_tile(
   const grp_matmul_gated_act_t custom_act = fused_epilogue
       ? fused_act
       : grp_matmul_gated_act_t::none;
+  // DQ-INT8 discriminators derived from the call's params:
+  //
+  //   * `ck_dynamic_quant`     — taken from `params[0].dynamic_quant`.
+  //                              MoE calls are homogeneous (every
+  //                              firing expert shares the same quant
+  //                              config), so `params[0]` is
+  //                              representative.  The per-expert quant
+  //                              SHAPE (per-token src, per-channel wei)
+  //                              is independently validated for each
+  //                              quant-bearing expert by
+  //                              `check_n_tile_extra` before we reach
+  //                              here; there is no separate
+  //                              flag-uniformity gate — the dispatcher
+  //                              relies on the orchestrator building
+  //                              uniform calls.
+  //   * `ck_compute_dtype`     — taken DIRECTLY from
+  //                              `params[0].dtypes.compute` (`s8` for
+  //                              symmetric, `u8` for asymmetric).  This
+  //                              MUST be the same field the runtime
+  //                              hoist (`reorder_quantization_wrapper`)
+  //                              keys its `needs_zp = (compute == u8)`
+  //                              decision off — otherwise the variant
+  //                              the SYM/ASYM microkernel is selected
+  //                              for can disagree with the byte stream
+  //                              the hoist actually produces.
+  //
+  //                              Previously this derived the flavour
+  //                              from `src_zp.buff != nullptr`, which is
+  //                              WRONG for dynamic quant: `src_zp` is an
+  //                              OUTPUT the hoist allocates, so a
+  //                              dynamic-asymmetric caller (compute=u8)
+  //                              leaves `src_zp.buff == nullptr` at this
+  //                              point and the resolver mis-selected the
+  //                              SYM kernel.  The SYM kernel then ran its
+  //                              hard-coded `XOR 0x80` + `128×sum_wei`
+  //                              recentering on u8 asymmetric bytes while
+  //                              ignoring `src_zp` — producing systematic
+  //                              garbage for every asym DQ-INT8 call.
+  //                              The gtest helper hardcodes
+  //                              `dtypes.compute = s8`, so the symmetric
+  //                              path stayed consistent and the bug was
+  //                              invisible to the suite.
+  // Representative expert for the call-level quant-mode classification.
+  // MoE calls are homogeneous across FIRING experts, but the grouped /
+  // per-expert fallback DQ-INT8 pre-pass rewrites ONLY active experts to
+  // `src=s8` + cleared `dynamic_quant` + per-token `src_scale`; an
+  // INACTIVE expert (M==0) keeps its pre-quant bf16/f32 dtype and null
+  // src_scale.  Reading `params[0]` blindly would therefore misclassify
+  // the whole call to the wrong dtype / quant mode whenever expert 0
+  // routed no tokens (common in MoE decode).  Classify from the FIRST
+  // ACTIVE expert instead; fall back to 0 when every expert is inactive
+  // (no compute, so the classification is irrelevant).  Note the
+  // wei/dst/bias dtype reads above stay on `params[0]` — the caller sets
+  // those uniformly across active AND inactive experts, so index 0 is
+  // representative for them regardless of routing.
+  size_t rep = 0;
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (i < M.size() && M[i] > 0) { rep = i; break; }
+  }
+  bool        ck_dynamic_quant = false;
+  data_type_t ck_compute_dtype = data_type_t::none;
+  if (!params.empty() && params[rep].dynamic_quant) {
+    ck_dynamic_quant = true;
+    ck_compute_dtype = params[rep].dtypes.compute;
+  } else if (!params.empty()
+             && params[rep].dtypes.src == data_type_t::s8
+             && params[rep].quant_params.src_scale.buff != nullptr) {
+    // Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ): the group_dynamic_quant
+    // pre-pass already quantized the src to s8 and CLEARED dynamic_quant,
+    // but left a per-token src_scale.  This is still a DQ-INT8 call — keep
+    // `ck_dynamic_quant=false` (no runtime hoist needed; src is already
+    // s8) but propagate the compute dtype so `resolve_variant` selects the
+    // sym/asym CK int8 variant instead of falling back to AOCL.
+    ck_compute_dtype = params[rep].dtypes.compute;
+  }
   custom_kernel::CallContext kctx;
   engage_ntile_custom_kernel(
       custom_act,
-      /*src_dtype=*/params[0].dtypes.src,
+      /*src_dtype=*/params[rep].dtypes.src,
       /*wei_dtype=*/params[0].dtypes.wei,
       /*dst_dtype=*/params[0].dtypes.dst,
       act_dtype,
       /*bias_dtype=*/params[0].dtypes.bias,
       transA, transB, M, N, K, ldb, alpha, beta, weight,
-      is_weights_const, kctx);
+      is_weights_const, kctx, ck_dynamic_quant, ck_compute_dtype);
+
+  // ── DQ-INT8 scale-path decision (uniform across experts) ──────────
+  // The microkernel reads src/wei scales as bf16 or f32 (converting on
+  // load).  Decide ONCE how the hoist feeds them:
+  //   * RAW passthrough (no pre-conversion) when interleave is off AND
+  //     src/wei share a supported scale dtype (bf16 or f32).  This is
+  //     the common gpt-oss path (swiglu_oai_mul / none) — the kernel
+  //     converts bf16→f32 on load.  `scale_kind` = that dtype.
+  //   * CONVERT+permute to f32 otherwise — silu/gelu interleave (the
+  //     pack permutes weight columns; wei_scale must match and the
+  //     kernel can't gather) OR a src/wei scale-dtype mismatch the
+  //     single `scale_kind` can't express.  `scale_kind` = kF32.
+  bool ck_scales_raw       = false;  // pass caller buffers straight through
+  bool ck_scales_interleave = false; // silu/gelu split-halves permute
+  if (custom_kernel::is_int8_variant(kctx.variant)) {
+    ck_scales_interleave =
+        (kctx.act_kind == custom_kernel::ActKind::silu_and_mul)
+        || (kctx.act_kind == custom_kernel::ActKind::gelu_and_mul);
+    const data_type_t sdt = params[rep].quant_params.src_scale.dt;
+    const data_type_t wdt = params[rep].quant_params.wei_scale.dt;
+    const bool supported_dt =
+        (sdt == data_type_t::bf16 || sdt == data_type_t::f32);
+    ck_scales_raw = !ck_scales_interleave && supported_dt && (sdt == wdt);
+    kctx.scale_kind = (ck_scales_raw && sdt == data_type_t::bf16)
+        ? custom_kernel::ScaleKind::kBf16
+        : custom_kernel::ScaleKind::kF32;
+  }
 
   // Custom-kernel engagement guard for the wide swiglu path.
   //
@@ -2906,7 +3285,9 @@ void flat_n_tile(
           /*num_threads=*/num_threads,
           /*nr_align=*/nr_align,
           fused_act, act_dtype,
-          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
+          /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta,
+          /*dynamic_quant=*/ck_dynamic_quant,
+          /*compute_dtype=*/ck_compute_dtype));
 
   // APILOG moved below after the plan is built so the log line can
   // surface both the env-selected and the auto-resolved N_ORDER
@@ -2964,7 +3345,42 @@ void flat_n_tile(
   std::vector<HoistedSrcQuant> hoisted(num_ops);
   bool any_hoist = false;
   for (int e = 0; e < num_ops; ++e) {
-    if (M[e] <= 0 || !params[e].dynamic_quant) continue;
+    if (M[e] <= 0) continue;
+
+    // Grouped pre-quant fast path: the group_dynamic_quant pre-pass
+    // already converted this expert's src to s8 (per-token src_scale,
+    // dynamic_quant cleared).  No per-expert hoist is needed — point
+    // `hoisted[e]` at the caller's s8 src + scale so `do_tile`'s int8
+    // path consumes it exactly like the runtime-hoisted case, and
+    // materialise the CK scale views.  Gated on the int8 CK variant
+    // having resolved (set below from the same s8-src + compute dtype).
+    if (!params[e].dynamic_quant
+        && params[e].dtypes.src == data_type_t::s8
+        && params[e].quant_params.src_scale.buff != nullptr
+        && custom_kernel::is_int8_variant(kctx.variant)) {
+      hoisted[e].valid     = true;
+      hoisted[e].src_ptr   = src[e];               // already s8
+      hoisted[e].lda       = lda[e];
+      hoisted[e].src_dtype = params[e].dtypes.src;
+      hoisted[e].src_scale = params[e].quant_params.src_scale;
+      hoisted[e].src_zp    = params[e].quant_params.src_zp;
+      any_hoist = true;
+      if (ck_scales_raw) {
+        hoisted[e].src_scale_view = hoisted[e].src_scale.buff;
+        hoisted[e].wei_scale_view = params[e].quant_params.wei_scale.buff;
+      } else {
+        hoisted[e].src_scale_view = materialise_f32_scale(
+            hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
+            M[e], hoisted[e].src_scale_f32_owned);
+        hoisted[e].wei_scale_view = materialise_f32_wei_scale(
+            params[e].quant_params.wei_scale.buff,
+            params[e].quant_params.wei_scale.dt,
+            N[e], ck_scales_interleave, hoisted[e].wei_scale_f32_owned);
+      }
+      continue;
+    }
+
+    if (!params[e].dynamic_quant) continue;
 
     // Single-shot reorder: build a local `shadow` of `params[e]`
     // because the wrapper mutates its `matmul_params &` argument
@@ -3016,6 +3432,59 @@ void flat_n_tile(
       hoisted[e].src_scale = shadow.quant_params.src_scale;
       hoisted[e].src_zp    = shadow.quant_params.src_zp;
       any_hoist = true;
+
+      // DQ-INT8 scale views (decision computed once above).  RAW path:
+      // hand the kernel the caller's scale buffers unchanged (it
+      // converts bf16→f32 on load) — zero pre-conversion, the common
+      // gpt-oss case.  CONVERT path: materialise f32 (and apply the
+      // silu/gelu interleave permutation to wei_scale) since the kernel
+      // can't gather the permuted columns / express a mixed dtype.  A
+      // null view routes the expert back to AOCL in `do_tile`.
+      if (custom_kernel::is_int8_variant(kctx.variant)) {
+        if (ck_scales_raw) {
+          hoisted[e].src_scale_view = hoisted[e].src_scale.buff;
+          hoisted[e].wei_scale_view =
+              params[e].quant_params.wei_scale.buff;
+        } else {
+          hoisted[e].src_scale_view = materialise_f32_scale(
+              hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
+              M[e], hoisted[e].src_scale_f32_owned);
+          hoisted[e].wei_scale_view = materialise_f32_wei_scale(
+              params[e].quant_params.wei_scale.buff,
+              params[e].quant_params.wei_scale.dt,
+              N[e], ck_scales_interleave, hoisted[e].wei_scale_f32_owned);
+        }
+      }
+    }
+  }
+
+  // B.1 hardening — when the int8 CK is engaged but the hoist did
+  // not produce a valid s8/u8 buffer for an active expert (rare,
+  // e.g. caller passed `dynamic_quant=true` with `dtypes.wei != s8`
+  // so the wrapper short-circuited as a no-op), `do_tile` will
+  // fall the per-tile dispatch back to the AOCL path.  Surface a
+  // single per-call apilog warn so the operator can see why the
+  // CK did not run on these experts; the OMP region itself stays
+  // log-silent in the hot path.
+  if (use_custom && custom_kernel::is_int8_variant(kctx.variant)) {
+    static const bool s_int8_bad_hoist_warn = apilog_info_enabled();
+    if (s_int8_bad_hoist_warn) {
+      int n_bad_hoist = 0;
+      for (int e = 0; e < num_ops; ++e) {
+        if (M[e] <= 0) continue;
+        if (!params[e].dynamic_quant) continue;
+        if (!hoisted[e].valid) ++n_bad_hoist;
+      }
+      if (n_bad_hoist > 0) {
+        apilog_info(
+            "[GRP_MATMUL.CK INT8 BAD HOIST] flat_n_tile: ",
+            n_bad_hoist, "/", num_ops,
+            " active expert(s) failed dynamic-quant src hoist; "
+            "those experts fall back to AOCL DLP sym_quant for "
+            "this call.  CK kept engaged for the remaining experts. "
+            "Common cause: caller set dynamic_quant=true but "
+            "dtypes.wei != s8.");
+      }
     }
   }
 
@@ -3031,8 +3500,20 @@ void flat_n_tile(
       any_hoist ? &hoisted : nullptr
   };
 
+  // `is_int8` drives the planner's int8-variant per-thread N floor
+  // (`kDecodeNTileInt8` / `kMinNTileInt8` via the `*_for_variant`
+  // helpers).  Key it off the RESOLVED CK variant — not merely
+  // `ck_dynamic_quant` — so a DQ-INT8 call that the CK refused
+  // (`kctx.enabled == false`, e.g. K %% 4 != 0, unsupported act, …)
+  // and runs on the AOCL DLP path uses the bf16/AOCL tile model
+  // rather than the int8 one.  Behaviour-neutral today (the int8
+  // constants equal their bf16 siblings) but keeps the planner's
+  // dtype-aware tuning surface correct once they diverge.
+  const bool is_int8_call =
+      use_custom && custom_kernel::is_int8_variant(kctx.variant);
   const GroupNTileTopology topo =
-      summarise_topology(M, N, K, num_threads, wei_elem);
+      summarise_topology(M, N, K, num_threads, wei_elem,
+                         /*is_int8=*/is_int8_call);
   // Pass `use_custom` so the planner can short-circuit to the
   // strict-stable plan for the non-custom path.
   // The custom path keeps the legacy cost-model picks because its
@@ -3205,12 +3686,13 @@ void flat_n_tile(
     // load now that they all cache + override, so the savings are
     // microscopic — clarity is the deliverable).  Same hoist
     // pattern we applied to `decode_n_tile_snapshot` in the planner.
-    const int  log_n_tile_heavy_thr    = get_grp_matmul_n_tile_heavy_threshold();
-    const int  log_aocl_target_slots   = get_grp_matmul_aocl_target_slots();
-    const int  log_aocl_blis_nc        = get_grp_matmul_aocl_blis_nc();
     const int env_order = get_grp_matmul_n_order();
     const bool is_auto_resolved =
         (env_order == 0 && plan.auto_resolved_order >= 0);
+    int max_M_log = 0;
+    for (int e = 0; e < num_ops; ++e)
+      if (M[e] > max_M_log) max_M_log = M[e];
+    const bool is_decode_log = (max_M_log <= kDecodeMaxM);
     const char *strategy_name =
         (plan.strategy == GroupNTileStrategy::Sequential)   ? "Sequential"
       : (plan.strategy == GroupNTileStrategy::DecodeD)      ? "DecodeD"
@@ -3228,9 +3710,33 @@ void flat_n_tile(
         : (use_custom        ? "custom_dynamic"
         :  aocl_strict       ? "aocl_strict_stable"
         :                       "aocl_legacy_costmodel");
+    // Log ONLY the tunables that govern the path actually taken — the
+    // CK and AOCL knob sets are mutually exclusive at runtime, so
+    // printing the inactive set is pure debug noise.  CK path: pack /
+    // subtile + the active thread-balancer (decode_proportional on
+    // decode, n_tile_heavy_thr on prompt).  AOCL path: the DLP slot /
+    // BLIS-Nc knobs.
+    std::string tunables;
+    if (use_custom) {
+      tunables = " pack_nr=" + std::to_string(kctx.pack_nr)
+               + " subtile_cols=" + std::to_string(kctx.subtile_cols);
+      if (is_decode_log) {
+        tunables += std::string(" decode_proportional=")
+                  + (get_grp_matmul_decode_proportional() ? "on" : "off");
+      } else {
+        tunables += " n_tile_heavy_thr="
+                  + std::to_string(get_grp_matmul_n_tile_heavy_threshold());
+      }
+    } else {
+      tunables = " aocl_target_slots="
+               + std::to_string(get_grp_matmul_aocl_target_slots())
+               + " aocl_blis_nc="
+               + std::to_string(get_grp_matmul_aocl_blis_nc());
+    }
     apilog_info("[GRP_MATMUL.PLAN] flat_n_tile strategy=", strategy_name,
                 " path=", path_name,
                 " kernel=", (use_custom ? "custom" : "standard"),
+                " phase=", (is_decode_log ? "decode" : "prompt"),
                 " act=", act_name(fused_act),
                 " fused_epilogue=", (fused_epilogue ? "yes" : "no"),
                 " tight=", (plan.tight_fused_epilogue ? "yes" : "no"),
@@ -3238,8 +3744,10 @@ void flat_n_tile(
                 " thr_per_expert=", plan.decode_thr_per_expert,
                 " n_thr_fixed=", plan.n_thr_fixed,
                 " max_n_thr=", plan.max_n_thr,
-                " pack_nr=", (use_custom ? kctx.pack_nr : 0),
-                " subtile_cols=", (use_custom ? kctx.subtile_cols : 0),
+                " stable_n_thr[0]=",
+                static_cast<int>(plan.stable_n_thr_per_expert[0]),
+                " per_expert_remainder=",
+                (plan.per_expert_remainder ? "yes" : "no"),
                 " min_n_tile=", plan.min_n_tile,
                 " num_ops=", num_ops,
                 " num_threads=", num_threads,
@@ -3247,20 +3755,36 @@ void flat_n_tile(
                 " n_order_used=",
                 is_auto_resolved ? plan.auto_resolved_order : env_order,
                 is_auto_resolved ? " (auto)" : "",
-                " stable_n_thr[0]=",
-                static_cast<int>(plan.stable_n_thr_per_expert[0]),
-                " n_tile_heavy_thr=",
-                log_n_tile_heavy_thr,
-                " per_expert_remainder=",
-                (plan.per_expert_remainder ? "yes" : "no"),
-                " aocl_target_slots=",
-                log_aocl_target_slots,
-                " aocl_blis_nc=",
-                log_aocl_blis_nc);
+                tunables);
   }
 
   switch (plan.strategy) {
     case GroupNTileStrategy::Sequential:
+      // B.4 hardening — Sequential strategy bypasses the custom
+      // kernel entirely (see `do_tile` ctx note above and the
+      // strategy comment block at the top of this file).  When
+      // `use_custom` was set (CK was engaged at flat_n_tile entry
+      // and `prepare_for_call` accepted) but the planner picked
+      // Sequential (typically: N too small to usefully split, or
+      // narrow-N escape after R3 capacity guard), the call still
+      // produces correct output via AOCL DLP, but the operator may
+      // expect the CK to have run.  Surface a single per-call
+      // info-level apilog line so the demotion is observable;
+      // `gemm_mode_out` already labels this as
+      // `flat_n_tile_sequential`.  Phase 2 line item: wire CK
+      // through Sequential so the demotion can become a fast path
+      // instead of a fallback.
+      if (use_custom) {
+        static const bool s_seq_demote = apilog_info_enabled();
+        if (s_seq_demote) {
+          apilog_info(
+              "[GRP_MATMUL.PLAN SEQUENTIAL DEMOTES CK] use_custom=true "
+              "but plan.strategy=Sequential; this call dispatches via "
+              "execute_expert_slice (AOCL DLP), bypassing the custom "
+              "kernel.  Common cause: N too small for tile split. "
+              "Sequential CK wiring is a planned Phase 2 follow-up.");
+        }
+      }
       execute_sequential(plan, ctx);
       break;
     case GroupNTileStrategy::DecodeD:

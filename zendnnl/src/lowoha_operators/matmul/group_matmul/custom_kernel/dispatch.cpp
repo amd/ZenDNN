@@ -41,6 +41,20 @@ bool dispatch_supported() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Convenience predicate — variant is in the DQ-INT8 family:
+//   {kS8_S8_BF16_SYM, kU8_S8_BF16_ASYM,   // bf16 dst
+//    kS8_S8_F32_SYM,  kU8_S8_F32_ASYM}.   // f32 dst (act=none only)
+// Hoisted to one place so dispatch.cpp, the warmer, and the
+// debug-assert in `dispatch_tile()` agree on the int8 family
+// membership.  Keeping it `inline` (no namespace qualifier) lets the
+// optimiser fold the call into a single `cmp + or` at every callsite.
+// `is_int8_variant` now lives in the public header (`dispatch.hpp`)
+// so call sites in the N-tile executor can branch on it without
+// touching dispatch internals; this TU keeps using the header-level
+// definition.
+// ─────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────
 // CallContext lifecycle — `release_owned_buffers()` + `reset()`.
 //
 // The destructor + the in-place reset are the only places the
@@ -65,6 +79,17 @@ void CallContext::release_owned_buffers() {
       ptr = nullptr;
     }
   }
+  // DQ-INT8 sibling — symmetric semantics with a different free
+  // sink (the int8 cache and the bf16 cache are disjoint singletons
+  // and their disable-cache buffers come from different
+  // aligned_alloc'ed regions tagged by the per-pack family in
+  // `pack.cpp`).
+  for (auto &ptr : owned_packed_ptrs_int8) {
+    if (ptr != nullptr) {
+      free_owned_packed_weight_int8(ptr);
+      ptr = nullptr;
+    }
+  }
 }
 
 void CallContext::reset() {
@@ -81,8 +106,16 @@ void CallContext::reset() {
   subtile_cols  = 0;
   act_kind      = ActKind::none;
   bias_kind     = BiasKind::none;
-  for (auto &fn : kfn_table) fn = nullptr;
+  compute_int   = IntCompute::kS8_Sym;
+  // Restore the same safe default as the member initializer: f32 scales.
+  // `dispatch_tile_int8()` derives src/wei scale byte strides from
+  // `scale_kind`, so a stale value across a CallContext reuse would read
+  // scales at the wrong element width if the next caller forgot to set it.
+  scale_kind    = ScaleKind::kF32;
+  for (auto &fn : kfn_table)      fn = nullptr;
+  for (auto &fn : kfn_table_int8) fn = nullptr;
   packed_ptrs.fill(nullptr);
+  packed_ptrs_int8.fill(nullptr);
   subtile_cols_per_expert.fill(0);
 }
 
@@ -97,10 +130,59 @@ void CallContext::reset() {
 // DLP.
 // ────────────────────────────────────────────────────────────────────
 KernelVariant resolve_variant(data_type_t src, data_type_t wei,
-                              data_type_t dst) noexcept {
-  if (src == data_type_t::bf16 && wei == data_type_t::bf16) {
+                              data_type_t dst,
+                              bool        dynamic_quant,
+                              data_type_t compute_dtype) noexcept {
+  // BF16 family — `dynamic_quant` MUST be false (any
+  // dynamic_quant=true call must go through the DQ-INT8 branch
+  // below; we keep these mutually exclusive to avoid silent
+  // mis-routing).
+  if (!dynamic_quant
+      && src == data_type_t::bf16
+      && wei == data_type_t::bf16) {
     if (dst == data_type_t::bf16) return KernelVariant::kBF16_BF16_BF16;
     if (dst == data_type_t::f32 ) return KernelVariant::kBF16_BF16_F32;
+  }
+  // DQ-INT8 family — two ways the per-token-quantized s8/u8 src reaches
+  // the CK microkernel, both with `wei == s8` and the same dequant math:
+  //
+  //   1. Runtime hoist (legacy): caller passes bf16 src with
+  //      `dynamic_quant = true`; the N-tile executor hoists bf16 → s8/u8
+  //      (per-token src_scale) before `dispatch_tile`.
+  //   2. Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ, default on): the
+  //      `group_dynamic_quant` pre-pass already quantized the src to s8,
+  //      set `dtypes.src = s8`, cleared `dynamic_quant`, and left a
+  //      per-token `src_scale` buffer in params.  The src arrives here
+  //      ALREADY s8, so accept `src == s8` directly — `check_n_tile_extra`
+  //      has already validated the grouped per-token src_scale + per-
+  //      channel wei_scale shape, so this only fires on the DQ-INT8
+  //      grouped form (a static s8s8 GEMM would have dst = s8, not
+  //      bf16/f32, and is rejected by the dst checks below).
+  //
+  // Discriminator on the compute dtype (identical for both):
+  //   * `compute_dtype = s8` → kS8_S8_BF16_SYM  (sym, no src_zp).
+  //   * `compute_dtype = u8` → kU8_S8_BF16_ASYM (asym, with src_zp).
+  const bool dq_int8_src =
+      (dynamic_quant && src == data_type_t::bf16)   // (1) runtime hoist
+      || (src == data_type_t::s8);                  // (2) grouped pre-quant
+  if (dq_int8_src
+      && wei == data_type_t::s8) {
+    if (dst == data_type_t::bf16) {
+      if (compute_dtype == data_type_t::s8)
+        return KernelVariant::kS8_S8_BF16_SYM;
+      if (compute_dtype == data_type_t::u8)
+        return KernelVariant::kU8_S8_BF16_ASYM;
+    }
+    // FP32 dst — direct store of the dequantised accumulator (Act=none
+    // only; gated kinds stay BF16 and are refused in fill_kfn_table_int8
+    // / the microkernel selector).  Mirror of the bf16 family's
+    // bf16/f32 dst split.
+    if (dst == data_type_t::f32) {
+      if (compute_dtype == data_type_t::s8)
+        return KernelVariant::kS8_S8_F32_SYM;
+      if (compute_dtype == data_type_t::u8)
+        return KernelVariant::kU8_S8_F32_ASYM;
+    }
   }
   return KernelVariant::kUnsupported;
 }
@@ -114,6 +196,10 @@ DstDt dst_dt_for_variant(KernelVariant v) noexcept {
   switch (v) {
     case KernelVariant::kBF16_BF16_BF16: return DstDt::kBf16;
     case KernelVariant::kBF16_BF16_F32:  return DstDt::kF32;
+    case KernelVariant::kS8_S8_BF16_SYM:  return DstDt::kBf16;
+    case KernelVariant::kU8_S8_BF16_ASYM: return DstDt::kBf16;
+    case KernelVariant::kS8_S8_F32_SYM:   return DstDt::kF32;
+    case KernelVariant::kU8_S8_F32_ASYM:  return DstDt::kF32;
     default: return DstDt::kBf16;  // unreachable on the success path
   }
 }
@@ -152,8 +238,23 @@ namespace {
 // leave room for caller-side spills).  Accumulators live in zmm
 // registers, so they don't enter the budget.  Returned value is a
 // multiple of pack_nr, minimum one o-block.
-int pick_l2_subtile_cols(int M_max, int K, int pack_nr) {
-  if (M_max <= 0 || K <= 0 || pack_nr <= 0) return pack_nr;
+//
+// `src_elem_bytes` and `wei_elem_bytes` describe the per-element
+// byte volume the kernel consumes:
+//   * BF16 family       → src=2, wei=2, comp_bytes_per_col=0.
+//   * DQ-INT8 family    → src=1 (the hoisted s8/u8 stripe the int8
+//     microkernel reads), wei=1, comp_bytes_per_col=4 (the int32
+//     compensation row appended after each o-block — adds a
+//     constant per-column overhead independent of K).
+// Without dtype-awareness the bf16 byte model (2,2,0) was used for
+// the int8 family too, over-budgeting the working set by 2x and
+// shrinking subtiles below their byte-budget optimum.  See R2 in
+// `analysis_scratch/int8_ntile_audit.md`.
+int pick_l2_subtile_cols(int M_max, int K, int pack_nr,
+                         int src_elem_bytes, int wei_elem_bytes,
+                         int comp_bytes_per_col) {
+  if (M_max <= 0 || K <= 0 || pack_nr <= 0
+      || src_elem_bytes <= 0 || wei_elem_bytes <= 0) return pack_nr;
   static const int64_t l2_budget = []() {
     const int64_t l2 =
         zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
@@ -162,9 +263,10 @@ int pick_l2_subtile_cols(int M_max, int K, int pack_nr) {
   }();
 
   const int64_t input_bytes =
-      static_cast<int64_t>(M_max) * K * sizeof(uint16_t);
+      static_cast<int64_t>(M_max) * K * src_elem_bytes;
   const int64_t weight_bytes_per_col =
-      static_cast<int64_t>(K) * sizeof(uint16_t);
+      static_cast<int64_t>(K) * wei_elem_bytes
+      + static_cast<int64_t>(comp_bytes_per_col);
   if (l2_budget <= input_bytes || weight_bytes_per_col <= 0) {
     return pack_nr;
   }
@@ -173,6 +275,27 @@ int pick_l2_subtile_cols(int M_max, int K, int pack_nr) {
   const int cols_aligned =
       static_cast<int>((cols_raw / pack_nr) * pack_nr);
   return std::max(cols_aligned, pack_nr);
+}
+
+// Per-variant byte model used by `pick_l2_subtile_cols`.  The
+// switch is constexpr-friendly so the subtile selection turns
+// into two branchless multiplies + one constant load on the
+// hot prepare-for-call path; the runtime overhead vs the previous
+// hard-coded `sizeof(uint16_t)` is microscopic.
+struct SubtileBytes {
+  int src_bytes_per_elem;
+  int wei_bytes_per_elem;
+  int comp_bytes_per_col;
+};
+inline SubtileBytes subtile_bytes_for_variant(KernelVariant v) {
+  if (is_int8_variant(v)) {
+    // The hoisted src is s8/u8 (1 byte) — the int8 microkernel
+    // reads it directly; the bf16 caller src is replaced by the
+    // pre-OMP hoist before the kernel runs.
+    // Comp row is int32 per-column appended after each o-block.
+    return {1, 1, 4};
+  }
+  return {2, 2, 0};
 }
 
 // Resolve the per-MR microkernel function-pointer table for one
@@ -184,6 +307,22 @@ status_t fill_kfn_table(
   const int max_mr = max_mr_for_nv(NV);
   for (int mr = 1; mr <= max_mr; ++mr) {
     kfn_table[mr] = select_ukernel(mr, NV, act_kind, dst_dt);
+    if (kfn_table[mr] == nullptr) return status_t::failure;
+  }
+  return status_t::success;
+}
+
+// DQ-INT8 sibling of `fill_kfn_table` — same loop shape, different
+// selector (`select_int8_ukernel`).  Carries both the `compute`
+// (kS8_Sym / kU8_Asym) axis and the `dst_dt` (kBf16 / kF32) axis;
+// the selector returns nullptr for any (gated_act, kF32) tuple so a
+// mis-resolved f32 gated variant refuses here rather than at runtime.
+status_t fill_kfn_table_int8(
+    int NV, IntCompute compute, ActKind act_kind, DstDt dst_dt,
+    int8_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+  const int max_mr = max_mr_for_nv(NV);
+  for (int mr = 1; mr <= max_mr; ++mr) {
+    kfn_table[mr] = select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
     if (kfn_table[mr] == nullptr) return status_t::failure;
   }
   return status_t::success;
@@ -212,7 +351,9 @@ status_t prepare_for_call(
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
     const std::vector<bool>          &is_weights_const,
-    CallContext &out) {
+    CallContext &out,
+    bool         dynamic_quant,
+    data_type_t  compute_dtype) {
 
   // Reset the full CallContext to defaults on entry.  Callers may
   // reuse a single context across calls (e.g. an OMP region that
@@ -297,8 +438,16 @@ status_t prepare_for_call(
   };
 
   // ── Run-once invariants (CPU + dtypes + activation) ──────────────
-  if (!dispatch_supported())
-    return refuse("avx512bf16_not_available");
+  // The dispatcher serves two ISA families: bf16 variants need
+  // AVX-512 BF16 (VDPBF16PS); DQ-INT8 variants need AVX-512 VNNI
+  // (VPDPBUSD).  On the Zen 4/5 targets VNNI is a strict superset of
+  // BF16, but on broader x86 (e.g. Cascade Lake / Ice Lake) VNNI
+  // exists WITHOUT BF16.  Refuse early ONLY when NEITHER family's ISA
+  // is present; the precise per-variant ISA gate runs after
+  // `resolve_variant()` below (bf16 -> BF16, int8 -> VNNI) so a
+  // VNNI-only host can still serve the DQ-INT8 fast path.
+  if (!avx512bf16_available() && !avx512vnni_available())
+    return refuse("no_avx512_bf16_or_vnni");
 
   // ── Library-wide weight-cache toggle ─────────────────────────────
   // `ZENDNNL_MATMUL_WEIGHT_CACHE` (read via
@@ -343,29 +492,61 @@ status_t prepare_for_call(
   }
 
   // A / B / C dtype gate: route through `resolve_variant()` which is
-  // the single source of truth for "which (src, wei, dst) tuples the
-  // custom kernel can serve".  `kUnsupported` here means the caller
-  // falls back to DLP.  Routing through the variant keeps the
-  // dispatcher's gate aligned with the gtest matrix in
-  // `gtests/group_matmul/custom_kernel/`, which calls
+  // the single source of truth for "which (src, wei, dst, dynamic_quant,
+  // compute_dtype) tuples the custom kernel can serve".  `kUnsupported`
+  // here means the caller falls back to DLP.  Routing through the
+  // variant keeps the dispatcher's gate aligned with the gtest matrix
+  // in `gtests/group_matmul/custom_kernel/`, which calls
   // `resolve_variant()` directly to assert the table.
+  //
+  // DQ-INT8 family additionally requires the AVX-512 VNNI feature
+  // (VPDPBUSD), which is a strict superset of AVX-512 BF16 on the
+  // Zen 4/5 microarchitectures we target but on broader x86 silicon
+  // is an independent feature flag.  Refuse cleanly with a specific
+  // tag so the user can distinguish "no AVX-512 VNNI" from "wrong
+  // dtype" in apilog.
   const KernelVariant variant =
-      resolve_variant(src_dtype, wei_dtype, dst_dtype);
+      resolve_variant(src_dtype, wei_dtype, dst_dtype,
+                      dynamic_quant, compute_dtype);
   if (variant == KernelVariant::kUnsupported) {
     if (s_refuse_log) {
       apilog_verbose("[GRP_MATMUL.CK REFUSED] reason="
                      "unsupported_dtype (src=", dt_name(src_dtype),
                      " wei=", dt_name(wei_dtype),
                      " dst=", dt_name(dst_dtype),
+                     " dynamic_quant=", (dynamic_quant ? 1 : 0),
+                     " compute=", dt_name(compute_dtype),
                      " — see resolve_variant() in custom_kernel/dispatch.cpp"
                      " for the supported table)");
     }
     return status_t::failure;
   }
+  // Per-variant ISA gate (the early run-once check above only confirms
+  // at least ONE family's ISA exists).  bf16 variants require AVX-512
+  // BF16; int8 variants require AVX-512 VNNI.  Splitting the gate here
+  // lets a VNNI-only host (no BF16) still serve DQ-INT8.
+  if (!is_int8_variant(variant) && !avx512bf16_available()) {
+    return refuse("avx512bf16_not_available",
+                  "BF16 custom kernel requires AVX-512 BF16 (VDPBF16PS)"
+                  " — runtime CPU detection failed");
+  }
+  if (is_int8_variant(variant) && !avx512vnni_available()) {
+    return refuse("avx512vnni_not_available",
+                  "DQ-INT8 custom kernel requires AVX-512 VNNI "
+                  "(VPDPBUSD) — runtime CPU detection failed");
+  }
   // Cache the variant on the per-call context so `dispatch_tile()`
   // can route to the right kernel instantiation without re-running
   // the dtype switch per tile.
   out.variant = variant;
+  // Asymmetric (u8 src + per-row src_zp) for BOTH the bf16-dst and
+  // f32-dst asym variants; symmetric otherwise.  Keying on the
+  // resolved variant (not just the bf16 one) ensures the f32-dst asym
+  // path selects the kU8_Asym microkernels and honours src_zp.
+  out.compute_int = (variant == KernelVariant::kU8_S8_BF16_ASYM
+                     || variant == KernelVariant::kU8_S8_F32_ASYM)
+      ? IntCompute::kU8_Asym
+      : IntCompute::kS8_Sym;
   // Activation gate.
   //
   // The kernel handles four activation states inline:
@@ -493,6 +674,16 @@ status_t prepare_for_call(
     if ((N[i] % pack_nr) != 0)
       return refuse("N_not_multiple_of_pack_nr",
                     "an active expert's N is not a multiple of pack_nr");
+    // The int8 microkernel reads the per-row src in 4-byte (K-quad)
+    // broadcasts; the packed weight is zero-padded to a K-quad but
+    // the hoisted src buffer is exactly K bytes per row, so a
+    // K % 4 != 0 tail would over-read the src row.  Refuse the int8
+    // CK path for unaligned K (the AOCL DLP sym-quant fallback
+    // handles any K).  bf16 (K-pair) is unaffected.
+    if (is_int8_variant(variant) && (K[i] % kVNNIInt8Quad) != 0)
+      return refuse("int8_K_not_multiple_of_4",
+                    "DQ-INT8 custom kernel requires K divisible by 4 "
+                    "(VNNI K-quad); falling back to AOCL DLP");
     if (alpha[i] != 1.0f || beta[i] != 0.0f)
       return refuse("alpha_beta_not_supported",
                     "custom kernel requires alpha=1, beta=0 per expert");
@@ -544,21 +735,37 @@ status_t prepare_for_call(
               : ActKind::none;
   out.bias_kind    = bias_kind;
   // Representative subtile_cols (worst-case m_max) — used by APILOG /
-  // debug.  Dispatch reads per-expert values below.
-  out.subtile_cols = pick_l2_subtile_cols(m_max, K_for_subtile, pack_nr);
+  // debug.  Dispatch reads per-expert values below.  Byte model is
+  // dtype-aware: bf16 family uses (2,2,0); int8 family uses (1,1,4)
+  // — see `subtile_bytes_for_variant` for the rationale.
+  const SubtileBytes sb = subtile_bytes_for_variant(out.variant);
+  out.subtile_cols = pick_l2_subtile_cols(
+      m_max, K_for_subtile, pack_nr,
+      sb.src_bytes_per_elem, sb.wei_bytes_per_elem, sb.comp_bytes_per_col);
 
-  // Resolve the dst dtype for kernel-table fill from the cached
-  // variant (single source of truth — keeps fill_kfn_table aligned
-  // with `resolve_variant`).  `select_ukernel` rejects the
-  // structurally-impossible (swiglu, FP32) combination by returning
-  // nullptr, which `fill_kfn_table` then surfaces as failure.
-  const DstDt dst_dt = dst_dt_for_variant(out.variant);
-  if (fill_kfn_table(out.NV, out.act_kind, dst_dt, out.kfn_table)
-      != status_t::success) {
-    return refuse("kfn_table_fill_failed",
-                  "no microkernel for this (NV, act_kind, dst_dt) tuple "
-                  "— note swiglu_oai_mul + FP32-dst is intentionally "
-                  "rejected (BF16 dst only)");
+  // Fill the per-MR kernel-pointer table from the resolved variant:
+  // BF16 family → `kfn_table` (template axis is `DstDt`); DQ-INT8
+  // family → `kfn_table_int8` (template axes are `IntCompute` and
+  // `DstDt` — bf16 or f32 dst).  Only the populated table is read
+  // by `dispatch_tile`; the other stays zero-initialised.
+  if (is_int8_variant(out.variant)) {
+    const DstDt dst_dt = dst_dt_for_variant(out.variant);
+    if (fill_kfn_table_int8(out.NV, out.compute_int, out.act_kind, dst_dt,
+                            out.kfn_table_int8) != status_t::success) {
+      return refuse("kfn_table_int8_fill_failed",
+                    "no DQ-INT8 microkernel for this (NV, compute, "
+                    "act_kind, dst_dt) tuple — note gated act + FP32-dst "
+                    "is intentionally rejected (BF16 dst only)");
+    }
+  } else {
+    const DstDt dst_dt = dst_dt_for_variant(out.variant);
+    if (fill_kfn_table(out.NV, out.act_kind, dst_dt, out.kfn_table)
+        != status_t::success) {
+      return refuse("kfn_table_fill_failed",
+                    "no microkernel for this (NV, act_kind, dst_dt) tuple "
+                    "— note swiglu_oai_mul + FP32-dst is intentionally "
+                    "rejected (BF16 dst only)");
+    }
   }
 
   // ── Pre-pack every active expert's weight (single-threaded; the
@@ -586,52 +793,77 @@ status_t prepare_for_call(
       (act == grp_matmul_gated_act_t::silu_and_mul)
       || (act == grp_matmul_gated_act_t::gelu_and_mul);
   out.packed_ptrs.fill(nullptr);
+  out.packed_ptrs_int8.fill(nullptr);
   out.subtile_cols_per_expert.fill(0);
-  // `out.owned_packed_ptrs` was already zeroed by `out.reset()` at
-  // entry; only the `cache_off` branch below stores into it.
+  // `out.owned_packed_ptrs` / `owned_packed_ptrs_int8` were already
+  // zeroed by `out.reset()` at entry; only the `cache_off` branch
+  // below stores into them.
+  const bool variant_is_int8 = is_int8_variant(out.variant);
   for (int i = 0; i < num_ops; ++i) {
     if (M[i] <= 0) continue;
     bool was_hit_unused = false;
-    status_t pst = get_or_pack_weight_bf16(
-        static_cast<const bfloat16_t *>(weight[i]),
-        K[i], N[i], ldb[i], pack_nr,
-        /*transB=*/transB[i],
-        /*interleave_split_halves=*/interleave_split_halves,
-        &out.packed_ptrs[i],
-        /*was_hit_out=*/&was_hit_unused,
-        /*disable_cache=*/cache_off);
-    if (pst != status_t::success) {
-      // `get_or_pack_weight_bf16` already logged the concrete reason
-      // (OOM / transB mismatch) via log_error.  Attribute the
-      // refusal here so the L4 chain is self-contained.  Note: any
-      // caller-owned buffers allocated by earlier iterations of this
-      // loop are still tracked in `out.owned_packed_ptrs[]` (set
-      // below); they will be freed by the CallContext destructor
-      // when the caller's `ctx` goes out of scope, OR by the next
-      // `prepare_for_call(ctx)`'s `out.reset()` — no leak either
-      // way.  Explicit cleanup here would be defensive duplication.
-      return refuse("weight_pack_failed",
-                    "get_or_pack_weight_bf16 returned failure — "
-                    "see preceding log_error for OOM/arg detail");
-    }
-    // In disable-cache mode the returned pointer is a fresh
-    // aligned_alloc; record it as caller-owned so the destructor
-    // frees it.  In the default mode the pointer belongs to the
-    // LRU singleton and `owned_packed_ptrs[i]` stays null
-    // (`release_owned_buffers()` then skips it — no double-free).
-    if (cache_off) {
-      out.owned_packed_ptrs[i] = out.packed_ptrs[i];
+    if (variant_is_int8) {
+      // DQ-INT8 path — caller's weight is signed s8 (`is_weights_const`
+      // / pack_nr / ldb / transB contracts are the same as bf16).
+      // The int8 pack writes both the VNNI-quad weight slab and the
+      // per-column compensation row; the microkernel reads both
+      // through a single `int8_t *`.
+      status_t pst = get_or_pack_weight_int8(
+          static_cast<const int8_t *>(weight[i]),
+          K[i], N[i], ldb[i], pack_nr,
+          /*transB=*/transB[i],
+          /*interleave_split_halves=*/interleave_split_halves,
+          &out.packed_ptrs_int8[i],
+          /*was_hit_out=*/&was_hit_unused,
+          /*disable_cache=*/cache_off);
+      if (pst != status_t::success) {
+        return refuse("weight_pack_failed",
+                      "get_or_pack_weight_int8 returned failure — "
+                      "see preceding log_error for OOM/arg detail");
+      }
+      if (cache_off) {
+        out.owned_packed_ptrs_int8[i] = out.packed_ptrs_int8[i];
+      }
+    } else {
+      // BF16 path — unchanged.
+      status_t pst = get_or_pack_weight_bf16(
+          static_cast<const bfloat16_t *>(weight[i]),
+          K[i], N[i], ldb[i], pack_nr,
+          /*transB=*/transB[i],
+          /*interleave_split_halves=*/interleave_split_halves,
+          &out.packed_ptrs[i],
+          /*was_hit_out=*/&was_hit_unused,
+          /*disable_cache=*/cache_off);
+      if (pst != status_t::success) {
+        return refuse("weight_pack_failed",
+                      "get_or_pack_weight_bf16 returned failure — "
+                      "see preceding log_error for OOM/arg detail");
+      }
+      if (cache_off) {
+        out.owned_packed_ptrs[i] = out.packed_ptrs[i];
+      }
     }
     if (per_expert_subtile) {
       out.subtile_cols_per_expert[i] =
-          pick_l2_subtile_cols(M[i], K[i], pack_nr);
+          pick_l2_subtile_cols(M[i], K[i], pack_nr,
+                               sb.src_bytes_per_elem,
+                               sb.wei_bytes_per_elem,
+                               sb.comp_bytes_per_col);
     }
   }
 
   out.enabled = true;
   if (s_refuse_log) {
-    apilog_verbose("[GRP_MATMUL.CK ENGAGED] pack_nr=",
-                out.pack_nr,
+    const char *variant_name =
+        (out.variant == KernelVariant::kBF16_BF16_BF16) ? "bf16_bf16_bf16"
+        : (out.variant == KernelVariant::kBF16_BF16_F32) ? "bf16_bf16_f32"
+        : (out.variant == KernelVariant::kS8_S8_BF16_SYM) ? "s8_s8_bf16_sym"
+        : (out.variant == KernelVariant::kU8_S8_BF16_ASYM) ? "u8_s8_bf16_asym"
+        : (out.variant == KernelVariant::kS8_S8_F32_SYM) ? "s8_s8_f32_sym"
+        : (out.variant == KernelVariant::kU8_S8_F32_ASYM) ? "u8_s8_f32_asym"
+        : "unsupported";
+    apilog_verbose("[GRP_MATMUL.CK ENGAGED] variant=", variant_name,
+                " pack_nr=", out.pack_nr,
                 " NV=", out.NV,
                 " max_mr=", out.max_mr,
                 " subtile_cols=", out.subtile_cols,
@@ -657,6 +889,234 @@ status_t prepare_for_call(
 // the public dispatch.hpp surface so the prepack module can compute
 // the same NR the dispatcher will pack under.)
 
+// DQ-INT8 dispatch tile — owns the per-tile sub-tile + per-MR loop
+// for the `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM` variants.  Splits
+// out of the public `dispatch_tile` so the BF16 loop body stays
+// straight-line and any future Phase-2 changes to the int8 hot
+// path land here without disturbing the bf16 sibling.
+//
+// Pointer convention:
+//   * `A`         — caller's `src` cast to `uint8_t *`.  For
+//     `kS8_S8_BF16_SYM` the caller passes the s8 buffer
+//     (`int8_t *`) but the microkernel re-interprets it as
+//     `uint8_t *` and XORs each broadcast with `0x80808080` to
+//     run VPDPBUSD; the compensation row precomputed at pack time
+//     undoes the resulting `+128 × sum_wei` bias.  Casting once
+//     here keeps the signature uniform across compute flavours.
+//   * `Bpacked`   — `int8_t *` to this expert's packed weight slab
+//     (one o-block of weight bytes followed by `pack_nr` int32
+//     compensation lanes; the microkernel walks both regions via
+//     byte arithmetic, see int8_microkernel.cpp).
+//   * `src_scale_full` / `src_zp_full` / `wei_scale_full` — full
+//     M / M / N vectors as the caller passed to the public
+//     `dispatch_tile`.  The dispatcher slices to the per-(m_off,
+//     mr_now) and per-(sub_col_base, n_blocks) windows.  `src_zp`
+//     is passed straight through (nullptr for sym).
+//
+// Tight / wide destination handling is identical to the bf16
+// sibling — gated activation epilogues store to the half-width tight
+// arena; act=none stores to the wide [M, N] dst.  The dst element
+// width is variant-dependent (`dst_elem_bytes_int8` below): bf16 for
+// the *_BF16_* variants, f32 for the *_F32_* (act=none) variants.
+namespace {
+inline void dispatch_tile_int8(
+    const CallContext &ctx,
+    int   expert_idx,
+    int   M, int K,
+    int   n_tile, int col_start,
+    const void   *src,  int lda,
+    const void   *bias,
+    void         *tight_dst, int tight_ldc,
+    const void    *src_scale_full,
+    const int32_t *src_zp_full,
+    const void    *wei_scale_full) {
+
+  // Per-tile contract: src_scale + wei_scale are required; src_zp
+  // is required iff the variant is asym.  The caller (N-tile
+  // executor) populates both from the hoisted dynamic-quant output;
+  // mis-routing here would silently dequant to zero, which the
+  // microkernel's epilogue would propagate.  Assert in debug.
+  assert(src_scale_full != nullptr
+         && "dispatch_tile_int8: src_scale is null — N-tile hoist "
+            "must populate this for DQ-INT8");
+  assert(wei_scale_full != nullptr
+         && "dispatch_tile_int8: wei_scale is null — caller must "
+            "thread the per-expert wei_scale");
+  // Asym requires src_zp — true for both the bf16-dst and f32-dst
+  // asym variants.  Key off the resolved compute family rather than a
+  // single variant so the f32-dst asym path is covered too.
+  if (ctx.compute_int == IntCompute::kU8_Asym) {
+    assert(src_zp_full != nullptr
+           && "dispatch_tile_int8: src_zp is null on the asym path "
+              "— hoist must populate it for compute=u8");
+  }
+
+  const int8_t  *Bpacked_full =
+      ctx.packed_ptrs_int8[expert_idx];
+  const auto    *A_bytes      = static_cast<const uint8_t *>(src);
+  std::byte     *Tight_bytes  = static_cast<std::byte *>(tight_dst);
+  // Dst element width tracks the resolved variant: BF16 (2 bytes) for
+  // the kS8/U8_*_BF16_* variants, FP32 (4 bytes) for the kS8/U8_*_F32_*
+  // variants.  The kernel itself reinterprets the `void *` dst to the
+  // right type via its `DstDt` template; the dispatcher only needs the
+  // element stride here for pointer arithmetic.  FP32 dst is act=none
+  // only (gated kinds are BF16-dst), so the gated path below always
+  // sees the BF16 width.
+  const size_t dst_elem_bytes_int8 =
+      (dst_dt_for_variant(ctx.variant) == DstDt::kF32)
+          ? sizeof(float)
+          : sizeof(bfloat16_t);
+
+  const int    K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
+  // Per-o-block stride in BYTES: weight slab + per-column int32
+  // compensation row.  Mirror of the pack-time
+  // `bytes_per_oblock` expression in pack.cpp; the two MUST stay
+  // in lockstep.
+  const size_t o_blk_stride_bytes =
+      static_cast<size_t>(K_quad) * ctx.pack_nr * kVNNIInt8Quad
+      + static_cast<size_t>(ctx.pack_nr) * sizeof(int32_t);
+
+  const int subtile_cols = (ctx.subtile_cols_per_expert[expert_idx] > 0)
+      ? ctx.subtile_cols_per_expert[expert_idx]
+      : ctx.subtile_cols;
+
+  // Balanced MR partition — identical scheme to the bf16 sibling.
+  // See dispatch_tile (bf16) for the rationale.
+  const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
+  const int mr_base = M / n_calls;
+  const int n_big   = M - mr_base * n_calls;
+
+  const size_t bias_elem_bytes = (ctx.bias_kind == BiasKind::fp32)
+      ? sizeof(float)
+      : sizeof(bfloat16_t);
+
+  // Scale element width — the microkernel reads src/wei scales as bf16
+  // (converting on load) or f32.  The dispatcher slices both scale
+  // buffers by byte offset using this stride; the kernel re-casts the
+  // `const void *` per `ctx.scale_kind`.
+  const size_t scale_elem_bytes = (ctx.scale_kind == ScaleKind::kBf16)
+      ? sizeof(bfloat16_t)
+      : sizeof(float);
+
+  const bool is_gated_act =
+      (ctx.act_kind == ActKind::swiglu_oai_mul)
+      || (ctx.act_kind == ActKind::silu_and_mul)
+      || (ctx.act_kind == ActKind::gelu_and_mul);
+
+  if (is_gated_act) {
+    for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
+      const int sub_n        = std::min(subtile_cols, n_tile - sub_off);
+      const int sub_col_base = col_start + sub_off;
+      const int n_blocks     = sub_n / ctx.pack_nr;
+
+      const int8_t *Bpacked_blk_base = Bpacked_full
+          + static_cast<size_t>(sub_col_base / ctx.pack_nr) * o_blk_stride_bytes;
+      const char *bias_blk_base = (bias != nullptr)
+          ? static_cast<const char *>(bias)
+              + static_cast<size_t>(sub_col_base) * bias_elem_bytes
+          : nullptr;
+      const char *wei_scale_blk_base = static_cast<const char *>(wei_scale_full)
+          + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
+
+      int m_off = 0;
+      for (int c = 0; c < n_calls; ++c) {
+        const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+        const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
+
+        const uint8_t *A_chunk =
+            A_bytes + static_cast<size_t>(m_off) * lda;
+        const void    *src_scale_chunk = static_cast<const char *>(src_scale_full)
+            + static_cast<size_t>(m_off) * scale_elem_bytes;
+        const int32_t *src_zp_chunk =
+            (src_zp_full != nullptr) ? src_zp_full + m_off : nullptr;
+
+        std::byte *Tight_row_base = Tight_bytes
+            + (static_cast<size_t>(m_off) * tight_ldc
+               + (sub_col_base / 2)) * dst_elem_bytes_int8;
+
+        for (int b = 0; b < n_blocks; ++b) {
+          const int8_t *Bpacked_blk =
+              Bpacked_blk_base + static_cast<size_t>(b) * o_blk_stride_bytes;
+          const void *bias_blk = (bias_blk_base != nullptr)
+              ? static_cast<const void *>(bias_blk_base
+                  + static_cast<size_t>(b) * ctx.pack_nr * bias_elem_bytes)
+              : nullptr;
+          const void *wei_scale_blk = static_cast<const void *>(
+              wei_scale_blk_base
+              + static_cast<size_t>(b) * ctx.pack_nr * scale_elem_bytes);
+          // 16 cols per (g, u) pair × NV/2 pairs per kernel call —
+          // mirror of the bf16 sibling's tight stride.
+          std::byte *Tight_row = Tight_row_base
+              + static_cast<size_t>(b) * (ctx.pack_nr / 2) * dst_elem_bytes_int8;
+
+          kfn(A_chunk, lda, Bpacked_blk,
+              src_scale_chunk, src_zp_chunk, wei_scale_blk, ctx.scale_kind,
+              bias_blk, ctx.bias_kind,
+              /*Cout=*/nullptr, /*ldc=*/0,
+              Tight_row, tight_ldc, K);
+        }
+        m_off += mr_now;
+      }
+    }
+    return;
+  }
+
+  // Act = none — wide output to the [M, N] dst arena.
+  for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
+    const int sub_n        = std::min(subtile_cols, n_tile - sub_off);
+    const int sub_col_base = col_start + sub_off;
+    const int n_blocks     = sub_n / ctx.pack_nr;
+
+    const int8_t *Bpacked_blk_base = Bpacked_full
+        + static_cast<size_t>(sub_col_base / ctx.pack_nr) * o_blk_stride_bytes;
+    const char *bias_blk_base = (bias != nullptr)
+        ? static_cast<const char *>(bias)
+            + static_cast<size_t>(sub_col_base) * bias_elem_bytes
+        : nullptr;
+    const char *wei_scale_blk_base = static_cast<const char *>(wei_scale_full)
+        + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
+
+    int m_off = 0;
+    for (int c = 0; c < n_calls; ++c) {
+      const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+      const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
+
+      const uint8_t *A_chunk =
+          A_bytes + static_cast<size_t>(m_off) * lda;
+      const void    *src_scale_chunk = static_cast<const char *>(src_scale_full)
+          + static_cast<size_t>(m_off) * scale_elem_bytes;
+      const int32_t *src_zp_chunk =
+          (src_zp_full != nullptr) ? src_zp_full + m_off : nullptr;
+
+      std::byte *Wide_row_base = Tight_bytes
+          + (static_cast<size_t>(m_off) * tight_ldc
+             + sub_col_base) * dst_elem_bytes_int8;
+
+      for (int b = 0; b < n_blocks; ++b) {
+        const int8_t *Bpacked_blk =
+            Bpacked_blk_base + static_cast<size_t>(b) * o_blk_stride_bytes;
+        const void *bias_blk = (bias_blk_base != nullptr)
+            ? static_cast<const void *>(bias_blk_base
+                + static_cast<size_t>(b) * ctx.pack_nr * bias_elem_bytes)
+            : nullptr;
+        const void *wei_scale_blk = static_cast<const void *>(
+            wei_scale_blk_base
+            + static_cast<size_t>(b) * ctx.pack_nr * scale_elem_bytes);
+        std::byte *Wide_row = Wide_row_base
+            + static_cast<size_t>(b) * ctx.pack_nr * dst_elem_bytes_int8;
+
+        kfn(A_chunk, lda, Bpacked_blk,
+            src_scale_chunk, src_zp_chunk, wei_scale_blk, ctx.scale_kind,
+            bias_blk, ctx.bias_kind,
+            Wide_row, tight_ldc,
+            /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
+      }
+      m_off += mr_now;
+    }
+  }
+}
+}  // namespace
+
 void dispatch_tile(
     const CallContext &ctx,
     int   expert_idx,
@@ -664,7 +1124,10 @@ void dispatch_tile(
     int   n_tile, int col_start,
     const void *src,  int lda,
     const void *bias,
-    void       *tight_dst, int tight_ldc) {
+    void       *tight_dst, int tight_ldc,
+    const void    *src_scale,
+    const int32_t *src_zp,
+    const void    *wei_scale) {
 
   // ── Per-tile contract assertions (debug-only) ────────────────────
   //
@@ -714,6 +1177,28 @@ void dispatch_tile(
   assert((col_start % ctx.pack_nr) == 0
          && "dispatch_tile: col_start not a multiple of pack_nr — "
             "B-pack offset (col_start / pack_nr) would mis-align");
+
+  // ── DQ-INT8 fast path — hand off to the int8 sibling and return.
+  // The bf16 loop body below is straight-line; keeping the int8
+  // branch up front avoids loading the bf16-specific stride
+  // constants we don't need on this path.
+  if (is_int8_variant(ctx.variant)) {
+    dispatch_tile_int8(ctx, expert_idx, M, K, n_tile, col_start,
+                       src, lda, bias, tight_dst, tight_ldc,
+                       src_scale, src_zp, wei_scale);
+    return;
+  }
+  // BF16 callers must NOT pass src_scale / src_zp / wei_scale —
+  // those are DQ-INT8-only.  If they did, fail loudly in debug so
+  // the contract violation is visible; in release the BF16 body
+  // simply ignores them.
+  assert(src_scale == nullptr
+         && "dispatch_tile: src_scale must be null on the BF16 path");
+  assert(src_zp == nullptr
+         && "dispatch_tile: src_zp must be null on the BF16 path");
+  assert(wei_scale == nullptr
+         && "dispatch_tile: wei_scale must be null on the BF16 path");
+  (void)src_scale; (void)src_zp; (void)wei_scale;
 
   const bfloat16_t *Bpacked_full = ctx.packed_ptrs[expert_idx];
   const auto       *A            = static_cast<const bfloat16_t *>(src);

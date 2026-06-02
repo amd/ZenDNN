@@ -279,16 +279,16 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_n_tile_override{-1};
 inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
 
 // Sentinel `INT_MIN` = no override; falls through to the cached env
-// path (which itself applies the documented default -1 = DISABLED).
+// path (which itself applies the documented default 0 = AUTO).
 // `-1` is no longer usable as the "no override" marker because it
 // now carries a meaningful value (DISABLED) — see the three-mode
 // doc-block on `get_grp_matmul_n_tile_heavy_threshold()` below.
 //
 // Settable values:
-//   * INT_MIN   — no override (falls through to env-cache).  Tests
-//                 should never set this explicitly; it is the
-//                 production state.
-//   * -1        — explicit DISABLED.  Same as unset env.
+//   * INT_MIN   — no override (falls through to env-cache, default 0
+//                 = AUTO).  Tests should never set this explicitly;
+//                 it is the production state.
+//   * -1        — explicit DISABLED (prompt → uniform Phase B base+1).
 //   *  0        — explicit AUTO.  Engages
 //                 `apply_adaptive_tiers()` in the planner.
 //   *  > 0      — explicit MANUAL single-threshold override.  Heavy
@@ -303,6 +303,12 @@ inline std::atomic<int> s_grp_n_tile_strategy_override{-1};
 // failure.
 inline std::atomic<int> s_grp_matmul_n_tile_heavy_threshold_override{
     std::numeric_limits<int>::min()};
+
+// Sentinel `-1` = no override (falls through to env / default OFF).
+// `0` = force OFF (decode uses uniform Phase B base+1), `1` = force ON
+// (decode M-proportional split).  RAII helper `DecodeProportionalOverride`
+// in `gtests/group_matmul/moe_test_utils.hpp` saves/restores it.
+inline std::atomic<int> s_grp_matmul_decode_proportional_override{-1};
 
 }  // namespace test_api
 
@@ -501,21 +507,24 @@ inline int get_grp_matmul_n_order() {
 }
 
 // ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD = { -1, 0, positive int } —
-//   cached, default -1 (DISABLED).
+//   cached, default 0 (AUTO).  NOTE: this knob is PROMPT-ONLY; decode
+//   uses the unconditional M-proportional split regardless of its value
+//   (gate `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`).
 //
 // Three-mode dispatch for asymmetric per-expert thread distribution
 // inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
 // are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
-// the N_TILE heavy-threshold dispatch entirely and stay on Phase B
-// base+1 regardless of the env value.  See `apply_round_pick` Single
-// case for the rationale.
+// the N_TILE heavy-threshold dispatch entirely.  NOTE: decode no longer
+// uses uniform Phase B base+1 — it uses the UNCONDITIONAL M-proportional
+// thread split (see `apply_round_pick` Single case), which is
+// independent of this knob.  This knob only governs the PROMPT path.
 //
-//   -1  DISABLED (default — current production behavior).  Phase B
+//   -1  DISABLED (explicit opt-out).  Phase B
 //       base+1 only: top few experts by M get one extra thread, all
 //       others get a uniform share via `n_thr_fixed`.  Same as the
 //       legacy behaviour when the env was unset.
 //
-//    0  AUTO  (prompt-only).  Planner-driven adaptive 3-tier policy.
+//    0  AUTO  (DEFAULT, prompt-only).  Planner-driven adaptive 3-tier policy.
 //       `apply_adaptive_tiers()` (group_matmul_n_tile.cpp) inspects
 //       the per-call M distribution, num_threads and num_active and
 //       builds a per-expert thread allocation with:
@@ -545,16 +554,16 @@ inline int get_grp_matmul_n_order() {
 //       Validated empirical sweet spot on Qwen3-30B-A3B prompt
 //       (BS=32, i/p=128, max_M ≈ 3500): value = 1024.
 //
-// Invalid values (< -1, "abc", etc.) → silently treated as default
-// (-1 / DISABLED), matching the strict-parse convention of the
-// other ZENDNNL_GRP_MATMUL_* env vars.  Mid-process env changes have
-// no effect; relaunch for A/B.
+// Invalid values (< -1, "abc", etc.) → silently treated as the default
+// (0 / AUTO — the prompt adaptive-tier policy described above), matching
+// the strict-parse convention of the other ZENDNNL_GRP_MATMUL_* env
+// vars.  Mid-process env changes have no effect; relaunch for A/B.
 //
 // All three modes share the same executor consumer
 // (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
 // only difference is how the planner populates that array.
 inline int get_grp_matmul_n_tile_heavy_threshold() {
-  constexpr int kDefault = -1;  // DISABLED
+  constexpr int kDefault = 0;  // AUTO (prompt adaptive tiers)
   // Test override sentinel: INT_MIN = no override.  Cannot use `-1`
   // any more since `-1` is now a meaningful (DISABLED) value.
   // Production keeps the static-const env-cache for branch-
@@ -570,6 +579,29 @@ inline int get_grp_matmul_n_tile_heavy_threshold() {
     // Accept -1 (DISABLED), 0 (AUTO), positive int (MANUAL).  Reject
     // anything more negative — silently clamp to default.
     return (parsed >= -1) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL = { "0", "1" } — cached,
+//   default OFF.  Gates the DECODE-class M-proportional per-expert
+//   thread split in the ALGO 3 CK Single-round plan (allocate threads
+//   to each active expert in proportion to its M, clamped to its
+//   N-tile capacity).
+//   OFF (default): uniform Phase B base/base+1 distribution — measured
+//                  faster than the proportional split across the
+//                  evaluated decode MoE shapes, so it is the default.
+//   ON ("1"):      M-proportional split for decode CK (opt-in).
+//   Independent of ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD (which is
+//   prompt-only).  Mid-process env changes have no effect (static const).
+inline bool get_grp_matmul_decode_proportional() {
+  const int ovr = test_api::s_grp_matmul_decode_proportional_override.load(
+      std::memory_order_relaxed);
+  if (ovr >= 0) return ovr != 0;
+  static const bool v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL");
+    if (e == nullptr || e[0] == '\0') return false;  // default: OFF
+    return e[0] != '0';
   }();
   return v;
 }
@@ -640,16 +672,33 @@ inline void sort_indices_by_m(int *indices, int n,
   });
 }
 
-/// Env-gated BF16 custom-microkernel engagement for an N-tile executor.
+/// Env-gated custom-microkernel engagement for an N-tile executor.
+/// Covers BOTH compute regimes:
+///
+///   * BF16 (`dynamic_quant=false`, default): bf16×bf16→bf16 (or
+///     bf16×bf16→f32) — the original `engage_ntile_custom_kernel`
+///     contract.
+///   * DQ-INT8 (`dynamic_quant=true`, `compute_dtype∈{s8,u8}`):
+///     hoist-quantised src(s8 or u8) × pre-packed wei(s8) → bf16,
+///     per-token src_scale + optional src_zp, per-channel wei_scale.
+///
 /// Caller stack-allocates a fresh `CallContext` and reads `kctx.enabled`
-/// on return.  Controlled by `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL`
-/// (cached, default ON; set to 0 to opt out).  Even with the env
-/// enabled, the dispatcher's contract check (bf16, no transA, α=1,
-/// β=0, N % pack_nr, supported act/bias dtypes, is_weights_const =
-/// true / empty for every active expert) decides whether the path
-/// can actually run; caller falls back to its standard path when
-/// kctx.enabled=false.
-/// Supported `act`: none, swiglu_oai_mul (fused gate+up → halved out).
+/// on return.  Controlled by `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` (master,
+/// cached, default ON) AND `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` (int8
+/// sub-toggle, cached, default ON — only consulted for DQ-INT8 calls;
+/// bf16 calls ignore it).  Both default to ON when unset; set the env
+/// to "0" to opt out (master "0" disables CK for all dtypes; int8 "0"
+/// disables only the DQ-INT8 fast path, leaving bf16 CK active).
+///
+/// Even with the envs enabled, the dispatcher's per-call contract
+/// check (dtype tuple, no transA, α=1, β=0, N % pack_nr, supported
+/// act/bias dtypes, is_weights_const = true / empty for every active
+/// expert) decides whether the path can actually run; caller falls
+/// back to its standard path when kctx.enabled=false.
+///
+/// Supported `act`: none, swiglu_oai_mul (fused gate+up → halved out),
+/// silu_and_mul, gelu_and_mul (canonical split-halves; CK arena
+/// pack-permuted at prepack time).
 inline void engage_ntile_custom_kernel(
     grp_matmul_gated_act_t act,
     data_type_t src_dtype,
@@ -667,12 +716,29 @@ inline void engage_ntile_custom_kernel(
     const std::vector<float>         &beta,
     const std::vector<const void *>  &weight,
     const std::vector<bool>          &is_weights_const,
-    custom_kernel::CallContext       &kctx) {
+    custom_kernel::CallContext       &kctx,
+    bool                              dynamic_quant = false,
+    data_type_t                       compute_dtype = data_type_t::none) {
   if (!get_grp_matmul_custom_kernel()) return;
+  // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
+  // operators can A/B int8 without disabling bf16.  The int8 CK path
+  // arrives two ways and BOTH must honour the sub-toggle:
+  //   * runtime hoist  — `dynamic_quant=true` (bf16 src quantized
+  //     per-tile);
+  //   * grouped pre-quant — `group_dynamic_quant` already produced an
+  //     s8 src and CLEARED `dynamic_quant`, so detect it via
+  //     `src=s8 && wei=s8`.  Without this, a grouped-s8 call would
+  //     engage CK even with the int8 sub-toggle OFF (inconsistent with
+  //     `ck_eligible_int8` / prepack which honour the sub-toggle).
+  // Bf16 calls (`src=bf16, wei=bf16`) never satisfy either clause.
+  const bool is_dq_int8_call =
+      dynamic_quant
+      || (src_dtype == data_type_t::s8 && wei_dtype == data_type_t::s8);
+  if (is_dq_int8_call && !get_grp_matmul_custom_kernel_int8()) return;
   custom_kernel::prepare_for_call(
       act, src_dtype, wei_dtype, dst_dtype, act_dtype, bias_dtype,
       transA, transB, M, N, K, ldb, alpha, beta, weight,
-      is_weights_const, kctx);
+      is_weights_const, kctx, dynamic_quant, compute_dtype);
 }
 
 /// Effective N-column alignment for the per-thread split:

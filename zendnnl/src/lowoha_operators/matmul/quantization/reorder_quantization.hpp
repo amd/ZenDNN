@@ -54,14 +54,22 @@ struct reorder_quant_buffers_t {
 };
 
 struct group_reorder_quant_buffers_t {
+  // Per-expert NON-OWNING views into the arenas below (grouped path), or
+  // unused (the per-expert fallback path owns its memory via fallback_buf).
   std::vector<uint8_t *> src_buf;
   std::vector<uint8_t *> scale_buf;
   std::vector<reorder_quant_buffers_t> fallback_buf;
+  // Single backing allocations for the grouped path: one malloc for all
+  // experts' s8 dst rows, one for the scale rows the caller did not
+  // pre-allocate — instead of two mallocs PER expert.  `src_buf` /
+  // `scale_buf` index into these and must not be freed individually.
+  uint8_t *src_arena   = nullptr;
+  uint8_t *scale_arena = nullptr;
 
   group_reorder_quant_buffers_t() = default;
   ~group_reorder_quant_buffers_t() {
-    for (auto *p : src_buf) free(p);
-    for (auto *p : scale_buf) free(p);
+    free(src_arena);
+    free(scale_arena);
   }
 
   group_reorder_quant_buffers_t(const group_reorder_quant_buffers_t &) = delete;
