@@ -1,0 +1,68 @@
+# GPT-OSS 20B MoE — PROMPT (prefill chunk, BS=16, ip=128) — 24 unique rows from 24 layers.
+#
+# One row per unique (num_ops, sorted-desc M) pattern observed in
+# the *largest* prefill forward pass. Identical patterns across
+# layers are merged. The trailing per-line `# freq=N layers=[...]`
+# comment records the number of layers that had this exact pattern
+# (= len(layers=[...])); the `layers=[i,j,...]` list itself is
+# preserved for traceability only.
+#
+# Selected pass: tokens=1921, total_M=7684 (= tokens * topk).
+# All prefill passes detected: (tokens=128, sum=512, recs=24), (tokens=1921, sum=7684, recs=24)
+# (vLLM CPU scheduler chunks the prefill — typically the first prompt is
+#  prefilled alone, then the rest are batched together with the first decode token.)
+#
+# Architecture: 32 experts, topk=4, 24 transformer layers
+# hidden_size=2880, intermediate_size=2880, act=swiglu_oai_mul (act=3)
+#
+# Format: num_ops, M_per_op, K, N, iters, src:wei:dst, weights_const, warmup, moe_topk, gated_act, N_down, use_internal_alloc, total_experts
+#   use_internal_alloc=1; total_experts=32
+#   iters/warmup recomputed from sum_M: sum_M>=16384 -> 20/5; >=4096 -> 50/10; <4096 -> 100/20.
+#   Trailing per-line `# freq=N layers=[...]` preserves source occurrence info (layers omitted for decode files).
+
+# ═══════════════════════════════════════════════════════════════════════
+# PROMPT (deduped): tokens=1921, topk=4 → total_M=7684
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ── num_ops=22 active experts (1 unique rows, covering 1 layers) ──
+22, 1916:1901:1478:1000:770:187:169:83:44:25:25:24:16:13:10:8:5:5:2:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[14]
+
+# ── num_ops=23 active experts (1 unique rows, covering 1 layers) ──
+23, 1881:1859:1309:799:676:461:300:114:78:59:53:39:11:8:8:6:6:5:4:3:3:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[15]
+
+# ── num_ops=25 active experts (3 unique rows, covering 3 layers) ──
+25, 1874:1648:1468:851:484:448:213:146:127:87:87:72:52:39:38:8:8:7:6:6:5:4:4:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[8]
+25, 1917:1656:1072:658:438:365:337:324:216:211:143:102:77:48:27:23:17:15:10:8:6:5:4:3:2, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[17]
+25, 1873:1464:1245:1165:700:443:272:135:133:95:51:31:23:18:11:5:5:3:3:3:2:1:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[22]
+
+# ── num_ops=26 active experts (3 unique rows, covering 3 layers) ──
+26, 1895:1311:1246:906:557:517:187:185:181:177:134:124:118:49:25:20:19:8:6:6:6:2:2:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[9]
+26, 1883:1851:1687:712:400:231:193:157:116:108:99:45:41:36:29:22:18:18:15:5:4:4:3:3:2:2, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[10]
+26, 1904:1811:1037:522:483:479:427:358:149:111:78:75:55:46:39:30:28:26:9:6:5:2:1:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[12]
+
+# ── num_ops=27 active experts (1 unique rows, covering 1 layers) ──
+27, 1902:1897:742:740:650:631:360:307:130:124:49:31:25:21:21:11:11:8:7:6:3:3:1:1:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[16]
+
+# ── num_ops=28 active experts (3 unique rows, covering 3 layers) ──
+28, 1910:1828:1110:677:446:422:359:355:158:154:86:66:32:27:14:7:6:6:3:3:3:3:2:2:2:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[18]
+28, 1688:1617:1004:927:867:784:145:92:76:72:71:71:66:60:56:36:9:9:8:6:4:4:4:3:2:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[20]
+28, 1890:1866:1022:940:470:384:329:316:70:63:59:58:46:36:30:27:20:16:8:7:5:5:4:4:3:3:2:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[23]
+
+# ── num_ops=29 active experts (3 unique rows, covering 3 layers) ──
+29, 1893:1845:1326:981:306:204:156:140:125:115:75:67:66:63:62:59:48:35:24:21:21:16:13:6:5:4:4:3:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[7]
+29, 1885:1547:1410:1105:634:383:181:161:89:72:44:42:39:33:15:11:10:4:3:3:2:2:2:2:1:1:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[11]
+29, 1873:1867:1412:597:336:278:224:205:161:127:117:116:102:90:63:40:30:14:12:4:3:2:2:2:2:2:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[13]
+
+# ── num_ops=30 active experts (2 unique rows, covering 2 layers) ──
+30, 1872:1543:1472:912:478:309:148:123:115:107:88:78:68:60:56:55:43:41:28:23:22:12:11:7:6:3:1:1:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[19]
+30, 1848:1816:1231:709:532:504:257:209:112:102:89:66:54:51:17:12:12:11:10:8:7:5:5:4:4:3:2:2:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[21]
+
+# ── num_ops=32 active experts (7 unique rows, covering 7 layers) ──
+32, 1663:1051:874:857:458:421:285:253:189:132:130:121:108:92:91:89:77:71:68:66:65:60:58:57:56:52:52:47:41:39:38:23, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[0]
+32, 1836:1589:709:671:470:416:406:195:164:157:129:110:95:95:71:62:62:61:50:48:41:39:34:32:32:30:24:21:11:11:10:3, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[1]
+32, 1838:1642:988:646:531:386:375:319:303:99:75:64:46:46:44:40:33:33:27:21:20:19:17:17:16:16:10:5:3:3:1:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[2]
+32, 1763:1651:1517:346:277:249:213:198:190:140:131:110:105:77:68:67:63:61:55:54:53:47:45:44:44:38:24:19:11:11:7:6, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[3]
+32, 1877:1102:769:736:498:427:377:263:258:172:148:148:147:98:80:72:70:63:62:62:62:49:32:32:22:15:11:8:8:6:5:5, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[4]
+32, 1399:1286:1283:892:627:290:236:227:189:153:141:114:90:77:73:69:67:55:52:46:44:42:39:37:34:33:29:23:16:13:4:4, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[5]
+32, 1644:1572:795:511:498:461:346:188:182:181:146:143:131:126:117:102:98:67:61:58:47:46:45:42:32:13:8:7:6:5:5:1, 2880, 5760, 50, bf16:bf16:bf16, true, 10, 4, 3, 2880, 1, 32  # freq=1 layers=[6]
+

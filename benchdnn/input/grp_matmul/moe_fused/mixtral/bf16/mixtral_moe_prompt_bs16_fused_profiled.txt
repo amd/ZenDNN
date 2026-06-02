@@ -1,0 +1,60 @@
+# Mixtral 8x7B Instruct v0.1 MoE — PROMPT (prefill chunk, BS=16, ip=128) — 32 unique rows from 32 layers.
+#
+# One row per unique (num_ops, sorted-desc M) pattern observed in
+# the *largest* prefill forward pass. Identical patterns across
+# layers are merged. The trailing per-line `# freq=N layers=[...]`
+# comment records the number of layers that had this exact pattern
+# (= len(layers=[...])); the `layers=[i,j,...]` list itself is
+# preserved for traceability only.
+#
+# Selected pass: tokens=1921, total_M=3842 (= tokens * topk).
+# All prefill passes detected: (tokens=128, sum=256, recs=32), (tokens=1921, sum=3842, recs=32)
+# (vLLM CPU scheduler chunks the prefill — typically the first prompt is
+#  prefilled alone, then the rest are batched together with the first decode token.)
+#
+# Architecture: 8 experts, topk=2, 32 transformer layers
+# hidden_size=4096, intermediate_size=14336, act=silu_and_mul (act=1)
+#
+# Format: num_ops, M_per_op, K, N, iters, src:wei:dst, weights_const, warmup, moe_topk, gated_act, N_down, use_internal_alloc, total_experts
+#   use_internal_alloc=1; total_experts=8
+#   iters/warmup recomputed from sum_M: sum_M>=16384 -> 20/5; >=4096 -> 50/10; <4096 -> 100/20.
+#   Trailing per-line `# freq=N layers=[...]` preserves source occurrence info (layers omitted for decode files).
+
+# ═══════════════════════════════════════════════════════════════════════
+# PROMPT (deduped): tokens=1921, topk=2 → total_M=3842
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ── num_ops=8 active experts (32 unique rows, covering 32 layers) ──
+8, 1051:862:466:429:368:314:224:128, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[0]
+8, 728:648:599:581:498:352:329:107, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[1]
+8, 891:668:590:515:462:436:193:87, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[2]
+8, 995:536:498:483:403:380:339:208, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[3]
+8, 603:548:542:536:432:411:405:365, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[4]
+8, 811:767:417:406:403:374:337:327, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[5]
+8, 1395:1098:496:347:186:147:123:50, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[6]
+8, 1392:628:370:362:336:260:253:241, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[7]
+8, 1450:1292:503:241:165:132:31:28, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[8]
+8, 1549:1338:340:251:171:124:48:21, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[9]
+8, 958:793:754:443:309:240:239:106, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[10]
+8, 1066:1039:546:454:429:261:42:5, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[11]
+8, 1279:976:705:305:204:155:111:107, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[12]
+8, 1839:849:668:227:155:41:38:25, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[13]
+8, 1823:503:449:328:319:262:109:49, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[14]
+8, 1725:661:637:389:192:134:69:35, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[15]
+8, 1667:1269:457:242:153:25:18:11, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[16]
+8, 1511:962:458:438:248:128:89:8, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[17]
+8, 1341:712:578:350:326:299:156:80, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[18]
+8, 766:722:652:577:456:366:214:89, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[19]
+8, 863:557:508:457:410:384:367:296, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[20]
+8, 866:553:526:481:414:395:331:276, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[21]
+8, 804:528:520:472:451:372:370:325, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[22]
+8, 741:732:622:493:460:308:278:208, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[23]
+8, 883:543:510:494:459:404:317:232, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[24]
+8, 687:546:543:518:461:427:343:317, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[25]
+8, 1011:991:402:385:279:273:273:228, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[26]
+8, 722:710:683:443:425:339:298:222, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[27]
+8, 954:701:649:413:364:309:269:183, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[28]
+8, 932:919:602:340:323:304:243:179, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[29]
+8, 1235:941:634:630:280:75:44:3, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[30]
+8, 1057:846:686:459:317:291:114:72, 4096, 28672, 100, bf16:bf16:bf16, true, 20, 2, 1, 4096, 1, 8  # freq=1 layers=[31]
+
