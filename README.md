@@ -26,6 +26,8 @@
 
 ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems.
 
+ZenDNN exposes its functionality primarily through the **Low Overhead API (LowOHA)** — a set of direct, function-based entry points (e.g. `matmul_direct`, `group_matmul_direct`, `reorder_direct`) that operate on raw pointers with minimal per-call overhead. This makes LowOHA the performance-first interface for latency-sensitive inference and small GEMM-heavy workloads such as Scaled Dot-Product Attention (SDPA), Batched Matrix Multiply (BMM), and Mixture-of-Experts (MoE) group GEMMs. It is complemented by a modular, object-oriented Tensor Operator API. For details, see the [ZenDNN architecture documentation](docs/zendnnl_architecture.md).
+
 ZenDNN is a redesigned, re-architected, and refactored deep learning library, evolving from the original ZenDNN_legacy. The legacy version is retained for reference and backward compatibility (https://github.com/amd/ZenDNN/tree/zendnn_legacy).
 In addition to features offered by ZenDNN_legacy, ZenDNN is intended to support the following additional features:
 
@@ -50,15 +52,23 @@ ZenDNN
 |- zendnnl      : contains library code.
 |   |- gtests   : GoogleTest files.
 |   |- src      : contains library code.
-|   |   |- common : contains high level utilities needed by the library.
-|   |   |- memory : implements tensor_t class.
-|   |   |- operator : implements all operator classes.
-|   |   |   |- common : implements base classes needed for the operators.
-|   |   |   |- sample_operator : demonstrates how to create an operator.
-|   |   |   |- matmul_operator : implements matrix multiplication with optional post-op.
-|   |   |   |- reorder_operator : copies data between different memory formats.
-|   |   |   |- compare_operator : perform element-wise comparison of tensors.
-|   |   |   |- embag_operator : implements embedding bag and embedding operators.
+|   |   |- common : high level utilities needed by the library.
+|   |   |- memory : implements the tensor_t class and tensor storage/quantization/options.
+|   |   |- lowoha_operators : direct, low overhead (function-based) operator implementations (the performance-first API path).
+|   |   |   |- matmul        : matmul_direct and group_matmul_direct (incl. fused MoE), and backends.
+|   |   |   |- reorder       : data type conversion, quantization/dequantization, and weight prepack.
+|   |   |   |- normalization : LayerNorm, RMSNorm, and FusedAddRMSNorm kernels.
+|   |   |   |- sdpa          : scaled dot-product (flash) attention and BMM-based SDPA.
+|   |   |   |- softmax       : low overhead softmax.
+|   |   |   |- pooling       : low overhead pooling.
+|   |   |- operators : object-oriented operator implementations (the modular Tensor Operator API path).
+|   |   |   |- common   : base classes needed for the operators (operator, context, kernel, post-op).
+|   |   |   |- matmul   : implements matrix multiplication with optional post-op.
+|   |   |   |- reorder  : copies data between different memory formats.
+|   |   |   |- embag    : implements embedding bag and embedding operators.
+|   |   |   |- sdpa     : scaled dot-product attention (encoder) operator.
+|   |   |   |- compare  : performs element-wise comparison of tensors.
+|   |   |   |- sample   : demonstrates how to create an operator.
 ```
 
 ## 1.3. Third Party Libraries
@@ -68,9 +78,8 @@ ZenDNN depends on the following libraries.
  - GoogleTest (https://github.com/google/googletest)
  - NLOHMANN JSON (https://github.com/nlohmann/json) 
 
-Apart from this ZenDNN uses BLAS backends for matrix computations. It depends on any one of the following BLAS backends
+Apart from this ZenDNN uses BLAS backends for matrix computations. It depends on the following BLAS backend
  - AOCL DLP (https://github.com/amd/aocl-dlp)
- - AOCL BLIS (https://github.com/amd/blis)
 
 ZenDNN can also use the following other optional backends
  - OneDNN (https://github.com/uxlfoundation/oneDNN)

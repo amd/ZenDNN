@@ -6,45 +6,72 @@
 ## Overview
 ZenDNN is a high-performance CPU inference library designed to accelerate deep learning workloads. It provides optimized implementations for several key operations. The architecture is modular, extensible, and integrates seamlessly with popular deep learning frameworks. Its layered architecture ensures flexibility, extensibility, and high performance across a variety of hardware platforms and use cases.
 
+At the core of ZenDNN's interface is the **Low Overhead API (LowOHA)** — a set of direct, function-based entry points (e.g. `matmul_direct`, `group_matmul_direct`, `reorder_direct`) that operate on raw pointers with minimal per-call overhead. LowOHA is the **primary, performance-first interface** for latency-sensitive inference and small GEMM-heavy workloads (SDPA, BMM, MoE group GEMMs). It is complemented by a modular, object-oriented **Tensor Operator API** for integrations that benefit from explicit tensor, context, and operator abstractions.
 
-<img src="images/zendnnl_architecture.png" alt="ZenDNN Architecture" width="500" height="600"/>
+
+<img src="images/zendnnl_architecture.png" alt="ZenDNN Architecture" width="500" height="579"/>
 
 
 ## 1. Frontend Layer
 The **Frontend** is where model developers define their neural networks using high-level APIs provided by frameworks such as **PyTorch**, **TensorFlow**, **Llama.cpp**. These frameworks handle model construction, training, and inference logic. ML operators (e.g. MatMul, EmbeddingBag, Reorder) are defined at this layer. When a model is executed, the frontend translates these operations into a format that ZenDNN can understand and dispatches them to the ZenDNN Library below.
 
-## 2. Regular and Low Overhead API Layer
-The **Regular and Low Overhead API Layer** is the critical interface that connects the frontend (PyTorch, TensorFlow, Llama.cpp, etc.) with the optimized computational backend of ZenDNN. It exposes two paths:
+## 2. Low Overhead and Tensor Operator API Layer
+The **Low Overhead and Tensor Operator API Layer** is the critical interface that connects the frontend (PyTorch, TensorFlow, Llama.cpp, etc.) with the optimized computational backend of ZenDNN. It exposes two paths:
 
-- **Regular API path:** A **modularized, object-oriented approach** that is extensible and framework-agnostic. It ensures that ZenDNN can be easily integrated into various ecosystems without requiring deep changes in the framework internals, and enables rapid experimentation and deployment of new operators and optimizations.
-- **Low Overhead API (LowOHA) path:** **Lightweight** and minimal; it minimizes API overhead and is **critical for small GEMM-heavy workloads** such as Scaled Dot-Product Attention (SDPA) and Batched Matrix Multiply (BMM), where per-call overhead can dominate runtime.
+- **Low Overhead API (LowOHA) path:** The **primary, performance-first interface** of ZenDNN. It provides **direct, function-based APIs** that bypass operator-factory construction and context setup, minimizing per-call overhead. LowOHA is **critical for latency-sensitive inference and small GEMM-heavy workloads** such as Scaled Dot-Product Attention (SDPA), Batched Matrix Multiply (BMM), and Mixture-of-Experts (MoE) group GEMMs, where per-call overhead can dominate runtime.
+- **Tensor Operator API path:** A **modularized, object-oriented approach** that is extensible and framework-agnostic. It ensures that ZenDNN can be easily integrated into various ecosystems without requiring deep changes in the framework internals, and enables rapid experimentation and deployment of new operators and optimizations.
 
-### Regular API: Features
+### Low Overhead API (LowOHA): Features
+The LowOHA path is the recommended interface for new integrations and for any workload where throughput and latency matter. Each operation is exposed as a single direct call (e.g. `matmul_direct`, `group_matmul_direct`, `sdpa_direct`) that accepts raw data pointers and stride metadata, with no dependency on framework tensor objects.
 
-#### 2.1. Tensor Creation and Management
+#### 2.1. Direct, Function-Based Interface
+- Exposes flat C-style entry points that operate directly on raw pointers and explicit strides.
+- Bypasses the operator factory, context objects, and tensor-wrapping layers used by the Tensor Operator API path.
+- Framework-agnostic: no dependency on PyTorch ATen or other framework tensors, enabling clean embedding into any runtime.
+
+#### 2.2. Minimal Per-Call Overhead
+- Eliminates object construction, registration, and dispatch costs on the hot path.
+- Designed for **repeated, high-frequency invocation** in inference loops where setup cost would otherwise dominate.
+- Especially impactful for **small and batched GEMMs** (SDPA, BMM, MoE expert GEMMs) where compute time per call is small relative to overhead.
+
+#### 2.3. Weight Caching and Reuse
+- Supports constant-weight caching so reordered/packed weights are computed once and reused across calls.
+- Reduces redundant reorders and improves data locality for repeated weight reuse.
+
+#### 2.4. Fused Post-Operations
+- Supports backend-native fusion of post-ops (e.g. activations such as ReLU/GELU/SiLU, bias add, binary add) directly into the kernel.
+- Provides gated-activation fusions (silu_and_mul, gelu_and_mul, swiglu_oai_mul) and optional MoE weighted-reduce for group GEMMs.
+
+#### 2.5. Precision Support
+- Operates across **FP32, FP16, BF16, and INT8**, with built-in data-type conversion, quantization, and dequantization via the LowOHA reorder path.
+- Selects vectorized kernels (e.g. AVX-512, AVX-512-FP16) at runtime based on data type and available hardware.
+
+The full set of supported operations and their detailed documentation is listed in [Low Overhead API (LowOHA): Supported Operations](#low-overhead-api-lowoha-supported-operations).
+
+### Tensor Operator API: Features
+The Tensor Operator API complements LowOHA with an object-oriented, extensible model. It is well suited for integrations that benefit from explicit tensor, context, and operator abstractions.
+
+#### 2.6. Tensor Creation and Management
 - Accepts input and output buffers from the framework.
 - Wraps them into ZenDNN-compatible tensor objects.
 - Handles metadata such as shape, data type (FP32, FP16, BF16, INT8), and memory layout (blocked and non blocked).
 - Ensures zero-copy or minimal-copy data handling to reduce overhead.
 
-#### 2.2. Operator Registration and Dispatch
+#### 2.7. Operator Registration and Dispatch
 - Maintains a registry of supported operators (Example: MatMul, Fused MatMul, Reorder, etc.).
 - Maps framework-level operations to ZenDNN core implementations.
 - Combines multiple operations into a single kernel to reduce memory bandwidth and improve cache locality.
 
-#### 2.3. Precision Control
+#### 2.8. Precision Control
 - Allows frameworks to specify the desired precision for inference:
   - **FP32**: Full precision for accuracy-sensitive tasks.
   - **FP16**: Half-precision (IEEE 754) for reduced memory footprint and bandwidth with moderate precision.
   - **BF16**: Balanced precision for performance and accuracy.
   - **INT8**: Quantized precision for reduced memory and faster inference.
 
-#### 2.4. Execution Context Management
+#### 2.9. Execution Context Management
 - Initializes and manages execution contexts (Example: constant buffers, post ops, etc. )
 - Provides hooks for profiling and logging.
-
-### Low Overhead API (LowOHA)
-The Low Overhead API path provides direct, function-based APIs that bypass the regular operator factory and context setup. It is optimized for latency-sensitive inference and small GEMM-heavy workloads (e.g. SDPA, BMM), where minimizing per-call overhead is essential. Supported operations and their documentation are listed in [Low Overhead API (LowOHA): Supported Operations](#low-overhead-api-lowoha-supported-operations).
 
 
 ## 3. ZenDNN Library
@@ -71,11 +98,27 @@ ZenDNN leverages several low-level libraries to provide foundational building bl
 
 ---
 
-The following sections describe the design and execution model in more detail: the core building blocks of the Regular API, the supported Low Overhead API operations, the hardware layer, execution flows for both API paths, and design principles.
+The following sections describe the design and execution model in more detail: the supported Low Overhead API operations, the core building blocks of the Tensor Operator API, the hardware layer, execution flows for both API paths, and design principles.
 
 
-## Core Design Principles: Regular API
-The **Regular API** is built on four core building blocks. These are the design elements of the ZenDNN core used by the regular path:
+## Low Overhead API (LowOHA): Supported Operations
+The Low Overhead API path exposes direct, function-based APIs for a growing set of operations. Each operation is a single entry point optimized for minimal per-call overhead, and has dedicated documentation:
+
+| Operation | Description | Documentation |
+|-----------|-------------|---------------|
+| **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul via `matmul_direct` with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
+| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op; optional gated activation post-op (silu_and_mul, gelu_and_mul, swiglu_oai_mul); optional fused MoE via a single-call interface (currently two-pass internally in V1: Op1(gate+up)+activation, then Op2(down_proj); a future deep single-pass fusion is anticipated). | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
+| **SDPA** | Scaled Dot-Product (flash) attention via `sdpa_direct`; tiled O(S) memory, runtime SIMD dispatch, OpenMP parallelization; self- and cross-attention. | [lowoha_sdpa_operator.md](operator/lowoha_sdpa_operator.md) |
+| **Normalization** | LayerNorm, RMSNorm, and FusedAddRMSNorm via a single direct entry point; AVX-512 / AVX-512-FP16 vectorized kernels. | [lowoha_normalization_operator.md](operator/lowoha_normalization_operator.md) |
+| **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
+| **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |
+| **Conv2D** | Low overhead 2D convolution. | [lowoha_conv2d_operator.md](operator/lowoha_conv2d_operator.md) |
+| **Pooling** | Low overhead pooling operations. | [lowoha_pooling_operator.md](operator/lowoha_pooling_operator.md) |
+| **Softmax** | Low overhead softmax. | [lowoha_softmax_operator.md](operator/lowoha_softmax_operator.md) |
+
+
+## Core Design Principles: Tensor Operator API
+The **Tensor Operator API** is built on four core building blocks. These are the design elements of the ZenDNN core used by the Tensor Operator API path:
 
 - **Tensor:** Manages data layout, memory, and shape transformations.
 - **Context:** Maintains constant model parameters, post op operation, runtime settings like threading and logging and profiling information.
@@ -210,19 +253,6 @@ Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact
 
 
 
-## Low Overhead API (LowOHA): Supported Operations
-The Low Overhead API path exposes direct, Low Overhead APIs for specific operations. Each operation has dedicated documentation:
-
-| Operation | Description | Documentation |
-|-----------|-------------|---------------|
-| **Group MatMul** | Multiple independent GEMMs in one call via `group_matmul_direct`; sequential chaining or parallel execution; optional MoE weighted-reduce post-op; optional gated activation post-op (silu_and_mul, gelu_and_mul, swiglu_oai_mul); optional fused MoE via a single-call interface (currently two-pass internally in V1: Op1(gate+up)+activation, then Op2(down_proj); a future deep single-pass fusion is anticipated). | [lowoha_group_matmul_operator.md](operator/lowoha_group_matmul_operator.md) |
-| **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
-| **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
-| **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |
-| **Conv2D** | Low overhead 2D convolution. | [lowoha_conv2d_operator.md](operator/lowoha_conv2d_operator.md) |
-| **Pooling** | Low overhead pooling operations. | [lowoha_pooling_operator.md](operator/lowoha_pooling_operator.md) |
-| **Softmax** | Low overhead softmax. | [lowoha_softmax_operator.md](operator/lowoha_softmax_operator.md) |
-
 ## 5. Hardware Layer
 ZenDNN is engineered to extract maximum performance from **general-purpose CPUs**, making it ideal for server-side inference, edge computing, and CPU-only environments. This layer is where all computations are ultimately executed, and its efficiency directly impacts the overall throughput and latency of deep learning models.
 
@@ -249,41 +279,12 @@ ZenDNN kernels are designed to:
 
 
 ## Execution Flow
-ZenDNN supports two execution paths. The flow differs depending on whether the frontend uses the **Regular API** or the **Low Overhead API (LowOHA)**.
-
-### Regular API path
-For the regular path, a tensor moves through the ZenDNN stack as follows:
-
-1. **Input Tensor** is passed from the frontend (Example: PyTorch).
-2. The **Regular API** receives the tensor and determines the appropriate operator (creates context and operator).
-3. **ZenDNN Core** processes the tensor using the selected operator and kernel.
-4. The **Kernel** invokes routines from **Third Party Libraries** (Example: AOCL, OneDNN).
-5. Computation is executed on the **CPU**.
-6. The **Output Tensor** is returned back to the frontend.
-
-```
-Input Tensor (from Frontend)
-          ↓
-   Regular API
-(Receives tensor, creates context and operator)
-          ↓
-      ZenDNN Core
-(Processes tensor using operator & kernel)
-          ↓
-   Third Party Libraries
-(Invokes optimized routines: AOCL, OneDNN, etc.)
-          ↓
-         CPU
-(Performs computation)
-          ↓
-     Output Tensor
-(Returned to Frontend)
-```
+ZenDNN supports two execution paths. The flow differs depending on whether the frontend uses the **Low Overhead API (LowOHA)** or the **Tensor Operator API**.
 
 ### Low Overhead API (LowOHA) path
-For the Low Overhead API path, execution is more direct to minimize per-call overhead:
+For the Low Overhead API path, execution is direct to minimize per-call overhead:
 
-1. **Input** is passed from the frontend to a **direct Low Overhead API** (e.g. `matmul_direct`, `group_matmul_direct`).
+1. **Input** is passed from the frontend to a **direct Low Overhead API** (e.g. `matmul_direct`, `group_matmul_direct`, `sdpa_direct`).
 2. **Backend selection** (e.g. via Auto Tuner or Decision Tree) chooses the best backend and native kernel for the problem size.
 3. **Native kernel** or **Third Party Libraries** (AOCL, LibXSMM, OneDNN, FBGEMM) perform the computation.
 4. Computation is executed on the **CPU**.
@@ -301,6 +302,35 @@ Input (from Frontend)
          CPU
           ↓
      Output (to Frontend)
+```
+
+### Tensor Operator API path
+For the Tensor Operator API path, a tensor moves through the ZenDNN stack as follows:
+
+1. **Input Tensor** is passed from the frontend (Example: PyTorch).
+2. The **Tensor Operator API** receives the tensor and determines the appropriate operator (creates context and operator).
+3. **ZenDNN Core** processes the tensor using the selected operator and kernel.
+4. The **Kernel** invokes routines from **Third Party Libraries** (Example: AOCL, OneDNN).
+5. Computation is executed on the **CPU**.
+6. The **Output Tensor** is returned back to the frontend.
+
+```
+Input Tensor (from Frontend)
+          ↓
+   Tensor Operator API
+(Receives tensor, creates context and operator)
+          ↓
+      ZenDNN Core
+(Processes tensor using operator & kernel)
+          ↓
+   Third Party Libraries
+(Invokes optimized routines: AOCL, OneDNN, etc.)
+          ↓
+         CPU
+(Performs computation)
+          ↓
+     Output Tensor
+(Returned to Frontend)
 ```
 
 
