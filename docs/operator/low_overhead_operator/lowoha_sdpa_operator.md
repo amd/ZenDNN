@@ -5,9 +5,9 @@
 
 ## Overview
 
-The **LowOHA SDPA (Scaled Dot-Product Attention) Operator** is a high-performance, framework-agnostic implementation of the flash attention algorithm for CPU inference. It provides a direct C API that accepts raw pointers and stride metadata, eliminating any dependency on PyTorch ATen or other framework tensors.
+The **SDPA (Scaled Dot-Product Attention) API** (`sdpa_direct`) is a high-performance, framework-agnostic implementation of the flash attention algorithm for CPU inference. It accepts raw pointers and stride metadata, eliminating any dependency on PyTorch ATen or other framework tensors.
 
-The operator implements the standard multi-head attention computation:
+It computes the standard multi-head attention:
 
 $$
 \text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{Q \cdot K^T}{\sqrt{d_k}} + M\right) \cdot V
@@ -22,17 +22,21 @@ Where:
 
 For self-attention S<sub>q</sub> == S<sub>kv</sub>. For cross-attention (e.g. encoder-decoder models like T5/MT5, or attention pooling in SigLIP) they may differ.
 
-Key design goals:
+The `sdpa_params` structure is a *unified* parameter block designed for both a flash-style backend and a future BMM-based backend. Today only the **flash backend** is active (the BMM path is reserved and disabled in `lowoha_sdpa.cpp`); the flash backend selects its tile sizes and SIMD specialization automatically from the workload, with no manual algorithm knob.
+
+Include `lowoha_operators/sdpa/lowoha_sdpa.hpp` (namespace `zendnnl::lowoha::sdpa`).
+
+### Key benefits
+
 - Zero framework overhead — operates on raw data pointers with explicit strides
 - Runtime SIMD dispatch — AVX-512 when available, scalar fallback otherwise
 - Tiled flash attention — O(S) memory instead of O(S²) for the attention matrix
 - OpenMP parallelization across batch × heads × query tiles
 - Thread-local scratch buffer reuse across calls
+- Self- and cross-attention support, with optional additive 2-D / 4-D mask and causal masking
+- FP32 / BF16 / FP16 inputs with FP32 internal precision for numerical stability
 
-
-## Core API: `sdpa_direct`
-
-The primary interface for LowOHA SDPA:
+## API signature
 
 ```cpp
 status_t sdpa_direct(
@@ -45,16 +49,9 @@ status_t sdpa_direct(
 );
 ```
 
-**Returns:** `status_t::success` on success, `status_t::failure` on error.
+### Parameters
 
-**Namespace:** `zendnnl::lowoha::sdpa`
-
-
-## Parameters Structure
-
-### `sdpa_params`
-
-The unified parameter structure for all SDPA backends:
+`sdpa_params` is the unified parameter structure for all SDPA backends:
 
 ```cpp
 struct sdpa_params {
@@ -90,6 +87,24 @@ struct sdpa_params {
 };
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `batch` | `int64_t` | Batch size (B) |
+| `num_heads` | `int64_t` | Number of attention heads (H) |
+| `seq_len` | `int64_t` | Query / output sequence length (S<sub>q</sub>) |
+| `kv_seq_len` | `int64_t` | Key / value sequence length (S<sub>kv</sub>); `0` = same as `seq_len` |
+| `head_dim` | `int64_t` | Per-head feature dimension (D) |
+| `q/k/v/o_stride_*` | `int64_t` | Per-tensor BHSD strides (see [Stride requirements](#stride-requirements)) |
+| `mask_ndims` | `int` | Mask rank: `0` (none), `2`, or `4` |
+| `mask_sizes` / `mask_strides` | `int64_t[4]` | Mask shape and strides |
+| `qkv_dt` | `data_type_t` | Q/K/V data type (`f32`, `bf16`, or `f16`) |
+| `out_dt` | `data_type_t` | Output data type (must equal `qkv_dt`, or `none`) |
+| `mask_dt` | `data_type_t` | Mask data type (see [Supported data types](#supported-data-types)) |
+| `scale` | `double` | Attention scale; `0` = auto (`1/sqrt(head_dim)`) |
+| `is_causal` | `bool` | Enable causal (upper-triangular) masking |
+| `dropout_p` | `double` | Dropout probability (must be `0`) |
+| `num_threads` | `int32_t` | OpenMP thread count; `0` = auto |
+
 #### `seq_len` vs `kv_seq_len`
 
 | Field | Applies to | Description |
@@ -101,7 +116,7 @@ For **self-attention** (e.g. ViT encoder, GPT), set `kv_seq_len = 0` or `kv_seq_
 
 For **cross-attention** (e.g. T5/MT5 decoder attending to encoder, SigLIP attention pooling), set `kv_seq_len` to the actual K/V sequence length.
 
-### Stride Requirements
+#### Stride requirements
 
 The flash backend uses per-tensor BHSD strides to support non-contiguous memory layouts. The following constraints must be satisfied:
 
@@ -113,7 +128,7 @@ The flash backend uses per-tensor BHSD strides to support non-contiguous memory 
 | `o_stride_b` | Must be `> 0` when `batch > 1` | Parallel writes must not alias |
 | `o_stride_h` | Must be `> 0` when `num_heads > 1` | Parallel writes must not alias |
 
-### Supported Data Types
+#### Supported data types
 
 | Q/K/V Type | Mask Type | Output Type | Notes |
 |------------|-----------|-------------|-------|
@@ -128,12 +143,11 @@ The flash backend uses per-tensor BHSD strides to support non-contiguous memory 
 
 > **Note:** Internal precision is FP32 across all paths. Both the Q×K^T and softmax×V matmuls write FP32 outputs into the per-thread accumulators (`aocl_gemm_bf16bf16f32of32` for BF16 inputs, `aocl_gemm_f16f16f32of32` for FP16 inputs, `aocl_gemm_f32f32f32of32` for FP32 inputs). Online-softmax max/sum reductions and the running output accumulator stay in FP32. `out_dt` must either equal `qkv_dt` or be `data_type_t::none`.
 
-#### ISA requirement for FP16
+##### ISA requirement for FP16
 
 The FP16 paths require **AVX512-FP16** at runtime (CPUID leaf 7, subleaf 0, EDX bit 23; available on Zen 5 / Sapphire Rapids and later). The operator probes this via `zendnnl_platform_info().get_avx512_f16_status()` and rejects FP16 calls early with `status_t::isa_unsupported` when the ISA is absent, mirroring the gate enforced by the matmul backend (`lowoha_matmul.cpp`).
 
-
-### Attention Mask
+#### Attention mask
 
 The attention mask is an optional additive mask applied before the softmax. It supports two layouts:
 
@@ -144,8 +158,15 @@ The attention mask is an optional additive mask applied before the softmax. It s
 
 The last dimension (`S_kv`) must have stride 1 (contiguous). When `is_causal = true`, future positions are filled with `-inf` regardless of the mask.
 
+### Return value
+
+- `status_t::success` — attention computed and written to `output`
+- `status_t::failure` — validation or kernel failure (null pointers, invalid dims/strides, unsupported dtype combination, non-zero dropout, non-contiguous mask last dim)
+- `status_t::isa_unsupported` — FP16 request on a host without **AVX512-FP16** (see [ISA requirement for FP16](#isa-requirement-for-fp16))
 
 ## Execution Flow
+
+`sdpa_direct` is a thin profiling/logging wrapper around the flash backend. The backend validates inputs, builds lightweight tensor/mask views, then dispatches on the runtime ISA and the Q sequence length:
 
 ```
 sdpa_direct()
@@ -187,7 +208,6 @@ cpu_flash_attention_sa<SimdTag, scalar_t, mask_t, q_split, kv_split>()
   │    7. Write final output = accumulator / sum (SIMD scaled store)
 ```
 
-
 ## Flash Attention Algorithm
 
 The kernel implements the online softmax flash attention algorithm, which avoids materializing the full S×S attention matrix:
@@ -199,7 +219,6 @@ The kernel implements the online softmax flash attention algorithm, which avoids
 3. **Memory Efficiency**: Scratch memory per thread is `O(q_split × kv_split + q_split × head_dim)` instead of `O(S × S)` for the full attention matrix. Scratch buffers are thread-local and reused across calls.
 
 4. **Parallelization**: The outer loop over `batch × heads × q_tiles` work items is parallelized with `#pragma omp parallel for schedule(static)`.
-
 
 ## SIMD Dispatch
 
@@ -536,7 +555,6 @@ int lowoha_sdpa_broadcast_mask_example() {
 }
 ```
 
-
 ### Example 6: Cross-Attention (Encoder-Decoder)
 
 Cross-attention is used in encoder-decoder models (T5, MT5) where the decoder query attends to encoder key/value with a different sequence length.
@@ -605,37 +623,35 @@ int lowoha_sdpa_cross_attention_example() {
 }
 ```
 
+## Notes and best practices
 
-## Tiling Heuristics
+1. **Tiling heuristics**: The flash kernel selects tile sizes from the Q sequence length (`seq_len`) to balance parallelism and cache efficiency; `kv_split_size` is clamped at runtime to `min(512, kv_seq_len)`.
 
-The flash kernel selects tile sizes based on the Q sequence length (`seq_len`)
-to balance parallelism and cache efficiency. `kv_split_size` is clamped at
-runtime to `min(512, kv_seq_len)`.
+   | Condition | `q_split_size` | `kv_split_size` | Rationale |
+   |-----------|---------------|-----------------|-----------|
+   | `seq_len >= 768` | 256 | 512 | Large tiles maximize GEMM efficiency |
+   | `seq_len >= 192` | 64 | 512 | Moderate tiles for medium sequences |
+   | `seq_len < 192` | 32 | 512 | Small tiles preserve parallelism for short sequences |
+   | `batch > 4` (override) | 512 | 512 | Larger Q tiles when batch parallelism is sufficient |
 
-| Condition | `q_split_size` | `kv_split_size` | Rationale |
-|-----------|---------------|-----------------|-----------|
-| `seq_len >= 768` | 256 | 512 | Large tiles maximize GEMM efficiency |
-| `seq_len >= 192` | 64 | 512 | Moderate tiles for medium sequences |
-| `seq_len < 192` | 32 | 512 | Small tiles preserve parallelism for short sequences |
-| `batch > 4` (override) | 512 | 512 | Larger Q tiles when batch parallelism is sufficient |
+2. **Scratch memory**: Each thread uses a private, grow-only scratch arena (sized from the selected tiles) managed by a `thread_local` allocator (`flash_scratch_acquire`) and reused across calls. Call `sdpa_flash_cpu_free_scratch()` to release it eagerly.
 
+   | Buffer | Size | Purpose |
+   |--------|------|---------|
+   | `qk_data` | `q_split × kv_split` | Q×K^T tile (FP32 accumulation) |
+   | `qk_max_data` | `q_split` | Running row-wise max for online softmax |
+   | `qk_sum_data` | `q_split` | Running row-wise sum for online softmax |
+   | `dst_data` | `q_split × head_dim` | Running output accumulator (FP32) |
+   | `qk_reduced_data` | `q_split × kv_split` | Reduced-precision softmax weights/tile feeding the softmax×V GEMM (BF16 / FP16 path) |
 
-## Scratch Memory Management
+3. **Threading**: Set `params.num_threads` to control parallelism (`0` = auto: uses `OMP_NUM_THREADS` or the system default). Work is distributed across `batch × heads × query-tiles`, so larger batch/head counts expose more parallel work.
 
-Each thread uses a private scratch buffer for intermediate results:
+4. **Self- vs cross-attention**: For self-attention set `kv_seq_len = 0` (or `seq_len`); for cross-attention set `kv_seq_len` to the K/V length. K and V always share `S_kv`.
 
-| Buffer | Size | Purpose |
-|--------|------|---------|
-| `qk_data` | `q_split × kv_split` | Q×K^T tile (FP32 accumulation) |
-| `qk_max_data` | `q_split` | Running row-wise max for online softmax |
-| `qk_sum_data` | `q_split` | Running row-wise sum for online softmax |
-| `dst_data` | `q_split × head_dim` | Running output accumulator (FP32) |
-| `qk_reduced_data` | `q_split × kv_split` | Reduced-precision softmax weights/tile that feeds the softmax×V GEMM (BF16 or FP16 path) |
+5. **Dropout**: Only `dropout_p = 0.0` is supported. Non-zero dropout returns `status_t::failure`.
 
-Scratch buffers are managed via a `thread_local` allocator (`flash_scratch_acquire`) that grows-only and reuses memory across calls. Call `sdpa_flash_cpu_free_scratch()` to eagerly release.
+6. **Head dimension contiguity**: `stride_d` must be `1` for Q, K, and V (required by the underlying GEMM).
 
-## Limitations
+7. **Mask contiguity**: The last mask dimension (`S_kv`) must have stride `1`.
 
-- **Dropout**: Only `dropout_p = 0.0` is supported. Non-zero dropout returns `status_t::failure`.
-- **Head dimension contiguity**: `stride_d` must be 1 for Q, K, and V (required by the underlying GEMM).
-- **Mask contiguity**: The last mask dimension (`S_kv`) must have stride 1.
+8. **FP16 ISA gate**: FP16 requests on hosts without **AVX512-FP16** return `status_t::isa_unsupported`; check for this status and fall back or skip gracefully.

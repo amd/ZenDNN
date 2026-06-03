@@ -996,6 +996,7 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/tensor_operator/operator.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/tensor_operator/matmul_operator.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/tensor_operator/reorder_operator.md \
+                         @PROJECT_SOURCE_DIR@/docs/operator/tensor_operator/sdpa_operator.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/tensor_operator/compare_operator.md \
                          @PROJECT_SOURCE_DIR@/docs/CONTRIBUTING.md \
                          @PROJECT_SOURCE_DIR@/docs/logging.md \
