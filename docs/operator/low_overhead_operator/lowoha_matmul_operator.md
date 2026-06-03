@@ -1,30 +1,43 @@
-
 (Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # LowOHA MatMul Operator
 
+## Table of Contents
+
+- [Overview](#overview)
+- [General MatMul Operation](#general-matmul-operation)
+- [Core API: `matmul_direct`](#core-api-matmul_direct)
+- [Parameters Structure](#parameters-structure)
+- [Usage Examples](#usage-examples)
+- [Reorder Quantization](#reorder-quantization-source-quantization-via-reorder)
+- [Weight Caching and Reordering](#weight-caching-and-reordering)
+- [Zero-Point Compensation Caching (INT8)](#zero-point-compensation-caching-int8)
+- [Backend Selection](#backend-selection)
+
 ## Overview
 
-The **LowOHA MatMul Operator** is a high-performance, low-overhead matrix multiplication operator designed for **latency-sensitive inference workloads**. It provides a direct API to backend libraries (AOCL, LibXSMM, OneDNN) with built-in weight caching, and fused post-operations.
+The LowOHA MatMul Operator is the primary matrix multiplication API in ZenDNN — a high-performance, low-overhead matrix multiplication operator designed for latency-sensitive inference workloads. It provides a direct, function-based interface (`matmul_direct`) to backend libraries (AOCL-DLP, LibXSMM, OneDNN) with built-in weight caching and fused post-operations, making it the recommended entry point for most inference paths (model serving, LLM decoding, batched MatMul, INT8 / WOQ quantized inference).
 
-Unlike the standard MatMul operator which uses the operator factory pattern, LowOHA MatMul provides a **function-based interface** optimized for:
-- Minimal execution overhead
-- Repeated weight reuse
-- Backend-native post-operation fusion
-- Direct control over execution parameters
+Key characteristics:
 
+- **Minimal execution overhead** — direct function call with no operator-factory or object-construction cost on the hot path
+- **Repeated weight reuse** — reordered weights are cached across calls and keyed on the weight pointer
+- **Backend-native post-operation fusion** — post-ops, INT8, and WOQ paths exposed directly to the backend
+- **Direct control over execution parameters** — the caller picks dtypes, layout, threading, and (optionally) the backend algorithm
 
-# General MatMul Operation
+For the operator-factory-based API (`matmul_operator_t`, used for graph-style composition and framework integration patterns), see [MatMul Operator](../tensor_operator/matmul_operator.md).
+
+## General MatMul Operation
 
 Let:
 
 - *A* ∈ ℝ<sup>mxk</sup> or ℝ<sup>bsxmxk</sup>: Input Matrix or Batched Input Matrix
 - *B* ∈ ℝ<sup>kxn</sup> or ℝ<sup>bsxkxn</sup>: Weight Matrix or Batched Weight Matrix
 - *C* ∈ ℝ<sup>mxn</sup> or ℝ<sup>bsxmxn</sup>: Output Matrix or Batched Output Matrix
-- *Bias* ∈ ℝ¹ˣᴺ: Optional Bias vector
+- *Bias* ∈ ℝ<sup>1xn</sup>: Optional Bias vector
 - *Alpha* (*α*): Scaling factor for the matrix product
 - *Beta* (*β*): Scaling factor for the output (for accumulation)
-- *Post_ops(x)*: Optional activation or binary post operations (Example: ReLU, GELU, Binary_add, etc.)
+- *Post_ops(x)*: Optional activation or binary post operations (e.g., ReLU, GELU, `binary_add`, etc.)
 - *Transpose(A, B)*: Optional transpose operation on matrices A or B
 
 The computation can be expressed as:
@@ -33,7 +46,27 @@ $$
 C = \text{PostOps}(\alpha \cdot (A \cdot B) + \beta \cdot C + \text{Bias})
 $$
 
+### LowOHA MatMul Flow Diagram
 
+```text
+       Input A                            Weights B
+  ([M x K] or [BS x M x K])         ([K x N] or [BS x K x N])
+    (Optional:                          (Constant weights:
+ dynamic quant to S8/U8)            reorder cached on first call)
+       |                                    |
+       +------------------x-----------------+
+                          |
+                       MatMul    ← alpha * (A x B) + beta * C
+                          |
+                   +------v------+
+                   |   Add Bias  |
+                   +------v------+
+                   | Scale / ZP  |  ← INT8 dequant or WOQ dequant
+                   +------v------+
+                   |   Post-Op   |  ← Activation / Binary Op (fused)
+                   +------v------+
+                       Output C
+```
 
 ## Core API: `matmul_direct`
 
@@ -41,7 +74,7 @@ The primary interface for LowOHA MatMul is the `matmul_direct` function:
 
 ```cpp
 status_t matmul_direct(
-  const char layout,           // 'r' for row-major,
+  const char layout,           // 'r' for row-major
   const bool transA,           // Transpose input matrix A
   const bool transB,           // Transpose weight matrix B
   const int M,                 // Number of rows in A (and C)
@@ -61,7 +94,6 @@ status_t matmul_direct(
   matmul_params params         // LowOHA parameters (dtypes, post-ops, quantization)
 );
 ```
-
 
 ## Parameters Structure
 
@@ -85,18 +117,18 @@ The main configuration structure for LowOHA MatMul:
 
 ```cpp
 struct matmul_params {
-  matmul_data_types dtypes;                       // Data types for tensors
-  std::vector<matmul_post_op> postop_;             // Post-operations
+  matmul_data_types dtypes;                  // Data types for tensors
+  std::vector<matmul_post_op> postop_;       // Post-operations
   matmul_quantization_params_t quant_params; // Quantization parameters
-  char mem_format_a;                       // Memory format for A ('n'=non-reordered, 'r'=reordered)
-  char mem_format_b;                       // Memory format for B ('n'=non-reordered, 'r'=reordered)
-  matmul_algo_t lowoha_algo;               // Preferred backend algorithm
-  uint64_t num_threads;                    // Number of threads (0 = auto)
-  std::string plugin_op;                   // Plugin op name
-  bool dynamic_quant;                      // Enable dynamic quantization of source (default: false)
+  char mem_format_a;                         // Memory format for A ('n'=non-reordered, 'r'=reordered)
+  char mem_format_b;                         // Memory format for B ('n'=non-reordered; 'r'=pre-reordered into AOCL-DLP blocked layout via a prior reorder_direct() prepack — backend skips its internal reorder)
+  matmul_algo_t lowoha_algo;                 // Preferred backend algorithm (default: matmul_algo_t::none → resolves to aocl_dlp_blocked for single MatMul, libxsmm for batched)
+  int32_t num_threads;                       // Number of threads (0 = auto)
+  std::string plugin_op;                     // Plugin op name
+  bool dynamic_quant;                        // Enable dynamic quantization of source (default: false)
+  int32_t weight_cache_type;                 // Per-call weight cache mode (0=disabled, 1=out-of-place, 2=allow in-place; capped by ZENDNNL_WEIGHT_CACHE env var)
 };
 ```
-
 
 ### `matmul_data_types`
 
@@ -114,20 +146,19 @@ struct matmul_data_types {
 
 **Supported Combinations:**
 
-| Src Type | Weight Type | Bias Type | dst Type | Notes |
+| Src Type | Weight Type | Bias Type | Dst Type | Notes |
 |----------|-------------|-----------|-------------|-------|
-| FP32 | FP32 | FP32 | FP32 | Standard floating-point |
-| BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
-| F16 | F16 | FP32/F16 | F16/FP32 | Half-precision (requires AVX512-FP16) |
-| BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), symmetric |
-| BF16 | U4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
-| U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
-| S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
-| BF16 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
-| FP32 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
+| F32 | F32 | F32 | F32 | Standard floating-point |
+| BF16 | BF16 | F32/BF16 | F32/BF16 | Mixed-precision BFloat16 |
+| F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16) |
+| BF16 | S4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), symmetric |
+| BF16 | U4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
+| U8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
+| S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
+| BF16 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
+| F32 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
 
-> **Note:** F16 matmul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16, F16 operations return `status_t::isa_unsupported`.
-
+> **Note:** F16 MatMul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16, F16 operations return `status_t::isa_unsupported`.
 
 ### `matmul_post_op`
 
@@ -159,7 +190,7 @@ struct matmul_post_op {
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
- > **Note — On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, `mish` is rejected by input validation in `validate_matmul_direct_inputs`. This runs by default (diagnostics are enabled unless `ZENDNNL_DIAGNOSTICS_ENABLE=0` is set); the kernel does not perform an additional always-on runtime rejection beyond the validator.**
+> **Note:** On AOCL-DLP INT8 `sym_quant` / `dynamic_quant` kernel paths, the `mish` post-op is rejected by `validate_matmul_direct_inputs` (input validation runs by default unless `ZENDNNL_DIAGNOSTICS_ENABLE=0`).
 
 **Binary Post-Op Dimensions:**
 
@@ -167,9 +198,9 @@ For binary post-ops (`binary_add` and `binary_mul`), the `dims` field specifies 
 
 | Operation | Dims | Shape | Description |
 |-----------|------|-------|-------------|
-| MM | 2D | `{M, N}` | Element-wise operation on output |
-| BMM | 2D | `{M, N}` | Same values broadcast to all batches |
-| BMM | 3D | `{Batch, M, N}` | Different values per batch |
+| MM (Matrix Multiply) | 2D | `{M, N}` | Element-wise operation on output |
+| BMM (Batched Matrix Multiply) | 2D | `{M, N}` | Same values broadcast to all batches |
+| BMM (Batched Matrix Multiply) | 3D | `{Batch, M, N}` | Different values per batch |
 
 ### `matmul_quantization_params_t`
 
@@ -187,7 +218,7 @@ struct matmul_quantization_params_t {
    */
   struct matmul_quant_t {
     const void *buff;              // Pointer to scale/zero-point data
-    data_type_t dt;                // Scale: f32/bf16. INT8 zero-point: s8/u8/s32. WOQ U4 weight ZP: s8 or bf16
+    data_type_t dt;                // Scale: f32/bf16. INT8 zero-point: s8/u8/s32. WOQ U4 weight ZP: s8 or bf16.
     std::vector<int64_t> dims;     // Dimensions of the quantization tensor
   };
   
@@ -199,13 +230,14 @@ struct matmul_quantization_params_t {
   matmul_quant_t dst_zp;        // Destination tensor zero-point (for INT8)
 };
 ```
+
 **INT8 Quantization Granularity:**
 
-| Buffer         | Scale (mandatory)                            | Zero-Point     |
-|----------------|----------------------------------------------|----------------|
-| Input          | Yes  Per-tensor, per-token, or per-group     | Yes Per-tensor |
-| Weights        | Yes  Per-tensor, per-channel, or per-group   | Yes Per-tensor |
-| Output         | Yes  Per-tensor                              | Yes Per-tensor |
+| Buffer  | Scale Granularity (mandatory)              | Zero-Point Granularity (when present) |
+|---------|--------------------------------------------|----------------------------------------|
+| Input   | Per-tensor, per-token, or per-group        | Per-tensor                             |
+| Weights | Per-tensor, per-channel, or per-group      | Per-tensor                             |
+| Output  | Per-tensor                                 | Per-tensor                             |
 
 > **Note:**
 > - Zero-points are not supported when input or weight scales are per-token or per-group.
@@ -229,7 +261,6 @@ struct matmul_quantization_params_t {
 
 > **Note:** When both source and weight use per-group scales, the number of groups (G) must match between them.
 
-
 **WOQ Quantization Granularity for weights:**
 
 | Granularity | Scale Dims | Zero-Point Dims | Description |
@@ -238,8 +269,7 @@ struct matmul_quantization_params_t {
 | Per-channel | `{1, N}` | `{1, N}` | One scale/zp per output channel |
 | Per-group | `{G, N}` | `{G, N}` | G groups along K dimension (G = K/group_size) |
 
-**Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
-
+> **Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
 
 **Supported Data Types for Scales and Zero Points by Backend:**
 
@@ -257,10 +287,9 @@ struct matmul_quantization_params_t {
 | WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
 
 > **Notes:**
-> - **WOQ Routing:** WOQ is supported by DLP backend only.
+> - **WOQ Routing:** WOQ is supported by the AOCL-DLP backend only.
 > - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
 > - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
-
 
 ## Usage Examples
 
@@ -461,7 +490,8 @@ int lowoha_woq_bf16s4_matmul_example() {
 ```
 
 **Key Points for WOQ:**
-- **S4 Weight Packing**: Weights are stored as 4-bit signed integers (range [-8, 7]), with 2 values packed per byte (low nibble and high nibble). S4 uses symmetric quantization — no zero-point is passed to the DLP kernel.
+
+- **S4 Weight Packing**: Weights are stored as 4-bit signed integers (range [-8, 7]), with 2 values packed per byte (low nibble and high nibble). S4 uses symmetric quantization — no zero-point is passed to the AOCL-DLP kernel.
 - **U4 Weight Packing**: Weights are stored as 4-bit unsigned integers (range [0, 15]), with 2 values packed per byte. U4 uses asymmetric quantization with a zero-point. The zero-point data type can be `s8` (integer domain) or `bf16` (float domain), which determines the dequantization formula.
 - **Quantization Granularity**: Per-group quantization divides K dimension into groups, each with its own scale (and zero-point for U4). The group size must be even and must divide K evenly.
 - **Constant Weights**: `is_weights_const = true` is required for WOQ to enable weight reordering and caching.
@@ -474,8 +504,9 @@ int lowoha_woq_bf16s4_matmul_example() {
 | `bf16` (float domain) | `dequant = (u4_weight - 8) * scale + zp` | Asymmetric dequantization with midpoint shift (8 = midpoint of [0, 15]) and float zero-point added post-scaling |
 
 **Key Differences from S4 WOQ:**
+
 - **Weight type**: `data_type_t::u4` (unsigned, range [0, 15]) vs `data_type_t::s4` (signed, range [-8, 7])
-- **Zero-point**: Required for U4 (asymmetric). S4 does not use zero-point in the DLP kernel. U4 zero-point can be `s8` or `bf16`.
+- **Zero-point**: Required for U4 (asymmetric). S4 does not use zero-point in the AOCL-DLP kernel. U4 zero-point can be `s8` or `bf16`.
 - **Dequantization**: Depends on zero-point data type — see the dequantization formulas table above.
 
 ### Example 4: INT8 MatMul with Zero-Point Compensation Caching
@@ -584,10 +615,9 @@ int lowoha_int8_matmul_example() {
 }
 ```
 
-
 ### Example 5: F16 (Half-Precision) MatMul
 
-This example demonstrates F16 matmul where all tensors (source, weights, destination) use half-precision floating point. F16 matmul is only supported via the OneDNN backend and requires AVX512-FP16.
+This example demonstrates F16 MatMul where all tensors (source, weights, destination) use half-precision floating point. F16 MatMul is only supported via the OneDNN backend and requires AVX512-FP16.
 
 ```cpp
 int lowoha_matmul_f16_example() {
@@ -641,6 +671,7 @@ int lowoha_matmul_f16_example() {
 ```
 
 **Key Points for F16:**
+
 - **ISA Requirement**: F16 requires AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23). Available on Zen 5 / Sapphire Rapids and later.
 - **Backend**: F16 is only supported via OneDNN backend. Kernel selection automatically routes to `onednn_blocked`.
 
@@ -648,7 +679,7 @@ int lowoha_matmul_f16_example() {
 
 Reorder quantization enables **BF16 or F32 source tensors to be quantized to S8/U8 on-the-fly** before dispatching to INT8 matmul kernels. This is useful when the model provides floating-point activations but the weights are already in INT8 format.
 
-To enable reorder quantization, `dtypes.compute` must be set to the target quantization type (`s8` for symmetric or `u8` for asymmetric), `dynamic_quant` must be enabled, and the source type must be BF16 or FP32.
+To enable reorder quantization, `dtypes.compute` must be set to the target quantization type (`s8` for symmetric or `u8` for asymmetric), `dynamic_quant` must be enabled, and the source type must be BF16 or F32.
 
 ### How It Works
 
@@ -848,38 +879,37 @@ int lowoha_int8_per_group_dynamic_quant_example() {
 ```
 
 **Key Points for Per-Group INT8:**
+
 - **Source and weight groups must match**: When both use per-group scales, `K / group_size` must be the same for source dims `{M, G}` and weight dims `{G, N}`.
 - **Scale data types**: Both `f32` and `bf16` are supported for scale tensors.
 - **Dynamic source quantization**: When `src_scale.buff` is `nullptr` with `dynamic_quant = true`, the scale is computed from the source data at runtime using per-group statistics.
 - **Weight reorder caching**: The weight reorder cache key includes the group size, so different group sizes for the same weight tensor produce separate cache entries.
 
-
 ## Weight Caching and Reordering
 
 One of the key features of LowOHA MatMul is **automatic weight reordering and caching**.
 
-### How It Works
+### How Weight Caching Works
 
-1. **First Execution**: 
+1. **First Execution**:
    - Weights are reordered to the optimal format for the selected backend
    - Reordered weights are stored in an LRU cache
-   - Cache key is generated from weight pointer, dimensions, data type, backend, and group size (for per-group symmetric quantization)
+   - Cache key is generated from weight pointer, dimensions, data type, backend, and (for per-group symmetric quantization) group size
 
 2. **Subsequent Executions**:
    - Cache is queried using the same key
-   - If cache hit: reordered weights are retrieved (fast path)
-   - If cache miss: weights are reordered and cached
+   - On cache hit: reordered weights are retrieved (fast path)
+   - On cache miss: weights are reordered and cached
 
 3. **Cache Eviction**:
    - When cache is full, least recently used weights are evicted
    - Evicted weights are freed to make room for new entries
 
-
 ## Zero-Point Compensation Caching (INT8)
 
-For INT8 matmul with asymmetric quantization, LowOHA provides **automatic caching of 1D zero-point compensation**:
+For INT8 MatMul with asymmetric quantization, LowOHA provides **automatic caching of 1D zero-point compensation**:
 
-### How It Works
+### How ZP Compensation Caching Works
 
 1. **1D Compensation (src_zp only)**:
    - Compensation depends only on weight column sums: `comp[n] = -src_zp × Σ(B[k,n])`
@@ -888,7 +918,7 @@ For INT8 matmul with asymmetric quantization, LowOHA provides **automatic cachin
 
 2. **2D Compensation (wei_zp ≠ 0)**:
    - Compensation depends on source row sums (changes per inference)
-   - Cannot be cached, recomputed every execution
+   - Cannot be cached; recomputed every execution
 
 ### Cache Configuration
 
@@ -897,44 +927,40 @@ For INT8 matmul with asymmetric quantization, LowOHA provides **automatic cachin
 | `ZENDNNL_ZP_COMP_CACHE` | `1` (default) | Enable ZP compensation caching |
 | `ZENDNNL_ZP_COMP_CACHE` | `0` | Disable ZP compensation caching |
 
-
 ## Backend Selection
 
-LowOHA MatMul supports multiple backends. The backend can be selected:
+LowOHA MatMul supports multiple backends. A backend (kernel) can be selected either programmatically via `matmul_params` or at runtime via an environment variable.
 
-### 1. Via `matmul_params`
+### Supported Algorithms
+
+The same algorithms can be selected by either the `matmul_algo_t` enum value (in code) or the `ZENDNNL_MATMUL_ALGO` environment variable value (at runtime).
+
+| `ZENDNNL_MATMUL_ALGO` | `matmul_algo_t` enum | Description |
+|-----------------------|----------------------|-------------|
+| `auto`                | `auto_tuner`         | Auto Tuner — selects the most performant backend at runtime |
+| `0`                   | `dynamic_dispatch`   | Automatic backend selection based on heuristics |
+| `1`                   | `aocl_dlp_blocked`   | Blocked AOCL-DLP backend (default for single MatMul) |
+| `2`                   | `onednn_blocked`     | Blocked OneDNN backend |
+| `3`                   | `libxsmm_blocked`    | Blocked LibXSMM backend |
+| `4`                   | `aocl_dlp`           | AOCL-DLP backend |
+| `5`                   | `onednn`             | OneDNN backend |
+| `6`                   | `libxsmm`            | LibXSMM backend (default for batched MatMul) |
+
+> **Note:** When neither `params.lowoha_algo` nor `ZENDNNL_MATMUL_ALGO` is set, single MatMul falls back to `aocl_dlp_blocked` and batched MatMul falls back to `libxsmm`.
+
+### Via `matmul_params`
+
+Set the `lowoha_algo` field on the `matmul_params` struct using the `matmul_algo_t` enum:
 
 ```cpp
 matmul_params params;
-params.lowoha_algo = matmul_algo_t::aocl_dlp;  
+params.lowoha_algo = matmul_algo_t::aocl_dlp;
 ```
 
-**Available Algorithms:**
-- `matmul_algo_t::auto_tuner` - Auto Tuner (selects performant backend at runtime)
-- `matmul_algo_t::dynamic_dispatch` - Automatic backend selection based on heuristics
-- `matmul_algo_t::aocl_dlp_blocked` - Blocked AOCL DLP backend
-- `matmul_algo_t::onednn_blocked` - Blocked OneDNN backend
-- `matmul_algo_t::libxsmm_blocked` - Blocked LibXSMM backend
-- `matmul_algo_t::aocl_dlp` - AOCL DLP backend
-- `matmul_algo_t::onednn` - OneDNN backend
-- `matmul_algo_t::libxsmm` - LibXSMM backend
+### Via Environment Variable
 
-
-### 2. Via Environment Variable
+Export `ZENDNNL_MATMUL_ALGO` before running the application using the value from the table above:
 
 ```bash
-export ZENDNNL_MATMUL_ALGO=1
+export ZENDNNL_MATMUL_ALGO=1   # selects aocl_dlp_blocked
 ```
-
-### Supported LowOHA Matmul Kernels
-
-| Algo |       Kernel          |
-|------|-----------------------|
-| auto | auto_tuner            |
-| 0    | dynamic_dispatch      |
-| 1    | aocl_dlp_blocked      |
-| 2    | onednn_blocked        |
-| 3    | libxsmm_blocked       |
-| 4    | aocl_dlp              |
-| 5    | onednn                |
-| 6    | libxsmm               |

@@ -1,34 +1,48 @@
-
 (Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # MatMul Operator
 
+## Table of Contents
+
+- [Overview](#overview)
+- [General MatMul Operation](#general-matmul-operation)
+- [MatMul Operation Support Overview](#matmul-operation-support-overview)
+- [Quantization](#quantization)
+- [Weight-Only Quantization (WOQ)](#weight-only-quantization-woq)
+- [Supported Configurations](#supported-configurations)
+- [Tensor](#tensor)
+- [Examples](#examples)
+- [Parameter Naming Convention](#parameter-naming-convention)
+- [Runtime Variables](#runtime-variables)
+- [Common Variables](#common-variables)
+- [Error Handling](#error-handling)
+- [Logger](#logger)
+
 ## Overview
 
-This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32, BF16, F16 (half-precision), INT8 data types, and Weight-Only Quantization (WOQ) with S4/U4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (FP32 2D-matmul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
+This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for F32, BF16, F16 (half-precision), INT8 data types, and Weight-Only Quantization (WOQ) with S4/U4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (F32 2D-MatMul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched MatMul with activation.
 
-> **Note:** F16 (half-precision) matmul requires **AVX512-FP16** support on the CPU. On hardware without AVX512-FP16, F16 operations return `status_t::isa_unsupported` and tests/examples are gracefully skipped.
+> **Note:** F16 (half-precision) MatMul requires **AVX512-FP16** support on the CPU. On hardware without AVX512-FP16, F16 operations return `status_t::isa_unsupported` and tests/examples are gracefully skipped.
 
-
-# General MatMul Operation
+## General MatMul Operation
 
 Let:
 
-- *A* ∈ ℝ<sup>mxk</sup> or ℝ<sup>bsxmxk</sup>: Input Matrix  or Batched Input Matrix
+- *A* ∈ ℝ<sup>mxk</sup> or ℝ<sup>bsxmxk</sup>: Input Matrix or Batched Input Matrix
 - *B* ∈ ℝ<sup>kxn</sup> or ℝ<sup>bsxkxn</sup>: Weight Matrix or Batched Weight Matrix
 - *C* ∈ ℝ<sup>mxn</sup> or ℝ<sup>bsxmxn</sup>: Output Matrix or Batched Output Matrix
-- *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
+- *Bias* ∈ ℝ<sup>1xn</sup>: Optional Bias vector
 - *Alpha* (*α*): Scaling factor for the matrix product
 - *Beta* (*β*): Scaling factor for the existing output tensor (accumulation / in-place update)
-- *Scale* : Scaling factor for quantized data (INT8; **WOQ**: mandatory weight scales for S4/U4 weights)
-- *ZeroPoint* : Zero-point offset for quantized data (INT8; **WOQ U4**: asymmetric weight zero-point, S8 or BF16 domain)
-- *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
-- *BinaryOp(x, y)* : Optional binary post-operation (Example: element-wise add/mul with another matrix)
-- *D* ∈ ℝᴹˣᴺ : Optional second operand for binary operations
-- *Transpose(A, B)* : Optional transpose operation on matrices A or B (Example: Aᵀ, Bᵀ)
-- *Strides(A, B)* : Optional strides for matrix A or B, defining the step size for accessing elements
+- *Scale*: Scaling factor for quantized data (INT8; **WOQ**: mandatory weight scales for S4/U4 weights)
+- *ZeroPoint*: Zero-point offset for quantized data (INT8; **WOQ U4**: asymmetric weight zero-point, S8 or BF16 domain)
+- *Activation(x)*: Optional activation function (e.g., ReLU, GELU, etc.)
+- *BinaryOp(x, y)*: Optional binary post-operation (e.g., element-wise add/mul with another matrix)
+- *D* ∈ ℝ<sup>mxn</sup>: Optional second operand for binary operations
+- *Transpose(A, B)*: Optional transpose operation on matrices A or B (e.g., Aᵀ, Bᵀ)
+- *Strides(A, B)*: Optional strides for matrix A or B, defining the step size for accessing elements
 
-- Note: If Input and Weight matrices both are not batched, then Output matrix can not be batched.
+> **Note:** If Input and Weight matrices both are not batched, then the Output matrix cannot be batched.
 
 The computation can be expressed as:
 
@@ -44,13 +58,13 @@ $$
 
 ## Steps to Perform MatMul Operation
 
-1. **Fused GEMM (matrix multiply, α/β scaling, accumulation)**:  
+1. **Fused GEMM (matrix multiply, α/β scaling, accumulation)**:
    ```
    Z = α × (A × B) + β × C
    ```
-   (When *β* ≠ 0, *C* is the output tensor’s value before this update.)
+   (When *β* ≠ 0, *C* is the output tensor's value before this update.)
 
-2. **Bias Addition (optional)**:  
+2. **Bias Addition (optional)**:
    ```
    Z = Z + Bias
    ```
@@ -60,22 +74,22 @@ $$
    Z = Scale × Z + ZeroPoint
    ```
 
-4. **Activation Function (optional)**:  
+4. **Activation Function (optional)**:
    ```
    Z = Activation(Z)
    ```
 
-5. **Binary Post-Op (optional)**:  
+5. **Binary Post-Op (optional)**:
    ```
    Z = BinaryOp(Z, D)
    ```
 
-6. **Store Result**:  
+6. **Store Result**:
    ```
    C = Z
    ```
 
-- Above steps are repeated for each batch in batched matmul with proper offsets.
+> **Note:** The above steps are repeated for each batch in batched MatMul with proper offsets.
 
 ## Example with ReLU and Add Post-Op
 
@@ -85,7 +99,7 @@ $$
 C = \text{ReLU}(\alpha \cdot (A \times B) + \beta \cdot C + \text{Bias}) + D
 $$
 
-# MatMul Operation Support Overview
+## MatMul Operation Support Overview
 
 - **Bias Handling**: Bias is typically applied **per channel**, meaning a unique bias value is added to each output feature or channel. This is common in neural network layers to allow each output neuron to learn an independent offset.
 
@@ -111,25 +125,26 @@ $$
   - Multiple Activations
   - Mix of Binary and Activation
 
-### Matmul Operation Flow Diagram
+### MatMul Operation Flow Diagram
+
 ```text
-       Input A                            Weights B 
+       Input A                            Weights B
   ([M x K] or [BS x M x K])         ([K x N] or [BS x K x N])
-    (Optional:                         (Optional: 
+    (Optional:                         (Optional:
 Transpose/Strides)                 Transpose/Strides)
        |                                    |
        +------------------x-----------------+
                           |
                        MatMul
                           |
-                   +------v------+ 
+                   +------v------+
                    |   Add Bias  |
                    +------v------+
                    |   Post-Op   |  ← Activation / Binary Op D
                    +------v------+
                        Output C
-
 ```
+
 ## Quantization
 
 Quantization is a technique used to reduce the precision of numerical computations, enabling faster execution and reduced memory usage. In the context of the MatMul operator, quantization is primarily applied to INT8 data types, where floating-point values are mapped to 8-bit integers using a scale and zero-point.
@@ -163,12 +178,12 @@ Quantization is a technique used to reduce the precision of numerical computatio
    - Library performs the MatMul operation in the INT8 domain for improved performance.
 
 3. **Dequantization**:
-   - Convert the INT8 results back to FP32/BF16 using the scale and zero-point for further processing.
+   - Convert the INT8 results back to F32/BF16 using the scale and zero-point for further processing.
 
 ### Benefits of Quantization
 
 - **Performance**: Reduced precision allows for faster computation on hardware optimized for INT8 operations.
-- **Memory Efficiency**: INT8 tensors consume less memory compared to FP32 or BF16 tensors.
+- **Memory Efficiency**: INT8 tensors consume less memory compared to F32 or BF16 tensors.
 - **Energy Efficiency**: Lower precision computations require less energy, making them suitable for edge devices.
 
 ### Example: Quantized tensor creation
@@ -202,11 +217,11 @@ auto quantized_input = tensor_t()
 
 ### Supported Quantization Configurations
 
-| Tensor         | Scale (mandatory)                          | Zero-Point (per-tensor)|
-|----------------|--------------------------------------------|------------------------|
-| Input          | Yes (FP32/BF16)  Per-tensor                | Yes (INT8/UINT8/INT32) |
-| Weights        | Yes (FP32/BF16)  Per-tensor or per-channel | Yes (INT8/UINT8/INT32) |
-| Output         | Yes (FP32/BF16)  Per-tensor                | Yes (INT8/UINT8/INT32) |
+| Tensor  | Scale Granularity (mandatory)              | Scale Data Type | Zero-Point (per-tensor)  |
+|---------|--------------------------------------------|-----------------|--------------------------|
+| Input   | Per-tensor                                 | F32 / BF16      | INT8 / UINT8 / INT32     |
+| Weights | Per-tensor or per-channel                  | F32 / BF16      | INT8 / UINT8 / INT32     |
+| Output  | Per-tensor                                 | F32 / BF16      | INT8 / UINT8 / INT32     |
 
 Quantization in the MatMul operator enables efficient computation while maintaining acceptable accuracy for many deep learning workloads.
 
@@ -224,16 +239,17 @@ Weight-Only Quantization (WOQ) is a specialized quantization technique where **o
 |-----------|------------------|-------------|
 | Input (Src) | BF16 | Source activations in BFloat16 |
 | Weights | S4 (signed 4-bit) or U4 (unsigned 4-bit) | Packed weights (2 values per byte) |
-| Output | FP32, BF16 | Destination data type |
-| Bias | FP32 | Optional bias vector |
+| Output | F32, BF16 | Destination data type |
+| Bias | F32 | Optional bias vector |
 
 ### S4/U4 Weight Format
 
 S4 weights use **signed 4-bit integers** with a range of [-8, 7]. U4 weights use **unsigned 4-bit integers** with a range of [0, 15]. Two 4-bit values are packed into a single byte:
+
 - **Low nibble** (bits 0-3): First value
 - **High nibble** (bits 4-7): Second value
 
-S4 uses symmetric quantization (no zero-point in the DLP WOQ path). U4 uses **asymmetric** quantization: the weight zero-point may be **S8** (integer-domain) or **BF16** (float-domain), which selects the dequantization path in the LowOHA/DLP stack (see **LowOHA MatMul** operator documentation for routing notes).
+S4 uses symmetric quantization (no zero-point in the AOCL-DLP WOQ path). U4 uses **asymmetric** quantization: the weight zero-point may be **S8** (integer-domain) or **BF16** (float-domain), which selects the dequantization path in the LowOHA/AOCL-DLP stack (see **LowOHA MatMul** operator documentation for routing notes).
 
 ### WOQ Quantization Granularity
 
@@ -303,42 +319,51 @@ auto weights_u4 = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
 
 | Parameter | Scale (mandatory) | Zero-Point | Granularity |
 |-----------|-------------------|------------|-------------|
-| Weights (S4) | Yes (FP32/BF16) | No (symmetric) | Per-tensor, per-channel, or per-group |
-| Weights (U4) | Yes (FP32/BF16) | Yes (S8/BF16, asymmetric) | Per-tensor, per-channel, or per-group |
+| Weights (S4) | Yes (F32/BF16) | No (symmetric) | Per-tensor, per-channel, or per-group |
+| Weights (U4) | Yes (F32/BF16) | Yes (S8/BF16, asymmetric) | Per-tensor, per-channel, or per-group |
 
 ## Supported Configurations
+
 This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
 
-| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type            | Scale | ZeroPoint | ISA Requirement |
-|------------------|---------------------|--------------------|--------------------------------|-------|-----------|-----------------|
-| FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       | AVX2+           |
-| BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       | AVX512+         |
-| F16              | F16                 | FP32, F16          | F16, FP32                      | N/A   | N/A       | AVX512-FP16     |
-| UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       | AVX2+           |
-| BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | No        | AVX512+         |
-| BF16             | U4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Yes (S8/BF16)  | AVX512+         |
----
-| Activation     | Description                     |
-|----------------|---------------------------------|
-| ReLU           | Rectified Linear Unit          |
-| Sigmoid        | Sigmoid Activation Function    |
-| Tanh           | Hyperbolic Tangent Function    |
-| GELU (erf)     | Gaussian Error Linear Unit (erf variant) |
-| GELU (tanh)    | Gaussian Error Linear Unit (tanh variant) |
-| SiLU           | Sigmoid Linear Unit (Swish)    |
-| Mish           | Mish                           |
----
-| Binary Post-Op | Description                     |
-|----------------|---------------------------------|
-| Add            | Element-wise addition           |
-| Mul            | Element-wise multiplication     |
+**Data Type Combinations:**
 
-**Note** Binary post-ops require extra buffer from user.
+| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type        | Scale | ZeroPoint     | ISA Requirement |
+|------------------|---------------------|--------------------|----------------------------|-------|---------------|-----------------|
+| F32              | F32                 | F32                | F32                        | N/A   | N/A           | AVX2+           |
+| BF16             | BF16                | F32, BF16          | F32, BF16                  | N/A   | N/A           | AVX512+         |
+| F16              | F16                 | F32, F16           | F16, F32                   | N/A   | N/A           | AVX512-FP16     |
+| UINT8/INT8       | INT8                | F32, BF16, INT8    | F32, BF16, INT32, UINT8, INT8 | Yes | Yes         | AVX2+           |
+| BF16             | S4 (WOQ)            | F32, BF16          | F32, BF16                  | Yes   | No            | AVX512+         |
+| BF16             | U4 (WOQ)            | F32, BF16          | F32, BF16                  | Yes   | Yes (S8/BF16) | AVX512+         |
+
+**Supported Activations:**
+
+| Activation     | Description                               |
+|----------------|-------------------------------------------|
+| ReLU           | Rectified Linear Unit                     |
+| Sigmoid        | Sigmoid Activation Function               |
+| Tanh           | Hyperbolic Tangent Function               |
+| GELU (erf)     | Gaussian Error Linear Unit (erf variant)  |
+| GELU (tanh)    | Gaussian Error Linear Unit (tanh variant) |
+| SiLU           | Sigmoid Linear Unit (Swish)               |
+| Mish           | Mish                                      |
+
+**Supported Binary Post-Ops:**
+
+| Binary Post-Op | Description                 |
+|----------------|-----------------------------|
+| Add            | Element-wise addition       |
+| Mul            | Element-wise multiplication |
+
+> **Note:** Binary post-ops require an extra buffer from the user.
 
 ## Tensor
-A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D), matrices (2D) to higher dimensions (3D, etc.), Tensors are a fundamental building block for neural network computations, facilitating efficient data manipulation and mathematical operations.
 
-In the context of the **MatMul operator** tensors are used to represent:
+A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D) and matrices (2D) to higher dimensions (3D, etc.). Tensors are a fundamental building block for neural network computations, enabling efficient data manipulation and mathematical operations.
+
+In the context of the **MatMul operator**, tensors are used to represent:
+
 - Input data: Activations or feature maps from previous layers in the neural network.
 - Weights: Learnable parameters that are optimized during training.
 - Biases: Optional offsets that can be added to the output.
@@ -348,121 +373,139 @@ In the context of the **MatMul operator** tensors are used to represent:
 
 Each tensor is defined by several important attributes that determine how it behaves in computations:
 
----
-
 #### Shape
+
 Specifies the dimensions of the tensor. It defines how data is organized and processed.
 
-- **Input Tensor**: \([M, K]\)  or \([BS, M, K]\)
+- **Input Tensor**: \([M, K]\) or \([BS, M, K]\)
 - **Weight Tensor**: \([K, N]\) or \([BS, K, N]\)
 - **Output Tensor**: \([M, N]\) or \([BS, M, N]\)
+
 ```cpp
 tensor.set_size({M, K});
-tensor.set_size({BS, M, K}); 
+tensor.set_size({BS, M, K});
 ```
----
 
 #### Data Type
+
 Indicates the precision of the values stored in the tensor.
 
-- **FP32**:*(Default)* 32-bit floating point
+- **F32**: *(Default)* 32-bit floating point
 - **BF16**: 16-bit Brain Floating Point
 - **F16**: 16-bit IEEE 754 Half-Precision Floating Point (requires AVX512-FP16)
 - **INT8/S8/U8**: 8-bit signed/unsigned integer (for quantization)
 - **S4**: 4-bit signed integer (for WOQ symmetric, packed 2 values per byte)
 - **U4**: 4-bit unsigned integer (for WOQ asymmetric, packed 2 values per byte)
+
 ```cpp
 tensor.set_data_type(data_type_t::f32);
 tensor.set_data_type(data_type_t::f16);  // For F16 half-precision
 tensor.set_data_type(data_type_t::s4);   // For WOQ weights (symmetric)
 tensor.set_data_type(data_type_t::u4);   // For WOQ weights (asymmetric)
 ```
----
+
 #### Storage
+
 The storage of a tensor defines how and where its data is allocated or managed in memory.
 
 - **Default Storage Allocation**
 - **Aligned Storage Allocation**
 - **Borrowing Memory from a Raw Pointer**
 - **Sharing Storage with Another Tensor**
+
 ```cpp
 tensor.set_storage();
 ```
----
+
 #### Layout
+
 Describes how the tensor is stored in memory, which affects performance and access patterns.
 
-- **Contiguous**:*(default)* Linear, row-major format
+- **Contiguous**: *(default)* Linear, row-major format
 - **Blocked**: Data is stored in blocks for optimized access patterns.
+
 ```cpp
 tensor.set_layout(tensor_layout_t::blocked);
 ```
----
 
 #### Transpose (Optional)
+
 Specifies whether the tensor is transposed, which swaps its rows and columns.
 
-- **Original**:*(default)* *A* ∈ ℝᴹˣᴷ
+- **Original**: *(default)* *A* ∈ ℝᴹˣᴷ
+
 ```cpp
-tensor.set_order("ab");   //for 2D case
-tensor.set_order("abc");  //for 3D case
+tensor.set_order("ab");   // for 2D case
+tensor.set_order("abc");  // for 3D case
 ```
+
 - **Transposed**: *Aᵀ* ∈ ℝᴷˣᴹ
+
 ```cpp
-tensor.set_order("ba");   //for 2D case
-tensor.set_order("acb");  //for 3D case
+tensor.set_order("ba");   // for 2D case
+tensor.set_order("acb");  // for 3D case
 ```
----
 
 #### Strides (Optional)
+
 Defines how many memory elements to skip to move between elements along each dimension.
 
 - Enables efficient access to non-contiguous data
 - Useful for custom memory layouts and batched operations
-- default stride = {K,1} if not passed for 2D tensor of size {M,K}
-- default stride = {MxK,K,1} if not passed for 3D tensor of size {BS,M,K}
+- Default stride = `{K, 1}` if not passed for a 2D tensor of size `{M, K}`
+- Default stride = `{M*K, K, 1}` if not passed for a 3D tensor of size `{BS, M, K}`
+
 ```cpp
 tensor.set_stride({stride_m, stride_k});
 ```
 
-#### Example:
+#### Example
+
 A tensor of shape **[M, K]** with strides **[stride_M, stride_K]** defines how memory is accessed along each dimension.
 
-#### Offset Calculation
 The memory offset for accessing an element at position \([i, j]\) is calculated as:
 
 ```
 Offset = i * stride_M + j * stride_K
 ```
 
-#### Where:
-- *i* : Row index *i* ∈ [ 0 , M )
-- *j* : Column index *j* ∈ [ 0 , K )
+Where:
+
+- *i*: Row index *i* ∈ [ 0 , M )
+- *j*: Column index *j* ∈ [ 0 , K )
+
 ```cpp
 auto tensor = tensor_t()
-              .set_name("strided_example")       // Set tensor name
-              .set_size({M, K})                // Define tensor dimensions
-              .set_stride({stride_M, stride_K}) // Define strides
-              .set_storage()                  // Allocate storage
-              .create();
-```
----
-Tensor can be created in two ways:
-1. Direct Tensor creation (Fine grained control over attributes)
-```cpp
-auto tensor = tensor_t()
-              .set_name("example_tensor")       // Set tensor name
-              .set_size({M, K})                // Define tensor dimensions, can be {BS, M, K} for batched tensor
-              .set_data_type(data_type::f32)   // Set data type
-              .set_stride({stride_1, stride_2}) // Define strides
-              .set_storage()                  // Allocate storage
-              .set_layout()                   // Set layout
+              .set_name("strided_example")        // Set tensor name
+              .set_size({M, K})                   // Define tensor dimensions
+              .set_stride({stride_M, stride_K})   // Define strides
+              .set_storage()                      // Allocate storage
               .create();
 ```
 
-2. Using Tensor Factory
-The *tensor_factory_t* class provides utility functions to create tensors with predefined configurations.
+### Tensor Creation
+
+A tensor can be created in two ways:
+
+1. **Direct Tensor creation** (fine-grained control over attributes):
+
+```cpp
+auto tensor = tensor_t()
+              .set_name("example_tensor")         // Set tensor name
+              .set_size({M, K})                   // Define tensor dimensions, can be {BS, M, K} for batched tensor
+              .set_data_type(data_type_t::f32)    // Set data type
+              .set_stride({stride_1, stride_2})   // Define strides
+              .set_storage()                      // Allocate storage
+              .set_layout()                       // Set layout
+              .create();
+```
+
+2. **Using Tensor Factory**
+
+The `tensor_factory_t` class provides utility functions to create tensors with predefined configurations.
+
 Available APIs:
+
 - **uniform_dist_strided_tensor**: Creates a tensor with uniform random values and custom strides.
 - **zero_tensor**: Creates a tensor initialized with zeros.
 - **uniform_tensor**: Creates a tensor with a uniform value.
@@ -477,7 +520,7 @@ This example performs matrix multiplication with `float32 (f32)` data types, app
 
 **Key Components**
 
-- **Weights and Bias Initialization** 
+- **Weights and Bias Initialization**
   - Weights: Uniform tensor with dimensions `{MATMUL_K, MATMUL_N}`
   - Bias: Uniform tensor with dimensions `{1, MATMUL_N}`
 
@@ -486,7 +529,6 @@ This example performs matrix multiplication with `float32 (f32)` data types, app
 
 - **Execution**
   - Performs the matrix multiplication, sets the input and output tensors, and executes the operator.
-
 
 ```cpp
 int matmul_relu_f32_kernel_example() {
@@ -570,17 +612,16 @@ int matmul_relu_f32_kernel_example() {
 }
 ```
 
-
 ### 2. matmul_mul_silu_mul_f32_kernel_example
 
 This example showcases an advanced operation combining matrix multiplication with a series of binary multiplication and SiLU operations.
 
 **Key Components**
 
-- **Post-Operations**  
+- **Post-Operations**
   - Applies a binary multiplication, SiLU, followed by another binary multiplication.
 
-- **Execution**  
+- **Execution**
   - Involves setting multiple input tensors corresponding to the operations defined in the context.
 
 ```cpp
@@ -676,17 +717,16 @@ int matmul_mul_silu_mul_f32_kernel_example() {
 }
 ```
 
-
 ### 3. batch_matmul_relu_bf16_kernel_example
 
 This example showcases an advanced operation combining batched matrix multiplication with ReLU operation for BFloat16 datatype.
 
 **Key Components**
 
-- **Post-Operations**  
+- **Post-Operations**
   - Applies the ReLU operation on the result.
 
-- **Execution**  
+- **Execution**
   - Involves setting multiple input tensors corresponding to the operations defined in the context.
 
 ```cpp
@@ -768,18 +808,17 @@ int batch_matmul_relu_bf16_kernel_example() {
 }
 ```
 
-
 ### 4. batch_matmul_inp2d_relu_f32_kernel_example
 
-This example showcases an advanced operation combining batched matrix multiplication with 2D input_tensor and ReLU postop for float32 datatype.
+This example showcases an advanced operation combining batched matrix multiplication with 2D input_tensor and ReLU post-op for float32 datatype.
 
 **Key Components**
 
-- **Post-Operations**  
+- **Post-Operations**
   - Applies the ReLU operation on the result.
 
-- **Execution**  
-  - Involves setting multiple input tensors corresponding to the operations defined in the context and performing batched Matrix Mulitplication with 2D Input and 3D Weights.
+- **Execution**
+  - Involves setting multiple input tensors corresponding to the operations defined in the context and performing batched Matrix Multiplication with 2D Input and 3D Weights.
 
 ```cpp
 int batch_matmul_inp2d_relu_f32_kernel_example() {
@@ -827,11 +866,11 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
     auto input_tensor = tensor_factory.uniform_tensor({BATCH_MATMUL_M, BATCH_MATMUL_K},
                         data_type_t::f32,
                         1.0, "matmul_input");
-    
+
     // Create an output 3D tensor with dimensions [BS, M, N], data type float32
     auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, BATCH_MATMUL_M, BATCH_MATMUL_N},
                          data_type_t::f32, "matmul_output");
-    
+
     // Set inputs and outputs for the operator, force aocl-dlp kernel and execute
     status = batch_matmul_operator
              .set_input("matmul_input", input_tensor)
@@ -859,7 +898,6 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
   return OK;
 }
 ```
-
 
 ### 5. matmul_woq_bf16_kernel_example
 
@@ -963,29 +1001,33 @@ int matmul_woq_bf16_kernel_example() {
 ```
 
 **Key Points for WOQ:**
+
 - **S4 Weight Tensor**: Created with `data_type_t::s4` and an associated scale tensor. S4 uses symmetric quantization (no zero-point).
-- **U4 Weight Tensor**: Created with `data_type_t::u4` with **scale** and **zero-point** tensors. The zero-point data type may be **S8** or **BF16** (see dequantization formulas above; BF16 zp uses the float-domain formula with midpoint shift).
-- **Scales**: Per-channel example uses `{1, N}`; per-group uses `{G, N}` with G = K / group_size.
+- **U4 Weight Tensor**: Created with `data_type_t::u4` with **scale** and **zero-point** tensors. The zero-point data type may be **S8** or **BF16** (see dequantization formulas above; BF16 zero-point uses the float-domain formula with midpoint shift).
+- **Scales**: Per-channel example uses `{1, N}`; per-group uses `{G, N}` with `G = K / group_size`.
 - **Dequantization**: S4: `W_dequant = scale * W_s4`. U4 (integer ZP): `(W_u4 - ZeroPoint_int8) * scale`. U4 (float ZP): `(W_u4 - 8) * scale + ZeroPoint_float`.
 - **BF16 Input**: Source activations remain in BFloat16 for accuracy.
 - **Post-ops Support**: WOQ MatMul supports the same post-operations as regular MatMul (ReLU, GELU, SiLU, binary ops, etc.).
 
 ## Parameter Naming Convention
-**Important:** The string identifiers used in .set_param(), .set_input(), and .set_output() are fixed and must not be changed. These names are internally mapped and executed by the operator implementation.
 
-Required Identifers:
+> **Important:** The string identifiers used in `.set_param()`, `.set_input()`, and `.set_output()` are fixed and must not be changed. These names are internally mapped and executed by the operator implementation.
 
-- .set_param("weights", ...) → must use "weights"
-- .set_param("bias", ...) → must use "bias"
-- .set_input("matmul_input", ...) → must use "matmul_input"
-- .set_output("matmul_output", ...) → must use "matmul_output"
+Required identifiers:
+
+- `.set_param("weights", ...)` → must use `"weights"`
+- `.set_param("bias", ...)` → must use `"bias"`
+- `.set_input("matmul_input", ...)` → must use `"matmul_input"`
+- `.set_output("matmul_output", ...)` → must use `"matmul_output"`
 
 Changing these names will result in incorrect behavior or operator failure.
 
 ## Runtime Variables
+
 To achieve optimal performance for the MatMul operator, you can configure runtime variables using either a JSON configuration file or environment variables.
 
-### Supported Matmul Kernels
+### Supported MatMul Kernels
+
 | Algo |       Kernel       |
 |------|--------------------|
 | 1    | aocl_dlp_blocked   |
@@ -998,10 +1040,12 @@ To achieve optimal performance for the MatMul operator, you can configure runtim
 | 8    | -NA-               |
 | 9    | reference          |
 
-### Configuration methods
+### Configuration Methods
 
-#### 1. JSON Configuration
+#### JSON Configuration
+
 Specify the desired kernel in your JSON config file:
+
 ```json
 {
   "matmul" : {
@@ -1009,17 +1053,20 @@ Specify the desired kernel in your JSON config file:
   }
 }
 ```
+
 Example: `"kernel": "aocl_dlp_blocked"`
 
-#### 2. Environment Variable
+#### Environment Variable
+
 Set the environment variable before running your application:
-```
-export ZENDNNL_MATMUL_ALGO = <algo>
-```
-Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_dlp_blocked)
 
-- Note: Runtime variable can be set via either method, precedence is given to JSON configuration if both are provided.
+```bash
+export ZENDNNL_MATMUL_ALGO=<algo>
+```
 
+Example: `export ZENDNNL_MATMUL_ALGO=1` (for aocl_dlp_blocked)
+
+> **Note:** The runtime variable can be set via either method; precedence is given to JSON configuration if both are provided.
 
 ## Common Variables
 
@@ -1030,17 +1077,17 @@ Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_dlp_blocked)
 - **status_t**, **exception_t**: Status and exception handling types.
 - **Logging utilities**: `testlog_info`, `testlog_error`.
 
-
 ## Error Handling
 
 Each example includes error checking where the operator creation and execution status is checked, and relevant logging is provided.
 
 ### ISA-Unsupported Status
+
 When F16 (half-precision) data types are used on a platform that lacks AVX512-FP16, the operator returns `status_t::isa_unsupported`. Callers should handle this status gracefully:
+
 - **GTests**: Use `GTEST_SKIP()` to skip the test with an informative message.
 - **Examples**: Log an informational message and return success to indicate a graceful skip.
 - **Applications**: Check for `status_t::isa_unsupported` before logging errors.
-
 
 ## Logger
 

@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.26)
 
 # project information
 project(ZENDNNL_EXAMPLES)
