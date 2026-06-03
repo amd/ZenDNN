@@ -380,13 +380,15 @@ status_t group_reorder_quantization_wrapper(
   if (!requires_dynamic_quant) {
     return status_t::success;
   }
-  if (src_dtype != data_type_t::bf16 && src_dtype != data_type_t::f32) {
+  if (src_dtype != data_type_t::bf16 && src_dtype != data_type_t::f32 &&
+      src_dtype != data_type_t::f16) {
     return status_t::success;
   }
   if (compute_dtype != data_type_t::s8) {
     return fallback_per_expert();
   }
-  if (scale_dtype != data_type_t::f32 && scale_dtype != data_type_t::bf16) {
+  if (scale_dtype != data_type_t::f32 && scale_dtype != data_type_t::bf16 &&
+      scale_dtype != data_type_t::f16) {
     return fallback_per_expert();
   }
 

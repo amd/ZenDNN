@@ -398,7 +398,7 @@ TEST_P(TestReorder, F16) {
     if (weights_buff) {
       free(weights_buff);
     }
-    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
   }
   if (reorder_status == status_t::unimplemented) {
     if (weights_buff) {
@@ -725,6 +725,210 @@ TEST_P(TestReorder, BF16_QUANT_DEQUANT) {
   }
 
   // ---- Step 3: Compare original BF16 with dequantized BF16 ----
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param F16_QUANT_DEQUANT user-defined name of test
+ *  @brief Round-trip test: F16 static quantization (S8/U8) and dequantization
+ *
+ *  Static FP16 quant + dequant exercises both directions of the FP16 reorder
+ *  surface (f16 -> s8/u8 and s8/u8 -> f16). At dispatch time the FMA backend
+ *  (F32-FMA vs FP16-FMA) is auto-selected by can_use_f16_fma_kernel() from
+ *  the runtime AVX512-FP16 ISA status and the build-time toolchain
+ *  version. Rebuild the library with -DZENDNNL_NATIVE_F32_ACCUM=ON to
+ *  force F32-FMA at build time (no runtime knob).
+ */
+TEST_P(TestReorder, F16_QUANT_DEQUANT) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::f16;
+  data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, false, true);
+  log_info("Quantization: ",
+           is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)");
+
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+
+  auto src_tensor = tensor_factory.uniform_dist_tensor(shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
+
+  auto scale_tensor = tensor_factory.uniform_dist_tensor(
+                        quant_shape, data_type_t::f32, 0.2f);
+  float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
+  size_t scale_nelem = scale_tensor.get_nelem();
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
+  }
+
+  // ZP constrained to [55, 183] to prevent saturation with min_scale=0.04
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.uniform_dist_tensor(
+                  quant_shape, data_type_t::s32, 128.0f);
+    int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
+    size_t zp_nelem = zp_tensor.get_nelem();
+    for (size_t i = 0; i < zp_nelem; ++i) {
+      zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
+    }
+  }
+
+  // ---- Step 1: Quantization (F16 -> S8/U8) ----
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = quant_dtype;
+  lowoha_params.use_strided_src = false;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params);
+  if (quant_status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+  }
+  if (quant_status != status_t::success) {
+    log_error("Quantization (F16 -> ",
+              is_symmetric ? "S8" : "U8", ") failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // ---- Step 2: Dequantization (S8/U8 -> F16) using same scale/zp ----
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = quant_dtype;
+  dequant_params.dst_dtype = src_dtype;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (", is_symmetric ? "S8" : "U8",
+              " -> F16) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // ---- Step 3: Compare original F16 with dequantized F16 ----
+  // compare_lowoha_quant_output reads both tensors via tensor.at() which
+  // widens to f32 on the fly. The BF16 truncation-epsilon branch in the
+  // helper is a conservative bound for F16 (10 mantissa bits vs BF16's 7).
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param F16_QUANT_DEQUANT_F16_SCALE user-defined name of test
+ *  @brief Round-trip test: F16 source with a user-supplied FP16 scale
+ *  buffer and S8/U8 destination. Exercises the f16 branch of
+ *  get_scale_value on the static quant/dequant read path. The companion
+ *  test F16_DYN_QUANT_F16_SCALE covers the dynamic-quant write path that
+ *  narrows scale to f16 via compute_dynamic_quant_params /
+ *  dynamic_dispatch's scale_needs_narrow branch.
+ *
+ *  We initialize the f16 scale buffer by widening from an f32 distribution so
+ *  every stored scale value is representable in f16 (10-bit mantissa) — the
+ *  reference comparison reads back via get_scale_value which widens to f32,
+ *  so the round-trip-through-f16 step is lossless for these inputs.
+ */
+TEST_P(TestReorder, F16_QUANT_DEQUANT_F16_SCALE) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::f16;
+  data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, false, true);
+  log_info("Quantization: ",
+           is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)",
+           " (FP16 scale buffer)");
+
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+
+  auto src_tensor = tensor_factory.uniform_dist_tensor(shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
+
+  // Build scale in f32 first (to apply the [0.04, ~0.24] floor), then narrow
+  // to f16 so the user buffer holds f16-encoded scale values. f16's normal
+  // range easily covers this magnitude (min normal ≈ 6.1e-5).
+  auto scale_tensor_f32 = tensor_factory.uniform_dist_tensor(
+                            quant_shape, data_type_t::f32, 0.2f);
+  float *scale_f32_ptr = static_cast<float *>(scale_tensor_f32.get_raw_handle_unsafe());
+  size_t scale_nelem = scale_tensor_f32.get_nelem();
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_f32_ptr[i] = 0.04f + std::fabs(scale_f32_ptr[i]);
+  }
+
+  auto scale_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::f16);
+  uint16_t *scale_f16_ptr = static_cast<uint16_t *>(scale_tensor.get_raw_handle_unsafe());
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_f16_ptr[i] = float16_t::f32_to_f16_val(scale_f32_ptr[i]);
+  }
+
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.uniform_dist_tensor(
+                  quant_shape, data_type_t::s32, 128.0f);
+    int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
+    size_t zp_nelem = zp_tensor.get_nelem();
+    for (size_t i = 0; i < zp_nelem; ++i) {
+      zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
+    }
+  }
+
+  // Step 1: Quantization (F16 src, FP16 scale -> S8/U8)
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = quant_dtype;
+  lowoha_params.use_strided_src = false;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params);
+  if (quant_status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+  }
+  if (quant_status != status_t::success) {
+    log_error("Quantization (F16 src, FP16 scale -> ",
+              is_symmetric ? "S8" : "U8", ") failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // Step 2: Dequantization (S8/U8 -> F16) reusing the same FP16 scale buffer.
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = quant_dtype;
+  dequant_params.dst_dtype = src_dtype;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (", is_symmetric ? "S8" : "U8",
+              " -> F16) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // Step 3: Compare. compare_lowoha_quant_output widens the FP16 scale via
+  // tensor.at(), then computes max_scale and tolerance off that. The f16
+  // narrowing on the scale buffer adds at most ~scale * 2^-11 of relative
+  // error; the shared BF16/FP16 tolerance epsilon (max_scale/2 + 0.03)
+  // absorbs this comfortably.
   bool is_test_successful = true;
   compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
                               lowoha_params, is_test_successful);
@@ -1232,252 +1436,251 @@ TEST_P(TestReorder, BF16_F16_CVT_SCALED) {
   EXPECT_TRUE(is_test_successful);
 }
 
-// TODO: Enable strided tests when strided API is supported
-// /** @fn TEST_P
-//  *  @param TestReorder parameterized test class to initialize parameters
-//  *  @param BF16_QUANT_DEQUANT_STRIDED user-defined name of test
-//  *  @brief Round-trip test: strided BF16 quantization (S8/U8) and dequantization
-//  */
-// TEST_P(TestReorder, BF16_QUANT_DEQUANT_STRIDED) {
-//   if (!use_LOWOHA) {
-//     GTEST_SKIP();
-//   }
-//   bool is_symmetric = (std::rand() % 2 == 0);
-//   data_type_t src_dtype = data_type_t::bf16;
-//   data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
-//   bool use_row_padding = (std::rand() % 2 == 0);
-//   log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, true, true);
-//   log_info("Quantization: ",
-//            is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)");
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param BF16_QUANT_DEQUANT_STRIDED user-defined name of test
+ *  @brief Round-trip test: strided BF16 quantization (S8/U8) and dequantization
+ */
+TEST_P(TestReorder, BF16_QUANT_DEQUANT_STRIDED) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::bf16;
+  data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  bool use_row_padding = (std::rand() % 2 == 0);
+  log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, true, true);
+  log_info("Quantization: ",
+           is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)");
 
-//   std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
-//   std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
-//                                       use_row_padding);
-//   std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
+                                      use_row_padding);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
 
-//   auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
-//                       shape, strided_shape, src_dtype, 2.0f);
-//   auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
+  auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
+                      shape, strided_shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
 
-//   auto scale_tensor = tensor_factory.uniform_dist_tensor(
-//                         quant_shape, data_type_t::f32, 0.2f);
-//   float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
-//   size_t scale_nelem = scale_tensor.get_nelem();
-//   for (size_t i = 0; i < scale_nelem; ++i) {
-//     scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
-//   }
+  auto scale_tensor = tensor_factory.uniform_dist_tensor(
+                        quant_shape, data_type_t::f32, 0.2f);
+  float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
+  size_t scale_nelem = scale_tensor.get_nelem();
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
+  }
 
-//   // ZP constrained to [55, 183] to prevent saturation with min_scale=0.04
-//   tensor_t zp_tensor;
-//   if (!is_symmetric) {
-//     zp_tensor = tensor_factory.uniform_dist_tensor(
-//                   quant_shape, data_type_t::s32, 128.0f);
-//     int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
-//     size_t zp_nelem = zp_tensor.get_nelem();
-//     for (size_t i = 0; i < zp_nelem; ++i) {
-//       zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
-//     }
-//   }
+  // ZP constrained to [55, 183] to prevent saturation with min_scale=0.04
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.uniform_dist_tensor(
+                  quant_shape, data_type_t::s32, 128.0f);
+    int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
+    size_t zp_nelem = zp_tensor.get_nelem();
+    for (size_t i = 0; i < zp_nelem; ++i) {
+      zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
+    }
+  }
 
-//   lowoha_params.src_dtype = src_dtype;
-//   lowoha_params.dst_dtype = quant_dtype;
-//   lowoha_params.use_strided_src = true;
-//   lowoha_params.lowoha_algo = reorder_algo_t::native;
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = quant_dtype;
+  lowoha_params.use_strided_src = true;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t quant_status = lowoha_reorder_kernel_test(
-//                             src_tensor, quant_tensor, scale_tensor, zp_tensor,
-//                             lowoha_params);
-//   if (quant_status != status_t::success) {
-//     log_error("Quantization (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params);
+  if (quant_status != status_t::success) {
+    log_error("Quantization (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
 
-//   ReorderType dequant_params = lowoha_params;
-//   dequant_params.src_dtype = quant_dtype;
-//   dequant_params.dst_dtype = src_dtype;
-//   dequant_params.use_strided_src = false;
-//   dequant_params.lowoha_algo = reorder_algo_t::native;
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = quant_dtype;
+  dequant_params.dst_dtype = src_dtype;
+  dequant_params.use_strided_src = false;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t dequant_status = lowoha_reorder_kernel_test(
-//                               quant_tensor, dequant_tensor, scale_tensor,
-//                               zp_tensor, dequant_params);
-//   if (dequant_status != status_t::success) {
-//     log_error("Dequantization (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   bool is_test_successful = true;
-//   compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
-//                               lowoha_params, is_test_successful);
-//   EXPECT_TRUE(is_test_successful);
-// }
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
 
-// /** @fn TEST_P
-//  *  @param TestReorder parameterized test class to initialize parameters
-//  *  @param FP32_QUANT_DEQUANT_STRIDED user-defined name of test
-//  *  @brief Round-trip test: strided FP32 quantization (S8/U8) and dequantization
-//  */
-// TEST_P(TestReorder, FP32_QUANT_DEQUANT_STRIDED) {
-//   if (!use_LOWOHA) {
-//     GTEST_SKIP();
-//   }
-//   bool is_symmetric = (std::rand() % 2 == 0);
-//   data_type_t src_dtype = data_type_t::f32;
-//   data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
-//   bool use_row_padding = (std::rand() % 2 == 0);
-//   log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, true, true);
-//   log_info("Quantization: ",
-//            is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)");
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param FP32_QUANT_DEQUANT_STRIDED user-defined name of test
+ *  @brief Round-trip test: strided FP32 quantization (S8/U8) and dequantization
+ */
+TEST_P(TestReorder, FP32_QUANT_DEQUANT_STRIDED) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::f32;
+  data_type_t quant_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  bool use_row_padding = (std::rand() % 2 == 0);
+  log_lowoha_test_info(lowoha_params, src_dtype, quant_dtype, true, true);
+  log_info("Quantization: ",
+           is_symmetric ? "Symmetric (S8, no zp)" : "Asymmetric (U8, with zp)");
 
-//   std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
-//   std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
-//                                       use_row_padding);
-//   std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
+                                      use_row_padding);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
 
-//   auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
-//                       shape, strided_shape, src_dtype, 2.0f);
-//   auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
+  auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
+                      shape, strided_shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, quant_dtype);
 
-//   auto scale_tensor = tensor_factory.uniform_dist_tensor(
-//                         quant_shape, data_type_t::f32, 0.2f);
-//   float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
-//   size_t scale_nelem = scale_tensor.get_nelem();
-//   for (size_t i = 0; i < scale_nelem; ++i) {
-//     scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
-//   }
+  auto scale_tensor = tensor_factory.uniform_dist_tensor(
+                        quant_shape, data_type_t::f32, 0.2f);
+  float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
+  size_t scale_nelem = scale_tensor.get_nelem();
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
+  }
 
-//   // ZP constrained to [55, 183] to prevent saturation with min_scale=0.04
-//   tensor_t zp_tensor;
-//   if (!is_symmetric) {
-//     zp_tensor = tensor_factory.uniform_dist_tensor(
-//                   quant_shape, data_type_t::s32, 128.0f);
-//     int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
-//     size_t zp_nelem = zp_tensor.get_nelem();
-//     for (size_t i = 0; i < zp_nelem; ++i) {
-//       zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
-//     }
-//   }
+  // ZP constrained to [55, 183] to prevent saturation with min_scale=0.04
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.uniform_dist_tensor(
+                  quant_shape, data_type_t::s32, 128.0f);
+    int32_t *zp_ptr = static_cast<int32_t *>(zp_tensor.get_raw_handle_unsafe());
+    size_t zp_nelem = zp_tensor.get_nelem();
+    for (size_t i = 0; i < zp_nelem; ++i) {
+      zp_ptr[i] = 55 + (std::abs(zp_ptr[i]) % 129);
+    }
+  }
 
-//   // ---- Step 1: Quantization (FP32 → S8/U8) with strided source ----
-//   lowoha_params.src_dtype = src_dtype;
-//   lowoha_params.dst_dtype = quant_dtype;
-//   lowoha_params.use_strided_src = true;
-//   lowoha_params.lowoha_algo = reorder_algo_t::native;
+  // ---- Step 1: Quantization (FP32 → S8/U8) with strided source ----
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = quant_dtype;
+  lowoha_params.use_strided_src = true;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t quant_status = lowoha_reorder_kernel_test(
-//                             src_tensor, quant_tensor, scale_tensor, zp_tensor,
-//                             lowoha_params);
-//   if (quant_status != status_t::success) {
-//     log_error("Quantization (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params);
+  if (quant_status != status_t::success) {
+    log_error("Quantization (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   // ---- Step 2: Dequantization (S8/U8 → FP32) using same scale/zp ----
-//   auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+  // ---- Step 2: Dequantization (S8/U8 → FP32) using same scale/zp ----
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
 
-//   ReorderType dequant_params = lowoha_params;
-//   dequant_params.src_dtype = quant_dtype;
-//   dequant_params.dst_dtype = src_dtype;
-//   dequant_params.use_strided_src = false;
-//   dequant_params.lowoha_algo = reorder_algo_t::native;
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = quant_dtype;
+  dequant_params.dst_dtype = src_dtype;
+  dequant_params.use_strided_src = false;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t dequant_status = lowoha_reorder_kernel_test(
-//                               quant_tensor, dequant_tensor, scale_tensor,
-//                               zp_tensor, dequant_params);
-//   if (dequant_status != status_t::success) {
-//     log_error("Dequantization (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   // ---- Step 3: Compare original vs dequantized output ----
-//   bool is_test_successful = true;
-//   compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
-//                               lowoha_params, is_test_successful);
-//   EXPECT_TRUE(is_test_successful);
-// }
+  // ---- Step 3: Compare original vs dequantized output ----
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
 
-// /** @fn TEST_P
-//  *  @param TestReorder parameterized test class to initialize parameters
-//  *  @param FP32_BF16_CVT_STRIDED user-defined name of test
-//  *  @brief Round-trip test: strided FP32 <-> BF16 conversion with scale/zp
-//  */
-// TEST_P(TestReorder, FP32_BF16_CVT_STRIDED) {
-//   if (!use_LOWOHA) {
-//     GTEST_SKIP();
-//   }
-//   data_type_t src_dtype = (std::rand() % 2 == 0) ? data_type_t::f32 :
-//                           data_type_t::bf16;
-//   data_type_t dst_dtype = (src_dtype == data_type_t::f32) ? data_type_t::bf16 :
-//                           data_type_t::f32;
-//   bool use_row_padding = (std::rand() % 2 == 0);
-//   log_lowoha_test_info(lowoha_params, src_dtype, dst_dtype, true, true);
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param FP32_BF16_CVT_STRIDED user-defined name of test
+ *  @brief Round-trip test: strided FP32 <-> BF16 conversion with scale/zp
+ */
+TEST_P(TestReorder, FP32_BF16_CVT_STRIDED) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  data_type_t src_dtype = (std::rand() % 2 == 0) ? data_type_t::f32 :
+                          data_type_t::bf16;
+  data_type_t dst_dtype = (src_dtype == data_type_t::f32) ? data_type_t::bf16 :
+                          data_type_t::f32;
+  bool use_row_padding = (std::rand() % 2 == 0);
+  log_lowoha_test_info(lowoha_params, src_dtype, dst_dtype, true, true);
 
-//   std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
-//   std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
-//                                       use_row_padding);
-//   std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params,
+                                      use_row_padding);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
 
-//   auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
-//                       shape, strided_shape, src_dtype, 2.0f);
+  auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
+                      shape, strided_shape, src_dtype, 2.0f);
 
-//   auto scale_tensor = tensor_factory.uniform_dist_tensor(
-//                         quant_shape, data_type_t::f32, 0.2f);
-//   float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
-//   size_t scale_nelem = scale_tensor.get_nelem();
-//   for (size_t i = 0; i < scale_nelem; ++i) {
-//     scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
-//   }
+  auto scale_tensor = tensor_factory.uniform_dist_tensor(
+                        quant_shape, data_type_t::f32, 0.2f);
+  float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
+  size_t scale_nelem = scale_tensor.get_nelem();
+  for (size_t i = 0; i < scale_nelem; ++i) {
+    scale_ptr[i] = 0.04f + std::fabs(scale_ptr[i]);
+  }
 
-//   auto zp_tensor = tensor_factory.uniform_dist_tensor(
-//                      quant_shape, data_type_t::s32, 64.0f);
+  auto zp_tensor = tensor_factory.uniform_dist_tensor(
+                     quant_shape, data_type_t::s32, 64.0f);
 
-//   // ---- Step 1: Forward conversion (src_dtype → dst_dtype) with strided src ----
-//   auto fwd_tensor = tensor_factory.zero_tensor(shape, dst_dtype);
+  // ---- Step 1: Forward conversion (src_dtype → dst_dtype) with strided src ----
+  auto fwd_tensor = tensor_factory.zero_tensor(shape, dst_dtype);
 
-//   lowoha_params.src_dtype = src_dtype;
-//   lowoha_params.dst_dtype = dst_dtype;
-//   lowoha_params.use_strided_src = true;
-//   lowoha_params.lowoha_algo = reorder_algo_t::native;
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = dst_dtype;
+  lowoha_params.use_strided_src = true;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t fwd_status = lowoha_reorder_kernel_test(
-//                           src_tensor, fwd_tensor, scale_tensor, zp_tensor,
-//                           lowoha_params);
-//   if (fwd_status != status_t::success) {
-//     log_error("Forward cvt (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t fwd_status = lowoha_reorder_kernel_test(
+                          src_tensor, fwd_tensor, scale_tensor, zp_tensor,
+                          lowoha_params);
+  if (fwd_status != status_t::success) {
+    log_error("Forward cvt (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   // ---- Step 2: Backward conversion (dst_dtype → src_dtype) ----
-//   auto bwd_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+  // ---- Step 2: Backward conversion (dst_dtype → src_dtype) ----
+  auto bwd_tensor = tensor_factory.zero_tensor(shape, src_dtype);
 
-//   ReorderType bwd_params = lowoha_params;
-//   bwd_params.src_dtype = dst_dtype;
-//   bwd_params.dst_dtype = src_dtype;
-//   bwd_params.use_strided_src = false;
-//   bwd_params.lowoha_algo = reorder_algo_t::native;
+  ReorderType bwd_params = lowoha_params;
+  bwd_params.src_dtype = dst_dtype;
+  bwd_params.dst_dtype = src_dtype;
+  bwd_params.use_strided_src = false;
+  bwd_params.lowoha_algo = reorder_algo_t::native;
 
-//   status_t bwd_status = lowoha_reorder_kernel_test(
-//                           fwd_tensor, bwd_tensor, scale_tensor,
-//                           zp_tensor, bwd_params);
-//   if (bwd_status != status_t::success) {
-//     log_error("Backward cvt (strided) failed");
-//     EXPECT_TRUE(false);
-//     return;
-//   }
+  status_t bwd_status = lowoha_reorder_kernel_test(
+                          fwd_tensor, bwd_tensor, scale_tensor,
+                          zp_tensor, bwd_params);
+  if (bwd_status != status_t::success) {
+    log_error("Backward cvt (strided) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
 
-//   // ---- Step 3: Compare original vs round-trip output ----
-//   bool is_test_successful = true;
-//   compare_lowoha_quant_output(src_tensor, bwd_tensor, scale_tensor,
-//                               lowoha_params, is_test_successful);
-//   EXPECT_TRUE(is_test_successful);
-// }
+  // ---- Step 3: Compare original vs round-trip output ----
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, bwd_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
 
 /** @fn TEST_P
  *  @param TestReorder parameterized test class to initialize parameters
@@ -1609,6 +1812,199 @@ TEST_P(TestReorder, BF16_DYN_QUANT) {
     return;
   }
 
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param F16_DYN_QUANT user-defined name of test
+ *  @brief Round-trip test: F16 dynamic quantization (S8/U8) and dequantization
+ *
+ *  The reorder operator only offers F16 in the *forward* dynamic-quant
+ *  direction (f16 -> s8/u8); there is no `dynamic_quant=true` path that
+ *  consumes s8/u8 input. For the round-trip image we therefore run Step 2
+ *  through the static dequant dispatcher. We pick f32 as the dequant
+ *  target (instead of f16) because the comparison helper already widens
+ *  f16 -> f32 via `tensor.at()` on the source side, so dequanting straight
+ *  to f32 keeps the compare in a single dtype with no extra narrow/widen.
+ *  The companion test `F16_DYN_QUANT_F16_SCALE` exercises the `s8/u8 -> f16`
+ *  static dequant path explicitly.
+ *
+ *  At dispatch time the FMA backend (F32-FMA vs FP16-FMA) is auto-selected
+ *  by can_use_f16_fma_kernel() from the runtime AVX512-FP16 ISA status
+ *  and the build-time toolchain version. Rebuild the library with
+ *  -DZENDNNL_NATIVE_F32_ACCUM=ON to force F32-FMA at build time
+ *  (no runtime knob).
+ */
+TEST_P(TestReorder, F16_DYN_QUANT) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::f16;
+  data_type_t compute_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  log_lowoha_test_info(lowoha_params, src_dtype, compute_dtype, false, true);
+  log_info("Dynamic Quantization: ",
+           is_symmetric ? "Symmetric (S8)" : "Asymmetric (U8)");
+
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+
+  auto src_tensor = tensor_factory.uniform_dist_tensor(shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, compute_dtype);
+
+  auto scale_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::f32);
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::s32);
+  }
+
+  // ---- Step 1: Dynamic Quantization (F16 -> S8/U8) ----
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = compute_dtype;
+  lowoha_params.use_strided_src = false;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params, /*dynamic_quant=*/true);
+  if (quant_status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+  }
+  if (quant_status != status_t::success) {
+    log_error("Dynamic quantization (F16 -> ",
+              is_symmetric ? "S8" : "U8", ") failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // ---- Step 2: Dequantization (S8/U8 -> F32) using computed scale/zp ----
+  // Dequant runs through the *static* dequant dispatcher (there is no
+  // dynamic_quant=true path that consumes s8/u8). Target dtype is f32 by
+  // choice -- the comparison helper widens f16 source via tensor.at() to
+  // f32, so dequanting straight to f32 keeps the compare in one dtype.
+  // The s8/u8 -> f16 static dequant path is exercised by the companion
+  // test F16_DYN_QUANT_F16_SCALE.
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, data_type_t::f32);
+
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = compute_dtype;
+  dequant_params.dst_dtype = data_type_t::f32;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (", is_symmetric ? "S8" : "U8",
+              " -> F32) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // ---- Step 3: Compare original F16 with F32 dequant ----
+  // compare_lowoha_quant_output reads both tensors via tensor.at() which
+  // widens to f32 on the fly, so the f16 source and f32 dequant compare
+  // cleanly. Tolerance follows the same scale/2 + epsilon model as the
+  // BF16/FP32 paths; F16 has 10 mantissa bits (more than BF16's 7), so
+  // the BF16 truncation-noise epsilon is conservative for F16.
+  bool is_test_successful = true;
+  compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+                              lowoha_params, is_test_successful);
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
+ *  @param F16_DYN_QUANT_F16_SCALE user-defined name of test
+ *  @brief Round-trip test: F16 dynamic quantization (S8/U8) with an FP16
+ *  scale buffer and dequantization back to F16.
+ *
+ *  Exercises the f16 narrowing path on the dynamic-quant WRITE side
+ *  (dynamic_dispatch widens scale to f32 internally, then narrows back to
+ *  f16 into the user buffer via float16_t::f32_to_f16_val) and the f16
+ *  branch of get_scale_value on the static-dequant READ side. The companion
+ *  test F16_QUANT_DEQUANT_F16_SCALE covers the read-only path with a
+ *  user-supplied f16 scale; this test covers the produce-then-consume path
+ *  end-to-end with the scale buffer staying in f16 throughout.
+ *
+ *  Dequant target is f16 (not f32 like F16_DYN_QUANT) so the same f16 scale
+ *  buffer is consumed back through the static dequant dispatcher
+ *  (reorder_dtype_dispatch.cpp s8/u8 -> f16 path), maximising f16 scale
+ *  coverage in a single test.
+ */
+TEST_P(TestReorder, F16_DYN_QUANT_F16_SCALE) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP();
+  }
+  bool is_symmetric = (std::rand() % 2 == 0);
+  data_type_t src_dtype = data_type_t::f16;
+  data_type_t compute_dtype = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+  log_lowoha_test_info(lowoha_params, src_dtype, compute_dtype, false, true);
+  log_info("Dynamic Quantization: ",
+           is_symmetric ? "Symmetric (S8)" : "Asymmetric (U8)",
+           " (FP16 scale buffer)");
+
+  std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+  std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+
+  auto src_tensor = tensor_factory.uniform_dist_tensor(shape, src_dtype, 2.0f);
+  auto quant_tensor = tensor_factory.zero_tensor(shape, compute_dtype);
+
+  // The scale buffer is FP16 from the outset: dynamic_dispatch computes
+  // scale in f32 internally and narrows to f16 on store (see
+  // dynamic_dispatch.cpp's scale_needs_narrow branch).
+  auto scale_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::f16);
+  tensor_t zp_tensor;
+  if (!is_symmetric) {
+    zp_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::s32);
+  }
+
+  lowoha_params.src_dtype = src_dtype;
+  lowoha_params.dst_dtype = compute_dtype;
+  lowoha_params.use_strided_src = false;
+  lowoha_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t quant_status = lowoha_reorder_kernel_test(
+                            src_tensor, quant_tensor, scale_tensor, zp_tensor,
+                            lowoha_params, /*dynamic_quant=*/true);
+  if (quant_status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+  }
+  if (quant_status != status_t::success) {
+    log_error("Dynamic quantization (F16 -> ",
+              is_symmetric ? "S8" : "U8", ", FP16 scale) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // Step 2: Static dequant (S8/U8 -> F16) reusing the same FP16 scale buffer.
+  // This is the read side of the f16 scale path: get_scale_value widens
+  // f16 -> f32 before handing the scalar scale to the dequant kernel.
+  auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+  ReorderType dequant_params = lowoha_params;
+  dequant_params.src_dtype = compute_dtype;
+  dequant_params.dst_dtype = src_dtype;
+  dequant_params.lowoha_algo = reorder_algo_t::native;
+
+  status_t dequant_status = lowoha_reorder_kernel_test(
+                              quant_tensor, dequant_tensor, scale_tensor,
+                              zp_tensor, dequant_params);
+  if (dequant_status != status_t::success) {
+    log_error("Dequantization (", is_symmetric ? "S8" : "U8",
+              " -> F16, FP16 scale) failed");
+    EXPECT_TRUE(false);
+    return;
+  }
+
+  // Step 3: Compare. compare_lowoha_quant_output reads the f16 scale via
+  // tensor.at() (widens to f32). Tolerance follows the shared
+  // BF16/FP16 model (max_scale/2 + epsilon); the f16 narrowing on the
+  // scale buffer adds at most ~scale * 2^-11 of relative error, well
+  // inside that epsilon.
   bool is_test_successful = true;
   compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
                               lowoha_params, is_test_successful);

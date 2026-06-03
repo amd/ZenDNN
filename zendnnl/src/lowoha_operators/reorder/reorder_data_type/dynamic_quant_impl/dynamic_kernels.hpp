@@ -26,15 +26,20 @@ namespace zendnnl {
 namespace lowoha {
 namespace reorder {
 
-// Fused per-token AVX512 native kernels
+// Fused per-token AVX512 native kernels (F32-FMA backend, Strategy B)
 void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
                                              float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_s8_native(const float *src, int8_t *dst,
+                                            float *scales, int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
                                             float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                                              float *scales, int32_t *zps,
                                              int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
+                                            float *scales, int32_t *zps,
+                                            int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t N);
 
@@ -46,10 +51,16 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
 void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
                                             float *scales,
                                             int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
+                                            float *scales,
+                                            int64_t M, int64_t K, int64_t G);
 void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                                              float *scales, int32_t *zps,
                                              int64_t M, int64_t K, int64_t G);
 void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
+                                            float *scales, int32_t *zps,
+                                            int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t K, int64_t G);
 
@@ -75,12 +86,24 @@ void dynamic_per_token_compute_scales_f32_u8_asymmetric(const float *src,
                                                          int32_t *zps,
                                                          int64_t M, int64_t N,
                                                          int num_threads);
+void dynamic_per_token_compute_scales_f16_s8_symmetric(const uint16_t *src,
+                                                        float *scales,
+                                                        int64_t M, int64_t N,
+                                                        int num_threads);
+void dynamic_per_token_compute_scales_f16_u8_asymmetric(const uint16_t *src,
+                                                         float *scales,
+                                                         int32_t *zps,
+                                                         int64_t M, int64_t N,
+                                                         int num_threads);
 
-// Unfused 2-pass per-token AVX512 native kernels
+// Unfused 2-pass per-token AVX512 native kernels (F32-FMA backend)
 void dynamic_per_token_quant_bf16_s8_unfused_native(const uint16_t *src,
                                                      int8_t *dst, float *scales,
                                                      int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_s8_unfused_native(const float *src,
+                                                    int8_t *dst, float *scales,
+                                                    int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_s8_unfused_native(const uint16_t *src,
                                                     int8_t *dst, float *scales,
                                                     int64_t M, int64_t N);
 void dynamic_per_token_quant_bf16_u8_unfused_native(const uint16_t *src,
@@ -91,8 +114,41 @@ void dynamic_per_token_quant_f32_u8_unfused_native(const float *src,
                                                     uint8_t *dst, float *scales,
                                                     int32_t *zps,
                                                     int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_u8_unfused_native(const uint16_t *src,
+                                                    uint8_t *dst, float *scales,
+                                                    int32_t *zps,
+                                                    int64_t M, int64_t N);
 
-// Grouped per-token BF16/F32 -> S8 symmetric dynamic quantization.
+// FP16-FMA backend (Strategy A) — native __m512h kernels requiring
+// AVX512-FP16 ISA. On toolchains older than GCC 12, these compile to
+// no-op stubs and the dispatcher must select the F32-FMA backend.
+void dynamic_per_token_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
+                                             float *scales,
+                                             int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst,
+                                             float *scales, int32_t *zps,
+                                             int64_t M, int64_t N);
+// Unfused 2-pass FP16-FMA per-token kernels: Pass 1 parallel over M, Pass 2
+// parallel over M*N elements via zendnnl_parallel_for. Used when
+// ZENDNNL_DYNAMIC_QUANT_ALGO=2 selects the unfused override and the FP16-FMA
+// backend is active.
+void dynamic_per_token_quant_f16_s8_unfused_avx512fp16(const uint16_t *src,
+                                                     int8_t *dst,
+                                                     float *scales,
+                                                     int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_u8_unfused_avx512fp16(const uint16_t *src,
+                                                     uint8_t *dst,
+                                                     float *scales,
+                                                     int32_t *zps,
+                                                     int64_t M, int64_t N);
+void dynamic_per_group_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
+                                             float *scales,
+                                             int64_t M, int64_t K, int64_t G);
+void dynamic_per_group_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst,
+                                             float *scales, int32_t *zps,
+                                             int64_t M, int64_t K, int64_t G);
+
+// Grouped per-token BF16/F32/F16 -> S8 symmetric dynamic quantization.
 // Sources are independent [M_i, K_i] matrices; destinations are packed
 // [M_i, K_i]. One global row loop schedules across sum(M_i).
 void dynamic_per_token_group_quant_bf16_s8_native(
@@ -105,6 +161,15 @@ void dynamic_per_token_group_quant_bf16_s8_native(
     const std::vector<float *> &scales,
     int num_threads);
 void dynamic_per_token_group_quant_f32_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int num_threads);
+void dynamic_per_token_group_quant_f16_s8_native(
     const std::vector<const void *> &src,
     const std::vector<int> &M,
     const std::vector<int> &K,

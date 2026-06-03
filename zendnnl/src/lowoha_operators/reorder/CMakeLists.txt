@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -22,12 +22,15 @@ set(lowoha_reorder_sources
   reorder_data_type/scalar_impl/scalar_granular_impl.cpp
   reorder_data_type/scalar_impl/scalar_dynamic_dispatch.cpp
   reorder_data_type/scalar_impl/dynamic_per_token_ref_kernel.cpp
-  reorder_data_type/static_quant_dequant_impl/quant_dequant_per_tensor_avx512_kernel.cpp
+  reorder_data_type/static_quant_dequant_impl/quant_dequant_per_tensor_avx512_f32_fma_kernel.cpp
+  reorder_data_type/static_quant_dequant_impl/quant_dequant_per_tensor_avx512_f16_fma_kernel.cpp
   reorder_data_type/static_quant_dequant_impl/bf16_f32_per_tensor_avx512_kernel.cpp
   reorder_data_type/static_quant_dequant_impl/f16_per_tensor_avx512_kernel.cpp
   reorder_data_type/dynamic_quant_impl/dynamic_dispatch.cpp
-  reorder_data_type/dynamic_quant_impl/per_group_avx512_kernel.cpp
-  reorder_data_type/dynamic_quant_impl/per_token_avx512_kernel.cpp)
+  reorder_data_type/dynamic_quant_impl/per_group_avx512_f32_fma_kernel.cpp
+  reorder_data_type/dynamic_quant_impl/per_token_avx512_f32_fma_kernel.cpp
+  reorder_data_type/dynamic_quant_impl/per_token_avx512_f16_fma_kernel.cpp
+  reorder_data_type/dynamic_quant_impl/per_group_avx512_f16_fma_kernel.cpp)
 
 set(lowoha_reorder_public_headers
   lowoha_reorder_common.hpp

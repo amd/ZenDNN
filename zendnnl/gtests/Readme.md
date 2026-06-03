@@ -539,12 +539,18 @@ LOWOHA reorder tests validate quantization, dequantization, and type conversion 
 
 | Category | Test Cases | Description |
 |----------|-----------|-------------|
-| **Static Quantization** | `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT` | Round-trip: Source → INT8 (S8/U8) → Source using user-provided scale/zp |
+| **Static Quantization** | `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE` | Round-trip: Source → INT8 (S8/U8) → Source using user-provided scale/zp. The `F16_QUANT_DEQUANT_F16_SCALE` variant exercises FP16-typed scale buffers (in addition to FP16 source/destination). |
 | **Strided Static Quantization** | `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED` | Same as above but with strided (non-contiguous) source memory |
 | **Type Conversion** | `FP32_BF16_CVT` | Round-trip: FP32 ↔ BF16 without scale/zp |
 | **Scaled Type Conversion** | `FP32_BF16_CVT_SCALED` | Round-trip: FP32 ↔ BF16 with scale/zp |
 | **Strided Scaled Conversion** | `FP32_BF16_CVT_STRIDED` | Same as scaled conversion but with strided source memory |
-| **Dynamic Quantization** | `FP32_DYN_QUANT`, `BF16_DYN_QUANT` | Round-trip: Source → INT8 (S8/U8) → Source where scale/zp are computed by the kernel |
+| **Dynamic Quantization** | `FP32_DYN_QUANT`, `BF16_DYN_QUANT`, `F16_DYN_QUANT`, `F16_DYN_QUANT_F16_SCALE` | Round-trip: Source → INT8 (S8/U8) → Source where scale/zp are computed by the kernel. The `F16_DYN_QUANT_F16_SCALE` variant exercises the FP16-typed scale buffer on the dynamic-quant write side (`compute_dynamic_quant_params` / `dynamic_dispatch`'s `scale_needs_narrow` branch) and reads it back through the `s8/u8 -> f16` static dequant path. |
+
+> **Note:** `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE`, `F16_DYN_QUANT`, and `F16_DYN_QUANT_F16_SCALE` exercise FP16 source. At dispatch time the kernel picks between two backends:
+> - **F32-FMA** (AVX-512F + F16C): F16C convert on load/store, all math in `__m512`. Bit-exact with the scalar reference.
+> - **FP16-FMA** (`__m512h`-native, AVX512-FP16 ISA): full quant chain in FP16, ~2× throughput on Granite Rapids / Turin / Sapphire Rapids; ±1 LSB drift vs the scalar reference (absorbed by the shared BF16/FP16 tolerance epsilon — see below).
+>
+> Backend is auto-selected by `can_use_f16_fma_kernel()` (defined in `lowoha_reorder_common.hpp`) — FP16-FMA when the host has AVX512-FP16 + the library was built with GCC 12+ and without `-DZENDNNL_NATIVE_F32_ACCUM=ON`; else F32-FMA. No runtime env var. Rebuild with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to pin reorder to F32-FMA. Orthogonal to `ZENDNNL_DYNAMIC_QUANT_ALGO` which selects fused/unfused/scalar layout.
 
 ### **Round-Trip Methodology**
 
@@ -560,7 +566,7 @@ All LOWOHA reorder tests follow a three-step pattern:
   ```
   tolerance = max_scale / 2  +  epsilon
   ```
-  Where `epsilon = 0.03` for BF16 sources and `0.001` for FP32 sources. The `max_scale / 2` term accounts for the maximum rounding error introduced by quantization.
+  Where `epsilon = 0.03` for BF16 and FP16 sources, and `0.001` for FP32 sources. The `max_scale / 2` term accounts for the maximum rounding error introduced by quantization. The `0.03` epsilon is sized for BF16's ~8-bit mantissa truncation; FP16's 10-bit mantissa is more precise and the FP16-FMA backend's ±1 LSB drift sits comfortably inside this same budget for the value ranges these tests use, so a single shared epsilon serves both dtypes.
 
 - **Type conversion tests** (`FP32_BF16_CVT`): Use `compare_lowoha_reorder_output` with fixed tolerances based on the output data type (BF16 tolerance for BF16, FP32 tolerance for FP32).
 
@@ -600,7 +606,7 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
  - The suite is **LOWOHA-only**. By default every test instance runs as a LOWOHA reorder test.
  - The legacy regular reorder + matmul `TEST_P` bodies are still present in `test_reorder.cpp` but are unreachable at runtime: each begins with `if (use_LOWOHA) GTEST_SKIP();`, and `use_LOWOHA` is now always `true` unless the user passes `--lowoha` with any value other than `true`/`1` (e.g. `false`, `0`, or any other non-empty token), in which case `SetUp()` masks the whole fixture.
  - Use `--lowoha true` (or omit the flag) to run LOWOHA reorder tests; passing any value other than `true`/`1` skips every test in the fixture with `please use LOA (LOWOHA) API`.
- - **LOWOHA test cases**: `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `FP32_BF16_CVT`, `FP32_BF16_CVT_SCALED`, `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED`, `FP32_BF16_CVT_STRIDED`, `FP32_DYN_QUANT`, `BF16_DYN_QUANT`
+ - **LOWOHA test cases**: `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE`, `FP32_BF16_CVT`, `FP32_BF16_CVT_SCALED`, `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED`, `FP32_BF16_CVT_STRIDED`, `FP32_DYN_QUANT`, `BF16_DYN_QUANT`, `F16_DYN_QUANT`, `F16_DYN_QUANT_F16_SCALE`
  - **Legacy (always-skipped) regular test cases**: `F32_F32`, `BF16_F32`, `BF16_BF16`, `F32`, `BF16`, `S8`, `F32_F32_Stride`, `BF16_F32_Stride`, `BF16_BF16_Stride`
 
 #### LOWOHA Reorder Tests
@@ -629,6 +635,17 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DYN_QUANT/* --lowoha true
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DYN_QUANT/* --lowoha true
+ # FP16 tests below can run via dispatcher fallback to the F32-FMA/F16C backend
+ # when AVX512-FP16 is unavailable; AVX512-FP16 is required only for FP16-FMA.
+ # FP16 dynamic quantization:
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F16_DYN_QUANT/* --lowoha true
+# FP16 static quantization round-trip:
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F16_QUANT_DEQUANT/* --lowoha true
+# FP16 static quantization round-trip with FP16-typed scale buffer:
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F16_QUANT_DEQUANT_F16_SCALE/* --lowoha true
+# FP16 dynamic quantization with FP16-typed scale buffer (write side narrows
+# scale to f16; read side widens via get_scale_value):
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F16_DYN_QUANT_F16_SCALE/* --lowoha true
 ```
 6. Run a specific LOWOHA test with fixed seed and thread count:
 ```bash

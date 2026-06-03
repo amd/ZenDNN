@@ -64,6 +64,7 @@ using zendnnl::memory::data_type_t;
  * Supported conversions:
  * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
  * - F32  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F16  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
  * - F32  ↔ BF16:  Type conversion with optional scale and zero-point
  * - F32  ↔ F16:   Type conversion with optional scale and zero-point
  * - BF16 ↔ F16:   Type conversion with optional scale and zero-point (via f32)

@@ -252,6 +252,88 @@ static void reorder_dynamic_impl(const void *src, void *dst, size_t nelems,
     }
     return;
   }
+
+  // ---- FP16 family (static + dynamic quantization, FP16 dequant) ----
+  //
+  // For algo==native, the FMA precision is selected at runtime between
+  // F32-FMA (AVX-512F + F16C convert) and FP16-FMA (__m512h native,
+  // AVX512-FP16 ISA) by can_use_f16_fma_kernel() — defaults to FP16-FMA
+  // when the ISA is present and the library was not built with
+  // -DZENDNNL_NATIVE_F32_ACCUM=ON.
+
+  const bool use_fp16fma =
+      (params.src_dtype == data_type_t::f16 ||
+       params.dst_dtype == data_type_t::f16)
+          ? can_use_f16_fma_kernel()
+          : false;
+
+  // F16 -> INT8 (Quantization)
+  if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::s8) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    int8_t *dst_int8 = static_cast<int8_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      if (use_fp16fma) {
+        quantize_f16_to_int8_avx512fp16(src_f16, dst_int8, nelems, scale, zero_point);
+      } else {
+        quantize_f16_to_int8_avx512(src_f16, dst_int8, nelems, scale, zero_point);
+      }
+    } else {
+      quantize_f16_to_int8_ref(src_f16, dst_int8, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // INT8 -> F16 (Dequantization)
+  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f16) {
+    const int8_t *src_int8 = static_cast<const int8_t *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      if (use_fp16fma) {
+        dequantize_int8_to_f16_avx512fp16(src_int8, dst_f16, nelems, scale, zero_point);
+      } else {
+        dequantize_int8_to_f16_avx512(src_int8, dst_f16, nelems, scale, zero_point);
+      }
+    } else {
+      dequantize_int8_to_f16_ref(src_int8, dst_f16, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // F16 -> UINT8 (Quantization)
+  if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::u8) {
+    const uint16_t *src_f16 = static_cast<const uint16_t *>(src);
+    uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      if (use_fp16fma) {
+        quantize_f16_to_uint8_avx512fp16(src_f16, dst_uint8, nelems, scale, zero_point);
+      } else {
+        quantize_f16_to_uint8_avx512(src_f16, dst_uint8, nelems, scale, zero_point);
+      }
+    } else {
+      quantize_f16_to_uint8_ref(src_f16, dst_uint8, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // UINT8 -> F16 (Dequantization)
+  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f16) {
+    const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
+    uint16_t *dst_f16 = static_cast<uint16_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      if (use_fp16fma) {
+        dequantize_uint8_to_f16_avx512fp16(src_uint8, dst_f16, nelems, scale, zero_point);
+      } else {
+        dequantize_uint8_to_f16_avx512(src_uint8, dst_f16, nelems, scale, zero_point);
+      }
+    } else {
+      dequantize_uint8_to_f16_ref(src_uint8, dst_f16, nelems, scale, zero_point);
+    }
+    return;
+  }
 }
 
 /**

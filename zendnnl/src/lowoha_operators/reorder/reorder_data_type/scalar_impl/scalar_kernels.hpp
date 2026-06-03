@@ -55,17 +55,32 @@ void convert_bf16_to_f16_ref(const uint16_t *input, uint16_t *output,
 void convert_f16_to_bf16_ref(const uint16_t *input, uint16_t *output,
                              size_t nelems, float scale, int zero_point);
 
+// FP16 ref family (static + dynamic quantization; dequant is static).
+void quantize_f16_to_int8_ref(const uint16_t *input, int8_t *output,
+                               size_t nelems, float scale, int zero_point);
+void dequantize_int8_to_f16_ref(const int8_t *input, uint16_t *output,
+                                 size_t nelems, float scale, int zero_point);
+void quantize_f16_to_uint8_ref(const uint16_t *input, uint8_t *output,
+                                size_t nelems, float scale, int zero_point);
+void dequantize_uint8_to_f16_ref(const uint8_t *input, uint16_t *output,
+                                  size_t nelems, float scale, int zero_point);
+
 // Ref fused per-token dynamic quantization kernels
 void dynamic_per_token_quant_bf16_s8_ref(const uint16_t *src, int8_t *dst,
     float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_s8_ref(const float *src, int8_t *dst,
-                                        float *scales, int64_t M, int64_t N);
+                                         float *scales, int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_s8_ref(const uint16_t *src, int8_t *dst,
+                                         float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_bf16_u8_ref(const uint16_t *src, uint8_t *dst,
-    float *scales, int32_t *zps,
-    int64_t M, int64_t N);
+                                         float *scales, int32_t *zps,
+                                         int64_t M, int64_t N);
 void dynamic_per_token_quant_f32_u8_ref(const float *src, uint8_t *dst,
-                                        float *scales, int32_t *zps,
-                                        int64_t M, int64_t N);
+                                         float *scales, int32_t *zps,
+                                         int64_t M, int64_t N);
+void dynamic_per_token_quant_f16_u8_ref(const uint16_t *src, uint8_t *dst,
+                                         float *scales, int32_t *zps,
+                                         int64_t M, int64_t N);
 
 // Scalar granular implementations
 void reorder_granular_scaler_impl_2d(const void *src, void *dst,

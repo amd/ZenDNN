@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
+#include "common/float16.hpp"
 
 #include <immintrin.h>
 #include <cstring>
@@ -556,6 +557,145 @@ void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
   // Handle remaining elements with scalar code
   for (; i < nelems; ++i) {
     output[i] = (static_cast<float>(input[i]) - zero_point) * scale;
+  }
+}
+
+// ===========================================================================
+// FP16 family (AVX-512F + F16C) — F32-FMA backend
+//
+// Requires AVX-512F and F16C. The two CPUID bits are architecturally
+// independent, but every shipping AVX-512F-capable CPU also has F16C in
+// practice (F16C arrived in 2012, AVX-512F in 2017), so the implementations
+// request both via `target("avx512f,f16c")` and the dispatcher does not add
+// a separate runtime ISA probe. Computes in F32 and converts FP16 only at
+// the load/store boundary (VCVTPH2PS / VCVTPS2PH). Bit-exact with the
+// scalar reference path (F16 -> F32 widen is lossless).
+//
+// Forward (quant)  : f16 -> s8 / u8
+// Reverse (dequant): s8 / u8 -> f16
+//
+// Pure type conversions f16 <-> f32 and f16 <-> bf16 are intentionally NOT
+// exposed in the LOWOHA reorder path.
+// ===========================================================================
+
+/** Convert 16 FP16 values (256-bit) to 16 float32 values (512-bit). */
+__attribute__((target("avx512f,f16c")))
+static inline __m512 f16_to_float_vec(__m256i f16) {
+  return _mm512_cvtph_ps(f16);
+}
+
+/** Convert 16 float32 values to 16 FP16 values with round-to-nearest-even. */
+__attribute__((target("avx512f,f16c")))
+static inline __m256i float_to_f16_vec(__m512 val) {
+  return _mm512_cvtps_ph(val,
+      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+}
+
+/** Quantize FP16 -> int8 (per-tensor). */
+__attribute__((target("avx512f,f16c")))
+void quantize_f16_to_int8_avx512(const uint16_t *input, int8_t *output,
+                                  size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+  __m512  scale_vec   = _mm512_set1_ps(scale);
+  __m512i zp_vec_i32  = _mm512_set1_epi32(zero_point);
+  __m512i min_val_i32 = _mm512_set1_epi32(-128);
+  __m512i max_val_i32 = _mm512_set1_epi32(127);
+
+  for (; i + 15 < nelems; i += 16) {
+    __m256i f16_vals  = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(input + i));
+    __m512  fvals     = f16_to_float_vec(f16_vals);
+    __m512  scaled    = _mm512_div_ps(fvals, scale_vec);
+    __m512i rounded   = _mm512_cvtps_epi32(scaled);
+    __m512i with_zp   = _mm512_add_epi32(rounded, zp_vec_i32);
+    __m512i clamped   = _mm512_max_epi32(min_val_i32,
+                            _mm512_min_epi32(max_val_i32, with_zp));
+    __m128i int8_vals = _mm512_cvtsepi32_epi8(clamped);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(output + i), int8_vals);
+  }
+
+  for (; i < nelems; ++i) {
+    float val = common::float16_t::f16_to_f32_val(input[i]);
+    int32_t q = static_cast<int32_t>(std::nearbyint(val / scale)) + zero_point;
+    q = std::max(-128, std::min(127, q));
+    output[i] = static_cast<int8_t>(q);
+  }
+}
+
+/** Quantize FP16 -> uint8 (per-tensor). */
+__attribute__((target("avx512f,f16c")))
+void quantize_f16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
+                                   size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+  __m512  scale_vec   = _mm512_set1_ps(scale);
+  __m512i zp_vec_i32  = _mm512_set1_epi32(zero_point);
+  __m512i min_val_i32 = _mm512_set1_epi32(0);
+  __m512i max_val_i32 = _mm512_set1_epi32(255);
+
+  for (; i + 15 < nelems; i += 16) {
+    __m256i f16_vals  = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(input + i));
+    __m512  fvals     = f16_to_float_vec(f16_vals);
+    __m512  scaled    = _mm512_div_ps(fvals, scale_vec);
+    __m512i rounded   = _mm512_cvtps_epi32(scaled);
+    __m512i with_zp   = _mm512_add_epi32(rounded, zp_vec_i32);
+    __m512i clamped   = _mm512_max_epi32(min_val_i32,
+                            _mm512_min_epi32(max_val_i32, with_zp));
+    __m128i u8_vals   = _mm512_cvtusepi32_epi8(clamped);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(output + i), u8_vals);
+  }
+
+  for (; i < nelems; ++i) {
+    float val = common::float16_t::f16_to_f32_val(input[i]);
+    int32_t q = static_cast<int32_t>(std::nearbyint(val / scale)) + zero_point;
+    q = std::max(0, std::min(255, q));
+    output[i] = static_cast<uint8_t>(q);
+  }
+}
+
+/** Dequantize int8 -> FP16 (per-tensor). */
+__attribute__((target("avx512f,f16c")))
+void dequantize_int8_to_f16_avx512(const int8_t *input, uint16_t *output,
+                                    size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 zp_vec    = _mm512_set1_ps(static_cast<float>(zero_point));
+
+  for (; i + 15 < nelems; i += 16) {
+    __m128i s8_vals  = _mm_loadu_si128(reinterpret_cast<const __m128i *>(input + i));
+    __m512i i32_vals = _mm512_cvtepi8_epi32(s8_vals);  // sign-extend
+    __m512  fvals    = _mm512_mul_ps(
+                          _mm512_sub_ps(_mm512_cvtepi32_ps(i32_vals), zp_vec),
+                          scale_vec);
+    __m256i f16_out  = float_to_f16_vec(fvals);
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(output + i), f16_out);
+  }
+
+  for (; i < nelems; ++i) {
+    float val = (static_cast<float>(input[i]) - zero_point) * scale;
+    output[i] = common::float16_t::f32_to_f16_val(val);
+  }
+}
+
+/** Dequantize uint8 -> FP16 (per-tensor). */
+__attribute__((target("avx512f,f16c")))
+void dequantize_uint8_to_f16_avx512(const uint8_t *input, uint16_t *output,
+                                     size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 zp_vec    = _mm512_set1_ps(static_cast<float>(zero_point));
+
+  for (; i + 15 < nelems; i += 16) {
+    __m128i u8_vals  = _mm_loadu_si128(reinterpret_cast<const __m128i *>(input + i));
+    __m512i i32_vals = _mm512_cvtepu8_epi32(u8_vals);  // zero-extend
+    __m512  fvals    = _mm512_mul_ps(
+                          _mm512_sub_ps(_mm512_cvtepi32_ps(i32_vals), zp_vec),
+                          scale_vec);
+    __m256i f16_out  = float_to_f16_vec(fvals);
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(output + i), f16_out);
+  }
+
+  for (; i < nelems; ++i) {
+    float val = (static_cast<float>(input[i]) - zero_point) * scale;
+    output[i] = common::float16_t::f32_to_f16_val(val);
   }
 }
 

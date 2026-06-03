@@ -433,7 +433,144 @@ static inline float reduce_add_ph_to_fp32(__m512h v) {
   return _mm512_reduce_add_ps(_mm512_add_ps(lo32, hi32));
 }
 
+// ---- FP16 lane classification ------------------------------------------
+//
+// finite_mask_ph(v) returns a __mmask32 whose bit k is 1 iff lane k of v
+// is finite (not NaN, not +/-Inf). Built on _mm512_fpclass_ph_mask which
+// flags the non-finite set, then inverted with knot to keep finite lanes.
+// Useful for absmax / min / max reductions that must ignore non-finite
+// inputs (otherwise a single NaN propagates through the whole reduction).
+
+__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
+static inline __mmask32 finite_mask_ph(__m512h v) {
+  // fpclass categories: 0x01 QNaN, 0x02 +0, 0x04 -0, 0x08 +Inf,
+  // 0x10 -Inf, 0x20 Denormal, 0x40 -Finite, 0x80 SNaN. Match the
+  // non-finite set (NaNs + Infs) and invert to keep finite lanes.
+  constexpr int kNonFinite = 0x01 | 0x08 | 0x10 | 0x80;
+  __mmask32 nonfin = _mm512_fpclass_ph_mask(v, kNonFinite);
+  return _knot_mask32(nonfin);
+}
+
+// ---- Safe-inv-scale guard for FP16-FMA quantize kernels ----------------
+//
+// FP16-FMA quantize kernels broadcast (1/scale_f32) as a __m512h and use
+// VMULPH for the hot multiply. If scale_f32 is so small that 1/scale_f32
+// exceeds the FP16 max normal (~65504), the conversion overflows to +Inf
+// and every nonzero lane of the subsequent VMULPH saturates -- the row /
+// chunk becomes garbage that bears no relation to the scalar reference.
+//
+// Callers should query this helper before entering the vector loop. If it
+// returns false, fall back to the F32-mul scalar/tail path which keeps the
+// reciprocal in f32 and stays bit-equal to the F32-FMA backend's output.
+//
+// 65504.0f / 2 is a conservative threshold: scale = 1/65504 ≈ 1.527e-5 is
+// the smallest scale whose reciprocal still fits in FP16 normal range.
+// We add a factor of 2 of headroom so an FP16-rounded inv_scale doesn't
+// overflow either.
+
+__attribute__((always_inline))
+static inline bool fp16_inv_scale_is_finite(float scale_f32) {
+  // 65504 is the FP16 max normal value. 1/scale ≤ 65504/2 keeps both
+  // the exact and FP16-rounded reciprocal comfortably representable.
+  constexpr float kMaxFiniteInvScale = 65504.0f * 0.5f;
+  return scale_f32 > (1.0f / kMaxFiniteInvScale);
+}
+
+// Companion guard for FP16-FMA *asymmetric* dynamic-quant paths that
+// narrow round(val/scale) to int16 (VCVTPH2W) before applying the int32
+// zero point. The quotient ranges over [-zp, 255 - zp] by construction
+// of the dynamic asymmetric formula. For the int16 narrow to be a no-op
+// (i.e. not silently saturate before the int32 zp add), we need both
+// endpoints to fit inside int16:
+//   -zp     >= INT16_MIN   ->  zp <= 32767
+//   255-zp  <= INT16_MAX   ->  zp >= 255 - 32767 = -32512
+// Picking the tighter symmetric bound |zp| <= 32512 keeps the check
+// branchless and gives ~255 lanes of headroom either side.
+//
+// When this returns false the kernel must fall back to the scalar tail
+// (which computes the quotient in int32 from the start) for that row /
+// group; otherwise the FP16-FMA output can diverge from the scalar /
+// F32-FMA result by more than 1 LSB. This regime is structurally
+// reachable from FP16 source data clustered far from zero, e.g.
+// min=-65000, max=-64500 -> zp ≈ 33150 (outside int16).
+__attribute__((always_inline))
+static inline bool fp16_zp_safe_for_s16_narrow(int32_t zp) {
+  constexpr int32_t kMaxZpInS16Narrow = 32512;
+  return (zp >= -kMaxZpInS16Narrow) && (zp <= kMaxZpInS16Narrow);
+}
+
+// Companion guard for FP16-FMA *dequant* paths (s8/u8 -> f16) that
+// convert the int32 difference (input - zp) to FP16 via VCVTDQ2PH
+// before the FP16 scale multiply. The difference ranges over:
+//   s8 source: [-128 - zp, 127 - zp]   ->  max |diff| <= 128 + |zp|
+//   u8 source: [   0 - zp, 255 - zp]   ->  max |diff| <= 255 + |zp|
+// For VCVTDQ2PH to keep the difference inside FP16 finite range
+// (|x| <= 65504), the tightest bound across s8/u8 is |zp| <= 65249,
+// since the u8 case has the wider input range. We pick a single
+// conservative |zp| <= 65000 cap that works for both s8 and u8
+// inputs and leaves ~250 of headroom for the s32 difference. When
+// this returns false the kernel must fall back to the scalar tail
+// (which computes (input - zp) * scale in f32 before narrowing to
+// f16); otherwise VCVTDQ2PH saturates the difference to +/-Inf and
+// the subsequent FP16 multiply propagates the infinity, producing
+// a wrong dequantized value compared to the scalar / F32-FMA
+// reference (which computes in f32 throughout). User-supplied
+// static dequant is the regime that can hit this; the int32
+// zero_point contract explicitly permits any int32, including
+// values far outside FP16's range.
+__attribute__((always_inline))
+static inline bool fp16_zp_safe_for_dequant_widen(int32_t zp) {
+  constexpr int32_t kMaxZpInDequantWiden = 65000;
+  return (zp >= -kMaxZpInDequantWiden) && (zp <= kMaxZpInDequantWiden);
+}
+
+// Companion guard for FP16-FMA *dequant* paths (s8/u8 -> f16) that
+// narrow the user-supplied f32 scale to _Float16 once before the
+// vector loop. Two failure modes diverge from the scalar / F32-FMA
+// reference (which keeps scale in f32 throughout):
+//   (i)  |scale| > 65504    -> (_Float16)scale = +/-Inf, and any lane
+//                              with (input - zp) == 0 produces
+//                              0 * Inf = NaN instead of 0.
+//   (ii) 0 < |scale| < FP16_MIN_NORMAL = 2^-14 (~6.1e-5)
+//                           -> (_Float16)scale rounds to 0 (or a
+//                              subnormal that flushes to 0 on some
+//                              configurations), so lanes whose scalar
+//                              result is a small representable f16
+//                              are stored as 0.
+// The guard returns true iff scale is exactly 0 (degenerate but
+// arithmetically consistent: 0 * finite_diff = 0 on both paths) OR
+// FP16_MIN_NORMAL <= |scale| <= FP16_MAX_NORMAL. When it returns
+// false the kernel must fall back to the scalar tail, which computes
+// (input - zp) * scale entirely in f32 before the final f16 store.
+__attribute__((always_inline))
+static inline bool fp16_scale_safe_for_dequant_narrow(float scale_f32) {
+  constexpr float kFp16MinNormal = 6.103515625e-5f;  // 2^-14
+  constexpr float kFp16MaxNormal = 65504.0f;
+  if (scale_f32 == 0.0f) return true;
+  const float abs_scale = scale_f32 < 0.0f ? -scale_f32 : scale_f32;
+  return (abs_scale >= kFp16MinNormal) && (abs_scale <= kFp16MaxNormal);
+}
+
 #endif  // ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS || __GNUC__ >= 12
+
+// Narrow an f32 dynamic-quant scale to FP16 with an explicit floor at
+// FP16's min positive normal (2^-14 ≈ 6.10e-5). Dynamic-quant scale
+// computation clamps the f32 scale at 1e-10 to avoid division-by-zero
+// in the symmetric / asymmetric formulas; but 1e-10 rounds to FP16
+// zero (below even FP16's min positive subnormal 5.96e-8), which would
+// break the subsequent static-quant read-back (round(val / 0) = ±Inf).
+// Use this helper from any path that writes the dynamic-quant scale
+// into an f16 user buffer (compute_dynamic_quant_params fall-through
+// and the fused fast paths in dynamic_dispatch). The bf16 path doesn't
+// need an analogous helper because BF16's min positive normal (~1.2e-38)
+// easily holds 1e-10. The non-negativity of `scale` is asserted by the
+// dynamic-quant formulas; the clamp is one-sided.
+static inline uint16_t narrow_f32_scale_to_f16(float scale_f32) {
+  constexpr float kFp16MinPosNormal = 6.103515625e-5f;  // 2^-14
+  const float clamped = (scale_f32 < kFp16MinPosNormal) ? kFp16MinPosNormal
+                                                        : scale_f32;
+  return float16_t::f32_to_f16_val(clamped);
+}
 
 }//namespace common
 

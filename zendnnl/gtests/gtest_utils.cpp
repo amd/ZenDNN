@@ -4959,15 +4959,48 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
 
   // Compute tolerance based on the max scale value
   // Quantization round-trip error is bounded by scale/2 (rounding error)
-  // plus additional epsilon for BF16 truncation and numerical noise
-  float *scale_ptr = static_cast<float *>(scale_tensor.get_raw_handle_unsafe());
-  size_t scale_nelem = scale_tensor.get_nelem();
+  // plus additional epsilon for BF16 truncation and numerical noise.
+  //
+  // The scale tensor's storage dtype may be f32, bf16, or f16. Use the
+  // dtype-aware load path (raw f32 for f32 storage, bf16/f16 widen helpers
+  // for the others) instead of a blind float* cast — otherwise an f16 or
+  // bf16 scale buffer would be read as garbage f32 bits.
+  const data_type_t scale_dt = scale_tensor.get_data_type();
+  const size_t scale_nelem = scale_tensor.get_nelem();
   float max_scale = 0.0f;
-  for (size_t i = 0; i < scale_nelem; ++i) {
-    max_scale = std::max(max_scale, std::fabs(scale_ptr[i]));
+  if (scale_dt == data_type_t::f32) {
+    const float *scale_ptr = static_cast<const float *>(
+        scale_tensor.get_raw_handle_unsafe());
+    for (size_t i = 0; i < scale_nelem; ++i) {
+      max_scale = std::max(max_scale, std::fabs(scale_ptr[i]));
+    }
+  } else if (scale_dt == data_type_t::bf16) {
+    const int16_t *scale_ptr = static_cast<const int16_t *>(
+        scale_tensor.get_raw_handle_unsafe());
+    for (size_t i = 0; i < scale_nelem; ++i) {
+      const float v = bfloat16_t::bf16_to_f32_val(scale_ptr[i]);
+      max_scale = std::max(max_scale, std::fabs(v));
+    }
+  } else if (scale_dt == data_type_t::f16) {
+    const uint16_t *scale_ptr = static_cast<const uint16_t *>(
+        scale_tensor.get_raw_handle_unsafe());
+    for (size_t i = 0; i < scale_nelem; ++i) {
+      const float v = float16_t::f16_to_f32_val(scale_ptr[i]);
+      max_scale = std::max(max_scale, std::fabs(v));
+    }
+  } else {
+    // Unknown scale dtype — fall back to f32 interpretation. This matches
+    // the historical behavior and keeps existing tests passing for the
+    // bf16/f32 source paths.
+    const float *scale_ptr = static_cast<const float *>(
+        scale_tensor.get_raw_handle_unsafe());
+    for (size_t i = 0; i < scale_nelem; ++i) {
+      max_scale = std::max(max_scale, std::fabs(scale_ptr[i]));
+    }
   }
 
-  // Base tolerance: half a quantization step (max rounding error)
+  // Base tolerance: half a quantization step (max rounding error from
+  // round(src_val / scale)).
   float tol = max_scale / 2.0f;
 
   // Add epsilon for numerical noise and reduced-precision truncation:
@@ -4994,7 +5027,7 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
     tol += 0.03f;   // BF16 truncation + numerical noise
   }
   else if (involves_f16) {
-    tol += 0.01f;   // F16 truncation + numerical noise
+    tol += 0.03f;   // F16 truncation + numerical noise
   }
   else {
     tol += 0.001f;  // Small epsilon for F32 numerical noise

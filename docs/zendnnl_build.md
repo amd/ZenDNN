@@ -160,6 +160,26 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 | ZENDNNL_LOCAL_PARLOOPER | Same as ZENDNNL_LOCAL_AOCLDLP but for PARLOOPER. Custom path: `-DPARLOOPER_ROOT_DIR=<path>`. | BOOL | OFF |
 | ZENDNNL_LOCAL_FBGEMM | Same as ZENDNNL_LOCAL_AOCLDLP but for FBGEMM. Custom path: `-DFBGEMM_ROOT_DIR=<path>`. | BOOL | OFF |
 
+### 3.5 Backend Options
+
+These options pin a specific arithmetic precision at the kernel level. They are evaluated at build time only; there is no equivalent runtime environment variable.
+
+| Option | Description | Type | Default |
+|--------|-------------|------|---------|
+| ZENDNNL_NATIVE_F32_ACCUM | Master switch that disables every `__m512h`-native FP16-FMA kernel in the library (currently used by reorder, normalization, embedding_bag, and matmul) and forces those operators onto their F32-accumulating AVX-512 fallback. Use for numerical-reproducibility studies or when you want bit-exact agreement with the scalar reference at the cost of ~2× throughput on FP16-FMA-capable hosts. When OFF (default), FP16-FMA is auto-selected at dispatch time via `can_use_f16_fma_kernel()` whenever the host has AVX512-FP16 ISA and the library was built with GCC 12+. When ON, `can_use_f16_fma_kernel()` returns false unconditionally and the FP16-FMA TUs compile to empty link stubs. | BOOL | OFF |
+
+```bash
+# Default build — FP16-FMA when the host has AVX512-FP16 ISA, GCC 12+
+# is the host compiler, and ZENDNNL_NATIVE_F32_ACCUM is not set.
+cmake ..
+
+# Force the F32-FMA AVX-512 fallback everywhere (numerical-reproducibility
+# studies, or bit-exact agreement with the scalar reference).
+cmake -DZENDNNL_NATIVE_F32_ACCUM=ON ..
+```
+
+The runtime ISA / toolchain probe is `can_use_f16_fma_kernel()`; see `lowoha_operators/reorder/lowoha_reorder_common.hpp` (reorder), `lowoha_operators/normalization/lowoha_normalization_common.hpp` (normalization), and `operators/embag/native_kernels/embag_avx512_kernels.hpp` (embag) for the per-operator wrappers.
+
 ## 4. The Build Process
 
 ### 4.1 General Build Process

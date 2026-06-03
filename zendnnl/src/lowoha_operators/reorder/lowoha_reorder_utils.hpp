@@ -94,11 +94,11 @@ static inline uint16_t float_to_f16(float val) {
 
 /**
  * @brief Extract scale value from quant_t at given index
- *
- * Supports both f32 and bf16 scale buffers.  When the buffer is bf16 the
- * value is transparently converted to f32 so that all downstream arithmetic
- * operates in full precision.
- *
+ * 
+ * Supports f32, bf16, and f16 scale buffers.  When the buffer is bf16 or
+ * f16 the value is transparently widened to f32 so that all downstream
+ * arithmetic operates in full precision.
+ * 
  * @param scale_param The scale quant_t parameter
  * @param index Index into the scale array (0 for per-tensor)
  * @return Scale value as f32 (default 1.0f if buffer is null)
@@ -111,6 +111,10 @@ static inline float get_scale_value(const reorder_quant_params_t::quant_t
   }
   if (scale_param.dt == data_type_t::bf16) {
     return bf16_to_float(static_cast<const uint16_t *>(scale_param.buff)[index]);
+  }
+  if (scale_param.dt == data_type_t::f16) {
+    return common::float16_t::f16_to_f32_val(
+        static_cast<const uint16_t *>(scale_param.buff)[index]);
   }
   return static_cast<const float *>(scale_param.buff)[index];
 }
@@ -186,6 +190,65 @@ static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale,
     int zp) {
   float f32_val = (static_cast<float>(u8_val) - zp) * scale;
   return float_to_bf16(f32_val);
+}
+
+//==============================================================================
+// Inline helper functions for FP16 scalar quantization / dequantization
+//
+// Mirrors the BF16 family: widen via float16_t::f16_to_f32_val on load and
+// narrow via f32_to_f16_val on store. Used for static and dynamic
+// quantization. Pure type conversions f16 <-> f32 / f16 <-> bf16 are
+// intentionally NOT exposed in the LOWOHA reorder path.
+//==============================================================================
+
+/**
+ * @brief Quantize a single f16 value to int8
+ * @param f16_val Input f16 value (as uint16_t)
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Quantized int8 value
+ */
+static inline int8_t quantize_f16_to_s8_scalar(uint16_t f16_val, float scale, int zp) {
+  float f32_val = common::float16_t::f16_to_f32_val(f16_val);
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
+  return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
+}
+
+/**
+ * @brief Quantize a single f16 value to uint8
+ * @param f16_val Input f16 value (as uint16_t)
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Quantized uint8 value
+ */
+static inline uint8_t quantize_f16_to_u8_scalar(uint16_t f16_val, float scale, int zp) {
+  float f32_val = common::float16_t::f16_to_f32_val(f16_val);
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
+  return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
+}
+
+/**
+ * @brief Dequantize a single int8 value to f16
+ * @param s8_val Input int8 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Dequantized f16 value (as uint16_t)
+ */
+static inline uint16_t dequantize_s8_to_f16_scalar(int8_t s8_val, float scale, int zp) {
+  float f32_val = (static_cast<float>(s8_val) - zp) * scale;
+  return common::float16_t::f32_to_f16_val(f32_val);
+}
+
+/**
+ * @brief Dequantize a single uint8 value to f16
+ * @param u8_val Input uint8 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Dequantized f16 value (as uint16_t)
+ */
+static inline uint16_t dequantize_u8_to_f16_scalar(uint8_t u8_val, float scale, int zp) {
+  float f32_val = (static_cast<float>(u8_val) - zp) * scale;
+  return common::float16_t::f32_to_f16_val(f32_val);
 }
 
 //==============================================================================

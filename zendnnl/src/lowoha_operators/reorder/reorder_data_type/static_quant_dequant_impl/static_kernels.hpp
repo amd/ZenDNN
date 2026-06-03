@@ -57,6 +57,33 @@ void convert_bf16_to_f16_avx512(const uint16_t *input, uint16_t *output,
 void convert_f16_to_bf16_avx512(const uint16_t *input, uint16_t *output,
                                 size_t nelems, float scale, int zero_point);
 
+// FP16 AVX-512 kernels — F32-FMA backend (F16C load/store + __m512 math).
+// Requires AVX-512F and F16C. These are architecturally independent CPUID
+// bits, but every shipping CPU with AVX-512F (Skylake-X 2017 and later) also
+// has F16C (Ivy Bridge 2012 and later), so the implementations request both
+// via the GCC target attribute and the dispatcher does not add a separate
+// runtime ISA probe.
+void quantize_f16_to_int8_avx512(const uint16_t *input, int8_t *output,
+                                  size_t nelems, float scale, int zero_point);
+void dequantize_int8_to_f16_avx512(const int8_t *input, uint16_t *output,
+                                    size_t nelems, float scale, int zero_point);
+void quantize_f16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
+                                   size_t nelems, float scale, int zero_point);
+void dequantize_uint8_to_f16_avx512(const uint8_t *input, uint16_t *output,
+                                     size_t nelems, float scale, int zero_point);
+
+// FP16 AVX-512 kernels — FP16-FMA backend (__m512h native, AVX512-FP16 ISA).
+// On toolchains older than GCC 12, the implementations compile to no-op
+// stubs and the dispatcher must select the F32-FMA backend instead.
+void quantize_f16_to_int8_avx512fp16(const uint16_t *input, int8_t *output,
+                                      size_t nelems, float scale, int zero_point);
+void dequantize_int8_to_f16_avx512fp16(const int8_t *input, uint16_t *output,
+                                        size_t nelems, float scale, int zero_point);
+void quantize_f16_to_uint8_avx512fp16(const uint16_t *input, uint8_t *output,
+                                       size_t nelems, float scale, int zero_point);
+void dequantize_uint8_to_f16_avx512fp16(const uint8_t *input, uint16_t *output,
+                                         size_t nelems, float scale, int zero_point);
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl

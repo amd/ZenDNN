@@ -12,26 +12,29 @@ Unlike the standard Reorder operator which uses the operator factory pattern, Lo
 - Quantization (BF16/FP32 → INT8/UINT8)
 - Dequantization (INT8/UINT8 → BF16/FP32)
 - Data type conversion (FP32 ⇔ BF16, FP32 ⇔ F16, BF16 ⇔ F16)
-- **Dynamic quantization** (compute scale/zero-point from source data at runtime)
+- Dynamic quantization (compute scale/zero-point from source data at runtime) — supports BF16, FP32, and FP16 sources
 - Per-tensor, per-channel (row and column), and per-group (row and column) quantization granularities
 - Strided (non-contiguous) source memory support
+- For per-tensor FP16 source/destination, the optimal AVX-512 path has two backends — F32-FMA (AVX-512F + F16C convert) and FP16-FMA (`__m512h`-native, AVX512-FP16 ISA) — auto-selected at dispatch time via `can_use_f16_fma_kernel()`. Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to pin reorder to the F32-FMA path. No runtime env var.
 
 
 ## Quantization/Dequantization/Conversion Formulas
 
-### Quantization (BF16/FP32 → INT8)
+### Quantization (BF16/FP32/FP16 → INT8)
 
 $$
 \mathrm{int8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{input}}{\mathrm{scale}}) + \mathrm{zp}, -128, 127)
 $$
 
-### Quantization (BF16/FP32 → UINT8)
+`round` is round-to-nearest-even (banker's rounding). `clamp` saturates out-of-range quotients to the s8 endpoints; this is how a user-supplied `int32` `zp` outside the s8 range gets reduced — see *Validation Rules §Zero-point validation*.
+
+### Quantization (BF16/FP32/FP16 → UINT8)
 
 $$
 \mathrm{uint8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{input}}{\mathrm{scale}}) + \mathrm{zp}, 0, 255)
 $$
 
-### Dequantization (INT8/UINT8 → BF16/FP32)
+### Dequantization (INT8/UINT8 → BF16/FP32/FP16)
 
 $$
 \mathrm{output} = (\mathrm{int8} - \mathrm{zp}) \times \mathrm{scale}
@@ -65,6 +68,68 @@ $$
 \mathrm{f32} = (\mathrm{f32}(\mathrm{bf16}) - \mathrm{zp}) \times \mathrm{scale}
 $$
 
+### Data Type Conversion (FP32 → FP16)
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{f16} = \mathrm{f16}(\mathrm{f32})
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{f16} = \mathrm{f16}(\frac{\mathrm{f32}}{\mathrm{scale}} + \mathrm{zp})
+$$
+
+### Data Type Conversion (FP16 → FP32)
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{f32} = \mathrm{f32}(\mathrm{f16})
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{f32} = (\mathrm{f32}(\mathrm{f16}) - \mathrm{zp}) \times \mathrm{scale}
+$$
+
+### Data Type Conversion (BF16 → FP16)
+
+Routes through FP32 internally (`bf16 → f32 → f16`).
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{f16} = \mathrm{f16}(\mathrm{f32}(\mathrm{bf16}))
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{f16} = \mathrm{f16}(\frac{\mathrm{f32}(\mathrm{bf16})}{\mathrm{scale}} + \mathrm{zp})
+$$
+
+### Data Type Conversion (FP16 → BF16)
+
+Routes through FP32 internally (`f16 → f32 → bf16`).
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{bf16} = \mathrm{bf16}(\mathrm{f32}(\mathrm{f16}))
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{bf16} = \mathrm{bf16}(\frac{\mathrm{f32}(\mathrm{f16})}{\mathrm{scale}} + \mathrm{zp})
+$$
+
+> **Note on the cross-format conversions (BF16 ↔ FP16):** Both directions go through FP32 as an intermediate. FP32 is a strict superset of both BF16 (which keeps the 8 exponent bits + 7 mantissa bits) and FP16 (5 exponent + 10 mantissa), so the intermediate is exact. The destination narrow then loses precision only at the destination dtype's representable limit — FP16's narrower exponent range (`~6.1e-5` to `65504`) is the binding constraint when converting BF16 → FP16, while FP16's wider mantissa (10 vs 7 bits) means FP16 → BF16 loses 3 mantissa bits to the BF16 narrow.
+
 ### Dynamic Quantization Parameter Computation
 
 When `dynamic_quant = true`, scale and zero-point are computed from the source data at runtime.
@@ -86,10 +151,14 @@ $$
 $$
 
 $$
-\mathrm{zp} = \mathrm{round}(\frac{-\min(A)}{\mathrm{scale}})
+\mathrm{zp} = \mathrm{clamp}(\mathrm{round}(\frac{-\min(A)}{\mathrm{scale}}),\ \mathrm{INT32\_MIN},\ \mathrm{INT32\_MAX})
 $$
 
 Where $A$ is the set of source values within the quantization scope (per-tensor, per-channel, or per-group).
+
+> **Scale floor:** Both symmetric and asymmetric `scale` values are clamped to a positive floor before being returned. The internal compute floor is `1e-10`. When the user-supplied scale buffer dtype is `f16`, the floor is raised to FP16's minimum positive normal `2^-14 ≈ 6.10e-5` before the narrow-to-f16 step so the stored f16 scale is always non-zero and the downstream static-dequant `round(val / scale)` cannot divide by zero. This applies on both the fused-quant fast path and the `compute_dynamic_quant_params` fall-through path — `f16` scale buffers route through the fall-through path to keep `dst` and the stored f16 scale consistent (see *Implementation Support Matrix §Dynamic Quantization: Fused fast paths*).
+
+> **Non-finite source handling — statistics pass only:** Non-finite source values (NaN, ±Inf) are skipped when computing the per-scope min/max statistics in Pass 1 — they neither contribute to $\min(A)$ / $\max(A)$ nor to $\max(|\min(A)|, |\max(A)|)$. If a scope contains only non-finite values, the scope is treated as an empty set when computing the parameters: the result is a benign $(\mathrm{scale}, \mathrm{zp})$ reset. For asymmetric this gives $\mathrm{scale} = 1/255$ and $\mathrm{zp} = 0$ (via the `max := min + 1` constant-scope guard above). For symmetric this gives $\mathrm{scale} = 10^{-10}$ (the compute-floor; `abs_max` clamps to `1e-10`, then the final `scale < 1e-10` re-clamp pins it there) and $\mathrm{zp} = 0$. All three backends (scalar reference, F32-FMA, FP16-FMA) agree on this Pass-1 / parameter-reset behaviour. Pass 2 (quantization) does not mask non-finite source lanes. A NaN or ±Inf source element therefore still produces some destination value via the standard `nearbyint(v / scale) + zp` chain followed by saturation to the destination dtype range — the exact integer result for NaN/Inf source lanes is implementation-defined (saturating C++ cast / `VCVTPH2W` indefinite semantics) and is not guaranteed to equal the zero point. If your workload may contain non-finite values in the source tensor, sanitize them upstream (e.g. `where(isfinite(x), x, 0.0)`) for deterministic outputs.
 
 
 ## Core API: `reorder_direct`
@@ -173,14 +242,18 @@ Source strides enable reading from non-contiguous source memory:
 
 | Source Type | Destination Type | Operation |
 |-------------|------------------|-----------|
-| BF16 | S8 (INT8) | Quantization |
+| BF16 | S8 (INT8) | Quantization (static + dynamic) |
 | S8 (INT8) | BF16 | Dequantization |
-| BF16 | U8 (UINT8) | Quantization |
+| BF16 | U8 (UINT8) | Quantization (static + dynamic) |
 | U8 (UINT8) | BF16 | Dequantization |
-| FP32 | S8 (INT8) | Quantization |
+| FP32 | S8 (INT8) | Quantization (static + dynamic) |
 | S8 (INT8) | FP32 | Dequantization |
-| FP32 | U8 (UINT8) | Quantization |
+| FP32 | U8 (UINT8) | Quantization (static + dynamic) |
 | U8 (UINT8) | FP32 | Dequantization |
+| FP16 | S8 (INT8) | Quantization (static + dynamic) |
+| S8 (INT8) | FP16 | Dequantization (static only) |
+| FP16 | U8 (UINT8) | Quantization (static + dynamic) |
+| U8 (UINT8) | FP16 | Dequantization (static only) |
 | FP32 | BF16 | Data Type Conversion (optional scale/zp) |
 | BF16 | FP32 | Data Type Conversion (optional scale/zp) |
 | FP32 | F16  | Data Type Conversion (optional scale/zp) |
@@ -201,7 +274,7 @@ struct reorder_quant_params_t {
     std::vector<int64_t> dims;     // Dimensions (mandatory, must match tensor dims)
   };
 
-  quant_t scale;        // Scale factor (f32 or bf16)
+  quant_t scale;        // Scale factor (f32, bf16, or f16)
   quant_t zero_point;   // Zero point offset (s32 only)
 };
 ```
@@ -210,8 +283,10 @@ struct reorder_quant_params_t {
 
 | Parameter | Supported Type | Description |
 |-----------|---------------|-------------|
-| `scale` | `f32` or `bf16` | Scale factor (must be finite; bf16 is converted to f32 internally) |
+| `scale` | `f32`, `bf16`, or `f16` | Scale factor (must be finite; `bf16`/`f16` are widened to f32 transparently on read and narrowed back to the user's dtype on write in the dynamic-quant path) |
 | `zero_point` | `s32` | Zero point offset |
+
+> **Note on FP16 scale precision and range:** FP16 has a 10-bit mantissa (vs BF16's 7 and F32's 23) and a normal-number range of roughly `[6.1e-5, 65504]`. For typical workloads (activations in `[-2, 2]`, scales `≈ 0.0157`), FP16 storage is comfortably within the normal range; the narrowing introduces at most `~|scale| * 2^-11` of additional round-trip error, which sits well inside the shared BF16/FP16 test tolerance (`max_scale / 2 + 0.03`). When the reorder operator writes an `f16` scale buffer in the dynamic-quant path (any granularity, any backend) it floors the f32 scale at FP16's minimum positive normal (`2^-14 ≈ 6.10e-5`) before narrowing, so an "all-zero or very-small range" input produces a tiny but non-zero f16 scale and the downstream static-quant read-back never divides by zero. If you anticipate genuinely low-magnitude scales (`< 6.1e-5`) and the floor itself would be visibly lossy for your workload, use `f32` or `bf16` scale buffers instead.
 
 **Buffer Semantics:**
 
@@ -327,8 +402,10 @@ The quantization mode is determined by the presence of the `zero_point` buffer:
 |-------------|------------------|------|
 | BF16 | S8 (INT8) | Symmetric |
 | FP32 | S8 (INT8) | Symmetric |
+| FP16 | S8 (INT8) | Symmetric |
 | BF16 | U8 (UINT8) | Asymmetric |
 | FP32 | U8 (UINT8) | Asymmetric |
+| FP16 | U8 (UINT8) | Asymmetric |
 
 ### Supported Granularities
 
@@ -346,7 +423,7 @@ All granularities are supported for dynamic quantization:
 
 | Parameter | Required | Data Type | Buffer Size |
 |-----------|----------|-----------|-------------|
-| `scale.buff` | **Always** | `f32` or `bf16` | Product of `scale.dims` |
+| `scale.buff` | **Always** | `f32`, `bf16`, or `f16` | Product of `scale.dims` |
 | `zero_point.buff` | Asymmetric only | `s32` | Product of `zero_point.dims` |
 
 - For **symmetric** mode: leave `zero_point.buff = nullptr` (zero-point is implicitly 0)
@@ -1481,7 +1558,97 @@ int dynamic_quant_asymmetric_per_token_example() {
 }
 ```
 
-### Example 24: Dynamic Quantization — Per-Group-Row (BF16 → S8)
+### Example 24: FP16 Dynamic Quantization — Per-Token (FP16 → S8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "common/float16.hpp"
+
+int dynamic_quant_f16_per_token_example() {
+  using namespace zendnnl::lowoha::reorder;
+  using zendnnl::common::float16_t;
+
+  constexpr int64_t M = 4;     // 4 tokens (rows)
+  constexpr int64_t N = 256;
+
+  // FP16 stored as uint16_t (bit-compatible with float16_t).
+  std::vector<uint16_t> input_f16(M * N);
+  std::vector<int8_t>   output_s8(M * N);
+
+  // Initialize input...
+  // (e.g., for (int i = 0; i < M*N; ++i)
+  //          input_f16[i] = float16_t::f32_to_f16_val(some_f32_value(i));)
+
+  // Per-row scales (one per token).
+  std::vector<float> computed_scales(M, 0.0f);
+
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f16;     // FP16 source
+  params.dst_dtype = data_type_t::s8;      // symmetric quantization
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+
+  // Per-token (per-channel-row): dims = {M, 1}
+  params.quant_params.scale.buff = computed_scales.data();
+  params.quant_params.scale.dt   = data_type_t::f32;
+  params.quant_params.scale.dims = {M, 1};
+  // zero_point.buff = nullptr → symmetric mode (zp = 0).
+
+  // The kernel auto-picks between F32-FMA and FP16-FMA backends based on
+  // can_use_f16_fma_kernel() (AVX512-FP16 ISA + GCC 12+ + the library was
+  // not built with -DZENDNNL_NATIVE_F32_ACCUM=ON). To pin reorder to the
+  // F32-FMA path, rebuild the library with that CMake flag.
+  status_t status = reorder_direct(input_f16.data(), output_s8.data(), params);
+  if (status != status_t::success) {
+    return -1;
+  }
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 25: FP16 Dynamic Quantization — Asymmetric Per-Token (FP16 → U8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+#include "common/float16.hpp"
+
+int dynamic_quant_f16_asymmetric_per_token_example() {
+  using namespace zendnnl::lowoha::reorder;
+
+  constexpr int64_t M = 4;
+  constexpr int64_t N = 256;
+
+  std::vector<uint16_t> input_f16(M * N);
+  std::vector<uint8_t>  output_u8(M * N);
+
+  // Initialize input...
+
+  std::vector<float>   computed_scales(M, 0.0f);
+  std::vector<int32_t> computed_zps(M, 0);
+
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f16;
+  params.dst_dtype = data_type_t::u8;      // asymmetric quantization
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+
+  // Per-token: dims = {M, 1} for both scale and zp.
+  params.quant_params.scale.buff = computed_scales.data();
+  params.quant_params.scale.dt   = data_type_t::f32;
+  params.quant_params.scale.dims = {M, 1};
+
+  params.quant_params.zero_point.buff = computed_zps.data();
+  params.quant_params.zero_point.dt   = data_type_t::s32;
+  params.quant_params.zero_point.dims = {M, 1};
+
+  status_t status = reorder_direct(input_f16.data(), output_u8.data(), params);
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 26: Dynamic Quantization — Per-Group-Row (BF16 → S8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -1535,7 +1702,7 @@ The operator performs the following validations:
 2. **Shape validation:** src_shape and dst_shape must be non-empty with all positive dimensions
 3. **Shape matching:** src_shape and dst_shape must be identical (error thrown if different)
 4. **Data type validation:** Source/destination type combination must be supported
-5. **Scale validation:** Must be finite (for f32 or bf16)
+5. **Scale validation:** Must be finite (for f32, bf16, or f16)
 6. **Zero-point validation:** Zero-point values may be any `int32`; during quantization they are clamped to the valid range of the destination type, which can increase saturation and reduce dequantization accuracy if the specified zero-point lies outside that range.
 7. **Dims validation:** Must match tensor dimensionality and follow granularity rules
 8. **Per-group validation:** M must be divisible by G (row groups) or N must be divisible by G (column groups)
@@ -1543,11 +1710,11 @@ The operator performs the following validations:
 
 ### Dynamic Quantization Validation (when `dynamic_quant = true`)
 
-10. **Source data type:** Must be BF16 or FP32
+10. **Source data type:** Must be BF16, FP32, or FP16
 11. **Destination data type:** Must be S8 (symmetric) or U8 (asymmetric)
 12. **Scale buffer:** Must be non-null (output buffer required)
 13. **Scale dims:** Must be specified and valid for the tensor shape
-14. **Scale data type:** Must be f32 or bf16
+14. **Scale data type:** Must be f32, bf16, or f16
 15. **Symmetric mode:** If zero_point.buff is nullptr, destination must be S8
 16. **Asymmetric mode:** If zero_point.buff is provided, destination must be U8, and zero_point dims must match scale granularity
 17. **Zero-point data type:** Must be s32 (when provided)
@@ -1565,7 +1732,7 @@ The operator performs the following validations:
 
 The following table shows which combinations have optimized (AVX512) vs reference implementations:
 
-### Static Reorder: BF16/FP32 ↔ S8/U8 and FP32 ↔ BF16
+### Static Reorder: BF16/FP32/FP16 ↔ S8/U8 and FP32 ↔ BF16
 
 | Granularity | Source Contiguous | Source Strided (last_stride=1) | Source Strided (other) |
 |-------------|-------------------|--------------------------------|------------------------|
@@ -1573,7 +1740,35 @@ The following table shows which combinations have optimized (AVX512) vs referenc
 | Per-channel | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
 | Per-group | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
 
-### Dynamic Quantization: Parameter Computation
+For per-tensor FP16 source (or FP16 destination on dequant), the optimal AVX-512 path has two backends:
+- **F32-FMA** (default): F16C convert on load/store, math in `__m512`. Bit-exact with the scalar reference. Requires AVX-512F + F16C (the two CPUID bits are architecturally independent, but every shipping AVX-512F-capable CPU also has F16C, so the F32-FMA path is available wherever AVX-512F is available).
+- **FP16-FMA** (`__m512h`-native): math fully in FP16. Requires AVX512-FP16 ISA (Granite Rapids / Sapphire Rapids / Turin). ~2× throughput; tolerates ±1 LSB drift vs the scalar reference in the common regime. The FP16-FMA quant kernels narrow the intermediate `round(val/scale)` to `int16` (`VCVTPH2W`) before applying the `int32` zero point; the FP16-FMA dequant kernels widen the `int32` `(input - zero_point)` difference to FP16 (`VCVTDQ2PH`) and narrow the user scale to `_Float16` before the FP16 scale multiply. To preserve the public `int32 zero_point` and `finite scale` contracts on both directions, the vector loop is gated on the following safe ranges; any failure routes the whole call through the scalar tail (which computes the chain in `f32` with the offset in `int32`, matching the F32-FMA / scalar reference bit-for-bit):
+>
+> | Direction | Guards |
+> |---|---|
+> | Quant (`f16 → s8/u8`) | `1/scale` fits in FP16 (`scale > ~3.05e-5`) **and** `|zero_point| ≤ 32512` |
+> | Dequant (`s8/u8 → f16`) | `|zero_point| ≤ 65000` **and** (`scale = 0` or `FP16_MIN_NORMAL ≤ |scale| ≤ 65504`) |
+>
+> The dynamic-quant path almost never trips the quant-side zp guard in practice — `zp = round(-min/scale)` only exceeds 32512 when the source row is clustered far from zero in a very narrow band (e.g. an `f16` row with `min=-65000, max=-64500`). The dequant-side guards are only relevant when a user explicitly supplies an `int32 zero_point` or an `f32 scale` outside FP16's finite normal range to the static dequant API; both are permitted by the API contract.
+
+The backend is auto-selected via the helper `can_use_f16_fma_kernel()` (defined in `lowoha_reorder_common.hpp`), which wraps `zendnnl_platform_info().get_avx512_f16_status()`. Reorder exposes **no runtime env var** for this choice — selection is purely build-time + runtime ISA detection.
+
+Building the library with the CMake option `ZENDNNL_NATIVE_F32_ACCUM=ON` is the master kill-switch: it disables the FP16-FMA kernels and forces reorder onto its F32-accumulating AVX-512 path for numerical-reproducibility studies.
+
+### Dynamic Quantization: Fused fast paths (no compute-then-quantize round-trip)
+
+| Granularity | BF16 / FP32 source | FP16 source |
+|-------------|--------------------|-------------|
+| Per-token (per-channel-row), 2D contiguous | ✅ Fused vector (F32 math) | ✅ Fused vector — F32-FMA or FP16-FMA (auto-selected) |
+| Per-group-col, 2D contiguous | ✅ Fused vector (F32 math) | ✅ Fused vector — F32-FMA or FP16-FMA (auto-selected) |
+| Per-token, 2D contiguous, `ALGO=2` (unfused) | ✅ Unfused 2-pass vector (F32 math) | ✅ Unfused 2-pass vector — F32-FMA or FP16-FMA (auto-selected) |
+| Per-token, `ALGO=3` (scalar fused) | ⚙️ Scalar | ⚙️ Scalar |
+
+For granularities not in the fast-path table (per-tensor, per-channel-col, per-group-row, 1D / 3D, strided), the dynamic-quant path falls through to:
+1. `compute_dynamic_quant_params(src, params)` — scans the source data and fills the scale/zp buffers.
+2. Standard reorder using the freshly computed scale/zp (follows the static reorder support matrix above).
+
+### Dynamic Quantization: Parameter Computation (fall-through path)
 
 | Granularity | Implementation |
 |-------------|---------------|

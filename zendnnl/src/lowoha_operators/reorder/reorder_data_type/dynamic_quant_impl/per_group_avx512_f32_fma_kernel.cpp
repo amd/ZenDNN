@@ -16,6 +16,8 @@
 
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
+#include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -44,13 +46,16 @@ static inline __m512 bf16x16_to_f32_pg(__m256i bf16) {
       _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
 }
 
-/** Scalar BF16-to-F32 fallback for tail elements that don't fill a vector. */
-static inline float bf16_scalar_to_f32_pg(uint16_t v) {
-  uint32_t bits = static_cast<uint32_t>(v) << 16;
-  float r;
-  std::memcpy(&r, &bits, sizeof(float));
-  return r;
-}
+// Scalar BF16-to-F32 fallback: call common::bfloat16_t::bf16_to_f32_val
+// directly with a static_cast<int16_t>(...) on the raw u16 input (BF16 is
+// a bit-pattern type; signedness of the 16-bit container is irrelevant).
+
+//==============================================================================
+// FP16 <-> F32 conversion: call _mm512_cvtph_ps (F16C; AVX-512F + F16C)
+// for vector loads, and common::float16_t::f16_to_f32_val for scalar tail
+// elements. No local wrappers needed -- the intrinsic and central API
+// already serve directly.
+//==============================================================================
 
 /**
  * Returns a 16-bit mask where lane k is 1 iff v[k] is finite (not NaN/Inf).
@@ -84,8 +89,12 @@ static inline void compute_symmetric_scale_pg(float absmax, float &scale) {
  */
 static inline void compute_asymmetric_scale_zp_pg(float min_val, float max_val,
                                                    float &scale, int32_t &zp) {
-  if (min_val == std::numeric_limits<float>::max() &&
-      max_val == std::numeric_limits<float>::lowest()) {
+  // Empty-group / all-non-finite-group reset. Catches both the F32 init
+  // sentinels (numeric_limits<float>::max / lowest) and any non-finite
+  // bounds that could appear if a future code path produces NaN/Inf
+  // before reaching this helper.
+  if (min_val > max_val ||
+      !std::isfinite(min_val) || !std::isfinite(max_val)) {
     min_val = 0.0f;
     max_val = 0.0f;
   }
@@ -389,7 +398,7 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
       float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
       int64_t j = group_size & ~int64_t{15};
       for (; j < group_size; ++j) {
-        float v = bf16_scalar_to_f32_pg(grp_src[j]);
+        float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
         if (std::isfinite(v))
           absmax = std::max(absmax, std::abs(v));
       }
@@ -418,7 +427,7 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
                          _mm512_cvtsepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
-        float v = bf16_scalar_to_f32_pg(grp_src[j]);
+        float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
         q = std::max(-128, std::min(127, q));
         grp_dst[j] = static_cast<int8_t>(q);
@@ -605,7 +614,7 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
       group_minmax(load_f32, group_size, abs_mask, vinf, row_min, row_max);
       int64_t j = group_size & ~int64_t{15};
       for (; j < group_size; ++j) {
-        float v = bf16_scalar_to_f32_pg(grp_src[j]);
+        float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
         if (std::isfinite(v)) {
           row_min = std::min(row_min, v);
           row_max = std::max(row_max, v);
@@ -651,7 +660,242 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                          _mm512_cvtusepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
-        float v = bf16_scalar_to_f32_pg(grp_src[j]);
+        float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
+        int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
+        q = std::max(0, std::min(255, q));
+        grp_dst[j] = static_cast<uint8_t>(q);
+      }
+    }
+  });
+}
+
+//==============================================================================
+// FP16 PER-GROUP KERNELS — F32-FMA backend (Strategy B)
+//
+// Layout mirrors the BF16 per-group kernels above 1:1 with two mechanical
+// swaps in the load lambda and the scalar tail:
+// Identical structure to the BF16 per-group kernels above, with two
+// mechanical swaps in the load lambda and the scalar tail (the BF16 path
+// uses bf16x16_to_f32_pg + common::bfloat16_t::bf16_to_f32_val, the FP16
+// path uses _mm512_cvtph_ps + common::float16_t::f16_to_f32_val).
+//
+// The companion __m512h-native FP16-FMA kernels live in
+// per_group_avx512_f16_fma_kernel.cpp.
+//==============================================================================
+
+//==============================================================================
+// KERNEL 5:  F16 -> S8 Symmetric Per-Group Quantization  (AVX-512F + F16C)
+//==============================================================================
+//
+// Steps (per group, fused):
+//   1. Pass 1 - Absmax reduction: scan K/G F16 elements in the group,
+//      convert to F32 via VCVTPH2PS (F16C), compute absmax = max(|val|)
+//      with non-finite masking.
+//   2. Compute scale: scale = absmax / 127 (clamped to >= 1e-10).
+//   3. Write scale to scales[m * G + g].
+//   4. Pass 2 - Quantize: re-read F16 from L1 cache (still hot from Pass 1),
+//      convert to F32, compute Q[j] = round(val[j] / scale), narrow to int8
+//      with signed saturation, store to dst.
+//
+// Register usage (peak, per thread):
+//   zmm (512-bit):  ~14 total
+//     Pass 1:  abs_mask(1) + vinf(1) + f0-f3(4) + a0-a3(4)
+//              + vam0-vam3(4) = 14
+//     Pass 2:  vscale(1) + f0-f3(4) + r0-r3(4) = 9
+//   k-mask:    4  (finite_mask_pg results)
+//   Scalar:    scale, absmax, task, m, g, j
+//
+// Optimizations:
+//   1. Fused per-group:  Pass 1 + Pass 2 back-to-back keeps the group's
+//      F16 data hot in cache, avoiding a second DRAM read.
+//   2. F16C widen:  VCVTPH2PS converts 16 F16 lanes per instruction.
+//      Requires F16C; available on every shipping AVX-512F host (CPUID
+//      bits are independent but the superset relation holds in practice).
+//      No AVX512-FP16 ISA needed.
+//   3. Shared reduction helper:  load_f32 lambda abstracts the F16->F32
+//      load path while reusing the generic group_absmax template.
+//   4. Absmax via AND+MAX, non-finite masking, 4x unroll, VPMOVSDB
+//      saturation, cache-line stores -- same techniques as KERNEL 2.
+//   5. zendnnl_parallel_for over M*G total groups for thread-pool reuse
+//      across granular tasks.
+//==============================================================================
+
+__attribute__((target("avx512f,f16c")))
+void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
+                                            float *scales,
+                                            int64_t M, int64_t K, int64_t G) {
+  if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
+
+  const int64_t group_size = K / G;
+  const int64_t total_groups = M * G;
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  zendnnl_parallel_for(0, total_groups, 1,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,f16c"))) {
+    for (int64_t task = begin; task < end; ++task) {
+      const int64_t m = task / G;
+      const int64_t g = task - m * G;
+      const int64_t offset = m * K + g * group_size;
+      const uint16_t *grp_src = src + offset;
+      int8_t *grp_dst = dst + offset;
+
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,f16c"))) {
+        return _mm512_cvtph_ps(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(grp_src + j)));
+      };
+
+      float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+      int64_t j = group_size & ~int64_t{15};
+      for (; j < group_size; ++j) {
+        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (std::isfinite(v))
+          absmax = std::max(absmax, std::abs(v));
+      }
+
+      float scale;
+      compute_symmetric_scale_pg(absmax, scale);
+      scales[task] = scale;
+
+      const __m512 vscale = _mm512_set1_ps(scale);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+      j = 0;
+      for (; j + 63 < group_size; j += 64) {
+        __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+        __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 16), vscale));
+        __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
+        __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
+        store_4x16_s8_pg(grp_dst + j,
+                          _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
+                          _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
+                          cl_ok);
+      }
+      for (; j + 15 < group_size; j += 16) {
+        __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                         _mm512_cvtsepi32_epi8(r));
+      }
+      for (; j < group_size; ++j) {
+        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+        q = std::max(-128, std::min(127, q));
+        grp_dst[j] = static_cast<int8_t>(q);
+      }
+    }
+  });
+}
+
+//==============================================================================
+// KERNEL 6:  F16 -> U8 Asymmetric Per-Group Quantization  (AVX-512F + F16C)
+//==============================================================================
+//
+// Steps (per group, fused):
+//   1. Pass 1 - Min/Max reduction: scan K/G F16 elements in the group,
+//      convert to F32 via VCVTPH2PS, compute row_min/row_max with non-finite
+//      masking.
+//   2. Compute scale + zp: scale = (max - min) / 255 (clamped to >= 1e-10);
+//      zp = round(-min / scale), clamped to int32 range.
+//   3. Write scale to scales[m * G + g] and zp to zps[m * G + g].
+//   4. Pass 2 - Quantize: re-read F16 from L1, convert to F32, compute
+//      Q[j] = round(val[j] / scale) + zp, clamp to [0, 255] in signed s32
+//      (VPMAXSD/VPMINSD), narrow to uint8 with VPMOVUSDB and cache-line
+//      store.
+//
+// Register usage (peak, per thread):
+//   zmm (512-bit):  ~16 total
+//     Pass 1:  abs_mask(1) + vinf(1) + f0-f3(4) + vmin0-3(4) + vmax0-3(4) = 14
+//     Pass 2:  vscale(1) + vzp(1) + vlo32(1) + vhi32(1) + f0-f3(4) + r0-r3(4) = 12
+//   k-mask:    4  (finite_mask_pg results)
+//   Scalar:    scale, zp, row_min, row_max, task, m, g, j
+//
+// Optimizations:
+//   1. Fused per-group:  same L1 cache reuse as KERNEL 5.
+//   2. F16C widen, min/max with non-finite masking, 4x unroll -- same as
+//      KERNEL 5.
+//   3. Explicit [0, 255] clamp:  VPMAXSD/VPMINSD before VPMOVUSDB, since
+//      VPMOVUSDB treats negative int32 as large unsigned and saturates
+//      to 255 instead of 0.
+//   4. Cache-line stores:  64B aligned writes.
+//   5. zendnnl_parallel_for over M*G total groups for thread-pool reuse.
+//==============================================================================
+
+__attribute__((target("avx512f,f16c")))
+void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
+                                            float *scales, int32_t *zps,
+                                            int64_t M, int64_t K, int64_t G) {
+  if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
+
+  const int64_t group_size = K / G;
+  const int64_t total_groups = M * G;
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+  zendnnl_parallel_for(0, total_groups, 1,
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,f16c"))) {
+    for (int64_t task = begin; task < end; ++task) {
+      const int64_t m = task / G;
+      const int64_t g = task - m * G;
+      const int64_t offset = m * K + g * group_size;
+      const uint16_t *grp_src = src + offset;
+      uint8_t *grp_dst = dst + offset;
+
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,f16c"))) {
+        return _mm512_cvtph_ps(_mm256_loadu_si256(
+            reinterpret_cast<const __m256i *>(grp_src + j)));
+      };
+
+      float row_min, row_max;
+      group_minmax(load_f32, group_size, abs_mask, vinf, row_min, row_max);
+      int64_t j = group_size & ~int64_t{15};
+      for (; j < group_size; ++j) {
+        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (std::isfinite(v)) {
+          row_min = std::min(row_min, v);
+          row_max = std::max(row_max, v);
+        }
+      }
+
+      float scale;
+      int32_t zp;
+      compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
+      scales[task] = scale;
+      zps[task] = zp;
+
+      const __m512 vscale = _mm512_set1_ps(scale);
+      const __m512i vzp = _mm512_set1_epi32(zp);
+      const __m512i vlo = _mm512_set1_epi32(0);
+      const __m512i vhi = _mm512_set1_epi32(255);
+      const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+      j = 0;
+      for (; j + 63 < group_size; j += 64) {
+        __m512i r0 = _mm512_add_epi32(_mm512_cvtps_epi32(
+            _mm512_div_ps(load_f32(j), vscale)), vzp);
+        __m512i r1 = _mm512_add_epi32(_mm512_cvtps_epi32(
+            _mm512_div_ps(load_f32(j + 16), vscale)), vzp);
+        __m512i r2 = _mm512_add_epi32(_mm512_cvtps_epi32(
+            _mm512_div_ps(load_f32(j + 32), vscale)), vzp);
+        __m512i r3 = _mm512_add_epi32(_mm512_cvtps_epi32(
+            _mm512_div_ps(load_f32(j + 48), vscale)), vzp);
+        r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
+        r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
+        r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
+        r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
+        store_4x16_u8_pg(grp_dst + j,
+                          _mm512_cvtusepi32_epi8(r0), _mm512_cvtusepi32_epi8(r1),
+                          _mm512_cvtusepi32_epi8(r2), _mm512_cvtusepi32_epi8(r3),
+                          cl_ok);
+      }
+      for (; j + 15 < group_size; j += 16) {
+        __m512i r = _mm512_add_epi32(_mm512_cvtps_epi32(
+            _mm512_div_ps(load_f32(j), vscale)), vzp);
+        r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                         _mm512_cvtusepi32_epi8(r));
+      }
+      for (; j < group_size; ++j) {
+        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
         q = std::max(0, std::min(255, q));
         grp_dst[j] = static_cast<uint8_t>(q);

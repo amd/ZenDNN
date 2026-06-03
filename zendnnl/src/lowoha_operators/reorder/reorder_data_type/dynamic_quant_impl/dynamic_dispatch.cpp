@@ -33,9 +33,15 @@ namespace reorder {
  *
  * Each kernel manages its own OMP parallel region internally.
  *
- * Supports both f32 and bf16 scale output buffers. When scale.dt is bf16,
- * an intermediate f32 buffer is used for kernel computation, then converted
- * to bf16 on output.
+ * Supports f32, bf16, and f16 scale output buffers. When scale.dt is
+ * bf16 or f16, an intermediate f32 buffer is used for kernel computation
+ * and narrowed to the caller's storage dtype on output (via
+ * float_to_bf16 / float16_t::f32_to_f16_val).
+ *
+ * For f16 source, the FMA precision (F32 vs FP16) is selected by
+ * can_use_f16_fma_kernel() (defaults to FP16-FMA when the
+ * AVX512-FP16 ISA is available and the library was not built with
+ * -DZENDNNL_NATIVE_F32_ACCUM=ON).
  *
  * @return true if a matching kernel was dispatched, false otherwise
  */
@@ -43,14 +49,20 @@ bool dispatch_fused_per_token(const void *src, void *dst,
                                       const reorder_params_t &params,
                                       int64_t M, int64_t N) {
   const auto scale_dt = params.quant_params.scale.dt;
-  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+  if (scale_dt != data_type_t::f32  &&
+      scale_dt != data_type_t::bf16 &&
+      scale_dt != data_type_t::f16)
     return false;
 
-  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  // Scale staging: kernels operate on f32 scale. For bf16/f16 user
+  // buffers, stage through an std::vector<float> and narrow to the
+  // user's dtype after dispatch.
+  const bool scale_needs_narrow = (scale_dt == data_type_t::bf16 ||
+                                   scale_dt == data_type_t::f16);
   std::vector<float> scale_f32_tmp;
   float *scale_f32;
 
-  if (scale_is_bf16) {
+  if (scale_needs_narrow) {
     scale_f32_tmp.resize(M);
     scale_f32 = scale_f32_tmp.data();
   } else {
@@ -59,6 +71,11 @@ bool dispatch_fused_per_token(const void *src, void *dst,
 
   const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
   bool dispatched = false;
+
+  // FP16-FMA vs F32-FMA selection for f16 source. Cached once per call —
+  // can_use_f16_fma_kernel() reads platform info, no env var is consulted.
+  const bool f16_use_fp16fma =
+      (params.src_dtype == data_type_t::f16) ? can_use_f16_fma_kernel() : false;
 
   if (is_symmetric) {
     if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
@@ -70,6 +87,17 @@ bool dispatch_fused_per_token(const void *src, void *dst,
       dynamic_per_token_quant_f32_s8_native(
           static_cast<const float *>(src),
           static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::s8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_token_quant_f16_s8_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, N);
+      } else {
+        dynamic_per_token_quant_f16_s8_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, N);
+      }
       dispatched = true;
     }
   } else {
@@ -84,13 +112,29 @@ bool dispatch_fused_per_token(const void *src, void *dst,
           static_cast<const float *>(src),
           static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
       dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::u8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_token_quant_f16_u8_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      } else {
+        dynamic_per_token_quant_f16_u8_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      }
+      dispatched = true;
     }
   }
 
-  if (dispatched && scale_is_bf16) {
-    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
-    for (int64_t m = 0; m < M; ++m)
-      bf16_out[m] = float_to_bf16(scale_f32[m]);
+  if (dispatched && scale_needs_narrow) {
+    uint16_t *out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    if (scale_dt == data_type_t::bf16) {
+      for (int64_t m = 0; m < M; ++m)
+        out[m] = float_to_bf16(scale_f32[m]);
+    } else {  // f16: floor-then-narrow via narrow_f32_scale_to_f16
+      for (int64_t m = 0; m < M; ++m)
+        out[m] = common::narrow_f32_scale_to_f16(scale_f32[m]);
+    }
   }
 
   return dispatched;
@@ -103,6 +147,11 @@ bool dispatch_fused_per_token(const void *src, void *dst,
  * Pass 2: quantize (parallel over M*N contiguous elements, AVX-512).
  * Better thread utilization than fused kernels when M < num_threads.
  *
+ * For FP16 source, the FMA precision is selected at runtime between
+ * F32-FMA (AVX-512F + F16C) and FP16-FMA (Strategy A, AVX512-FP16 ISA)
+ * via can_use_f16_fma_kernel() — same selector as the fused per-token
+ * path.
+ *
  * @return true if a matching kernel was dispatched, false otherwise
  */
 
@@ -110,14 +159,17 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
                                         const reorder_params_t &params,
                                         int64_t M, int64_t N) {
   const auto scale_dt = params.quant_params.scale.dt;
-  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+  if (scale_dt != data_type_t::f32  &&
+      scale_dt != data_type_t::bf16 &&
+      scale_dt != data_type_t::f16)
     return false;
 
-  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  const bool scale_needs_narrow = (scale_dt == data_type_t::bf16 ||
+                                   scale_dt == data_type_t::f16);
   std::vector<float> scale_f32_tmp;
   float *scale_f32;
 
-  if (scale_is_bf16) {
+  if (scale_needs_narrow) {
     scale_f32_tmp.resize(M);
     scale_f32 = scale_f32_tmp.data();
   } else {
@@ -126,6 +178,10 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
 
   const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
   bool dispatched = false;
+
+  // FP16-FMA vs F32-FMA selection (same policy as fused per-token).
+  const bool f16_use_fp16fma =
+      (params.src_dtype == data_type_t::f16) ? can_use_f16_fma_kernel() : false;
 
   if (is_symmetric) {
     if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
@@ -137,6 +193,17 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
       dynamic_per_token_quant_f32_s8_unfused_native(
           static_cast<const float *>(src),
           static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::s8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_token_quant_f16_s8_unfused_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, N);
+      } else {
+        dynamic_per_token_quant_f16_s8_unfused_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, N);
+      }
       dispatched = true;
     }
   } else {
@@ -151,13 +218,29 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
           static_cast<const float *>(src),
           static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
       dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::u8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_token_quant_f16_u8_unfused_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      } else {
+        dynamic_per_token_quant_f16_u8_unfused_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      }
+      dispatched = true;
     }
   }
 
-  if (dispatched && scale_is_bf16) {
-    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
-    for (int64_t m = 0; m < M; ++m)
-      bf16_out[m] = float_to_bf16(scale_f32[m]);
+  if (dispatched && scale_needs_narrow) {
+    uint16_t *out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    if (scale_dt == data_type_t::bf16) {
+      for (int64_t m = 0; m < M; ++m)
+        out[m] = float_to_bf16(scale_f32[m]);
+    } else {  // f16: floor-then-narrow via narrow_f32_scale_to_f16
+      for (int64_t m = 0; m < M; ++m)
+        out[m] = common::narrow_f32_scale_to_f16(scale_f32[m]);
+    }
   }
 
   return dispatched;
@@ -173,7 +256,9 @@ bool dispatch_fused_per_group(const void *src, void *dst,
                                       const reorder_params_t &params,
                                       int64_t M, int64_t K) {
   const auto scale_dt = params.quant_params.scale.dt;
-  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+  if (scale_dt != data_type_t::f32  &&
+      scale_dt != data_type_t::bf16 &&
+      scale_dt != data_type_t::f16)
     return false;
   if (!is_per_group_col_dims(params.quant_params.scale.dims, params.src_shape))
     return false;
@@ -183,11 +268,12 @@ bool dispatch_fused_per_group(const void *src, void *dst,
     return false;
 
   const int64_t scale_nelems = M * G;
-  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  const bool scale_needs_narrow = (scale_dt == data_type_t::bf16 ||
+                                   scale_dt == data_type_t::f16);
   std::vector<float> scale_f32_tmp;
   float *scale_f32;
 
-  if (scale_is_bf16) {
+  if (scale_needs_narrow) {
     scale_f32_tmp.resize(scale_nelems);
     scale_f32 = scale_f32_tmp.data();
   } else {
@@ -196,6 +282,10 @@ bool dispatch_fused_per_group(const void *src, void *dst,
 
   const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
   bool dispatched = false;
+
+  // FP16 FMA backend selection (per-group path, see can_use_f16_fma_kernel).
+  const bool f16_use_fp16fma =
+      (params.src_dtype == data_type_t::f16) ? can_use_f16_fma_kernel() : false;
 
   if (is_symmetric) {
     if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
@@ -207,6 +297,17 @@ bool dispatch_fused_per_group(const void *src, void *dst,
       dynamic_per_group_quant_f32_s8_native(
           static_cast<const float *>(src),
           static_cast<int8_t *>(dst), scale_f32, M, K, G);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::s8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_group_quant_f16_s8_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, K, G);
+      } else {
+        dynamic_per_group_quant_f16_s8_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<int8_t *>(dst), scale_f32, M, K, G);
+      }
       dispatched = true;
     }
   } else {
@@ -223,13 +324,29 @@ bool dispatch_fused_per_group(const void *src, void *dst,
           static_cast<const float *>(src),
           static_cast<uint8_t *>(dst), scale_f32, zp_out, M, K, G);
       dispatched = true;
+    } else if (params.src_dtype == data_type_t::f16 && params.dst_dtype == data_type_t::u8) {
+      if (f16_use_fp16fma) {
+        dynamic_per_group_quant_f16_u8_avx512fp16(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, K, G);
+      } else {
+        dynamic_per_group_quant_f16_u8_native(
+            static_cast<const uint16_t *>(src),
+            static_cast<uint8_t *>(dst), scale_f32, zp_out, M, K, G);
+      }
+      dispatched = true;
     }
   }
 
-  if (dispatched && scale_is_bf16) {
-    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
-    for (int64_t i = 0; i < scale_nelems; ++i)
-      bf16_out[i] = float_to_bf16(scale_f32[i]);
+  if (dispatched && scale_needs_narrow) {
+    uint16_t *out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    if (scale_dt == data_type_t::bf16) {
+      for (int64_t i = 0; i < scale_nelems; ++i)
+        out[i] = float_to_bf16(scale_f32[i]);
+    } else {  // f16: floor-then-narrow via narrow_f32_scale_to_f16
+      for (int64_t i = 0; i < scale_nelems; ++i)
+        out[i] = common::narrow_f32_scale_to_f16(scale_f32[i]);
+    }
   }
 
   return dispatched;
@@ -246,22 +363,25 @@ bool dispatch_group_dynamic_per_token(
     const group_dynamic_quant_params_t &params) {
   if (params.dst_dtype != data_type_t::s8) return false;
   if (params.scale_dtype != data_type_t::f32 &&
-      params.scale_dtype != data_type_t::bf16) {
+      params.scale_dtype != data_type_t::bf16 &&
+      params.scale_dtype != data_type_t::f16) {
     return false;
   }
   if (params.src_dtype != data_type_t::bf16 &&
-      params.src_dtype != data_type_t::f32) {
+      params.src_dtype != data_type_t::f32 &&
+      params.src_dtype != data_type_t::f16) {
     return false;
   }
 
   const size_t num_ops = M.size();
-  const bool scale_is_bf16 = (params.scale_dtype == data_type_t::bf16);
+  const bool scale_needs_narrow = (params.scale_dtype == data_type_t::bf16 ||
+                                   params.scale_dtype == data_type_t::f16);
   int64_t total_rows = 0;
   for (int m : M) total_rows += std::max(0, m);
 
   std::vector<float *> scale_f32(num_ops, nullptr);
   std::vector<float> scale_tmp;
-  if (scale_is_bf16) {
+  if (scale_needs_narrow) {
     scale_tmp.resize(static_cast<size_t>(total_rows));
     size_t off = 0;
     for (size_t i = 0; i < num_ops; ++i) {
@@ -277,16 +397,28 @@ bool dispatch_group_dynamic_per_token(
   if (params.src_dtype == data_type_t::bf16) {
     dynamic_per_token_group_quant_bf16_s8_native(
         src, M, K, lda, dst, dst_lda, scale_f32, params.num_threads);
-  } else {
+  } else if (params.src_dtype == data_type_t::f32) {
     dynamic_per_token_group_quant_f32_s8_native(
+        src, M, K, lda, dst, dst_lda, scale_f32, params.num_threads);
+  } else {
+    dynamic_per_token_group_quant_f16_s8_native(
         src, M, K, lda, dst, dst_lda, scale_f32, params.num_threads);
   }
 
-  if (scale_is_bf16) {
-    for (size_t i = 0; i < num_ops; ++i) {
-      uint16_t *out = static_cast<uint16_t *>(scale[i]);
-      for (int64_t m = 0; m < M[i]; ++m) {
-        out[m] = float_to_bf16(scale_f32[i][m]);
+  if (scale_needs_narrow) {
+    if (params.scale_dtype == data_type_t::bf16) {
+      for (size_t i = 0; i < num_ops; ++i) {
+        uint16_t *out = static_cast<uint16_t *>(scale[i]);
+        for (int64_t m = 0; m < M[i]; ++m) {
+          out[m] = float_to_bf16(scale_f32[i][m]);
+        }
+      }
+    } else {  // f16: floor-then-narrow via narrow_f32_scale_to_f16
+      for (size_t i = 0; i < num_ops; ++i) {
+        uint16_t *out = static_cast<uint16_t *>(scale[i]);
+        for (int64_t m = 0; m < M[i]; ++m) {
+          out[m] = common::narrow_f32_scale_to_f16(scale_f32[i][m]);
+        }
       }
     }
   }

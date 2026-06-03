@@ -20,6 +20,7 @@
 #define LOWOHA_REORDER_GRAIN_SIZE 1024
 
 #include "memory/memory_utils.hpp"
+#include "common/zendnnl_global.hpp"
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
 #include <vector>
 #include <cstdint>
@@ -45,20 +46,9 @@ enum class reorder_algo_t : int {
 /**
  * @brief Structure for reorder quantization parameters
  *
- * Used for quantization (bf16/f32 -> int8/uint8) and dequantization (int8/uint8 -> bf16/f32).
+ * Used for quantization (bf16/f32/f16 -> int8/uint8) and dequantization (int8/uint8 -> bf16/f32/f16).
  * Also used for f32 <-> bf16, f32 <-> f16 and bf16 <-> f16 type conversions
  * with optional scaling.
- *
- * Formulas:
- *   - Quantization (s8):   int8_val = clamp(round(src_val / scale) + zero_point, -128, 127)
- *   - Quantization (u8):   uint8_val = clamp(round(src_val / scale) + zero_point, 0, 255)
- *   - Dequantization:      dst_val = (int_val - zero_point) * scale
- *   - f32  -> bf16:        bf16_val = bf16((f32_val / scale) + zero_point)  [scale/zp optional]
- *   - bf16 -> f32:         f32_val  = (bf16_as_f32 - zero_point) * scale    [scale/zp optional]
- *   - f32  -> f16:         f16_val  = f16((f32_val / scale) + zero_point)   [scale/zp optional]
- *   - f16  -> f32:         f32_val  = (f16_as_f32 - zero_point) * scale     [scale/zp optional]
- *   - bf16 -> f16:         f16_val  = f16((bf16_as_f32 / scale) + zero_point) [scale/zp optional]
- *   - f16  -> bf16:        bf16_val = bf16((f16_as_f32 - zero_point) * scale) [scale/zp optional]
  *
  * Note: For float-only conversions (f32 <-> bf16, f32 <-> f16, bf16 <-> f16),
  *       scale and zero_point are OPTIONAL.  If not provided (buff = nullptr),
@@ -89,7 +79,7 @@ enum class reorder_algo_t : int {
  * Per-group-col indexing: index = row * G + group_idx, where group_idx = col / (N / G)
  *
  * Currently supported:
- *   - scale: f32 or bf16 (bf16 is converted to f32 internally on read)
+ *   - scale: f32, bf16, or f16 (bf16/f16 are converted to f32 internally on read)
  *   - zero_point: s32 only
  *
  * Dynamic Quantization Mode (when reorder_params_t::dynamic_quant = true):
@@ -109,7 +99,7 @@ struct reorder_quant_params_t {
   struct quant_t {
     void *buff;                    ///< Pointer to quantization data buffer (read for static, write for dynamic)
     data_type_t
-    dt;                ///< Data type of the buffer (f32 or bf16 for scale, s32 for zp)
+    dt;                ///< Data type of the buffer (f32, bf16, or f16 for scale; s32 for zp)
     std::vector<int64_t> dims;     ///< Dimensions matching tensor dimensionality
 
     /**
@@ -118,7 +108,7 @@ struct reorder_quant_params_t {
     quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
   };
 
-  quant_t scale;                              ///< Scale factor (f32 or bf16; bf16 converted to f32 on read)
+  quant_t scale;                              ///< Scale factor (f32, bf16, or f16; bf16/f16 converted to f32 on read)
   quant_t zero_point;                         ///< Zero point offset (currently s32 only)
 
   /**
@@ -384,6 +374,45 @@ inline int32_t get_dynamic_quant_algo_override() {
     return 0;
   }();
   return val;
+}
+
+/**
+ * @brief Check if the AVX512-FP16 (__m512h) FMA kernels are usable.
+ *
+ * Reorder ships two FP16 AVX-512 backends side-by-side:
+ *   - F32-FMA       — AVX-512F + F16C load/store, math in __m512. Every
+ *                     shipping AVX-512F-capable CPU also has F16C (the two
+ *                     CPUID bits are independent, but commercial silicon
+ *                     introduced F16C in 2012 and AVX-512F in 2017, so the
+ *                     superset relation holds in practice).
+ *   - FP16-FMA      — native __m512h math, requires the AVX512-FP16 ISA
+ *                     (Granite Rapids / Sapphire Rapids / Turin) and a
+ *                     toolchain that supports __m512h intrinsics
+ *                     (GCC 12+).
+ *
+ * This helper decides which backend the dispatchers should pick.
+ * Returns true to authorise the FP16-FMA kernels, false to fall back to
+ * the F32-FMA kernels.
+ *
+ * Selection policy (single source of truth; the dispatchers simply call
+ * this helper):
+ *   - Library built with @c -DZENDNNL_NATIVE_F32_ACCUM=ON → false
+ *     (build-time kill switch for numerical-reproducibility studies).
+ *   - Otherwise + GCC < 12                                → false
+ *     (__m512h intrinsics unavailable; the FP16-FMA TUs compile to
+ *     empty link stubs on older toolchains, so we must avoid calling
+ *     them).
+ *   - Otherwise                                           → runtime
+ *     AVX512-FP16 ISA status reported by zendnnl_platform_info().
+ *
+ * No runtime environment variable is exposed for this choice.
+ */
+inline bool can_use_f16_fma_kernel() {
+#if !defined(ZENDNNL_NATIVE_F32_ACCUM) && defined(__GNUC__) && (__GNUC__ >= 12)
+  return zendnnl::common::zendnnl_platform_info().get_avx512_f16_status();
+#else
+  return false;
+#endif
 }
 
 } // namespace reorder

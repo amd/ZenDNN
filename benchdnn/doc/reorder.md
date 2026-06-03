@@ -56,8 +56,8 @@ Provide a file with one configuration per line. Each line should contain:
 - `rows` (Number of rows in the tensor)
 - `cols` (Number of columns in the tensor)
 - `iters` (Number of benchmark iterations)
-- `src_dtype` (Source data type, e.g., f32, bf16)
-- `dst_dtype` (Destination data type, e.g., s8, u8)
+- `src_dtype` (Source data type: `f32`, `bf16`, `f16`)
+- `dst_dtype` (Destination data type: `s8`, `u8` for quantize cases; for static dequantize cases also `bf16`, `f16`, or `f32` — pick the destination dtype that matches the static reorder direction the library supports. Dynamic quantization only writes `s8` / `u8`.)
 - `algo` (Reorder algorithm: `DT`, `native`, or `reference`)
 - `scale_granularity` (Scale granularity: `per_tensor`, `per_channel_row`, `per_channel_col`, `per_group_row`, `per_group_col`)
 - `group_size` (Group size for per-group granularities; 0 otherwise)
@@ -77,8 +77,23 @@ Provide a file with one configuration per line. Each line should contain:
 4, 1024, 768, 100, f32, u8, reference, per_group_col, 128, false, 8, 20
 1, 4096, 4096, 50, f32, u8, reference, per_channel_col, 0, true, 0, 10
 2, 2048, 1024, 100, f32, u8, reference, per_group_row, 64, false, 4, 20
+# FP16 dynamic-quant examples (requires AVX-512 host; FP16-FMA backend
+# is auto-selected when AVX512-FP16 ISA is present, F32-FMA otherwise):
+1, 2048, 1024, 100, f16, s8, native, per_channel_row, 0, true, 0, 20
+1, 4096, 4096, 50,  f16, u8, native, per_tensor,      0, true, 0, 10
+4, 1024, 768,  100, f16, u8, native, per_group_col,   128, true, 8, 20
+# FP16 static dequant examples (s8/u8 -> f16, dynamic_quant=false). Same
+# FMA backend selection rules as the dynamic-quant FP16 path above:
+1, 2048, 1024, 100, s8, f16, native, per_tensor,      0, false, 0, 20
+1, 4096, 4096, 50,  u8, f16, native, per_channel_row, 0, false, 0, 10
 ```
 ---
+
+> **Note (FP16 on either side):** When `src_dtype=f16` (with `dynamic_quant=true` or `dynamic_quant=false`) or `dst_dtype=f16` (static dequant from `s8`/`u8`), the reorder kernel picks between two backends at dispatch time:
+> - **F32-FMA** (AVX-512F + F16C): F16C convert on load/store, math in `__m512`.
+> - **FP16-FMA** (`__m512h`-native, AVX512-FP16 ISA): full quant / dequant chain in FP16.
+>
+> Selection is automatic — FP16-FMA when the host has AVX512-FP16 and the library was built with GCC 12+, else F32-FMA. Decided by `can_use_f16_fma_kernel()` in `lowoha_reorder_common.hpp`; no runtime env var. To pin reorder to the F32-accumulating AVX-512 path for reproducibility studies, rebuild with `-DZENDNNL_NATIVE_F32_ACCUM=ON`. The static-reorder per-tensor path (used when the dynamic-quant fast-path doesn't match, and the only path used for the `s8/u8 → f16` dequant direction) follows the same policy. For per-tensor F16 source or F16 destination, this is the only granularity that has dedicated SIMD kernels at the static layer; other granularities fall through to the scalar element-wise loop (same as the BF16/F32 conventions).
 
 > **Note:**
 > - The `isInplace` option controls whether the reorder is performed in-place or out-of-place.
