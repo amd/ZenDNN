@@ -289,19 +289,29 @@ void AITensorFactory::fill_uniform_data(void *ptr, size_t nelem,
     }
     break;
   }
-  case data_type_t::s4: {
-    int8_t *data = static_cast<int8_t *>(ptr);
-    std::uniform_int_distribution<int> int_dist(-8, 7);
-    for (size_t i = 0; i < nelem; ++i) {
-      data[i] = static_cast<int8_t>(int_dist(rng));
-    }
-    break;
-  }
   case data_type_t::u8: {
     uint8_t *data = static_cast<uint8_t *>(ptr);
     std::uniform_int_distribution<int> int_dist(0, 255);
     for (size_t i = 0; i < nelem; ++i) {
       data[i] = static_cast<uint8_t>(int_dist(rng));
+    }
+    break;
+  }
+  case data_type_t::u4: {
+    const size_t nbytes = (nelem + 1) / 2;   // two 4-bit values per byte
+    uint8_t *data = static_cast<uint8_t *>(ptr);
+    std::uniform_int_distribution<int> int_dist(0, 255);
+    for (size_t i = 0; i < nbytes; ++i) {
+      data[i] = static_cast<uint8_t>(int_dist(rng));
+    }
+    break;
+  }
+  case data_type_t::s4: {
+    const size_t nbytes = (nelem + 1) / 2;   // two packed 4-bit values per byte
+    int8_t *data = static_cast<int8_t *>(ptr);
+    std::uniform_int_distribution<int> int_dist(-128, 127);
+    for (size_t i = 0; i < nbytes; ++i) {
+      data[i] = static_cast<int8_t>(int_dist(rng));
     }
     break;
   }

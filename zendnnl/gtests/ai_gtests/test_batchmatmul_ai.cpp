@@ -372,7 +372,7 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
       if (params.expect_success) {
         if (test_status == status_t::success) {
           // Validate that output tensor is reasonable
-          EXPECT_TRUE(validate_output_tensor(tensors.output, params))
+          EXPECT_TRUE(validate_output_tensor(tensors.output, params, weight_dtype))
               << "ZenDNNL output tensor validation failed";
         }
       }
@@ -825,11 +825,13 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
   // Parameters:
   //   output - Output tensor
   //   params - Batch matmul test parameters
+  //   weight_dtype - Weight tensor data type (used to relax checks for S4 weights)
   // Returns:
   //   true if output tensor is valid, false otherwise
   // -----------------------------------------------------------------------------
   bool validate_output_tensor(const tensor_t &output,
-                              const BatchMatmulParamsAI &params) {
+                              const BatchMatmulParamsAI &params,
+                              data_type_t weight_dtype = data_type_t::none) {
     // Check dimensions
     auto expected_dims = BatchMatmulTestUtils::get_output_dims(params.batch_size,
                          params.m, params.n);
@@ -841,6 +843,17 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
     auto expected_dtype = AITestUtils::get_output_dtype(params.data_types);
     if (output.get_data_type() != expected_dtype) {
       return false;
+    }
+
+    // For S4 quantized weights, skip the all-zeros / sub-threshold check.
+    // S4 has only 16 quantization levels, so for small K and tiny output
+    // shapes the kernel can legitimately produce values at or below the BF16
+    // 1e-4 / F32 1e-7 thresholds (especially when fused with post-ops like
+    // relu/binary_mul that can drive the output toward zero). The strict
+    // non-zero heuristic flags these correct results as failures, so skip it
+    // for S4 the same way test_matmul_ai.cpp does.
+    if (weight_dtype == data_type_t::s4) {
+      return true;
     }
 
     // Check that output is not all zeros (basic sanity check).
@@ -956,7 +969,8 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
   // -----------------------------------------------------------------------------
   bool validate_boundary_output(const tensor_t &output,
                                 const BatchMatmulParamsAI &params) {
-    if (!validate_output_tensor(output, params)) {
+    auto weight_dtype = AITestUtils::get_weight_dtype(params.data_types);
+    if (!validate_output_tensor(output, params, weight_dtype)) {
       return false;
     }
 

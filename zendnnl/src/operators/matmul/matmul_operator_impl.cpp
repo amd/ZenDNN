@@ -438,6 +438,15 @@ status_t matmul_impl_t::validate() {
   if (weights && (weights->get_data_type() == data_type_t::s4 ||
                   weights->get_data_type() == data_type_t::u4) &&
       forced_kernel != "reference") {
+    // AOCL DLP S4/U4 GEMM requires a pre-reordered (blocked) 2D weight.
+    // A batched/3D S4/U4 weight cannot be reordered per-batch, so reject it
+    if (weights_size.size() != 2) {
+      apilog_error("<", get_name(),
+                   "> S4/U4 weights must be 2D (pre-reordered); batched/3D "
+                   "S4/U4 weights are not supported.");
+      return status_t::failure;
+    }
+
     apilog_info("Weight tensor is S4/U4, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
   }
