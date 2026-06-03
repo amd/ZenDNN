@@ -941,14 +941,14 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
   // Hot path: cache hit. Unreachable when cache_enabled is false
   // because the clear() above just emptied the cache.
-  if (cache.find_key(key)) {
-    dlp_postop_metadata_holder_t *h = cache.get(key);
-    if (h->no_metadata) {
+  dlp_postop_metadata_holder_t *cached_holder = nullptr;
+  if (cache.try_get(key, cached_holder)) {
+    if (cached_holder->no_metadata) {
       return nullptr;
     }
-    patch_mutable_fields(&h->metadata, h, lowoha_param, bias, dtypes,
-                         M, N, K, zp_comp_acc, zp_comp_ndim);
-    return &h->metadata;
+    patch_mutable_fields(&cached_holder->metadata, cached_holder, lowoha_param,
+                         bias, dtypes, M, N, K, zp_comp_acc, zp_comp_ndim);
+    return &cached_holder->metadata;
   }
 
   // Cold path: determine dispatch flags BEFORE allocating the holder.
@@ -1031,15 +1031,15 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
   // Cold path: allocate + initialize a new holder now that we know it
   // will be wired.
-  auto *h = static_cast<dlp_postop_metadata_holder_t *>(
+  auto *new_holder = static_cast<dlp_postop_metadata_holder_t *>(
               std::calloc(1, sizeof(dlp_postop_metadata_holder_t)));
-  if (!h) {
+  if (!new_holder) {
     EXCEPTION_WITH_LOC(
       "[postop-cache] failed to allocate dlp_postop_metadata_holder_t");
   }
-  init_metadata_holder(h);
+  init_metadata_holder(new_holder);
 
-  dlp_metadata_t *dlp_metadata = &h->metadata;
+  dlp_metadata_t *dlp_metadata = &new_holder->metadata;
 
   // Count different types of operations
   int eltwise_count = 0;
@@ -1107,10 +1107,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   }
   // Wire seq_vector (only if we have post-ops). total_ops is bounded by
   // AOCL_DLP_MAX_POST_OPS via the AOCL DLP API contract (chains beyond
-  // that are rejected by the backend), and h->seq_vector is sized to
-  // exactly that cap, so no in-house bounds check is needed here.
+  // that are rejected by the backend), and new_holder->seq_vector is sized
+  // to exactly that cap, so no in-house bounds check is needed here.
   if (total_ops > 0) {
-    dlp_metadata->seq_vector = h->seq_vector;
+    dlp_metadata->seq_vector = new_holder->seq_vector;
   }
   else {
     dlp_metadata->seq_vector = nullptr;
@@ -1132,14 +1132,14 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   //     is malloc'd into the holder, and the kernel call site's matching
   //     cleanup_dlp_post_op() frees both at the end of the matmul.
   if (is_non_quant_src_int8 || is_bf16_f32_per_token_sym) {
-    dlp_metadata->a_pre_quant  = &h->a_pre_quant;
-    dlp_metadata->a_post_quant = &h->a_post_quant;
+    dlp_metadata->a_pre_quant  = &new_holder->a_pre_quant;
+    dlp_metadata->a_post_quant = &new_holder->a_post_quant;
     if (lowoha_param.quant_params.src_zp.buff) {
       // a_pre_quant.zp is pre-wired by init_metadata_holder at the
       // holder's embedded a_pre_quant_zp; the explicit re-assignment
       // documents which holder field zp targets in the asymmetric path.
       // The else branch nulls zp for the symmetric variant.
-      dlp_metadata->a_pre_quant->zp = &h->a_pre_quant_zp;
+      dlp_metadata->a_pre_quant->zp = &new_holder->a_pre_quant_zp;
       dlp_metadata->a_pre_quant->zp->zero_point = const_cast<void *>
           (lowoha_param.quant_params.src_zp.buff);
       dlp_metadata->a_pre_quant->zp->zero_point_len = 1;
@@ -1163,8 +1163,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       // haven't set is_per_call yet, so this becomes a regular cached
       // no_metadata sentinel and every subsequent call (per-token-sym
       // or scalar) for this key short-circuits to nullptr.
-      h->no_metadata = true;
-      cache.add(key, h);
+      new_holder->no_metadata = true;
+      cache.add(key, new_holder);
       return nullptr;
     }
     const data_type_t src_scale_dt = lowoha_param.quant_params.src_scale.dt;
@@ -1183,16 +1183,16 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       // kernel call site releases both inv_scales and the holder.
       // The cache.add at the tail of this function is gated on
       // !is_per_call, so this holder is never inserted into the cache.
-      h->is_per_call = true;
-      h->a_pre_quant_inv_scales_dyn = static_cast<float *>(
+      new_holder->is_per_call = true;
+      new_holder->a_pre_quant_inv_scales_dyn = static_cast<float *>(
         std::malloc(static_cast<size_t>(src_quant_scale_len)
                     * sizeof(float)));
-      if (!h->a_pre_quant_inv_scales_dyn) {
+      if (!new_holder->a_pre_quant_inv_scales_dyn) {
         log_error("BF16-INT8 per-token-sym: failed to allocate inv_scales");
         // Release the per-call holder directly. The caller's
         // cleanup_dlp_post_op(nullptr) is a documented no-op, so
         // returning nullptr is the safe error contract here.
-        std::free(h);
+        std::free(new_holder);
         return nullptr;
       }
       for (md_t si = 0; si < src_quant_scale_len; ++si) {
@@ -1202,10 +1202,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         if (s < 1e-20f) {
           s = 1e-20f;
         }
-        h->a_pre_quant_inv_scales_dyn[si] = 1.0f / s;
+        new_holder->a_pre_quant_inv_scales_dyn[si] = 1.0f / s;
       }
       dlp_metadata->a_pre_quant->scl->scale_factor =
-        h->a_pre_quant_inv_scales_dyn;
+        new_holder->a_pre_quant_inv_scales_dyn;
       dlp_metadata->a_pre_quant->scl->scale_factor_len = src_quant_scale_len;
     }
     else {
@@ -1234,7 +1234,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     int64_t src_group_size = (src_scale_nelems == static_cast<size_t>(M))
                              ? K : K / (static_cast<int64_t>(src_scale_nelems) / M);
 
-    dlp_metadata->post_op_grp = &h->post_op_grp;
+    dlp_metadata->post_op_grp = &new_holder->post_op_grp;
     // post_op_grp->a_scl and ->b_scl pre-wired by init_metadata_holder.
     dlp_metadata->post_op_grp->group_size = static_cast<int>(src_group_size);
     dlp_metadata->post_op_grp->seq_length = 1;
@@ -1260,27 +1260,27 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   // Wire scale array for INT8 (scale[i].sf and scale[i].zp pre-wired by
   // init_metadata_holder at the holder's embedded sub-arrays).
   if (scale_count > 0) {
-    dlp_metadata->scale = h->scale;
+    dlp_metadata->scale = new_holder->scale;
   }
 
   // Wire bias array
   if (bias_count > 0) {
-    dlp_metadata->bias = h->bias;
+    dlp_metadata->bias = new_holder->bias;
   }
 
   // Wire eltwise array
   if (eltwise_count > 0) {
-    dlp_metadata->eltwise = h->eltwise;
+    dlp_metadata->eltwise = new_holder->eltwise;
   }
 
   // Wire matrix_add array (sf pre-wired + DLP_F32 default by init_metadata_holder)
   if (matrix_add_count > 0) {
-    dlp_metadata->matrix_add = h->matrix_add;
+    dlp_metadata->matrix_add = new_holder->matrix_add;
   }
 
   // Wire matrix_mul array (sf pre-wired + DLP_F32 default by init_metadata_holder)
   if (matrix_mul_count > 0) {
-    dlp_metadata->matrix_mul = h->matrix_mul;
+    dlp_metadata->matrix_mul = new_holder->matrix_mul;
   }
 
   int op_index = 0;
@@ -1363,7 +1363,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   }
 
   // Add post-ops
-  setup_dlp_postops(dlp_metadata, h, lowoha_param.postop_,
+  setup_dlp_postops(dlp_metadata, new_holder, lowoha_param.postop_,
                     op_index, eltwise_index, matrix_add_index, matrix_mul_index,
                     bias_index, scale_index, N);
 
@@ -1399,7 +1399,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
   // Setup pre-ops for WOQ (Weight-Only Quantization)
   if (is_woq) {
-    setup_woq_pre_ops(dlp_metadata, h, lowoha_param, K, N, dtypes.wei);
+    setup_woq_pre_ops(dlp_metadata, new_holder, lowoha_param, K, N, dtypes.wei);
   }
 
   // Register the fully-built holder in the per-thread cache; subsequent
@@ -1409,8 +1409,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   // are owned by the kernel call site's cleanup_dlp_post_op() and must
   // NOT enter the cache: their inv_scales[M] buffer is length-variable
   // and would leak if released by lru_cache_t's bare std::free eviction.
-  if (!h->is_per_call) {
-    cache.add(key, h);
+  if (!new_holder->is_per_call) {
+    cache.add(key, new_holder);
   }
 
   return dlp_metadata;

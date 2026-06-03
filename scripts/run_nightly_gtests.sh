@@ -59,6 +59,7 @@
 #                       Valid names: matmul, group_matmul, reorder, softmax,
 #                                    sdpa, normalization, embedding,
 #                                    embedding_bag,
+#                                    lru_cache, postop_cache, omp_api,
 #                                    matmul_ai_primitive, matmul_ai_lowoha,
 #                                    embag_ai_primitive, embag_ai_lowoha,
 #                                    batchmatmul (opt-in only; ~38h)
@@ -146,6 +147,9 @@ OP_NAMES=(
   normalization
   embedding
   embedding_bag
+  lru_cache
+  postop_cache
+  omp_api
   matmul_ai_primitive
   matmul_ai_lowoha
   embag_ai_primitive
@@ -161,6 +165,11 @@ declare -A OP_FILTER=(
   [normalization]='Normalization/*'
   [embedding]='Embedding/*'
   [embedding_bag]='EmbeddingBag/*'
+  # Fast, deterministic unit/utility suites (no randomized data). Included in
+  # the default sweep; each finishes in well under a second.
+  [lru_cache]='LruCacheTryGet.*'
+  [postop_cache]='*PostopCache*'
+  [omp_api]='OmpApiTest.*'
   [matmul_ai_primitive]='AITests/TestMatmul*'
   [matmul_ai_lowoha]='AITests/TestMatmul*'
   [embag_ai_primitive]='AITests/TestEmbagAI*'

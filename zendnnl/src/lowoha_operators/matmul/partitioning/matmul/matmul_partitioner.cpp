@@ -274,8 +274,9 @@ static const void *libxsmm_weight_prepack(
                  static_cast<unsigned int>(ldb), weight,
                  static_cast<uint32_t>(matmul_algo_t::libxsmm_blocked));
 
-  if (brgemm_weight_cache.find_key(key)) {
-    return brgemm_weight_cache.get(key);
+  void *cached_blocked = nullptr;
+  if (brgemm_weight_cache.try_get(key, cached_blocked)) {
+    return cached_blocked;
   }
 
   size_t buf_sz = libxsmm_weight_block_size(K, N, src_dtype);

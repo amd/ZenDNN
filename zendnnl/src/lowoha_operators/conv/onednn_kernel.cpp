@@ -93,16 +93,14 @@ bool reorderAndCacheWeights(
     else {
         // Use lock guard to protect the entire check-compute-cache operation
         std::lock_guard<std::mutex> lock(weight_cache_mutex);
-        auto found_obj = conv_weight_cache.find_key(key);
-        if (!found_obj) {
+        if (conv_weight_cache.try_get(key, dst_weights_mem)) {
+            apilog_info("Read onednn conv cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+        }
+        else {
             apilog_info("onednn conv reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
             dnnl::stream eng_stream(eng);
             dnnl::reorder(src_weights_mem, dst_weights_mem).execute(eng_stream, src_weights_mem, dst_weights_mem);
             conv_weight_cache.add(key, dst_weights_mem);
-        }
-        else {
-            apilog_info("Read onednn conv cached weights WEIGHT_CACHE_OUT_OF_PLACE");
-            dst_weights_mem = conv_weight_cache.get(key);
         }
     }
 

@@ -596,8 +596,8 @@ status_t get_or_pack_weight_bf16(
   // `apilog_verbose_enabled()` twice per call.
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
-  if (pack_cache.find_key(key)) {
-    *out_packed = static_cast<const bfloat16_t *>(pack_cache.get(key));
+  if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+    *out_packed = static_cast<const bfloat16_t *>(cached_pack);
     if (was_hit_out != nullptr) *was_hit_out = true;
     // Include the full cache key on the HIT line so a model-level
     // log shows exactly which (weight_ptr, K, N, ldb, transB,

@@ -104,9 +104,10 @@ inline int32_t* cache_or_compute_zp_compensation(
     // Check cache first
     if (can_cache) {
       std::lock_guard<std::mutex> lock(get_lowoha_mutex());
-      if (zp_comp_cache.find_key(key_obj)) {
+      int32_t *cached_comp = nullptr;
+      if (zp_comp_cache.try_get(key_obj, cached_comp)) {
         log_info("Cache hit: reading cached zero-point compensation");
-        return zp_comp_cache.get(key_obj);
+        return cached_comp;
       }
     }
     
@@ -135,12 +136,13 @@ inline int32_t* cache_or_compute_zp_compensation(
     // TOCTOU: another thread may have inserted this key while we computed.
     if (can_cache) {
       std::lock_guard<std::mutex> lock(get_lowoha_mutex());
-      if (zp_comp_cache.find_key(key_obj)) {
+      int32_t *cached_comp = nullptr;
+      if (zp_comp_cache.try_get(key_obj, cached_comp)) {
         std::free(static_cast<void *>(zp_comp_acc));
         log_info(
           "Cache hit after compute: peer inserted zero-point compensation; "
           "discarding duplicate buffer");
-        return zp_comp_cache.get(key_obj);
+        return cached_comp;
       }
       zp_comp_cache.add(key_obj, zp_comp_acc);
       log_info("Cache add: storing zero-point compensation");

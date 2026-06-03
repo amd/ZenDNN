@@ -238,7 +238,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   // Out-of-place reordering
   else if (weight_cache_type == 1) {
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
-    auto found_obj = matmul_weight_cache.find_key(key);
+    void *cached_ptr = nullptr;
+    bool found_obj = matmul_weight_cache.try_get(key, cached_ptr);
     if (!found_obj) {
       apilog_verbose("[AOCL.reorder MISS] weight cache miss — packing weights");
       size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B', k, n,
@@ -256,7 +257,6 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
       // The same cache key may already hold a nullptr from the prepacked
       // mem_format_b == 'r' path above, or from an earlier in-place reorder.
       // In both cases the caller's weight buffer is the reordered buffer.
-      void *cached_ptr = matmul_weight_cache.get(key);
       if (cached_ptr == nullptr) {
         apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE "
                     "(reusing user buffer)");
@@ -283,9 +283,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   // by inspecting whether the stored pointer is null.
   else if (weight_cache_type == 2) {
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
-    auto found_obj = matmul_weight_cache.find_key(key);
-    if (found_obj) {
-      void *cached_ptr = matmul_weight_cache.get(key);
+    void *cached_ptr = nullptr;
+    if (matmul_weight_cache.try_get(key, cached_ptr)) {
       if (cached_ptr == nullptr) {
         apilog_info("Read AOCL cached weights WEIGHT_CACHE_IN_PLACE "
                     "(reusing user buffer)");
@@ -418,7 +417,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
   }
   else if (weight_cache_type == 1) {
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
-    auto found_obj = matmul_weight_cache.find_key(key);
+    void *cached_ptr = nullptr;
+    bool found_obj = matmul_weight_cache.try_get(key, cached_ptr);
     if (!found_obj) {
       apilog_verbose("[AOCL.reorder symquant MISS] weight cache miss — packing");
       size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
@@ -434,7 +434,6 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
     else {
       // See reorderAndCacheWeights: nullptr means a prior prepack or
       // in-place path made the caller's weight buffer the reordered buffer.
-      void *cached_ptr = matmul_weight_cache.get(key);
       if (cached_ptr == nullptr) {
         apilog_info("Read AOCL sym_quant cached weights "
                     "WEIGHT_CACHE_OUT_OF_PLACE (reusing user buffer)");
@@ -455,9 +454,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
   // buffer just like the out-of-place branch.
   else if (weight_cache_type == 2) {
     std::lock_guard<std::mutex> lock(weight_cache_mutex);
-    auto found_obj = matmul_weight_cache.find_key(key);
-    if (found_obj) {
-      void *cached_ptr = matmul_weight_cache.get(key);
+    void *cached_ptr = nullptr;
+    if (matmul_weight_cache.try_get(key, cached_ptr)) {
       if (cached_ptr == nullptr) {
         apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_IN_PLACE "
                     "(reusing user buffer)");
@@ -551,9 +549,14 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 
   // Use lock guard to protect the entire check-compute-cache operation
   std::lock_guard<std::mutex> lock(woq_cache_mutex);
-  auto found_obj = matmul_weight_cache_woq.find_key(key);
+  // Short-circuit: only consult (and timestamp-bump) the cache when weights
+  // are const. When !is_weights_const the value is recomputed regardless, so
+  // skipping the lookup preserves the original no-bump behavior of that path.
+  void *cached_woq = nullptr;
+  bool found_obj = is_weights_const &&
+                   matmul_weight_cache_woq.try_get(key, cached_woq);
 
-  if (!is_weights_const || !found_obj) {
+  if (!found_obj) {
     apilog_verbose("[AOCL.reorder WOQ MISS] simulated WOQ reorder "
                    "(weight_cache_type=", weight_cache_type, ")");
     size_t alignment = 64;
@@ -585,7 +588,7 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
   else {
     apilog_verbose("[AOCL.reorder WOQ HIT] simulated WOQ cache hit — "
                    "reusing cached pack");
-    reorder_weights = matmul_weight_cache_woq.get(key);
+    reorder_weights = cached_woq;
   }
 }
 

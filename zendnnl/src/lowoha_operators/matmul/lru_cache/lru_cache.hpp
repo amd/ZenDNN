@@ -49,6 +49,11 @@ class lru_cache_t {
   void add(const lru_key_t &key, const value_t &value);
   value_t get(const lru_key_t &key);
   bool find_key(const lru_key_t &key) const;
+  /** Single-lookup hit test + fetch. Returns true and copies the stored
+   *  value into @p out on hit (including when the stored value is nullptr);
+   *  returns false on miss. Bumps the LRU timestamp on hit. Replaces the
+   *  find_key()+get() two-lookup pattern with one locked traversal. */
+  bool try_get(const lru_key_t &key, value_t &out);
   /** Clear all entries. Safe to call between test cases to avoid stale pointer-keyed entries. */
   void clear();
 
@@ -66,7 +71,7 @@ class lru_cache_t {
 
   // Private members
   uint32_t capacity_;
-  std::atomic<size_t> current_timestamp_;
+  std::atomic<size_t> current_timestamp_{0};
   std::unique_ptr<std::unordered_map<lru_key_t, timed_entry_t>> lru_cache_map_;
   mutable std::mutex mutex_;  // Mutex for thread-safe access
 };
@@ -211,6 +216,32 @@ lru_cache_t<KEY_T, VALUE_T>::get(
     return it->second.value_;
   }
   throw std::runtime_error("Key not found in cache.");
+}
+
+// Combined presence-test and fetch performed under a single mutex
+// acquisition and a single hash lookup. This is the one-lookup
+// replacement for the find_key() + get() pair, which acquired the
+// lock and hashed the key twice on every cache hit.
+//
+// Returns true on hit and copies the stored value into @p out; the
+// copy distinguishes presence (return value) from the value itself,
+// so caches that legitimately store a nullptr value (e.g. the AOCL
+// in-place reorder convention) are handled correctly. Returns false
+// on miss and leaves @p out untouched. The timestamp is bumped only
+// on hit, matching the prior get()-on-hit LRU semantics. The value is
+// copied out while the lock is held, so the caller never observes a
+// reference that evict() could invalidate.
+template <typename KEY_T, typename VALUE_T>
+bool lru_cache_t<KEY_T, VALUE_T>::try_get(
+  const lru_key_t &key, value_t &out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = lru_cache_map_->find(key);
+  if (it == lru_cache_map_->end()) {
+    return false;
+  }
+  it->second.timestamp_ = current_timestamp_++;
+  out = it->second.value_;
+  return true;
 }
 } // namespace matmul
 } // namespace lowoha

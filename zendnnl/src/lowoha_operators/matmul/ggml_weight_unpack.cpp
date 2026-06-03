@@ -393,9 +393,8 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
   void *cached_buffer = nullptr;
   {
     std::lock_guard<std::mutex> lock(cache_mutex);
-    if (weight_cache.find_key(cache_key)) {
+    if (weight_cache.try_get(cache_key, cached_buffer)) {
       apilog_info("GGML unpack/reorder cache hit: N=", N, ", K=", K);
-      cached_buffer = weight_cache.get(cache_key);
     }
   }
 
@@ -449,10 +448,9 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
 
     {
       std::lock_guard<std::mutex> lock(cache_mutex);
-      if (weight_cache.find_key(cache_key)) {
+      if (weight_cache.try_get(cache_key, cached_buffer)) {
         apilog_info("GGML unpack/reorder cache filled by another thread: N=",
                     N, ", K=", K);
-        cached_buffer = weight_cache.get(cache_key);
       } else {
         weight_cache.add(cache_key, new_cached_buffer);
         cached_buffer = new_cached_buffer;

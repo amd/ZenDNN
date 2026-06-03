@@ -148,9 +148,8 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
                          blocking_hash);
 
     // Check if the weight is still in the LRU cache (may have been evicted)
-    if (matmul_weight_cache.find_key(cache_key)) {
+    if (matmul_weight_cache.try_get(cache_key, dnnl_params.weights.mem)) {
       apilog_info("Read onednn cached weights (cache hit)");
-      dnnl_params.weights.mem = matmul_weight_cache.get(cache_key);
       return;
     }
     // Entry was evicted from LRU cache, remove stale hash_values entry
@@ -172,9 +171,8 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
                        blocking_hash);
 
   // Check if blocked weights already exist in cache (from different full_key with same blocking)
-  if (matmul_weight_cache.find_key(cache_key)) {
+  if (matmul_weight_cache.try_get(cache_key, dnnl_params.weights.mem)) {
     apilog_info("Read onednn cached weights (blocking hash match)");
-    dnnl_params.weights.mem = matmul_weight_cache.get(cache_key);
     // Update hash_values for faster lookup next time
     hash_values[full_key] = blocking_hash;
     return;

@@ -175,6 +175,8 @@ gtests/
 ├── test_group_matmul.cpp    # Group matmul testsuite (MoE postop, gated activation, fused MoE).
 ├── test_batchmatmul.cpp     # Batch matmul testsuite with different test cases.
 ├── test_reorder.cpp         # Reorder testsuite (regular + LOWOHA quantization/dequantization).
+├── test_postop_cache.cpp    # AOCL DLP post-op metadata cache testsuite (hit-path refresh, key distinctness, kill switch).
+├── test_lru_cache.cpp       # Unit testsuite for the lru_cache_t container (try_get contract).
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
 ├── test_normalization.cpp   # Normalization testsuite with different test cases.
@@ -1013,6 +1015,28 @@ export OMP_MAX_ACTIVE_LEVELS=2
 6. Run only the parallel-region tests (per-task ICV, loop pattern, concurrent max_threads):
 ```bash
 ./install/gtests/gtests --gtest_filter='OmpApiTest.*ParallelRegion*:OmpApiTest.*PerTaskIcv*:OmpApiTest.*ParallelThreads*'
+```
+
+### LRU Cache Tests
+ - LruCacheTryGet TestSuite validates the generic `lru_cache_t` container in `lowoha_operators/matmul/lru_cache/lru_cache.hpp`
+ - Focuses on `try_get()`, the single-lookup primitive that replaced the `find_key()` + `get()` two-lookup pattern across the matmul / group-matmul / conv weight, pack, reorder and zero-point-compensation caches
+ - Uses fixed `TEST` cases (not parameterized) — pure container contract, no kernels, no randomized data, independent of `gtest_utils.hpp`
+ - Complements the consumer-level integration coverage in `test_postop_cache.cpp` (and the weight/pack-cache hit paths exercised by `test_matmul.cpp` / `group_matmul/`); this suite pins the container contract those sites build on
+
+#### Test Categories
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| **Hit / Miss** | 3 tests | Hit returns `true` + value; miss returns `false` and leaves the out-parameter untouched; miss on an empty cache |
+| **nullptr value** | 1 test | A stored `nullptr` reads back as a hit with `out == nullptr` (the AOCL in-place-reorder convention) — not mistaken for a miss |
+| **LRU recency** | 2 tests | `try_get()` bumps the timestamp like `get()` so a touched entry survives eviction; an evicted key then misses via `try_get()` |
+| **Equivalence / Fidelity** | 2 tests | `try_get()` agrees with `find_key()` + `get()`; works with the production `Key_matmul` key type (custom hash + equality) |
+
+#### Running LRU Cache Tests
+
+1. Run all LRU cache tests:
+```bash
+./install/gtests/gtests --gtest_filter='LruCacheTryGet.*'
 ```
 
 ### Softmax Tests
