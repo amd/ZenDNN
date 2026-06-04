@@ -121,7 +121,7 @@ Where `k` is the inner matrix dimension that determines accumulation error scali
 
 **Relaxation Features:**
 - **Zero-reference tolerance**: `8e-4` for near-zero reference values (`< 1e-6`)
-- **Additional slack**: `2e-4` buffer for F32 operations
+- **Additional slack**: `9e-4` buffer for F32 operations
 
 **Note**: Relaxation can be enabled via `ENABLE_F32_RELAXATION` macro in `gtest_utils.hpp` and is enabled by default for LIBXSMM backends.
 

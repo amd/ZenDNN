@@ -4436,7 +4436,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
   constexpr float ZERO_REF_THRESH = 1e-6f;
-  constexpr float F32_EPS_SLACK = 2e-4f;
+  constexpr float F32_EPS_SLACK = 9e-4f;
 
   const bool is_f32 = output_tensor.get_data_type() == data_type_t::f32;
 

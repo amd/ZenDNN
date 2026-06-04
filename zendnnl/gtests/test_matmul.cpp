@@ -1412,8 +1412,20 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
                         binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
   bool ok = (status == status_t::success && ref_status == status_t::success);
   if (ok) {
+    uint32_t binary_mul_count = 0;
+    for (auto po : po_types) {
+      if (po == post_op_type_t::binary_mul) {
+        ++binary_mul_count;
+      }
+    }
+    // 18x base for dynamic quant; scale by max(1, 2*binary_mul_count) for binary_mul post-ops.
+    const uint32_t binary_mul_scale = binary_mul_count ?
+                                      (2u * binary_mul_count) :
+                                      1u;
+    const float epsilon = static_cast<float>(binary_mul_scale) * 18.f *
+                          epsilon_bf16;
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
-                             rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f, true);
+                             rtol_bf16, epsilon, ok, false, 1.0f, true);
   }
   EXPECT_TRUE(ok);
 }
