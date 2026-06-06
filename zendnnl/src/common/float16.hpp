@@ -185,37 +185,6 @@ class float16_t {
   uint16_t raw_bits_; /*!< float16 raw bits (IEEE 754 half-precision) */
 };
 
-#if defined(__GNUC__) && (__GNUC__ >= 12)
-//===----------------------------------------------------------------------===//
-// AVX-512-FP16 masked load/store shims
-//
-// GCC 12 and 13 ship AVX-512-FP16 intrinsics but are missing
-// _mm512_maskz_loadu_ph and _mm512_mask_storeu_ph (added in GCC 14).
-// Both lower to the same VMOVDQU16 instruction as their epi16
-// counterparts, so on GCC < 14 we forward to the epi16 form. On
-// GCC >= 14, the real intrinsics are used. Defined inline in this
-// header so they always inline at the call site.
-//===----------------------------------------------------------------------===//
-
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline __m512h f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
-#if (__GNUC__ < 14)
-  return (__m512h)_mm512_maskz_loadu_epi16(k, addr);
-#else
-  return _mm512_maskz_loadu_ph(k, addr);
-#endif
-}
-
-__attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
-static inline void f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
-#if (__GNUC__ < 14)
-  _mm512_mask_storeu_epi16(addr, k, (__m512i)val);
-#else
-  _mm512_mask_storeu_ph(addr, k, val);
-#endif
-}
-#endif  // __GNUC__ >= 12
-
 }//namespace common
 
 namespace interface {

@@ -36,10 +36,6 @@ namespace ops {
 #if __GNUC__ >= 12
 
 using common::float16_t;
-// Pull the masked-PH load/store shims from common into ops scope so that
-// the F16 (no-conversion) path can call them directly.
-using common::f16_maskz_loadu_vec;
-using common::f16_mask_storeu_vec;
 
 /*-----------------------------------------------------------------------------
   embag_avx512_f16_fma_kernel:
@@ -89,7 +85,7 @@ __attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
 static inline __m512h f16_load_tail(const InType *src, int tail) {
   if constexpr(std::is_same_v<InType, float16_t>) {
     __mmask32 mask = (1u << tail) - 1;
-    return f16_maskz_loadu_vec(mask, src);
+    return (__m512h)_mm512_maskz_loadu_epi16(mask, src);
   }
   else {
     const float *fp = reinterpret_cast<const float *>(src);
@@ -133,7 +129,7 @@ __attribute__((always_inline, target("avx512f,avx512vl,avx512bw,avx512fp16")))
 static inline void f16_store_tail(OutType *dst, __m512h val, int tail) {
   if constexpr(std::is_same_v<OutType, float16_t>) {
     __mmask32 mask = (1u << tail) - 1;
-    f16_mask_storeu_vec(dst, mask, val);
+    _mm512_mask_storeu_epi16(dst, mask, (__m512i)val);
   }
   else {
     float *fp = reinterpret_cast<float *>(dst);
