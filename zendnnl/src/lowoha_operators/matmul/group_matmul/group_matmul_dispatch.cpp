@@ -113,6 +113,12 @@ void sequential_experts(
   matmul_algo_t algo = resolve_kernel();
 
   for (size_t i = 0; i < num_ops; ++i) {
+    // Inactive experts (M<=0) are padded placeholder slots that may carry
+    // null src/dst/weight pointers (validate_group_matmul_direct_inputs
+    // allows null for M==0 because dispatch is expected to short-circuit
+    // empty rows); skip them so the slice/activation calls never
+    // dereference null.
+    if (M[i] <= 0) continue;
     execute_expert_slice(layout[i], transA[i], transB[i],
                          M[i], N[i], K[i], alpha[i],
                          src[i], lda[i], weight[i], ldb[i],
@@ -144,12 +150,29 @@ void parallel_multilevel(
   const std::vector<bool> &is_weights_const,
   std::vector<matmul_params> &params,
   int num_threads,
-  grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
+  grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
+  const char **gemm_mode_out) {
+
+  // The executor owns its gemm_mode and writes the concrete regime it ran
+  // ("multilevel_concurrent" vs "multilevel_rounds") so the post-exec
+  // [GRP_MATMUL.CALL] line reflects the real path.  No-op when nullptr.
+  auto set_ml_mode = [&](const char *s) {
+    if (gemm_mode_out != nullptr) *gemm_mode_out = s;
+  };
+  // Default to SKIP so a no-op early return (empty call / num_threads<=0)
+  // reports exec_algo=0 rather than a real ALGO-4 run; the two regime
+  // branches below overwrite it with the executed path.
+  set_ml_mode("multilevel_skip");
 
   const int num_ops = static_cast<int>(M.size());
   if (num_ops == 0 || num_threads <= 0) {
     return;
   }
+
+  // NOTE: the all-inactive (every M<=0) call is short-circuited to a "skip"
+  // mode by the dispatcher (group_matmul_run_parallel_dispatch) before this
+  // executor is ever entered, so no per-regime all-inactive guard is needed
+  // here.  The per-slot M<=0 guards below still cover the mixed case.
 
   // Generic ahead-of-time weight pre-pack for ALGO 4.
   // See sequential_experts above for the contract; identical short-
@@ -174,6 +197,7 @@ void parallel_multilevel(
 
   if (num_ops <= num_ccds && max_M >= ccd_size) {
     // (A) Few experts, large M: multi-CCD per expert, all concurrent.
+    set_ml_mode("multilevel_concurrent");
     int64_t total_M = 0;
     for (int i = 0; i < num_ops; ++i) {
       total_M += M[i];
@@ -207,7 +231,11 @@ void parallel_multilevel(
     #pragma omp parallel num_threads(num_ops)
     {
       const int i = omp_get_thread_num();
-      if (i < num_ops) {
+      // Inactive experts (M<=0) are padded placeholder slots that may carry
+      // null src/dst/weight pointers; skip them so the slice/activation
+      // calls never dereference null (matches the M==0 guards in the
+      // sequential / m-tile / n-tile executors).
+      if (i < num_ops && M[i] > 0) {
         execute_expert_slice(layout[i], transA[i], transB[i],
                              M[i], N[i], K[i], alpha[i],
                              src[i], lda[i], weight[i], ldb[i],
@@ -223,6 +251,7 @@ void parallel_multilevel(
   }
   else {
     // (B) Round-based, 1 CCD per expert.
+    set_ml_mode("multilevel_rounds");
     const int batch = std::min(num_ops, num_ccds);
 
     scoped_active_levels guard(2);
@@ -234,7 +263,11 @@ void parallel_multilevel(
       #pragma omp parallel num_threads(round_size)
       {
         const int slot = omp_get_thread_num();
-        if (slot < round_size) {
+        // Inactive experts (M<=0) are padded placeholder slots that may carry
+        // null src/dst/weight pointers; skip them so the slice/activation
+        // calls never dereference null (matches the M==0 guards in the
+        // sequential / m-tile / n-tile executors).
+        if (slot < round_size && M[round_start + slot] > 0) {
           const int e = round_start + slot;
           execute_expert_slice(layout[e], transA[e], transB[e],
                                M[e], N[e], K[e], alpha[e],
@@ -252,7 +285,19 @@ void parallel_multilevel(
 }
 
 // ── ALGO=5: per_expert ─────────────────────────────────────────────────
-// Parallel-for over experts; each expert gets 1 thread.
+// Parallel-for over experts; each expert is executed by a single thread (no
+// intra-expert N-split).  This is NOT a 1:1 expert↔thread mapping: with
+// `schedule(dynamic, 1)`, and whenever `num_ops > num_threads`, a thread
+// processes several experts sequentially (~num_ops/num_threads each).
+//
+// `schedule(dynamic, 1)`: MoE routing is M-skewed (per-expert token counts
+// range from 1 to many), so a static partition leaves threads that drew
+// light experts idle while heavy-expert threads run long — worst when
+// `num_ops > num_threads` and each thread must process several experts in
+// sequence.  Dynamic scheduling with chunk 1 lets a thread grab the next
+// unprocessed expert as soon as it finishes, balancing the skew.  Each
+// iteration writes only its own expert's `dst[i]` slice, so there is no
+// cross-iteration dependency that dynamic ordering could violate.
 
 void parallel_per_expert(
   const std::vector<char> &layout,
@@ -288,8 +333,13 @@ void parallel_per_expert(
   matmul_algo_t algo = resolve_kernel();
   scoped_active_levels guard(1);
 
-  #pragma omp parallel for num_threads(num_threads)
+  #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
   for (size_t i = 0; i < num_ops; ++i) {
+    // Inactive experts (M<=0) are padded placeholder slots that may carry
+    // null src/dst/weight pointers; skip them so the slice/activation calls
+    // never dereference null (matches the M==0 guards in the sequential /
+    // m-tile / n-tile executors).
+    if (M[i] <= 0) continue;
     execute_expert_slice(layout[i], transA[i], transB[i],
                          M[i], N[i], K[i], alpha[i],
                          src[i], lda[i], weight[i], ldb[i],
@@ -614,6 +664,20 @@ static bool check_n_tile_extra(
 //      this — the planner's R3 gate is structural.  ALGO 5 has no
 //      m_tile/n_tile safety dependency so it covers unsafe paths too.
 //
+//   0.6. DECODE, active_ops > num_threads → ALGO 5 (parallel_per_expert).
+//      Decode-class only (`max_M ≤ kDecodeMaxM`).  `active_ops` counts the
+//      experts that actually fire (`M[i] > 0`), not the padded slot count.
+//      When more experts fire
+//      than there are threads, ALGO 3's decode-optimal single round is
+//      infeasible (needs one thread per active expert) and degrades to a
+//      multi-round schedule; the flat per-expert path matches or beats it
+//      on the measured Qwen-class shapes (e.g. ~88 active experts on 64
+//      threads).  Fires REGARDLESS of an `AUTO_DECODE_ALGO` pin (it
+//      supersedes Rule 1 for this regime); only the global
+//      `ZENDNNL_GRP_MATMUL_ALGO` force overrides it.  Prompt is never
+//      routed by THIS rule — it follows its own policy (Rule 1/2 +
+//      safety clamps), typically ALGO 2 when m_tile_safe.
+//
 //   1. PHASE ENV — `max_M ≤ kDecodeMaxM` (decode) →
 //                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
 //                  `max_M >  kDecodeMaxM` (prompt) →
@@ -718,8 +782,103 @@ static int auto_select_algo(
   const bool phase_env_pinned = is_decode
       ? grp_matmul_auto_decode_algo_is_set()
       : grp_matmul_auto_prompt_algo_is_set();
-  if (total_experts <= kFewExpertsAlgo2Pref && !phase_env_pinned) {
-    return m_tile_safe ? 2 : 1;
+  // DECODE-ONLY now: ALGO 2 (flat_m_tile) is the measured Mixtral-class
+  // DECODE winner.  For PROMPT, the few-experts case is handled by the
+  // prompt M-tile regime routing (Rule 0.7) below — which may peel a
+  // light Mixtral prompt frame off to ALGO 1 (wide-N) exactly as
+  // flat_m_tile's internal wide-N fallback used to.  Restricting Rule 0.5
+  // to decode preserves that prompt behaviour now that ALGO 2 is pure.
+  //
+  // CONSISTENCY: ALGO 2 is now a PURE M-tile executor — it no longer has
+  // the internal wide-N fallback that the old "ALGO 2 wins Mixtral decode"
+  // measurement relied on.  For shallow-M decode (`M[i] < team_size`)
+  // single-tier M-tile under-fills the team (it splits M rows, capped at
+  // M[i]), whereas the old wide-N branch gave the full team an N-split.
+  // So apply the SAME regime classification Rule 0.7 uses for prompt, so
+  // ALGO 0 reproduces the old flat_m_tile internal routing for decode too:
+  //   * kWideN (shallow M) → ALGO 1 (full-team sequential = old wide-N).
+  //   * kMTile             → ALGO 2 (single-tier / multi-tier — old deep-M
+  //                          and max_M==1 behaviour, unchanged).
+  // (kManyExperts can't fire here: total_experts ≤ kFewExpertsAlgo2Pref(8)
+  //  ≤ num_threads on any real host, so active_ops ≤ num_threads.)
+  if (is_decode && total_experts <= kFewExpertsAlgo2Pref && !phase_env_pinned) {
+    switch (classify_m_tile_regime(M, num_threads)) {
+      case m_tile_regime::kManyExperts: return 5;
+      case m_tile_regime::kWideN:       return 1;
+      case m_tile_regime::kMTile:       return m_tile_safe ? 2 : 1;
+    }
+  }
+
+  // Rule 0.6 — DECODE with MORE ACTIVE EXPERTS THAN THREADS → ALGO 5.
+  // The count compared here is the ACTIVE-COMPUTE expert count
+  // `active_ops = |{ i : M[i] > 0 }|` — the experts that actually fire this
+  // call — NOT `M.size()` and NOT the framework `total_matmul` expert pool.
+  // The distinction matters: framework opt-in callers pass M already sliced
+  // to the contiguous active set (so `active_ops == M.size()` there), but a
+  // legacy caller may pass a padded vector with `M[i]==0` placeholders
+  // in-range (dispatch short-circuits those empty rows), and only the
+  // M[i]>0 experts consume a thread.  It is this active count that drives
+  // ALGO 3's per-expert thread budget.  When active experts exceed the
+  // thread count (`active_ops > num_threads`), ALGO 3's decode-optimal
+  // ManyExperts single round is infeasible (single round needs one thread
+  // per active expert, i.e. `num_threads >= active_ops`) and it degrades to
+  // a multi-round schedule that benchmarks no better than the flat per-
+  // expert path on the measured Qwen-class decode shapes (e.g. Qwen3-128
+  // decode with ~88 active experts on a 64-core host).  ALGO 5
+  // (parallel_per_expert) is a single flat, non-nested `omp parallel for
+  // schedule(dynamic)` over experts — no N-split, no round barriers — which
+  // fully occupies the team (~active_ops/num_threads experts each) and lets
+  // the dynamic schedule balance the M-skew.  When `num_threads >=
+  // active_ops` (e.g. the same call on 128 cores) the rule does not fire and
+  // ALGO 3's single round stays selected via Rule 1.  ALGO 5 has no tiling-
+  // safety dependency (BLAS handles every layout/dtype), so no clamp.
+  //
+  // DECODE ONLY: the `is_decode` guard keeps prompt out of this rule (a prior
+  // version without it could route an unpinned, many-expert prompt frame to
+  // ALGO 5).  Prompt is compute-bound on large M, so it follows its own
+  // policy (Rule 1/2 + safety clamps) — typically ALGO 2 (M-tile) when
+  // m_tile_safe, but it can still clamp to ALGO 1 or honour an explicit pin.  This rule fires REGARDLESS of an explicit
+  // `AUTO_DECODE_ALGO` pin — in the experts-exceed-threads regime the
+  // per-expert path is the policy and an explicit decode pin no longer wins
+  // here (use the global `ZENDNNL_GRP_MATMUL_ALGO` force, applied before
+  // `auto_select_algo`, to override a specific call).
+  if (is_decode) {
+    const int active_ops =
+        static_cast<int>(std::count_if(M.begin(), M.end(),
+                                        [](int m) { return m > 0; }));
+    if (active_ops > num_threads) {
+      return 5;
+    }
+  }
+
+  // Rule 0.7 — PROMPT M-tile REGIME routing.  ALGO 2 (flat_m_tile) is now a
+  // PURE M-tile executor (multi-tier hybrid + Phase-2 single-tier); the two
+  // non-M-tile regimes it used to handle via internal fallbacks are routed
+  // to the dedicated algos HERE, at selection time, so AUTO reproduces the
+  // exact executor flat_m_tile picked internally before the cleanup:
+  //   * kManyExperts (active_ops > num_threads) → ALGO 5 (per-expert): a
+  //     pure M-tile plan cannot give < 1 thread/active-expert, so this
+  //     regime is M-tile-infeasible.  (Equivalent to the old round-based
+  //     branch, which was itself a flat schedule(dynamic) per-expert pool.)
+  //   * kWideN (shallow M: max_M>1 && total_need*2 ≤ num_threads) → ALGO 1
+  //     (sequential full-team): M is too shallow to feed the M-tile slicer;
+  //     the whole team streams each expert's weight once (the old wide-N
+  //     fallback's behaviour).
+  //   * kMTile → ALGO 2: the genuine M-tile regime (multi-tier or single-
+  //     tier is then chosen INSIDE flat_m_tile).
+  // Scope: applies only when the resolved prompt algo is the M-tile-family
+  // default (phase algo == 2 — i.e. AUTO_PROMPT_ALGO unset → default 2, or
+  // an explicit `=2` pin).  An explicit non-2 prompt pin (1/3/4/5) or the
+  // `=0` legacy escape hatch is honoured via Rule 1 / Rule 2 below.  Decode
+  // is unaffected (ALGO 3 default + Rule 0.6).  The classifier's gates
+  // mirror flat_m_tile's old internal gates exactly (same kSliceTarget),
+  // so the routing is parity-preserving.
+  if (!is_decode && get_grp_matmul_auto_prompt_algo() == 2) {
+    switch (classify_m_tile_regime(M, num_threads)) {
+      case m_tile_regime::kManyExperts: return 5;
+      case m_tile_regime::kWideN:       return 1;
+      case m_tile_regime::kMTile:       return m_tile_safe ? 2 : 1;
+    }
   }
 
   // Rule 1 — PHASE ENV.  Single-line phase classification (decode iff
@@ -983,6 +1142,13 @@ bool group_matmul_run_parallel_dispatch(
     //                                before any other rule).
     //   3. auto_rule0_capacity     — `num_ops > kNTilePlanMaxExperts`
     //                                → ALGO 5 (structural).
+    //   3b. auto_decode_ops_gt_threads — decode-class call with
+    //                                `active_ops > num_threads` → ALGO 5
+    //                                (Rule 0.6; `active_ops = count(M[i]>0)`).
+    //                                Fires before the phase
+    //                                env so it is labelled distinctly even
+    //                                when an `AUTO_DECODE_ALGO` pin is set
+    //                                (which it overrides).
     //   4. auto_phase_env*         — `ZENDNNL_GRP_MATMUL_AUTO_*_ALGO`
     //                                non-zero AND honoured (`_clamp`
     //                                suffix when the m_tile_safe /
@@ -997,6 +1163,11 @@ bool group_matmul_run_parallel_dispatch(
       reason = "auto_single_thread";
     } else if (static_cast<int>(M.size()) > kNTilePlanMaxExperts) {
       reason = "auto_rule0_capacity";
+    } else if (is_decode &&
+               static_cast<int>(std::count_if(
+                   M.begin(), M.end(), [](int m) { return m > 0; }))
+                   > num_threads) {
+      reason = "auto_decode_ops_gt_threads";
     } else if (phase_env_active >= 1 && phase_env_active <= 5) {
       reason = (phase_env_active == use_algo) ? "auto_phase_env"
                                               : "auto_phase_env_clamp";
@@ -1063,6 +1234,14 @@ bool group_matmul_run_parallel_dispatch(
       : ck_hint_int8  ? (params[rep].dtypes.compute == data_type_t::u8
                             ? "int8_asym" : "int8_sym")
       :                 "none";
+    // SELECTION record (emitted BEFORE the executor runs): `chosen=ALGO_X`
+    // is the algo the selector picked, with `reason` explaining the gate.
+    // The ALGO that ACTUALLY executed — including any in-executor clamp or
+    // fork (e.g. ALGO 2 -> sequential-full-team when active_ops>num_threads,
+    // or ALGO 2 -> vertical fusion in the fused path) — is reported by the
+    // post-exec `[GRP_MATMUL.CALL]` line via `mode=` (precise branch) and
+    // `exec_algo=` (the real 1..5).  Compare those two lines to see any
+    // selection-vs-execution divergence.
     apilog_info(
         "[GRP_MATMUL.ALGO] chosen=ALGO_", use_algo,
         " env_algo=", env_algo,
@@ -1093,6 +1272,25 @@ bool group_matmul_run_parallel_dispatch(
     }
   };
 
+  // Whole-call no-op short-circuit.  When no expert fires (every M[i] <= 0,
+  // including the empty-vector case), there is no GEMM to run on ANY algo.
+  // Mark the executed path "skip" (exec_algo=0 on the post-exec
+  // [GRP_MATMUL.CALL] line) and return before the switch so we neither
+  // prepack nor mislabel exec_algo with the *selected* ALGO for a call that
+  // executed nothing.  The per-slot M<=0 guards inside the executors still
+  // handle the mixed case (some experts active, some padded/inactive); this
+  // covers the all-inactive call once, in one place.
+  //
+  // Return `true` (activation already handled) — NOT `act_fused`.  There is
+  // nothing to activate, and the caller's separate-pass post-op fires on
+  // `!return_value`; with no active rows the dst slots may be null by
+  // contract, so a separate pass would dereference null.  Reporting the
+  // no-op as "fused" makes every caller skip that post-pass.
+  if (std::none_of(M.begin(), M.end(), [](int m) { return m > 0; })) {
+    set_mode("skip");
+    return true;
+  }
+
   switch (use_algo) {
   case 1:
     set_mode("sequential_experts");
@@ -1101,10 +1299,14 @@ bool group_matmul_run_parallel_dispatch(
                        is_weights_const, params, num_threads, fused_act, act_dtype);
     break;
   case 2:
-    set_mode("flat_m_tile");
+    // flat_m_tile owns its gemm_mode — it writes the concrete branch it ran
+    // (flat_m_tile_multitier / _single_tier / _seq_clamp) into gemm_mode_out,
+    // like flat_n_tile does, so the post-exec [GRP_MATMUL.CALL] line reflects
+    // the real M-tile path rather than a generic "flat_m_tile".
     flat_m_tile(layout, transA, transB, M, N, K, alpha,
                 src, lda, weight, ldb, bias, beta, dst, ldc,
-                fused_act, act_dtype, is_weights_const, params, num_threads);
+                fused_act, act_dtype, is_weights_const, params, num_threads,
+                gemm_mode_out);
     break;
   case 3:
     // flat_n_tile handles both the legacy non-fused path and the fused
@@ -1124,10 +1326,12 @@ bool group_matmul_run_parallel_dispatch(
                 act_dtype, gemm_mode_out);
     break;
   case 4:
-    set_mode("multilevel");
+    // parallel_multilevel owns its gemm_mode (multilevel_concurrent /
+    // multilevel_rounds), written into gemm_mode_out.
     parallel_multilevel(layout, transA, transB, M, N, K, alpha,
                         src, lda, weight, ldb, bias, beta, dst, ldc,
-                        is_weights_const, params, num_threads, fused_act, act_dtype);
+                        is_weights_const, params, num_threads, fused_act, act_dtype,
+                        gemm_mode_out);
     break;
   case 5:
     set_mode("per_expert");

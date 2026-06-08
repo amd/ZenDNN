@@ -466,6 +466,48 @@ inline int get_grp_matmul_m_tile_slice_target() {
   return v;
 }
 
+// ── ALGO 2 (M-tile) regime classifier ──────────────────────────────────
+// ALGO 2 (`flat_m_tile`) is a PURE M-tile executor (multi-tier hybrid +
+// Phase-2 single-tier).  The two non-M-tile regimes it historically
+// handled via internal fallbacks — the wide-N memory-bound fallback
+// (sequential full-team, ALGO-1-equivalent) and the experts-exceed-threads
+// regime (per-expert, ALGO-5-equivalent) — are no longer chosen inside
+// flat_m_tile for AUTO.  This classifier lets `auto_select_algo` (ALGO 0)
+// detect those regimes at SELECTION time and route them to the dedicated
+// algos (ALGO 1 / ALGO 5) so AUTO reproduces the executor flat_m_tile used
+// to pick internally.  The gates mirror flat_m_tile's old internal gates
+// EXACTLY (same kSliceTarget, same total_need / max_M math) so the routing
+// is parity-preserving, not coincidental:
+//   * kManyExperts — `active_ops > num_threads`.  A pure M-tile plan cannot
+//                    give < 1 thread per active expert, so this regime is
+//                    M-tile-INFEASIBLE; AUTO routes it to ALGO 5.
+//   * kWideN       — `max_M > 1 && total_need*2 <= num_threads`, where
+//                    `total_need = Σ_active min(M[i], ceil(M[i]/kSliceTarget))`.
+//                    M is too shallow to feed the slicer; AUTO routes to
+//                    ALGO 1 (sequential full-team).
+//   * kMTile       — everything else (multi-tier or single-tier M-tile).
+enum class m_tile_regime { kMTile, kWideN, kManyExperts };
+
+inline m_tile_regime classify_m_tile_regime(const std::vector<int> &M,
+                                            int num_threads) {
+  const int kSliceTarget = get_grp_matmul_m_tile_slice_target();
+  int active_ops = 0;
+  int max_M = 0;
+  int64_t total_need = 0;
+  for (int m : M) {
+    if (m <= 0) continue;
+    ++active_ops;
+    if (m > max_M) max_M = m;
+    total_need += std::min<int64_t>(
+        m, std::max<int64_t>(
+               1, (static_cast<int64_t>(m) + kSliceTarget - 1) / kSliceTarget));
+  }
+  if (active_ops > num_threads) return m_tile_regime::kManyExperts;
+  if (max_M > 1 && total_need * 2 <= static_cast<int64_t>(num_threads))
+    return m_tile_regime::kWideN;
+  return m_tile_regime::kMTile;
+}
+
 inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
   constexpr int kDefault = 256;
   const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_max_m_override
@@ -595,6 +637,14 @@ inline int get_grp_matmul_m_tile_pipeline_scratch_kb() {
 
 /// ALGO 2 — M-tile parallel GEMM (legacy single-matmul executor).
 /// Defined in `group_matmul_m_tile.cpp` (Section B).
+///
+/// `gemm_mode_out` (optional): the executor writes the concrete branch it
+/// actually ran — one of `"flat_m_tile_multitier"`, `"flat_m_tile_single_tier"`,
+/// `"flat_m_tile_seq_clamp"` (the many-experts sequential-full-team clamp,
+/// which is ALGO-1 behaviour), or `"flat_m_tile_skip"` (no-op early return:
+/// empty call, `num_threads <= 0`, or no active expert — nothing executed;
+/// maps to `exec_algo=0`) — so the post-exec `[GRP_MATMUL.CALL]` line and
+/// benchdnn/profiler output reveal the real path (mirrors `flat_n_tile`).
 void flat_m_tile(
   const std::vector<char> &layout,
   const std::vector<bool> &transA, const std::vector<bool> &transB,
@@ -607,7 +657,8 @@ void flat_m_tile(
   grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
   const std::vector<bool> &is_weights_const,
   std::vector<matmul_params> &params,
-  int num_threads);
+  int num_threads,
+  const char **gemm_mode_out = nullptr);
 
 /// ALGO 2 — vertical-fusion pipeline (W13 → gated act → W2) at
 /// M-tile slice granularity.  Tri-regime: BF16 end-to-end, WOQ-INT4

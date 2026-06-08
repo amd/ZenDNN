@@ -173,6 +173,17 @@ inline constexpr int kVerticalFusionDQINT8 = 6;  // vertical fusion engaged with
                                                  // bf16 src/dst; Op1 hoisted
                                                  // pre-OMP, Op2 re-quantized
                                                  // per-slice in Stage 2b)
+inline constexpr int kManyExpertsSeqFallback = 7;  // active_ops > num_threads:
+                                                   // pure M-tile is infeasible
+                                                   // (< 1 thread/expert), so a
+                                                   // FORCED ALGO 2 clamps to the
+                                                   // sequential full-team path
+                                                   // (ALGO 1 equivalent) + WARN.
+                                                   // AUTO never reaches this (it
+                                                   // routes active>threads to
+                                                   // ALGO 5); only an explicit
+                                                   // ZENDNNL_GRP_MATMUL_ALGO=2
+                                                   // force lands here.
 }  // namespace m_tile_path_tag
 
 }  // namespace test_api
@@ -183,16 +194,15 @@ inline constexpr int kVerticalFusionDQINT8 = 6;  // vertical fusion engaged with
 //
 // Phase 1b/2/3 single-tier planner output.
 //
-// Returned by `plan_m_tile_single_tier_assignment()`.  The two
-// executor branches that today's legacy `flat_m_tile` selects after
-// the round-based / multi-tier early returns — wide-N memory-bound
-// fallback and Phase-2 single-tier CCD-stripe — share a single
-// `t_assign` computation, so the helper emits both Phase-1b stats
-// (used by the wide-N gate and any caller-side diagnostics) and the
-// Phase-3 tid mapping in one struct.  Vertical-fusion (phase 1)
-// reuses the same helper so the pipeline executor's slice math is
-// bit-identical to the legacy executor's for every shape that
-// reaches Phase 2.
+// Returned by `plan_m_tile_single_tier_assignment()`.  `flat_m_tile`
+// (now a pure M-tile executor) reaches this helper after ruling out
+// the many-experts clamp and multi-tier branches and runs the
+// Phase-2 single-tier CCD-stripe it produces.  The helper emits both
+// the Phase-1b stats (`total_need` / `max_M`, used by the advisory
+// wide-N gate and any caller diagnostics) and the Phase-3 tid mapping
+// in one struct.  Vertical-fusion (phase 1) reuses the same helper so
+// the pipeline executor's slice math is bit-identical to the legacy
+// executor's for every shape that reaches Phase 2.
 //
 // All `tid_to_*` arrays are sized exactly to `num_threads` after the
 // planner returns; threads with `tid_to_expert[tid] == -1` sit idle
@@ -205,14 +215,20 @@ struct m_tile_single_tier_plan_t {
   std::vector<int> tid_to_local;
   std::vector<int> tid_to_team;
 
-  // Wide-N memory-bound fallback signal.  True when the Phase-1b
-  // sum of per-expert ideal thread counts is at most half of
-  // `num_threads` AND `max_M > 1`.  In that case the helper
-  // short-circuits before Phase 2/3 and leaves the tid_to_* arrays
-  // empty; the caller is responsible for running its wide-N branch
-  // (full-team sequential GEMM per expert).  Mirrors the legacy
-  // `flat_m_tile` wide-N gate exactly so behaviour parity is
-  // structural, not coincidental.
+  // Wide-N memory-bound signal.  True when the Phase-1b sum of
+  // per-expert ideal thread counts is at most half of `num_threads`
+  // AND `max_M > 1`.
+  //
+  // By default the planner does NOT short-circuit on this signal: Phase
+  // 2/3 still run so the `tid_to_*` arrays are fully populated (a forced
+  // ALGO 2 on a wide-N shape needs a complete single-tier mapping —
+  // `flat_m_tile` is pure M-tile, ignores this flag, and `auto_select_algo`
+  // routes the AUTO wide-N regime to ALGO 1 instead).  A caller that passes
+  // `short_circuit_on_wide_n=true` (today only the vertical-fusion pipeline
+  // `flat_m_tile_pipeline_bf16`, which treats the signal as an eligibility
+  // failure and bails to the legacy two-pass) gets an EARLY return with
+  // `wide_n_fallback=true` and EMPTY `tid_to_*` arrays — skipping the
+  // throwaway Phase-2/3 work it would never read.
   bool wide_n_fallback = false;
 
   // Phase 1b raw outputs.  Exposed for the wide-N gate (which uses
@@ -233,13 +249,16 @@ struct m_tile_single_tier_plan_t {
 // branches (those execute inline in `flat_m_tile` and return before
 // reaching this helper).
 //
-// When the wide-N fallback gate matches, the helper sets
-// `plan.wide_n_fallback = true` and returns BEFORE populating the
-// Phase-3 mapping arrays — callers that want the wide-N executor
-// (today: `flat_m_tile`) take their inline branch; callers that
-// want to bypass wide-N entirely (today: the vertical-fusion phase 1
-// dispatcher) treat the signal as an eligibility failure and fall
-// back to legacy two-pass.
+// When the wide-N gate matches the helper sets `plan.wide_n_fallback =
+// true`.  By default it then CONTINUES through Phase 2/3 and fully
+// populates the `tid_to_*` mapping, because the legacy `flat_m_tile`
+// executor ignores the flag and runs the single-tier plan even on wide-N
+// shapes (ALGO 2 is pure M-tile; `auto_select_algo` routes the AUTO wide-N
+// regime to ALGO 1 before it ever reaches here).  A caller that will bail
+// on the signal and never read the mapping passes
+// `short_circuit_on_wide_n=true` (today only the vertical-fusion phase-1
+// dispatcher) to get an early return with empty `tid_to_*` arrays and skip
+// the throwaway Phase-2 surplus loop + Phase-3 placement.
 //
 // The helper is intentionally side-effect-free (no env reads, no
 // capture-tag writes, no logging) so the caller controls
@@ -255,7 +274,8 @@ inline m_tile_single_tier_plan_t plan_m_tile_single_tier_assignment(
     int num_ops, int num_threads,
     int active_ops,
     int kSliceTarget,
-    int cores_per_ccd, int num_ccds) {
+    int cores_per_ccd, int num_ccds,
+    bool short_circuit_on_wide_n = false) {
 
   m_tile_single_tier_plan_t plan;
 
@@ -293,10 +313,22 @@ inline m_tile_single_tier_plan_t plan_m_tile_single_tier_assignment(
   //
   // `total_need * 2` promoted to int64_t to defuse hypothetical
   // signed-int overflow (practical bound: total_need ≪ INT_MAX).
+  // Wide-N signal.  Consumed ONLY by the vertical-fusion pipeline
+  // (`flat_m_tile_pipeline_bf16`), which bails to the legacy two-pass when
+  // set.  `flat_m_tile` no longer branches on it (ALGO 2 is pure M-tile;
+  // `auto_select_algo` routes the AUTO wide-N regime to ALGO 1).
+  //
+  // Phase 2/3 below run by default so that a FORCED ALGO 2 on a wide-N shape
+  // (`flat_m_tile`, which IGNORES the flag) still gets a complete single-tier
+  // tid→expert mapping.  A caller that bails on the wide-N signal and never
+  // reads the mapping (today only the vertical-fusion pipeline) passes
+  // `short_circuit_on_wide_n=true` to skip the throwaway Phase-2 surplus loop
+  // + Phase-3 placement; it gets `wide_n_fallback=true` with empty tid_to_*
+  // arrays, which is exactly what it needs to return false.
   if (max_M > 1
       && static_cast<int64_t>(total_need) * 2 <= num_threads) {
     plan.wide_n_fallback = true;
-    return plan;
+    if (short_circuit_on_wide_n) return plan;
   }
 
   // ── CCD capacity / cap_at_ccd computation ──

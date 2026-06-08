@@ -2531,25 +2531,219 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvForcesAlgo1OnGptOssDecode) {
          "for the decode phase";
 }
 
-// Few-experts default policy: with NO phase env pinned, a Mixtral-class
-// 8-expert DECODE shape routes to ALGO 2 (Rule 0.5), overriding the
-// decode phase default of ALGO 3.  Prompt already defaults to ALGO 2, so
-// this is the decode-side benefit folded into the out-of-the-box policy.
-TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeDefaultRoutesToAlgo2) {
+// Rule 0.6 — more ACTIVE experts than threads → ALGO 5 (AUTO default).
+// Qwen-class decode (88 active experts) on 64 threads: num_ops > num_threads,
+// so ALGO 3's single round is infeasible → AUTO prefers ALGO 5
+// (parallel_per_expert: flat per-expert OMP, schedule(dynamic)).
+TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsRoutesToAlgo5) {
   using namespace zendnnl::lowoha::matmul;
   using namespace moe_test_utils;
   reset_grp_matmul_caches();
   AlgoEnvGuard reset_algo(0);
-  // No phase-env overrides — exercises the unset-env default policy.
+  // No phase-env override — exercises the default AUTO policy.
 
-  // Mixtral-class decode: 8 experts, decode-class M (≤ kDecodeMaxM).
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "num_ops(88) > num_threads(64) must route AUTO to ALGO 5";
+}
+
+// The same Qwen-class shape on 128 threads: num_ops(88) <= num_threads(128),
+// so Rule 0.6 does NOT fire and ALGO 3 single round stays selected.
+TEST(TestGroupMatmulAutoPhaseEnv, ExpertsLeqThreadsKeepsAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "num_ops(88) <= num_threads(128): ALGO 3 single round feasible, "
+         "Rule 0.6 must not fire";
+}
+
+// Rule 0.6 OVERRIDES an explicit AUTO_DECODE_ALGO pin: in the
+// experts-exceed-threads decode regime the flat per-expert path (ALGO 5)
+// is the policy, so even an explicit AUTO_DECODE_ALGO=3 pin is superseded.
+// Only the global ZENDNNL_GRP_MATMUL_ALGO force can override per-call.
+TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsOverridesExplicitDecodePin) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  AutoPromptAlgoOverride no_prompt(0);
+  AutoDecodeAlgoOverride force_decode(3);  // explicit decode pin (superseded)
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "decode num_ops(88) > num_threads(64) must route to ALGO 5 even "
+         "with an explicit AUTO_DECODE_ALGO=3 pin";
+}
+
+// The global ZENDNNL_GRP_MATMUL_ALGO force is still honoured in the
+// experts-exceed-threads regime (it is applied before auto_select_algo),
+// so an operator retains a per-call escape hatch back to ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsGlobalForceWins) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard force_algo(3);  // global force ALGO 3
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "global ZENDNNL_GRP_MATMUL_ALGO=3 must win over Rule 0.6";
+}
+
+// Rule 0.7 (prompt M-tile regime routing): a PROMPT-class frame with
+// active_ops > num_threads is M-tile-INFEASIBLE, so AUTO routes it to
+// ALGO 5 (per-expert) — reproducing the executor flat_m_tile used to pick
+// internally (its old round-based per-expert pool), now that ALGO 2 is a
+// pure M-tile executor that would otherwise clamp this regime to sequential
+// full-team.  (This is the M-tile-family default path: prompt algo == 2.)
+TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsRoutesToAlgo5) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  // No phase-env override — exercises the default AUTO policy (prompt=2).
+
+  // Prompt-class: max_M=64 > kDecodeMaxM(32); 88 active experts on 64 threads
+  // (active_ops > num_threads) → M-tile infeasible → ALGO 5.
+  auto s = build_auto_probe(/*M=*/64, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "prompt-class active_ops(88) > num_threads(64) is M-tile-infeasible; "
+         "AUTO must route to ALGO 5 (per-expert)";
+}
+
+// Rule 0.7: a PROMPT-class wide-N frame (few actives × shallow M ×
+// large N: max_M>1 && total_need*2 <= num_threads) routes to ALGO 1
+// (sequential full-team) — reproducing flat_m_tile's old wide-N fallback,
+// now that ALGO 2 is pure M-tile.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // 8 actives × M=8 on 64 threads: total_need = 8*ceil(8/16) = 8, 2*8=16
+  // <= 64; max_M=8 > 1 → wide-N regime.  Prompt-class because... max_M=8
+  // <= kDecodeMaxM(32) would be DECODE.  Use M=40 (>32 prompt) but keep
+  // total_need*2 <= num_threads: 8*ceil(40/16)=8*3=24, 2*24=48 <= 64. ✓
+  auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/8, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            1)
+      << "prompt-class wide-N (8 actives × M=40 / 64t: total_need*2=48 <= 64, "
+         "max_M=40 > 1) must route to ALGO 1 (sequential full-team)";
+}
+
+// Rule 0.7: a PROMPT-class genuine M-tile frame (not wide-N, not many-
+// experts) routes to ALGO 2.  16 actives × M=512 on 64 threads:
+// total_need = 16*ceil(512/16) = 16*32 = 512, 2*512=1024 > 64 (not wide-N);
+// 16 <= 64 (not many-experts) → kMTile → ALGO 2.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptMTileRegimeRoutesToAlgo2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  auto s = build_auto_probe(/*M=*/512, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/16, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            2)
+      << "prompt-class M-tile regime (16 actives × M=512 / 64t) must route "
+         "to ALGO 2 (pure M-tile)";
+}
+
+// Rule 0.6 counts ACTIVE experts (M[i] > 0), NOT the padded slot count.
+// A legacy caller may pass M with inactive (M[i]==0) placeholders in-range;
+// only the firing experts consume a thread, so a call whose SLOT count
+// exceeds the thread budget but whose ACTIVE count does not must stay on
+// ALGO 3 (the rule must not fire on padding alone).
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // 88 slots on 64 threads (slot count > threads) but only 58 fire — mark
+  // the trailing 30 inactive (M[i]=0).  active_ops(58) <= num_threads(64),
+  // so Rule 0.6 must NOT fire and decode stays on its ALGO 3 default.
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  for (int i = 58; i < 88; ++i) s.M[i] = 0;
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "decode slot count(88) > threads(64) but active(58) <= threads(64): "
+         "Rule 0.6 must compare ACTIVE experts, so ALGO 3 stays selected";
+
+  // Now make 78 fire (active > threads) — Rule 0.6 fires -> ALGO 5.
+  for (int i = 0; i < 88; ++i) s.M[i] = (i < 78) ? 16 : 0;
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "decode active(78) > threads(64) must route to ALGO 5";
+}
+
+// Few-experts decode policy (Rule 0.5) is now REGIME-AWARE, mirroring the
+// prompt Rule 0.7, because ALGO 2 is a pure M-tile executor (no internal
+// wide-N fallback).  A Mixtral-class 8-expert decode shape with shallow M
+// (max_M>1, total_need*2 ≤ num_threads) is the wide-N regime, so AUTO routes
+// it to ALGO 1 (full-team sequential) — exactly the executor the old ALGO 2
+// wide-N branch ran.  (Single-tier M-tile would under-fill the team here:
+// it splits M rows capped at M[i], so M < team_size leaves threads idle.)
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeShallowMRoutesToAlgo1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // Mixtral-class decode: 8 experts, shallow decode-class M (max_M=16>1;
+  // total_need = 8*ceil(16/16) = 8; 2*8 = 16 ≤ 128 → wide-N regime).
   auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
                             /*num_ops=*/8, /*num_threads=*/128);
   EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
                                    s.num_threads),
+            1)
+      << "≤8-expert shallow-M decode is the wide-N regime → ALGO 1 "
+         "(full-team sequential = old ALGO 2 wide-N branch), not single-tier";
+}
+
+// The other half of the few-experts decode split: a single-token-per-expert
+// decode (max_M==1) is NOT the wide-N regime (the gate excludes max_M==1, as
+// the old flat_m_tile wide-N gate did), so it stays on ALGO 2 single-tier —
+// the latency-optimal one-thread-per-expert CCD-stripe.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeSingleTokenRoutesToAlgo2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+
+  // 8 experts, M=1 (max_M==1 → wide-N excluded → kMTile → ALGO 2).
+  auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
+                            /*num_ops=*/8, /*num_threads=*/128);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
             2)
-      << "≤8-expert decode must take the few-experts ALGO 2 preference "
-         "(Rule 0.5) instead of the decode default ALGO 3";
+      << "≤8-expert single-token decode (max_M==1) stays on ALGO 2 "
+         "single-tier (the kMTile regime)";
 }
 
 // The few-experts ALGO 2 preference is a DEFAULT refinement: an explicit
@@ -2593,13 +2787,17 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
       << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
          "decode default ALGO 3";
 
-  // Same active count but total=8 → Rule 0.5 fires → ALGO 2.
+  // Same active count but total=8 → Rule 0.5 fires.  The shape is shallow-M
+  // decode (M=16, total_need=4*1=4, 2*4=8 ≤ 64 → wide-N regime), so the
+  // regime-aware Rule 0.5 routes it to ALGO 1 (= old ALGO 2 wide-N branch).
+  // The point of this test is that Rule 0.5 FIRED on total=8 (≠ the ALGO 3
+  // decode default it took at total=16), proving it keys on TOTAL not active.
   s.params[0].total_matmul = 8;
   EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
                                    s.num_threads),
-            2)
-      << "total=8 (≤ threshold) must take the few-experts ALGO 2 "
-         "preference even with only 4 active experts";
+            1)
+      << "total=8 (≤ threshold) must fire Rule 0.5 even with only 4 active "
+         "experts; shallow-M decode → wide-N regime → ALGO 1";
 }
 
 // Grouped-s8 post-quant call with INACTIVE experts must NOT be vetoed to
@@ -3669,14 +3867,15 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
 // `group_matmul_parallel_common.hpp`.
 // ============================================================================
 
-// Wide-N memory-bound fallback engages when `total_need * 2 ≤ num_threads`
-// AND `max_M > 1`.  On 32 threads with 8 actives × M=8, total_need =
-// 8 × ceil(8/16) = 8; 2×8 = 16 ≤ 32 ⇒ wide-N fires.  Mirrors the Mixtral
-// prompt-light regime documented in the planner doc-block.
-TEST(TestGroupMatmulMTileBranches, WideNFallbackEngagesOnLightFrames) {
+// ALGO 2 is now PURE M-tile: a FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a
+// wide-N shape (`total_need*2 ≤ num_threads && max_M > 1`) no longer falls
+// back to the sequential-full-team loop — it runs the single-tier M-tile
+// plan (kPhase2Single).  (AUTO routes this regime to ALGO 1 via Rule 0.7;
+// see TestGroupMatmulAutoPhaseEnv.PromptWideNRoutesToAlgo1.)
+TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
   using namespace moe_test_utils;
   using zendnnl::lowoha::matmul::group_matmul_direct;
-  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
   using zendnnl::lowoha::matmul::status_t;
 
   const int saved_num_threads = omp_get_max_threads();
@@ -3706,6 +3905,7 @@ TEST(TestGroupMatmulMTileBranches, WideNFallbackEngagesOnLightFrames) {
   AlgoEnvGuard            algo_guard(2);
   MTileHybridOverride     hybrid_auto(0);
   MTilePathCaptureGuard   cap;
+  GemmModeCaptureGuard    mode_cap;
 
   ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
                                 s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
@@ -3717,10 +3917,18 @@ TEST(TestGroupMatmulMTileBranches, WideNFallbackEngagesOnLightFrames) {
 
   const int tag = zendnnl::lowoha::matmul::test_api
       ::s_last_m_tile_path.load(std::memory_order_relaxed);
-  EXPECT_EQ(tag, kWideNFallback)
-      << "Wide-N fallback must engage on 8 actives × M=8 / 32t "
-         "(total_need*2 = 16 ≤ 32, max_M = 8 > 1); got tag=" << tag
-      << " (kRoundBased=0, kMultiTier=1, kWideNFallback=2, kPhase2Single=3)";
+  EXPECT_EQ(tag, kPhase2Single)
+      << "Forced ALGO 2 on a wide-N shape (8 actives × M=8 / 32t) must run "
+         "PURE single-tier M-tile now (no internal wide-N fallback); "
+         "got tag=" << tag
+      << " (kMultiTier=1, kPhase2Single=3, kManyExpertsSeqFallback=7)";
+
+  // gemm_mode must name the executed branch, and exec_algo must map to 2.
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode.load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr);
+  EXPECT_STREQ(mode, "flat_m_tile_single_tier");
+  EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 2);
 }
 
 // Wide-N fallback MUST be excluded for pure-decode workloads (max_M==1).
@@ -3824,6 +4032,7 @@ TEST(TestGroupMatmulMTileBranches, MultiTierEngagesOnSkewedPrompt) {
   AlgoEnvGuard            algo_guard(2);
   MTileHybridOverride     hybrid_auto(0);
   MTilePathCaptureGuard   cap;
+  GemmModeCaptureGuard    mode_cap;
 
   ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
                                 s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
@@ -3838,6 +4047,108 @@ TEST(TestGroupMatmulMTileBranches, MultiTierEngagesOnSkewedPrompt) {
   EXPECT_EQ(tag, kMultiTier)
       << "Multi-tier hybrid must engage on 16 actives with skewed M "
          "(1 heavy M=1024 + 15 lights M=4, skew ≈ 15×); got tag=" << tag;
+
+  // gemm_mode must name the multi-tier branch; exec_algo maps to 2.
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode.load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr);
+  EXPECT_STREQ(mode, "flat_m_tile_multitier");
+  EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 2);
+}
+
+// ============================================================================
+// [8j] Logging truth: gemm_mode names the executed branch, and
+//      executed_algo_from_gemm_mode maps it to the ALGO that actually ran.
+// ============================================================================
+
+// Unit test for the mode->algo mapping used by the post-exec
+// [GRP_MATMUL.CALL] exec_algo= field.  Pure function, no execution.
+TEST(TestGroupMatmulGemmMode, ExecutedAlgoFromGemmModeMapping) {
+  using zendnnl::lowoha::matmul::executed_algo_from_gemm_mode;
+  EXPECT_EQ(executed_algo_from_gemm_mode(nullptr), 0);
+  EXPECT_EQ(executed_algo_from_gemm_mode("garbage"), 0);
+  EXPECT_EQ(executed_algo_from_gemm_mode("sequential"), 1);
+  EXPECT_EQ(executed_algo_from_gemm_mode("sequential_experts"), 1);
+  // seq-clamp wears an ALGO-2 mode prefix but runs ALGO-1 behaviour -> 1.
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_seq_clamp"), 1);
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_single_tier"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_multitier"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode("vertical_fusion_bf16"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_n_tile_custom"), 3);
+  EXPECT_EQ(executed_algo_from_gemm_mode("multilevel_rounds"), 4);
+  EXPECT_EQ(executed_algo_from_gemm_mode("per_expert"), 5);
+  // Fused composites derive the algo from the Op1 sub-mode.
+  EXPECT_EQ(executed_algo_from_gemm_mode(
+      "fused_moe_2pass_intalloc(op1=flat_m_tile_single_tier,"
+      "op2=flat_m_tile_single_tier)+postop"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode(
+      "fused_moe_vertical_intalloc(op1=vertical_fusion_bf16,"
+      "op2=vertical_fusion_bf16)"), 2);
+  EXPECT_EQ(executed_algo_from_gemm_mode(
+      "fused_moe_2pass(op1=flat_n_tile_custom,op2=flat_n_tile_custom)"), 3);
+  // No-op / skip markers map to 0 (nothing executed).
+  EXPECT_EQ(executed_algo_from_gemm_mode("fused_moe_skip"), 0);
+  EXPECT_EQ(executed_algo_from_gemm_mode("flat_m_tile_skip"), 0);
+  EXPECT_EQ(executed_algo_from_gemm_mode("multilevel_skip"), 0);
+}
+
+// Forced ALGO 2 with active_ops > num_threads: gemm_mode must name the
+// sequential-full-team clamp, and exec_algo must report 1 (the ALGO-1
+// behaviour that actually ran) even though chosen=ALGO_2.  This is the
+// headline selection-vs-execution divergence the logging makes explicit.
+TEST(TestGroupMatmulMTileBranches, ForcedAlgo2SeqClampWritesMode) {
+  using namespace moe_test_utils;
+  using zendnnl::lowoha::matmul::group_matmul_direct;
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag
+      ::kManyExpertsSeqFallback;
+  using zendnnl::lowoha::matmul::status_t;
+
+  const int saved_num_threads = omp_get_max_threads();
+  struct ThreadGuard {
+    int prev;
+    ~ThreadGuard() { omp_set_num_threads(prev); }
+  } thread_guard{saved_num_threads};
+  omp_set_num_threads(8);
+  int actual_team_size = 0;
+  #pragma omp parallel
+  {
+    #pragma omp master
+    actual_team_size = omp_get_num_threads();
+  }
+  if (actual_team_size < 4) {
+    GTEST_SKIP() << "Requires >= 4 OMP threads; have " << actual_team_size;
+  }
+
+  // 8 active experts on a 4-thread budget -> active_ops(8) > num_threads(4)
+  // -> M-tile infeasible -> sequential-full-team clamp.
+  auto s = build_hybrid_probe(/*num_threads=*/4,
+      /*Ms=*/{8, 8, 8, 8, 8, 8, 8, 8});
+
+  reset_grp_matmul_caches();
+  AlgoEnvGuard            algo_guard(2);
+  MTilePathCaptureGuard   cap;
+  GemmModeCaptureGuard    mode_cap;
+
+  ASSERT_EQ(group_matmul_direct(s.gv.layout, s.gv.transA, s.gv.transB,
+                                s.gv.Ms, s.gv.Ns, s.gv.Ks, s.gv.alpha,
+                                s.srcs, s.gv.lda, s.weis, s.gv.ldb,
+                                s.biases, s.gv.beta, s.dsts, s.gv.ldc,
+                                s.gv.is_wc, s.params,
+                                nullptr, nullptr),
+            status_t::success);
+
+  const int tag = zendnnl::lowoha::matmul::test_api
+      ::s_last_m_tile_path.load(std::memory_order_relaxed);
+  EXPECT_EQ(tag, kManyExpertsSeqFallback);
+
+  const char *mode = zendnnl::lowoha::matmul::test_api
+      ::s_last_group_matmul_direct_gemm_mode.load(std::memory_order_relaxed);
+  ASSERT_NE(mode, nullptr);
+  EXPECT_STREQ(mode, "flat_m_tile_seq_clamp");
+  EXPECT_EQ(zendnnl::lowoha::matmul::executed_algo_from_gemm_mode(mode), 1)
+      << "forced ALGO 2 clamped to sequential-full-team must report "
+         "exec_algo=1 (ran ALGO-1 behaviour) despite chosen=ALGO_2";
 }
 
 // Multi-tier hybrid MUST stay off when `M_TILE_HYBRID=-1` (DISABLED),
@@ -4362,31 +4673,23 @@ TEST(TestGroupMatmulMTileStandalone, GatedActSwigluOaiMul) {
 }
 
 // ============================================================================
-// [8h] TestGroupMatmulMTileBranches.RoundBasedEngagesOnManyExperts
+// [8h] TestGroupMatmulMTileBranches.ForcedAlgo2ManyExpertsClampsToSeqFullTeam
 //
-// The kRoundBased branch fires when `active_ops > num_threads` — the
-// planner abandons slice-based parallelism and dispatches one expert
-// per OMP iteration with `num_thr=1` per expert.  Prior to this test,
-// the branch had NO gtest coverage; the existing
-// `TestGroupMatmulMTileBranches.*` tests all keep `active_ops <=
-// num_threads` and so exercise only Phase 2 / multi-tier / wide-N.
+// When `active_ops > num_threads` a pure M-tile plan is INFEASIBLE (it
+// cannot give < 1 thread per active expert).  AUTO routes this regime to
+// ALGO 5 (see TestGroupMatmulAutoPhaseEnv.* below); a FORCED
+// `ZENDNNL_GRP_MATMUL_ALGO=2` clamps to the sequential full-team path
+// (ALGO 1 equivalent: each active expert runs across the whole team, one at
+// a time) and emits a one-time WARN.  Tag: kManyExpertsSeqFallback.
 //
-// We trigger the branch by pinning `params[e].num_threads = 4` while
-// providing 8 active experts.  The OMP region inside `flat_m_tile`
-// then requests exactly 4 threads via `#pragma omp parallel
-// num_threads(4)`, so the host's actual thread budget doesn't matter
-// for triggering — but we still require >=4 OMP threads to be
-// available so the team can actually be formed.
-//
-// Two sub-tests: act=none (validates per-expert dispatch) and
-// act=silu_and_mul (validates the full-M post-pass apply_gated_act_
-// inplace at `m_tile.cpp:812-814`, which applies on rows `[0, M[e])`
-// per expert — different row-range semantics from the slice-based
-// branches).
+// We trigger it by pinning `params[e].num_threads = 4` while providing 8
+// active experts.  Value parity is checked against an ALGO 1 reference
+// (the clamp IS the ALGO 1 sequential full-team algorithm).
 // ============================================================================
 
-TEST(TestGroupMatmulMTileBranches, RoundBasedEngagesOnManyExperts) {
-  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kRoundBased;
+TEST(TestGroupMatmulMTileBranches, ForcedAlgo2ManyExpertsClampsToSeqFullTeam) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag
+      ::kManyExpertsSeqFallback;
 
   const int saved = omp_get_max_threads();
   struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
@@ -4395,15 +4698,15 @@ TEST(TestGroupMatmulMTileBranches, RoundBasedEngagesOnManyExperts) {
     GTEST_SKIP() << "Requires >= 4 OMP threads.";
 
   auto s = build_standalone_mtile_shape(
-      /*num_threads=*/4,        // < active_ops=8 ⇒ kRoundBased
+      /*num_threads=*/4,        // < active_ops=8 ⇒ M-tile infeasible
       /*Ms=*/std::vector<int>(8, 8),
       /*N=*/128, /*K=*/64,
       /*with_bias=*/false);
   run_and_compare_standalone(
       s, /*algo_test=*/2, /*algo_ref=*/1,
-      /*expected_tag=*/kRoundBased,
+      /*expected_tag=*/kManyExpertsSeqFallback,
       /*rtol=*/5e-2f, /*atol=*/5e-2f,
-      "round_based_8actives_4threads");
+      "forced_algo2_8actives_4threads_seq_clamp");
 }
 
 // Multi-tier value parity — same skewed prompt shape as
@@ -4438,13 +4741,13 @@ TEST(TestGroupMatmulMTileBranches, MultiTierValueParityOnSkewedPrompt) {
       "multi_tier_skewed_prompt_value_parity");
 }
 
-// Wide-N value parity — same light-frame shape as
-// `WideNFallbackEngagesOnLightFrames` above.  Wide-N parallelises a
-// single expert across more threads than the standard CCD-stripe by
-// striding along N (memory-bound regime); value parity confirms the
-// N-stride boundaries align cleanly across worker threads.
-TEST(TestGroupMatmulMTileBranches, WideNFallbackValueParityOnLightFrames) {
-  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kWideNFallback;
+// Forced-ALGO-2 value parity on a wide-N light-frame shape.  ALGO 2 is now
+// pure M-tile, so a forced ALGO 2 on this shape runs single-tier
+// (kPhase2Single) rather than the old wide-N sequential fallback.  Value
+// parity against an ALGO 1 reference confirms the single-tier slice/stitch
+// is numerically correct on the shallow-M shape.
+TEST(TestGroupMatmulMTileBranches, ForcedAlgo2WideNValueParityOnLightFrames) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kPhase2Single;
 
   const int saved = omp_get_max_threads();
   struct G { int p; ~G() { omp_set_num_threads(p); } } g{saved};
@@ -4459,9 +4762,9 @@ TEST(TestGroupMatmulMTileBranches, WideNFallbackValueParityOnLightFrames) {
       /*with_bias=*/false);
   run_and_compare_standalone(
       s, /*algo_test=*/2, /*algo_ref=*/1,
-      /*expected_tag=*/kWideNFallback,
+      /*expected_tag=*/kPhase2Single,
       /*rtol=*/5e-2f, /*atol=*/5e-2f,
-      "wide_n_light_frames_value_parity");
+      "forced_algo2_wide_n_light_frames_value_parity");
 }
 
 // ============================================================================
@@ -5500,8 +5803,12 @@ TEST(TestGroupMatmulMTileStandalone, F32WithBiasF32) {
       "standalone_f32_bias_f32");
 }
 
-TEST(TestGroupMatmulMTileBranches, RoundBasedGatedActFullMPostPass) {
-  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kRoundBased;
+// Forced ALGO 2 with active_ops > num_threads AND a fused gated activation:
+// the sequential full-team clamp (kManyExpertsSeqFallback) must still apply
+// the full-M post-pass activation per expert correctly.
+TEST(TestGroupMatmulMTileBranches, ManyExpertsSeqClampGatedActFullMPostPass) {
+  using zendnnl::lowoha::matmul::test_api::m_tile_path_tag
+      ::kManyExpertsSeqFallback;
   using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
   using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 
@@ -5522,9 +5829,9 @@ TEST(TestGroupMatmulMTileBranches, RoundBasedGatedActFullMPostPass) {
 
   run_and_compare_standalone(
       s, /*algo_test=*/2, /*algo_ref=*/1,
-      /*expected_tag=*/kRoundBased,
+      /*expected_tag=*/kManyExpertsSeqFallback,
       /*rtol=*/5e-2f, /*atol=*/5e-2f,
-      "round_based_silu_full_M_post_pass",
+      "many_experts_seq_clamp_silu_full_M_post_pass",
       /*gated_act=*/&ga);
 }
 

@@ -419,19 +419,27 @@ inline void dqint8_compact_and_requant_slice(
 // Op2 = W2) when vertical fusion's eligibility gate fails — see the
 // fork in `group_matmul_fused_moe_execute`.
 //
-// Four internal branches (capture-tag values, see
-// `test_api::m_tile_path_tag::*` in `group_matmul_m_tile_planner.hpp`,
-// Section P.1):
+// ALGO 2 is a PURE M-tile executor.  Two genuine M-tile branches plus one
+// correctness clamp (capture-tag values, see `test_api::m_tile_path_tag::*`
+// in `group_matmul_m_tile_planner.hpp`, Section P.1):
 //
-//   1. Round-based       (`kRoundBased`     = 0) — active_ops > num_threads.
-//                        Each thread runs ≥1 whole expert sequentially.
-//   2. Multi-tier hybrid (`kMultiTier`      = 1) — skewed expert M
+//   1. Multi-tier hybrid (`kMultiTier`      = 1) — skewed expert M
 //                        distribution; splits threads into light + heavy
 //                        pools (see `execute_light_expert`).
-//   3. Wide-N fallback   (`kWideNFallback`  = 2) — memory-bound regime
-//                        where each expert gets the full team (no slicing).
-//   4. Phase-2 single-tier(`kPhase2Single` = 3) — default M-weighted
+//   2. Phase-2 single-tier(`kPhase2Single` = 3) — default M-weighted
 //                        CCD-striped slice plan (see Section A.4).
+//   *  ManyExperts clamp (`kManyExpertsSeqFallback` = 7) — `active_ops >
+//                        num_threads` makes a pure M-tile plan infeasible
+//                        (< 1 thread/expert).  AUTO never reaches it
+//                        (`auto_select_algo` routes that regime to ALGO 5);
+//                        a FORCED ALGO 2 clamps to sequential full-team
+//                        (ALGO 1 equivalent) + a one-time WARN.
+//
+// The former internal "round-based" (per-expert) and "wide-N" (sequential
+// full-team) PERF fallbacks were removed: `auto_select_algo` (Rule 0.6 /
+// Rule 0.7 via `classify_m_tile_regime`) now peels those regimes off to
+// ALGO 5 / ALGO 1 at selection time, so AUTO reproduces the same executor
+// while ALGO 2 stays pure.
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
@@ -496,7 +504,21 @@ void flat_m_tile(
     grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
     const std::vector<bool> &is_weights_const,
     std::vector<matmul_params> &params,
-    int num_threads) {
+    int num_threads,
+    const char **gemm_mode_out) {
+
+  // The executor OWNS its gemm_mode: each branch below writes the concrete
+  // path it ran into `*gemm_mode_out` (mirrors `flat_n_tile`), so the
+  // post-exec [GRP_MATMUL.CALL] line reports the real M-tile branch rather
+  // than a generic "flat_m_tile".  No-op when the caller passes nullptr.
+  auto set_mtile_mode = [&](const char *s) {
+    if (gemm_mode_out != nullptr) *gemm_mode_out = s;
+  };
+  // Default to a SKIP mode so a no-op early return (empty call,
+  // num_threads<=0, or no active expert) reports that nothing executed
+  // (exec_algo=0) rather than mislabelling it as a real ALGO-2 run.  The
+  // concrete branches below overwrite this with the executed M-tile path.
+  set_mtile_mode("flat_m_tile_skip");
 
   const int num_ops = static_cast<int>(M.size());
   if (num_ops == 0 || num_threads <= 0) return;
@@ -643,56 +665,53 @@ void flat_m_tile(
   // scope; the multi-tier branch below uses linear (not CCD-striped)
   // mapping over the heavy pool.
 
-  // ── Many active experts > num_threads: dynamic-scheduled work pool ──
+  // ── ALGO 2 is M-tile-INFEASIBLE when active_ops > num_threads ──
   //
-  // F4 — replaces the prior round-based `(round + tid)` static layout
-  // (which idled (num_threads − tail_round) threads on the final
-  // round whenever `active_ops % num_threads != 0`) with an
-  // `omp for schedule(dynamic, 1)` work-stealing pool.  Each thread
-  // pulls the next active expert from a shared work-queue (an
-  // atomic fetch-add inside the OMP runtime, ~50–100 ns per task)
-  // when it finishes its current one; the per-expert GEMM is
-  // 10–100 µs at minimum, so the dispatch overhead is in the noise.
+  // A pure M-tile plan splits an expert's M rows across a thread team; it
+  // cannot hand out fewer than one thread per active expert, so when more
+  // experts fire than there are threads there is NO valid M-tile slice plan
+  // (the single-tier planner would floor every active expert at 1 thread,
+  // overflow `num_threads`, and silently DROP the surplus experts in its
+  // Phase-3 tid mapping — a correctness bug).
   //
-  // Behaviour change:
-  //   * No `#pragma omp barrier` per round → threads that pick a
-  //     fast expert immediately grab the next instead of waiting.
-  //   * The implicit barrier at end of the `parallel` region still
-  //     joins all threads before the function returns.
-  //   * Thread → expert mapping is no longer deterministic; CCD
-  //     spreading is still preserved structurally because tids
-  //     0..cores_per_ccd-1 sit on CCD 0 etc. via KMP_AFFINITY
-  //     compact, and dynamic dispatch fills idle slots uniformly.
-  //   * `static thread_local matmul_params local_params` is reused
-  //     across iterations on the same thread (declared per-thread
-  //     scope, re-assigned at the start of every task) — safe.
+  // AUTO never reaches this branch: `auto_select_algo` routes the
+  // `active_ops > num_threads` regime to ALGO 5 (parallel_per_expert).  The
+  // only way here is an explicit `ZENDNNL_GRP_MATMUL_ALGO=2` force on such a
+  // shape.  Per the cleanup policy, ALGO 2 stays a PURE M-tile executor and
+  // does NOT fall back to the per-expert (ALGO-5) schedule it used to; for
+  // this infeasible regime we instead CLAMP to the sequential full-team path
+  // (ALGO 1 equivalent — each active expert's GEMM runs across the whole
+  // `num_threads` team, one expert at a time) and emit a one-time WARN so
+  // the operator knows forced ALGO 2 could not run as M-tile here.
   if (active_ops > num_threads) {
+    static const bool s_warn = apilog_warning_enabled();
+    static std::atomic<bool> s_warned{false};
+    if (s_warn && !s_warned.exchange(true, std::memory_order_relaxed)) {
+      apilog_warning(
+          "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) on a shape with "
+          "active_ops > num_threads: pure M-tile is infeasible (cannot give "
+          "< 1 thread per active expert).  CLAMP to sequential full-team "
+          "(ALGO 1 equivalent).  AUTO (ZENDNNL_GRP_MATMUL_ALGO unset) routes "
+          "this regime to ALGO 5 (per-expert) instead.");
+    }
+    set_mtile_mode("flat_m_tile_seq_clamp");
     if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
       test_api::s_last_m_tile_path.store(
-          test_api::m_tile_path_tag::kRoundBased,
+          test_api::m_tile_path_tag::kManyExpertsSeqFallback,
           std::memory_order_relaxed);
     }
-    std::vector<int> active_idx;
-    active_idx.reserve(active_ops);
-    for (int i = 0; i < num_ops; ++i)
-      if (M[i] > 0) active_idx.push_back(i);
-
-    #pragma omp parallel num_threads(num_threads)
-    {
-      #pragma omp for schedule(dynamic, 1) nowait
-      for (int j = 0; j < active_ops; ++j) {
-        const int e = active_idx[j];
-        static thread_local matmul_params local_params;
-        local_params = params[e];
-        execute_expert_slice(layout[e], transA[e], transB[e],
-            M[e], N[e], K[e], alpha[e],
-            src[e], lda[e], weight[e], ldb[e],
-            bias[e], beta[e], dst[e], ldc[e],
-            is_weights_const[e], 1, local_params, algo);
-        if (fused_act != grp_matmul_gated_act_t::none) {
-          apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
-                                  N[e], ldc[e], act_dtype);
-        }
+    for (int e = 0; e < num_ops; ++e) {
+      if (M[e] <= 0) continue;
+      static thread_local matmul_params local_params;
+      local_params = params[e];
+      execute_expert_slice(layout[e], transA[e], transB[e],
+          M[e], N[e], K[e], alpha[e],
+          src[e], lda[e], weight[e], ldb[e],
+          bias[e], beta[e], dst[e], ldc[e],
+          is_weights_const[e], num_threads, local_params, algo);
+      if (fused_act != grp_matmul_gated_act_t::none) {
+        apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
+                                N[e], ldc[e], act_dtype);
       }
     }
     return;
@@ -878,6 +897,7 @@ void flat_m_tile(
         // that fall through to single-tier do not poison the tag.
         // See doc-block on `test_api::s_capture_m_tile_path` in
         // `group_matmul_parallel_common.hpp`.
+        set_mtile_mode("flat_m_tile_multitier");
         if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
           test_api::s_last_m_tile_path.store(
               test_api::m_tile_path_tag::kMultiTier,
@@ -1099,83 +1119,29 @@ void flat_m_tile(
       M, active_pos, num_ops, num_threads, active_ops,
       kSliceTarget, cores_per_ccd, num_ccds);
 
-  // ── Wide-N memory-bound fallback (few actives × small M × large N) ──
+  // ── Wide-N regime is no longer executed here (ALGO 2 is pure M-tile) ──
   //
-  // When `total_need * 2 ≤ num_threads`, the M dimension across all
-  // active experts is too shallow to absorb the available parallelism
-  // at the kSliceTarget=16 floor.  Phase 2's surplus distribution
-  // below would then pile leftover threads onto small-M experts and
-  // shrink each thread's slice well below kSliceTarget; brgemm hits
-  // its narrow-M path and per-thread efficiency collapses.
+  // The wide-N memory-bound regime — few actives × shallow M × large N,
+  // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — used to fall back here
+  // to a sequential-full-team loop (an ALGO-1 equivalent).  That decision
+  // now lives in `auto_select_algo` (Rule 0.7 via `classify_m_tile_regime`,
+  // same gate constants), which routes the regime to ALGO 1 for AUTO so
+  // ALGO 2 stays a PURE M-tile executor.
   //
-  // In this regime (e.g., Mixtral prompt light frames with 7-8
-  // actives × M ≤ 60 × N=28672, or GPT-OSS prompt tiny frames with
-  // 12-18 actives × M ≤ 64) sequential-with-full-team is strictly
-  // better: each expert's GEMM is parallelized across all
-  // `num_threads` by the inner matmul algo (M-and-N-aware), the
-  // weight matrix is loaded once per expert by the whole team via
-  // shared L3, and the inactive M-tile slots that would otherwise
-  // sit on the OMP barrier are avoided altogether.
-  //
-  // Decode safety: `max_M_single_tier > 1` excludes pure-decode
-  // workloads (M=1 per expert).  In that regime Phase 2's surplus
-  // step is a structural no-op — `t_assign[i] < M[i]` is false for
-  // every expert, so the surplus loop breaks immediately and the
-  // existing M-tile CCD-stripe runs each expert on its own CCD with
-  // 1 thread (Mixtral decode: 8 actives → 8 parallel single-thread
-  // calls on 8 distinct CCDs, the latency-optimal mapping).  Sending
-  // that to the sequential-with-full-team path would serialize 8
-  // GEMMs back-to-back and trade away the CCD-parallel decode win.
-  //
-  // Mutually exclusive with the round-based (`active_ops >
-  // num_threads`) branch above (different active-count regime) and
-  // with the multi-tier path (which requires `active_ops ≥
-  // num_threads/2 ≥ 64` ⇒ total_need ≫ num_threads/2 in practice).
-  //
-  // The 2× margin is conservative on purpose so we do not chase the
-  // sequential path for healthy mid-range workloads.  Empirical
-  // regimes at 128 threads:
-  //   Mixtral prompt light  7 × ceil(36/16) = 21   →   42 ≤ 128  → fallback
-  //   GPT-OSS prompt tiny  12 × ceil(42/16) = 36   →   72 ≤ 128  → fallback
-  //   Mixtral prompt heavy  8 × ceil(992/16)= 496  →  992 > 128  → M-tile
-  //   GPT-OSS prompt heavy 32 × ceil(496/16)= 992  → 1984 > 128  → M-tile
-  //   Qwen3 prompt light  100 × 1          ≈ 100  →  200 > 128  → M-tile
-  //   Mixtral decode        max_M=1                          → M-tile (excluded)
-  //   GPT-OSS decode        max_M=1                          → M-tile (excluded)
-  //
-  // The helper returns `plan.wide_n_fallback = true` when this gate
-  // matches; the inline branch below stays identical to the
-  // pre-refactor form for behaviour parity.
-  if (plan.wide_n_fallback) {
-    // Capture-gated branch tag — see doc-block on
-    // `test_api::s_capture_m_tile_path` in
-    // `group_matmul_parallel_common.hpp`.
-    if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
-      test_api::s_last_m_tile_path.store(
-          test_api::m_tile_path_tag::kWideNFallback,
-          std::memory_order_relaxed);
-    }
-    for (int e = 0; e < num_ops; ++e) {
-      if (M[e] <= 0) continue;
-      static thread_local matmul_params local_params;
-      local_params = params[e];
-      execute_expert_slice(layout[e], transA[e], transB[e],
-          M[e], N[e], K[e], alpha[e],
-          src[e], lda[e], weight[e], ldb[e],
-          bias[e], beta[e], dst[e], ldc[e],
-          is_weights_const[e], num_threads, local_params, algo);
-      if (fused_act != grp_matmul_gated_act_t::none) {
-        apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
-                                N[e], ldc[e], act_dtype);
-      }
-    }
-    return;
-  }
+  // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
+  // the single-tier M-tile plan below: this is CORRECT (the regime is
+  // M-tile-feasible — `total_need ≤ num_threads/2 < num_threads`, so the
+  // planner's Phase-2/3 mapping covers every active expert), just less
+  // memory-optimal than ALGO 1 would be.  The planner still computes
+  // `plan.wide_n_fallback` because the vertical-fusion pipeline
+  // (`flat_m_tile_pipeline_bf16`) consults it to bail to the legacy
+  // two-pass; `flat_m_tile` itself no longer branches on it.
 
   // Capture-gated branch tag — Phase 2 single-tier is the default
   // fallthrough when none of the earlier branches commit.  See
   // doc-block on `test_api::s_capture_m_tile_path` in
   // `group_matmul_parallel_common.hpp`.
+  set_mtile_mode("flat_m_tile_single_tier");
   if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
     test_api::s_last_m_tile_path.store(
         test_api::m_tile_path_tag::kPhase2Single,
@@ -1592,9 +1558,13 @@ bool flat_m_tile_pipeline_bf16(
   }
 
   // ── Single-tier Phase-1b/2/3 plan (shared with `flat_m_tile`) ──
+  // Pass short_circuit_on_wide_n=true: this executor bails to the legacy
+  // two-pass on the wide-N signal (just below) and never reads the tid
+  // mapping, so let the planner skip the throwaway Phase-2/3 work on wide-N.
   const auto plan = plan_m_tile_single_tier_assignment(
       M, active_pos, num_ops, num_threads, active_ops,
-      kSliceTarget, cores_per_ccd, num_ccds);
+      kSliceTarget, cores_per_ccd, num_ccds,
+      /*short_circuit_on_wide_n=*/true);
 
   // Wide-N fallback bails out: full-team-per-expert sequential GEMM
   // doesn't fuse vertically at M-tile granularity (no row-disjoint

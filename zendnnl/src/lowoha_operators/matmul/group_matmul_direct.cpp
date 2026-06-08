@@ -1160,6 +1160,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     std::ostringstream ss;
     ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops
        << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
+       << " exec_algo=" << executed_algo_from_gemm_mode(gemm_mode)
        << " threads=" << num_threads
        << " dtype=" << dt_name(params[0].dtypes.src)
        << ">"       << dt_name(params[0].dtypes.wei)

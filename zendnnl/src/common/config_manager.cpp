@@ -15,12 +15,67 @@
 # *******************************************************************************/
 #include "config_manager.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <string>
+
 namespace zendnnl {
 namespace common {
 
 using namespace zendnnl::error_handling;
 using json = nlohmann::json;
 using namespace zendnnl::ops;
+
+namespace {
+
+// Throw-free parse of a `*_LOG_LEVEL` environment value.  Accepts EITHER a
+// numeric level ("0".."4") OR a case-insensitive name ("disabled" / "error"
+// / "warning" / "info" / "verbose") — the same names the JSON config path
+// already accepts via `logger_support_t::str_to_log_level`.  Returns true
+// and writes `out` on a recognised value; returns false (leaving the
+// caller's current setting untouched) on null / empty / out-of-range /
+// unrecognised input.
+//
+// Rationale: the previous `std::stoi(std::getenv(...))` ABORTED the whole
+// process with an uncaught `std::invalid_argument` when an operator set a
+// non-numeric level such as `ZENDNNL_API_LOG_LEVEL=info` (a natural value,
+// and exactly the one the JSON path accepts).  A logging-config knob must
+// never crash the library or its tools (benchdnn / gtests).
+bool parse_env_log_level(const char *raw, log_level_t &out) {
+  if (raw == nullptr) return false;
+  std::string s(raw);
+  const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  if (s.empty()) return false;
+
+  // All-digits -> numeric level (manual parse: cannot throw).
+  if (std::all_of(s.begin(), s.end(),
+                  [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    unsigned long v = 0;
+    for (char c : s) {
+      v = v * 10UL + static_cast<unsigned long>(c - '0');
+      if (v >= static_cast<unsigned long>(log_level_t::log_level_count))
+        return false;  // out of range (also bounds the accumulation)
+    }
+    out = log_level_t(static_cast<uint32_t>(v));
+    return true;
+  }
+
+  // Otherwise a name.  Accept ONLY the known tokens; an unrecognised name is
+  // ignored (keep the current setting) rather than silently disabling logs.
+  std::string lower = s;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  if (lower == "disabled" || lower == "error" || lower == "warning" ||
+      lower == "info" || lower == "verbose") {
+    out = logger_support_t::str_to_log_level(lower);
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
 
 void config_manager_t::config() {
   //default config
@@ -174,53 +229,33 @@ status_t config_manager_t::set_user_logger_config() {
 
 status_t config_manager_t::set_env_logger_config() {
   {
-    char *log_level_str = std::getenv("ZENDNNL_COMMON_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        config_logger.log_level_map[log_module_t::common]
-          = log_level_t(log_level);
-    }
+    log_level_t level;
+    if (parse_env_log_level(std::getenv("ZENDNNL_COMMON_LOG_LEVEL"), level))
+      config_logger.log_level_map[log_module_t::common] = level;
   }
 
   {
-    char *log_level_str = std::getenv("ZENDNNL_API_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        config_logger.log_level_map[log_module_t::api]
-          = log_level_t(log_level);
-    }
+    log_level_t level;
+    if (parse_env_log_level(std::getenv("ZENDNNL_API_LOG_LEVEL"), level))
+      config_logger.log_level_map[log_module_t::api] = level;
   }
 
   {
-    char *log_level_str = std::getenv("ZENDNNL_TEST_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        config_logger.log_level_map[log_module_t::test]
-          = log_level_t(log_level);
-    }
+    log_level_t level;
+    if (parse_env_log_level(std::getenv("ZENDNNL_TEST_LOG_LEVEL"), level))
+      config_logger.log_level_map[log_module_t::test] = level;
   }
 
   {
-    char *log_level_str = std::getenv("ZENDNNL_PROFILE_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        config_logger.log_level_map[log_module_t::profile]
-          = log_level_t(log_level);
-    }
+    log_level_t level;
+    if (parse_env_log_level(std::getenv("ZENDNNL_PROFILE_LOG_LEVEL"), level))
+      config_logger.log_level_map[log_module_t::profile] = level;
   }
 
   {
-    char *log_level_str = std::getenv("ZENDNNL_DEBUG_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        config_logger.log_level_map[log_module_t::debug]
-          = log_level_t(log_level);
-    }
+    log_level_t level;
+    if (parse_env_log_level(std::getenv("ZENDNNL_DEBUG_LOG_LEVEL"), level))
+      config_logger.log_level_map[log_module_t::debug] = level;
   }
 
   return status_t::success;

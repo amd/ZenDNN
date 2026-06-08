@@ -36,6 +36,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -131,6 +132,50 @@ inline constexpr int    kFewExpertsAlgo1 = 8;
 /// cascade) still wins — this is a DEFAULT refinement, not a hard clamp.
 /// Falls back to ALGO 1 when the shape is not m_tile_safe.
 inline constexpr int    kFewExpertsAlgo2Pref = 8;
+
+// ── Executed-ALGO from gemm_mode ────────────────────────────────────────
+// Maps the executor-written `gemm_mode` string (the authoritative record of
+// what ACTUALLY ran) to the ALGO that actually executed (1..5), so the
+// post-exec `[GRP_MATMUL.CALL]` line can surface `exec_algo=` alongside
+// `mode=`.  Together with the pre-exec `[GRP_MATMUL.ALGO] chosen=` selection
+// line, this makes any selection-vs-execution divergence explicit instead of
+// silent (e.g. a forced ALGO 2 that clamps to sequential-full-team reports
+// `chosen=ALGO_2 ... exec_algo=1 mode=flat_m_tile_seq_clamp`).
+//
+// Returns 0 for null / unrecognised modes OR for explicit no-op markers
+// (`*_skip` — nothing executed), and 1..5 for a recognised executed path.
+// So `exec_algo=0` means "no GEMM ran or mode not understood", NOT "ALGO 0".
+// ORDER MATTERS: the `flat_m_tile_seq_clamp` special case (ALGO-1 behaviour
+// wearing an ALGO-2 mode prefix) and the `*_skip` markers must be checked
+// before the generic `flat_m_tile` / `multilevel` / `fused_moe` prefixes
+// they share.  Fused composites
+// (`fused_moe_*(op1=..,op2=..)`) derive the algo from the Op1 sub-mode; the
+// full per-op detail stays in the `mode=` string itself.
+inline int executed_algo_from_gemm_mode(const char *mode) {
+  if (mode == nullptr) return 0;
+  auto starts = [&](const char *p) {
+    return std::strncmp(mode, p, std::strlen(p)) == 0;
+  };
+  // No-op / nothing-executed markers map to 0 (must precede the generic
+  // prefixes they share, e.g. "flat_m_tile_skip" before "flat_m_tile").
+  if (starts("skip"))                  return 0;  // whole-call no-op (all M<=0)
+  if (starts("flat_m_tile_skip"))      return 0;  // empty / no active expert
+  if (starts("multilevel_skip"))       return 0;
+  if (starts("fused_moe_skip"))        return 0;
+  if (starts("flat_m_tile_seq_clamp")) return 1;  // sequential full-team
+  if (starts("sequential"))            return 1;  // "sequential" / "..._experts"
+  if (starts("flat_m_tile"))           return 2;
+  if (starts("vertical_fusion"))       return 2;  // M-tile fused pipeline
+  if (starts("flat_n_tile"))           return 3;
+  if (starts("multilevel"))            return 4;
+  if (starts("per_expert"))            return 5;
+  if (starts("fused_moe")) {
+    // Composite: derive from the Op1 executor sub-mode.
+    const char *op1 = std::strstr(mode, "op1=");
+    return (op1 != nullptr) ? executed_algo_from_gemm_mode(op1 + 4) : 0;
+  }
+  return 0;
+}
 
 // NOTE: `kNTilePlanMaxExperts` (max experts the ALGO 3 N-tile planner
 // can represent, = 256) now lives in
