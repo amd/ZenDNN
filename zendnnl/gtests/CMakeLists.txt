@@ -32,7 +32,6 @@ if(ZENDNNL_BUILD_GTEST)
     test_matmul.cpp
     test_postop_cache.cpp
     test_lru_cache.cpp
-    test_reorder.cpp
     test_batchmatmul.cpp
     test_embag.cpp
     test_embedding.cpp
@@ -42,7 +41,10 @@ if(ZENDNNL_BUILD_GTEST)
     test_softmax.cpp)
   # Group-matmul-specific gtest artifacts (5 test files + 2 helper TUs +
   # moe_test_utils.hpp + README) live in the `group_matmul/` subdirectory.
-  # Sourced via `add_subdirectory()` below after the gtests target exists.
+  # Reorder gtest artifacts (5 behavior-focused test files + shared
+  # reorder_test_common.hpp) live in the `reorder/` subdirectory.
+  # Both are sourced via `add_subdirectory()` below after the gtests target
+  # exists.
 
   set(gtests_headers
     gtest_utils.hpp)
@@ -76,12 +78,15 @@ if(ZENDNNL_BUILD_GTEST)
   add_subdirectory(group_matmul)
   # Adds group_embag/ test sources to the gtests target.
   add_subdirectory(group_embag)
+  # Adds reorder/ test sources to the gtests target.
+  add_subdirectory(reorder)
 
   target_include_directories(gtests
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_matmul"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_embag")
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/group_embag"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/reorder")
 
   # Link to OpenMP and GTest
   target_link_libraries(gtests

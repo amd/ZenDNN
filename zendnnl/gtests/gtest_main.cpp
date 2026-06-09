@@ -22,6 +22,9 @@
 // outside-of-the-subdir reference; the subdir's CMakeLists.txt + its
 // helper TU own everything else.
 #include "group_matmul/group_matmul_test_helpers.hpp"
+// Reorder fixture param (`ReorderType`), the `reorder_test` global, and the
+// reorder kernel/compare helpers live in the reorder/ subfolder.
+#include "reorder/reorder_test_helpers.hpp"
 // Group-embag-specific declarations (`GroupEmbagType`,
 // `group_embag_test`) live under `group_embag/`.  Same pattern as
 // `group_matmul/`: extern in the helpers header, definition + resize

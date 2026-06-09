@@ -172,18 +172,27 @@ The `zendnnl/gtests/` directory contains all test-related files and subdirectori
 gtests/
 ├── gtest_main.cpp           # Entry point for all tests.
 ├── test_matmul.cpp          # Single-op matmul testsuite (F32, BF16, INT8, WOQ, stride).
-├── test_group_matmul.cpp    # Group matmul testsuite (MoE postop, gated activation, fused MoE).
 ├── test_batchmatmul.cpp     # Batch matmul testsuite with different test cases.
-├── test_reorder.cpp         # Reorder testsuite (regular + LOWOHA quantization/dequantization).
-├── test_postop_cache.cpp    # AOCL DLP post-op metadata cache testsuite (hit-path refresh, key distinctness, kill switch).
-├── test_lru_cache.cpp       # Unit testsuite for the lru_cache_t container (try_get contract).
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
 ├── test_normalization.cpp   # Normalization testsuite with different test cases.
+├── test_postop_cache.cpp    # Post-op cache testsuite.
+├── test_lru_cache.cpp       # Unit testsuite for the lru_cache_t container (try_get contract).
+├── test_sdpa.cpp            # SDPA (scaled dot-product attention) testsuite.
 ├── test_omp_api.cpp         # OpenMP thread-control utility testsuite (omp_thread_control.hpp).
 ├── test_softmax.cpp         # Softmax testsuite (OneDNN vs Reference).
-└── gtest_utils.cpp/hpp      # Utility functions for tests.
+├── gtest_utils.cpp/hpp      # Utility functions for tests.
+├── reorder/                 # Reorder testsuite (regular + LOWOHA quant/dequant/conversion).
+│   ├── reorder_test_common.hpp        # Shared TestReorder fixture (all reorder TEST_P bodies).
+│   ├── test_reorder_regular.cpp       # Legacy regular reorder+matmul tests + the lone INSTANTIATE.
+│   ├── test_static_quant_dequant.cpp  # LOWOHA static quant/dequant round-trips.
+│   ├── test_dynamic_quant.cpp         # LOWOHA dynamic-quant round-trips.
+│   ├── test_strided_cases.cpp         # LOWOHA strided quant/conversion round-trips.
+│   └── test_conversion.cpp            # LOWOHA type-conversion round-trips.
+├── group_matmul/            # Group matmul testsuite (see group_matmul/README.md).
+└── group_embag/             # Group embedding-bag / embedding testsuite.
 ```
+> **Note:** Reorder tests live in `reorder/` (see `reorder/README.md`). They share the single `TestReorder` fixture, so `--gtest_filter=Reorder/TestReorder.*` works as before.
 
 ## **Configure and build GTest with ZenDNN**
 - Configure:
@@ -377,7 +386,7 @@ Requires `--op normalization`:
 | `--use_scale`, `--use_shift` | Boolean |
 | `--gamma_dt`, `--beta_dt` | **`f32`**, **`bf16`**, or **`f16`** (`f16` only on AVX512-FP16-capable hosts; otherwise rejected with a log message and a random fallback) |
 
-**Defaults (random mode):** Omitted flags randomize (`--seed` → timestamp, `--test` → 400). **`--lowoha` omitted:** the suite is **LOWOHA-only** — every test runs with the LOWOHA (LOA) API (matmul/batch matmul/embedding/embedding-bag/reorder all use LOWOHA on; the legacy regular reorder + matmul `TEST_P` bodies remain in `test_reorder.cpp` but self-skip via their existing `if (use_LOWOHA) GTEST_SKIP();` guard; normalization/softmax/SDPA/OMP API/postop-cache/group matmul (including fused-MoE, prepack, custom-kernel)/group embag/group embedding are LOWOHA-only operators or LOWOHA-internal infrastructure with no non-LOWOHA path). Passing any value other than `true`/`1` causes fixtures that expose a non-LOWOHA path to skip with `please use LOA (LOWOHA) API` (this also applies to the AI gtests `AITests/*` when `ZENDNNL_BUILD_AI_GTESTS=ON`). **`--input_file`:** per-suite overrides ignored; globals (`--test`, `--seed`, `--num_threads`) and env `ZENDNNL_MATMUL_ALGO` / `ZENDNNL_BMM_ALGO` still apply — see [CLI flags vs input-file mode](#cli-flags-vs-input-file-mode), [Backend selection precedence](#backend-selection-precedence).
+**Defaults (random mode):** Omitted flags randomize (`--seed` → timestamp, `--test` → 400). **`--lowoha` omitted:** the suite is **LOWOHA-only** — every test runs with the LOWOHA (LOA) API (matmul/batch matmul/embedding/embedding-bag/reorder all use LOWOHA on; the legacy regular reorder + matmul `TEST_P` bodies remain in `reorder/test_reorder_regular.cpp` but self-skip via their existing `if (use_LOWOHA) GTEST_SKIP();` guard; normalization/softmax/SDPA/OMP API/postop-cache/group matmul (including fused-MoE, prepack, custom-kernel)/group embag/group embedding are LOWOHA-only operators or LOWOHA-internal infrastructure with no non-LOWOHA path). Passing any value other than `true`/`1` causes fixtures that expose a non-LOWOHA path to skip with `please use LOA (LOWOHA) API` (this also applies to the AI gtests `AITests/*` when `ZENDNNL_BUILD_AI_GTESTS=ON`). **`--input_file`:** per-suite overrides ignored; globals (`--test`, `--seed`, `--num_threads`) and env `ZENDNNL_MATMUL_ALGO` / `ZENDNNL_BMM_ALGO` still apply — see [CLI flags vs input-file mode](#cli-flags-vs-input-file-mode), [Backend selection precedence](#backend-selection-precedence).
 
 **Dtypes:** CLI accepts `f32`, `f16`, `bf16`, `s32`, `s16`, `s8`, `s4`, `u32`, `u16`, `u8`, `u4`. Matmul honors **`src_dtype`**: `s8`/`u8` only; **`dst_dtype`**: `s8`/`u8`/`f32`/`bf16`/`f16` (others randomized). `s64` is **`--indices_dtype`** only. Reorder random mode shares matmul flags; use `--gtest_filter` to select suites. Embedding uses the shared embag flags only (`EmbeddingInput` ⊂ `EmbagInput`). Unset flags use `*Type` random defaults (random mode only; not with `--input_file`).
 
@@ -606,10 +615,11 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ### Reorder Tests
  - The Reorder TestSuite contains both LOWOHA reorder tests and legacy regular reorder tests (Reorder + Matmul).
  - The suite is **LOWOHA-only**. By default every test instance runs as a LOWOHA reorder test.
- - The legacy regular reorder + matmul `TEST_P` bodies are still present in `test_reorder.cpp` but are unreachable at runtime: each begins with `if (use_LOWOHA) GTEST_SKIP();`, and `use_LOWOHA` is now always `true` unless the user passes `--lowoha` with any value other than `true`/`1` (e.g. `false`, `0`, or any other non-empty token), in which case `SetUp()` masks the whole fixture.
+ - The reorder testsuite lives in the `reorder/` subdirectory (split out of the former monolithic `test_reorder.cpp`); all bodies share the single `TestReorder` fixture in `reorder/reorder_test_common.hpp`. See `reorder/README.md` for the per-file layout.
+ - The legacy regular reorder + matmul `TEST_P` bodies are still present in `reorder/test_reorder_regular.cpp` but are unreachable at runtime: each begins with `if (use_LOWOHA) GTEST_SKIP();`, and `use_LOWOHA` is now always `true` unless the user passes `--lowoha` with any value other than `true`/`1` (e.g. `false`, `0`, or any other non-empty token), in which case `SetUp()` masks the whole fixture.
  - Use `--lowoha true` (or omit the flag) to run LOWOHA reorder tests; passing any value other than `true`/`1` skips every test in the fixture with `please use LOA (LOWOHA) API`.
- - **LOWOHA test cases**: `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE`, `FP32_BF16_CVT`, `FP32_BF16_CVT_SCALED`, `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED`, `FP32_BF16_CVT_STRIDED`, `FP32_DYN_QUANT`, `BF16_DYN_QUANT`, `F16_DYN_QUANT`, `F16_DYN_QUANT_F16_SCALE`
- - **Legacy (always-skipped) regular test cases**: `F32_F32`, `BF16_F32`, `BF16_BF16`, `F32`, `BF16`, `S8`, `F32_F32_Stride`, `BF16_F32_Stride`, `BF16_BF16_Stride`
+ - **LOWOHA test cases**: `BF16_QUANT_DEQUANT`, `FP32_QUANT_DEQUANT`, `F16_QUANT_DEQUANT`, `F16_QUANT_DEQUANT_F16_SCALE` (`reorder/test_static_quant_dequant.cpp`); `FP32_DYN_QUANT`, `BF16_DYN_QUANT`, `F16_DYN_QUANT`, `F16_DYN_QUANT_F16_SCALE` (`reorder/test_dynamic_quant.cpp`); `BF16_QUANT_DEQUANT_STRIDED`, `FP32_QUANT_DEQUANT_STRIDED`, `FP32_BF16_CVT_STRIDED` (`reorder/test_strided_cases.cpp`); `FP32_BF16_CVT`, `FP32_BF16_CVT_SCALED`, `FP32_F16_CVT`, `FP32_F16_CVT_SCALED`, `BF16_F16_CVT`, `BF16_F16_CVT_SCALED` (`reorder/test_conversion.cpp`)
+ - **Legacy (always-skipped) regular test cases** (`reorder/test_reorder_regular.cpp`): `F32_F32`, `BF16_F32`, `BF16_BF16`, `F32`, `BF16`, `S8`, `F16`, `F32_F32_Stride`, `BF16_F32_Stride`, `BF16_BF16_Stride`
 
 #### LOWOHA Reorder Tests
 
@@ -627,11 +637,15 @@ For 1D tensors, only per-tensor and per-channel granularities are supported.
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT_DEQUANT_STRIDED/* --lowoha true
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_QUANT_DEQUANT_STRIDED/* --lowoha true
 ```
-4. Run LOWOHA type conversion tests (FP32 ↔ BF16):
+4. Run LOWOHA type conversion tests (FP32 ↔ BF16, FP32 ↔ F16, BF16 ↔ F16):
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT/* --lowoha true
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT_SCALED/* --lowoha true
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CVT_STRIDED/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_F16_CVT/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_F16_CVT_SCALED/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F16_CVT/* --lowoha true
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F16_CVT_SCALED/* --lowoha true
 ```
 5. Run LOWOHA dynamic quantization tests:
 ```bash
