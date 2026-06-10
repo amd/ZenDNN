@@ -773,8 +773,7 @@ void flat_m_tile(
         if (M[i] > max_M) max_M = M[i];
       }
     }
-    const int avg_M = (active_ops > 0)
-        ? static_cast<int>(sum_M_total / active_ops) : 0;
+    const int avg_M = static_cast<int>(sum_M_total / active_ops);
 
     // F8 — Same env-tunable hatch as `kSliceTarget`.  Defaults match
     // the original literal constants exactly (256 / 4 / 8); each
@@ -1520,8 +1519,7 @@ bool flat_m_tile_pipeline_bf16(
         if (M[i] > max_M) max_M = M[i];
       }
     }
-    const int avg_M = (active_ops > 0)
-        ? static_cast<int>(sum_M_total / active_ops) : 0;
+    const int avg_M = static_cast<int>(sum_M_total / active_ops);
     const int kHybridMinMaxM   = get_grp_matmul_m_tile_hybrid_min_max_m();
     const int kHybridMinSkewX  = get_grp_matmul_m_tile_hybrid_min_skew();
     const int kLightsPerThread =
