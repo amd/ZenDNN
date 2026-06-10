@@ -125,6 +125,13 @@ const void *compute_bias_offset(
          (static_cast<size_t>(col_start) * bias_element_size);
 }
 
+static bool is_strided_gemm_layout(const matmul_partition_config_t &config) {
+  const int min_lda = config.transA ? config.M : config.K;
+  const int min_ldb = config.transB ? config.K : config.N;
+  return config.lda != min_lda || config.ldb != min_ldb ||
+         config.ldc != config.N;
+}
+
 static matmul_algo_t select_partition_kernel(
   const char trans_input,
   const char trans_weight,
@@ -134,10 +141,14 @@ static matmul_algo_t select_partition_kernel(
   bool is_weights_const
 ) {
   const matmul_algo_t kernel = config.kernel;
-
   if (kernel != matmul_algo_t::libxsmm &&
       kernel != matmul_algo_t::libxsmm_blocked) {
     return kernel;
+  }
+
+  if (is_strided_gemm_layout(config)) {
+    apilog_info("LibXSMM partitioned kernel does not support strided layouts, falling back to DLP");
+    return matmul_algo_t::aocl_dlp;
   }
 
   // LibXSMM matmul path (libxsmm / libxsmm_blocked) is currently supported
