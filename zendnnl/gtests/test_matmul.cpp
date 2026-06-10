@@ -1088,8 +1088,8 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
  */
 TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
   uint64_t sym_k = (k / 32) * 32;
-  if (sym_k == 0) {
-    sym_k = 32;
+  if (sym_k < 64) {
+    sym_k = 64;
   }
 
   std::mt19937 local_rng(m ^ k ^ n ^ 0xBB01);

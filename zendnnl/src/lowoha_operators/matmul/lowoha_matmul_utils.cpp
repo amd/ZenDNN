@@ -796,6 +796,16 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 
+  const bool non_f32_quant_scale_src = params.quant_params.src_scale.buff &&
+                                       params.quant_params.src_scale.dt != data_type_t::f32;
+  const bool is_int8_quant_matmul = params.dtypes.wei == data_type_t::s8 &&
+                                    params.quant_params.src_scale.buff;
+  if (is_int8_quant_matmul && non_f32_quant_scale_src &&
+      (kernel != matmul_algo_t::aocl_dlp &&
+       kernel != matmul_algo_t::aocl_dlp_blocked)) {
+    kernel = matmul_algo_t::aocl_dlp_blocked;
+  }
+
   const bool is_non_qunat_int8 = (params.dtypes.src == data_type_t::bf16 ||
                                   params.dtypes.src == data_type_t::f32) &&
                                  (params.dtypes.wei == data_type_t::s8) &&

@@ -142,6 +142,10 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
           (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_type =
             get_aocl_store_type(
               mul_buff_tensor.get_data_type());
+          // Row-broadcast {1, N} operand: one scale per output column. The new
+          // AOCL DLP drop requires SCALE post-ops to set scale_factor_dim.
+          (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_dim =
+            DLP_PARAM_DIM_PER_CHANNEL;
           (aocl_dlp_po_ptr->scale + mul_idx_1d)->zp->zero_point_type = DLP_TYPE::DLP_S32;
           mul_idx_1d++;
         }
@@ -220,6 +224,12 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
       (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_len =
         dst_scale_ != nullptr ? compute_product(output_tensor.get_quant_scale_size()) :
         1;
+      // The new AOCL DLP drop requires SCALE post-ops to set scale_factor_dim
+      // explicitly. Dst scale is per-tensor (len 1) or per-channel / per-column.
+      (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_dim =
+        ((aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_len == 1)
+          ? DLP_PARAM_DIM_PER_TENSOR
+          : DLP_PARAM_DIM_PER_CHANNEL;
       // Set dst zero-point
       (aocl_dlp_po_ptr->scale + mul_idx_1d)->zp->zero_point =
         dst_zp_ != nullptr ? const_cast<void *>(dst_zp_) : &dummy_zp;
@@ -453,6 +463,12 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
         (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = NULL;
         (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len =
           aocl_binary_row_vector_len_n(it->second);
+        // Row-broadcast {1, N} operand: one scale per output column. The new
+        // AOCL DLP drop requires SCALE post-ops to set scale_factor_dim
+        // explicitly (DLP_PARAM_DIM_INVALID is rejected). See
+        // dlp_gemm_post_ops.c and aocl_gemm_post_ops.h.
+        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_dim =
+          DLP_PARAM_DIM_PER_CHANNEL;
         (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
         log_info("Adding done");
         mul_index_1d++;
@@ -839,6 +855,15 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
           (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
             get_aocl_store_type(src_scale_dt);
           (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = src_scale_size;
+          // SCALE post-ops must set scale_factor_dim explicitly for the new
+          // AOCL DLP drop. Source scale is per-tensor (len 1) or per-token /
+          // per-row (len M).
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_dim =
+            (src_scale_size == 1)
+              ? DLP_PARAM_DIM_PER_TENSOR
+              : (src_scale_size == static_cast<int>(dim_M)
+                   ? DLP_PARAM_DIM_PER_TOKEN
+                   : DLP_PARAM_DIM_PER_CHANNEL);
           (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
           (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
             DLP_TYPE::DLP_S32;
@@ -853,6 +878,13 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
           (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
             get_aocl_store_type(wei_scale_dt);
           (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = wei_scale_size;
+          // SCALE post-ops must set scale_factor_dim explicitly for the new
+          // AOCL DLP drop. Weight scale is per-tensor (len 1) or per-channel /
+          // per-column (len N).
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_dim =
+            (wei_scale_size == 1)
+              ? DLP_PARAM_DIM_PER_TENSOR
+              : DLP_PARAM_DIM_PER_CHANNEL;
           (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
           (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
             DLP_TYPE::DLP_S32;

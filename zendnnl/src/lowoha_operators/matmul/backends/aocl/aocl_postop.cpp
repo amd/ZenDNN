@@ -173,6 +173,39 @@ auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
   }
 };
 
+// Infer the SCALE post-op granularity (scale_factor_dim) from the scale
+// vector length. The AOCL DLP SCALE post-op now *requires* the caller to
+// set sf->scale_factor_dim explicitly (PER_TENSOR / PER_CHANNEL / PER_TOKEN)
+// and rejects DLP_PARAM_DIM_INVALID; it also strictly validates that the
+// length matches the chosen dim (len==1 for PER_TENSOR, len==n for
+// PER_CHANNEL, len==m for PER_TOKEN). See dlp_gemm_post_ops.c and the
+// scale_factor_dim contract in aocl_gemm_post_ops.h.
+//
+// len == 1            -> PER_TENSOR
+// len == M (rows)     -> PER_TOKEN   (source / per-token activations)
+// len == N (columns)  -> PER_CHANNEL (weight / dst / row-broadcast operands)
+//
+// vec_dim selects the granularity for the non-scalar case and disambiguates
+// the M == N corner case (e.g. PER_TOKEN for source scales, PER_CHANNEL for
+// weight / dst / binary_mul broadcast scales).
+auto infer_scale_dim = [](std::size_t len, int64_t M, int64_t N,
+                          DLP_PARAM_DIM_TYPE vec_dim) -> DLP_PARAM_DIM_TYPE {
+  if (len == 1) {
+    return DLP_PARAM_DIM_PER_TENSOR;
+  }
+  if (vec_dim == DLP_PARAM_DIM_PER_TOKEN &&
+      len == static_cast<std::size_t>(M)) {
+    return DLP_PARAM_DIM_PER_TOKEN;
+  }
+  if (vec_dim == DLP_PARAM_DIM_PER_CHANNEL &&
+      len == static_cast<std::size_t>(N)) {
+    return DLP_PARAM_DIM_PER_CHANNEL;
+  }
+  // Fall back to the caller-requested vector granularity; DLP will reject a
+  // genuine (dim, len) mismatch, surfacing a misconfigured scale loudly.
+  return vec_dim;
+};
+
 } // namespace (anonymous detail)
 
 // Per-call teardown for create_dlp_post_op()'s return value.
@@ -432,6 +465,8 @@ static void setup_dlp_postops(dlp_metadata_t *md,
         sc.sf->scale_factor     = const_cast<void *>(po.buff);
         sc.sf->scale_factor_len = n_cols;
         sc.sf->scale_factor_type = to_dlp_type(po.dtype);
+        // Row-broadcast {1, N}: one scale per output column -> per-channel.
+        sc.sf->scale_factor_dim = DLP_PARAM_DIM_PER_CHANNEL;
         static int32_t bmul_bcast_zp = 0;
         sc.zp->zero_point     = &bmul_bcast_zp;
         sc.zp->zero_point_type = DLP_S32;
@@ -701,6 +736,8 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         md->scale[scale_index].sf->scale_factor = const_cast<void *>(po.buff);
         md->scale[scale_index].sf->scale_factor_len = N;
         md->scale[scale_index].sf->scale_factor_type = to_dlp_type(po.dtype);
+        // Row-broadcast {1, N}: one scale per output column -> per-channel.
+        md->scale[scale_index].sf->scale_factor_dim = DLP_PARAM_DIM_PER_CHANNEL;
         scale_index++;
       }
       else {
@@ -846,6 +883,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
       md->scale[sidx].sf->scale_factor = const_cast<void *>(src_scale.buff);
       md->scale[sidx].sf->scale_factor_len = get_num_elements(src_scale.dims);
       md->scale[sidx].sf->scale_factor_type = to_dlp_type(src_scale.dt);
+      // Source scale is per-tensor (len 1) or per-token / per-row (len M).
+      md->scale[sidx].sf->scale_factor_dim = infer_scale_dim(
+        get_num_elements(src_scale.dims), M, N, DLP_PARAM_DIM_PER_TOKEN);
       sidx++;
     }
     if (lowoha_param.quant_params.wei_scale.buff) {
@@ -853,6 +893,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
       md->scale[sidx].sf->scale_factor = const_cast<void *>(wei_scale.buff);
       md->scale[sidx].sf->scale_factor_len = get_num_elements(wei_scale.dims);
       md->scale[sidx].sf->scale_factor_type = to_dlp_type(wei_scale.dt);
+      // Weight scale is per-tensor (len 1) or per-channel / per-column (len N).
+      md->scale[sidx].sf->scale_factor_dim = infer_scale_dim(
+        get_num_elements(wei_scale.dims), M, N, DLP_PARAM_DIM_PER_CHANNEL);
     }
     if (lowoha_param.quant_params.dst_scale.buff) {
       const auto &dst_scale = lowoha_param.quant_params.dst_scale;
@@ -861,6 +904,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
       md->scale[scale_index].sf->scale_factor_len =
         get_num_elements(dst_scale.dims);
       md->scale[scale_index].sf->scale_factor_type = to_dlp_type(dst_scale.dt);
+      // Dst scale is per-tensor (len 1) or per-channel / per-column (len N).
+      md->scale[scale_index].sf->scale_factor_dim = infer_scale_dim(
+        get_num_elements(dst_scale.dims), M, N, DLP_PARAM_DIM_PER_CHANNEL);
       // dst_zp shares the same slot as dst_scale in the cold path
       // (lines 1017-1023). Only patch when the caller actually supplies
       // a dst_zp buffer; the dummy-zp branch on the cold path uses a
@@ -1324,6 +1370,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       to_dlp_type(lowoha_param.quant_params.src_scale.dt);
     dlp_metadata->scale[scale_index].sf->scale_factor_len =
       get_num_elements(lowoha_param.quant_params.src_scale.dims);
+    // Source scale is per-tensor (len 1) or per-token / per-row (len M).
+    dlp_metadata->scale[scale_index].sf->scale_factor_dim = infer_scale_dim(
+      get_num_elements(lowoha_param.quant_params.src_scale.dims), M, N,
+      DLP_PARAM_DIM_PER_TOKEN);
     // Set dummy zero point
     static int32_t dummy_zp = 0;
     dlp_metadata->scale[scale_index].zp->zero_point = &dummy_zp;
@@ -1341,6 +1391,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       to_dlp_type(lowoha_param.quant_params.wei_scale.dt);
     dlp_metadata->scale[scale_index].sf->scale_factor_len =
       get_num_elements(lowoha_param.quant_params.wei_scale.dims);
+    // Weight scale is per-tensor (len 1) or per-channel / per-column (len N).
+    dlp_metadata->scale[scale_index].sf->scale_factor_dim = infer_scale_dim(
+      get_num_elements(lowoha_param.quant_params.wei_scale.dims), M, N,
+      DLP_PARAM_DIM_PER_CHANNEL);
     // Set dummy zero point
     static int32_t dummy_zp_wei = 0;
     dlp_metadata->scale[scale_index].zp->zero_point = &dummy_zp_wei;
@@ -1376,6 +1430,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       to_dlp_type(lowoha_param.quant_params.dst_scale.dt);
     dlp_metadata->scale[scale_index].sf->scale_factor_len =
       get_num_elements(lowoha_param.quant_params.dst_scale.dims);
+    // Dst scale is per-tensor (len 1) or per-channel / per-column (len N).
+    dlp_metadata->scale[scale_index].sf->scale_factor_dim = infer_scale_dim(
+      get_num_elements(lowoha_param.quant_params.dst_scale.dims), M, N,
+      DLP_PARAM_DIM_PER_CHANNEL);
     // Set destination zero-point if present
     if (lowoha_param.quant_params.dst_zp.buff) {
       dlp_metadata->scale[scale_index].zp->zero_point =
