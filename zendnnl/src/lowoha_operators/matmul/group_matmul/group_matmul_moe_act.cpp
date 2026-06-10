@@ -34,6 +34,7 @@
 #include <omp.h>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
@@ -45,6 +46,7 @@ namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::bfloat16_t;
+using zendnnl::common::float16_t;
 using zendnnl::memory::data_type_t;
 
 namespace {
@@ -52,12 +54,15 @@ namespace {
 // Shared AVX-512 vector activation math — single source of truth
 // for `fast_exp_neg_avx512`, `sigmoid_avx512`, `silu_avx512`,
 // `gelu_avx512`, `swiglu_oai_avx512`, and the `bf16x16_to_f32` /
-// `f32_to_bf16x16` cvt helpers.  Pulled in via using-declarations
-// (rather than `using namespace ...;`) so each name is explicit
-// and pinned at the namespace boundary; future drift between this
-// file and `bf16_microkernel.cpp` is structurally impossible.
+// `f32_to_bf16x16` / `f16x16_to_f32` / `f32_to_f16x16` cvt helpers.
+// Pulled in via using-declarations (rather than `using namespace
+// ...;`) so each name is explicit and pinned at the namespace
+// boundary; future drift between this file and
+// `bf16_microkernel.cpp` is structurally impossible.
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::f16x16_to_f32;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_f16x16;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::fast_exp_neg_avx512;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
@@ -145,6 +150,48 @@ void swiglu_oai_mul_row_scalar_bf16(bfloat16_t *row, int dim) {
         std::min(static_cast<float>(row[2 * n + 1]), 7.0f));
     float sig = sigmoid_scalar(g * alpha);
     row[n] = bfloat16_t((1.0f + u) * g * sig);
+  }
+}
+
+// ── F16 scalar row kernels ────────────────────────────────────────
+//
+// Storage type is `float16_t` — the canonical F16 element type
+// (data_type_t::f16 maps to float16_t via prec_traits, and the
+// group_matmul stack carries F16 dst buffers as float16_t*).  This
+// matches the bf16 siblings' use of `bfloat16_t*` and avoids the
+// strict-aliasing UB of viewing a float16_t buffer through uint16_t*.
+// Element access mirrors the bf16 kernels: `static_cast<float>()`
+// (float16_t::operator float → f16_to_f32_val) on read and the
+// `float16_t(value)` converting constructor (→ f32_to_f16_val) on
+// write.  The activation math (silu / gelu / swiglu_oai) runs in F32
+// throughout — same pattern as the bf16 siblings.
+void silu_and_mul_row_scalar_f16(float16_t *row, int dim) {
+  float16_t *gate = row, *up = row + dim;
+  for (int n = 0; n < dim; ++n) {
+    float g = static_cast<float>(gate[n]);
+    float u = static_cast<float>(up[n]);
+    gate[n] = float16_t(silu_scalar(g) * u);
+  }
+}
+
+void gelu_and_mul_row_scalar_f16(float16_t *row, int dim) {
+  float16_t *gate = row, *up = row + dim;
+  for (int n = 0; n < dim; ++n) {
+    float g = static_cast<float>(gate[n]);
+    float u = static_cast<float>(up[n]);
+    gate[n] = float16_t(gelu_scalar(g) * u);
+  }
+}
+
+void swiglu_oai_mul_row_scalar_f16(float16_t *row, int dim) {
+  const float alpha = 1.702f;
+  for (int n = 0; n < dim; ++n) {
+    float g = std::max(-7.0f,
+        std::min(static_cast<float>(row[2 * n]), 7.0f));
+    float u = std::max(-7.0f,
+        std::min(static_cast<float>(row[2 * n + 1]), 7.0f));
+    float sig = sigmoid_scalar(g * alpha);
+    row[n] = float16_t((1.0f + u) * g * sig);
   }
 }
 
@@ -296,6 +343,104 @@ static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
   }
 }
 
+// ── F16 AVX-512 row kernels ────────────────────────────────────────
+//
+// Mirror the BF16 row-kernel pattern line-for-line, swapping
+// `bf16x16_to_f32` / `f32_to_bf16x16` for the F16 cvts (`f16x16_to_
+// f32` / `f32_to_f16x16`).  Storage type is `float16_t` (the canonical
+// F16 element type — same as the bf16 path uses `bfloat16_t`).  SIMD
+// load/store go through `__m256i*`/`__m512i*` (may_alias) so the
+// element type doesn't affect them; the scalar tail uses
+// `static_cast<float>()` / the `float16_t(value)` constructor.  The
+// activation math (silu / gelu / swiglu_oai) runs on FP32 lanes
+// throughout, so the only difference vs the BF16 path is the cvt.
+//
+// Target attribute is the SAME as the BF16 siblings
+// (`avx512f,avx512bw,avx512vl,fma`).  The F16
+// load/store goes through `f16x16_to_f32` / `f32_to_f16x16`, which
+// use the AVX-512F `VCVTPH2PS` / `VCVTPS2PH` intrinsics
+// (`_mm512_cvtph_ps` / `_mm512_cvtps_ph`); the FP32 activation math
+// is AVX-512F and the deinterleave is AVX-512BW.  No AVX-512-FP16
+// instruction is emitted, so these kernels run on any AVX-512F host
+// and are safe to dispatch behind the `avx512f_available()` gate
+// (avoids the SIGILL hazard of an avx512fp16-licensed function being
+// reached on a host without AVX-512-FP16).  Note: F16 group_matmul as
+// a whole still requires AVX-512-FP16 for the GEMM itself — the public
+// `group_matmul_direct` F16 ISA gate enforces that upstream — but the
+// activation post-pass does not depend on it.
+
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static void silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
+  float16_t *gate = row, *up = row + dim;
+  int n = 0;
+  for (; n + 16 <= dim; n += 16) {
+    __m512 g = f16x16_to_f32(_mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(&gate[n])));
+    __m512 u = f16x16_to_f32(_mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(&up[n])));
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
+        f32_to_f16x16(_mm512_mul_ps(silu_avx512(g), u)));
+  }
+  for (; n < dim; ++n) {
+    float g = static_cast<float>(gate[n]);
+    float u = static_cast<float>(up[n]);
+    gate[n] = float16_t(silu_scalar(g) * u);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static void gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
+  float16_t *gate = row, *up = row + dim;
+  int n = 0;
+  for (; n + 16 <= dim; n += 16) {
+    __m512 g = f16x16_to_f32(_mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(&gate[n])));
+    __m512 u = f16x16_to_f32(_mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(&up[n])));
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
+        f32_to_f16x16(_mm512_mul_ps(gelu_avx512(g), u)));
+  }
+  for (; n < dim; ++n) {
+    float g = static_cast<float>(gate[n]);
+    float u = static_cast<float>(up[n]);
+    gate[n] = float16_t(gelu_scalar(g) * u);
+  }
+}
+
+// F16 swiglu_oai row helper.  Same vpermtxvar_epi16 deinterleave
+// pattern as the BF16 sibling — `_mm512_permutexvar_epi16` operates
+// on 16-bit lanes regardless of their float interpretation, so the
+// gate/up index tables (kDeintGateIdx / kDeintUpIdx) are reused
+// verbatim.  Only the load lift (`f16x16_to_f32`) and the final
+// cvt-store (`f32_to_f16x16`) differ from the BF16 path.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static void swiglu_oai_mul_row_avx512_f16(float16_t *row, int dim) {
+  const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
+  const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
+
+  int n = 0;
+  for (; n + 16 <= dim; n += 16) {
+    __m512i raw = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i *>(&row[2 * n]));
+    __m512 g = f16x16_to_f32(
+        _mm512_castsi512_si256(_mm512_permutexvar_epi16(g_idx, raw)));
+    __m512 u = f16x16_to_f32(
+        _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
+
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(&row[n]),
+        f32_to_f16x16(swiglu_oai_avx512(g, u)));
+  }
+  const float alpha = 1.702f;
+  for (; n < dim; ++n) {
+    float g = std::max(-7.0f,
+        std::min(static_cast<float>(row[2 * n]), 7.0f));
+    float u = std::max(-7.0f,
+        std::min(static_cast<float>(row[2 * n + 1]), 7.0f));
+    float sig = sigmoid_scalar(g * alpha);
+    row[n] = float16_t((1.0f + u) * g * sig);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Out-of-place swiglu_oai tile kernels (src/dst may alias when dst ≤ src)
 //
@@ -390,14 +535,79 @@ static void swiglu_oai_tile_avx512_bf16(const bfloat16_t *src,
   }
 }
 
+// ── F16 swiglu_oai OOP tile kernels ────────────────────────────────
+//
+// Mirror of the BF16 OOP tile pattern: scalar tail handler + AVX-512
+// deinterleave-and-fold body.  Storage type is `float16_t` (canonical
+// F16 element type); cvt to / from F32 via `static_cast<float>` /
+// the `float16_t(value)` constructor (scalar) or `f16x16_to_f32` /
+// `f32_to_f16x16`
+// (AVX-512F `VCVTPH2PS` / `VCVTPS2PH`).
+//
+// In-place safety: dst may alias into src's buffer with `dst_offset
+// ≤ src_offset` (same alias contract as the BF16 sibling — write at
+// position n always happens AFTER reads at positions 2n and 2n+1,
+// both of which are ≥ n).  At dst_offset == src_offset (col_start
+// == 0) the write at position n overwrites only positions that are
+// never read again.
+
+void swiglu_oai_tile_scalar_f16(const float16_t *src, float16_t *dst,
+                                int pairs) {
+  const float alpha = 1.702f;
+  for (int n = 0; n < pairs; ++n) {
+    float g = std::max(-7.0f,
+        std::min(static_cast<float>(src[2 * n]), 7.0f));
+    float u = std::max(-7.0f,
+        std::min(static_cast<float>(src[2 * n + 1]), 7.0f));
+    float sig = sigmoid_scalar(g * alpha);
+    dst[n] = float16_t((1.0f + u) * g * sig);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static void swiglu_oai_tile_avx512_f16(const float16_t *src,
+                                       float16_t *dst, int pairs) {
+  const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
+  const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
+
+  int n = 0;
+  for (; n + 16 <= pairs; n += 16) {
+    __m512i raw = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i *>(&src[2 * n]));
+    __m512 g = f16x16_to_f32(
+        _mm512_castsi512_si256(_mm512_permutexvar_epi16(g_idx, raw)));
+    __m512 u = f16x16_to_f32(
+        _mm512_castsi512_si256(_mm512_permutexvar_epi16(u_idx, raw)));
+
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[n]),
+        f32_to_f16x16(swiglu_oai_avx512(g, u)));
+  }
+  const float alpha = 1.702f;
+  for (; n < pairs; ++n) {
+    float g = std::max(-7.0f,
+        std::min(static_cast<float>(src[2 * n]), 7.0f));
+    float u = std::max(-7.0f,
+        std::min(static_cast<float>(src[2 * n + 1]), 7.0f));
+    float sig = sigmoid_scalar(g * alpha);
+    dst[n] = float16_t((1.0f + u) * g * sig);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Target-attributed execute functions (contain OMP loop — eliminates
 // per-row dispatch function call overhead)
 // ═══════════════════════════════════════════════════════════════════════
 
+// Target attribute is `avx512f,avx512bw,avx512vl,fma`:
+// all three dtype branches — including the F16 branch — emit only
+// AVX-512F/BW instructions (F16↔F32 cvt via VCVTPH2PS/VCVTPS2PH, F32
+// activation math, AVX-512BW deinterleave).  This keeps the function's
+// compile-time ISA license aligned with the `avx512f_available()`
+// dispatch gate below, so it cannot SIGILL on an AVX-512F host that
+// lacks AVX-512-FP16.
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 void execute_act_rows_avx512(
-    grp_matmul_gated_act_t act, bool is_f32,
+    grp_matmul_gated_act_t act, data_type_t dst_dtype,
     const std::vector<void *> &dst,
     const std::vector<int64_t> &row_offsets,
     const std::vector<int> &N,
@@ -412,7 +622,7 @@ void execute_act_rows_avx512(
     const int m = static_cast<int>(t - row_offsets[e]);
     const int dim = N[e] / 2;
 
-    if (is_f32) {
+    if (dst_dtype == data_type_t::f32) {
       float *row = static_cast<float *>(dst[e])
           + static_cast<size_t>(m) * ldc[e];
       switch (act) {
@@ -424,7 +634,7 @@ void execute_act_rows_avx512(
         swiglu_oai_mul_row_avx512_f32(row, dim); break;
       default: break;
       }
-    } else {
+    } else if (dst_dtype == data_type_t::bf16) {
       auto *row = static_cast<bfloat16_t *>(dst[e])
           + static_cast<size_t>(m) * ldc[e];
       switch (act) {
@@ -436,12 +646,24 @@ void execute_act_rows_avx512(
         swiglu_oai_mul_row_avx512_bf16(row, dim); break;
       default: break;
       }
+    } else {
+      auto *row = static_cast<float16_t *>(dst[e])
+          + static_cast<size_t>(m) * ldc[e];
+      switch (act) {
+      case grp_matmul_gated_act_t::silu_and_mul:
+        silu_and_mul_row_avx512_f16(row, dim); break;
+      case grp_matmul_gated_act_t::gelu_and_mul:
+        gelu_and_mul_row_avx512_f16(row, dim); break;
+      case grp_matmul_gated_act_t::swiglu_oai_mul:
+        swiglu_oai_mul_row_avx512_f16(row, dim); break;
+      default: break;
+      }
     }
   }
 }
 
 void execute_act_rows_scalar(
-    grp_matmul_gated_act_t act, bool is_f32,
+    grp_matmul_gated_act_t act, data_type_t dst_dtype,
     const std::vector<void *> &dst,
     const std::vector<int64_t> &row_offsets,
     const std::vector<int> &N,
@@ -456,7 +678,7 @@ void execute_act_rows_scalar(
     const int m = static_cast<int>(t - row_offsets[e]);
     const int dim = N[e] / 2;
 
-    if (is_f32) {
+    if (dst_dtype == data_type_t::f32) {
       float *row = static_cast<float *>(dst[e])
           + static_cast<size_t>(m) * ldc[e];
       switch (act) {
@@ -468,7 +690,7 @@ void execute_act_rows_scalar(
         swiglu_oai_mul_row_scalar_f32(row, dim); break;
       default: break;
       }
-    } else {
+    } else if (dst_dtype == data_type_t::bf16) {
       auto *row = static_cast<bfloat16_t *>(dst[e])
           + static_cast<size_t>(m) * ldc[e];
       switch (act) {
@@ -478,6 +700,18 @@ void execute_act_rows_scalar(
         gelu_and_mul_row_scalar_bf16(row, dim); break;
       case grp_matmul_gated_act_t::swiglu_oai_mul:
         swiglu_oai_mul_row_scalar_bf16(row, dim); break;
+      default: break;
+      }
+    } else {
+      auto *row = static_cast<float16_t *>(dst[e])
+          + static_cast<size_t>(m) * ldc[e];
+      switch (act) {
+      case grp_matmul_gated_act_t::silu_and_mul:
+        silu_and_mul_row_scalar_f16(row, dim); break;
+      case grp_matmul_gated_act_t::gelu_and_mul:
+        gelu_and_mul_row_scalar_f16(row, dim); break;
+      case grp_matmul_gated_act_t::swiglu_oai_mul:
+        swiglu_oai_mul_row_scalar_f16(row, dim); break;
       default: break;
       }
     }
@@ -536,12 +770,12 @@ status_t group_matmul_moe_act_execute(
     return status_t::failure;
   }
 
-  if (dst_dtype != data_type_t::f32 && dst_dtype != data_type_t::bf16) {
-    log_error("group_matmul_moe_act: unsupported dst_dtype (must be f32 or bf16)");
+  if (dst_dtype != data_type_t::f32
+      && dst_dtype != data_type_t::bf16
+      && dst_dtype != data_type_t::f16) {
+    log_error("group_matmul_moe_act: unsupported dst_dtype (must be f32, bf16, or f16)");
     return status_t::failure;
   }
-
-  const bool is_f32 = (dst_dtype == data_type_t::f32);
 
   for (int i = 0; i < num_ops; ++i) {
     if (N[i] % 2 != 0) {
@@ -576,10 +810,10 @@ status_t group_matmul_moe_act_execute(
   // has F without BW/VL but is not a supported platform.  This matches
   // the dispatch pattern in group_matmul_moe_postop.cpp.
   if (avx512f_available())
-    execute_act_rows_avx512(act, is_f32, dst, row_offsets, N, ldc,
+    execute_act_rows_avx512(act, dst_dtype, dst, row_offsets, N, ldc,
                             total_rows, num_threads);
   else
-    execute_act_rows_scalar(act, is_f32, dst, row_offsets, N, ldc,
+    execute_act_rows_scalar(act, dst_dtype, dst, row_offsets, N, ldc,
                             total_rows, num_threads);
 
   return status_t::success;
@@ -598,14 +832,17 @@ void apply_gated_act_inplace(
   if (act == grp_matmul_gated_act_t::none || row_start >= row_end || !dst)
     return;
 
+  if (dst_dtype != data_type_t::f32
+      && dst_dtype != data_type_t::bf16
+      && dst_dtype != data_type_t::f16)
+    return;
+
   const int dim = N / 2;
-  const bool is_f32 = (dst_dtype == data_type_t::f32);
-  const bool use_avx512 =
-      avx512f_available();
+  const bool use_avx512 = avx512f_available();
 
   for (int m = row_start; m < row_end; ++m) {
     if (use_avx512) {
-      if (is_f32) {
+      if (dst_dtype == data_type_t::f32) {
         float *row = static_cast<float *>(dst)
             + static_cast<size_t>(m) * ldc;
         switch (act) {
@@ -617,7 +854,7 @@ void apply_gated_act_inplace(
           swiglu_oai_mul_row_avx512_f32(row, dim); break;
         default: break;
         }
-      } else {
+      } else if (dst_dtype == data_type_t::bf16) {
         auto *row = static_cast<bfloat16_t *>(dst)
             + static_cast<size_t>(m) * ldc;
         switch (act) {
@@ -629,9 +866,21 @@ void apply_gated_act_inplace(
           swiglu_oai_mul_row_avx512_bf16(row, dim); break;
         default: break;
         }
+      } else {
+        auto *row = static_cast<float16_t *>(dst)
+            + static_cast<size_t>(m) * ldc;
+        switch (act) {
+        case grp_matmul_gated_act_t::silu_and_mul:
+          silu_and_mul_row_avx512_f16(row, dim); break;
+        case grp_matmul_gated_act_t::gelu_and_mul:
+          gelu_and_mul_row_avx512_f16(row, dim); break;
+        case grp_matmul_gated_act_t::swiglu_oai_mul:
+          swiglu_oai_mul_row_avx512_f16(row, dim); break;
+        default: break;
+        }
       }
     } else {
-      if (is_f32) {
+      if (dst_dtype == data_type_t::f32) {
         float *row = static_cast<float *>(dst)
             + static_cast<size_t>(m) * ldc;
         switch (act) {
@@ -643,7 +892,7 @@ void apply_gated_act_inplace(
           swiglu_oai_mul_row_scalar_f32(row, dim); break;
         default: break;
         }
-      } else {
+      } else if (dst_dtype == data_type_t::bf16) {
         auto *row = static_cast<bfloat16_t *>(dst)
             + static_cast<size_t>(m) * ldc;
         switch (act) {
@@ -653,6 +902,18 @@ void apply_gated_act_inplace(
           gelu_and_mul_row_scalar_bf16(row, dim); break;
         case grp_matmul_gated_act_t::swiglu_oai_mul:
           swiglu_oai_mul_row_scalar_bf16(row, dim); break;
+        default: break;
+        }
+      } else {
+        auto *row = static_cast<float16_t *>(dst)
+            + static_cast<size_t>(m) * ldc;
+        switch (act) {
+        case grp_matmul_gated_act_t::silu_and_mul:
+          silu_and_mul_row_scalar_f16(row, dim); break;
+        case grp_matmul_gated_act_t::gelu_and_mul:
+          gelu_and_mul_row_scalar_f16(row, dim); break;
+        case grp_matmul_gated_act_t::swiglu_oai_mul:
+          swiglu_oai_mul_row_scalar_f16(row, dim); break;
         default: break;
         }
       }
@@ -674,18 +935,21 @@ void apply_swiglu_oai_tile_rows(
   assert((col_start & 1) == 0
          && "apply_swiglu_oai_tile_rows: col_start must be even "
             "(pair-aligned for interleaved gate/up layout)");
-  assert((dtype == data_type_t::f32 || dtype == data_type_t::bf16)
-         && "apply_swiglu_oai_tile_rows: dtype must be f32 or bf16");
+  assert((dtype == data_type_t::f32
+          || dtype == data_type_t::bf16
+          || dtype == data_type_t::f16)
+         && "apply_swiglu_oai_tile_rows: dtype must be f32, bf16, or f16");
   if (pairs <= 0 || M <= 0 || dst_buf == nullptr) return;
   if ((col_start & 1) != 0) return;  // pair-misaligned — refuse silently in release
-  if (dtype != data_type_t::f32 && dtype != data_type_t::bf16) return;
+  if (dtype != data_type_t::f32
+      && dtype != data_type_t::bf16
+      && dtype != data_type_t::f16) return;
 
-  const bool is_f32 = (dtype == data_type_t::f32);
   const bool use_avx512 = avx512f_available();
 
   const int dst_col = col_start / 2;  // swiglu halves the output width
 
-  if (is_f32) {
+  if (dtype == data_type_t::f32) {
     auto *base = static_cast<float *>(dst_buf);
     for (int m = 0; m < M; ++m) {
       const float *src_row = base + static_cast<size_t>(m) * ldc + col_start;
@@ -695,7 +959,7 @@ void apply_swiglu_oai_tile_rows(
       else
         swiglu_oai_tile_scalar_f32(src_row, dst_row, pairs);
     }
-  } else {
+  } else if (dtype == data_type_t::bf16) {
     auto *base = static_cast<bfloat16_t *>(dst_buf);
     for (int m = 0; m < M; ++m) {
       const bfloat16_t *src_row = base + static_cast<size_t>(m) * ldc + col_start;
@@ -704,6 +968,16 @@ void apply_swiglu_oai_tile_rows(
         swiglu_oai_tile_avx512_bf16(src_row, dst_row, pairs);
       else
         swiglu_oai_tile_scalar_bf16(src_row, dst_row, pairs);
+    }
+  } else {
+    auto *base = static_cast<float16_t *>(dst_buf);
+    for (int m = 0; m < M; ++m) {
+      const float16_t *src_row = base + static_cast<size_t>(m) * ldc + col_start;
+      float16_t *dst_row       = base + static_cast<size_t>(m) * ldc + dst_col;
+      if (use_avx512)
+        swiglu_oai_tile_avx512_f16(src_row, dst_row, pairs);
+      else
+        swiglu_oai_tile_scalar_f16(src_row, dst_row, pairs);
     }
   }
 }
@@ -726,16 +1000,19 @@ void apply_swiglu_oai_tile_rows_oop(
   assert(dst_buf != nullptr && "apply_swiglu_oai_tile_rows_oop: dst_buf is null");
   assert((src_col_start & 1) == 0
          && "apply_swiglu_oai_tile_rows_oop: src_col_start must be even");
-  assert((dtype == data_type_t::f32 || dtype == data_type_t::bf16)
-         && "apply_swiglu_oai_tile_rows_oop: dtype must be f32 or bf16");
+  assert((dtype == data_type_t::f32
+          || dtype == data_type_t::bf16
+          || dtype == data_type_t::f16)
+         && "apply_swiglu_oai_tile_rows_oop: dtype must be f32, bf16, or f16");
   if (pairs <= 0 || M <= 0 || src_buf == nullptr || dst_buf == nullptr) return;
   if ((src_col_start & 1) != 0) return;
-  if (dtype != data_type_t::f32 && dtype != data_type_t::bf16) return;
+  if (dtype != data_type_t::f32
+      && dtype != data_type_t::bf16
+      && dtype != data_type_t::f16) return;
 
-  const bool is_f32 = (dtype == data_type_t::f32);
   const bool use_avx512 = avx512f_available();
 
-  if (is_f32) {
+  if (dtype == data_type_t::f32) {
     const auto *src_base = static_cast<const float *>(src_buf);
     auto       *dst_base = static_cast<float *>(dst_buf);
     for (int m = 0; m < M; ++m) {
@@ -748,7 +1025,7 @@ void apply_swiglu_oai_tile_rows_oop(
       else
         swiglu_oai_tile_scalar_f32(src_row, dst_row, pairs);
     }
-  } else {
+  } else if (dtype == data_type_t::bf16) {
     const auto *src_base = static_cast<const bfloat16_t *>(src_buf);
     auto       *dst_base = static_cast<bfloat16_t *>(dst_buf);
     for (int m = 0; m < M; ++m) {
@@ -760,6 +1037,19 @@ void apply_swiglu_oai_tile_rows_oop(
         swiglu_oai_tile_avx512_bf16(src_row, dst_row, pairs);
       else
         swiglu_oai_tile_scalar_bf16(src_row, dst_row, pairs);
+    }
+  } else {
+    const auto *src_base = static_cast<const float16_t *>(src_buf);
+    auto       *dst_base = static_cast<float16_t *>(dst_buf);
+    for (int m = 0; m < M; ++m) {
+      const float16_t *src_row =
+          src_base + static_cast<size_t>(m) * src_ldc + src_col_start;
+      float16_t *dst_row =
+          dst_base + static_cast<size_t>(m) * dst_ldc + dst_col_start;
+      if (use_avx512)
+        swiglu_oai_tile_avx512_f16(src_row, dst_row, pairs);
+      else
+        swiglu_oai_tile_scalar_f16(src_row, dst_row, pairs);
     }
   }
 }

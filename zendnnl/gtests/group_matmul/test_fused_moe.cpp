@@ -505,14 +505,18 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEInternalAllocMixedM,
 // ???????????????????????????????????????????????????????????????????????????????
 
 struct CombinedTestParam {
-  bool use_moe, use_act, use_fused, is_bf16;
+  bool use_moe, use_act, use_fused;
+  data_type_t dt;
   int M, num_ops;
 };
 
 static std::string CombinedParamName(
   const ::testing::TestParamInfo<CombinedTestParam> &info) {
   const auto &p = info.param;
-  std::string name = (p.is_bf16 ? "bf16" : "f32");
+  const char *dt_name = (p.dt == data_type_t::bf16) ? "bf16"
+                        : (p.dt == data_type_t::f16)  ? "f16"
+                        : "f32";
+  std::string name = dt_name;
   name += "_M" + std::to_string(p.M) + "_E" + std::to_string(p.num_ops)
           + "_moe" + (p.use_moe ? "1" : "0")
           + "_act" + (p.use_act ? "1" : "0")
@@ -532,7 +536,8 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
   const auto &p = GetParam();
   const int H = 256, dim = 128, N_gate_up = 2 * dim, K = H, topk = 2;
   const int num_ops = p.num_ops, M = p.M;
-  const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+  const data_type_t dt = p.dt;
+  const size_t elem_sz = zendnnl::common::size_of(dt);
 
   // Op1 output width depends on whether act/fused is used.
   const bool need_gate_up = p.use_act || p.use_fused;
@@ -556,23 +561,23 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
 
   // Allocate all buffers (some won't be used ? harmless).
   TypedBuffers src, w1, d1, d1_ref, w2, d2_fused, d2_ref;
-  src    .alloc(num_ops, (size_t)M * K,        p.is_bf16);
-  w1     .alloc(num_ops, (size_t)K * N_op1,    p.is_bf16);
-  d1     .alloc(num_ops, (size_t)M * N_op1,    p.is_bf16);
-  d1_ref .alloc(num_ops, (size_t)M * N_op1,    p.is_bf16);
-  w2     .alloc(num_ops, (size_t)K_down * H,   p.is_bf16);
-  d2_fused.alloc(num_ops, (size_t)M * H,       p.is_bf16);
-  d2_ref  .alloc(num_ops, (size_t)M * H,       p.is_bf16);
-  fill_moe_tensors(num_ops, p.is_bf16, &src, &w1, &w2);
+  src    .alloc(num_ops, (size_t)M * K,        dt);
+  w1     .alloc(num_ops, (size_t)K * N_op1,    dt);
+  d1     .alloc(num_ops, (size_t)M * N_op1,    dt);
+  d1_ref .alloc(num_ops, (size_t)M * N_op1,    dt);
+  w2     .alloc(num_ops, (size_t)K_down * H,   dt);
+  d2_fused.alloc(num_ops, (size_t)M * H,       dt);
+  d2_ref  .alloc(num_ops, (size_t)M * H,       dt);
+  fill_moe_tensors(num_ops, dt, &src, &w1, &w2);
 
   auto gv = GemmVecs::uniform(num_ops, M, N_op1, K);
-  auto srcs   = src.cptrs(p.is_bf16);
-  auto wei1   = w1.cptrs(p.is_bf16);
-  auto wei2   = w2.cptrs(p.is_bf16);
-  auto dst1   = d1.ptrs(p.is_bf16);
-  auto dst1_r = d1_ref.ptrs(p.is_bf16);
-  auto dst2_f = d2_fused.ptrs(p.is_bf16);
-  auto dst2_r = d2_ref.ptrs(p.is_bf16);
+  auto srcs   = src.cptrs(dt);
+  auto wei1   = w1.cptrs(dt);
+  auto wei2   = w2.cptrs(dt);
+  auto dst1   = d1.ptrs(dt);
+  auto dst1_r = d1_ref.ptrs(dt);
+  auto dst2_f = d2_fused.ptrs(dt);
+  auto dst2_r = d2_ref.ptrs(dt);
   std::vector<const void *> no_bias(num_ops, nullptr);
   auto params = make_uniform_params(num_ops, dt);
 
@@ -593,8 +598,7 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
   const int D_final  = p.use_fused ? H : N_op1;
   const int num_slots = M * topk;
   std::vector<float> moe_weights(num_slots, 1.0f / topk);
-  std::vector<float> moe_out_f((size_t)M * D_final, 0.0f);
-  std::vector<bfloat16_t> moe_out_b((size_t)M * D_final, bfloat16_t(0.0f));
+  std::vector<char> moe_out((size_t)M * D_final * elem_sz, 0);
   std::vector<const void *> moe_row_ptrs(num_slots);
 
   group_matmul_moe_postop_params moe{};
@@ -602,24 +606,19 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
   if (p.use_moe && num_ops >= topk) {
     moe.num_tokens    = M;
     moe.topk          = topk;
-    moe.output        = p.is_bf16 ? (void *)moe_out_b.data() :
-                        (void *)moe_out_f.data();
+    moe.output        = moe_out.data();
     moe.ldc_output    = D_final;
     moe.topk_weights  = moe_weights.data();
     moe.skip_weighted = false;
     for (int t = 0; t < M; ++t) {
       for (int kk = 0; kk < topk; ++kk) {
         const int slot = t * topk + kk, expert = (t + kk) % num_ops;
-        if (p.use_fused) {
-          moe_row_ptrs[slot] = p.is_bf16
-                               ? (const void *)(d2_fused.bf16[expert].data() + t * D_final)
-                               : (const void *)(d2_fused.f32[expert].data()  + t * D_final);
-        }
-        else {
-          moe_row_ptrs[slot] = p.is_bf16
-                               ? (const void *)(d1.bf16[expert].data() + t * N_op1)
-                               : (const void *)(d1.f32[expert].data()  + t * N_op1);
-        }
+        const void *base = p.use_fused
+                           ? (const void *)dst2_f[expert]
+                           : (const void *)dst1[expert];
+        const size_t row_stride = p.use_fused ? (size_t)H : (size_t)N_op1;
+        moe_row_ptrs[slot] = static_cast<const char *>(base)
+                             + (size_t)t * row_stride * elem_sz;
       }
     }
     moe.row_ptrs = moe_row_ptrs.data();
@@ -629,10 +628,14 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
   // Execute the combined call.
   {
     auto ptest = params;
-    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
-                                  gv.Ks, gv.alpha, srcs, gv.lda, wei1, gv.ldb, no_bias, gv.beta,
-                                  dst1, gv.ldc, gv.is_wc, ptest, moe_ptr, act_ptr, fused_ptr),
-              status_t::success) << "Combined call failed";
+    const status_t st_combined = group_matmul_direct(
+        gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+        gv.Ks, gv.alpha, srcs, gv.lda, wei1, gv.ldb, no_bias, gv.beta,
+        dst1, gv.ldc, gv.is_wc, ptest, moe_ptr, act_ptr, fused_ptr);
+    if (st_combined == status_t::isa_unsupported) {
+      GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+    }
+    ASSERT_EQ(st_combined, status_t::success) << "Combined call failed";
   }
 
   // Build step-by-step reference.
@@ -643,8 +646,11 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
 
   if (p.use_act) {
     for (int e = 0; e < num_ops; ++e) {
-      if (p.is_bf16) {
+      if (dt == data_type_t::bf16) {
         apply_ref_gated_act(d1_ref.bf16[e], M, N_op1, N_op1, act.act);
+      }
+      else if (dt == data_type_t::f16) {
+        apply_ref_gated_act(d1_ref.f16[e],  M, N_op1, N_op1, act.act);
       }
       else {
         apply_ref_gated_act(d1_ref.f32[e],  M, N_op1, N_op1, act.act);
@@ -677,10 +683,10 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
           const int expert = (t + kk) % num_ops;
           float v;
           if (p.use_fused) {
-            v = d2_ref.at(expert, (size_t)t * H + d, p.is_bf16);
+            v = d2_ref.at(expert, (size_t)t * H + d, dt);
           }
           else {
-            v = d1_ref.at(expert, (size_t)t * N_op1 + d, p.is_bf16);
+            v = d1_ref.at(expert, (size_t)t * N_op1 + d, dt);
           }
           acc += moe_weights[t * topk + kk] * v;
         }
@@ -689,21 +695,40 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
     }
   }
 
-  // Compare.
-  const auto tol = tol_fused(p.is_bf16);
+  // Compare.  F16 reuses the BF16 tolerance bucket via
+  // tol_fused(data_type_t) in moe_test_utils.hpp.
+  const auto tol = tol_fused(dt);
+  const char *dt_label = (dt == data_type_t::bf16) ? "bf16"
+                         : (dt == data_type_t::f16)  ? "f16"
+                         : "f32";
   auto check = [&](float got, float ref, const char *tag, int a, int b, int c) {
     ASSERT_NEAR(got, ref, std::abs(ref) * tol.rel + tol.abs)
         << tag << " moe=" << p.use_moe << " act=" << p.use_act
-        << " fused=" << p.use_fused << (p.is_bf16 ? " bf16" : " f32")
+        << " fused=" << p.use_fused << " " << dt_label
         << " a=" << a << " b=" << b << " c=" << c;
+  };
+
+  auto read_moe_out = [&](size_t idx) -> float {
+    const char *base = moe_out.data();
+    if (dt == data_type_t::bf16) {
+      int16_t raw;
+      std::memcpy(&raw, base + idx * sizeof(int16_t), sizeof(raw));
+      return bfloat16_t::bf16_to_f32_val(raw);
+    }
+    if (dt == data_type_t::f16) {
+      uint16_t raw;
+      std::memcpy(&raw, base + idx * sizeof(uint16_t), sizeof(raw));
+      return float16_t::f16_to_f32_val(raw);
+    }
+    float v;
+    std::memcpy(&v, base + idx * sizeof(float), sizeof(v));
+    return v;
   };
 
   if (p.use_moe && num_ops >= topk) {
     for (int t = 0; t < M; ++t) {
       for (int d = 0; d < D_final; ++d) {
-        const float got = p.is_bf16
-                          ? static_cast<float>(moe_out_b[t * D_final + d])
-                          : moe_out_f[t * D_final + d];
+        const float got = read_moe_out((size_t)t * D_final + d);
         check(got, moe_ref_f[t * D_final + d], "moe", 0, t, d);
       }
     }
@@ -712,22 +737,22 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
     for (int e = 0; e < num_ops; ++e)
       for (int r = 0; r < M; ++r)
         for (int c = 0; c < H; ++c)
-          check(d2_fused.at(e, (size_t)r * H + c, p.is_bf16),
-                d2_ref  .at(e, (size_t)r * H + c, p.is_bf16), "fused", e, r, c);
+          check(d2_fused.at(e, (size_t)r * H + c, dt),
+                d2_ref  .at(e, (size_t)r * H + c, dt), "fused", e, r, c);
   }
   else if (p.use_act) {
     for (int e = 0; e < num_ops; ++e)
       for (int r = 0; r < M; ++r)
         for (int c = 0; c < dim; ++c)
-          check(d1    .at(e, (size_t)r * N_op1 + c, p.is_bf16),
-                d1_ref.at(e, (size_t)r * N_op1 + c, p.is_bf16), "act-only", e, r, c);
+          check(d1    .at(e, (size_t)r * N_op1 + c, dt),
+                d1_ref.at(e, (size_t)r * N_op1 + c, dt), "act-only", e, r, c);
   }
   else {
     for (int e = 0; e < num_ops; ++e)
       for (int r = 0; r < M; ++r)
         for (int c = 0; c < N_op1; ++c)
-          check(d1    .at(e, (size_t)r * N_op1 + c, p.is_bf16),
-                d1_ref.at(e, (size_t)r * N_op1 + c, p.is_bf16), "plain", e, r, c);
+          check(d1    .at(e, (size_t)r * N_op1 + c, dt),
+                d1_ref.at(e, (size_t)r * N_op1 + c, dt), "plain", e, r, c);
   }
 }
 
@@ -742,8 +767,8 @@ static std::vector<CombinedTestParam> make_combined_params() {
       for (bool fused : {
              false, true
            })
-        for (bool bf16 : {
-               false, true
+        for (data_type_t dt : {
+               data_type_t::f32, data_type_t::bf16
              })
           for (int m : {
                  16, 64
@@ -751,7 +776,30 @@ static std::vector<CombinedTestParam> make_combined_params() {
             for (int e : {
                    2, 4
                  })
-              out.push_back({moe, act, fused, bf16, m, e});
+              out.push_back({moe, act, fused, dt, m, e});
+
+  // F16: only the 4 non-fused cells (`use_fused = false`).  The
+  // fused-MoE pipeline (`group_matmul_fused_moe.cpp`) rejects
+  // `act_dtype ∉ {f32, bf16}` and has no F16 Op1→act→Op2 kernel,
+  // so emitting those cells under F16 would either fail validation
+  // or silently misroute.  The 4 non-fused cells exercise the
+  // `(matmul × gated_act × moe_postop)` composition that
+  // TestGatedAct / TestMoEPostop only cover standalone for F16 —
+  // this fills the composition-axis gap.  16 cases total.
+  for (bool moe : {
+         false, true
+       })
+    for (bool act : {
+           false, true
+         })
+      for (int m : {
+             16, 64
+           })
+        for (int e : {
+               2, 4
+             })
+          out.push_back({moe, act, /*use_fused=*/false,
+                         data_type_t::f16, m, e});
   return out;
 }
 

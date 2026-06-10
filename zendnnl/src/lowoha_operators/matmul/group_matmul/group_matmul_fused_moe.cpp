@@ -543,7 +543,8 @@ inline status_t validate_fused_moe_inputs(
       return status_t::failure;
     if (act != grp_matmul_gated_act_t::none
         && act_dtype != data_type_t::f32
-        && act_dtype != data_type_t::bf16)
+        && act_dtype != data_type_t::bf16
+        && act_dtype != data_type_t::f16)
       return status_t::failure;
     return status_t::success;
   });

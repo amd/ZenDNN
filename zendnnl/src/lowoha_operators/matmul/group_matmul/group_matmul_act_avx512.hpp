@@ -119,6 +119,37 @@ static inline __m256i f32_to_bf16x16(__m512 f32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// F16 ↔ FP32 conversion
+// ═══════════════════════════════════════════════════════════════════
+//
+/// `f16x16_to_f32`: convert 16 × IEEE 754 binary16 lanes to 16 × FP32
+/// via the AVX-512F `VCVTPH2PS` intrinsic (`_mm512_cvtph_ps`).  The
+/// input is loaded as a `__m256i` (16 × uint16_t) for storage-ABI
+/// parity with the BF16 helpers and consumed directly — no `__m256h`
+/// cast.  Using the `__m256i`-typed AVX-512F form (rather than the
+/// AVX-512-FP16 `_mm512_cvtxph_ps` on `__m256h`) keeps this helper on
+/// the same widely-available intrinsic set as `common/float16.cpp`
+/// and avoids a toolchain dependency on `__m256h`/`avx512fp16` for a
+/// conversion that the base AVX-512F ISA already provides.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static inline __m512 f16x16_to_f32(__m256i f16) {
+  return _mm512_cvtph_ps(f16);
+}
+
+/// `f32_to_f16x16`: round-to-nearest-even FP32→F16 cvt via the AVX-512F
+/// `VCVTPS2PH` intrinsic (`_mm512_cvtps_ph`).  Stores the 16 × F16
+/// lanes as a `__m256i` for storage-ABI parity with the BF16 helpers.
+/// The explicit `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC`
+/// immediate pins round-to-nearest-even independent of the runtime
+/// MXCSR mode, matching `float16_t::cvt_f32_to_f16_vec` in
+/// `common/float16.cpp`.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+static inline __m256i f32_to_f16x16(__m512 f32) {
+  return _mm512_cvtps_ph(f32,
+                         _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Per-element math primitives
 // ═══════════════════════════════════════════════════════════════════
 

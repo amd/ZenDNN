@@ -183,8 +183,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  *                         group_matmul_moe_postop_params.
  * @param gated_act        Optional gated activation applied in-place after GEMM
  *                         and before moe_postop: dst[:, 0:dim] = act(gate) * up
- *                         where dim = N/2. Requires N even and dst dtype f32 or
- *                         bf16. nullptr disables (default). Parallel mode only;
+ *                         where dim = N/2. Requires N even and dst dtype
+ *                         f32, bf16, or f16. nullptr disables (default).
+ *                         Parallel mode only;
  *                         see grp_matmul_gated_act_params.
  * @param fused_moe        Optional fused MoE parameters describing the full
  *                         Op1 (gate+up) → activation → Op2 (down_proj) block

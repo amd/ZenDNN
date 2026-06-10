@@ -130,16 +130,11 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
       }
 
       // Same bias-skip predicate as in the non-strided path / the kernel
-      // helpers in gtest_utils: libxsmm doesn't accept bias for bf16 dst, and
-      // aocl_dlp doesn't accept it for f16 dst.  Skip allocating bias here so
-      // the kernel-under-test and reference both see an empty bias.
+      // helpers in gtest_utils: libxsmm doesn't accept bias for bf16 dst.
       const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                       algo == matmul_algo_t::libxsmm_blocked);
-      const bool is_aocl_kernel    = (algo == matmul_algo_t::aocl_dlp ||
-                                      algo == matmul_algo_t::aocl_dlp_blocked);
       const bool skip_bias =
-        (is_libxsmm_kernel && dst_dt == data_type_t::bf16) ||
-        (is_aocl_kernel    && dst_dt == data_type_t::f16);
+        (is_libxsmm_kernel && dst_dt == data_type_t::bf16);
 
       std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops),
           out(num_ops), out_ref(num_ops);
@@ -160,6 +155,10 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
 
       status_t status = group_matmul_kernel_test(inp, wt, bias, out, algo,
                         alpha, beta);
+
+      if (status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+      }
 
       status_t ref_status = status_t::success;
       for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
@@ -189,7 +188,18 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
     const int D = static_cast<int>(n);
     const int num_tokens = static_cast<int>(m);
     const int topk = 2;
-    const bool enable_moe = ((m + n + k + num_ops) % 2 == 1)
+    // MoE weighted-reduce post-op supports FP32, BF16, and F16 dst
+    // (see `validate_group_matmul_moe_postop` and the AVX-512-FP16
+    // `moe_weighted_reduce_avx512_f16` specialisation in
+    // group_matmul_moe_postop.cpp).  F16 inputs are gated upstream by
+    // the dispatcher's F16 ISA check at group_matmul_direct.cpp:
+    // 871-876 — hosts without AVX-512-FP16 return
+    // status_t::isa_unsupported and the test body GTEST_SKIP()s.
+    const bool moe_dst_ok = (dst_dt == data_type_t::f32)
+                            || (dst_dt == data_type_t::bf16)
+                            || (dst_dt == data_type_t::f16);
+    const bool enable_moe = moe_dst_ok
+                            && ((m + n + k + num_ops) % 2 == 1)
                             && (num_ops >= static_cast<size_t>(topk));
 
     std::vector<char> layouts(num_ops, 'r');
@@ -228,18 +238,14 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
       params[i].num_threads = num_threads;
     }
 
-    // libxsmm doesn't accept bias for bf16 dst, and aocl_dlp doesn't accept it
-    // for f16 dst.  matmul_forced_ref_kernel_test applies the same condition,
-    // so we must drop bias here too to keep kernel-under-test and reference in
-    // sync.
+    // libxsmm doesn't accept bias for bf16 dst.matmul_forced_ref_kernel_test
+    // applies the same condition, so we must drop bias here too to keep
+    // kernel-under-test and reference in sync.
     {
       const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                       algo == matmul_algo_t::libxsmm_blocked);
-      const bool is_aocl_kernel    = (algo == matmul_algo_t::aocl_dlp ||
-                                      algo == matmul_algo_t::aocl_dlp_blocked);
       const bool skip_bias =
-        (is_libxsmm_kernel && dst_dt == data_type_t::bf16) ||
-        (is_aocl_kernel    && dst_dt == data_type_t::f16);
+        (is_libxsmm_kernel && dst_dt == data_type_t::bf16);
       if (skip_bias) {
         for (auto &b : biases) {
           b = nullptr;
@@ -280,6 +286,10 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
                                       alphas, srcs, ldas, weis, ldbs, biases, betas, dsts, ldcs,
                                       is_wc, params, moe_ptr);
 
+    if (st == status_t::isa_unsupported) {
+      GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+    }
+
     // Reference using the per-op forced reference kernel.
     status_t ref_st = status_t::success;
     for (size_t i = 0; i < num_ops && ref_st == status_t::success; ++i) {
@@ -313,6 +323,29 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
                                    ? rtol_pref
                                    : rtol_pref * topk;
       const bool is_bf16_dst = (dst_dt == data_type_t::bf16);
+      const bool is_f16_dst  = (dst_dt == data_type_t::f16);
+
+      // Per-element dtype-aware read helper.  All three supported MoE
+      // dst dtypes go through this — keeps the per-(t, d) loop body
+      // free of nested branches.  F16 routes through
+      // `float16_t::f16_to_f32_val` (matching the AVX-512-FP16
+      // kernel's `_mm512_cvtxps_ph` store semantics).
+      auto load_dst_f32 = [&](const char *base, size_t idx) -> float {
+        if (is_bf16_dst) {
+          uint16_t bits;
+          std::memcpy(&bits, base + idx * sizeof(uint16_t), sizeof(bits));
+          return zendnnl::common::bfloat16_t::bf16_to_f32_val(
+              static_cast<int16_t>(bits));
+        }
+        if (is_f16_dst) {
+          uint16_t bits;
+          std::memcpy(&bits, base + idx * sizeof(uint16_t), sizeof(bits));
+          return zendnnl::common::float16_t::f16_to_f32_val(bits);
+        }
+        float v;
+        std::memcpy(&v, base + idx * sizeof(float), sizeof(v));
+        return v;
+      };
 
       for (int t = 0; t < num_tokens && ok; ++t) {
         for (int d = 0; d < D && ok; ++d) {
@@ -321,28 +354,13 @@ class TestGroupMatmul : public ::testing::TestWithParam<MatmulType> {
             const size_t expert = (t + kk) % num_ops;
             const auto *rb = static_cast<const char *>(
                                out_ref_t[expert].get_raw_handle_unsafe());
-            float v;
-            if (is_bf16_dst) {
-              auto *rb_bf = reinterpret_cast<const uint16_t *>(rb);
-              v = zendnnl::common::bfloat16_t::bf16_to_f32_val(
-                    static_cast<int16_t>(rb_bf[(size_t)t * n + d]));
-            }
-            else {
-              auto *rb_f = reinterpret_cast<const float *>(rb);
-              v = rb_f[(size_t)t * n + d];
-            }
+            const float v = load_dst_f32(rb, (size_t)t * n + d);
             const float w = moe.skip_weighted ? 1.0f : moe_weights[t * topk + kk];
             acc += w * v;
           }
-          float got;
-          if (is_bf16_dst) {
-            auto *op = reinterpret_cast<const uint16_t *>(moe_output.data());
-            got = zendnnl::common::bfloat16_t::bf16_to_f32_val(
-                    static_cast<int16_t>(op[(size_t)t * D + d]));
-          }
-          else {
-            got = reinterpret_cast<const float *>(moe_output.data())[(size_t)t * D + d];
-          }
+          const float got = load_dst_f32(
+              reinterpret_cast<const char *>(moe_output.data()),
+              (size_t)t * D + d);
           if (std::abs(acc - got) > moe_abs_bound + effective_rtol * std::abs(acc)) {
             log_error("MoE mismatch t=", t, " d=", d, " expected=", acc, " got=", got);
             ok = false;
@@ -382,6 +400,41 @@ TEST_P(TestGroupMatmul, BF16_BF16_Stride) {
                  data_type_t::bf16, rtol_bf16, epsilon_bf16, /*use_stride=*/true);
 }
 
+// Widening factors (rtol × 5, epsilon × 16) are empirically the
+// smallest that absorb the full matmul_test shape grid (alpha up to
+// 10, k up to 3000); a 2× regression still trips the bound.  The
+// algo-switched f32-tier path TestMatmul.F16_F32 uses for oneDNN does
+// NOT apply here, because the group parallel path never reaches a
+// oneDNN kernel — the `algo` carried by the test parameter has no
+// effect on dispatch.
+// F16 group-matmul tolerance: widened relative to TestMatmul.F16_F16
+// because the parallel `aocl_batch_gemm_f16` kernel
+// parallelises summation across more threads than the single-op AOCL
+// F16 kernel, accumulating more F16 rounding noise at large alpha·k.
+// Empirically 5×rtol / 16×eps is the smallest widening that absorbs
+// the matmul_test grid (alpha up to 10, k up to ~3000); a 2×
+// regression still trips the bound.
+inline float f16_group_eps()  {
+  return 16.0f * epsilon_bf16;
+}
+inline float f16_group_rtol() {
+  return  5.0f * rtol_bf16;
+}
+
+TEST_P(TestGroupMatmul, F16_F16) {
+  run_basic_test(data_type_t::f16, data_type_t::f16, data_type_t::f16,
+                 data_type_t::f16, f16_group_rtol(), f16_group_eps());
+}
+TEST_P(TestGroupMatmul, F16_F32) {
+  run_basic_test(data_type_t::f16, data_type_t::f16, data_type_t::f32,
+                 data_type_t::f32, f16_group_rtol(), f16_group_eps());
+}
+TEST_P(TestGroupMatmul, F16_F16_Stride) {
+  run_basic_test(data_type_t::f16, data_type_t::f16, data_type_t::f16,
+                 data_type_t::f16, f16_group_rtol(), f16_group_eps(),
+                 /*use_stride=*/true);
+}
+
 INSTANTIATE_TEST_SUITE_P(GroupMatmul, TestGroupMatmul,
                          ::testing::ValuesIn(matmul_test));
 
@@ -391,14 +444,17 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmul, TestGroupMatmul,
 
 struct GatedActTestParam {
   int dim, M, num_ops, act_int;  // act_int: 0=none, 1=silu, 2=gelu, 3=swiglu_oai
-  bool is_bf16;
+  data_type_t dt;
 };
 
 static std::string GatedActParamName(
   const ::testing::TestParamInfo<GatedActTestParam> &info) {
   static const char *act_names[] = {"none", "silu", "gelu", "swiglu"};
   const auto &p = info.param;
-  return std::string(act_names[p.act_int]) + (p.is_bf16 ? "_bf16" : "_f32")
+  const char *dt_name = (p.dt == data_type_t::bf16) ? "bf16"
+                        : (p.dt == data_type_t::f16)  ? "f16"
+                        : "f32";
+  return std::string(act_names[p.act_int]) + "_" + dt_name
          + "_d" + std::to_string(p.dim) + "_M" + std::to_string(p.M)
          + "_E" + std::to_string(p.num_ops);
 }
@@ -413,18 +469,28 @@ TEST_P(TestGatedAct, Correctness) {
   const int dim = p.dim, N = 2 * dim, M = p.M, K = 32;
   const int num_ops = p.num_ops;
   const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
-  const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+  const data_type_t dt = p.dt;
+  const bool is_bf16 = (dt == data_type_t::bf16);
+  const bool is_f16  = (dt == data_type_t::f16);
 
-  // Allocate and fill buffers.
+  // Allocate and fill buffers.  TypedBuffers handles all three dtypes
+  // through its data_type_t-aware overloads (added during the F16
+  // enablement work); the per-storage `bf16` / `f16` / `f32` member
+  // vectors are filled by the dispatching `fill_src` / `fill_wei1`
+  // overloads below.
   TypedBuffers src, wei, dst_act, dst_ref;
-  src.alloc(num_ops, (size_t)M * K, p.is_bf16);
-  wei.alloc(num_ops, (size_t)K * N, p.is_bf16);
-  dst_act.alloc(num_ops, (size_t)M * N, p.is_bf16);
-  dst_ref.alloc(num_ops, (size_t)M * N, p.is_bf16);
+  src.alloc(num_ops, (size_t)M * K, dt);
+  wei.alloc(num_ops, (size_t)K * N, dt);
+  dst_act.alloc(num_ops, (size_t)M * N, dt);
+  dst_ref.alloc(num_ops, (size_t)M * N, dt);
   for (int e = 0; e < num_ops; ++e) {
-    if (p.is_bf16) {
+    if (is_bf16) {
       fill_src(src.bf16[e], e, 0.05f);
       fill_wei1(wei.bf16[e], e, 0.01f);
+    }
+    else if (is_f16) {
+      fill_src(src.f16[e], e, 0.05f);
+      fill_wei1(wei.f16[e], e, 0.01f);
     }
     else           {
       fill_src(src.f32[e],  e, 0.05f);
@@ -433,19 +499,24 @@ TEST_P(TestGatedAct, Correctness) {
   }
 
   auto gv = GemmVecs::uniform(num_ops, M, N, K, 1.0f, 0.0f, /*wc=*/true);
-  auto srcs    = src.cptrs(p.is_bf16);
-  auto weis    = wei.cptrs(p.is_bf16);
-  auto dsts    = dst_act.ptrs(p.is_bf16);
-  auto dsts_ref= dst_ref.ptrs(p.is_bf16);
+  auto srcs    = src.cptrs(dt);
+  auto weis    = wei.cptrs(dt);
+  auto dsts    = dst_act.ptrs(dt);
+  auto dsts_ref= dst_ref.ptrs(dt);
   std::vector<const void *> biases(num_ops, nullptr);
   auto params  = make_uniform_params(num_ops, dt);
 
   // Run reference Op1 (no activation) ? dst_ref.
   {
     auto pr = params;
-    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
-                                  gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-                                  dsts_ref, gv.ldc, gv.is_wc, pr, nullptr, nullptr), status_t::success);
+    const status_t st_ref = group_matmul_direct(
+        gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+        gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
+        dsts_ref, gv.ldc, gv.is_wc, pr, nullptr, nullptr);
+    if (st_ref == status_t::isa_unsupported) {
+      GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+    }
+    ASSERT_EQ(st_ref, status_t::success);
   }
 
   // Run fused Op1+Act ? dst_act.
@@ -460,13 +531,19 @@ TEST_P(TestGatedAct, Correctness) {
               status_t::success);
   }
 
+  // Per-dtype label used in mismatch messages below.
+  const char *dt_label = is_bf16 ? "bf16" : (is_f16 ? "f16" : "f32");
+
   // For act=none: must be byte-identical to reference.
   if (act_type == grp_matmul_gated_act_t::none) {
     for (int e = 0; e < num_ops; ++e) {
       const size_t sz = (size_t)M * N;
-      if (p.is_bf16)
+      if (is_bf16)
         ASSERT_EQ(std::memcmp(dst_act.bf16[e].data(), dst_ref.bf16[e].data(),
                               sz * sizeof(bfloat16_t)), 0) << "expert=" << e;
+      else if (is_f16)
+        ASSERT_EQ(std::memcmp(dst_act.f16[e].data(), dst_ref.f16[e].data(),
+                              sz * sizeof(float16_t)), 0) << "expert=" << e;
       else
         ASSERT_EQ(std::memcmp(dst_act.f32[e].data(), dst_ref.f32[e].data(),
                               sz * sizeof(float)), 0) << "expert=" << e;
@@ -475,23 +552,23 @@ TEST_P(TestGatedAct, Correctness) {
   }
 
   // Compare activated output against scalar reference (applied to dst_ref).
-  const auto tol = tol_act(p.is_bf16);
+  const auto tol = tol_act(dt);
   for (int e = 0; e < num_ops; ++e) {
     for (int m = 0; m < M; ++m) {
       for (int n = 0; n < dim; ++n) {
         float g_val, u_val;
         if (act_type == grp_matmul_gated_act_t::swiglu_oai_mul) {
-          g_val = dst_ref.at(e, (size_t)m * N + 2 * n, p.is_bf16);
-          u_val = dst_ref.at(e, (size_t)m * N + 2 * n + 1, p.is_bf16);
+          g_val = dst_ref.at(e, (size_t)m * N + 2 * n, dt);
+          u_val = dst_ref.at(e, (size_t)m * N + 2 * n + 1, dt);
         }
         else {
-          g_val = dst_ref.at(e, (size_t)m * N + n, p.is_bf16);
-          u_val = dst_ref.at(e, (size_t)m * N + dim + n, p.is_bf16);
+          g_val = dst_ref.at(e, (size_t)m * N + n, dt);
+          u_val = dst_ref.at(e, (size_t)m * N + dim + n, dt);
         }
         const float expected = ref_gated_act(act_type, g_val, u_val);
-        const float actual   = dst_act.at(e, (size_t)m * N + n, p.is_bf16);
+        const float actual   = dst_act.at(e, (size_t)m * N + n, dt);
         ASSERT_NEAR(actual, expected, std::abs(expected) * tol.rel + tol.abs)
-            << "act=" << p.act_int << (p.is_bf16 ? " bf16" : " f32")
+            << "act=" << p.act_int << " " << dt_label
             << " dim=" << dim << " M=" << M << " e=" << e
             << " m=" << m << " n=" << n;
       }
@@ -505,19 +582,19 @@ static std::vector<GatedActTestParam> make_gated_act_params() {
   for (int a : {
          0, 1, 2, 3
        })
-    for (bool bf : {
-           false, true
+    for (data_type_t dt : {
+           data_type_t::f32, data_type_t::bf16, data_type_t::f16
          })
       for (int d : {
              1, 7, 15, 16, 17, 31, 32, 33, 64, 128, 255, 256, 512
            })
-        out.push_back({d, 4, 2, a, bf});
+        out.push_back({d, 4, 2, a, dt});
   // Vary M and num_ops (skip duplicates of core M=4,E=2).
   for (int a : {
          1, 2, 3
        })
-    for (bool bf : {
-           false, true
+    for (data_type_t dt : {
+           data_type_t::f32, data_type_t::bf16, data_type_t::f16
          })
       for (int d : {
              1, 16, 33, 128
@@ -531,11 +608,11 @@ static std::vector<GatedActTestParam> make_gated_act_params() {
             if (m == 4 && e == 2) {
               continue;
             }
-            out.push_back({d, m, e, a, bf});
+            out.push_back({d, m, e, a, dt});
           }
   // Large-expert MoE-realistic configs.
-  for (bool bf : {
-         false, true
+  for (data_type_t dt : {
+         data_type_t::f32, data_type_t::bf16, data_type_t::f16
        })
     for (int e : {
            32, 64
@@ -543,7 +620,7 @@ static std::vector<GatedActTestParam> make_gated_act_params() {
       for (int m : {
              1, 2
            })
-        out.push_back({16, m, e, 1, bf});
+        out.push_back({16, m, e, 1, dt});
   return out;
 }
 
@@ -556,14 +633,18 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulGatedAct, TestGatedAct,
 
 struct MoEPostopTestParam {
   int num_ops, M, N, K, topk;
-  bool skip_weighted, is_bf16;
+  bool skip_weighted;
+  data_type_t dt;
 };
 
 static std::string MoEPostopParamName(
   const ::testing::TestParamInfo<MoEPostopTestParam> &info) {
   const auto &p = info.param;
-  return (p.is_bf16 ? "bf16" : "f32")
-         + std::string("_E") + std::to_string(p.num_ops)
+  const char *dt_name = (p.dt == data_type_t::bf16) ? "bf16"
+                        : (p.dt == data_type_t::f16)  ? "f16"
+                        : "f32";
+  return std::string(dt_name)
+         + "_E" + std::to_string(p.num_ops)
          + "_M" + std::to_string(p.M) + "_N" + std::to_string(p.N)
          + "_K" + std::to_string(p.K) + "_topk" + std::to_string(p.topk)
          + (p.skip_weighted ? "_skip" : "");
@@ -581,25 +662,34 @@ TEST_P(TestMoEPostop, Correctness) {
     return;
   }
   const int num_tokens = total_M / p.topk;
-  const data_type_t dt = p.is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+  const data_type_t dt = p.dt;
   const size_t elem_sz = zendnnl::common::size_of(dt);
+  const bool is_bf16 = (dt == data_type_t::bf16);
+  const bool is_f16  = (dt == data_type_t::f16);
 
   TypedBuffers src, wei, dst, dst_ref;
-  src.alloc(p.num_ops, (size_t)p.M * p.K, p.is_bf16);
-  wei.alloc(p.num_ops, (size_t)p.K * p.N, p.is_bf16);
-  dst.alloc(p.num_ops, (size_t)p.M * p.N, p.is_bf16);
-  dst_ref.alloc(p.num_ops, (size_t)p.M * p.N, p.is_bf16);
+  src.alloc(p.num_ops, (size_t)p.M * p.K, dt);
+  wei.alloc(p.num_ops, (size_t)p.K * p.N, dt);
+  dst.alloc(p.num_ops, (size_t)p.M * p.N, dt);
+  dst_ref.alloc(p.num_ops, (size_t)p.M * p.N, dt);
   for (int e = 0; e < p.num_ops; ++e) {
-    // Keep init in f32 domain first, then mirror to bf16 (matches legacy pattern).
     std::vector<float> sf((size_t)p.M * p.K), wf((size_t)p.K * p.N);
     fill_src(sf, e, 0.01f);
     fill_wei1(wf, e, 0.005f);
-    if (p.is_bf16) {
+    if (is_bf16) {
       for (size_t i = 0; i < sf.size(); ++i) {
         src.bf16[e][i] = bfloat16_t(sf[i]);
       }
       for (size_t i = 0; i < wf.size(); ++i) {
         wei.bf16[e][i] = bfloat16_t(wf[i]);
+      }
+    }
+    else if (is_f16) {
+      for (size_t i = 0; i < sf.size(); ++i) {
+        src.f16[e][i] = float16_t(sf[i]);
+      }
+      for (size_t i = 0; i < wf.size(); ++i) {
+        wei.f16[e][i] = float16_t(wf[i]);
       }
     }
     else {
@@ -609,10 +699,10 @@ TEST_P(TestMoEPostop, Correctness) {
   }
 
   auto gv   = GemmVecs::uniform(p.num_ops, p.M, p.N, p.K);
-  auto srcs = src.cptrs(p.is_bf16);
-  auto weis = wei.cptrs(p.is_bf16);
-  auto dsts = dst.ptrs(p.is_bf16);
-  auto dsts_ref = dst_ref.ptrs(p.is_bf16);
+  auto srcs = src.cptrs(dt);
+  auto weis = wei.cptrs(dt);
+  auto dsts = dst.ptrs(dt);
+  auto dsts_ref = dst_ref.ptrs(dt);
   std::vector<const void *> biases(p.num_ops, nullptr);
   auto params = make_uniform_params(p.num_ops, dt);
 
@@ -638,17 +728,28 @@ TEST_P(TestMoEPostop, Correctness) {
 
   // Run GEMM + MoE reduce and a separate plain-GEMM reference in one shot.
   auto pa_run = params;
-  ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
-                                gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-                                dsts, gv.ldc, gv.is_wc, pa_run, &moe), status_t::success);
+  const status_t st_run = group_matmul_direct(
+                            gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                            srcs, gv.lda, weis, gv.ldb, biases, gv.beta, dsts, gv.ldc,
+                            gv.is_wc, pa_run, &moe);
+  if (st_run == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
+  }
+  ASSERT_EQ(st_run, status_t::success);
 
   auto pa_ref = params;
-  ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
-                                gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases, gv.beta,
-                                dsts_ref, gv.ldc, gv.is_wc, pa_ref), status_t::success);
+  const status_t st_ref = group_matmul_direct(
+                            gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                            srcs, gv.lda, weis, gv.ldb, biases, gv.beta, dsts_ref, gv.ldc,
+                            gv.is_wc, pa_ref);
+  ASSERT_EQ(st_ref, status_t::success);
 
-  // Manual weighted reduce over reference outputs.
-  const auto tol = tol_moe(p.is_bf16);
+  // Manual weighted reduce over reference outputs.  F16 reuses the
+  // bf16 tolerance bucket (Tol{0.15, 0.02}) — see tol_moe(data_type_t)
+  // in moe_test_utils.hpp.  F16 has more mantissa bits than BF16 so
+  // the actual numerical error is comparable or tighter, but the
+  // bound stays at the BF16 level for safety.
+  const auto tol = tol_moe(dt);
   for (int t = 0; t < num_tokens; ++t) {
     for (int d = 0; d < p.N; ++d) {
       float acc = 0.0f;
@@ -658,18 +759,28 @@ TEST_P(TestMoEPostop, Correctness) {
         if (expert >= p.num_ops) {
           continue;
         }
-        const float val = dst_ref.at(expert, (size_t)row * p.N + d, p.is_bf16);
+        const float val = dst_ref.at(expert, (size_t)row * p.N + d, dt);
         acc += (p.skip_weighted ? 1.0f : moe_w[si]) * val;
       }
       float got;
-      if (p.is_bf16)
-        got = static_cast<float>(reinterpret_cast<const bfloat16_t *>(
-                                   moe_out.data())[(size_t)t * p.N + d]);
-      else {
-        got = reinterpret_cast<const float *>(moe_out.data())[(size_t)t * p.N + d];
+      if (is_bf16) {
+        int16_t raw;
+        std::memcpy(&raw, moe_out.data() + (size_t)t * p.N * elem_sz + d * sizeof(int16_t), sizeof(raw));
+        got = bfloat16_t::bf16_to_f32_val(raw);
       }
+      else if (is_f16) {
+        uint16_t raw;
+        std::memcpy(&raw, moe_out.data() + (size_t)t * p.N * elem_sz + d * sizeof(uint16_t), sizeof(raw));
+        got = float16_t::f16_to_f32_val(raw);
+      }
+      else {
+        float v;
+        std::memcpy(&v, moe_out.data() + (size_t)t * p.N * elem_sz + d * sizeof(float), sizeof(v));
+        got = v;
+      }
+      const char *dt_label = is_bf16 ? "bf16" : (is_f16 ? "f16" : "f32");
       ASSERT_NEAR(got, acc, std::abs(acc) * tol.rel + tol.abs)
-          << (p.is_bf16 ? "bf16" : "f32") << " E=" << p.num_ops
+          << dt_label << " E=" << p.num_ops
           << " M=" << p.M << " N=" << p.N << " topk=" << p.topk
           << (p.skip_weighted ? " skip" : "") << " t=" << t << " d=" << d;
     }
@@ -678,8 +789,8 @@ TEST_P(TestMoEPostop, Correctness) {
 
 static std::vector<MoEPostopTestParam> make_moe_postop_params() {
   std::vector<MoEPostopTestParam> out;
-  for (bool bf : {
-         false, true
+  for (data_type_t dt : {
+         data_type_t::f32, data_type_t::bf16, data_type_t::f16
        })
     for (int e : {
            2, 4, 8
@@ -690,18 +801,21 @@ static std::vector<MoEPostopTestParam> make_moe_postop_params() {
         for (int topk : {
                1, 2
              })
-          if ((e * m) % topk == 0) out.push_back({e, m, 64, 32, topk, false, bf});
-  for (bool bf : {
-         false, true
-       }) out.push_back({4, 4, 64, 32, 2, true, bf});
+          if ((e * m) % topk == 0) out.push_back({e, m, 64, 32, topk, false, dt});
+  // skip_weighted variant — every dtype.
+  for (data_type_t dt : {
+         data_type_t::f32, data_type_t::bf16, data_type_t::f16
+       }) out.push_back({4, 4, 64, 32, 2, true, dt});
+  // Wide-N / narrow-K coverage for f32 only (legacy coverage; the
+  // shape grid above already exercises the F16 cvt path adequately).
   for (int n : {
          16, 128, 256
        })
     for (int k : {
            16, 64
-         }) out.push_back({4, 4, n, k, 2, false, false});
-  out.push_back({16, 2, 64, 32, 2, false, false});
-  out.push_back({32, 1, 64, 32, 2, false, false});
+         }) out.push_back({4, 4, n, k, 2, false, data_type_t::f32});
+  out.push_back({16, 2, 64, 32, 2, false, data_type_t::f32});
+  out.push_back({32, 1, 64, 32, 2, false, data_type_t::f32});
   return out;
 }
 
@@ -735,7 +849,9 @@ using zendnnl::error_handling::status_t;
 // Convenience builders for the 4 v-states.  `n` is the active count
 // (= num_ops); `tail_kind` controls the prepack-extras tail used by
 // the sweep-bound test below.
-inline std::vector<void *> v_empty() { return {}; }
+inline std::vector<void *> v_empty() {
+  return {};
+}
 inline std::vector<void *> v_all_null(size_t n) {
   return std::vector<void *>(n, nullptr);
 }
@@ -780,7 +896,8 @@ TEST_F(TestGroupMatmulHelperParity, QuickO1_AllNullFusedPresent_IsInternal) {
 }
 
 // ── Cell 3/8: quick_o1 + all-non-null + fused_moe_present ─────────────────
-TEST_F(TestGroupMatmulHelperParity, QuickO1_AllNonNullFusedPresent_NotInternal) {
+TEST_F(TestGroupMatmulHelperParity,
+       QuickO1_AllNonNullFusedPresent_NotInternal) {
   bool out = true;
   const auto v = v_all_nonnull(4);
   ASSERT_EQ(detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
@@ -793,7 +910,8 @@ TEST_F(TestGroupMatmulHelperParity, QuickO1_AllNonNullFusedPresent_NotInternal) 
 //   quick_o1 SAMPLES v[0] only.  When v[0]==nullptr it reports internal,
 //   even if downstream slots are non-null — the diagnostic sweep
 //   path is responsible for catching the mixed state.
-TEST_F(TestGroupMatmulHelperParity, QuickO1_MixedAt0FusedPresent_NoMixedDetect) {
+TEST_F(TestGroupMatmulHelperParity,
+       QuickO1_MixedAt0FusedPresent_NoMixedDetect) {
   bool out = false;
   auto v = v_all_nonnull(4);
   v[0] = nullptr;  // mixed: only [0] is null
@@ -801,7 +919,7 @@ TEST_F(TestGroupMatmulHelperParity, QuickO1_MixedAt0FusedPresent_NoMixedDetect) 
                                   internal_alloc_mode::quick_o1, &out),
             status_t::success)
       << "quick_o1 must NOT report failure on mixed-state — that's the "
-         "sweep_active path's job; quick_o1 is a fast production check";
+      "sweep_active path's job; quick_o1 is a fast production check";
   EXPECT_EQ(out, kIsInternalTrue);
 }
 
@@ -886,12 +1004,14 @@ TEST_F(TestGroupMatmulHelperParity, Sweep_PrepackExtrasTail_NotMixed) {
   // v.size() = 8, num_ops = 4.
   std::vector<void *> v(8, nullptr);
   static int sentinel = 0;
-  for (int i = 0; i < 4; ++i) v[i] = &sentinel;
+  for (int i = 0; i < 4; ++i) {
+    v[i] = &sentinel;
+  }
   ASSERT_EQ(detect_internal_alloc(v, /*num_ops=*/4, /*fused_moe_present=*/true,
                                   internal_alloc_mode::sweep_active, &out),
             status_t::success)
       << "sweep must stop at num_ops=4; the [4..8) all-null tail is the "
-         "prepack-extras tail and is legitimate";
+      "prepack-extras tail and is legitimate";
   EXPECT_EQ(out, kIsInternalFalse) << "active range is all non-null";
 }
 
@@ -914,7 +1034,8 @@ TEST_F(TestGroupMatmulHelperParity, Sweep_NumOpsExceedsVSize_ClampsSafely) {
 //     (fused_moe != nullptr) && (v.empty() || v[0] == nullptr)
 //   The helper's quick_o1 path must produce identical results across
 //   the 2x2 (fused_moe_present, v.empty()/non-empty/null/non-null) grid.
-TEST_F(TestGroupMatmulHelperParity, ProductionParity_QuickO1_MatchesOldFormula) {
+TEST_F(TestGroupMatmulHelperParity,
+       ProductionParity_QuickO1_MatchesOldFormula) {
   auto run_old = [](const std::vector<void *> &v, bool fmp) -> bool {
     return fmp && (v.empty() || v[0] == nullptr);
   };
@@ -924,7 +1045,9 @@ TEST_F(TestGroupMatmulHelperParity, ProductionParity_QuickO1_MatchesOldFormula) 
                           internal_alloc_mode::quick_o1, &out);
     return out;
   };
-  for (bool fmp : {false, true}) {
+  for (bool fmp : {
+         false, true
+       }) {
     EXPECT_EQ(run_old(v_empty(),       fmp), run_new(v_empty(),       fmp));
     EXPECT_EQ(run_old(v_all_null(4),   fmp), run_new(v_all_null(4),   fmp));
     EXPECT_EQ(run_old(v_all_nonnull(4),fmp), run_new(v_all_nonnull(4),fmp));

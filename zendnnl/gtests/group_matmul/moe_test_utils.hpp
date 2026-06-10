@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/group_matmul/m_tile/group_matmul_m_tile.hpp"
@@ -66,7 +67,25 @@
 namespace moe_test_utils {
 
 using bfloat16_t = zendnnl::common::bfloat16_t;
+using float16_t  = zendnnl::common::float16_t;
 using data_type_t = zendnnl::common::data_type_t;
+
+// ───────────────────────────────────────────────────────────────────
+// F16 / BF16 / F32 dispatch
+//
+// The legacy harness used a `bool is_bf16` axis with the implicit
+// "false ⇒ f32" mapping; F16 support adds a third floating-point
+// storage type, so the dispatch axis is now `data_type_t` (restricted
+// to {f32, bf16, f16}).  Legacy `bool is_bf16` overloads forward to
+// the data_type_t variant so the BF16/F32 test bodies don't need to
+// change at the call site.  New tests should pass `data_type_t`
+// directly.
+// ───────────────────────────────────────────────────────────────────
+
+inline data_type_t bool_to_fp_dt(bool is_bf16) {
+  return is_bf16 ? data_type_t::bf16 : data_type_t::f32;
+}
+
 using zendnnl::lowoha::matmul::matmul_params;
 using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
@@ -96,6 +115,9 @@ inline void fill_pattern(std::vector<T> &vec, int e, int seed_step, int mod,
     if constexpr(std::is_same_v<T, bfloat16_t>) {
       vec[i] = bfloat16_t(v);
     }
+    else if constexpr(std::is_same_v<T, float16_t>) {
+      vec[i] = float16_t(v);
+    }
     else {
       vec[i] = static_cast<T>(v);
     }
@@ -109,10 +131,16 @@ inline void fill_src(std::vector<float> &v, int e, float s = 0.02f)   {
 inline void fill_src(std::vector<bfloat16_t> &v, int e, float s = 0.02f) {
   fill_pattern(v, e, 7, 11, 5, s);
 }
+inline void fill_src(std::vector<float16_t> &v, int e, float s = 0.02f) {
+  fill_pattern(v, e, 7, 11, 5, s);
+}
 inline void fill_wei1(std::vector<float> &v, int e, float s = 0.005f)  {
   fill_pattern(v, e, 3, 7, 3, s);
 }
 inline void fill_wei1(std::vector<bfloat16_t> &v, int e, float s = 0.005f) {
+  fill_pattern(v, e, 3, 7, 3, s);
+}
+inline void fill_wei1(std::vector<float16_t> &v, int e, float s = 0.005f) {
   fill_pattern(v, e, 3, 7, 3, s);
 }
 inline void fill_wei2(std::vector<float> &v, int e, float s = 0.008f)  {
@@ -121,26 +149,44 @@ inline void fill_wei2(std::vector<float> &v, int e, float s = 0.008f)  {
 inline void fill_wei2(std::vector<bfloat16_t> &v, int e, float s = 0.008f) {
   fill_pattern(v, e, 5, 9, 4, s);
 }
+inline void fill_wei2(std::vector<float16_t> &v, int e, float s = 0.008f) {
+  fill_pattern(v, e, 5, 9, 4, s);
+}
 
 // ───────────────────────────────────────────────────────────────────
-// [1.b] TypedBuffers: holds both bf16 and f32 storage, exposes opaque pointers.
+// [1.b] TypedBuffers: holds f32 / bf16 / f16 storage, exposes opaque pointers.
 //
-// Avoids the if/else maze around every buffer access.  Only one of the two
-// vectors is actually resized based on `is_bf16`.  `is_mixed = true` resizes
-// both (used by TestFusedMoEAlgos for bf16-src ↔ f32-dst mixed precision).
+// Avoids the if/else maze around every buffer access.  Only the storage
+// matching the requested data_type_t is resized; `is_mixed = true`
+// additionally resizes the f32 side (used by TestFusedMoEAlgos for
+// low-precision src ↔ f32-dst mixed precision).
 // ───────────────────────────────────────────────────────────────────
 
 struct TypedBuffers {
   std::vector<std::vector<float>> f32;
   std::vector<std::vector<bfloat16_t>> bf16;
-  bool store_f32 = false;
+  std::vector<std::vector<float16_t>>  f16;
+  bool store_f32  = false;
   bool store_bf16 = false;
+  bool store_f16  = false;
 
-  void alloc(int num_ops, size_t elems, bool is_bf16, bool is_mixed = false) {
-    // Mixed precision: bf16 inputs, f32 outputs.  Caller selects which half
-    // to use for a given role by calling ptrs_f32/ptrs_bf16.
-    store_bf16 = is_bf16 || is_mixed;
-    store_f32  = !is_bf16 || is_mixed;
+  // ───── data_type_t-aware overloads (preferred) ─────
+  void alloc(int num_ops, size_t elems, data_type_t fp, bool is_mixed = false) {
+    // Mixed precision: low-precision inputs (bf16/f16), f32 outputs.
+    // Caller selects which half to use for a given role by calling
+    // cptrs/ptrs with the same dtype (or data_type_t::f32 for the
+    // mixed-output side).  `fp` is restricted to {f32, bf16, f16}.
+    //
+    // Pairing rule when is_mixed = true:
+    //   fp == bf16 -> bf16 (primary) + f32 (secondary)
+    //   fp == f16  -> f16  (primary) + f32 (secondary)
+    //   fp == f32  -> f32  (primary) + bf16 (secondary), matching the
+    //                legacy `bool is_bf16` overload's contract where
+    //                bf16 was the only low-precision pair for f32.
+    store_bf16 = (fp == data_type_t::bf16)
+                 || (is_mixed && fp == data_type_t::f32);
+    store_f16  = (fp == data_type_t::f16);
+    store_f32  = (fp == data_type_t::f32) || is_mixed;
     if (store_f32)  {
       f32.resize(num_ops);
       for (auto &v : f32) {
@@ -153,31 +199,81 @@ struct TypedBuffers {
         v.assign(elems, bfloat16_t(0.0f));
       }
     }
+    if (store_f16) {
+      f16.resize(num_ops);
+      for (auto &v : f16) {
+        v.assign(elems, float16_t(0.0f));
+      }
+    }
   }
 
-  // Opaque pointer view selector: `bf16 = true` picks bf16 storage.
-  std::vector<const void *> cptrs(bool pick_bf16) const {
-    std::vector<const void *> out(pick_bf16 ? bf16.size() : f32.size());
-    if (pick_bf16) for (size_t e = 0; e < bf16.size(); ++e) {
+  // Legacy bool is_bf16 overload (forwards to data_type_t variant).
+  void alloc(int num_ops, size_t elems, bool is_bf16, bool is_mixed = false) {
+    alloc(num_ops, elems, bool_to_fp_dt(is_bf16), is_mixed);
+  }
+
+  // Opaque pointer view selector.
+  std::vector<const void *> cptrs(data_type_t fp) const {
+    if (fp == data_type_t::bf16) {
+      std::vector<const void *> out(bf16.size());
+      for (size_t e = 0; e < bf16.size(); ++e) {
         out[e] = bf16[e].data();
       }
-    else           for (size_t e = 0; e < f32.size();  ++e) {
-        out[e] = f32[e].data();
+      return out;
+    }
+    if (fp == data_type_t::f16) {
+      std::vector<const void *> out(f16.size());
+      for (size_t e = 0; e < f16.size(); ++e) {
+        out[e] = f16[e].data();
       }
+      return out;
+    }
+    std::vector<const void *> out(f32.size());
+    for (size_t e = 0; e < f32.size(); ++e) {
+      out[e] = f32[e].data();
+    }
     return out;
+  }
+  std::vector<void *> ptrs(data_type_t fp) {
+    if (fp == data_type_t::bf16) {
+      std::vector<void *> out(bf16.size());
+      for (size_t e = 0; e < bf16.size(); ++e) {
+        out[e] = bf16[e].data();
+      }
+      return out;
+    }
+    if (fp == data_type_t::f16) {
+      std::vector<void *> out(f16.size());
+      for (size_t e = 0; e < f16.size(); ++e) {
+        out[e] = f16[e].data();
+      }
+      return out;
+    }
+    std::vector<void *> out(f32.size());
+    for (size_t e = 0; e < f32.size(); ++e) {
+      out[e] = f32[e].data();
+    }
+    return out;
+  }
+  // Legacy bool overloads: `pick_bf16 = true` picks bf16 storage.
+  std::vector<const void *> cptrs(bool pick_bf16) const {
+    return cptrs(bool_to_fp_dt(pick_bf16));
   }
   std::vector<void *> ptrs(bool pick_bf16) {
-    std::vector<void *> out(pick_bf16 ? bf16.size() : f32.size());
-    if (pick_bf16) for (size_t e = 0; e < bf16.size(); ++e) {
-        out[e] = bf16[e].data();
-      }
-    else           for (size_t e = 0; e < f32.size();  ++e) {
-        out[e] = f32[e].data();
-      }
-    return out;
+    return ptrs(bool_to_fp_dt(pick_bf16));
+  }
+
+  float at(int e, size_t i, data_type_t fp) const {
+    if (fp == data_type_t::bf16) {
+      return static_cast<float>(bf16[e][i]);
+    }
+    if (fp == data_type_t::f16) {
+      return static_cast<float>(f16[e][i]);
+    }
+    return f32[e][i];
   }
   float at(int e, size_t i, bool is_bf16) const {
-    return is_bf16 ? static_cast<float>(bf16[e][i]) : f32[e][i];
+    return at(e, i, bool_to_fp_dt(is_bf16));
   }
 };
 
@@ -346,8 +442,12 @@ inline void apply_ref_gated_act_tensor(tensor_t &t, int M, int N, int ldc,
     apply_ref_gated_act<bfloat16_t>(
       static_cast<bfloat16_t *>(t.get_raw_handle_unsafe()), M, N, ldc, act);
   }
+  else if (dtype == data_type_t::f16) {
+    apply_ref_gated_act<float16_t>(
+      static_cast<float16_t *>(t.get_raw_handle_unsafe()), M, N, ldc, act);
+  }
   // Other dtypes intentionally unsupported — gated_act validation in
-  // group_matmul_direct rejects non-f32/bf16 dst before reaching the kernel.
+  // group_matmul_direct accepts only f32, bf16, and f16 dst.
 }
 
 // Pick a random gated activation type compatible with the given output width.
@@ -355,7 +455,7 @@ inline void apply_ref_gated_act_tensor(tensor_t &t, int M, int N, int ldc,
 // uniformly samples from {none, silu_and_mul, gelu_and_mul, swiglu_oai_mul}.
 // Uses the supplied RNG so the choice is reproducible per test parameter set.
 inline grp_matmul_gated_act_t pick_random_gated_act(uint64_t n,
-                                                    std::mt19937 &rng) {
+    std::mt19937 &rng) {
   if (n % 2 != 0 || n < 2) {
     return grp_matmul_gated_act_t::none;
   }
@@ -437,17 +537,39 @@ inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
 struct Tol {
   float rel, abs;
 };
+
+// F16 tolerances are intentionally close to BF16. Depending on backend,
+// F16 matmul may accumulate in native F16 or in F32 and then round to
+// the destination type, so the overall error envelope is comparable to
+// BF16 for these test shapes. Keeping F16 at the BF16 envelope avoids
+// fragile per-dtype rebudgeting in every test body.
+inline Tol tol_fused(data_type_t fp) {
+  if (fp == data_type_t::bf16 || fp == data_type_t::f16) {
+    return Tol{0.20f, 0.05f};
+  }
+  return Tol{5e-4f, 1e-4f};
+}
+inline Tol tol_act(data_type_t fp) {
+  if (fp == data_type_t::bf16 || fp == data_type_t::f16) {
+    return Tol{0.15f, 0.02f};
+  }
+  return Tol{2e-4f, 1e-5f};
+}
+inline Tol tol_moe(data_type_t fp) {
+  if (fp == data_type_t::bf16 || fp == data_type_t::f16) {
+    return Tol{0.15f, 0.02f};
+  }
+  return Tol{5e-4f, 1e-5f};
+}
+// Legacy bool overloads.
 inline Tol tol_fused(bool is_bf16) {
-  return is_bf16 ? Tol{0.20f, 0.05f} :
-         Tol{5e-4f, 1e-4f};
+  return tol_fused(bool_to_fp_dt(is_bf16));
 }
-inline Tol tol_act(bool is_bf16)   {
-  return is_bf16 ? Tol{0.15f, 0.02f} :
-         Tol{2e-4f, 1e-5f};
+inline Tol tol_act(bool is_bf16) {
+  return tol_act(bool_to_fp_dt(is_bf16));
 }
-inline Tol tol_moe(bool is_bf16)   {
-  return is_bf16 ? Tol{0.15f, 0.02f} :
-         Tol{5e-4f, 1e-5f};
+inline Tol tol_moe(bool is_bf16) {
+  return tol_moe(bool_to_fp_dt(is_bf16));
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -473,12 +595,12 @@ struct AlgoEnvGuard {
     std::string s = std::to_string(algo);
     setenv("ZENDNNL_GRP_MATMUL_ALGO", s.c_str(), 1);
     prev_override =
-        zendnnl::lowoha::matmul::test_api_algo_override().exchange(
-            algo, std::memory_order_relaxed);
+      zendnnl::lowoha::matmul::test_api_algo_override().exchange(
+        algo, std::memory_order_relaxed);
   }
   ~AlgoEnvGuard() {
     zendnnl::lowoha::matmul::test_api_algo_override().store(
-        prev_override, std::memory_order_relaxed);
+      prev_override, std::memory_order_relaxed);
     if (had_prev) {
       setenv("ZENDNNL_GRP_MATMUL_ALGO", prev_value.c_str(), 1);
     }
@@ -542,13 +664,13 @@ struct CustomKernelOverride {
   int prev;
   explicit CustomKernelOverride(bool value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_override.exchange(
-            value ? 1 : 0, std::memory_order_relaxed);
+           ::s_grp_matmul_custom_kernel_override.exchange(
+             value ? 1 : 0, std::memory_order_relaxed);
   }
   ~CustomKernelOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_custom_kernel_override.store(
+      prev, std::memory_order_relaxed);
   }
   CustomKernelOverride(const CustomKernelOverride &) = delete;
   CustomKernelOverride &operator=(const CustomKernelOverride &) = delete;
@@ -564,20 +686,20 @@ struct DecodeProportionalOverride {
   int prev;
   explicit DecodeProportionalOverride(bool value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_decode_proportional_override.exchange(
-            value ? 1 : 0, std::memory_order_relaxed);
+           ::s_grp_matmul_decode_proportional_override.exchange(
+             value ? 1 : 0, std::memory_order_relaxed);
   }
   ~DecodeProportionalOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_decode_proportional_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_decode_proportional_override.store(
+      prev, std::memory_order_relaxed);
   }
   DecodeProportionalOverride(const DecodeProportionalOverride &) = delete;
   DecodeProportionalOverride &operator=(
-      const DecodeProportionalOverride &) = delete;
+    const DecodeProportionalOverride &) = delete;
   DecodeProportionalOverride(DecodeProportionalOverride &&) = delete;
   DecodeProportionalOverride &operator=(
-      DecodeProportionalOverride &&) = delete;
+    DecodeProportionalOverride &&) = delete;
 };
 
 // Sibling guard for the DQ-INT8 sub-knob — sets / restores
@@ -588,13 +710,13 @@ struct CustomKernelInt8Override {
   int prev;
   explicit CustomKernelInt8Override(bool value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_int8_override.exchange(
-            value ? 1 : 0, std::memory_order_relaxed);
+           ::s_grp_matmul_custom_kernel_int8_override.exchange(
+             value ? 1 : 0, std::memory_order_relaxed);
   }
   ~CustomKernelInt8Override() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_int8_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_custom_kernel_int8_override.store(
+      prev, std::memory_order_relaxed);
   }
   CustomKernelInt8Override(const CustomKernelInt8Override &) = delete;
   CustomKernelInt8Override &operator=(const CustomKernelInt8Override &) = delete;
@@ -606,13 +728,13 @@ struct NRoundsModeOverride {
   int prev;
   explicit NRoundsModeOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_n_rounds_mode_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_n_rounds_mode_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~NRoundsModeOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_n_rounds_mode_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_n_rounds_mode_override.store(
+      prev, std::memory_order_relaxed);
   }
   NRoundsModeOverride(const NRoundsModeOverride &) = delete;
   NRoundsModeOverride &operator=(const NRoundsModeOverride &) = delete;
@@ -633,13 +755,13 @@ struct NTileStrategyOverride {
   int prev;
   explicit NTileStrategyOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_n_tile_strategy_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_n_tile_strategy_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~NTileStrategyOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_n_tile_strategy_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_n_tile_strategy_override.store(
+      prev, std::memory_order_relaxed);
   }
   NTileStrategyOverride(const NTileStrategyOverride &) = delete;
   NTileStrategyOverride &operator=(const NTileStrategyOverride &) = delete;
@@ -671,13 +793,13 @@ struct AutoPromptAlgoOverride {
   int prev;
   explicit AutoPromptAlgoOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_auto_prompt_algo_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_auto_prompt_algo_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~AutoPromptAlgoOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_auto_prompt_algo_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_auto_prompt_algo_override.store(
+      prev, std::memory_order_relaxed);
   }
   AutoPromptAlgoOverride(const AutoPromptAlgoOverride &) = delete;
   AutoPromptAlgoOverride &operator=(const AutoPromptAlgoOverride &) = delete;
@@ -689,13 +811,13 @@ struct AutoDecodeAlgoOverride {
   int prev;
   explicit AutoDecodeAlgoOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_auto_decode_algo_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_auto_decode_algo_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~AutoDecodeAlgoOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_auto_decode_algo_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_auto_decode_algo_override.store(
+      prev, std::memory_order_relaxed);
   }
   AutoDecodeAlgoOverride(const AutoDecodeAlgoOverride &) = delete;
   AutoDecodeAlgoOverride &operator=(const AutoDecodeAlgoOverride &) = delete;
@@ -725,22 +847,22 @@ struct NTileHeavyThresholdOverride {
   int prev;
   explicit NTileHeavyThresholdOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_n_tile_heavy_threshold_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_n_tile_heavy_threshold_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~NTileHeavyThresholdOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_n_tile_heavy_threshold_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_n_tile_heavy_threshold_override.store(
+      prev, std::memory_order_relaxed);
   }
   NTileHeavyThresholdOverride(
-      const NTileHeavyThresholdOverride &) = delete;
+    const NTileHeavyThresholdOverride &) = delete;
   NTileHeavyThresholdOverride &operator=(
-      const NTileHeavyThresholdOverride &) = delete;
+    const NTileHeavyThresholdOverride &) = delete;
   NTileHeavyThresholdOverride(
-      NTileHeavyThresholdOverride &&) = delete;
+    NTileHeavyThresholdOverride &&) = delete;
   NTileHeavyThresholdOverride &operator=(
-      NTileHeavyThresholdOverride &&) = delete;
+    NTileHeavyThresholdOverride &&) = delete;
 };
 
 // RAII guard for the M-tile multi-tier hybrid env override
@@ -758,13 +880,13 @@ struct MTileHybridOverride {
   int prev;
   explicit MTileHybridOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_hybrid_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~MTileHybridOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_hybrid_override.store(
+      prev, std::memory_order_relaxed);
   }
   MTileHybridOverride(const MTileHybridOverride &) = delete;
   MTileHybridOverride &operator=(const MTileHybridOverride &) = delete;
@@ -787,13 +909,13 @@ struct MTileSliceTargetOverride {
   int prev;
   explicit MTileSliceTargetOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_slice_target_override
-        .exchange(value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_slice_target_override
+           .exchange(value, std::memory_order_relaxed);
   }
   ~MTileSliceTargetOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_slice_target_override
-        .store(prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_slice_target_override
+    .store(prev, std::memory_order_relaxed);
   }
   MTileSliceTargetOverride(const MTileSliceTargetOverride &) = delete;
   MTileSliceTargetOverride &operator=(const MTileSliceTargetOverride &) = delete;
@@ -805,16 +927,17 @@ struct MTileHybridMinMaxMOverride {
   int prev;
   explicit MTileHybridMinMaxMOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_min_max_m_override
-        .exchange(value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_hybrid_min_max_m_override
+           .exchange(value, std::memory_order_relaxed);
   }
   ~MTileHybridMinMaxMOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_min_max_m_override
-        .store(prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_hybrid_min_max_m_override
+    .store(prev, std::memory_order_relaxed);
   }
   MTileHybridMinMaxMOverride(const MTileHybridMinMaxMOverride &) = delete;
-  MTileHybridMinMaxMOverride &operator=(const MTileHybridMinMaxMOverride &) = delete;
+  MTileHybridMinMaxMOverride &operator=(const MTileHybridMinMaxMOverride &) =
+    delete;
   MTileHybridMinMaxMOverride(MTileHybridMinMaxMOverride &&) = delete;
   MTileHybridMinMaxMOverride &operator=(MTileHybridMinMaxMOverride &&) = delete;
 };
@@ -823,16 +946,17 @@ struct MTileHybridMinSkewOverride {
   int prev;
   explicit MTileHybridMinSkewOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_min_skew_override
-        .exchange(value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_hybrid_min_skew_override
+           .exchange(value, std::memory_order_relaxed);
   }
   ~MTileHybridMinSkewOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_min_skew_override
-        .store(prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_hybrid_min_skew_override
+    .store(prev, std::memory_order_relaxed);
   }
   MTileHybridMinSkewOverride(const MTileHybridMinSkewOverride &) = delete;
-  MTileHybridMinSkewOverride &operator=(const MTileHybridMinSkewOverride &) = delete;
+  MTileHybridMinSkewOverride &operator=(const MTileHybridMinSkewOverride &) =
+    delete;
   MTileHybridMinSkewOverride(MTileHybridMinSkewOverride &&) = delete;
   MTileHybridMinSkewOverride &operator=(MTileHybridMinSkewOverride &&) = delete;
 };
@@ -841,22 +965,22 @@ struct MTileHybridLightsPerThreadOverride {
   int prev;
   explicit MTileHybridLightsPerThreadOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
-        .exchange(value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
+           .exchange(value, std::memory_order_relaxed);
   }
   ~MTileHybridLightsPerThreadOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
-        .store(prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
+    .store(prev, std::memory_order_relaxed);
   }
   MTileHybridLightsPerThreadOverride(
-      const MTileHybridLightsPerThreadOverride &) = delete;
+    const MTileHybridLightsPerThreadOverride &) = delete;
   MTileHybridLightsPerThreadOverride &operator=(
-      const MTileHybridLightsPerThreadOverride &) = delete;
+    const MTileHybridLightsPerThreadOverride &) = delete;
   MTileHybridLightsPerThreadOverride(
-      MTileHybridLightsPerThreadOverride &&) = delete;
+    MTileHybridLightsPerThreadOverride &&) = delete;
   MTileHybridLightsPerThreadOverride &operator=(
-      MTileHybridLightsPerThreadOverride &&) = delete;
+    MTileHybridLightsPerThreadOverride &&) = delete;
 };
 
 // RAII guard for the vertical-fusion dispatch knob (the test-only
@@ -878,17 +1002,17 @@ struct MoEVerticalFusionOverride {
   int prev;
   explicit MoEVerticalFusionOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_vertical_fusion_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_vertical_fusion_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~MoEVerticalFusionOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_vertical_fusion_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_vertical_fusion_override.store(
+      prev, std::memory_order_relaxed);
   }
   MoEVerticalFusionOverride(const MoEVerticalFusionOverride &) = delete;
   MoEVerticalFusionOverride &operator=(
-      const MoEVerticalFusionOverride &) = delete;
+    const MoEVerticalFusionOverride &) = delete;
   MoEVerticalFusionOverride(MoEVerticalFusionOverride &&) = delete;
   MoEVerticalFusionOverride &operator=(MoEVerticalFusionOverride &&) = delete;
 };
@@ -908,21 +1032,21 @@ struct MoEPipelineScratchKbOverride {
   int prev;
   explicit MoEPipelineScratchKbOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~MoEPipelineScratchKbOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_m_tile_pipeline_scratch_kb_override.store(
+      prev, std::memory_order_relaxed);
   }
   MoEPipelineScratchKbOverride(
-      const MoEPipelineScratchKbOverride &) = delete;
+    const MoEPipelineScratchKbOverride &) = delete;
   MoEPipelineScratchKbOverride &operator=(
-      const MoEPipelineScratchKbOverride &) = delete;
+    const MoEPipelineScratchKbOverride &) = delete;
   MoEPipelineScratchKbOverride(MoEPipelineScratchKbOverride &&) = delete;
   MoEPipelineScratchKbOverride &operator=(
-      MoEPipelineScratchKbOverride &&) = delete;
+    MoEPipelineScratchKbOverride &&) = delete;
 };
 
 // RAII guard for the per-expert subtile_cols knob (the test-only
@@ -939,22 +1063,22 @@ struct CustomKernelSubtilePerExpertOverride {
   int prev;
   explicit CustomKernelSubtilePerExpertOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_subtile_per_expert_override
-        .exchange(value, std::memory_order_relaxed);
+           ::s_grp_matmul_custom_kernel_subtile_per_expert_override
+           .exchange(value, std::memory_order_relaxed);
   }
   ~CustomKernelSubtilePerExpertOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_subtile_per_expert_override
-        .store(prev, std::memory_order_relaxed);
+    ::s_grp_matmul_custom_kernel_subtile_per_expert_override
+    .store(prev, std::memory_order_relaxed);
   }
   CustomKernelSubtilePerExpertOverride(
-      const CustomKernelSubtilePerExpertOverride &) = delete;
+    const CustomKernelSubtilePerExpertOverride &) = delete;
   CustomKernelSubtilePerExpertOverride &operator=(
-      const CustomKernelSubtilePerExpertOverride &) = delete;
+    const CustomKernelSubtilePerExpertOverride &) = delete;
   CustomKernelSubtilePerExpertOverride(
-      CustomKernelSubtilePerExpertOverride &&) = delete;
+    CustomKernelSubtilePerExpertOverride &&) = delete;
   CustomKernelSubtilePerExpertOverride &operator=(
-      CustomKernelSubtilePerExpertOverride &&) = delete;
+    CustomKernelSubtilePerExpertOverride &&) = delete;
 };
 
 // RAII guard for the pack/microkernel NR knob (the test-only path
@@ -970,13 +1094,13 @@ struct CustomKernelNROverride {
   int prev;
   explicit CustomKernelNROverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_nr_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_custom_kernel_nr_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~CustomKernelNROverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_nr_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_custom_kernel_nr_override.store(
+      prev, std::memory_order_relaxed);
   }
   CustomKernelNROverride(const CustomKernelNROverride &) = delete;
   CustomKernelNROverride &operator=(const CustomKernelNROverride &) = delete;
@@ -988,21 +1112,21 @@ struct CustomKernelNTileOverride {
   int prev;
   explicit CustomKernelNTileOverride(int value) {
     prev = zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_n_tile_override.exchange(
-            value, std::memory_order_relaxed);
+           ::s_grp_matmul_custom_kernel_n_tile_override.exchange(
+             value, std::memory_order_relaxed);
   }
   ~CustomKernelNTileOverride() {
     zendnnl::lowoha::matmul::test_api
-        ::s_grp_matmul_custom_kernel_n_tile_override.store(
-            prev, std::memory_order_relaxed);
+    ::s_grp_matmul_custom_kernel_n_tile_override.store(
+      prev, std::memory_order_relaxed);
   }
   CustomKernelNTileOverride(
-      const CustomKernelNTileOverride &) = delete;
+    const CustomKernelNTileOverride &) = delete;
   CustomKernelNTileOverride &operator=(
-      const CustomKernelNTileOverride &) = delete;
+    const CustomKernelNTileOverride &) = delete;
   CustomKernelNTileOverride(CustomKernelNTileOverride &&) = delete;
   CustomKernelNTileOverride &operator=(
-      CustomKernelNTileOverride &&) = delete;
+    CustomKernelNTileOverride &&) = delete;
 };
 
 // RAII guard for the planner's `PhaseBSnapshot` capture hook.
@@ -1023,13 +1147,13 @@ struct CustomKernelNTileOverride {
 struct PhaseBCaptureGuard {
   PhaseBCaptureGuard() {
     zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot
-        = zendnnl::lowoha::matmul::test_api::PhaseBSnapshot{};
+      = zendnnl::lowoha::matmul::test_api::PhaseBSnapshot{};
     zendnnl::lowoha::matmul::test_api::s_capture_phase_b.store(
-        true, std::memory_order_release);
+      true, std::memory_order_release);
   }
   ~PhaseBCaptureGuard() {
     zendnnl::lowoha::matmul::test_api::s_capture_phase_b.store(
-        false, std::memory_order_release);
+      false, std::memory_order_release);
   }
   PhaseBCaptureGuard(const PhaseBCaptureGuard &) = delete;
   PhaseBCaptureGuard &operator=(const PhaseBCaptureGuard &) = delete;
@@ -1066,14 +1190,14 @@ struct PhaseBCaptureGuard {
 struct GemmModeCaptureGuard {
   GemmModeCaptureGuard() {
     zendnnl::lowoha::matmul::test_api
-        ::s_last_group_matmul_direct_gemm_mode.store(
-            nullptr, std::memory_order_relaxed);
+    ::s_last_group_matmul_direct_gemm_mode.store(
+      nullptr, std::memory_order_relaxed);
     zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
-        true, std::memory_order_release);
+      true, std::memory_order_release);
   }
   ~GemmModeCaptureGuard() {
     zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.store(
-        false, std::memory_order_release);
+      false, std::memory_order_release);
   }
   GemmModeCaptureGuard(const GemmModeCaptureGuard &) = delete;
   GemmModeCaptureGuard &operator=(const GemmModeCaptureGuard &) = delete;
@@ -1108,14 +1232,14 @@ struct GemmModeCaptureGuard {
 struct MTilePathCaptureGuard {
   MTilePathCaptureGuard() {
     zendnnl::lowoha::matmul::test_api::s_last_m_tile_path.store(
-        zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kNone,
-        std::memory_order_relaxed);
+      zendnnl::lowoha::matmul::test_api::m_tile_path_tag::kNone,
+      std::memory_order_relaxed);
     zendnnl::lowoha::matmul::test_api::s_capture_m_tile_path.store(
-        true, std::memory_order_release);
+      true, std::memory_order_release);
   }
   ~MTilePathCaptureGuard() {
     zendnnl::lowoha::matmul::test_api::s_capture_m_tile_path.store(
-        false, std::memory_order_release);
+      false, std::memory_order_release);
   }
   MTilePathCaptureGuard(const MTilePathCaptureGuard &) = delete;
   MTilePathCaptureGuard &operator=(const MTilePathCaptureGuard &) = delete;
@@ -1162,19 +1286,19 @@ struct LastInvocationCaptureGuard {
   bool prev_capture = false;
   LastInvocationCaptureGuard() {
     zendnnl::lowoha::matmul::group_matmul_prepack::test_api
-        ::clear_last_invocation_stats();
+    ::clear_last_invocation_stats();
     prev_capture = zendnnl::lowoha::matmul::group_matmul_prepack::test_api
-                       ::s_capture_last_invocation.exchange(
-                           true, std::memory_order_release);
+                   ::s_capture_last_invocation.exchange(
+                     true, std::memory_order_release);
   }
   ~LastInvocationCaptureGuard() {
     zendnnl::lowoha::matmul::group_matmul_prepack::test_api
-        ::s_capture_last_invocation.store(
-            prev_capture, std::memory_order_release);
+    ::s_capture_last_invocation.store(
+      prev_capture, std::memory_order_release);
   }
   LastInvocationCaptureGuard(const LastInvocationCaptureGuard &) = delete;
   LastInvocationCaptureGuard &operator=(
-      const LastInvocationCaptureGuard &) = delete;
+    const LastInvocationCaptureGuard &) = delete;
 };
 
 // ───────────────────────────────────────────────────────────────────
@@ -1198,9 +1322,9 @@ struct LastInvocationCaptureGuard {
 // can append `dst_down` / `ldc_down` after for the caller-allocated
 // case, or leave them empty to engage internal-alloc + src-reuse.
 inline grp_matmul_fused_moe_params make_fused_moe_op2(
-    int num_ops, int H,
-    const std::vector<const void *> &wei2,
-    const std::vector<const void *> &bias2) {
+  int num_ops, int H,
+  const std::vector<const void *> &wei2,
+  const std::vector<const void *> &bias2) {
   grp_matmul_fused_moe_params f{};
   f.down_weight = wei2;
   f.N_down      = std::vector<int>(num_ops, H);
@@ -1211,20 +1335,49 @@ inline grp_matmul_fused_moe_params make_fused_moe_op2(
 
 // Fill src/wei1/wei2 buffers with deterministic seeds.  Pass nullptr
 // for any buffer the caller doesn't want filled (e.g. weights only).
-inline void fill_moe_tensors(int num_ops, bool is_bf16,
+inline void fill_moe_tensors(int num_ops, data_type_t fp,
                              TypedBuffers *src, TypedBuffers *w1,
                              TypedBuffers *w2) {
   for (int e = 0; e < num_ops; ++e) {
-    if (is_bf16) {
-      if (src) fill_src (src->bf16[e], e);
-      if (w1)  fill_wei1(w1 ->bf16[e], e);
-      if (w2)  fill_wei2(w2 ->bf16[e], e);
-    } else {
-      if (src) fill_src (src->f32[e], e);
-      if (w1)  fill_wei1(w1 ->f32[e], e);
-      if (w2)  fill_wei2(w2 ->f32[e], e);
+    if (fp == data_type_t::bf16) {
+      if (src) {
+        fill_src(src->bf16[e], e);
+      }
+      if (w1) {
+        fill_wei1(w1 ->bf16[e], e);
+      }
+      if (w2) {
+        fill_wei2(w2 ->bf16[e], e);
+      }
+    }
+    else if (fp == data_type_t::f16) {
+      if (src) {
+        fill_src(src->f16[e], e);
+      }
+      if (w1) {
+        fill_wei1(w1 ->f16[e], e);
+      }
+      if (w2) {
+        fill_wei2(w2 ->f16[e], e);
+      }
+    }
+    else {
+      if (src) {
+        fill_src(src->f32[e], e);
+      }
+      if (w1) {
+        fill_wei1(w1 ->f32[e], e);
+      }
+      if (w2) {
+        fill_wei2(w2 ->f32[e], e);
+      }
     }
   }
+}
+inline void fill_moe_tensors(int num_ops, bool is_bf16,
+                             TypedBuffers *src, TypedBuffers *w1,
+                             TypedBuffers *w2) {
+  fill_moe_tensors(num_ops, bool_to_fp_dt(is_bf16), src, w1, w2);
 }
 
 // Per-expert-M canonical form.  The dispatcher accepts a per-expert
@@ -1232,16 +1385,15 @@ inline void fill_moe_tensors(int num_ops, bool is_bf16,
 // version covers every test case.  The uniform-M overload below
 // delegates here.
 inline status_t run_legacy_2call_ref(
-    const std::vector<int> &Ms, int K_in, int N_gate_up, int K_down, int H,
-    bool is_bf16, grp_matmul_gated_act_t act_type,
-    const std::vector<const void *> &src,
-    const std::vector<const void *> &wei1,
-    const std::vector<const void *> &wei2,
-    const std::vector<void *>       &d1_ref,
-    const std::vector<void *>       &d2_ref) {
+  const std::vector<int> &Ms, int K_in, int N_gate_up, int K_down, int H,
+  data_type_t dt, grp_matmul_gated_act_t act_type,
+  const std::vector<const void *> &src,
+  const std::vector<const void *> &wei1,
+  const std::vector<const void *> &wei2,
+  const std::vector<void *>       &d1_ref,
+  const std::vector<void *>       &d2_ref) {
   using namespace zendnnl::lowoha::matmul;
   const int num_ops = static_cast<int>(Ms.size());
-  const data_type_t dt = is_bf16 ? data_type_t::bf16 : data_type_t::f32;
 
   GemmVecs gv1;
   gv1.layout.assign(num_ops, 'r');
@@ -1273,31 +1425,59 @@ inline status_t run_legacy_2call_ref(
 
   auto pr1 = params;
   status_t s1 = group_matmul_direct(
-      gv1.layout, gv1.transA, gv1.transB, gv1.Ms, gv1.Ns, gv1.Ks, gv1.alpha,
-      src, gv1.lda, wei1, gv1.ldb, no_bias, gv1.beta, d1_ref, gv1.ldc,
-      gv1.is_wc, pr1, nullptr, act_ptr);
-  if (s1 != status_t::success) return s1;
+                  gv1.layout, gv1.transA, gv1.transB, gv1.Ms, gv1.Ns, gv1.Ks, gv1.alpha,
+                  src, gv1.lda, wei1, gv1.ldb, no_bias, gv1.beta, d1_ref, gv1.ldc,
+                  gv1.is_wc, pr1, nullptr, act_ptr);
+  if (s1 != status_t::success) {
+    return s1;
+  }
 
   std::vector<const void *> srcs2(num_ops);
-  for (int e = 0; e < num_ops; ++e) srcs2[e] = d1_ref[e];
+  for (int e = 0; e < num_ops; ++e) {
+    srcs2[e] = d1_ref[e];
+  }
   auto pr2 = params;
   return group_matmul_direct(
-      gv2.layout, gv2.transA, gv2.transB, gv2.Ms, gv2.Ns, gv2.Ks, gv2.alpha,
-      srcs2, gv2.lda, wei2, gv2.ldb, no_bias, gv2.beta, d2_ref, gv2.ldc,
-      gv2.is_wc, pr2);
+           gv2.layout, gv2.transA, gv2.transB, gv2.Ms, gv2.Ns, gv2.Ks, gv2.alpha,
+           srcs2, gv2.lda, wei2, gv2.ldb, no_bias, gv2.beta, d2_ref, gv2.ldc,
+           gv2.is_wc, pr2);
 }
 
 inline status_t run_legacy_2call_ref(
-    int num_ops, int M, int K_in, int N_gate_up, int K_down, int H,
-    bool is_bf16, grp_matmul_gated_act_t act_type,
-    const std::vector<const void *> &src,
-    const std::vector<const void *> &wei1,
-    const std::vector<const void *> &wei2,
-    const std::vector<void *>       &d1_ref,
-    const std::vector<void *>       &d2_ref) {
+  int num_ops, int M, int K_in, int N_gate_up, int K_down, int H,
+  data_type_t dt, grp_matmul_gated_act_t act_type,
+  const std::vector<const void *> &src,
+  const std::vector<const void *> &wei1,
+  const std::vector<const void *> &wei2,
+  const std::vector<void *>       &d1_ref,
+  const std::vector<void *>       &d2_ref) {
   return run_legacy_2call_ref(
-      std::vector<int>(num_ops, M), K_in, N_gate_up, K_down, H,
-      is_bf16, act_type, src, wei1, wei2, d1_ref, d2_ref);
+           std::vector<int>(num_ops, M), K_in, N_gate_up, K_down, H,
+           dt, act_type, src, wei1, wei2, d1_ref, d2_ref);
+}
+
+// Legacy bool overloads.
+inline status_t run_legacy_2call_ref(
+  const std::vector<int> &Ms, int K_in, int N_gate_up, int K_down, int H,
+  bool is_bf16, grp_matmul_gated_act_t act_type,
+  const std::vector<const void *> &src,
+  const std::vector<const void *> &wei1,
+  const std::vector<const void *> &wei2,
+  const std::vector<void *>       &d1_ref,
+  const std::vector<void *>       &d2_ref) {
+  return run_legacy_2call_ref(Ms, K_in, N_gate_up, K_down, H,
+                              bool_to_fp_dt(is_bf16), act_type, src, wei1, wei2, d1_ref, d2_ref);
+}
+inline status_t run_legacy_2call_ref(
+  int num_ops, int M, int K_in, int N_gate_up, int K_down, int H,
+  bool is_bf16, grp_matmul_gated_act_t act_type,
+  const std::vector<const void *> &src,
+  const std::vector<const void *> &wei1,
+  const std::vector<const void *> &wei2,
+  const std::vector<void *>       &d1_ref,
+  const std::vector<void *>       &d2_ref) {
+  return run_legacy_2call_ref(num_ops, M, K_in, N_gate_up, K_down, H,
+                              bool_to_fp_dt(is_bf16), act_type, src, wei1, wei2, d1_ref, d2_ref);
 }
 
 // Per-expert × per-row × per-col tolerance check.  `got_row_stride`
@@ -1306,17 +1486,19 @@ inline status_t run_legacy_2call_ref(
 // Per-expert-M form skips M=0 experts (Op2 doesn't write that slot).
 template <typename Label>
 inline void verify_per_expert_2d(
-    const TypedBuffers &got, size_t got_row_stride,
-    const TypedBuffers &ref, size_t ref_row_stride,
-    const std::vector<int> &Ms, int N, bool is_bf16,
-    Tol tol, Label &&label) {
+  const TypedBuffers &got, size_t got_row_stride,
+  const TypedBuffers &ref, size_t ref_row_stride,
+  const std::vector<int> &Ms, int N, data_type_t fp,
+  Tol tol, Label &&label) {
   for (int e = 0; e < (int)Ms.size(); ++e) {
     const int M_e = Ms[e];
-    if (M_e == 0) continue;
+    if (M_e == 0) {
+      continue;
+    }
     for (int r = 0; r < M_e; ++r) {
       for (int c = 0; c < N; ++c) {
-        const float g = got.at(e, (size_t)r * got_row_stride + c, is_bf16);
-        const float f = ref.at(e, (size_t)r * ref_row_stride + c, is_bf16);
+        const float g = got.at(e, (size_t)r * got_row_stride + c, fp);
+        const float f = ref.at(e, (size_t)r * ref_row_stride + c, fp);
         ASSERT_NEAR(g, f, std::abs(f) * tol.rel + tol.abs)
             << label << " e=" << e << " M_e=" << M_e
             << " r=" << r << " c=" << c;
@@ -1327,13 +1509,35 @@ inline void verify_per_expert_2d(
 
 template <typename Label>
 inline void verify_per_expert_2d(
-    const TypedBuffers &got, size_t got_row_stride,
-    const TypedBuffers &ref, size_t ref_row_stride,
-    int num_ops, int M, int N, bool is_bf16,
-    Tol tol, Label &&label) {
+  const TypedBuffers &got, size_t got_row_stride,
+  const TypedBuffers &ref, size_t ref_row_stride,
+  int num_ops, int M, int N, data_type_t fp,
+  Tol tol, Label &&label) {
   verify_per_expert_2d(got, got_row_stride, ref, ref_row_stride,
-                       std::vector<int>(num_ops, M), N, is_bf16,
+                       std::vector<int>(num_ops, M), N, fp,
                        tol, std::forward<Label>(label));
+}
+
+// Legacy bool overloads.
+template <typename Label>
+inline void verify_per_expert_2d(
+  const TypedBuffers &got, size_t got_row_stride,
+  const TypedBuffers &ref, size_t ref_row_stride,
+  const std::vector<int> &Ms, int N, bool is_bf16,
+  Tol tol, Label &&label) {
+  verify_per_expert_2d(got, got_row_stride, ref, ref_row_stride,
+                       Ms, N, bool_to_fp_dt(is_bf16), tol,
+                       std::forward<Label>(label));
+}
+template <typename Label>
+inline void verify_per_expert_2d(
+  const TypedBuffers &got, size_t got_row_stride,
+  const TypedBuffers &ref, size_t ref_row_stride,
+  int num_ops, int M, int N, bool is_bf16,
+  Tol tol, Label &&label) {
+  verify_per_expert_2d(got, got_row_stride, ref, ref_row_stride,
+                       num_ops, M, N, bool_to_fp_dt(is_bf16), tol,
+                       std::forward<Label>(label));
 }
 
 } // namespace moe_test_utils

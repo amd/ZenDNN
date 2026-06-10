@@ -38,7 +38,8 @@
 // INT8 K-grouping doesn't need per-test rounding.  The fixture's
 // alpha=1, beta=0, transA=transB=false constants live on
 // `TestGroupMatmulQuant`; this struct only carries the random axes.
-GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index, uint32_t total_tests) {
+GroupQuantMatmulType::GroupQuantMatmulType(uint32_t test_index,
+    uint32_t total_tests) {
   std::mt19937 gen(rand());
   matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   // K aligned to 4 — INT8 SYM/DYNAMIC tests previously rounded internally
@@ -163,6 +164,16 @@ status_t group_matmul_kernel_test(
       params_v[i].dtypes.dst  = dst_dt;
       params_v[i].dtypes.bias = bias_dt;
       params_v[i].num_threads = 0;
+      // Forward the caller-requested algo so the F16-aware setup in
+      // group_matmul_direct (ISA gate + reference-accum publication)
+      // sees the actual algo the test wants exercised. Prior to this
+      // the field was left at matmul_algo_t::none and the production
+      // F16 accum-type publication couldn't distinguish AOCL F16 (F16
+      // accumulator) from other paths (F32 accumulator), causing
+      // kernel vs forced-reference drift for the F16 group-matmul
+      // cases. Mirrors how matmul_kernel_test in gtest_utils.cpp
+      // populates params.lowoha_algo before invoking matmul_direct.
+      params_v[i].lowoha_algo = algo;
 
       bool is_woq = (src_dt == data_type_t::bf16 &&
                      (wei_dt == data_type_t::s4 || wei_dt == data_type_t::u4));
@@ -210,14 +221,10 @@ status_t group_matmul_kernel_test(
       }
 
       //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
-      //TODO: For AOCL-DLP matmul, bias is not supported for F16
       const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm ||
                                       algo == matmul_algo_t::libxsmm_blocked);
-      const bool is_aocl_kernel    = (algo == matmul_algo_t::aocl_dlp ||
-                                      algo == matmul_algo_t::aocl_dlp_blocked);
       const bool skip_bias =
-        (is_libxsmm_kernel && dst_dt == data_type_t::bf16) ||
-        (is_aocl_kernel    && dst_dt == data_type_t::f16);
+        (is_libxsmm_kernel && dst_dt == data_type_t::bf16);
 
       srcs[i]      = inputs[i].get_raw_handle_unsafe();
       wts[i]       = weights[i].get_raw_handle_unsafe();

@@ -78,17 +78,21 @@ struct size_check_ctx {
 //   need}` for the first vector that failed so the diagnostic site
 //   can `log_error` with a precise message.  Pass nullptr from the
 //   inline always-on path; both paths return the same boolean.
-struct undersized_info { const char *name; size_t got; size_t need; };
+struct undersized_info {
+  const char *name;
+  size_t got;
+  size_t need;
+};
 
 inline bool prepack_extras_metadata_undersized(
-    const std::vector<const void *> &weight,
-    const std::vector<int>          &K,
-    const std::vector<int>          &N,
-    const std::vector<int>          &ldb,
-    const std::vector<bool>         &transB,
-    const std::vector<bool>         &is_weights_const,
-    size_t                           total_matmul,
-    undersized_info                 *out_first_failure /* nullable */) {
+  const std::vector<const void *> &weight,
+  const std::vector<int>          &K,
+  const std::vector<int>          &N,
+  const std::vector<int>          &ldb,
+  const std::vector<bool>         &transB,
+  const std::vector<bool>         &is_weights_const,
+  size_t                           total_matmul,
+  undersized_info                 *out_first_failure /* nullable */) {
   auto under = [&](const char *name, size_t got) -> bool {
     if (got < total_matmul) {
       if (out_first_failure != nullptr) {
@@ -98,12 +102,24 @@ inline bool prepack_extras_metadata_undersized(
     }
     return false;
   };
-  if (under("weight",          weight.size()))           return true;
-  if (under("K",               K.size()))                return true;
-  if (under("N",               N.size()))                return true;
-  if (under("ldb",             ldb.size()))              return true;
-  if (under("transB",          transB.size()))           return true;
-  if (under("is_weights_const",is_weights_const.size())) return true;
+  if (under("weight",          weight.size())) {
+    return true;
+  }
+  if (under("K",               K.size())) {
+    return true;
+  }
+  if (under("N",               N.size())) {
+    return true;
+  }
+  if (under("ldb",             ldb.size())) {
+    return true;
+  }
+  if (under("transB",          transB.size())) {
+    return true;
+  }
+  if (under("is_weights_const",is_weights_const.size())) {
+    return true;
+  }
   return false;
 }
 
@@ -151,7 +167,7 @@ inline bool prepack_extras_metadata_undersized(
 //        — fused MoE workloads legitimately pass nullptr there)
 //
 //   D  Gated activation (parallel mode only)
-//        f32/bf16 dst, uniform dst dtype, even N
+//        f32/bf16/f16 dst, uniform dst dtype, even N
 //
 //   E  Row-major layout when fusing (parallel mode only)
 //        layout[i] ∈ {'r','R'} when gated_act or fused_moe is active
@@ -166,26 +182,26 @@ inline bool prepack_extras_metadata_undersized(
 //        experts; validate_group_matmul_moe_postop with the correct D
 // ───────────────────────────────────────────────────────────────────────
 status_t validate_group_matmul_direct_inputs(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA,
-    const std::vector<bool> &transB,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<float> &alpha,
-    const std::vector<const void *> &src,
-    const std::vector<int> &lda,
-    const std::vector<const void *> &weight,
-    const std::vector<int> &ldb,
-    const std::vector<const void *> &bias,
-    const std::vector<float> &beta,
-    const std::vector<void *> &dst,
-    const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    const std::vector<matmul_params> &params,
-    const group_matmul_moe_postop_params *moe_postop,
-    const grp_matmul_gated_act_params *gated_act,
-    const grp_matmul_fused_moe_params *fused_moe) {
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA,
+  const std::vector<bool> &transB,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src,
+  const std::vector<int> &lda,
+  const std::vector<const void *> &weight,
+  const std::vector<int> &ldb,
+  const std::vector<const void *> &bias,
+  const std::vector<float> &beta,
+  const std::vector<void *> &dst,
+  const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  const std::vector<matmul_params> &params,
+  const group_matmul_moe_postop_params *moe_postop,
+  const grp_matmul_gated_act_params *gated_act,
+  const grp_matmul_fused_moe_params *fused_moe) {
 
   // ── Phase A ─ input shapes & mode-feature compatibility ────────────
   if (M.empty() || params.empty() || src.empty()) {
@@ -220,7 +236,7 @@ status_t validate_group_matmul_direct_inputs(
   //     and prepack module aren't asked to reconcile a contract
   //     they cannot satisfy.
   const bool framework_opt_in =
-      (!params.empty() && params[0].active_matmul > 0);
+    (!params.empty() && params[0].active_matmul > 0);
   if (framework_opt_in) {
     const uint32_t am = params[0].active_matmul;
     const uint32_t tm = params[0].total_matmul;
@@ -238,8 +254,8 @@ status_t validate_group_matmul_direct_inputs(
     }
   }
   const size_t num_ops =
-      framework_opt_in ? static_cast<size_t>(params[0].active_matmul)
-                       : M.size();
+    framework_opt_in ? static_cast<size_t>(params[0].active_matmul)
+    : M.size();
 
   // Fused-MoE internal-alloc detection — INDEPENDENT per side.
   //
@@ -261,15 +277,15 @@ status_t validate_group_matmul_direct_inputs(
   // `group_matmul_fused_moe_execute` runs the same predicate via
   // the shared `detect_internal_alloc` helper.
   using zendnnl::lowoha::matmul::group_matmul_internal::
-      detect_internal_alloc;
+  detect_internal_alloc;
   using zendnnl::lowoha::matmul::group_matmul_internal::
-      internal_alloc_mode;
+  internal_alloc_mode;
   auto run_detect = [&](const std::vector<void *> &v,
                         const char *name,
-                        bool *out_internal) -> status_t {
+  bool *out_internal) -> status_t {
     const status_t st = detect_internal_alloc(
-        v, num_ops, /*fused_moe_present=*/(fused_moe != nullptr),
-        internal_alloc_mode::sweep_active, out_internal);
+      v, num_ops, /*fused_moe_present=*/(fused_moe != nullptr),
+      internal_alloc_mode::sweep_active, out_internal);
     if (st != status_t::success) {
       log_error("group_matmul_direct: fused_moe ", name, " has a mixed "
                 "null/non-null state — every active entry must be "
@@ -282,12 +298,14 @@ status_t validate_group_matmul_direct_inputs(
   };
   bool fused_op1_internal = false;
   bool fused_op2_internal = false;
-  if (run_detect(dst, "dst", &fused_op1_internal) != status_t::success)
+  if (run_detect(dst, "dst", &fused_op1_internal) != status_t::success) {
     return status_t::failure;
+  }
   if (fused_moe != nullptr) {
     if (run_detect(fused_moe->dst_down, "dst_down",
-                   &fused_op2_internal) != status_t::success)
+                   &fused_op2_internal) != status_t::success) {
       return status_t::failure;
+    }
   }
 
   // Vector sizes — strict equality for legacy callers (preserves the
@@ -299,9 +317,11 @@ status_t validate_group_matmul_direct_inputs(
   // active_matmul (or vice-versa); the dispatch still iterates
   // `[0, num_ops)` only.
   const size_check_ctx size_ctx{
-      /*num_ops=*/num_ops,
-      /*relaxed=*/(!params.empty() && params[0].active_matmul > 0)};
-  auto size_bad = [&](size_t s) { return size_ctx.fail(s); };
+    /*num_ops=*/num_ops,
+    /*relaxed=*/(!params.empty() &&params[0].active_matmul > 0)};
+  auto size_bad = [&](size_t s) {
+    return size_ctx.fail(s);
+  };
   if (size_bad(N.size()) || size_bad(K.size()) || size_bad(weight.size())
       || size_bad(lda.size()) || size_bad(ldb.size())
       || size_bad(layout.size()) || size_bad(transA.size())
@@ -333,8 +353,8 @@ status_t validate_group_matmul_direct_inputs(
       && params[0].total_matmul > params[0].active_matmul) {
     undersized_info first_failure{};
     if (prepack_extras_metadata_undersized(
-            weight, K, N, ldb, transB, is_weights_const,
-            /*total_matmul=*/params[0].total_matmul, &first_failure)) {
+          weight, K, N, ldb, transB, is_weights_const,
+          /*total_matmul=*/params[0].total_matmul, &first_failure)) {
       log_error("group_matmul_direct: ", first_failure.name,
                 ".size()=", first_failure.got,
                 " < total_matmul=", first_failure.need,
@@ -459,13 +479,15 @@ status_t validate_group_matmul_direct_inputs(
   }
 
   const bool run_gated_act = (gated_act != nullptr
-      && gated_act->act != grp_matmul_gated_act_t::none);
+                              && gated_act->act != grp_matmul_gated_act_t::none);
 
   // ── Phase D ─ gated activation rules ───────────────────────────────
   if (run_gated_act) {
     const data_type_t act_dtype = params[0].dtypes.dst;
-    if (act_dtype != data_type_t::f32 && act_dtype != data_type_t::bf16) {
-      log_error("group_matmul_direct: gated_act requires f32 or bf16 dst");
+    if (act_dtype != data_type_t::f32
+        && act_dtype != data_type_t::bf16
+        && act_dtype != data_type_t::f16) {
+      log_error("group_matmul_direct: gated_act requires f32, bf16, or f16 dst");
       return status_t::failure;
     }
     for (size_t i = 1; i < num_ops; ++i) {
@@ -520,7 +542,7 @@ status_t validate_group_matmul_direct_inputs(
     }
     if (fused_op2_internal) {
       const size_t dd_sweep =
-          std::min<size_t>(num_ops, fused_moe->dst_down.size());
+        std::min<size_t>(num_ops, fused_moe->dst_down.size());
       for (size_t i = 0; i < dd_sweep; ++i) {
         if (fused_moe->dst_down[i] != nullptr) {
           log_error("group_matmul_direct: fused_moe Op2 internal-alloc "
@@ -576,7 +598,7 @@ status_t validate_group_matmul_direct_inputs(
       // restricted `ldb_down` for `act == none` callers (validator
       // accepted ldb_down = N/2 but the execute path needs ldb_down = N).
       const grp_matmul_gated_act_t act_for_op2 =
-          run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none;
+        run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none;
       const int K_down_i = op2_k_for_act(N[i], act_for_op2);
       const int min_ldb = transB[i] ? K_down_i : fused_moe->N_down[i];
       if (fused_moe->ldb_down[i] < min_ldb) {
@@ -600,7 +622,8 @@ status_t validate_group_matmul_direct_inputs(
                     " < N_down=", fused_moe->N_down[i]);
           return status_t::failure;
         }
-      } else {
+      }
+      else {
         if (M[i] > 0 && lda[i] < fused_moe->N_down[i]) {
           log_error("group_matmul_direct: fused_moe Op2 internal-alloc "
                     "requires lda[", i, "]=", lda[i],
@@ -665,10 +688,11 @@ status_t validate_group_matmul_direct_inputs(
   // otherwise.  The helper accepts moe_postop == nullptr (returns
   // success) so it is safe to call unconditionally.
   const int moe_D = (fused_moe != nullptr && !fused_moe->N_down.empty())
-                     ? fused_moe->N_down[0] : N[0];
+                    ? fused_moe->N_down[0] : N[0];
   if (validate_group_matmul_moe_postop(moe_postop, moe_D,
-          params[0].dtypes.dst) != status_t::success)
+                                       params[0].dtypes.dst) != status_t::success) {
     return status_t::failure;
+  }
 
   return status_t::success;
 }
@@ -693,19 +717,27 @@ status_t validate_group_matmul_direct_inputs(
 
 inline const char *dt_name(data_type_t dt) {
   switch (dt) {
-    case data_type_t::f32:  return "f32";
-    case data_type_t::bf16: return "bf16";
-    case data_type_t::f16:  return "f16";
-    case data_type_t::s8:   return "s8";
-    case data_type_t::u8:   return "u8";
-    default:                return "?";
+  case data_type_t::f32:
+    return "f32";
+  case data_type_t::bf16:
+    return "bf16";
+  case data_type_t::f16:
+    return "f16";
+  case data_type_t::s8:
+    return "s8";
+  case data_type_t::u8:
+    return "u8";
+  default:
+    return "?";
   }
 }
 
 template <typename T>
 inline const char *uniformity_marker(const std::vector<T> &v) {
   for (size_t i = 1; i < v.size(); ++i)
-    if (v[i] != v[0]) return "(*)";
+    if (v[i] != v[0]) {
+      return "(*)";
+    }
   return "";
 }
 
@@ -776,8 +808,82 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // the `ZENDNNL_DIAGNOSTICS_ENABLE` gate (default ON; disabled
   // only when explicitly set to `0`) and live in
   // `validate_group_matmul_direct_inputs()`.
-  if (M.empty() || params.empty() || src.empty())
+  if (M.empty() || params.empty() || src.empty()) {
     return status_t::failure;
+  }
+
+  // ── F16 ISA gate + reference-accum-type setup ────────────────────
+  // The single-op path runs `kernel_select` per call, which both
+  // ISA-gates F16 and publishes the AOCL-DLP F16 accumulator type to
+  // the singleton config; the parallel group-matmul dispatch below
+  // bypasses `kernel_select` entirely and goes straight to per-expert
+  // execution, so without the same setup here:
+  //
+  //   1) F16 inputs would silently slip through to a kernel that
+  //      touches F16 storage and produces undefined results on hosts
+  //      without AVX-512-FP16.
+  //   2) Tests (and any user) validating the F16 group-matmul output
+  //      against the per-op reference would see systematic drift: the
+  //      F16 AOCL kernels here accumulate in native F16, but the
+  //      reference kernel reads `accum_type` from the singleton and
+  //      defaults to F32 accumulation, yielding a different rounding
+  //      profile.
+  //
+  // Run this scan once over `params[0..num_ops_input)` — every expert
+  // shares the same F16 / non-F16 classification in practice (uniform
+  // dtype per group is the documented contract for the F16 path), so
+  // checking the first expert suffices for the ISA gate, and the
+  // accum_type knob is a per-process singleton anyway. Iterate to be
+  // safe against mixed-dtype callers and reject early on any F16
+  // operand when the ISA is missing.
+  const size_t f16_scan_n = std::min<size_t>(M.size(), params.size());
+
+  // Per-expert predicates lifted out of the scan loop so the contract
+  // ("any F16 operand?" + "AOCL-DLP F16 kernel?") reads as named
+  // properties.  AOCL-DLP F16 GEMM accumulates in native F16; the
+  // group qualifies for ref-accum=F16 publication only when *every*
+  // F16-bearing expert routes through aocl_dlp / aocl_dlp_blocked.
+  // Anything else (mixed algos, non-AOCL F16 kernels) falls back to
+  // the F32 accum default so a stray non-AOCL expert can't poison the
+  // reference comparison for the whole group.
+  auto is_f16_op = [](const matmul_params &p) -> bool {
+    return p.dtypes.src  == data_type_t::f16 ||
+    p.dtypes.wei  == data_type_t::f16 ||
+    p.dtypes.dst  == data_type_t::f16 ||
+    p.dtypes.bias == data_type_t::f16;
+  };
+  auto is_aocl_dlp = [](const matmul_params &p) -> bool {
+    return p.lowoha_algo == matmul_algo_t::aocl_dlp ||
+    p.lowoha_algo == matmul_algo_t::aocl_dlp_blocked;
+  };
+
+  bool any_f16_operand   = false;
+  // `true` is the AND identity; only consumed below when
+  // `any_f16_operand` is also true, so the seed is never observed
+  // for non-F16 groups.
+  bool group_is_aocl_f16 = true;
+  for (size_t i = 0; i < f16_scan_n; ++i) {
+    const auto &p = params[i];
+    if (!is_f16_op(p)) {
+      continue;
+    }
+    any_f16_operand   = true;
+    group_is_aocl_f16 = group_is_aocl_f16 && is_aocl_dlp(p);
+  }
+  if (any_f16_operand &&
+      !zendnnl::common::zendnnl_platform_info().get_avx512_f16_status()) {
+    log_error("group_matmul_direct: F16 data type is not supported on "
+              "this platform (requires AVX-512-FP16).");
+    return status_t::isa_unsupported;
+  }
+  if (any_f16_operand) {
+    // Match the single-op behaviour: AOCL-DLP F16 → ref accum=F16,
+    // everything else (incl. non-F16 paths) → F32. Restore F32
+    // afterwards to avoid leaking F16 accum into a subsequent
+    // non-F16 caller that reads the singleton.
+    zendnnl::ops::matmul_config_t::instance().set_accum_type(
+      group_is_aocl_f16 ? data_type_t::f16 : data_type_t::f32);
+  }
 
   // (2) Parallel-only features must not appear in sequential mode.
   // The same rejection lives in validate_group_matmul_direct_inputs
@@ -824,13 +930,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // the framework opts in via `active_matmul > 0` do we relax to
     // `≥ no`, accepting the prepack-extras tail.
     const bool inline_relaxed =
-        (!params.empty() && params[0].active_matmul > 0);
+      (!params.empty() && params[0].active_matmul > 0);
     const size_t no = inline_relaxed
-        ? std::min<size_t>(params[0].active_matmul, M.size())
-        : M.size();
+                      ? std::min<size_t>(params[0].active_matmul, M.size())
+                      : M.size();
     const size_check_ctx inline_ctx{/*num_ops=*/no,
-                                    /*relaxed=*/inline_relaxed};
-    auto inline_size_bad = [&](size_t s) { return inline_ctx.fail(s); };
+        /*relaxed=*/inline_relaxed};
+    auto inline_size_bad = [&](size_t s) {
+      return inline_ctx.fail(s);
+    };
     // Per-side internal-alloc detection — independent for Op1
     // (dst[]) and Op2 (fused_moe->dst_down[]).  O(1) inference from
     // [0] is sufficient for the inline guard; the diagnostic
@@ -844,13 +952,13 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     bool inline_op1_internal = false;
     bool inline_op2_internal = false;
     detect_internal_alloc(
-        dst, /*num_ops=*/no, /*fused_moe_present=*/(fused_moe != nullptr),
-        internal_alloc_mode::quick_o1, &inline_op1_internal);
+      dst, /*num_ops=*/no, /*fused_moe_present=*/(fused_moe != nullptr),
+      internal_alloc_mode::quick_o1, &inline_op1_internal);
     if (fused_moe != nullptr) {
       detect_internal_alloc(
-          fused_moe->dst_down, /*num_ops=*/no,
-          /*fused_moe_present=*/true, internal_alloc_mode::quick_o1,
-          &inline_op2_internal);
+        fused_moe->dst_down, /*num_ops=*/no,
+        /*fused_moe_present=*/true, internal_alloc_mode::quick_o1,
+        &inline_op2_internal);
     }
     // else: inline_op2_internal stays false (no fused-MoE, no Op2).
     if (inline_size_bad(N.size()) || inline_size_bad(K.size())
@@ -860,19 +968,23 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         || inline_size_bad(transB.size()) || inline_size_bad(alpha.size())
         || inline_size_bad(beta.size()) || inline_size_bad(bias.size())
         || inline_size_bad(is_weights_const.size())
-        || inline_size_bad(params.size()))
+        || inline_size_bad(params.size())) {
       return status_t::failure;
+    }
     // dst/ldc only required (sized to >= num_ops) when Op1 is
     // caller-allocated; same for dst_down/ldc_down vs Op2.
     if (!inline_op1_internal
-        && (inline_size_bad(dst.size()) || inline_size_bad(ldc.size())))
+        && (inline_size_bad(dst.size()) || inline_size_bad(ldc.size()))) {
       return status_t::failure;
+    }
     if (fused_moe != nullptr && !inline_op2_internal
         && (inline_size_bad(fused_moe->dst_down.size())
-            || inline_size_bad(fused_moe->ldc_down.size())))
+            || inline_size_bad(fused_moe->ldc_down.size()))) {
       return status_t::failure;
-    if (src.size() != 1 && inline_size_bad(src.size()))
+    }
+    if (src.size() != 1 && inline_size_bad(src.size())) {
       return status_t::failure;
+    }
 
     // Prepack-extras contract: when the framework opts in with
     // `total_matmul > active_matmul`, the prepack module (see
@@ -900,9 +1012,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // log_error in production builds.  The diagnostic validator
       // populates and logs the precise undersized-vector name.
       if (prepack_extras_metadata_undersized(
-              weight, K, N, ldb, transB, is_weights_const,
-              /*total_matmul=*/params[0].total_matmul,
-              /*out_first_failure=*/nullptr)) {
+            weight, K, N, ldb, transB, is_weights_const,
+            /*total_matmul=*/params[0].total_matmul,
+            /*out_first_failure=*/nullptr)) {
         return status_t::failure;
       }
     }
@@ -933,10 +1045,18 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // present) carry placeholder dimensions that wouldn't reflect
       // the caller's ldc-vs-N invariant.
       for (size_t e = 0; e < no; ++e) {
-        if (M[e] <= 0) continue;
-        if (ldc[e] < N[e]) seen_tight = true;
-        else seen_wide = true;
-        if (seen_tight && seen_wide) return status_t::failure;
+        if (M[e] <= 0) {
+          continue;
+        }
+        if (ldc[e] < N[e]) {
+          seen_tight = true;
+        }
+        else {
+          seen_wide = true;
+        }
+        if (seen_tight && seen_wide) {
+          return status_t::failure;
+        }
       }
     }
   }
@@ -949,13 +1069,14 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // validate_group_matmul_direct_inputs() for the seven phases.
   status_t val = op_instrumentation::validate([&]() {
     return validate_group_matmul_direct_inputs(
-        layout, transA, transB, M, N, K, alpha,
-        src, lda, weight, ldb, bias, beta, dst, ldc,
-        is_weights_const, params,
-        moe_postop, gated_act, fused_moe);
+             layout, transA, transB, M, N, K, alpha,
+             src, lda, weight, ldb, bias, beta, dst, ldc,
+             is_weights_const, params,
+             moe_postop, gated_act, fused_moe);
   });
-  if (val != status_t::success)
+  if (val != status_t::success) {
     return val;
+  }
 
   // ── Active-set + prepack accounting ───────────────────────────────
   // Two counts drive the rest of this function:
@@ -984,14 +1105,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   //                        pre-PR / lazy-only behaviour.
   const size_t num_ops_input = M.size();
   const size_t num_ops =
-      (params[0].active_matmul > 0)
-          ? std::min<size_t>(params[0].active_matmul, num_ops_input)
-          : num_ops_input;
+    (params[0].active_matmul > 0)
+    ? std::min<size_t>(params[0].active_matmul, num_ops_input)
+    : num_ops_input;
 
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
-  if (is_profile)
+  if (is_profile) {
     profiler.tbp_start();
+  }
 
   const char *gemm_mode = nullptr;
 
@@ -1015,27 +1137,28 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       int cur_lda = (i == 0) ? lda[i] : ldc[i - 1];
 
       matmul_algo_t kernel = kernel_select(
-          params[i], bp.Batch_A, bp.Batch_B,
-          1, M[i], N[i], K[i], num_threads, bias[i], is_weights_const[i],
-          transB[i]);
+                               params[i], bp.Batch_A, bp.Batch_B,
+                               1, M[i], N[i], K[i], num_threads, bias[i], is_weights_const[i],
+                               transB[i]);
 
       params[i].num_threads = num_threads;
       matmul_execute(
-          layout[i], transA[i], transB[i],
-          M[i], N[i], K[i], alpha[i],
-          cur_src, cur_lda, weight[i], ldb[i],
-          bias[i], beta[i], dst[i], ldc[i],
-          is_weights_const[i],
-          size_of(params[i].dtypes.src), size_of(params[i].dtypes.dst),
-          num_threads, kernel, params[i], bp, auto_version);
+        layout[i], transA[i], transB[i],
+        M[i], N[i], K[i], alpha[i],
+        cur_src, cur_lda, weight[i], ldb[i],
+        bias[i], beta[i], dst[i], ldc[i],
+        is_weights_const[i],
+        size_of(params[i].dtypes.src), size_of(params[i].dtypes.dst),
+        num_threads, kernel, params[i], bp, auto_version);
     }
     gemm_mode = "sequential";
-  } else {
+  }
+  else {
     // ── Parallel grouped dispatch ─────────────────────────────────────
     const bool run_gated_act = (gated_act != nullptr
-        && gated_act->act != grp_matmul_gated_act_t::none);
+                                && gated_act->act != grp_matmul_gated_act_t::none);
     const data_type_t act_dtype = run_gated_act
-        ? params[0].dtypes.dst : data_type_t::none;
+                                  ? params[0].dtypes.dst : data_type_t::none;
 
     // ── Ahead-of-time weight pre-pack ─────────────────────────────────
     // Moved out of this dispatcher entirely: each scheduling ALGO's
@@ -1069,9 +1192,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     const std::vector<int> *M_eff_ptr = &M;
     if (num_ops < M.size()) {
       M_active_local.assign(
-          M.begin(),
-          M.begin()
-              + static_cast<std::vector<int>::difference_type>(num_ops));
+        M.begin(),
+        M.begin()
+        + static_cast<std::vector<int>::difference_type>(num_ops));
       M_eff_ptr = &M_active_local;
     }
     const std::vector<int> &M_eff = *M_eff_ptr;
@@ -1089,15 +1212,17 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // weighted-reduce internally as the natural Stage 4 of the
       // pipeline, so the dispatch body has nothing more to do here.
       status_t fused_st = group_matmul_fused_moe_execute(
-          *fused_moe,
-          run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
-          act_dtype,
-          layout, transA, transB, M_eff, N, K, alpha,
-          src, lda, weight, ldb, bias, beta, dst, ldc,
-          is_weights_const, params, num_threads, &gemm_mode, moe_postop);
-      if (fused_st != status_t::success)
+                            *fused_moe,
+                            run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
+                            act_dtype,
+                            layout, transA, transB, M_eff, N, K, alpha,
+                            src, lda, weight, ldb, bias, beta, dst, ldc,
+                            is_weights_const, params, num_threads, &gemm_mode, moe_postop);
+      if (fused_st != status_t::success) {
         return fused_st;
-    } else {
+      }
+    }
+    else {
       // Non-fused path: Op1 + activation (fused where possible) followed
       // by separate Op2 / moe_postop as needed.
       //
@@ -1115,41 +1240,46 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       bool group_quantized = false;
       if (get_grp_matmul_enable_group_dq()) {
         status_t group_quant_st = group_reorder_quantization_wrapper(
-            src, lda, transA, M_eff, K, num_threads, params_dispatch,
-            quantized_src, quantized_lda, group_quant_buffers,
-            group_quantized);
-        if (group_quant_st != status_t::success) return group_quant_st;
+                                    src, lda, transA, M_eff, K, num_threads, params_dispatch,
+                                    quantized_src, quantized_lda, group_quant_buffers,
+                                    group_quantized);
+        if (group_quant_st != status_t::success) {
+          return group_quant_st;
+        }
       }
 
       const bool act_fused = group_matmul_run_parallel_dispatch(
-          layout, transA, transB, M_eff, N, K, alpha,
-          group_quantized ? quantized_src : src,
-          group_quantized ? quantized_lda : lda,
-          weight, ldb, bias, beta, dst, ldc,
-          is_weights_const,
-          group_quantized ? params_dispatch : params,
-          num_threads, &gemm_mode,
-          run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
-          act_dtype);
+                               layout, transA, transB, M_eff, N, K, alpha,
+                               group_quantized ? quantized_src : src,
+                               group_quantized ? quantized_lda : lda,
+                               weight, ldb, bias, beta, dst, ldc,
+                               is_weights_const,
+                               group_quantized ? params_dispatch : params,
+                               num_threads, &gemm_mode,
+                               run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
+                               act_dtype);
 
       if (run_gated_act && !act_fused) {
         status_t act_st = group_matmul_moe_act_execute(
-            gated_act, dst, M_eff, N, ldc, act_dtype, num_threads);
-        if (act_st != status_t::success)
+                            gated_act, dst, M_eff, N, ldc, act_dtype, num_threads);
+        if (act_st != status_t::success) {
           return act_st;
+        }
       }
 
       if (moe_postop != nullptr) {
         status_t moe_st = group_matmul_moe_postop_execute(moe_postop, N[0],
-            num_threads, params[0].dtypes.dst);
-        if (moe_st != status_t::success)
+                          num_threads, params[0].dtypes.dst);
+        if (moe_st != status_t::success) {
           return moe_st;
+        }
       }
     }
   }
 
-  if (is_profile)
+  if (is_profile) {
     profiler.tbp_stop();
+  }
 
   // ── L1 APILOG (single per-call summary) ───────────────────────────
   // Built once; consumed by both apilog (full structured line) and
@@ -1167,13 +1297,13 @@ status_t group_matmul_direct(const std::vector<char> &layout,
        << ">"       << dt_name(params[0].dtypes.dst)
        << " layout=" << layout[0] << uniformity_marker(layout)
        << " transA=" << (transA[0] ? 'T' : 'N')
-                     << uniformity_marker(transA)
+       << uniformity_marker(transA)
        << " transB=" << (transB[0] ? 'T' : 'N')
-                     << uniformity_marker(transB)
+       << uniformity_marker(transB)
        << " alpha[0]=" << alpha[0] << uniformity_marker(alpha)
        << " beta[0]="  << beta[0]  << uniformity_marker(beta)
        << " wconst[0]=" << (is_weights_const[0] ? 1 : 0)
-                        << uniformity_marker(is_weights_const)
+       << uniformity_marker(is_weights_const)
        << " lda[0]=" << lda[0]
        << " ldb[0]=" << ldb[0]
        << " ldc[0]=" << (ldc.empty() ? -1 : ldc[0])
@@ -1183,7 +1313,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
 
     int64_t m_sum = 0;
     for (size_t i = 0; i < num_ops; ++i) {
-      if (i > 0) ss << ',';
+      if (i > 0) {
+        ss << ',';
+      }
       ss << M[i];
       m_sum += M[i];
     }
@@ -1194,7 +1326,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // N_down for cross-checking), and weighted-reduce post-op
     // (with token count + topk).
     const bool has_act = (gated_act != nullptr
-        && gated_act->act != grp_matmul_gated_act_t::none);
+                          && gated_act->act != grp_matmul_gated_act_t::none);
     const bool has_fused = (fused_moe  != nullptr);
     const bool has_moe   = (moe_postop != nullptr);
     ss << " fused=[";
@@ -1204,21 +1336,29 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       need_comma = true;
     }
     if (has_fused) {
-      if (need_comma) ss << ',';
+      if (need_comma) {
+        ss << ',';
+      }
       ss << "down_proj=N_down[0]=" << fused_moe->N_down[0];
       need_comma = true;
     }
     if (has_moe) {
-      if (need_comma) ss << ',';
+      if (need_comma) {
+        ss << ',';
+      }
       ss << "moe_postop(tokens=" << moe_postop->num_tokens
          << ",topk=" << moe_postop->topk << ')';
       need_comma = true;
     }
-    if (!need_comma) ss << "none";
+    if (!need_comma) {
+      ss << "none";
+    }
     ss << ']';
     ss << " sequential_chain=" << (src.size() == 1 ? 1 : 0);
 
-    if (s_l1_log) apilog_info(ss.str());
+    if (s_l1_log) {
+      apilog_info(ss.str());
+    }
     if (is_profile)
       profilelog_verbose(ss.str(), " time=", profiler.tbp_elapsedtime(),
                          profiler.get_res_str());
@@ -1242,10 +1382,10 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // the hook.  See the doc-block on `s_capture_gemm_mode` in
   // `group_matmul/group_matmul_parallel_common.hpp`.
   if (zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.load(
-          std::memory_order_relaxed)) {
+        std::memory_order_relaxed)) {
     zendnnl::lowoha::matmul::test_api
-        ::s_last_group_matmul_direct_gemm_mode.store(
-            gemm_mode, std::memory_order_relaxed);
+    ::s_last_group_matmul_direct_gemm_mode.store(
+      gemm_mode, std::memory_order_relaxed);
   }
 
   return status_t::success;

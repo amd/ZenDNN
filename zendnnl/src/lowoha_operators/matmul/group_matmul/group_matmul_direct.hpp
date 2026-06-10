@@ -83,7 +83,14 @@ namespace matmul {
  *   - @c row_ptrs and @c output must be non-null.
  *   - @c num_tokens > 0 and @c topk > 0.
  *   - @c ldc_output >= D (hidden dimension).
- *   - dst dtype must be FP32 or BF16.
+ *   - dst dtype must be FP32, BF16, or F16.  The weighted-reduce post-op
+ *     itself runs on AVX-512F (with a scalar fallback) for all three
+ *     dtypes and has no AVX-512-FP16 requirement of its own, so F16 works
+ *     here even on AVX-512F-only hosts (and via the scalar path).  The
+ *     AVX-512-FP16 requirement and the @c status_t::isa_unsupported
+ *     rejection apply only to the F16 GEMM path: when invoked through the
+ *     full @c group_matmul_direct flow, F16 is gated upstream by that GEMM
+ *     ISA check, not by this post-op.
  *   - @c topk_weights required unless @c skip_weighted is true.
  */
 struct group_matmul_moe_postop_params {
@@ -94,7 +101,7 @@ struct group_matmul_moe_postop_params {
   int topk = 0;
 
   /// Output buffer: row-major [num_tokens, ldc_output].
-  /// First D columns of each row are written (FP32 or BF16).
+  /// First D columns of each row are written (FP32, BF16, or F16).
   void *output = nullptr;
 
   /// Leading dimension of the output buffer (>= D).
@@ -111,8 +118,8 @@ struct group_matmul_moe_postop_params {
 
   /// Pre-gathered row pointers: flat array of size num_tokens * topk.
   /// Entry row_ptrs[t * topk + k] points to the start of a D-wide row
-  /// (FP32 or BF16) in an expert dst buffer — the row that contributes
-  /// to token t's k-th expert slot.
+  /// (FP32, BF16, or F16) in an expert dst buffer — the row that
+  /// contributes to token t's k-th expert slot.
   ///
   /// The caller builds this during token-to-expert scatter:
   ///   row_ptrs[t * topk + k] = dst[expert_id] + row_j * ldc[expert_id]
@@ -121,15 +128,15 @@ struct group_matmul_moe_postop_params {
 };
 
 status_t validate_group_matmul_moe_postop(
-    const group_matmul_moe_postop_params *postop,
-    int D,
-    data_type_t dst_elem);
+  const group_matmul_moe_postop_params *postop,
+  int D,
+  data_type_t dst_elem);
 
 status_t group_matmul_moe_postop_execute(
-    const group_matmul_moe_postop_params *postop,
-    int D,
-    int num_threads,
-    data_type_t dst_elem);
+  const group_matmul_moe_postop_params *postop,
+  int D,
+  int num_threads,
+  data_type_t dst_elem);
 
 // --- MoE gated activation: fused act(gate) * up after GEMM ---
 
@@ -174,17 +181,24 @@ struct grp_matmul_gated_act_params {
  * @param M           Per-expert row counts.
  * @param N           Per-expert column counts (must be even: N = 2*dim).
  * @param ldc         Per-expert leading dimensions of dst.
- * @param dst_dtype   Data type of dst buffers (FP32 or BF16).
+ * @param dst_dtype   Data type of dst buffers (FP32, BF16, or F16).
+ *                    The activation runs on AVX-512F (with a scalar
+ *                    fallback) for all three dtypes and has no
+ *                    AVX-512-FP16 requirement of its own.  The
+ *                    AVX-512-FP16 requirement applies only to the F16
+ *                    GEMM path: in the full `group_matmul_direct` flow
+ *                    F16 is gated upstream by that GEMM ISA check, not
+ *                    by this activation post-op.
  * @param num_threads OMP thread count for parallel execution.
  */
 status_t group_matmul_moe_act_execute(
-    const grp_matmul_gated_act_params *act_params,
-    const std::vector<void *> &dst,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &ldc,
-    data_type_t dst_dtype,
-    int num_threads);
+  const grp_matmul_gated_act_params *act_params,
+  const std::vector<void *> &dst,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &ldc,
+  data_type_t dst_dtype,
+  int num_threads);
 
 /**
  * @brief Apply gated activation in-place on a row range of a single expert.
@@ -198,12 +212,12 @@ status_t group_matmul_moe_act_execute(
  * @param row_end   Last row to process (exclusive).
  * @param N         Total columns (must be even: N = 2*dim).
  * @param ldc       Leading dimension of dst.
- * @param dst_dtype Data type of dst (f32 or bf16).
+ * @param dst_dtype Data type of dst (f32, bf16, or f16).
  */
 void apply_gated_act_inplace(
-    grp_matmul_gated_act_t act,
-    void *dst, int row_start, int row_end,
-    int N, int ldc, data_type_t dst_dtype);
+  grp_matmul_gated_act_t act,
+  void *dst, int row_start, int row_end,
+  int N, int ldc, data_type_t dst_dtype);
 
 /**
  * @brief Apply swiglu_oai_mul to an M x pairs interleaved tile, in-place.
@@ -249,11 +263,11 @@ void apply_gated_act_inplace(
  * @param col_start  First column in the interleaved buffer (must be even).
  * @param pairs      Number of (g, u) pairs this thread owns.
  * @param ldc        Leading dimension of dst_buf (elements, not bytes).
- * @param dtype      Buffer element type (f32 or bf16).
+ * @param dtype      Buffer element type (f32, bf16, or f16).
  */
 void apply_swiglu_oai_tile_rows(
-    void *dst_buf, int M, int col_start, int pairs,
-    int ldc, data_type_t dtype);
+  void *dst_buf, int M, int col_start, int pairs,
+  int ldc, data_type_t dtype);
 
 /**
  * @brief Out-of-place per-thread tile activation for swiglu_oai_mul.
@@ -276,12 +290,12 @@ void apply_swiglu_oai_tile_rows(
  * @param dst_col_start First column to write in dst.
  * @param M             Row count.
  * @param pairs         Number of (g, u) pairs to process (= dst cols written).
- * @param dtype         Buffer element type (f32 or bf16).
+ * @param dtype         Buffer element type (f32, bf16, or f16).
  */
 void apply_swiglu_oai_tile_rows_oop(
-    const void *src_buf, int src_ldc, int src_col_start,
-    void *dst_buf, int dst_ldc, int dst_col_start,
-    int M, int pairs, data_type_t dtype);
+  const void *src_buf, int src_ldc, int src_col_start,
+  void *dst_buf, int dst_ldc, int dst_col_start,
+  int M, int pairs, data_type_t dtype);
 
 // --- AOCL DLP-backed gated activations (implemented in
 //     group_matmul_moe_act_dlp.cpp).  Same row-range contract as
@@ -310,8 +324,8 @@ void apply_swiglu_oai_tile_rows_oop(
 // when DLP setup/execution fails and the caller must fall back to
 // apply_gated_act_inplace().
 bool silu_and_mul_dlp(
-    void *dst, int row_start, int row_end,
-    int N, int ldc, data_type_t dst_dtype);
+  void *dst, int row_start, int row_end,
+  int N, int ldc, data_type_t dst_dtype);
 
 /**
  * @brief Apply gelu_and_mul to a row range via AOCL DLP.
@@ -336,16 +350,16 @@ bool silu_and_mul_dlp(
 // when DLP setup/execution fails and the caller must fall back to
 // apply_gated_act_inplace().
 bool gelu_and_mul_dlp(
-    void *dst, int row_start, int row_end,
-    int N, int ldc, data_type_t dst_dtype);
+  void *dst, int row_start, int row_end,
+  int N, int ldc, data_type_t dst_dtype);
 
 // Common DLP entry point.  Returns false when DLP can't handle the
 // activation (currently: swiglu_oai_mul); caller must fall back to
 // apply_gated_act_inplace().
 bool apply_gated_act_inplace_dlp(
-    grp_matmul_gated_act_t act,
-    void *dst, int row_start, int row_end,
-    int N, int ldc, data_type_t dst_dtype);
+  grp_matmul_gated_act_t act,
+  void *dst, int row_start, int row_end,
+  int N, int ldc, data_type_t dst_dtype);
 
 // --- Fused MoE: Op1(gate+up) → activation → Op2(down_proj) in one pass ---
 
@@ -395,10 +409,14 @@ struct grp_matmul_fused_moe_params {
   /// [N, N_down[i]] for act=none.
   /// Must use same dtype as Op1 weights (params[i].dtypes.wei).
   std::vector<const void *> down_weight;
-  std::vector<int> N_down;                ///< Per-expert output columns of down_proj.
-  std::vector<int> ldb_down;              ///< Leading dimension of down_weight per expert.
-  std::vector<const void *> bias_down;    ///< Per-expert bias for down_proj (nullptr OK).
-  data_type_t bias_dt_down = data_type_t::none;  ///< Bias dtype for Op2 (none = no bias).
+  std::vector<int>
+  N_down;                ///< Per-expert output columns of down_proj.
+  std::vector<int>
+  ldb_down;              ///< Leading dimension of down_weight per expert.
+  std::vector<const void *>
+  bias_down;    ///< Per-expert bias for down_proj (nullptr OK).
+  data_type_t bias_dt_down =
+    data_type_t::none;  ///< Bias dtype for Op2 (none = no bias).
 
   // ─── Op2 (down_proj) weight quantization (optional) ──────────────────
   //
@@ -463,8 +481,10 @@ struct grp_matmul_fused_moe_params {
     down_weight_quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
   };
 
-  std::vector<down_weight_quant_t> down_scale;  ///< Per-expert Op2 weight scale (down_weight[i]'s scale tensor).
-  std::vector<down_weight_quant_t> down_zp;     ///< Per-expert Op2 weight zero-point (asymmetric quant only; empty for sym).
+  std::vector<down_weight_quant_t>
+  down_scale;  ///< Per-expert Op2 weight scale (down_weight[i]'s scale tensor).
+  std::vector<down_weight_quant_t>
+  down_zp;     ///< Per-expert Op2 weight zero-point (asymmetric quant only; empty for sym).
 
   // ─── Op2 output mode selection (dst_down behaviour) ──────────────────
   //
@@ -550,8 +570,10 @@ struct grp_matmul_fused_moe_params {
   // own weighted-reduce gather on the Op2 output.  ZenDNN allocating
   // Op1 scratch internally (and freeing it at end-of-call) avoids
   // forcing the framework to size and own the W13 intermediate.
-  std::vector<void *> dst_down;           ///< Empty → mode (2); non-empty → mode (1).
-  std::vector<int> ldc_down;              ///< Stride for dst_down (mode (1) only).
+  std::vector<void *>
+  dst_down;           ///< Empty → mode (2); non-empty → mode (1).
+  std::vector<int>
+  ldc_down;              ///< Stride for dst_down (mode (1) only).
 };
 
 /**
@@ -575,21 +597,21 @@ struct grp_matmul_fused_moe_params {
 // weighted-reduce post-op.  No default on moe_postop so the older
 // 5-trailing-arg overload below remains unambiguous.
 status_t group_matmul_fused_moe_execute(
-    const grp_matmul_fused_moe_params &fused,
-    grp_matmul_gated_act_t act, data_type_t act_dtype,
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    const char **gemm_mode_out,
-    const group_matmul_moe_postop_params *moe_postop);
+  const grp_matmul_fused_moe_params &fused,
+  grp_matmul_gated_act_t act, data_type_t act_dtype,
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  const char **gemm_mode_out,
+  const group_matmul_moe_postop_params *moe_postop);
 
 // Legacy ABI-preserving overload: same as the original (pre-postop)
 // signature.  Kept as a separate exported symbol so binaries linked
@@ -598,20 +620,20 @@ status_t group_matmul_fused_moe_execute(
 // moe_postop = nullptr.  Source-level callers that previously relied
 // on `gemm_mode_out`'s default get the same default here.
 status_t group_matmul_fused_moe_execute(
-    const grp_matmul_fused_moe_params &fused,
-    grp_matmul_gated_act_t act, data_type_t act_dtype,
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA, const std::vector<bool> &transB,
-    const std::vector<int> &M, const std::vector<int> &N,
-    const std::vector<int> &K, const std::vector<float> &alpha,
-    const std::vector<const void *> &src, const std::vector<int> &lda,
-    const std::vector<const void *> &weight, const std::vector<int> &ldb,
-    const std::vector<const void *> &bias, const std::vector<float> &beta,
-    const std::vector<void *> &dst, const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    const char **gemm_mode_out = nullptr);
+  const grp_matmul_fused_moe_params &fused,
+  grp_matmul_gated_act_t act, data_type_t act_dtype,
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K, const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  const char **gemm_mode_out = nullptr);
 
 /**
  * @brief Release all fused-MoE thread-local scratch held by the
@@ -681,27 +703,27 @@ void clear_fused_moe_scratch();
  *                                pairs on the same thread's N-tile.
  */
 bool group_matmul_run_parallel_dispatch(
-    const std::vector<char> &layout,
-    const std::vector<bool> &transA,
-    const std::vector<bool> &transB,
-    const std::vector<int> &M,
-    const std::vector<int> &N,
-    const std::vector<int> &K,
-    const std::vector<float> &alpha,
-    const std::vector<const void *> &src,
-    const std::vector<int> &lda,
-    const std::vector<const void *> &weight,
-    const std::vector<int> &ldb,
-    const std::vector<const void *> &bias,
-    const std::vector<float> &beta,
-    const std::vector<void *> &dst,
-    const std::vector<int> &ldc,
-    const std::vector<bool> &is_weights_const,
-    std::vector<matmul_params> &params,
-    int num_threads,
-    const char **gemm_mode_out,
-    grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
-    data_type_t act_dtype = data_type_t::none);
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA,
+  const std::vector<bool> &transB,
+  const std::vector<int> &M,
+  const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src,
+  const std::vector<int> &lda,
+  const std::vector<const void *> &weight,
+  const std::vector<int> &ldb,
+  const std::vector<const void *> &bias,
+  const std::vector<float> &beta,
+  const std::vector<void *> &dst,
+  const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  std::vector<matmul_params> &params,
+  int num_threads,
+  const char **gemm_mode_out,
+  grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
+  data_type_t act_dtype = data_type_t::none);
 
 } // namespace matmul
 } // namespace lowoha

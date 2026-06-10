@@ -18,7 +18,7 @@ consume, and which bug class does each test lock down".
 
 | Question | Answer |
 |---|---|
-| What gets tested? | The public `group_matmul_direct(...)` dispatcher and everything reachable from it: scheduling ALGOs 1..5, custom BF16 microkernel, fused-MoE (Op1 + activation + Op2), gated activations, MoE post-op (weighted reduce), per-expert active/total contract, internal-alloc patterns, prepack module, quantization (WOQ + INT8 + dynamic). |
+| What gets tested? | The public `group_matmul_direct(...)` dispatcher and everything reachable from it: scheduling ALGOs 1..5, custom BF16 microkernel, F16 entry path (basic correctness, see §4.1), fused-MoE (Op1 + activation + Op2), gated activations, MoE post-op (weighted reduce), per-expert active/total contract, internal-alloc patterns, prepack module, quantization (WOQ + INT8 + dynamic). |
 | What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `zendnnl/gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
 | Single binary? | Yes. All test files in this folder compile into the same `gtests` executable produced by the parent CMakeLists. Filter via `--gtest_filter=*Prepack*`, `--gtest_filter=*FusedMoE*`, etc. |
 | Helpers reuse policy? | One sibling header (`moe_test_utils.hpp`) for cross-file helpers; one helper TU (`group_matmul_test_helpers.{hpp,cpp}`) for the dispatch shim + quant fixture. File-local helpers stay in anonymous namespaces inside their owning `.cpp`. |
@@ -168,6 +168,8 @@ WOQ / INT8 / dynamic-quant params).  Mirrors the design of
 - BF16 / F32                        — `test_basic.cpp`
 - BF16 / BF16                       — `test_basic.cpp`
 - BF16-src x F32-dst (mixed)        — `test_algos.cpp` ([7], `FusedAlgoTestParam::mixed_prec`)
+- F16 / F16                         — `test_basic.cpp` (`TestGroupMatmul.F16_F16`, `F16_F16_Stride`); requires AVX-512-FP16, otherwise dispatcher returns `status_t::isa_unsupported` and the test `GTEST_SKIP()`s
+- F16 / F32                         — `test_basic.cpp` (`TestGroupMatmul.F16_F32`); same ISA gate
 - WOQ S4 / U4                       — `test_quant.cpp`
 - INT8 (sym/asym, per-tensor/channel/group/token) — `test_quant.cpp`
 - INT8 dynamic-quant                — `test_quant.cpp`

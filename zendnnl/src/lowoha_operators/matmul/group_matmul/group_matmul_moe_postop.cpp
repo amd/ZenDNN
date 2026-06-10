@@ -37,6 +37,7 @@
 #include <omp.h>
 
 #include "common/bfloat16.hpp"
+#include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -48,6 +49,7 @@ namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::bfloat16_t;
+using zendnnl::common::float16_t;
 using zendnnl::memory::data_type_t;
 
 // ---------------------------------------------------------------------------
@@ -57,34 +59,51 @@ using zendnnl::memory::data_type_t;
 namespace {
 
 // ── Scalar implementation (runtime fallback when AVX-512 is unavailable) ──
-
-template <typename Elem>
+//
+// Using `data_type_t` directly keeps a single source of truth for dtype
+// identity across the library; the dispatcher in `group_matmul_moe_postop_execute`
+// already receives `data_type_t dst_elem` from the caller, so no translation is needed.
+template <typename Elem, data_type_t Kind>
 inline float load_as_f32(const Elem *ptr, int idx) {
-  if constexpr (std::is_same_v<Elem, float>)
+  if constexpr(Kind == data_type_t::f32) {
     return ptr[idx];
-  else {
+  }
+  else if constexpr(Kind == data_type_t::bf16) {
     // Preserve raw BF16 bits without implementation-defined uint16→int16 cast.
     int16_t raw;
     std::memcpy(&raw, &ptr[idx], sizeof(int16_t));
     return bfloat16_t::bf16_to_f32_val(raw);
   }
-}
-
-template <typename Elem>
-inline void store_from_f32(Elem *ptr, int idx, float val) {
-  if constexpr (std::is_same_v<Elem, float>)
-    ptr[idx] = val;
   else {
-    int16_t raw = bfloat16_t::f32_to_bf16_val(val);
-    std::memcpy(&ptr[idx], &raw, sizeof(raw));
+    static_assert(Kind == data_type_t::f16,
+                  "load_as_f32: unhandled dtype "
+                  "(supported: f32, bf16, f16)");
+    return float16_t::f16_to_f32_val(static_cast<uint16_t>(ptr[idx]));
   }
 }
 
-template <typename Elem>
+template <typename Elem, data_type_t Kind>
+inline void store_from_f32(Elem *ptr, int idx, float val) {
+  if constexpr(Kind == data_type_t::f32) {
+    ptr[idx] = val;
+  }
+  else if constexpr(Kind == data_type_t::bf16) {
+    int16_t raw = bfloat16_t::f32_to_bf16_val(val);
+    std::memcpy(&ptr[idx], &raw, sizeof(raw));
+  }
+  else {
+    static_assert(Kind == data_type_t::f16,
+                  "store_from_f32: unhandled dtype "
+                  "(supported: f32, bf16, f16)");
+    ptr[idx] = static_cast<Elem>(float16_t::f32_to_f16_val(val));
+  }
+}
+
+template <typename Elem, data_type_t Kind>
 void moe_weighted_reduce_scalar(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const int num_threads) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads) {
 
   auto *out_base = static_cast<Elem *>(postop->output);
   const size_t out_stride = static_cast<size_t>(postop->ldc_output);
@@ -97,14 +116,14 @@ void moe_weighted_reduce_scalar(
       for (int k = 0; k < postop->topk; ++k) {
         const int slot = t * postop->topk + k;
         const auto *src_row =
-            static_cast<const Elem *>(postop->row_ptrs[static_cast<size_t>(slot)]);
+          static_cast<const Elem *>(postop->row_ptrs[static_cast<size_t>(slot)]);
         const float w =
-            postop->skip_weighted
-                ? 1.f
-                : postop->topk_weights[static_cast<size_t>(slot)];
-        acc += w * load_as_f32(src_row, d);
+          postop->skip_weighted
+          ? 1.f
+          : postop->topk_weights[static_cast<size_t>(slot)];
+        acc += w * load_as_f32<Elem, Kind>(src_row, d);
       }
-      store_from_f32(out_row, d, acc);
+      store_from_f32<Elem, Kind>(out_row, d, acc);
     }
   }
 }
@@ -113,9 +132,9 @@ void moe_weighted_reduce_scalar(
 
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 void moe_weighted_reduce_avx512_f32(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const int num_threads) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads) {
 
   auto *out_base = static_cast<float *>(postop->output);
   const size_t out_stride = static_cast<size_t>(postop->ldc_output);
@@ -131,28 +150,29 @@ void moe_weighted_reduce_avx512_f32(
     {
       const int slot = t * topk;
       const auto *src_row =
-          static_cast<const float *>(postop->row_ptrs[static_cast<size_t>(slot)]);
+        static_cast<const float *>(postop->row_ptrs[static_cast<size_t>(slot)]);
       const float w = postop->skip_weighted
-                          ? 1.f
-                          : postop->topk_weights[static_cast<size_t>(slot)];
+                      ? 1.f
+                      : postop->topk_weights[static_cast<size_t>(slot)];
       const __m512 vw = _mm512_set1_ps(w);
       int d = 0;
       for (; d < D16; d += 16) {
         __m512 vsrc = _mm512_loadu_ps(src_row + d);
         _mm512_storeu_ps(out_row + d, _mm512_mul_ps(vw, vsrc));
       }
-      for (; d < D; ++d)
+      for (; d < D; ++d) {
         out_row[d] = w * src_row[d];
+      }
     }
 
     // k=1..topk-1: accumulate with FMA.
     for (int k = 1; k < topk; ++k) {
       const int slot = t * topk + k;
       const auto *src_row =
-          static_cast<const float *>(postop->row_ptrs[static_cast<size_t>(slot)]);
+        static_cast<const float *>(postop->row_ptrs[static_cast<size_t>(slot)]);
       const float w = postop->skip_weighted
-                          ? 1.f
-                          : postop->topk_weights[static_cast<size_t>(slot)];
+                      ? 1.f
+                      : postop->topk_weights[static_cast<size_t>(slot)];
       const __m512 vw = _mm512_set1_ps(w);
       int d = 0;
       for (; d < D16; d += 16) {
@@ -160,17 +180,18 @@ void moe_weighted_reduce_avx512_f32(
         __m512 vsrc = _mm512_loadu_ps(src_row + d);
         _mm512_storeu_ps(out_row + d, _mm512_fmadd_ps(vw, vsrc, vacc));
       }
-      for (; d < D; ++d)
+      for (; d < D; ++d) {
         out_row[d] += w * src_row[d];
+      }
     }
   }
 }
 
 __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
 void moe_weighted_reduce_avx512_bf16(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const int num_threads) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads) {
 
   auto *out_base = static_cast<uint16_t *>(postop->output);
   const size_t out_stride = static_cast<size_t>(postop->ldc_output);
@@ -183,8 +204,9 @@ void moe_weighted_reduce_avx512_bf16(
   #pragma omp parallel num_threads(num_threads)
   {
     static thread_local std::vector<float> acc_buf;
-    if (acc_buf.size() < static_cast<size_t>(D))
+    if (acc_buf.size() < static_cast<size_t>(D)) {
       acc_buf.resize(static_cast<size_t>(D));
+    }
 
     #pragma omp for schedule(static)
     for (int t = 0; t < postop->num_tokens; ++t) {
@@ -195,45 +217,45 @@ void moe_weighted_reduce_avx512_bf16(
       {
         const int slot = t * topk;
         const auto *src_row = static_cast<const uint16_t *>(
-            postop->row_ptrs[static_cast<size_t>(slot)]);
+                                postop->row_ptrs[static_cast<size_t>(slot)]);
         const float w = postop->skip_weighted
-                            ? 1.f
-                            : postop->topk_weights[static_cast<size_t>(slot)];
+                        ? 1.f
+                        : postop->topk_weights[static_cast<size_t>(slot)];
         const __m512 vw = _mm512_set1_ps(w);
         int d = 0;
         for (; d < D16; d += 16) {
           __m256i src_bf16 = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(src_row + d));
+                               reinterpret_cast<const __m256i *>(src_row + d));
           __m512 vsrc = _mm512_castsi512_ps(
-              _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
+                          _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
           _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
         }
         for (; d < D; ++d)
           acc[d] = w * bfloat16_t::bf16_to_f32_val(
-                           static_cast<int16_t>(src_row[d]));
+                     static_cast<int16_t>(src_row[d]));
       }
 
       // k=1..topk-1: FMA into FP32 accumulator (no BF16 truncation).
       for (int k = 1; k < topk; ++k) {
         const int slot = t * topk + k;
         const auto *src_row = static_cast<const uint16_t *>(
-            postop->row_ptrs[static_cast<size_t>(slot)]);
+                                postop->row_ptrs[static_cast<size_t>(slot)]);
         const float w = postop->skip_weighted
-                            ? 1.f
-                            : postop->topk_weights[static_cast<size_t>(slot)];
+                        ? 1.f
+                        : postop->topk_weights[static_cast<size_t>(slot)];
         const __m512 vw = _mm512_set1_ps(w);
         int d = 0;
         for (; d < D16; d += 16) {
           __m256i src_bf16 = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(src_row + d));
+                               reinterpret_cast<const __m256i *>(src_row + d));
           __m512 vsrc = _mm512_castsi512_ps(
-              _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
+                          _mm512_slli_epi32(_mm512_cvtepu16_epi32(src_bf16), 16));
           __m512 vacc = _mm512_loadu_ps(acc + d);
           _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
         }
         for (; d < D; ++d)
           acc[d] += w * bfloat16_t::bf16_to_f32_val(
-                            static_cast<int16_t>(src_row[d]));
+                      static_cast<int16_t>(src_row[d]));
       }
 
       // Final: convert FP32 accumulator → BF16 output.
@@ -257,7 +279,125 @@ void moe_weighted_reduce_avx512_bf16(
         }
         for (; d < D; ++d)
           out_row[d] = static_cast<uint16_t>(
-              bfloat16_t::f32_to_bf16_val(acc[d]));
+                         bfloat16_t::f32_to_bf16_val(acc[d]));
+      }
+    }
+  }
+}
+
+// ── AVX-512-FP16 specialisation for F16 dst ─────────────────────────────
+//
+// Mirrors `moe_weighted_reduce_avx512_bf16` line-for-line, with the
+// load / store cvt swapped from BF16 (integer-RNE shift+add) to F16
+// (the AVX-512F `VCVTPH2PS` / `VCVTPS2PH` intrinsics `_mm512_cvtph_ps`
+// / `_mm512_cvtps_ph`).  The FP32 accumulator pattern is unchanged —
+// F16 has only 10 mantissa bits, so accumulating in F16 would lose
+// ~6 bits of precision per topk iteration; FP32 accumulation matches
+// the BF16 specialisation's rationale and avoids that loss.
+//
+// Load / store stay on `__m256i` (16 × uint16_t) — same storage ABI as
+// the BF16 specialisation.  The `__m256i`-typed AVX-512F cvt intrinsics
+// consume / produce that type directly (no `__m256h` cast), keeping
+// this path on the same widely-available intrinsic set as
+// `common/float16.cpp` and off the `avx512fp16`-only `_mm512_cvtxph_ps`
+// / `_mm512_cvtxps_ph` forms.
+__attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+void moe_weighted_reduce_avx512_f16(
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads) {
+
+  auto *out_base = static_cast<uint16_t *>(postop->output);
+  const size_t out_stride = static_cast<size_t>(postop->ldc_output);
+
+  const int topk = postop->topk;
+  const int D16 = D & ~15;
+
+  // Per-thread FP32 accumulator — same buffer-reuse pattern as the BF16
+  // specialisation.  Sized to D once and reused across calls; vectors
+  // monotonically grow, so steady-state calls see zero allocation.
+  #pragma omp parallel num_threads(num_threads)
+  {
+    static thread_local std::vector<float> acc_buf;
+    if (acc_buf.size() < static_cast<size_t>(D)) {
+      acc_buf.resize(static_cast<size_t>(D));
+    }
+
+    #pragma omp for schedule(static)
+    for (int t = 0; t < postop->num_tokens; ++t) {
+      uint16_t *out_row = out_base + static_cast<size_t>(t) * out_stride;
+      float *acc = acc_buf.data();
+
+      // k=0: initialize FP32 accumulator with w0 * src0.
+      {
+        const int slot = t * topk;
+        const auto *src_row = static_cast<const uint16_t *>(
+                                postop->row_ptrs[static_cast<size_t>(slot)]);
+        const float w = postop->skip_weighted
+                        ? 1.f
+                        : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < D16; d += 16) {
+          // Load 16 × F16 (256-bit) and cvt to 16 × F32 (512-bit).
+          __m256i src_f16 = _mm256_loadu_si256(
+                              reinterpret_cast<const __m256i *>(src_row + d));
+          __m512 vsrc = _mm512_cvtph_ps(src_f16);
+          _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
+        }
+        for (; d < D; ++d) {
+          acc[d] = w * float16_t::f16_to_f32_val(src_row[d]);
+        }
+      }
+
+      // k=1..topk-1: FMA into FP32 accumulator (no F16 truncation between
+      // iterations).
+      for (int k = 1; k < topk; ++k) {
+        const int slot = t * topk + k;
+        const auto *src_row = static_cast<const uint16_t *>(
+                                postop->row_ptrs[static_cast<size_t>(slot)]);
+        const float w = postop->skip_weighted
+                        ? 1.f
+                        : postop->topk_weights[static_cast<size_t>(slot)];
+        const __m512 vw = _mm512_set1_ps(w);
+        int d = 0;
+        for (; d < D16; d += 16) {
+          __m256i src_f16 = _mm256_loadu_si256(
+                              reinterpret_cast<const __m256i *>(src_row + d));
+          __m512 vsrc = _mm512_cvtph_ps(src_f16);
+          __m512 vacc = _mm512_loadu_ps(acc + d);
+          _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
+        }
+        for (; d < D; ++d) {
+          acc[d] += w * float16_t::f16_to_f32_val(src_row[d]);
+        }
+      }
+
+      // Final: convert FP32 accumulator → F16 output via the AVX-512F
+      // `VCVTPS2PH` intrinsic (`_mm512_cvtps_ph`).  The explicit
+      // `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC` immediate pins
+      // round-to-nearest-even independent of the runtime MXCSR mode,
+      // matching the rounding semantics of `float16_t::f32_to_f16_val`
+      // (and `cvt_f32_to_f16_vec`) in common/float16.cpp.
+      //
+      // Saturation note: `vcvtps2ph` saturates inputs outside F16's
+      // ±65504 normal range to ±inf.  This is the documented IEEE 754
+      // binary16 round-toward-nearest behaviour and matches the scalar
+      // `f32_to_f16_val` path; callers that need finite outputs for
+      // very large weighted sums must already bound their inputs.
+      {
+        int d = 0;
+        for (; d < D16; d += 16) {
+          __m512 vacc = _mm512_loadu_ps(acc + d);
+          __m256i out_f16 = _mm512_cvtps_ph(
+                              vacc,
+                              _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+          _mm256_storeu_si256(reinterpret_cast<__m256i *>(out_row + d),
+                              out_f16);
+        }
+        for (; d < D; ++d) {
+          out_row[d] = float16_t::f32_to_f16_val(acc[d]);
+        }
       }
     }
   }
@@ -265,19 +405,45 @@ void moe_weighted_reduce_avx512_bf16(
 
 // ── Dispatch: AVX-512 when available, scalar fallback otherwise ─────────
 
-template <typename Elem>
+template <typename Elem, data_type_t Kind>
 void moe_weighted_reduce(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const int num_threads) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads) {
 
-  if (zendnnl::common::zendnnl_platform_info().get_avx512f_status()) {
-    if constexpr (std::is_same_v<Elem, float>)
+  const auto &plat = zendnnl::common::zendnnl_platform_info();
+
+  if constexpr(Kind == data_type_t::f32) {
+    if (plat.get_avx512f_status()) {
       moe_weighted_reduce_avx512_f32(postop, D, num_threads);
-    else
+    }
+    else {
+      moe_weighted_reduce_scalar<Elem, Kind>(postop, D, num_threads);
+    }
+  }
+  else if constexpr(Kind == data_type_t::bf16) {
+    if (plat.get_avx512f_status()) {
       moe_weighted_reduce_avx512_bf16(postop, D, num_threads);
-  } else {
-    moe_weighted_reduce_scalar<Elem>(postop, D, num_threads);
+    }
+    else {
+      moe_weighted_reduce_scalar<Elem, Kind>(postop, D, num_threads);
+    }
+  }
+  else {
+    static_assert(Kind == data_type_t::f16,
+                  "moe_weighted_reduce: unhandled dtype "
+                  "(supported: f32, bf16, f16)");
+    // F16 vector path needs only AVX-512F: the F16<->F32 boundary uses
+    // the AVX-512F `VCVTPH2PS` / `VCVTPS2PH` intrinsics (`_mm512_cvtph_ps`
+    // / `_mm512_cvtps_ph`) and the accumulator math is FP32, so the gate
+    // is `get_avx512f_status()` — identical to the f32 / bf16 siblings
+    // above (no AVX-512-FP16 dependency).
+    if (plat.get_avx512f_status()) {
+      moe_weighted_reduce_avx512_f16(postop, D, num_threads);
+    }
+    else {
+      moe_weighted_reduce_scalar<Elem, Kind>(postop, D, num_threads);
+    }
   }
 }
 
@@ -288,12 +454,13 @@ void moe_weighted_reduce(
 // ---------------------------------------------------------------------------
 
 status_t validate_group_matmul_moe_postop(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const data_type_t dst_elem) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const data_type_t dst_elem) {
 
-  if (postop == nullptr)
+  if (postop == nullptr) {
     return status_t::success;
+  }
 
   if (postop->num_tokens <= 0 || postop->topk <= 0) {
     log_error("group_matmul_direct: moe_postop invalid num_tokens or topk");
@@ -311,8 +478,10 @@ status_t validate_group_matmul_moe_postop(
     log_error("group_matmul_direct: moe_postop ldc_output < D");
     return status_t::failure;
   }
-  if (dst_elem != data_type_t::f32 && dst_elem != data_type_t::bf16) {
-    log_error("group_matmul_direct: moe_postop requires FP32 or BF16 dst");
+  if (dst_elem != data_type_t::f32
+      && dst_elem != data_type_t::bf16
+      && dst_elem != data_type_t::f16) {
+    log_error("group_matmul_direct: moe_postop requires FP32, BF16, or F16 dst");
     return status_t::failure;
   }
 
@@ -327,24 +496,35 @@ status_t validate_group_matmul_moe_postop(
     }
     return status_t::success;
   });
-  if (slot_check != status_t::success)
+  if (slot_check != status_t::success) {
     return slot_check;
+  }
 
   return status_t::success;
 }
 
 status_t group_matmul_moe_postop_execute(
-    const group_matmul_moe_postop_params *postop,
-    const int D,
-    const int num_threads,
-    const data_type_t dst_elem) {
+  const group_matmul_moe_postop_params *postop,
+  const int D,
+  const int num_threads,
+  const data_type_t dst_elem) {
 
   if (dst_elem == data_type_t::f32) {
-    moe_weighted_reduce<float>(postop, D, num_threads);
+    moe_weighted_reduce<float, data_type_t::f32>(postop, D, num_threads);
     return status_t::success;
   }
   if (dst_elem == data_type_t::bf16) {
-    moe_weighted_reduce<uint16_t>(postop, D, num_threads);
+    moe_weighted_reduce<uint16_t, data_type_t::bf16>(postop, D, num_threads);
+    return status_t::success;
+  }
+  if (dst_elem == data_type_t::f16) {
+    // F16 weighted-reduce runs on AVX-512F (F16<->F32 via VCVTPH2PS /
+    // VCVTPS2PH + FP32 accumulator); the dispatch template gates on
+    // `get_avx512f_status()` and falls back to the scalar template
+    // otherwise.  Note: F16 group_matmul as a whole still requires
+    // AVX-512-FP16 for the GEMM — the public `group_matmul_direct` F16
+    // ISA gate enforces that upstream — but this reduce post-op does not.
+    moe_weighted_reduce<uint16_t, data_type_t::f16>(postop, D, num_threads);
     return status_t::success;
   }
 
