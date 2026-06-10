@@ -901,7 +901,13 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
     src_scale_shape = {m, 1};
   }
 
-  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops),
+  std::vector<int64_t> src_scale_dims;
+  src_scale_dims.reserve(src_scale_shape.size());
+  for (uint64_t d : src_scale_shape) {
+    src_scale_dims.push_back(static_cast<int64_t>(d));
+  }
+
+  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops), inp_quant(num_ops),
       wt_s8(num_ops), wt_ref(num_ops),
       bias(num_ops), out(num_ops), out_ref(num_ops);
 
@@ -913,18 +919,24 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
       FAIL() << "weight dynamic quantization failed";
     }
     auto src_scale = tensor_factory.zero_tensor(src_scale_shape, scale_dt);
-    auto inp_t     = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
-                     transA, src_scale, tensor_t());
-    auto inp_ref_t = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
-                     transA);
-
-    inp[i]     = inp_t;
-    inp_ref[i] = inp_ref_t;
-    wt_s8[i]   = wt_s8_t;
-    wt_ref[i]  = wt_ref_t;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
-    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
-    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    inp_ref[i] = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                 transA);
+    inp[i]     = tensor_factory.zero_tensor({m, sym_k}, test_dt, src_scale,
+                 tensor_t(), /*strided=*/false, transA);
+    std::memcpy(inp[i].get_raw_handle_unsafe(), inp_ref[i].get_raw_handle_unsafe(),
+                inp_ref[i].get_buffer_sz_bytes());
+    tensor_t inp_quant_t, ref_src_scale, ref_src_zp;
+    if (quant_params_compute(tensor_factory, inp_ref[i], test_dt, data_type_t::s8,
+                             src_scale_dims, scale_dt, ref_src_scale, ref_src_zp,
+                             &inp_quant_t) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+    inp_quant[i] = inp_quant_t;
+    wt_s8[i]     = wt_s8_t;
+    wt_ref[i]    = wt_ref_t;
+    bias[i]      = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
+    out[i]       = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    out_ref[i]   = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
   }
 
   // Random gated activation paired with the dynamic INT8 quant GEMM
@@ -944,7 +956,7 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
   status_t ref_status = status_t::success;
   for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
     std::vector<tensor_t> bin;
-    ref_status = matmul_forced_ref_kernel_test(inp_ref[i], wt_ref[i], bias[i],
+    ref_status = matmul_forced_ref_kernel_test(inp_quant[i], wt_s8[i], bias[i],
                  out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
   }
 
@@ -958,13 +970,12 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
       }
       for (size_t i = 0; i < num_ops && ok; ++i)
         moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
-                                             sym_k, 1.0f,
-                                             16 * epsilon_bf16, ok);
+                                             sym_k, 1.0f, epsilon_bf16, ok);
     }
     else {
       for (size_t i = 0; i < num_ops && ok; ++i)
         compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
-                                 rtol_bf16, 16 * epsilon_bf16, ok, false, 1.0f, true);
+                                 rtol_bf16, epsilon_bf16, ok, false, 1.0f, true);
     }
   }
   EXPECT_TRUE(ok);
@@ -1021,7 +1032,13 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
     src_scale_shape = {m, 1};
   }
 
-  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops),
+  std::vector<int64_t> src_scale_dims;
+  src_scale_dims.reserve(src_scale_shape.size());
+  for (uint64_t d : src_scale_shape) {
+    src_scale_dims.push_back(static_cast<int64_t>(d));
+  }
+
+  std::vector<tensor_t> inp(num_ops), inp_ref(num_ops), inp_quant(num_ops),
       wt_s8(num_ops), wt_ref(num_ops),
       bias(num_ops), out(num_ops), out_ref(num_ops);
 
@@ -1033,18 +1050,24 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
       FAIL() << "weight dynamic quantization failed";
     }
     auto src_scale = tensor_factory.zero_tensor(src_scale_shape, scale_dt);
-    auto inp_t     = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
-                     transA, src_scale, tensor_t());
-    auto inp_ref_t = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
-                     transA);
-
-    inp[i]     = inp_t;
-    inp_ref[i] = inp_ref_t;
-    wt_s8[i]   = wt_s8_t;
-    wt_ref[i]  = wt_ref_t;
-    bias[i]    = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
-    out[i]     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
-    out_ref[i] = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    inp_ref[i] = tensor_factory.uniform_dist_tensor({m, sym_k}, test_dt, 2.0,
+                 transA);
+    inp[i]     = tensor_factory.zero_tensor({m, sym_k}, test_dt, src_scale,
+                 tensor_t(), /*strided=*/false, transA);
+    std::memcpy(inp[i].get_raw_handle_unsafe(), inp_ref[i].get_raw_handle_unsafe(),
+                inp_ref[i].get_buffer_sz_bytes());
+    tensor_t inp_quant_t, ref_src_scale, ref_src_zp;
+    if (quant_params_compute(tensor_factory, inp_ref[i], test_dt, data_type_t::s8,
+                             src_scale_dims, scale_dt, ref_src_scale, ref_src_zp,
+                             &inp_quant_t) != status_t::success) {
+      FAIL() << "source dynamic quantization failed";
+    }
+    inp_quant[i] = inp_quant_t;
+    wt_s8[i]     = wt_s8_t;
+    wt_ref[i]    = wt_ref_t;
+    bias[i]      = tensor_factory.uniform_dist_tensor({1, n}, bias_dt, 2.0);
+    out[i]       = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+    out_ref[i]   = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
   }
 
   // Random gated activation paired with the dynamic INT8 quant GEMM
@@ -1064,7 +1087,7 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
   status_t ref_status = status_t::success;
   for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
     std::vector<tensor_t> bin;
-    ref_status = matmul_forced_ref_kernel_test(inp_ref[i], wt_ref[i], bias[i],
+    ref_status = matmul_forced_ref_kernel_test(inp_quant[i], wt_s8[i], bias[i],
                  out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
   }
 
@@ -1078,13 +1101,12 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
       }
       for (size_t i = 0; i < num_ops && ok; ++i)
         moe_test_utils::compare_activated_2D(out[i], out_ref[i], m, n / 2,
-                                             sym_k, 1.0f,
-                                             18 * epsilon_bf16, ok);
+                                             sym_k, 1.0f, epsilon_f32, ok);
     }
     else {
       for (size_t i = 0; i < num_ops && ok; ++i)
         compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k,
-                                 rtol_bf16, 18 * epsilon_bf16, ok, false, 1.0f, true);
+                                 rtol_f32, epsilon_f32, ok, false, 1.0f, true);
     }
   }
   EXPECT_TRUE(ok);

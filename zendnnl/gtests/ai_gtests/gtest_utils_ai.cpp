@@ -432,6 +432,11 @@ tensor_t AITensorFactory::create_zero_tensor(const std::vector<uint64_t> &dims,
 //
 // Fills a raw data buffer with boundary values for stress-testing matmul numerical stability.
 // The values alternate between large, small, positive, and negative values for each supported type.
+// Each pattern must have a non-zero sum over one period: a zero-sum period (e.g.
+// {+1,-1,+eps,-eps}) makes batched GEMM output exactly zero when K is a multiple of
+// the period length and weights are constant along K, which then fails the boundary
+// test "output must contain a non-zero element" heuristic even though the kernel is
+// correct.
 // Used by create_boundary_tensor to populate tensor data.
 //
 // Parameters:
@@ -452,17 +457,19 @@ void AITensorFactory::fill_boundary_data(void *ptr, size_t nelem,
     }
   };
   if (dtype == data_type_t::f32) {
-    static const float pattern[] = {1.0f, -1.0f, 1e-7f, -1e-7f};
+    // period sum = 1.0 (was 0 with symmetric +/- pairs)
+    static const float pattern[] = {1.0f, -1.0f, 1e-7f, 1.0f};
     fill_pattern(static_cast<float *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }
   else if (dtype == data_type_t::bf16) {
-    static const bfloat16_t pattern[] = {bfloat16_t(1.0f), bfloat16_t(-1.0f), bfloat16_t(1e-3f), bfloat16_t(-1e-3f)};
+    static const bfloat16_t pattern[] = {bfloat16_t(1.0f), bfloat16_t(-1.0f),
+                                         bfloat16_t(1e-3f), bfloat16_t(1.0f)};
     fill_pattern(static_cast<bfloat16_t *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }
   else if (dtype == data_type_t::s8) {
-    static const int8_t pattern[] = {127, -127, 1, -1};
+    static const int8_t pattern[] = {127, -127, 1, 2};
     fill_pattern(static_cast<int8_t *>(ptr), pattern,
                  sizeof(pattern)/sizeof(pattern[0]));
   }

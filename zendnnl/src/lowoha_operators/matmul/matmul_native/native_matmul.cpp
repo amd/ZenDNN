@@ -261,6 +261,14 @@ bool native_matmul_execute(
   //   No AVX512 → gemm_execute (scalar/AVX2 fallback)
   // ════════════════════════════════════════════════════════════════════
   if (kernel == matmul_algo_t::native_brgemm) {
+    // AIGtest Failed for aplha = 0 and beta = -0.5
+    // fall back to DLP which handles scalars.
+    // TODO: Fix this in the future
+    if (alpha == 0.0f) {
+      log_info("Native BRGEMM: alpha=0 not supported, falling back to aocl_dlp");
+      return false;
+    }
+
     const UarchParams &uarch = detect_uarch();
     int nt_exec = num_threads;
     if (M == 1 && is_bf16 && num_threads > 1)

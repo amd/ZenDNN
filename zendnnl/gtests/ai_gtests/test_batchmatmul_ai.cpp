@@ -25,6 +25,7 @@ using namespace zendnnl::lowoha::matmul;
 #include <memory>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 
 /** @brief AI Test class for comprehensive ZenDNNL batch matmul testing */
 class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
@@ -1029,7 +1030,30 @@ class TestBatchMatmulAI : public ::testing::TestWithParam<BatchMatmulParamsAI> {
       return false;
     }
 
-    if (params.batch_size * params.m * params.n <= 16 && !has_reasonable_values) {
+    // Tiny outputs with saturating or binary post-ops (or S4 WoQ weights) can
+    // legitimately be zero or below the "reasonable value" threshold — e.g.
+    // relu on a negative pre-activation, binary_mul on sub-threshold values,
+    // or a 1x1 S4 dot-product. Skip the strict magnitude check; NaN/Inf above
+    // is enough to catch real kernel breakage (mirrors validate_output_tensor).
+    const uint64_t out_elems = params.batch_size * params.m * params.n;
+    bool can_produce_subthreshold = (weight_dtype == data_type_t::s4);
+    if (!can_produce_subthreshold) {
+      for (const auto &po_type : params.post_op_config.post_ops) {
+        if (po_type == post_op_type_t::relu
+            || po_type == post_op_type_t::gelu_erf
+            || po_type == post_op_type_t::gelu_tanh
+            || po_type == post_op_type_t::sigmoid
+            || po_type == post_op_type_t::swish
+            || po_type == post_op_type_t::mish
+            || po_type == post_op_type_t::binary_mul
+            || po_type == post_op_type_t::binary_add) {
+          can_produce_subthreshold = true;
+          break;
+        }
+      }
+    }
+
+    if (out_elems <= 16 && !has_reasonable_values && !can_produce_subthreshold) {
       std::cout <<
                 "[AI_BATCH_BOUNDARY_ERROR] Small boundary case produced unreasonable values"
                 << std::endl;
