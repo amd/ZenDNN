@@ -20,12 +20,15 @@
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
-#include <cmath>
-#include <climits>
-#include <utility>
-#include <tuple>
 
 namespace zendnnl {
 namespace lowoha {
@@ -46,7 +49,7 @@ namespace matmul {
  * @brief Number of iterations used to evaluate and compare algorithm performance.
  *
  * During the evaluation phase, the autotuner cycles through available algorithms
- * (NUM_OF_ALGO) and measures their execution times over this many iterations.
+ * and measures their execution times over this many iterations.
  * The algorithm with the best average performance is selected and cached.
  *
  * Can be overridden via environment variable: ZENDNNL_MATMUL_EVAL_ITER
@@ -54,16 +57,42 @@ namespace matmul {
 #define MATMUL_EVALUATE_ITER 3
 
 /**
- * @brief Total number of matmul algorithms available for autotuning.
+ * @brief Returns the autotuner's candidate algorithm set.
  *
- * Currently supports two algorithms:
- * 1. oneDNN blocked algorithm
- * 2. AOCL DLP blocked algorithm
+ * The set is process-global: it is derived once from
+ * ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES (if set) or a default candidate set.
  *
- * This value is used to cycle through algorithms during the evaluation phase
- * using modulo arithmetic: (iteration_count % NUM_OF_ALGO) + 1
+ * The returned vector contains the algorithms the autotuner will cycle through
+ * during its evaluation phase.
+ *
+ * When ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES is set to a comma-separated list
+ * of algo integer ids (e.g. "1,2,6" for aocl_dlp_blocked, onednn_blocked,
+ * libxsmm), that list is used. matmul_algo_t::dynamic_dispatch and
+ * matmul_algo_t::auto_tuner are ignored. Otherwise the default
+ * {aocl_dlp_blocked, onednn_blocked} is used.
+ *
+ * @note The env var is parsed and validated exactly once on the first call;
+ *       every subsequent call returns a reference to the same cached vector.
+ *       Changes to the env var after the first call are not observed. Parse
+ *       errors (invalid integers, out-of-range ids, reserved ids) are logged
+ *       once during that first call and never again, so this is safe to call
+ *       from hot paths without log spam or repeated getenv/parsing cost.
+ *
+ * @return const reference to the cached candidate vector. Lifetime is the
+ *         program's; safe to bind to a const& but do not store as a value
+ *         if the caller wants to avoid the copy.
  */
-#define NUM_OF_ALGO 2
+const std::vector<matmul_algo_t> &get_algo_candidates();
+
+/**
+ * @brief Picks an algorithm from a candidate set by index.
+ *
+ * @param index      0-based index (typically iter_count % candidates.size()).
+ * @param candidates The candidate set returned by get_algo_candidates.
+ * @return matmul_algo_t The selected algorithm.
+ */
+matmul_algo_t get_algo(int index,
+                       const std::vector<matmul_algo_t> &candidates);
 
 /**
  * @brief Auto-tunes and executes matrix multiplication using the optimal algorithm
@@ -115,7 +144,8 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                                      float beta, void *C, int ldc, matmul_data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
                                      matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
-                                     const void *bias, bool is_weights_const);
+                                     const void *bias, bool is_weights_const,
+                                     int num_threads);
 
 /**
  * @brief Auto-tunes and executes matrix multiplication using alternative tuning strategy
@@ -171,7 +201,8 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                                      float beta, void *C, int ldc, matmul_data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
                                      matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
-                                     const void *bias, bool is_weights_const);
+                                     const void *bias, bool is_weights_const,
+                                     int num_threads);
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

@@ -45,13 +45,13 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            zendnnl::ops::matmul_algo_t &kernel,
                            char mem_format_a, char mem_format_b,
                            matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
-                           const void *bias, bool is_weights_const) {
+                           const void *bias, bool is_weights_const,
+                           int num_threads) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     log_info("Using libxsmm kernel");
     if (run_libxsmm_std(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C,
-                        dtypes,
-                        lowoha_param, bias)) {
+                        dtypes, lowoha_param, bias)) {
       return;
     }
   }
@@ -65,6 +65,39 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
     return;
   }
 #endif
+  if (kernel == matmul_algo_t::native_gemm ||
+      kernel == matmul_algo_t::native_brgemm) {
+    // Native kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
+    const bool is_fp32 = (lowoha_param.dtypes.src == data_type_t::f32 &&
+                          lowoha_param.dtypes.wei == data_type_t::f32 &&
+                          lowoha_param.dtypes.dst == data_type_t::f32);
+    const bool is_bf16 = (lowoha_param.dtypes.src == data_type_t::bf16 &&
+                          lowoha_param.dtypes.wei == data_type_t::bf16 &&
+                          (lowoha_param.dtypes.dst == data_type_t::bf16 ||
+                           lowoha_param.dtypes.dst == data_type_t::f32));
+    if (!is_fp32 && !is_bf16) {
+      log_info("Native kernel: unsupported data type, falling back to aocl_dlp");
+      kernel = matmul_algo_t::aocl_dlp;
+    }
+    else if (transA == 't') {
+      log_info("Native kernel: transA not supported, falling back to aocl_dlp");
+      kernel = matmul_algo_t::aocl_dlp;
+    }
+    else {
+      apilog_info("Executing matmul LOWOHA kernel with ",
+                  kernel_to_string(kernel),
+                  ", algo: ", static_cast<int>(kernel));
+      bool executed = native::native_matmul_execute(kernel, layout, transA == 't',
+                      transB == 't', M, N, K, alpha, A, lda, B, ldb, bias, beta, C, ldc,
+                      is_weights_const, num_threads, lowoha_param);
+      if (executed) {
+        return;
+      }
+      log_info("Native kernel execution failed, falling back to aocl_dlp");
+      kernel = matmul_algo_t::aocl_dlp;
+    }
+  }
+
   log_info("Using AOCL DLP kernel");
   run_dlp(layout, transA, transB, M, N, K, alpha, beta,
           lda, ldb, ldc, mem_format_a, mem_format_b,
@@ -89,21 +122,23 @@ void matmul_execute(const char layout,
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
 
-  // Auto-tuner kernel selection for single batch
+  // Auto-tuner kernel selection for single batch.
   if (kernel == matmul_algo_t::auto_tuner) {
     if (auto_version == 1) {
       kernel = auto_compute_matmul_v1(layout, trans_input, trans_weight, M,
                                       N, K, alpha, src, lda, weight, ldb,
                                       beta, dst, ldc, params.dtypes,
                                       kernel, params.mem_format_a, params.mem_format_b,
-                                      params, batch_params, bias, is_weights_const);
+                                      params, batch_params, bias, is_weights_const,
+                                      num_threads);
     }
     else {
       kernel = auto_compute_matmul_v2(layout, trans_input, trans_weight, M,
                                       N, K, alpha, src, lda, weight, ldb,
                                       beta, dst, ldc, params.dtypes,
                                       kernel, params.mem_format_a, params.mem_format_b,
-                                      params, batch_params, bias, is_weights_const);
+                                      params, batch_params, bias, is_weights_const,
+                                      num_threads);
     }
     return;
   }
@@ -211,7 +246,8 @@ void matmul_execute(const char layout,
                         ldb, beta, dst, ldc,
                         params.dtypes, kernel,
                         params.mem_format_a, params.mem_format_b, params,
-                        batch_params, bias, is_weights_const);
+                        batch_params, bias, is_weights_const,
+                        num_threads);
 }
 
 status_t matmul_direct(const char layout, const bool transA, const bool transB,

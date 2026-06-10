@@ -662,7 +662,8 @@ void execute_partitioned_matmul(
                         params.dtypes, config.kernel,
                         params.mem_format_a, params.mem_format_b,
                         params, batch_params,
-                        bias, is_weights_const);
+                        bias, is_weights_const,
+                        config.num_threads);
 }
 } // namespace matmul
 } // namespace lowoha

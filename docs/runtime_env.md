@@ -81,6 +81,7 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 | `ZENDNNL_AUTO_TUNER_TYPE` | Selects the auto-tuner version/strategy | `1` | `1` (v1 strategy), `2` (v2 strategy) |
 | `ZENDNNL_MATMUL_SKIP_ITER` | Number of warmup iterations before algorithm evaluation begins | `2` | Positive integer |
 | `ZENDNNL_MATMUL_EVAL_ITER` | Number of evaluation iterations to benchmark each algorithm | `3` | Positive integer |
+| `ZENDNNL_MATMUL_AUTO_ALGO_CANDIDATES` | Comma-separated list of algorithm IDs to evaluate | `1,2,5` | Comma-separated list of algorithm IDs |
 
 ### Auto-Tuner Phases
 
