@@ -37,6 +37,7 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `NORM_F16_TOL`: Tolerance for normalization F16 tests (default: `0.01`).
 - `SOFTMAX_F32_TOL`: Tolerance for softmax F32 tests (default: `0.001`).
 - `SOFTMAX_BF16_TOL`: Tolerance for softmax BF16 tests (default: `0.01`).
+- `SOFTMAX_F16_TOL`: Tolerance for softmax F16 tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `400`).
 - `POST_OPS_LIMIT`: Maximum number of post-ops allowed in a single chain (default: `3`). Defined in `gtest_utils.hpp`. Applies to `--postop`, matmul/batch-matmul/reorder input file `postOp` fields, and random post-op generation (which picks a chain length uniformly from `1` … `POST_OPS_LIMIT`). If the parsed chain exceeds this limit, gtest reports an error (`Post-op chain length exceeds POST_OPS_LIMIT.`).
 
@@ -1054,10 +1055,11 @@ export OMP_MAX_ACTIVE_LEVELS=2
 ```
 
 ### Softmax Tests
- - Softmax TestSuite has two testcases (F32_F32, BF16_BF16)
+ - Softmax TestSuite has three testcases (F32_F32, BF16_BF16, F16_F16)
  - Validates **OneDNN kernel** output against the **reference kernel** output
  - Randomized per-parameter: `ndims` (1D–5D), `shape`, `log_softmax`, `softmin`, `num_threads`
- - Fixed: `axis = -1` (last-axis only); dtype is selected by the test case (F32_F32 or BF16_BF16), not randomized
+ - Fixed: `axis = -1` (last-axis only); dtype is selected by the test case (F32_F32, BF16_BF16, or F16_F16), not randomized
+ - The `F16_F16` case self-skips (`GTEST_SKIP`) on hosts without AVX-512-FP16
  - Supports both standard softmax and log-softmax variants, plus the `softmin` mode
    (computes `softmax(-x)`; composes with `log_softmax` when both are true)
 
@@ -1073,11 +1075,15 @@ export OMP_MAX_ACTIVE_LEVELS=2
 ``` bash
 ./install/gtests/gtests --gtest_filter=Softmax/TestSoftmax.BF16_BF16/*
 ```
-4. Run softmax tests with fixed seed and thread count:
+4. Run all F16 Input, F16 Output softmax tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Softmax/TestSoftmax.F16_F16/*
+```
+5. Run softmax tests with fixed seed and thread count:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Softmax/* --seed 42 --num_threads 4
 ```
-5. Run 100 softmax tests:
+6. Run 100 softmax tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Softmax/* --test 100
 ```

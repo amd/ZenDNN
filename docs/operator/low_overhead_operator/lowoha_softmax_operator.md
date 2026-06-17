@@ -110,6 +110,13 @@ struct softmax_params {
 |------------|-------------|-------|
 | FP32 | FP32 | Standard floating-point precision |
 | BF16 | BF16 | Mixed-precision for inference |
+| F16 | F16 | Half-precision for inference; requires AVX-512-FP16 ISA |
+
+`src_dt` must equal `dst_dt` (mixed-precision I/O is not supported). For all
+dtypes the softmax math (max-subtract, exp, sum, log, divide) is computed in
+FP32 internally for numerical stability; BF16/F16 are narrowed only at the
+output store. F16 requires the host CPU to expose **AVX-512-FP16** — otherwise
+`softmax_direct` returns `status_t::isa_unsupported`.
 
 ### Helper Function: `setup_softmax_shape`
 
@@ -267,8 +274,8 @@ The implementation uses the **max-shift trick** for numerical stability:
 
 | Backend | Best For | Notes |
 |---------|----------|-------|
-| OneDNN | Large tensors, BF16 | Vectorized, optimized for AVX-512 |
-| Reference | Small tensors, debugging | Simple implementation, portable |
+| OneDNN | Large tensors, BF16/F16 | Vectorized, optimized for AVX-512 (F16 requires AVX-512-FP16) |
+| Reference | Small tensors, debugging | Simple implementation, portable; F32-internal compute |
 
 ## Common Use Cases
 
@@ -315,9 +322,12 @@ The `softmax_direct` function returns `status_t`:
 
 - `status_t::success`: Operation completed successfully
 - `status_t::failure`: Operation failed (check logs for details)
+- `status_t::isa_unsupported`: An F16 buffer was requested but the host CPU lacks AVX-512-FP16
 
 Common failure causes:
 - Null input/output pointers
 - Invalid dimensions (batch=0 or axis_dim=0)
-- Unsupported data type combination
+- Unsupported data type (must be `f32`, `bf16`, or `f16`)
+- Mismatched `src_dt` / `dst_dt` (mixed-precision I/O is not supported)
+- F16 requested on a host without AVX-512-FP16 support
 - Invalid axis index

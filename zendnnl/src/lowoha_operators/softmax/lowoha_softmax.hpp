@@ -49,8 +49,10 @@ status_t softmax_direct(
  * @param input                   Input tensor data
  * @param output                  Output tensor data
  * @param softmax_params          Softmax parameters (dims, softmax params, data types)
+ *
+ * @return status_t::success on success, or the backend failure status.
  */
-void softmax_kernel_wrapper(
+status_t softmax_kernel_wrapper(
     const void *input,
     void *output,
     softmax_params &params

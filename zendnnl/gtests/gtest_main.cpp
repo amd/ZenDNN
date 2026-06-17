@@ -79,6 +79,7 @@ const float NORM_F16_TOL  = 0.01;
 // Softmax tolerance constants
 const float SOFTMAX_F32_TOL  = 0.001;
 const float SOFTMAX_BF16_TOL = 0.01;
+const float SOFTMAX_F16_TOL  = 0.01;
 
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;

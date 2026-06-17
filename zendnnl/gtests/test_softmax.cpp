@@ -175,6 +175,55 @@ TEST_P(TestSoftmax, BF16_BF16) {
   EXPECT_TRUE(is_test_successful);
 }
 
+/** @fn TEST_P
+ *  @param TestSoftmax parameterized test class
+ *  @param F16_F16 src=f16, dst=f16
+ *  @brief Validates softmax OneDNN kernel against reference kernel (f16 I/O)
+ */
+TEST_P(TestSoftmax, F16_F16) {
+#if !ZENDNNL_DEPENDS_ONEDNN
+  GTEST_SKIP() << "OneDNN backend not compiled in; softmax_direct would "
+               "fall back to the reference kernel, making this test "
+               "reference-vs-reference.";
+#endif
+  if (!zendnnl_platform_info().get_avx512_f16_status()) {
+    GTEST_SKIP() << "AVX512-FP16 ISA not available on this platform.";
+  }
+  data_type_t dt = data_type_t::f16;
+
+  auto input_tensor      = tensor_factory.uniform_dist_tensor(shape, dt, 2.0f);
+  auto output_tensor     = tensor_factory.zero_tensor(shape, dt);
+  auto output_tensor_ref = tensor_factory.zero_tensor(shape, dt);
+
+  softmax_params sp{};
+  softmax_params ref_sp{};
+  ASSERT_EQ(build_params(dt, dt, sp),     status_t::success);
+  ASSERT_EQ(build_params(dt, dt, ref_sp), status_t::success);
+
+  status_t status = softmax_kernel_test(
+                      input_tensor.get_raw_handle_unsafe(),
+                      output_tensor.get_raw_handle_unsafe(), sp);
+  log_info("F16_F16 OneDNN kernel status: ",
+           (status == status_t::success) ? "success" : "failure");
+
+  status_t ref_status = softmax_forced_ref_kernel_test(
+                          input_tensor.get_raw_handle_unsafe(),
+                          output_tensor_ref.get_raw_handle_unsafe(), ref_sp);
+  log_info("F16_F16 reference kernel status: ",
+           (ref_status == status_t::success) ? "success" : "failure");
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_softmax_tensors(output_tensor, output_tensor_ref,
+                            shape, total_elements,
+                            SOFTMAX_F16_TOL, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers Softmax parameterized test suite
  */

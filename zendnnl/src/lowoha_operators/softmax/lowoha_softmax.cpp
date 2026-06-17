@@ -22,73 +22,84 @@ namespace zendnnl {
 namespace lowoha {
 namespace softmax {
 
-void softmax_kernel_wrapper(
-    const void *input,
-    void *output,
-    softmax_params &params
+status_t softmax_kernel_wrapper(
+  const void *input,
+  void *output,
+  softmax_params &params
 ) {
-    // Select algorithm if not specified
-    if (params.algorithm == softmax_algo_t::none) {
+  // Select algorithm if not specified
+  if (params.algorithm == softmax_algo_t::none) {
 #if ZENDNNL_DEPENDS_ONEDNN
-        params.algorithm = softmax_algo_t::onednn;
+    params.algorithm = softmax_algo_t::onednn;
 #else
-        params.algorithm = softmax_algo_t::reference;
+    params.algorithm = softmax_algo_t::reference;
 #endif
-    }
+  }
 
 #if ZENDNNL_DEPENDS_ONEDNN
-    if (params.algorithm == softmax_algo_t::onednn) {
-        log_info("Using OneDNN kernel for Softmax");
-        softmax_onednn_wrapper(input, output, params);
-        return;
-    }
+  if (params.algorithm == softmax_algo_t::onednn) {
+    log_info("Using OneDNN kernel for Softmax");
+    return softmax_onednn_wrapper(input, output, params);
+  }
 #endif
 
-    // Fallback to reference implementation (always reached if OneDNN not selected)
-    log_info("Using reference kernel for Softmax");
-    softmax_reference_wrapper(input, output, params);
+  // Fallback to reference implementation (always reached if OneDNN not selected)
+  log_info("Using reference kernel for Softmax");
+  return softmax_reference_wrapper(input, output, params);
 }
 
 status_t softmax_direct(
-    const void *input,
-    void *output,
-    softmax_params &params
+  const void *input,
+  void *output,
+  softmax_params &params
 ) {
-    // Create profiler instance for timing
-    zendnnl::profile::profiler_t profiler;
-    bool is_profile = is_profile_enabled();
-    if (is_profile) {
-        profiler.tbp_start();
-    }
+  // Create profiler instance for timing
+  zendnnl::profile::profiler_t profiler;
+  bool is_profile = is_profile_enabled();
+  if (is_profile) {
+    profiler.tbp_start();
+  }
 
-    // Validate inputs
-    if (validate_softmax_inputs(input, output, params)
-        != status_t::success) {
-        return status_t::failure;
-    }
+  // F16 requires AVX512-FP16; reject up-front on unsupported hosts to
+  // avoid undefined behavior in kernels that touch F16 storage.
+  const bool is_f16 = (params.src_dt == data_type_t::f16 ||
+                       params.dst_dt == data_type_t::f16);
+  if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
+    log_error("F16 data type is not supported on this platform "
+              "(requires AVX512-FP16).");
+    return status_t::isa_unsupported;
+  }
 
-    // Log API call
-    [[maybe_unused]] std::ostringstream ss;
-    if (apilog_info_enabled() || is_profile) {
-        ss << "LOWOHA softmax_direct: batch=" << params.batch
-           << ", axis_dim=" << params.axis_dim
-           << ", axis=" << params.axis
-           << ", log_softmax=" << (params.log_softmax ? "true" : "false")
-           << ", softmin=" << (params.softmin ? "true" : "false")
-           << ", src_dt=" << static_cast<int>(params.src_dt)
-           << ", dst_dt=" << static_cast<int>(params.dst_dt);
-    }
-    apilog_info(ss.str());
+  // Validate inputs
+  if (validate_softmax_inputs(input, output, params)
+      != status_t::success) {
+    return status_t::failure;
+  }
 
-    // Execute softmax
-    softmax_kernel_wrapper(input, output, params);
+  // Log API call
+  [[maybe_unused]] std::ostringstream ss;
+  if (apilog_info_enabled() || is_profile) {
+    ss << "LOWOHA softmax_direct: batch=" << params.batch
+       << ", axis_dim=" << params.axis_dim
+       << ", axis=" << params.axis
+       << ", log_softmax=" << (params.log_softmax ? "true" : "false")
+       << ", softmin=" << (params.softmin ? "true" : "false")
+       << ", src_dt=" << static_cast<int>(params.src_dt)
+       << ", dst_dt=" << static_cast<int>(params.dst_dt);
+  }
+  apilog_info(ss.str());
 
-    if (is_profile) {
-        profiler.tbp_stop();
-        profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
-    }
+  // Execute softmax; propagate the backend outcome so callers are not
+  // told the op succeeded when the kernel actually failed.
+  status_t status = softmax_kernel_wrapper(input, output, params);
 
-    return status_t::success;
+  if (is_profile) {
+    profiler.tbp_stop();
+    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                       profiler.get_res_str());
+  }
+
+  return status;
 }
 
 } // namespace softmax

@@ -281,6 +281,7 @@ extern const float NORM_BF16_TOL;
 extern const float NORM_F16_TOL;
 extern const float SOFTMAX_F32_TOL;
 extern const float SOFTMAX_BF16_TOL;
+extern const float SOFTMAX_F16_TOL;
 extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;

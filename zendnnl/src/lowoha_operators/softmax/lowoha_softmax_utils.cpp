@@ -22,97 +22,105 @@ namespace lowoha {
 namespace softmax {
 
 status_t validate_softmax_inputs(
-    const void *input,
-    const void *output,
-    softmax_params &params
+  const void *input,
+  const void *output,
+  softmax_params &params
 ) {
-    // Check for null pointers
-    if (input == nullptr) {
-        log_error("Softmax: Input pointer is null");
-        return status_t::failure;
-    }
+  // Check for null pointers
+  if (input == nullptr) {
+    log_error("Softmax: Input pointer is null");
+    return status_t::failure;
+  }
 
-    if (output == nullptr) {
-        log_error("Softmax: Output pointer is null");
-        return status_t::failure;
-    }
+  if (output == nullptr) {
+    log_error("Softmax: Output pointer is null");
+    return status_t::failure;
+  }
 
-    // Validate dimensions
-    if (params.axis_dim == 0) {
-        log_error("Softmax: Axis dimension cannot be zero");
-        return status_t::failure;
-    }
+  // Validate dimensions
+  if (params.axis_dim == 0) {
+    log_error("Softmax: Axis dimension cannot be zero");
+    return status_t::failure;
+  }
 
-    if (params.batch == 0) {
-        log_error("Softmax: Batch size cannot be zero");
-        return status_t::failure;
-    }
+  if (params.batch == 0) {
+    log_error("Softmax: Batch size cannot be zero");
+    return status_t::failure;
+  }
 
-    // Both backends pick a code path from src_dt and write output in that
-    // same dtype; src_dt != dst_dt would corrupt the caller's output buffer.
-    if (params.src_dt != params.dst_dt) {
-        log_error("Softmax: src_dt (", dtype_info(params.src_dt),
-                  ") must match dst_dt (", dtype_info(params.dst_dt),
-                  "); mixed-precision I/O is not supported");
-        return status_t::failure;
-    }
+  // Both backends pick a code path from src_dt and write output in that
+  // same dtype; src_dt != dst_dt would corrupt the caller's output buffer.
+  if (params.src_dt != params.dst_dt) {
+    log_error("Softmax: src_dt (", dtype_info(params.src_dt),
+              ") must match dst_dt (", dtype_info(params.dst_dt),
+              "); mixed-precision I/O is not supported");
+    return status_t::failure;
+  }
 
-    return status_t::success;
+  // Validate supported data types (f32, bf16, f16)
+  if (params.src_dt != data_type_t::f32 &&
+      params.src_dt != data_type_t::bf16 &&
+      params.src_dt != data_type_t::f16) {
+    log_error("Softmax: Unsupported data type (must be f32, bf16, or f16)");
+    return status_t::failure;
+  }
+
+  return status_t::success;
 }
 
 status_t setup_softmax_shape(
-    softmax_params &params,
-    const uint64_t *shape,
-    int ndims,
-    int axis
+  softmax_params &params,
+  const uint64_t *shape,
+  int ndims,
+  int axis
 ) {
-    // Validate inputs
-    if (shape == nullptr) {
-        log_error("Softmax: Shape pointer is null");
-        return status_t::failure;
+  // Validate inputs
+  if (shape == nullptr) {
+    log_error("Softmax: Shape pointer is null");
+    return status_t::failure;
+  }
+
+  if (ndims <= 0 || ndims > SOFTMAX_MAX_NDIMS) {
+    log_error("Softmax: Invalid number of dimensions: ", ndims,
+              " (must be between 1 and ", SOFTMAX_MAX_NDIMS, " for 5D support)");
+    return status_t::failure;
+  }
+
+  // Normalize axis to positive value
+  int normalized_axis = axis >= 0 ? axis : ndims + axis;
+  if (normalized_axis < 0 || normalized_axis >= ndims) {
+    log_error("Softmax: Invalid axis: ", axis, " for ", ndims, "D tensor");
+    return status_t::failure;
+  }
+
+  // Store original shape information
+  params.ndims = ndims;
+  params.axis = normalized_axis;
+  for (int i = 0; i < ndims; ++i) {
+    if (shape[i] == 0) {
+      log_error("Softmax: Dimension ", i, " has zero size");
+      return status_t::failure;
     }
+    params.shape[i] = shape[i];
+  }
 
-    if (ndims <= 0 || ndims > SOFTMAX_MAX_NDIMS) {
-        log_error("Softmax: Invalid number of dimensions: ", ndims,
-                  " (must be between 1 and ", SOFTMAX_MAX_NDIMS, " for 5D support)");
-        return status_t::failure;
-    }
+  // Fill batch, axis_dim with original shape values (not flattened)
+  // These will be recalculated by backends that need flattened representation
+  params.batch = (normalized_axis > 0) ? shape[0] : 1;
+  params.axis_dim = shape[normalized_axis];
 
-    // Normalize axis to positive value
-    int normalized_axis = axis >= 0 ? axis : ndims + axis;
-    if (normalized_axis < 0 || normalized_axis >= ndims) {
-        log_error("Softmax: Invalid axis: ", axis, " for ", ndims, "D tensor");
-        return status_t::failure;
-    }
+  // Build shape string for logging
+  std::ostringstream shape_str;
+  shape_str << shape[0];
+  for (int i = 1; i < ndims; ++i) {
+    shape_str << "," << shape[i];
+  }
+  log_info("Softmax: Setup ", ndims, "D tensor with shape=[", shape_str.str(),
+           "], axis=", normalized_axis,
+           " -> batch=", params.batch,
+           ", axis_dim=", params.axis_dim);
 
-    // Store original shape information
-    params.ndims = ndims;
-    params.axis = normalized_axis;
-    for (int i = 0; i < ndims; ++i) {
-        if (shape[i] == 0) {
-            log_error("Softmax: Dimension ", i, " has zero size");
-            return status_t::failure;
-        }
-        params.shape[i] = shape[i];
-    }
-
-    // Fill batch, axis_dim with original shape values (not flattened)
-    // These will be recalculated by backends that need flattened representation
-    params.batch = (normalized_axis > 0) ? shape[0] : 1;
-    params.axis_dim = shape[normalized_axis];
-
-    // Build shape string for logging
-    std::ostringstream shape_str;
-    shape_str << shape[0];
-    for (int i = 1; i < ndims; ++i) {
-        shape_str << "," << shape[i];
-    }
-    log_info("Softmax: Setup ", ndims, "D tensor with shape=[", shape_str.str(),
-             "], axis=", normalized_axis,
-             " -> batch=", params.batch,
-             ", axis_dim=", params.axis_dim);
-
-    return status_t::success;
+  return status_t::success;
 }
 
 } // namespace softmax
