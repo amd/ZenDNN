@@ -438,10 +438,10 @@ configure_package_config_file(
   INSTALL_DESTINATION zendnnl/lib/cmake)
 
 write_basic_package_version_file(
-  "zendnnl-version.cmake"
+  "zendnnl-config-version.cmake"
   VERSION ${ZENDNNL_LIBRARY_VERSION}
   COMPATIBILITY AnyNewerVersion)
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/zendnnl-config.cmake"
-  "${CMAKE_CURRENT_BINARY_DIR}/zendnnl-version.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/zendnnl-config-version.cmake"
   DESTINATION zendnnl/lib/cmake)
