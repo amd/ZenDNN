@@ -136,7 +136,9 @@ size_t aocl_compute_size(const prepack_params_t &params) {
   }
 
   if (params.wei_dtype == data_type_t::s8) {
-    if (params.sym_group_size > 0 && params.src_dtype == data_type_t::bf16) {
+    if (params.sym_group_size > 0 &&
+        (params.src_dtype == data_type_t::bf16 ||
+         params.src_dtype == data_type_t::s8)) {
       DLP_SYMM_STAT_QUANT symq_meta;
       symq_meta.group_size = params.sym_group_size;
       const size_t req = aocl_get_reorder_buf_size_s8s8s32os32_sym_quant(
@@ -203,7 +205,9 @@ status_t aocl_prepack(const void *weights, const prepack_params_t &params,
   }
 
   if (params.wei_dtype == data_type_t::s8) {
-    if (params.sym_group_size > 0 && params.src_dtype == data_type_t::bf16) {
+    if (params.sym_group_size > 0 &&
+        (params.src_dtype == data_type_t::bf16 ||
+         params.src_dtype == data_type_t::s8)) {
       DLP_SYMM_STAT_QUANT symq_meta;
       symq_meta.group_size = params.sym_group_size;
       aocl_reorder_s8s8s32os32_sym_quant(order, trans, 'B',
