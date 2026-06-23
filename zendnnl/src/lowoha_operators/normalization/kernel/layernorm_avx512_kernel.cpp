@@ -24,7 +24,9 @@ namespace zendnnl {
 namespace lowoha {
 namespace normalization {
 
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl,avx512bf16,fma")
+#endif
 
 using avx512::load16;
 using avx512::load16_mask;

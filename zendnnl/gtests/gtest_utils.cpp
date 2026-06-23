@@ -4226,7 +4226,7 @@ size_t get_aligned_size(size_t alignment, size_t size_) {
 // `lowoha_granularity_to_str(...)` and `lowoha_reorder_algo_to_str(...)` were moved to `reorder/reorder_test_helpers.cpp`.
 
 // Helper: Convert float32 to bf16 (as uint16_t)
-static inline uint16_t float_to_bf16_helper(float val) {
+[[maybe_unused]] static inline uint16_t float_to_bf16_helper(float val) {
   uint32_t bits;
   std::memcpy(&bits, &val, sizeof(float));
   // Round-to-nearest-even

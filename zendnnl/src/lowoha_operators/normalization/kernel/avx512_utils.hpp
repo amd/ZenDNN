@@ -22,7 +22,9 @@
 #include <cstddef>
 #include "common/data_types.hpp"
 
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl,avx512bf16,fma")
+#endif
 
 namespace zendnnl {
 namespace lowoha {

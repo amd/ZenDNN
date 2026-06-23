@@ -40,7 +40,9 @@
 #include <algorithm>
 
 // Enable AVX-512 AFTER all STL headers to avoid always_inline ABI mismatch
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC target("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+#endif
 
 #include <immintrin.h>
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"

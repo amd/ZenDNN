@@ -929,7 +929,7 @@ inline void fill_sorted_expert_order(GroupNTilePlan &plan,
 // kernel invocation overhead on wider per-thread N-slices.
 inline int effective_decode_n_tile_for_variant(bool is_int8);
 
-inline int effective_decode_n_tile() {
+[[maybe_unused]] inline int effective_decode_n_tile() {
   // bf16 default; delegates to the variant-aware helper so the env
   // override + constant selection live in exactly one place.
   return effective_decode_n_tile_for_variant(/*is_int8=*/false);

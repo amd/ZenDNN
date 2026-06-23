@@ -808,14 +808,16 @@ status_t matmul_impl_t::kernel_factory() {
               output_dtype == data_type_t::u8 ||
               output_dtype == data_type_t::s32 ||
               output_dtype == data_type_t::f16)) {
-      kernel = get_matmul_int8_avx512_kernel();
+      kernel = std::shared_ptr<matmul_int8_avx512_kernel_t>
+               (get_matmul_int8_avx512_kernel());
     }
     else if ((weight_dtype == data_type_t::s4 ||
               weight_dtype == data_type_t::u4) &&
              (input_dtype  == data_type_t::bf16) &&
              (output_dtype == data_type_t::f32 ||
               output_dtype == data_type_t::bf16)) {
-      kernel = get_matmul_bf16s4_avx512_kernel();
+      kernel = std::shared_ptr<matmul_bf16s4_avx512_kernel_t>
+               (get_matmul_bf16s4_avx512_kernel());
     }
     else {
       apilog_error("<", obj_name, "> kernel unimplemented.");

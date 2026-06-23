@@ -94,7 +94,7 @@ class operator_impl_t : public hashable_object_t {
   bool get_validation() const;
 
   /** @brief create */
-  void create();
+  void create() override;
 
   /** @brief execute an operator */
   virtual status_t    execute();
