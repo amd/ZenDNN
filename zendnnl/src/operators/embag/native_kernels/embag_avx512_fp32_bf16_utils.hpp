@@ -55,6 +55,17 @@ inline void maybe_prefetch_weight(const float *weights, int64_t i,
 #endif
 }
 
+// BF16 (16 x uint16_t packed in a __m256i) -> 16 x FP32.
+__attribute__((target("avx512f,avx512bw,avx512bf16")))
+static inline __m512 embag_bf16x16_to_fp32(__m256i bf16) {
+#if __GNUC__ >= 12
+  return _mm512_cvtpbh_ps((__m256bh)bf16);
+#else
+  return _mm512_castsi512_ps(
+           _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
+#endif
+}
+
 /*-----------------------------------------------------------------------------
   embag_avx512_kernel:
   Templated AVX-512 embedding bag kernel that accumulates in FP32. Used as
@@ -199,13 +210,9 @@ void embag_avx512_kernel(
             in_vec = _mm512_cvtph_ps(f16_data);
           }
           else {
-#if __GNUC__ >= 12
             __m256i bf16_data = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
                 &input[input_offset + b * simd_width]));
-            in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
-#else
-            in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
-#endif
+            in_vec = embag_bf16x16_to_fp32(bf16_data);
           }
           if (is_embedding) {
             acc[b] = in_vec;
@@ -240,16 +247,11 @@ void embag_avx512_kernel(
             in_vec = _mm512_cvtph_ps(f16_data);
           }
           else {
-#if __GNUC__ >= 12
             __m256i bf16_data = _mm256_maskz_loadu_epi16(
                                   tail_mask,
                                   reinterpret_cast<const __m256i *>(&input[input_offset +
                                                    full_blocks * simd_width]));
-            in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
-#else
-            in_vec = _mm512_maskz_loadu_ps(tail_mask,
-                                           &input[input_offset + full_blocks * simd_width]);
-#endif
+            in_vec = embag_bf16x16_to_fp32(bf16_data);
           }
           if (is_embedding) {
             acc[full_blocks] = in_vec;
