@@ -35,14 +35,6 @@ set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
 set(AOCLDLP_GIT_TAG "b3db7f5800aca3ba3ce5bdfab10f557c5b896e5a")
 option(AOCLDLP_GIT_PROGRESS ON)
 
-# amdblis repo information
-set(AMDBLIS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/amdblis"
-  CACHE PATH "AMD BLIS root dir")
-set(AMDBLIS_GIT_REPO "https://github.com/amd/blis.git")
-# amdblis tag AOCL-Sep2025-b1
-set(AMDBLIS_GIT_TAG "fb2a682725bdb56cdacb31d4ab7430c42b2eb24b")
-option(AMDBLIS_GIT_PROGRESS ON)
-
 # aocl-utils repo information
 set(AOCLUTILS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aoclutils"
   CACHE PATH "AOCL UTILS root dir")

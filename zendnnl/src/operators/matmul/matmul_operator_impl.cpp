@@ -707,35 +707,14 @@ std::string matmul_impl_t::op_execute_info() {
 
   if (forced_kernel.empty()) {
     if (weights.get_layout() & uint16_t(tensor_layout_t::blocked)) {
-#if ZENDNNL_DEPENDS_AOCLDLP
       ss << "kernel:aocl_dlp_blocked" << ",";
-#else
-      ss << "kernel:aocl_blis_blocked" << ",";
-#endif
     }
     else {
-#if ZENDNNL_DEPENDS_AOCLDLP
       ss << "kernel:aocl_dlp" << ",";
-#else
-      ss << "kernel:aocl_blis" << ",";
-#endif
     }
   }
   else {
-    // When BLIS is enabled, map aocl_dlp to aocl_blis in logs
-#if ZENDNNL_DEPENDS_AOCLBLIS
-    if (forced_kernel == "aocl_dlp") {
-      ss << "kernel:aocl_blis" << ",";
-    }
-    else if (forced_kernel == "aocl_dlp_blocked") {
-      ss << "kernel:aocl_blis_blocked" << ",";
-    }
-    else {
-      ss << "kernel:" << forced_kernel << ",";
-    }
-#else
     ss << "kernel:" << forced_kernel << ",";
-#endif
   }
   ss << input.value().tensor_info() << ","
      << weights.tensor_info() << ",";

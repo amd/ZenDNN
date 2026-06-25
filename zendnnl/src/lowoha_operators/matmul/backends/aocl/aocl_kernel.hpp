@@ -23,8 +23,8 @@
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"
 #else
-  #include "blis.h"
-  using md_t = dim_t;
+  #include <cstdint>
+  using md_t = std::int64_t;  // matches aocl-dlp md_t (int64_t); previously dim_t from blis.h
 #endif
 namespace zendnnl {
 namespace lowoha {

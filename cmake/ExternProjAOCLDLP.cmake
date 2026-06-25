@@ -128,7 +128,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
   #     set(ZENDNNL_AOCLDLP_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/include")
   #     set(ZENDNNL_AOCLDLP_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/lib")
 
-  #     if(NOT EXISTS ${ZENDNNL_AMDBLIS_INC_DIR})
+  #     if(NOT EXISTS ${ZENDNNL_AOCLDLP_INC_DIR})
   #       file(MAKE_DIRECTORY ${ZENDNNL_AOCLDLP_INC_DIR})
   #     endif()
 

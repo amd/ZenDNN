@@ -35,7 +35,6 @@ else()
 endif()
 
 # enable dependency injection
-enable_dependency_injection(AMDBLIS)
 enable_dependency_injection(AOCLDLP)
 enable_dependency_injection(ONEDNN)
 enable_dependency_injection(LIBXSMM)

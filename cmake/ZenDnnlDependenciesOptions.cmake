@@ -23,12 +23,8 @@ include_guard(GLOBAL)
 include(ZenDnnlDependenciesDefaults OPTIONAL)
 
 # sanity check on dependencies
-if((NOT ZENDNNL_DEPENDS_AMDBLIS) AND (NOT ZENDNNL_DEPENDS_AOCLDLP))
-  message(FATAL_ERROR "ZenDNNL has a hard dependency on amd-blis or aocl-dlp.")
-endif()
-
-if(ZENDNNL_DEPENDS_AMDBLIS AND ZENDNNL_DEPENDS_AOCLDLP)
-  message(FATAL_ERROR "Either aocl-dlp or amd-blis can be enabled but not both.")
+if(NOT ZENDNNL_DEPENDS_AOCLDLP)
+  message(FATAL_ERROR "ZenDNNL has a hard dependency on aocl-dlp.")
 endif()
 
 if(NOT ZENDNNL_DEPENDS_AOCLUTILS)
@@ -41,9 +37,6 @@ endif()
 
 # informative messages
 set(ZENDNNL_MSG_DEPS "")
-if(ZENDNNL_DEPENDS_AMDBLIS)
-  list(APPEND ZENDNNL_MSG_DEPS "amd-blis")
-endif()
 if(ZENDNNL_DEPENDS_AOCLDLP)
   list(APPEND ZENDNNL_MSG_DEPS "aocl-dlp")
 endif()

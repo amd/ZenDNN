@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -25,10 +25,6 @@ if (ZENDNNL_DEPENDS_AOCLDLP)
   list(APPEND aocl_dlp_matmul_operator_sources matmul_aocl_dlp_utils.cpp)
   set(aocl_dlp_matmul_operator_public_headers
     matmul_aocl_dlp_utils.hpp)
-elseif(ZENDNNL_DEPENDS_AMDBLIS)
-  list(APPEND aocl_dlp_matmul_operator_sources matmul_aocl_blis_utils.cpp)
-  set(aocl_dlp_matmul_operator_public_headers
-    matmul_aocl_blis_utils.hpp)
 endif()
 
 set(aocl_dlp_matmul_operator_private_headers

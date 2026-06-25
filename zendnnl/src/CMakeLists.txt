@@ -88,19 +88,6 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
   endif()
 
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
-    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AMDBLIS_INJECTED)
-      target_link_libraries(zendnnl_archive
-        PUBLIC "$<COMPILE_ONLY:amdblis::amdblis_archive>")
-    else()
-      target_link_libraries(zendnnl_archive
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
-    endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
-  endif()
-
   # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
   # CPU detection symbols take priority.
   if(ZENDNNL_DEPENDS_ONEDNN)
@@ -224,19 +211,6 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
   endif()
 
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
-    if(ZENDNNL_FWK_BUILD AND ZENDNNL_AMDBLIS_INJECTED)
-      target_link_libraries(zendnnl
-        PUBLIC amdblis::amdblis_archive)
-    else()
-      target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
-    endif()
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
-  endif()
-
   # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
   # CPU detection symbols take priority. See archive target comment above.
   if(ZENDNNL_DEPENDS_ONEDNN)
@@ -316,12 +290,6 @@ endif()
 
 # create top level include file
 prolog_header_file(${zendnnl_inc_file})
-
-if(ZENDNNL_DEPENDS_AMDBLIS)
-  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AMDBLIS" "1")
-else()
-  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AMDBLIS" "0")
-endif()
 
 if(ZENDNNL_DEPENDS_AOCLDLP)
   deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AOCLDLP" "1")
@@ -415,8 +383,6 @@ install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlIntegrationOptions.cmake"
 install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlMacros.cmake"
   DESTINATION zendnnl/lib/cmake)
 
-install(FILES "${CMAKE_MODULE_PATH}/FindZLAMDBLIS.cmake"
-  DESTINATION zendnnl/lib/cmake)
 install(FILES "${CMAKE_MODULE_PATH}/FindAOCLDLP.cmake"
   DESTINATION zendnnl/lib/cmake)
 install(FILES "${CMAKE_MODULE_PATH}/FindLIBXSMM.cmake"

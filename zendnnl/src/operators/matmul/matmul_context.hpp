@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -25,8 +25,6 @@
 
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "operators/matmul/aocl_dlp/matmul_aocl_dlp_utils.hpp"
-#else
-#include "operators/matmul/aocl_dlp/matmul_aocl_blis_utils.hpp"
 #endif
 
 namespace zendnnl {
@@ -53,8 +51,6 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief get post op pointer */
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *get_aocl_dlp_post_op_ptr_unsafe() const;
-#else
-  aocl_post_op *get_aocl_dlp_post_op_ptr_unsafe() const;
 #endif
 
   /** @brief get reordered weights pointer */

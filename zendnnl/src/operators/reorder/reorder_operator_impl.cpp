@@ -17,12 +17,6 @@
 #include "reorder_kernel_list.hpp"
 #include "aocl_dlp/reorder_utils.hpp"
 
-#if ZENDNNL_DEPENDS_AOCLDLP
-  #include "aocl_dlp.h"
-#else
-  #include "blis.h"
-#endif
-
 namespace zendnnl {
 namespace ops {
 

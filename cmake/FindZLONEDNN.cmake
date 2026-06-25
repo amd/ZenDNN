@@ -1,5 +1,5 @@
 #  *******************************************************************************
-#  * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+#  * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #  *
 #  * Licensed under the Apache License, Version 2.0 (the "License");
 #  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 #  * limitations under the License.
 #  *******************************************************************************
 
-#message(DEBUG "Searching for AMDBLIS in ${AMDBLIS_INSTALL_DIR}")
+#message(DEBUG "Searching for ONEDNN in ${DNNL_INSTALL_DIR}")
 
 set(DNNL_LIB_ROOT "${DNNL_INSTALL_DIR}/lib")
 set(DNNL_LIB_ROOT64 "${DNNL_INSTALL_DIR}/lib64")

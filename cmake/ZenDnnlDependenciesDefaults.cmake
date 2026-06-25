@@ -33,11 +33,6 @@ set(ZENDNNL_DEPENDS_AOCLUTILS ON
 set(ZENDNNL_DEPENDS_JSON ON
   CACHE BOOL "Use JSON script for configuration" FORCE)
 
-cmake_dependent_option(ZENDNNL_DEPENDS_AMDBLIS "Add AMDBLIS as a dependency" OFF
-  "ZENDNNL_DEPENDS_AOCLDLP" ON)
-
-cmake_dependent_option(ZENDNNL_LOCAL_AMDBLIS "use local AMDBLIS" OFF
-  "ZENDNNL_DEPENDS_AMDBLIS" OFF)
 cmake_dependent_option(ZENDNNL_LOCAL_AOCLDLP "use local AOCLDLP" OFF
   "ZENDNNL_DEPENDS_AOCLDLP" OFF)
 cmake_dependent_option(ZENDNNL_LOCAL_ONEDNN "use local ONEDNN" OFF

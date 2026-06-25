@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ endmacro()
 macro(find_build_dependencies  _install_prefix)
   # find aocl utils
   if(ZENDNNL_DEPENDS_AOCLUTILS)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presence...")
     set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
     set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
     #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
@@ -48,36 +48,29 @@ macro(find_build_dependencies  _install_prefix)
 
   # find json
   if(ZENDNNL_DEPENDS_JSON)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presence...")
     set(JSON_INSTALL_DIR "${_install_prefix}/deps/json")
     set(nlohmann_json_ROOT "${JSON_INSTALL_DIR}")
-    set(nlohmann_json_DIR "${json_ROOT}/share/cmake/nlohmann_json")
+    set(nlohmann_json_DIR "${nlohmann_json_ROOT}/share/cmake/nlohmann_json")
     find_package(nlohmann_json REQUIRED GLOBAL)
     if(nlohmann_json_FOUND)
       message(STATUS "${ZENDNNL_MSG_PREFIX}Found JSON at ${nlohmann_json_ROOT}")
       include_directories(${nlohmann_json_ROOT}/include)
     else()
-      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}JSON dependency not found.")
     endif()
-  endif()
-
-  # find amdblis
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AMD-BLIS presencce...")
-    set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
-    find_package(ZLAMDBLIS REQUIRED GLOBAL)
   endif()
 
   # find aocl dlp
   if(ZENDNNL_DEPENDS_AOCLDLP)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presence...")
     set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
     find_package(AOCLDLP REQUIRED GLOBAL)
   endif()
 
   # find onednn
   if(ZENDNNL_DEPENDS_ONEDNN)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presence...")
     set(DNNL_INSTALL_DIR "${_install_prefix}/deps/onednn")
     set(dnnl_ROOT "${DNNL_INSTALL_DIR}")
     set(dnnl_DIR "${dnnl_ROOT}/lib/cmake/dnnl")
@@ -103,21 +96,21 @@ macro(find_build_dependencies  _install_prefix)
 
   # find libxsmm
   if(ZENDNNL_DEPENDS_LIBXSMM)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presence...")
     set(LIBXSMM_INSTALL_DIR "${_install_prefix}/deps/libxsmm")
     find_package(LIBXSMM REQUIRED GLOBAL)
   endif()
 
   # find parlooper
   if(ZENDNNL_DEPENDS_PARLOOPER)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presence...")
     set(PARLOOPER_INSTALL_DIR "${_install_prefix}/deps/parlooper")
     find_package(PARLOOPER REQUIRED GLOBAL)
   endif()
 
   # find fbgemm
   if(ZENDNNL_DEPENDS_FBGEMM)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presence...")
     set(FBGEMM_INSTALL_DIR "${_install_prefix}/deps/fbgemm")
     find_package(FBGEMM REQUIRED GLOBAL)
   endif()
@@ -128,7 +121,7 @@ endmacro()
 macro(find_install_dependencies  _install_prefix)
   # find aocl utils
   if(ZENDNNL_DEPENDS_AOCLUTILS)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presence...")
     set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
     set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
     #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
@@ -148,34 +141,23 @@ macro(find_install_dependencies  _install_prefix)
 
   # find json
   if(ZENDNNL_DEPENDS_JSON)
-    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presencce...")
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presence...")
     set(JSON_INSTALL_DIR "${_install_prefix}/deps/json")
     set(nlohmann_json_ROOT "${JSON_INSTALL_DIR}")
-    set(nlohmann_json_DIR "${json_ROOT}/share/cmake/nlohmann_json")
+    set(nlohmann_json_DIR "${nlohmann_json_ROOT}/share/cmake/nlohmann_json")
     find_package(nlohmann_json REQUIRED GLOBAL)
     if(nlohmann_json_FOUND)
       message(STATUS "${ZENDNNL_MSG_PREFIX}Found JSON at ${nlohmann_json_ROOT}")
       include_directories(${nlohmann_json_ROOT}/include)
     else()
-      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
-    endif()
-  endif()
-
-  # find amdblis
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    if(NOT ZENDNNL_AMDBLIS_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AMD-BLIS presencce...")
-      set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
-      find_package(ZLAMDBLIS REQUIRED GLOBAL)
-    else()
-      message(STATUS "${ZENDNNL_MSG_PREFIX}AMD-BLIS seems injected, will not check its presence...")
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}JSON dependency not found.")
     endif()
   endif()
 
   # find aocl dlp
   if(ZENDNNL_DEPENDS_AOCLDLP)
     if(NOT ZENDNNL_AOCLDLP_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presencce...")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presence...")
       set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
       find_package(AOCLDLP REQUIRED GLOBAL)
     else()
@@ -186,7 +168,7 @@ macro(find_install_dependencies  _install_prefix)
   # find onednn
   if(ZENDNNL_DEPENDS_ONEDNN)
     if(NOT ZENDNNL_ONEDNN_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presencce...")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presence...")
       set(dnnl_INSTALL_DIR "${_install_prefix}/deps/onednn")
       set(dnnl_ROOT "${dnnl_INSTALL_DIR}")
       set(dnnl_DIR "${dnnl_ROOT}/lib/cmake/dnnl")
@@ -208,7 +190,7 @@ macro(find_install_dependencies  _install_prefix)
 
   if(ZENDNNL_DEPENDS_LIBXSMM)
     if(NOT ZENDNNL_LIBXSMM_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presencce...")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presence...")
       set(LIBXSMM_INSTALL_DIR "${_install_prefix}/deps/libxsmm")
       find_package(LIBXSMM REQUIRED GLOBAL)
     else()
@@ -218,7 +200,7 @@ macro(find_install_dependencies  _install_prefix)
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
     if(NOT ZENDNNL_PARLOOPER_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presencce...")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presence...")
       set(PARLOOPER_INSTALL_DIR "${_install_prefix}/deps/parlooper")
       find_package(PARLOOPER REQUIRED GLOBAL)
     else()
@@ -228,7 +210,7 @@ macro(find_install_dependencies  _install_prefix)
 
   if(ZENDNNL_DEPENDS_FBGEMM)
     if(NOT ZENDNNL_FBGEMM_INJECTED)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presencce...")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presence...")
       set(FBGEMM_INSTALL_DIR "${_install_prefix}/deps/fbgemm")
       find_package(FBGEMM REQUIRED GLOBAL)
     else()

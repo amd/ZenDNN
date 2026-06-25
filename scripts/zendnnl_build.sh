@@ -62,14 +62,6 @@ function parse_args() {
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
                 ;;
-            --enable-amdblis )
-                ZENDNNL_DEPENDS_AMDBLIS=1
-                shift
-                ;;
-            --local-amdblis )
-                ZENDNNL_LOCAL_AMDBLIS=1
-                shift
-                ;;
             --local-aocldlp )
                 ZENDNNL_LOCAL_AOCLDLP=1
                 shift
@@ -96,12 +88,6 @@ function parse_args() {
                 ;;
             --local-fbgemm )
                 ZENDNNL_LOCAL_FBGEMM=1
-                shift
-                ;;
-            --local-amdblis-dir )
-                ZENDNNL_LOCAL_AMDBLIS=1
-                ZENDNNL_LOCAL_AMDBLIS_DIR=$2
-                shift
                 shift
                 ;;
             --local-aocldlp-dir )
@@ -136,11 +122,6 @@ function parse_args() {
                 ;;
             --inject-aocldlp )
                 ZENDNNL_INJECT_AOCLDLP=$2
-                shift
-                shift
-                ;;
-            --inject-amdblis )
-                ZENDNNL_INJECT_AMDBLIS=$2
                 shift
                 shift
                 ;;
@@ -222,10 +203,8 @@ function parse_args() {
                 echo " dependency options :"
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
                 echo " --enable-parlooper : enable parlooper."
-                echo " --enable-amdblis   : enable amdblis (disables aocldlp which is default)."
                 echo
                 echo " local dependency options (builds from local source) :"
-                echo " --local-amdblis    : use local amdblis from dependencies/amdblis."
                 echo " --local-aocldlp    : use local aocldlp from dependencies/aocldlp."
                 echo " --local-aoclutils  : use local aoclutils from dependencies/aoclutils."
                 echo " --local-json       : use local json from dependencies/json."
@@ -235,7 +214,6 @@ function parse_args() {
                 echo " --local-fbgemm     : use local fbgemm from dependencies/fbgemm."
                 echo
                 echo " local dependency with custom path (builds from specified source dir) :"
-                echo " --local-amdblis-dir <path>    : use amdblis source from <path>."
                 echo " --local-aocldlp-dir <path>    : use aocldlp source from <path>."
                 echo " --local-onednn-dir <path>     : use onednn source from <path>."
                 echo " --local-libxsmm-dir <path>    : use libxsmm source from <path>."
@@ -244,7 +222,6 @@ function parse_args() {
                 echo
                 echo " dependency injection (use pre-built install, no compilation) :"
                 echo " --inject-aocldlp <path>    : inject pre-built aocldlp from <path>."
-                echo " --inject-amdblis <path>    : inject pre-built amdblis from <path>."
                 echo " --inject-onednn <path>     : inject pre-built onednn from <path>."
                 echo " --inject-libxsmm <path>    : inject pre-built libxsmm from <path>."
                 echo " --inject-parlooper <path>  : inject pre-built parlooper from <path>."
@@ -310,8 +287,6 @@ ZENDNNL_DOXYGEN=0
 # configure options
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_PARLOOPER=0
-ZENDNNL_DEPENDS_AMDBLIS=0
-ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLDLP=0
 ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
@@ -319,14 +294,12 @@ ZENDNNL_LOCAL_ONEDNN=0
 ZENDNNL_LOCAL_LIBXSMM=0
 ZENDNNL_LOCAL_PARLOOPER=0
 ZENDNNL_LOCAL_FBGEMM=0
-ZENDNNL_LOCAL_AMDBLIS_DIR=""
 ZENDNNL_LOCAL_AOCLDLP_DIR=""
 ZENDNNL_LOCAL_ONEDNN_DIR=""
 ZENDNNL_LOCAL_LIBXSMM_DIR=""
 ZENDNNL_LOCAL_PARLOOPER_DIR=""
 ZENDNNL_LOCAL_FBGEMM_DIR=""
 ZENDNNL_INJECT_AOCLDLP=""
-ZENDNNL_INJECT_AMDBLIS=""
 ZENDNNL_INJECT_ONEDNN=""
 ZENDNNL_INJECT_LIBXSMM=""
 ZENDNNL_INJECT_PARLOOPER=""
@@ -397,9 +370,6 @@ check_inject_path() {
 }
 
 # Validate local dependencies (only when no custom dir is given)
-if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ] && [ -z "${ZENDNNL_LOCAL_AMDBLIS_DIR}" ]; then
-    if ! check_local_dep "amdblis"; then return 1; fi
-fi
 if [ ${ZENDNNL_LOCAL_AOCLDLP} -eq 1 ] && [ -z "${ZENDNNL_LOCAL_AOCLDLP_DIR}" ]; then
     if ! check_local_dep "aocldlp"; then return 1; fi
 fi
@@ -423,9 +393,6 @@ if [ ${ZENDNNL_LOCAL_FBGEMM} -eq 1 ] && [ -z "${ZENDNNL_LOCAL_FBGEMM_DIR}" ]; th
 fi
 
 # Validate custom local source directories
-if [ -n "${ZENDNNL_LOCAL_AMDBLIS_DIR}" ]; then
-    if ! check_local_dir "amdblis" "${ZENDNNL_LOCAL_AMDBLIS_DIR}"; then return 1; fi
-fi
 if [ -n "${ZENDNNL_LOCAL_AOCLDLP_DIR}" ]; then
     if ! check_local_dir "aocldlp" "${ZENDNNL_LOCAL_AOCLDLP_DIR}"; then return 1; fi
 fi
@@ -445,9 +412,6 @@ fi
 # Validate inject paths
 if [ -n "${ZENDNNL_INJECT_AOCLDLP}" ]; then
     if ! check_inject_path "aocldlp" "${ZENDNNL_INJECT_AOCLDLP}"; then return 1; fi
-fi
-if [ -n "${ZENDNNL_INJECT_AMDBLIS}" ]; then
-    if ! check_inject_path "amdblis" "${ZENDNNL_INJECT_AMDBLIS}"; then return 1; fi
 fi
 if [ -n "${ZENDNNL_INJECT_ONEDNN}" ]; then
     if ! check_inject_path "onednn" "${ZENDNNL_INJECT_ONEDNN}"; then return 1; fi
@@ -541,21 +505,7 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=OFF"
     fi
 
-    if [ ${ZENDNNL_DEPENDS_AMDBLIS} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF"
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AMDBLIS=ON"
-    fi
-
     # local dependency options
-    if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF -DZENDNNL_DEPENDS_AMDBLIS=ON -DZENDNNL_LOCAL_AMDBLIS=ON"
-        if [ -n "${ZENDNNL_LOCAL_AMDBLIS_DIR}" ];then
-            CMAKE_OPTIONS="${CMAKE_OPTIONS} -DAMDBLIS_ROOT_DIR=${ZENDNNL_LOCAL_AMDBLIS_DIR}"
-        fi
-    else
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=OFF"
-    fi
-
     if [ ${ZENDNNL_LOCAL_AOCLDLP} -eq 1 ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLDLP=ON"
         if [ -n "${ZENDNNL_LOCAL_AOCLDLP_DIR}" ];then
@@ -616,9 +566,6 @@ else
     # dependency injection options
     if [ -n "${ZENDNNL_INJECT_AOCLDLP}" ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=ON -DZENDNNL_AOCLDLP_INJECT_DIR=${ZENDNNL_INJECT_AOCLDLP}"
-    fi
-    if [ -n "${ZENDNNL_INJECT_AMDBLIS}" ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF -DZENDNNL_DEPENDS_AMDBLIS=ON -DZENDNNL_AMDBLIS_INJECT_DIR=${ZENDNNL_INJECT_AMDBLIS}"
     fi
     if [ -n "${ZENDNNL_INJECT_ONEDNN}" ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=ON -DZENDNNL_ONEDNN_INJECT_DIR=${ZENDNNL_INJECT_ONEDNN}"

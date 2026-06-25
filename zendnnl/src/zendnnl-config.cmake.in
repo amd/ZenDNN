@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ set(ZENDNNL_DEPENDS_ONEDNN    @ZENDNNL_DEPENDS_ONEDNN@    CACHE BOOL "" FORCE)
 set(ZENDNNL_DEPENDS_LIBXSMM   @ZENDNNL_DEPENDS_LIBXSMM@   CACHE BOOL "" FORCE)
 set(ZENDNNL_DEPENDS_PARLOOPER @ZENDNNL_DEPENDS_PARLOOPER@ CACHE BOOL "" FORCE)
 set(ZENDNNL_DEPENDS_FBGEMM    @ZENDNNL_DEPENDS_FBGEMM@    CACHE BOOL "" FORCE)
-set(ZENDNNL_DEPENDS_AMDBLIS   @ZENDNNL_DEPENDS_AMDBLIS@   CACHE BOOL "" FORCE)
 set(ZENDNNL_DEPENDS_AOCLUTILS ON CACHE BOOL "" FORCE)
 set(ZENDNNL_DEPENDS_JSON      ON CACHE BOOL "" FORCE)
 

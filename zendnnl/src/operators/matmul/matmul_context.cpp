@@ -168,12 +168,10 @@ std::string matmul_context_t::context_info() {
 
 #if ZENDNNL_DEPENDS_AOCLDLP
 dlp_metadata_t *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
-#else
-aocl_post_op *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
-#endif
   LOG_DEBUG_INFO("Getting aocl_dlp_post_op_ptr from matmul_context_t");
   return aocl_dlp_utils_ptr->get_aocl_dlp_post_op_ptr_unsafe();
 }
+#endif
 
 void *matmul_context_t::get_aocl_dlp_reordered_weights_ptr_unsafe() const {
   LOG_DEBUG_INFO("Getting aocl_dlp_reordered_weights_ptr from matmul_context_t");

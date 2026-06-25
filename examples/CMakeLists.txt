@@ -124,5 +124,4 @@ if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_options(examples PRIVATE ${SANITIZER_FLAGS})
   target_link_options(examples PRIVATE "-fsanitize=address")
 endif()
-#  amdblis::amdblis_archive
 install(TARGETS examples)

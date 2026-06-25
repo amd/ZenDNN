@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -45,14 +45,6 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     PUBLIC  FILE_SET zendnnl_headers
             TYPE HEADERS FILES ${compare_operator_public_headers})
 endif()
-
-# target_link_libraries(zendnnl_archive
-#   PUBLIC OpenMP::OpenMP_CXX
-#   PUBLIC amdblis::amdblis_archive)
-
-# target_link_libraries(zendnnl
-#   PUBLIC OpenMP::OpenMP_CXX
-#   PUBLIC amdblis::amdblis)
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

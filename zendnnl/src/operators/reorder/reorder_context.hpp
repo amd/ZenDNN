@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
 #else
-#include "blis.h"
-using md_t = dim_t;
+#include <cstdint>
+using md_t = std::int64_t;  // matches aocl-dlp md_t (int64_t); previously dim_t from blis.h
 #endif
 
 namespace zendnnl {

@@ -25,8 +25,6 @@
 #include <string>
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"
-#else
-  #include "blis.h"
 #endif
 
 namespace zendnnl {

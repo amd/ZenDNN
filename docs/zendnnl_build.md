@@ -46,7 +46,7 @@ ZenDNN depends on the following third party libraries (TPL), referred in this do
 |------------|-------------|-----------|
 | nlohmann-json | To read and write json files | Mandatory |
 | aocl-utils | To detect runtime system information | Mandatory |
-| aocl-dlp or amd-blis | BLAS backend. AOCL-DLP is enabled by default; exactly one of AOCL-DLP or AMD-BLIS must be enabled. | Mandatory |
+| aocl-dlp | BLAS backend. | Mandatory |
 | onednn | In an unlikely situation of onednn kernels doing better than ZenDNN | Optional |
 | libxsmm         | Optimized small matrix multiplication library | Optional |
 | parlooper       | Parallel loop abstraction library             | Optional |
@@ -133,7 +133,6 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 | ZENDNNL_FWK_BUILD | Build ZenDNN as a part of framework build. If ON, `ZENDNNL_STANDALONE_BUILD` is disabled and injected archive dependencies use `COMPILE_ONLY` linking. If OFF (default), dependencies are linked with `WHOLE_ARCHIVE` for a self-contained archive. | BOOL | OFF |
 | ZENDNNL_STANDALONE_BUILD | Standalone build mode. This is ON by default and is automatically OFF when `ZENDNNL_FWK_BUILD=ON`. | BOOL | ON |
 | ZENDNNL_AOCLDLP_INJECT_DIR | Path to a pre-built AOCL-DLP install directory. If provided, ZenDNN skips building AOCL-DLP and uses this installation. The directory must contain `include/` and `lib/` or `lib64/` subdirectories. | PATH | (empty) |
-| ZENDNNL_AMDBLIS_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for AMD-BLIS. | PATH | (empty) |
 | ZENDNNL_ONEDNN_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for oneDNN. | PATH | (empty) |
 | ZENDNNL_LIBXSMM_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for LIBXSMM. | PATH | (empty) |
 | ZENDNNL_PARLOOPER_INJECT_DIR | Same as ZENDNNL_AOCLDLP_INJECT_DIR but for PARLOOPER. | PATH | (empty) |
@@ -141,12 +140,11 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 
 ### 3.4 Dependencies Options
 
-`aocl-utils` and `nlohmann-json` are hard dependencies and are forced ON by CMake. For the BLAS backend, exactly one of `ZENDNNL_DEPENDS_AOCLDLP` or `ZENDNNL_DEPENDS_AMDBLIS` must be ON. Optional dependency defaults are shown below.
+`aocl-utils` and `nlohmann-json` are hard dependencies and are forced ON by CMake. `aocl-dlp` is also a mandatory dependency: it defaults ON, and configuring with it OFF fails with a CMake error. Optional dependency defaults are shown below.
 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
-| ZENDNNL_DEPENDS_AOCLDLP | Enable AOCL-DLP as the BLAS backend. This is the default backend. | BOOL | ON |
-| ZENDNNL_DEPENDS_AMDBLIS | Enable AMD-BLIS as the BLAS backend. This must not be ON at the same time as `ZENDNNL_DEPENDS_AOCLDLP`. | BOOL | OFF |
+| ZENDNNL_DEPENDS_AOCLDLP | Enable AOCL-DLP as the BLAS backend. Mandatory; defaults ON and configuring with it OFF fails with a CMake error. | BOOL | ON |
 | ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
@@ -154,7 +152,6 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 | ZENDNNL_DEPENDS_AOCLUTILS | Enable aocl-utils for hardware identification. CMake forces this ON. | BOOL | ON |
 | ZENDNNL_DEPENDS_JSON | Enable nlohmann-json for configuration parsing. CMake forces this ON. | BOOL | ON |
 | ZENDNNL_LOCAL_AOCLDLP | Use a locally available AOCL-DLP source instead of downloading from a public repository. By default, the source is expected at `${ZENDNNL_SOURCE_DIR}/dependencies/aocldlp`. Alternatively, pass `-DAOCLDLP_ROOT_DIR=<path>` to specify a custom source directory (a symlink is created automatically). | BOOL | OFF |
-| ZENDNNL_LOCAL_AMDBLIS | Same as ZENDNNL_LOCAL_AOCLDLP but for AMD-BLIS. Custom path: `-DAMDBLIS_ROOT_DIR=<path>`. | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLUTILS | Same as ZENDNNL_LOCAL_AOCLDLP but for AOCL-UTILS. | BOOL | OFF |
 | ZENDNNL_LOCAL_JSON | Same as ZENDNNL_LOCAL_AOCLDLP but for JSON (nlohmann-json). | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Same as ZENDNNL_LOCAL_AOCLDLP but for oneDNN. Custom path: `-DONEDNN_ROOT_DIR=<path>`. | BOOL | OFF |
@@ -451,7 +448,6 @@ ZenDNN build can be integrated to the framework build using these files as follo
   | ZENDNNL_BINARY_DIR | Where ZenDNN will be built in the build tree. if unsure set ${CMAKE_CURRENT_BINARY_DIR}/zendnnl. |
   | ZENDNNL_INSTALL_PREFIX | Where ZenDNN will be installed. If unsure set ${CMAKE_INSTALL_PREFIX}/zendnnl. |
   | ZENDNNL_AOCLDLP_INJECT_DIR | Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN build. |
-  | ZENDNNL_AMDBLIS_INJECT_DIR | Install path of amd-blis if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_ONEDNN_INJECT_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_LIBXSMM_INJECT_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_PARLOOPER_INJECT_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |

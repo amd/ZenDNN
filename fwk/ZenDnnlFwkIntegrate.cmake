@@ -109,18 +109,9 @@ zendnnl_add_option(NAME ZENDNNL_CODE_COVERAGE
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 ## dependencies
-# set if zendnnl depends on amdblis. this should bf OFF only if
-# aocldlp dependency is ON.
-zendnnl_add_option(NAME ZENDNNL_DEPENDS_AMDBLIS
-  VALUE ON
-  TYPE BOOL
-  CACHE_STRING "zendnnl amdblis dependency"
-  COMMAND_LIST ZNL_CMAKE_ARGS)
-
-# set if zendnnl depends on aocldlp. this should bf ON only if
-# amdblis dependency is OFF.
+# set if zendnnl depends on aocldlp. aocl-dlp is a mandatory dependency.
 zendnnl_add_option(NAME ZENDNNL_DEPENDS_AOCLDLP
-  VALUE OFF
+  VALUE ON
   TYPE BOOL
   CACHE_STRING "zendnnl aocldlp dependency"
   COMMAND_LIST ZNL_CMAKE_ARGS)
@@ -151,14 +142,6 @@ zendnnl_add_option(NAME ZENDNNL_DEPENDS_FBGEMM
   VALUE OFF
   TYPE BOOL
   CACHE_STRING "zendnnl fbgemm dependency"
-  COMMAND_LIST ZNL_CMAKE_ARGS)
-
-# set path of amdblis if amdblis is injected. if the framework
-# does not inject it, set it to "" (empty string).
-zendnnl_add_option(NAME ZENDNNL_AMDBLIS_INJECT_DIR
-  VALUE <amd blis install path>
-  TYPE PATH
-  CACHE_STRING "zendnnl amdblis injection path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # set path of aocldlp if aocldlp is injected. if the framework
@@ -385,21 +368,6 @@ else()
 
   endif()
 
-  # amdblis dependency
-  if (ZENDNNL_DEPENDS_AMDBLIS)
-      zendnnl_add_dependency(NAME amdblis
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/amdblis"
-        ARCHIVE_FILE "libblis-mt.a"
-        ALIAS "amdblis::amdblis_archive")
-
-      if(ZENDNNL_LIB_BUILD_ARCHIVE)
-        target_link_libraries(zendnnl_library INTERFACE amdblis::amdblis_archive)
-      endif()
-      if(ZENDNNL_LIB_BUILD_SHARED)
-        target_link_libraries(zendnnl_shared_library INTERFACE amdblis::amdblis_archive)
-      endif()
-  endif()
-
   if (ZENDNNL_DEPENDS_AOCLDLP)
       zendnnl_add_dependency(NAME aocldlp
         PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aocldlp"
@@ -495,10 +463,6 @@ else()
   add_dependencies(zendnnl_json_deps fwk_zendnnl)
   add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
   add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)
-
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    add_dependencies(zendnnl_amdblis_deps fwk_zendnnl)
-  endif()
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
     add_dependencies(zendnnl_aocldlp_deps fwk_zendnnl)

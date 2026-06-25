@@ -38,7 +38,6 @@ set(ZENDNNL_LIB_BUILD_SHARED OFF CACHE BOOL "build zendnnl shared lib")
 set(ZENDNNL_FWK_BUILD OFF CACHE BOOL "framework build mode")
 
 # library dependencies
-set(ZENDNNL_AMDBLIS_INJECTED OFF CACHE BOOL "amdblis injected")
 set(ZENDNNL_AOCLDLP_INJECTED OFF CACHE BOOL "aocldlp injected")
 set(ZENDNNL_ONEDNN_INJECTED  OFF CACHE BOOL "onednn injected")
 set(ZENDNNL_LIBXSMM_INJECTED  OFF CACHE BOOL "libxsmm injected")

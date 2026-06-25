@@ -1,5 +1,5 @@
 #  *******************************************************************************
-#  * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+#  * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #  *
 #  * Licensed under the Apache License, Version 2.0 (the "License");
 #  * you may not use this file except in compliance with the License.
@@ -30,14 +30,12 @@ list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AOCLUTILS=${ZENDNNL_DEPENDS_AOCLUTI
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_JSON=${ZENDNNL_DEPENDS_JSON}")
 
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AOCLDLP=${ZENDNNL_DEPENDS_AOCLDLP}")
-list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AMDBLIS=${ZENDNNL_DEPENDS_AMDBLIS}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_ONEDNN=${ZENDNNL_DEPENDS_ONEDNN}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_LIBXSMM=${ZENDNNL_DEPENDS_LIBXSMM}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_PARLOOPER=${ZENDNNL_DEPENDS_PARLOOPER}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_FBGEMM=${ZENDNNL_DEPENDS_FBGEMM}")
 
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_AOCLDLP_INJECTED=${ZENDNNL_AOCLDLP_INJECTED}")
-list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_AMDBLIS_INJECTED=${ZENDNNL_AMDBLIS_INJECTED}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_ONEDNN_INJECTED=${ZENDNNL_ONEDNN_INJECTED}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_LIBXSMM_INJECTED=${ZENDNNL_LIBXSMM_INJECTED}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_PARLOOPER_INJECTED=${ZENDNNL_PARLOOPER_INJECTED}")
@@ -135,13 +133,6 @@ set_target_properties(zendnnl
 #   target_link_libraries(zendnnl_library
 #     INTERFACE au::aoclutils
 #     INTERFACE au::au_cpuid)
-
-#   if(ZENDNNL_DEPENDS_AMDBLIS)
-#     if(NOT ZENDNNL_AMDBLIS_INJECTED)
-#       target_link_libraries(zendnnl_library
-#         INTERFACE amdblis::amdblis_archive)
-#     endif()
-#   endif()
 
 #   if(ZENDNNL_DEPENDS_AOCLDLP)
 #     if(NOT ZENDNNL_AOCLDLP_INJECTED)
