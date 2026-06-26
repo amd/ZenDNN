@@ -225,7 +225,7 @@ status_t normalization_direct(
   const bool uses_beta  = params.use_shift &&
                           params.norm_type != norm_type_t::RMS_NORM &&
                           params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM;
-  const bool is_f16 = (params.src_dt == data_type_t::f16 ||
+  [[maybe_unused]] const bool is_f16 = (params.src_dt == data_type_t::f16 ||
                        params.dst_dt == data_type_t::f16 ||
                        (uses_gamma && params.gamma_dt == data_type_t::f16) ||
                        (uses_beta  && params.beta_dt  == data_type_t::f16));

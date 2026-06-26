@@ -1898,15 +1898,22 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
 // [8b] TestGroupMatmulAutoSelectAlgo — pin down `select_grp_matmul_algo`'s
 //      decisions on the (max_M, num_threads, num_ops) grid.
 //
-// Auto-select is a top-level capacity carve-out (rule 0) plus three
-// policy rules, evaluated in priority order:
+// Auto-select is a top-level capacity carve-out (rule 0) and a decode
+// regime carve-out (rule 0.6) that both run BEFORE the legacy phase
+// cascade, evaluated in priority order:
 //
-//   0. num_ops > kNTilePlanMaxExperts (=256) → ALGO 5   (capacity carve-out)
-//   1. num_ops ≥ num_threads                 → ALGO 3   (Qwen-style)
-//   2. num_ops ≤ kFewExpertsAlgo1 (= 8)      → ALGO 1   (Mixtral-style)
-//   3. otherwise — M-driven:
-//        prompt (max_M > kDecodeMaxM=32)     → ALGO 1
-//        decode (max_M ≤ kDecodeMaxM)        → ALGO 3   (gpt-oss-style)
+//   0.   num_ops > kNTilePlanMaxExperts (=256)          → ALGO 5   (capacity carve-out)
+//   0.6. decode (max_M ≤ kDecodeMaxM) AND
+//        active_ops > num_threads                       → ALGO 5   (per-expert; Qwen decode)
+//   1.   num_ops ≥ num_threads                          → ALGO 3   (Qwen-style)
+//   2.   num_ops ≤ kFewExpertsAlgo1 (= 8)               → ALGO 1   (Mixtral-style)
+//   3.   otherwise — M-driven:
+//          prompt (max_M > kDecodeMaxM=32)              → ALGO 1
+//          decode (max_M ≤ kDecodeMaxM)                 → ALGO 3   (gpt-oss-style)
+//
+// NOTE: rules 0 and 0.6 are STRUCTURAL — they fire regardless of the
+// phase-env pin, so clearing AUTO_{PROMPT,DECODE}_ALGO (below) only
+// restores the LEGACY behaviour for rules 1-3, not for these carve-outs.
 //
 // The matrix below covers each arrow explicitly with at least one
 // canonical workload (Qwen3-30B-A3B for rule 1, Mixtral 8x7B for
@@ -2107,12 +2114,21 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     /*num_ops=*/8, /*num_threads=*/128, /*expected_algo=*/1,
     "mixtral_tallN_E8_t128"});
 
-  // ── Rule 1 (Qwen3-30B-A3B): num_ops ≥ num_threads → ALGO 3 ──
+  // ── Rule 1 (Qwen3-30B-A3B): num_ops ≥ num_threads → ALGO 3,
+  //    EXCEPT decode rows caught by the rule-0.6 carve-out ──
   // Qwen3-30B-A3B Op1 (gate+up) shape: K=2048, N=1536 (768×2 for
   // gate+up), BF16.  128 experts, top-k=8.  Pin both prompt and
-  // decode at the two host sizes the deployment targets (64t, 128t)
-  // — at both, num_ops=128 ≥ num_threads so rule 1 fires
-  // unconditionally and ALGO 3 wins both phases at SELECTION TIME.
+  // decode at the two host sizes the deployment targets (64t, 128t).
+  //
+  // PROMPT rows (max_M > kDecodeMaxM): num_ops=128 ≥ num_threads so
+  // rule 1 selects ALGO 3 at both host sizes.
+  //
+  // DECODE rows (max_M ≤ kDecodeMaxM): the structural rule-0.6 carve-out
+  // fires BEFORE rule 1 when active_ops (=128) > num_threads — i.e. at
+  // 64t the Qwen decode frame routes to ALGO 5 (per-expert), because
+  // ALGO 3's single-round ManyExperts schedule needs one thread per
+  // active expert.  At 128t (active_ops == num_threads) rule 0.6 does
+  // NOT fire and rule 1 selects ALGO 3 as before.
   //
   // EXECUTION TIME — known fallback for the prompt rows.
   //   At N=1536, `kMinNTile=512` → `1536 / 512 = 3` tiles per expert,
@@ -2137,12 +2153,16 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     for (int nt : {
            64, 128
          }) {
-      const char *phase =
-        (M_val <= zendnnl::lowoha::matmul::kDecodeMaxM)
-        ? "decode" : "prompt";
+      const bool is_decode =
+        (M_val <= zendnnl::lowoha::matmul::kDecodeMaxM);
+      const char *phase = is_decode ? "decode" : "prompt";
+      // Decode + active_ops (=128) > num_threads → rule-0.6 carve-out
+      // → ALGO 5.  Everything else (prompt, or decode at 128t where
+      // active_ops == num_threads) → rule 1 → ALGO 3.
+      const int expected_algo = (is_decode && 128 > nt) ? 5 : 3;
       out.push_back({
         M_val, K_QW, N_QW, /*num_ops=*/128, nt,
-        /*expected_algo=*/3,
+        expected_algo,
         std::string("qwen3_30B_") + phase
         + "_E128_M" + std::to_string(M_val)
         + "_t" + std::to_string(nt)});
@@ -2159,23 +2179,29 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
   // materially slower than ALGO 5's per-expert OMP-parallel schedule
   // on many-experts decode-class shapes.
   //
-  // Three pins cover this boundary:
-  //   * E256 — exactly at capacity, still ALGO 3 (ManyExperts strategy
-  //     with multi-round scheduling handles 256 experts fine).
+  // Three pins cover this boundary.  These use PROMPT-class M
+  // (max_M=128 > kDecodeMaxM) on purpose: the structural decode
+  // carve-out (rule 0.6: decode + active_ops > num_threads → ALGO 5)
+  // would otherwise shadow the capacity carve-out at these
+  // experts-exceed-threads counts and route E256 *and* E257 to ALGO 5
+  // via rule 0.6, leaving the 256-vs-257 boundary untested.  In prompt
+  // (rule 0.6 does not apply) the boundary is isolated to rule 0:
+  //   * E256 — exactly at capacity, still ALGO 3 (rule 1: num_ops ≥
+  //     num_threads; ManyExperts handles 256 experts fine).
   //   * E257 — first value above capacity, must flip to ALGO 5.
   //   * E512 — well above capacity, must stay on ALGO 5.
   out.push_back({
-    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*M=*/128, /*K=*/2880, /*N=*/5760,
     /*num_ops=*/zendnnl::lowoha::matmul::kNTilePlanMaxExperts,
     /*num_threads=*/128, /*expected_algo=*/3,
     "many_experts_E256_t128_at_capacity"});
   out.push_back({
-    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*M=*/128, /*K=*/2880, /*N=*/5760,
     /*num_ops=*/zendnnl::lowoha::matmul::kNTilePlanMaxExperts + 1,
     /*num_threads=*/128, /*expected_algo=*/5,
     "many_experts_E257_t128_above_capacity"});
   out.push_back({
-    /*M=*/4, /*K=*/2880, /*N=*/5760,
+    /*M=*/128, /*K=*/2880, /*N=*/5760,
     /*num_ops=*/512, /*num_threads=*/128, /*expected_algo=*/5,
     "many_experts_E512_t128_above_capacity"});
 
