@@ -139,7 +139,14 @@ status_t warm_pack_all_custom_kernel_experts(
   // new state and warm normally.
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();
-  if (weight_cache_type != 1) {
+  // Warm the (always out-of-place) CK pack arena when the runtime will
+  // consult it: WC==1 (normal out-of-place), OR WC==2 under the grouped
+  // AUTO mixed-in-place mode (where CK decode is forced out-of-place and
+  // must be PRE-warmed from the raw weights BEFORE the AOCL full-weight
+  // prompt reorder mutates the buffer in place — see prepack.cpp).  The
+  // CK pack here is unconditionally out-of-place (no `in_place` arg to
+  // get_or_pack_weight_*), so it never mutates the weight.
+  if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
 

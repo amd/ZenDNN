@@ -228,11 +228,68 @@ struct matmul_params {
 
 /**
  * @brief Returns the cache mode allowed by both process and call settings.
+ *
+ * Reads the process-wide weight-cache setting LIVE on every call (not a
+ * one-time static cache): the grouped dispatcher may downgrade WC 2->1
+ * mid-process before compute, and every other reader (prepack warmers,
+ * dispatch gate, CK runtime) already observes `get_weight_cache()` live,
+ * so this stays consistent with them.  `get_weight_cache()` is a relaxed
+ * atomic load, negligible against the reorder/GEMM work that follows.
  */
 static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
-  static const int32_t env_cache_type =
+  const int32_t env_cache_type =
     zendnnl::ops::matmul_config_t::instance().get_weight_cache();
   return std::min(env_cache_type, weight_cache_type);
+}
+
+// ── Grouped-matmul weight-cache policy helpers ──────────────────────
+// Single source of truth for the two predicates that previously lived
+// open-coded across the prepack warmers, the prelude, the CK runtime,
+// and the AOCL runtime.  Keeping them here keeps WC=0/1/2 + mixed-in-place
+// gating uniform: callers ask the policy rather than re-deriving it.
+
+/**
+ * @brief True when the grouped AUTO mixed in-place mode is active.
+ *
+ * Mixed mode keeps the process weight-cache at 2 while letting ONLY the
+ * bf16 full-weight (prompt) AOCL reorder mutate the caller's weight buffer
+ * in place; every decode layout (CK, AOCL per-tile) stays out-of-place.
+ * The grouped dispatcher sets `grp_auto_mixed_inplace` when WC==2 + AUTO +
+ * PREPACK + CROSS_WARM + unlimited LRU capacity all hold.
+ */
+static inline bool is_grp_auto_mixed_inplace_active() {
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  return cfg.get_weight_cache() == 2 && cfg.get_grp_auto_mixed_inplace();
+}
+
+/**
+ * @brief True when a prepack warmer should populate the weight cache for
+ *        the given per-call cap.
+ *
+ * The runtime only consults the LRU cache for WC==1 (out-of-place) and for
+ * WC==2 under mixed in-place mode (decode layouts are warmed out-of-place
+ * before the prompt in-place mutation).  WC==0 (disabled) and pinned WC==2
+ * (no mixed flag) skip warming — the runtime either owns per-call buffers
+ * or does a lazy first-call in-place pack.
+ */
+static inline bool should_warm_weight_cache(int32_t weight_cache_type) {
+  return weight_cache_type == 1 ||
+         (weight_cache_type == 2 &&
+          zendnnl::ops::matmul_config_t::instance()
+              .get_grp_auto_mixed_inplace());
+}
+
+/**
+ * @brief Weight-cache type a warmer should pass for the bf16 full-weight
+ *        (prompt) AOCL reorder: in-place (2) only under mixed mode, else
+ *        out-of-place (1).  Decode/per-tile warmers always pass 1.
+ *        Callers must have already checked `should_warm_weight_cache()`.
+ */
+static inline int32_t warm_wct_for_full_weight_bf16(int32_t weight_cache_type) {
+  return (weight_cache_type == 2 &&
+          zendnnl::ops::matmul_config_t::instance()
+              .get_grp_auto_mixed_inplace())
+             ? 2 : 1;
 }
 
 } // namespace matmul

@@ -562,8 +562,8 @@ void flat_m_tile(
   // F2 — Active-position map.  When an expert is inactive (M[i]==0)
   // its raw index still claimed a CCD slot in the prior
   // `i % num_ccds` stripe mapping, leaving the modulus-collision
-  // CCD idle (e.g. Mixtral 8-expert MoE on 64t with one unrouted
-  // expert wasted exactly one CCD = 8 / 64 = 12.5 % of the budget).
+  // CCD idle (e.g. an 8-expert layer on 64t with one unrouted
+  // expert wastes exactly one CCD).
   // Use the active-position index instead: inactive experts get
   // `active_pos[i] = -1` and never participate in the stripe, while
   // active experts get a compact 0..active_ops-1 numbering that
@@ -578,11 +578,11 @@ void flat_m_tile(
   }
 
   // F1 — One-time HINT when flat_m_tile is pinned on a decode-class
-  // call (max_M == 1) AND the active count is so small that more
-  // than 75 % of `num_threads` will sit on the Phase-2 join barrier
-  // (Mixtral E=8 / 8 active on 128t: 120/128 = 93.75 % idle; the
-  // single-thread-per-active CCD-parallel mapping is correct for
-  // that shape, but the user almost certainly meant
+  // call (max_M == 1) AND the active count is so small that most of
+  // `num_threads` will sit on the Phase-2 join barrier (e.g. 8 active
+  // experts on 128t leaves most threads idle; the single-thread-per-
+  // active CCD-parallel mapping is correct for that shape, but the
+  // user almost certainly meant
   // ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=3 instead).
   //
   // Mechanics — gate ordering is "cheapest → most expensive" so that
@@ -750,8 +750,8 @@ void flat_m_tile(
   //   * Architectures with small total-expert count
   //     (E ≤ ~num_threads/4) can never reach
   //     `actives ≥ num_threads/2` at any batch size — `actives`
-  //     is bounded by E.  Mixtral (E=8) and GPT-OSS (E=32) fall
-  //     in this category on 128-thread systems.
+  //     is bounded by E.  Small-expert-count layers fall in this
+  //     category on high-thread-count systems.
   //   * High-BS workloads tend to smooth routing imbalance:
   //     the per-expert M stddev/mean ratio shrinks as
   //     ~1/√(BS·seq), so the `max_M ≥ 4×avg_M` skew gate gets
@@ -790,7 +790,7 @@ void flat_m_tile(
     // `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_MIN_SKEW` allowing any
     // positive int and `avg_M` bounded only by `int`, the product
     // `kHybridMinSkewX * avg_M` can overflow signed `int` (UB) on
-    // pathological tuning sweeps.  Promote one operand to `int64_t`
+    // pathological inputs.  Promote one operand to `int64_t`
     // so the comparison stays well-defined for all valid int
     // inputs.  At stock defaults (skew=4, avg_M ≤ a few thousand)
     // the cast compiles to a no-op on x86_64.
@@ -916,7 +916,7 @@ void flat_m_tile(
           // Overflow-safe ceil-div: with the F8 env knob
           // `ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET` accepting any
           // positive int, `M[idx] + kSliceTarget - 1` can overflow
-          // signed `int` for pathological tuning sweeps.  The
+          // signed `int` for pathological inputs.  The
           // ceil-div result is bounded by `M[idx]` so the int cast
           // after the ≥ 1 clamp is always safe.  See the sister
           // hardening on the single-tier `t_assign[i]` init below.
@@ -1014,16 +1014,15 @@ void flat_m_tile(
           // heavies) the tid-range layout already matches CCD ordering
           // because tid → physical core via KMP_AFFINITY compact.
           //
-          // F6 (open / unmeasured): the linear walk packs heavy teams
+          // F6 (open): the linear walk packs heavy teams
           // across CCDs by tid order.  When `ht_assign[idx]` does not
           // divide cores_per_ccd cleanly (e.g. 9 threads/heavy with
           // cores_per_ccd=8), adjacent heavy teams share the boundary
-          // CCD.  Heavy weights ≤ 16 MB fit two-per-CCD-L3 (Qwen3
-          // K=2048, M_heavy ≤ 4096); larger heavies (K=4096,
-          // M_heavy > 4096) could thrash the boundary CCD.  No
-          // production workload measured today exhibits the failure
-          // mode — recheck if future MoE deployments push past
-          // `M_heavy = 4096` on K = 4096 backbones, in which case
+          // CCD.  Heavy weights ≤ 16 MB fit two-per-CCD-L3 (e.g. K=2048,
+          // M_heavy ≤ 4096); larger heavies (K=4096, M_heavy > 4096)
+          // could thrash the boundary CCD — recheck if future
+          // deployments push past `M_heavy = 4096` on K = 4096
+          // backbones, in which case
           // switch to a CCD-aware heavy mapping (each heavy gets
           // ceil(ht_assign[idx] / cores_per_ccd) contiguous CCDs,
           // padding the last with zero threads).
@@ -1579,8 +1578,8 @@ bool flat_m_tile_pipeline_bf16(
   // We compute the EXACT byte count per thread up front (slice_M is
   // known once the planner returns).  If any thread's slice exceeds
   // the budget, eligibility fails — even forcing slice_M=1 still
-  // exceeds budget on pathological shapes (e.g. Mixtral I=14336
-  // would need `2 * 14336 * 2 = 56 KB` per row, well under any
+  // exceeds budget on pathological shapes (e.g. a large intermediate
+  // dim I=14336 needs `2 * 14336 * 2 = 56 KB` per row, well under any
   // sensible budget — so the practical bail-out trigger is when the
   // caller sets the budget unreasonably low).  Bail returns false
   // BEFORE any OMP work, so dst is untouched and the legacy two-pass

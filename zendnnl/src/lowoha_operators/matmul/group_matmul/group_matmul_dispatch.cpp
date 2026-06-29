@@ -47,7 +47,9 @@
 /// dispatch + the small serial ALGOs).
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
+#include <limits>
 #include <vector>
 
 #include <omp.h>
@@ -381,7 +383,7 @@ void parallel_per_expert(
 //     * Auto-select (`env_algo == 0`) on a shape that would
 //       otherwise pick ALGO 3: redirected to ALGO 1.  The current
 //       auto-select rule (see `auto_select_algo` below) picks
-//       ALGO 3 in two cases — `num_ops >= num_threads` (Qwen-style)
+//       ALGO 3 in two cases — `num_ops >= num_threads` (many experts)
 //       and the M-driven decode arrow (`max_M <= kDecodeMaxM`).
 //       Both honour `n_tile_safe`; on quantised inputs that fall
 //       outside the supported sub-set below, both arrows collapse
@@ -655,14 +657,14 @@ static bool check_n_tile_extra(
 //      Capacity carve-out: the N-tile planner's R3 gate rejects
 //      calls beyond `GroupNTilePlan::kMaxExperts` and silently
 //      falls back to its Sequential strategy (one expert at a
-//      time, full thread team each).  Sequential is materially
-//      slower than ALGO 5 (per-expert parallel, dynamic OMP
-//      schedule) on every num_ops > 256 shape we have measured —
-//      e.g., a hypothetical 300-expert MoE on 128 threads would
-//      run ~300 serial full-team matmuls instead of ~3 waves of
-//      128 parallel per-expert tasks.  Phase env cannot override
-//      this — the planner's R3 gate is structural.  ALGO 5 has no
-//      m_tile/n_tile safety dependency so it covers unsafe paths too.
+//      time, full thread team each).  ALGO 5 (per-expert parallel,
+//      dynamic OMP schedule) instead runs experts in parallel waves,
+//      so it is the better fit beyond that capacity — e.g. a
+//      300-expert layer on 128 threads runs in parallel per-expert
+//      waves instead of ~300 serial full-team matmuls.  Phase env
+//      cannot override this — the planner's R3 gate is structural.
+//      ALGO 5 has no m_tile/n_tile safety dependency so it covers
+//      unsafe paths too.
 //
 //   0.6. DECODE, active_ops > num_threads → ALGO 5 (parallel_per_expert).
 //      Decode-class only (`max_M ≤ kDecodeMaxM`).  `active_ops` counts the
@@ -687,48 +689,43 @@ static bool check_n_tile_extra(
 //      n_tile_safe clamps the global ALGO env path applies in
 //      `select_grp_matmul_algo`.  The defaults give an out-of-the-
 //      box auto policy: ALGO 2 (flat_m_tile + multi-tier hybrid +
-//      wide-N fallback) for prompt — the M-tile multi-tier captures
-//      the Qwen3-class skewed-M speedup, while the wide-N fallback
-//      keeps Mixtral / GPT-OSS light frames at parity with the
-//      legacy ALGO 1 path; safety clamp falls back to ALGO 1 when
-//      `!m_tile_safe` — and ALGO 3 (N-tile rounds + CK) for decode,
-//      the measured decode winner across every benchmarked MoE
-//      workload.  Set `AUTO_PROMPT_ALGO=1` to restore the legacy
-//      sequential_experts prompt path, or the env to `0` for the
-//      legacy 3-rule cascade.
+//      wide-N fallback) for prompt — the M-tile multi-tier targets
+//      skewed-M prompt shapes, while the wide-N fallback keeps
+//      few-expert light frames on the legacy ALGO 1 path; safety
+//      clamp falls back to ALGO 1 when `!m_tile_safe` — and ALGO 3
+//      (N-tile rounds + CK) for decode.  Set `AUTO_PROMPT_ALGO=1` to
+//      restore the legacy sequential_experts prompt path, or the env
+//      to `0` for the legacy 3-rule cascade.
 //
 //   2. LEGACY RULES (phase env == 0):
 //
 //      a. num_ops ≥ num_threads               → ALGO 3
-//         (Qwen3-30B-A3B-class: 128 experts on 64-128t hosts.  At
-//          this expert/thread ratio every expert sees a thin per-
-//          expert team and N-tile's round-based scheduling
-//          consistently outperforms ALGO 1's serial-experts-with-
+//         (many experts: at this expert/thread ratio every expert
+//          sees a thin per-expert team and N-tile's round-based
+//          scheduling fits better than ALGO 1's serial-experts-with-
 //          full-team approach.  Honors n_tile_safe — quantised paths
 //          fall back to ALGO 1.)
 //
 //      b. num_ops ≤ kFewExpertsAlgo1 (=8)     → ALGO 1
-//         (Mixtral-8x*-class: 8 experts.  Per-expert weight footprint
-//          is large enough that the full-weight AOCL DLP cache key
-//          + serial expert iteration amortises DRAM traffic better
-//          than N-tile's per-thread column slices on a thin per-
-//          expert team.)
+//         (few experts: the per-expert weight footprint is large
+//          enough that the full-weight AOCL DLP cache key + serial
+//          expert iteration amortises DRAM traffic better than
+//          N-tile's per-thread column slices on a thin per-expert
+//          team.)
 //
 //      c. otherwise (9 ≤ num_ops < num_threads) — M-driven:
 //           prompt (max_M >  kDecodeMaxM)     → ALGO 1
 //           decode (max_M ≤  kDecodeMaxM)     → ALGO 3
-//         (gpt-oss-20B-class: ops typically 9..32 on 64-128t hosts.
-//          Prompt uses ALGO 1's thread-count-stable full-weight cache
-//          key; decode uses ALGO 3's custom-kernel + per-tile path
-//          which is the measured win on the MoE decode hot path.
-//          N-tile's internal Sequential-strategy fallback handles
-//          narrow-N shapes where the planner can't satisfy
-//          `tiles_per_expert ≥ min`.)
+//         (moderate experts: prompt uses ALGO 1's thread-count-stable
+//          full-weight cache key; decode uses ALGO 3's custom-kernel
+//          + per-tile path.  N-tile's internal Sequential-strategy
+//          fallback handles narrow-N shapes where the planner can't
+//          satisfy `tiles_per_expert ≥ min`.)
 //
 // The historical large-weight wide-N prompt carve-out and weight-class
 // branching are intentionally dropped — the simpler M-driven default
-// preserves gpt-oss prompt routing, gives Mixtral and Qwen explicit
-// per-arch arrows, and the auto-selector now reads as a 3-rule table.
+// keeps the same routing with explicit expert-count arrows, and the
+// auto-selector now reads as a 3-rule table.
 // Callers that need a non-default decision on a specific deployment
 // can still pin via `ZENDNNL_GRP_MATMUL_ALGO` (global pin) or via
 // `ZENDNNL_GRP_MATMUL_AUTO_{PROMPT,DECODE}_ALGO` (per-phase pin while
@@ -760,12 +757,12 @@ static int auto_select_algo(
   const int max_M = *std::max_element(M.begin(), M.end());
   const bool is_decode = (max_M <= kDecodeMaxM);
 
-  // Rule 0.5 — FEW-EXPERTS ALGO 2 PREFERENCE (Mixtral-class default).
+  // Rule 0.5 — FEW-EXPERTS ALGO 2 PREFERENCE (few-experts default).
   // TOTAL expert count (framework `total_matmul` when set, else the
   // active op count) ≤ kFewExpertsAlgo2Pref → ALGO 2 for BOTH phases.
-  // ALGO 2 (flat_m_tile) is the measured winner on Mixtral-8x* prompt
-  // AND decode, so fold that benefit into the out-of-the-box AUTO
-  // policy.  This is a DEFAULT refinement: it fires only when the
+  // ALGO 2 (flat_m_tile) suits few-expert layers in both prompt and
+  // decode, so fold that into the out-of-the-box AUTO policy.  This is
+  // a DEFAULT refinement: it fires only when the
   // phase env relevant to THIS call is NOT explicitly pinned — an
   // explicit `AUTO_{PROMPT,DECODE}_ALGO` (including `=0` for the legacy
   // cascade) still wins via Rule 1 below.  Honours the m_tile_safe
@@ -847,6 +844,28 @@ static int auto_select_algo(
         static_cast<int>(std::count_if(M.begin(), M.end(),
                                         [](int m) { return m > 0; }));
     if (active_ops > num_threads) {
+      // DecodeDynamic override for the experts-exceed-threads decode
+      // regime.  When the N-tile strategy is DecodeDynamic-capable —
+      // either FORCED (`ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`) or the
+      // smart-AUTO mode (`=0`) — keep this many-experts decode regime on
+      // ALGO 3 so the CCD-cohesive DecodeDynamic pool can engage in
+      // `plan_group_n_tile` (its gate `active_ops >= 4*num_ccds` is
+      // trivially met here since `active_ops > num_threads >=
+      // num_ccds`).  DecodeDynamic has no `active_ops <= num_threads`
+      // ceiling (it maps whole experts onto CCDs, not thread-id onto
+      // expert), and on the measured Qwen-class decode shapes it beats
+      // ALGO 5's flat per-expert pool by ~1.2-1.5x.  Honours
+      // `n_tile_safe` — quantised / unsafe shapes that ALGO 3 cannot
+      // serve still fall through to ALGO 5.
+      //
+      // The production DEFAULT (strategy 2 = rounds) and an explicit
+      // `=1` (DecodeD) are NOT rerouted — they keep ALGO 5 exactly as
+      // before, so the default routing is untouched until strategy 0
+      // becomes the default.
+      const int nts = get_grp_n_tile_strategy();
+      if ((nts == 3 || nts == 0) && n_tile_safe) {
+        return 3;
+      }
       return 5;
     }
   }
@@ -904,7 +923,7 @@ static int auto_select_algo(
 
   // Rule 2 — LEGACY RULES (phase env == 0).
   //
-  // 2a. num_ops ≥ num_threads (Qwen-style).  Highest of the three
+  // 2a. num_ops ≥ num_threads (many experts).  Highest of the three
   //     legacy rules so an 8-expert deployment on a ≤ 8-thread host
   //     (rare but possible for local dev / single-CCD profiling)
   //     routes here, not to rule 2b.
@@ -923,7 +942,7 @@ static int auto_select_algo(
     return n_tile_safe ? 3 : 1;
   }
 
-  // 2b. num_ops ≤ kFewExpertsAlgo1 (Mixtral-style).
+  // 2b. num_ops ≤ kFewExpertsAlgo1 (few experts).
   if (num_ops <= kFewExpertsAlgo1) {
     return 1;
   }
@@ -1050,6 +1069,140 @@ bool group_matmul_run_parallel_dispatch(
   const char **gemm_mode_out,
   grp_matmul_gated_act_t fused_act,
   data_type_t act_dtype) {
+
+  // ── WEIGHT_CACHE=2 (in-place) safety downgrade for grouped matmul ─────
+  // In-place reorder/pack mutates the caller's weight buffer into a
+  // backend-/layout-specific blocked form, so it is only safe when a
+  // SINGLE layout ever touches a given weight buffer.  AUTO scheduling
+  // violates that on the SAME W13/W2 buffers: the prompt phase routes to
+  // an AOCL full-weight reorder while decode routes to AOCL per-tile or
+  // the custom-kernel pack — two layouts over one buffer (corruption).
+  // So under AUTO we take ONE of two deterministic verdicts (detailed at
+  // the (A)/(B) branch below):
+  //   (A) keep WC=2 in a MIXED in-place mode when it is provably safe
+  //       (PREPACK + CROSS_WARM + unlimited LRU pre-warm every out-of-
+  //       place layout from raw W before the single in-place prompt
+  //       mutation), or
+  //   (B) downgrade the process-wide cache mode to out-of-place (1)
+  //       otherwise — a mirror of the single-matmul guard in
+  //       `lowoha_matmul_utils.cpp`.
+  // Both verdicts are derived from process-constant env, so the decision
+  // (and its one-shot log) is stable for the rest of the run.
+  //
+  // PINNED algos keep a single layout per weight and so KEEP WC=2:
+  //   * ALGO 1/2/4/5 — one AOCL reorder layout per buffer, via AOCL's
+  //     own in-place path (aocl_kernel.cpp, size-gated with an out-of-
+  //     place fall-back when the blocked layout exceeds the plain size).
+  //   * ALGO 3 + CUSTOM_KERNEL off — pure AOCL DLP, single layout.
+  //   * ALGO 3 + CUSTOM_KERNEL on — made safe in the pack layer:
+  //     bf16/even-K packs IN PLACE into the (single-consumer) weight
+  //     buffer; int8 (extra compensation row) and odd-K bf16 (VNNI
+  //     K-pair pad) fall back to an out-of-place cache that never
+  //     mutates the weight (see prepare_for_call +
+  //     get_or_pack_weight_bf16).
+  if (matmul_config_t::instance().get_weight_cache() == 2) {
+    // Only AUTO (env_algo==0) mixes layouts on one buffer; pinned algos
+    // are left at WC=2 (see the route table above).
+    const int wc_env_algo = get_grp_matmul_algo();
+    if (wc_env_algo == 0) {
+      // AUTO has two outcomes for WC=2:
+      //
+      //  (A) MIXED in-place (preferred when safe) — keep WC=2 and route
+      //      asymmetrically: the AOCL full-weight (prompt) reorder mutates
+      //      the weight buffer IN PLACE, while CK decode and AOCL per-tile
+      //      decode stay OUT-OF-PLACE.  This is only correct because
+      //      cross-warm prefetches every out-of-place layout from the RAW
+      //      weights BEFORE the single in-place mutation, and nothing
+      //      re-reads raw W afterwards.  Preconditions:
+      //        * PREPACK on   — cross-warm runs upfront (before compute);
+      //        * CROSS_WARM on — both phases' layouts are warmed on the
+      //          first call;
+      //        * CUSTOM_KERNEL on — decode runs through the CK pack, which
+      //          cross-warm fully pre-warms (regime 3) from raw W.  With CK
+      //          OFF, decode falls to the AOCL per-tile path whose tight
+      //          (nr_align=2) variant cross-warm leaves lazy, so a decode
+      //          after the prompt mutation could reorder from the already-
+      //          mutated buffer and corrupt.  Requiring CK keeps the one
+      //          in-place-mutated layout class (bf16 even-K) on the warmed
+      //          CK decode path;
+      //        * tight fused-MoE layout (FUSED_MOE_TIGHT != 0) — a WIDE fused
+      //          layout makes `flat_n_tile` DISABLE the custom kernel even
+      //          with CK enabled, routing decode through the AOCL per-tile
+      //          path that would re-read the already-mutated buffer.  This is
+      //          required UNCONDITIONALLY (NOT gated on the per-call
+      //          fused_act): the WC=2 verdict is process-wide and sticky, so
+      //          it must derive only from process-constant env.  Keying it on
+      //          a per-call fused_act would let a non-fused call ENABLE
+      //          in-place mutation and a later wide-fused call flip the
+      //          verdict + downgrade 2->1 AFTER weights are mutated, so any
+      //          out-of-place reorder that then reads them as raw corrupts;
+      //        * unlimited LRU capacity — the in-place sentinel can never
+      //          be evicted and lazily re-derived from the mutated buffer.
+      //      The grouped dispatcher sets `grp_auto_mixed_inplace`; the CK
+      //      runtime and the prepack warmers consult it (see
+      //      custom_kernel/dispatch.cpp + prepack/prepack.cpp).
+      //
+      //  (B) DOWNGRADE to out-of-place (1) — the historical safe fallback
+      //      whenever (A)'s preconditions do not hold.
+      //
+      // Both writes are IDEMPOTENT (every AUTO call re-derives the same
+      // deterministic verdict from process-constant env, so concurrent
+      // cold-start calls converge); only the log lines are one-shot.
+      const bool mixed_eligible =
+          get_grp_matmul_prepack()
+          && get_grp_matmul_cross_warm()
+          && get_grp_matmul_custom_kernel()
+          && get_grp_matmul_fused_moe_tight() != 0
+          && matmul_config_t::instance().get_lru_cache_capacity()
+                 == std::numeric_limits<uint32_t>::max();
+      if (mixed_eligible) {
+        matmul_config_t::instance().set_grp_auto_mixed_inplace(true);
+        static std::atomic<bool> s_wc2_mixed_announced{false};
+        if (!s_wc2_mixed_announced.exchange(true, std::memory_order_relaxed)) {
+          apilog_info(
+              "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 AUTO "
+              "mixed-in-place ENABLED (prepack+cross_warm+custom_kernel on, "
+              "unlimited LRU capacity): AOCL full-weight prompt reorder "
+              "mutates the weight "
+              "buffer in place; CK / AOCL per-tile decode stay out-of-place, "
+              "pre-warmed from raw weights before the mutation.");
+        }
+      } else {
+        // Store weight_cache=1 before clearing the mixed-mode flag so THIS
+        // thread's own later reads never see (weight_cache==2, mixed false).
+        // NOTE: both are RELAXED atomics on independent locations, so this
+        // program order is NOT a cross-thread visibility guarantee — another
+        // thread may observe the two updates in either order.  Correctness
+        // does not rely on it: the AUTO verdict is deterministic from
+        // process-constant env, so for an ineligible config the mixed flag is
+        // never set true (the eligible branch above is never taken); this
+        // branch only ever clears an already-false flag and pins WC=1.  The
+        // first-call cold-start window (before any thread runs this downgrade)
+        // is covered by the framework's single warm-up call — see the
+        // mixed-mode contract in the header block above.
+        matmul_config_t::instance().set_weight_cache(1);
+        matmul_config_t::instance().set_grp_auto_mixed_inplace(false);
+        static std::atomic<bool> s_wc2_downgrade_warned{false};
+        if (!s_wc2_downgrade_warned.exchange(true, std::memory_order_relaxed)) {
+          apilog_warning(
+              "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 (in-place) is "
+              "unsafe under AUTO scheduling (env_algo=0) without "
+              "prepack+cross_warm+custom_kernel and unlimited LRU capacity.  "
+              "Downgrading "
+              "process-wide to out-of-place (weight_cache_type=1) for the "
+              "rest of the run; kernel selection unchanged.");
+        }
+      }
+    } else {
+      // Pinned ALGO (1..5) under WC=2: a single reorder layout owns each
+      // weight buffer, so the backends' normal in-place path is already
+      // safe.  Mixed mode is AUTO-only — clear the flag deterministically
+      // so a value left set by a prior AUTO run cannot leak into the
+      // pinned path (which would wrongly force the CK pack out-of-place).
+      // env_algo is process-constant, so all threads agree on this branch.
+      matmul_config_t::instance().set_grp_auto_mixed_inplace(false);
+    }
+  }
 
   const int use_algo = select_grp_matmul_algo(layout, M, N, K, params,
                        num_threads);

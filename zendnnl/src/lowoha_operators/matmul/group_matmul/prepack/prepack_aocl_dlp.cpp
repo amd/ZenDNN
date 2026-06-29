@@ -73,8 +73,9 @@ using zendnnl::ops::matmul_config_t;
 //           undersized tail-slot stride
 //        4) is_weights_const flag says "variable weight"
 //        5) per-tile aligned_n_split returns n_tile <= 0
-//     `reorderAndCacheWeights<int16_t>` itself returns `true`
-//     unconditionally today (see aocl_kernel.cpp:1460-1528), so a
+//     `reorderAndCacheWeights<int16_t>` returns `true` for the
+//     out-of-place path this warmer takes (see aocl_kernel.cpp
+//     `reorderAndCacheWeights`), so a
 //     post-pack "return false" branch is unreachable — we used to
 //     have a dead `else ++stats.skipped_invalid;` after the call,
 //     dropped to keep the wiring honest.
@@ -110,9 +111,18 @@ status_t warm_pack_all_aocl_dlp_experts(
   // log line surfaces "no work attempted" rather than "all skipped".
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();
-  if (weight_cache_type != 1) {
+  // Warm the full-weight AOCL DLP cache when the runtime consults it:
+  // WC==1 (out-of-place), OR WC==2 under the grouped AUTO mixed-in-place
+  // mode.  In mixed mode this full-weight (prompt) reorder is THE single
+  // in-place mutator of the weight buffer — it runs LAST in the prepack
+  // sequence (after the out-of-place CK / per-tile decode warms), so by
+  // the time it mutates W every other layout has already been packed from
+  // the raw weights.  `warm_wct` selects in-place (2) vs out-of-place (1)
+  // for `reorderAndCacheWeights` accordingly.
+  if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
+  const int32_t warm_wct = warm_wct_for_full_weight_bf16(weight_cache_type);
 
   // Reachable-entry bound: `[0, bound)` is the largest range every
   // metadata vector covers.  Compute it once up front so the
@@ -189,18 +199,21 @@ status_t warm_pack_all_aocl_dlp_experts(
                    /*extra_input_hash=*/0);
 
     void *reordered_unused = nullptr;
-    // `reorderAndCacheWeights<int16_t>` returns `true` unconditionally
-    // today (aocl_kernel.cpp:1460-1528); the dead `else ++skipped`
-    // branch was dropped — see file-level counter semantics block.
-    (void)reorderAndCacheWeights<int16_t>(
+    // Honour the return.  The out-of-place (weight_cache_type=1) path
+    // returns true, but the mixed-mode in-place path (warm_wct=2) can
+    // return false (e.g. interim + fallback aligned_alloc both OOM).  Count
+    // a failed reorder as skipped_invalid — matching the sym-quant warmers
+    // and the prepack counter contract — instead of silently as packed_ok.
+    const bool warmed = reorderAndCacheWeights<int16_t>(
         key, weight[i], reordered_unused, K[i], N[i], ldb[i],
         /*order=*/'r',
         /*trans=*/(transB[i] ? 't' : 'n'),
         /*mem_format_b=*/'n',
         aocl_get_reorder_buf_size_bf16bf16f32of32,
         aocl_reorder_bf16bf16f32of32,
-        /*weight_cache_type=*/1);
-    ++stats.packed_ok;
+        /*weight_cache_type=*/warm_wct);
+    if (warmed) ++stats.packed_ok;
+    else        ++stats.skipped_invalid;
   }
 
   return status_t::success;
@@ -239,7 +252,12 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
   // Production-cache gate — same as the bf16 full-weight warmer.
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();
-  if (weight_cache_type != 1) {
+  // Out-of-place warmer: also run under WC==2 in the grouped AUTO
+  // mixed-in-place mode so this layout is pre-warmed from the RAW weights
+  // before the bf16 full-weight AOCL in-place mutation.  Stays
+  // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
+  // weight_cache_type=1); only the bf16 full-weight warmer mutates W.
+  if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
 
@@ -384,7 +402,12 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
   // consult the LRU cache, so warming would be wasted CPU + memory.
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();
-  if (weight_cache_type != 1) {
+  // Out-of-place warmer: also run under WC==2 in the grouped AUTO
+  // mixed-in-place mode so this layout is pre-warmed from the RAW weights
+  // before the bf16 full-weight AOCL in-place mutation.  Stays
+  // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
+  // weight_cache_type=1); only the bf16 full-weight warmer mutates W.
+  if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
 
@@ -500,9 +523,10 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
                      /*extra_input_hash=*/0);
 
       void *reordered_unused = nullptr;
-      // `reorderAndCacheWeights<int16_t>` returns `true` unconditionally
-      // today (aocl_kernel.cpp:1460-1528); the dead `else ++skipped`
-      // branch was dropped — see file-level counter semantics block.
+      // `reorderAndCacheWeights<int16_t>` returns `true` on the out-of-place
+      // (weight_cache_type=1) path this per-tile warmer always takes; the
+      // dead `else ++skipped` branch was dropped — see file-level counter
+      // semantics block.
       (void)reorderAndCacheWeights<int16_t>(
           key, w_tile, reordered_unused, K[i], n_tile, ldb[i],
           /*order=*/'r',
@@ -561,7 +585,12 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
 
   const int32_t weight_cache_type =
       matmul_config_t::instance().get_weight_cache();
-  if (weight_cache_type != 1) {
+  // Out-of-place warmer: also run under WC==2 in the grouped AUTO
+  // mixed-in-place mode so this layout is pre-warmed from the RAW weights
+  // before the bf16 full-weight AOCL in-place mutation.  Stays
+  // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
+  // weight_cache_type=1); only the bf16 full-weight warmer mutates W.
+  if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
 

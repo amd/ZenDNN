@@ -82,10 +82,9 @@ inline constexpr int    kDecodeMaxM   = 32;                // per-expert M ≤ t
 inline constexpr int    kMinNTile     = 512;               // prompt-path per-thread N
 
 // DQ-INT8 sibling of `kMinNTile`.  Today set equal to the bf16
-// value so the dtype-aware split is a structural no-op; final
-// value baked from the D.1 tuning sweep.  Independent constants
-// let D.1 retune the int8 family without perturbing bf16 prompt
-// thresholds.
+// value so the dtype-aware split is a structural no-op.  Kept as an
+// independent constant so the int8 family can be retuned without
+// perturbing the bf16 prompt thresholds.
 inline constexpr int    kMinNTileInt8 = 512;
 
 // NOTE: `kDecodeNTile` (decode-path per-thread N, default 256) now
@@ -99,25 +98,23 @@ inline constexpr int    kMinNTileInt8 = 512;
 // NOTE: `kMediumWeight` (64 MB / expert, "referenced by N-tile
 // planner") was unused throughout the tree — no production or test
 // site read it on either `origin/main` or this branch — so it was
-// dropped instead of moved.  Re-introduce only with a measured
-// consumer.
+// dropped instead of moved.  Re-introduce only when a consumer needs
+// it.
 
 /// Few-experts threshold for ALGO 0 auto-select rule 2.  Workloads
 /// with `num_ops ≤ kFewExpertsAlgo1` AND `num_ops < num_threads`
 /// (rule 1's strict `>=` would otherwise win on a ≤ 8-thread host)
 /// pin to ALGO 1 (sequential experts with full-team AOCL DLP) for
-/// prompt AND decode.  Targets Mixtral-8x*-class deployments (8
-/// experts), where per-expert weight footprint is large enough that
-/// the full-team sequential path beats N-tile's column slices on a
-/// thin per-expert thread budget.  Bump only with a measured perf
-/// justification — most few-expert MoEs in the wild stay at exactly 8.
+/// prompt AND decode.  Targets few-expert layers, where the per-expert
+/// weight footprint is large enough that the full-team sequential path
+/// is a better fit than N-tile's column slices on a thin per-expert
+/// thread budget.
 ///
-/// The `num_ops < num_threads` precondition is satisfied for every
-/// realistic Mixtral deployment (8 experts on 32–128t hosts always
-/// hits rule 2).  An 8-expert workload on a ≤ 8-thread host (rare —
-/// only seen on local dev / single-CCD profiling) instead falls to
-/// rule 1 and routes to ALGO 3.  Documented in `auto_select_algo`'s
-/// rule precedence comment in `group_matmul_dispatch.cpp`.
+/// The `num_ops < num_threads` precondition holds for a few-expert
+/// layer on typical multi-CCD hosts.  An 8-expert workload on a
+/// ≤ 8-thread host instead falls to rule 1 and routes to ALGO 3.
+/// Documented in `auto_select_algo`'s rule precedence comment in
+/// `group_matmul_dispatch.cpp`.
 inline constexpr int    kFewExpertsAlgo1 = 8;
 
 /// Few-experts threshold for the ALGO 0 default-policy ALGO 2 preference.
@@ -126,10 +123,10 @@ inline constexpr int    kFewExpertsAlgo1 = 8;
 /// `total_matmul` when set, else the active op count) is `≤
 /// kFewExpertsAlgo2Pref` routes to ALGO 2 (flat_m_tile) for BOTH prompt
 /// and decode — overriding the per-phase defaults (prompt 2 / decode 3).
-/// Targets Mixtral-8x*-class deployments (8 experts), where ALGO 2 is the
-/// measured winner across prompt AND decode.  An explicit
-/// `AUTO_{PROMPT,DECODE}_ALGO` pin (including `=0` to request the legacy
-/// cascade) still wins — this is a DEFAULT refinement, not a hard clamp.
+/// Targets few-expert layers, where ALGO 2 fits both prompt and decode.
+/// An explicit `AUTO_{PROMPT,DECODE}_ALGO` pin (including `=0` to request
+/// the legacy cascade) still wins — this is a DEFAULT refinement, not a
+/// hard clamp.
 /// Falls back to ALGO 1 when the shape is not m_tile_safe.
 inline constexpr int    kFewExpertsAlgo2Pref = 8;
 
@@ -296,39 +293,32 @@ inline int get_grp_matmul_algo() {
 // `select_grp_matmul_algo` in `group_matmul_dispatch.cpp`).
 //
 // Defaults — chosen to give a sensible out-of-the-box auto policy
-// that captures the measured-best path per phase across the MoE
-// envelope we benchmark:
+// per phase:
 //
 //   AUTO_PROMPT_ALGO default = 2 (flat_m_tile, the M-tile planner).
-//     With the M-tile multi-tier hybrid (engaged on Qwen3-class
-//     skewed prompts, gated by `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=0`)
-//     and the wide-N memory-bound fallback (always-on; engages on
+//     With the M-tile multi-tier hybrid (engaged on skewed-M prompts,
+//     gated by `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=0`) and the wide-N
+//     memory-bound fallback (always-on; engages on
 //     `total_need * 2 <= num_threads`), ALGO 2 covers the prompt
-//     envelope across the benchmarked MoE workloads:
-//       * Qwen3-30B-A3B prompt: multi-tier hybrid path → 2.33×
-//         heavy-cluster mean speedup (108-frame sweep @ 128t).
-//       * Mixtral / GPT-OSS prompt-light frames: wide-N fallback
-//         routes to sequential-with-full-team — equivalent to the
-//         legacy ALGO 1 path on these shapes.
-//       * Other prompt frames: ALGO 2 single-tier Phase 2
-//         (M-weighted distribution) — the existing M-tile baseline.
+//     envelope:
+//       * skewed-M prompt: multi-tier hybrid path.
+//       * few-expert / light prompt frames: wide-N fallback routes to
+//         sequential-with-full-team — equivalent to the legacy ALGO 1
+//         path on these shapes.
+//       * other prompt frames: ALGO 2 single-tier Phase 2 (M-weighted
+//         distribution) — the existing M-tile baseline.
 //     Safety clamp: when `!m_tile_safe` the auto path falls back
 //     to ALGO 1, matching the global `ALGO=2` env path.  Set
 //     `AUTO_PROMPT_ALGO=1` to restore the legacy sequential_experts
-//     default for A/B regression testing or as an escape hatch on
-//     workloads where ALGO 2 single-tier Phase 2 is not yet
-//     validated against ALGO 1's full-team weight cache.
+//     default as an escape hatch.
 //
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile / N-tile rounds path).
-//     ALGO 3 + CK rounds is the measured decode winner across every
-//     benchmarked MoE workload (Qwen3-30B-A3B, GPT-OSS, Mixtral
-//     8x7B).  Safety clamp: when `!n_tile_safe` the auto path falls
-//     back to ALGO 1, matching the global `ALGO=3` env path.
+//     Safety clamp: when `!n_tile_safe` the auto path falls back to
+//     ALGO 1, matching the global `ALGO=3` env path.
 //
 // Set the env to `0` explicitly to restore the legacy 3-rule cascade
-// for the matching phase (escape hatch for A/B regression testing
-// against pre-default-flip behaviour).  Set to a specific algo
-// (1..5) to pin that phase to a single ALGO for tuning.
+// for the matching phase.  Set to a specific algo (1..5) to pin that
+// phase to a single ALGO.
 //
 // Structural gates that ALWAYS fire (independent of phase env):
 //   * R0 capacity (`num_ops > kNTilePlanMaxExperts=256`) → ALGO 5.
@@ -376,9 +366,8 @@ inline int get_grp_matmul_auto_prompt_algo() {
 //   the call classifies as DECODE (`max_M ≤ kDecodeMaxM`).  Value 0
 //   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
 //   the decode phase (with the same safety clamps as the prompt
-//   path).  Default 3 (N-tile rounds + CK) is the new out-of-the-
-//   box decode choice — the measured decode winner across the MoE
-//   envelope we benchmark.
+//   path).  Default 3 (N-tile rounds + CK) is the out-of-the-box
+//   decode choice.
 inline std::atomic<int> &test_api_auto_decode_algo_override();
 inline int get_grp_matmul_auto_decode_algo() {
   constexpr int kDefault = 3;
@@ -476,12 +465,12 @@ inline bool a3_can_fuse_act(grp_matmul_gated_act_t act,
 //         planner's choice is shape-independent and the AOCL DLP
 //         per-tile cache key set stays stable across decode
 //         iterations.  Set "0" to restore the original auto
-//         behaviour for A/B comparisons or shape exploration.
+//         behaviour for comparisons or shape exploration.
 //     2 = force multi-round legacy fixed-shape (batch experts × ccd_size
 //         threads each, possibly wasteful tail round).
 //     3 = force balanced (n_rounds = ceil(num_ops / target_batch),
 //         experts evenly redistributed across rounds).
-//   Mid-process env changes have no effect; relaunch for A/B.
+//   Mid-process env changes have no effect; relaunch to change it.
 // ── Test-only overrides for cached env getters ─────────────────────
 //
 // The N_ROUNDS / CUSTOM_KERNEL / CUSTOM_KERNEL_N_TILE getters cache
@@ -503,7 +492,7 @@ namespace test_api {
 inline std::atomic<int> s_grp_n_rounds_mode_override{-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_override{-1};
 // DQ-INT8 CK sub-knob — independent from the master CK switch so
-// tests / deployments can A/B the int8 fast path without
+// tests / deployments can toggle the int8 fast path without
 // disturbing the bf16 path.  Sentinel `-1` = no override (env / default).
 inline std::atomic<int> s_grp_matmul_custom_kernel_int8_override{-1};
 // NOTE: `s_grp_matmul_custom_kernel_n_tile_override` and
@@ -672,8 +661,8 @@ inline constexpr bool kDecodeTileAbOn = true;
 
 // ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT = { "0", "1" } — cached, default 1.
 //   Fused MoE Op1 → act → Op2 arena layout: tight [M, I] when 1,
-//   wide [M, 2I] when "0".  Tight halves Op2's src DRAM traffic and
-//   is neutral-or-positive on every measured workload.  The dispatcher
+//   wide [M, 2I] when "0".  Tight halves Op2's src DRAM traffic.
+//   The dispatcher
 //   only engages tight when ALL of: act is a CK-fusible gated
 //   activation (swiglu_oai_mul, silu_and_mul, gelu_and_mul — see
 //   `a3_can_fuse_act` for the live predicate; silu and gelu require
@@ -750,7 +739,7 @@ inline bool get_grp_matmul_custom_kernel() {
 // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = { "0", "1" } — cached, default ON.
 //   Independent sub-switch for the hand-rolled AVX-512 VNNI int8
 //   microkernel (`custom_kernel/ukernel/int8_microkernel.{hpp,cpp}`).
-//   Lets deployments A/B the DQ-INT8 fast path against the AOCL DLP
+//   Lets deployments compare the DQ-INT8 fast path against the AOCL DLP
 //   `aocl_gemm_s8s8s32obf16_sym_quant` reference without affecting
 //   the bf16 CK path.
 //
@@ -792,6 +781,15 @@ inline bool get_grp_matmul_custom_kernel_int8() {
 //   still arrives at decode with both regimes warm — no first-decode-
 //   call prepack spike.
 //
+//   Auto-select-only: cross-warm fires exclusively under
+//   `ZENDNNL_GRP_MATMUL_ALGO=0` (AUTO).  When a single ALGO is pinned
+//   (1..5) the same scheduling path serves every call, so the
+//   cross-warm target regime (which belongs to a DIFFERENT ALGO) would
+//   never be queried — the helper short-circuits and the pinned path
+//   prepacks only what it itself uses.  A pinned-ALGO fallback (e.g. an
+//   unsafe-shape safety clamp to ALGO 1) takes a one-time lazy reorder
+//   on first miss instead — not performant, but correct and bounded.
+//
 //   Cross-warm decision is `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL`-aware:
 //
 //     * `CK=1` (custom-kernel on, production decode path):
@@ -822,7 +820,7 @@ inline bool get_grp_matmul_custom_kernel_int8() {
 //   OFF — reverts to the strict per-ALGO regime populated by
 //   `prepack_for_algo_X` itself: each ALGO only warms what it would
 //   itself use at runtime.  Use this when memory is constrained or
-//   for A/B comparison with the pre-cross-warm behaviour.
+//   to compare against the pre-cross-warm behaviour.
 //
 //   Independent of `ZENDNNL_GRP_MATMUL_PREPACK`: the master knob
 //   short-circuits everything to a no-op; this knob only controls
@@ -969,8 +967,7 @@ inline bool get_grp_matmul_prepack() {
 // ──────────────────────────────────────────────────────────────────────
 
 // ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE = { "0", "1" } — cached, default ON.
-//   "0" restores the legacy dynamic plan topology (cache thrash)
-//   for A/B benchmarking.
+//   "0" restores the legacy dynamic plan topology (cache thrash).
 inline bool get_grp_matmul_aocl_stable_ntile() {
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE");

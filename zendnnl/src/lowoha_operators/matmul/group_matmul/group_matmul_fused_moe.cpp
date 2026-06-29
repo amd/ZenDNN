@@ -85,6 +85,7 @@
 ///     scratch and writing back into the caller's `src[]` buffer.
 ///   * Mixed (one filled, one empty) is rejected by the validator.
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <string>
@@ -435,7 +436,7 @@ inline status_t validate_fused_moe_inputs(
       // (G1) is the legacy check (preserved verbatim below).  (G2)
       // is new: it elevates the validator from "wide-enough stride"
       // to "consistent stride AND wide enough", which catches the
-      // gpt-oss / Mixtral / typical-MoE silent-corruption path where
+      // typical-MoE silent-corruption path where
       // K_in == hidden_dim but N_down can be smaller (rare) or
       // larger (with bias projections / future variants).  When this
       // gate trips, the validator emits a single `log_error` so the
@@ -900,6 +901,29 @@ inline status_t run_fused_moe_legacy_two_pass(
     if (pass1_quant_st != status_t::success) return pass1_quant_st;
   }
 
+  // Per-op timing instrumentation (diagnostic; OFF by default).  When
+  // ZENDNNL_GRP_MATMUL_OPTIME=1 we wrap each pass's executor with a
+  // wall-clock timer and emit one parseable [GRP_MATMUL.OPTIME] line per
+  // op per call (op=1 covers Op1 matmul + any separate activation pass;
+  // op=2 covers Op2).  The line carries this op's num_ops (total expert
+  // pool = M.size(), consistent with the other [GRP_MATMUL.*] lines),
+  // active_ops (the M[i]>0 experts that actually fire), and the per-op
+  // N/K maxima, so per-op latency can be correlated with shape offline.
+  // Covers only this legacy two-pass path (not the fused
+  // vertical-fusion path).  Emitted via apilog at info level (requires
+  // ZENDNNL_API_LOG_LEVEL=3); the measured region excludes the emit, so
+  // logging cost does not perturb the timing.
+  static const bool s_optime = []() {
+    // The OPTIME line is emitted via apilog_info; if info logging is
+    // off the output is dropped, so gate the whole diagnostic on it to
+    // avoid paying the timer + per-op reductions for nothing (apilog's
+    // own arguments are evaluated before it can short-circuit).
+    if (!apilog_info_enabled()) return false;
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_OPTIME");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+  }();
+  const double t_op1_start = s_optime ? omp_get_wtime() : 0.0;
+
   // Pass 1: Op1 (gate+up) + activation.  The dispatcher picks ALGO
   // 1..5 (or auto) per `ZENDNNL_GRP_MATMUL_ALGO` and the safety
   // gates; inner BLAS kernel honours `ZENDNNL_MATMUL_ALGO`.  For
@@ -926,6 +950,28 @@ inline status_t run_fused_moe_legacy_two_pass(
     const status_t act_st = group_matmul_moe_act_execute(
         &act_p, op1_dst, M, N, op1_ldc, act_dtype, num_threads);
     if (act_st != status_t::success) return act_st;
+  }
+  if (s_optime) {
+    // Close the timing window FIRST, before any metadata work, so the
+    // measured region is well-defined and excludes the reductions /
+    // logging below (argument-evaluation order is unspecified, so the
+    // elapsed read must not live in the apilog_info arg list).
+    const double t_op1_ms = (omp_get_wtime() - t_op1_start) * 1.0e3;
+    // N/K can vary per expert (validator allows it), so report the max
+    // across experts rather than element 0 — a single representative
+    // that does not mislead offline correlation when shapes differ.
+    // The reductions run only on the (off-by-default) diagnostic path.
+    const int n_max = N.empty() ? 0 : *std::max_element(N.begin(), N.end());
+    const int k_max = K.empty() ? 0 : *std::max_element(K.begin(), K.end());
+    const int active_ops = static_cast<int>(
+        std::count_if(M.begin(), M.end(), [](int m) { return m > 0; }));
+    apilog_info("[GRP_MATMUL.OPTIME] op=1 ms=", t_op1_ms,
+                " num_ops=", static_cast<int>(M.size()),
+                " active_ops=", active_ops,
+                " N_max=", n_max,
+                " K_max=", k_max,
+                " act_fused=", (act_fused ? 1 : 0),
+                " mode=", (pass1_mode != nullptr ? pass1_mode : "?"));
   }
 
   // Pass 2 source group dynamic quant (same opt-in gate).  Runs AFTER
@@ -957,6 +1003,7 @@ inline status_t run_fused_moe_legacy_two_pass(
   //   wide  + gated act  — lda=N,    K_down=N/2.
   //   wide  + act=none   — lda=N,    K_down=N.
   //   tight + gated act  — lda=N/2,  K_down=N/2.
+  const double t_op2_start = s_optime ? omp_get_wtime() : 0.0;
   group_matmul_run_parallel_dispatch(
       layout, scratch.transA_down, transB, M, fused.N_down, scratch.K_down,
       scratch.alpha_down,
@@ -969,6 +1016,25 @@ inline status_t run_fused_moe_legacy_two_pass(
       pass2_group_quantized ? pass2_params : scratch.params_down,
       num_threads, &pass2_mode,
       grp_matmul_gated_act_t::none, act_dtype);
+  if (s_optime) {
+    // Close the timing window FIRST (see Op1 note) so the measured
+    // region excludes the reductions / logging below.
+    const double t_op2_ms = (omp_get_wtime() - t_op2_start) * 1.0e3;
+    // Op2 N_down / K_down are likewise per-expert; report the max.
+    const int n_max = fused.N_down.empty()
+        ? 0 : *std::max_element(fused.N_down.begin(), fused.N_down.end());
+    const int k_max = scratch.K_down.empty()
+        ? 0 : *std::max_element(scratch.K_down.begin(), scratch.K_down.end());
+    const int active_ops = static_cast<int>(
+        std::count_if(M.begin(), M.end(), [](int m) { return m > 0; }));
+    apilog_info("[GRP_MATMUL.OPTIME] op=2 ms=", t_op2_ms,
+                " num_ops=", static_cast<int>(M.size()),
+                " active_ops=", active_ops,
+                " N_max=", n_max,
+                " K_max=", k_max,
+                " act_fused=", 0,
+                " mode=", (pass2_mode != nullptr ? pass2_mode : "?"));
+  }
   return status_t::success;
 }
 

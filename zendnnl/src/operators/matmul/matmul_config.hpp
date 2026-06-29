@@ -18,6 +18,7 @@
 #define _MATMUL_CONFIG_HPP_
 
 #include <algorithm>
+#include <atomic>
 #include <string>
 
 #include "common/data_types.hpp"
@@ -131,6 +132,16 @@ class matmul_config_t final : public op_config_t {
    *         2 = in-place).
    */
   int32_t get_weight_cache();
+
+  /** @brief Set the grouped-matmul AUTO mixed-in-place mode flag.
+   *
+   * See `grp_auto_mixed_inplace` for the contract.  Set by the grouped
+   * dispatcher's WEIGHT_CACHE=2 eligibility gate.
+   */
+  void set_grp_auto_mixed_inplace(bool enable);
+
+  /** @brief Get the grouped-matmul AUTO mixed-in-place mode flag. */
+  bool get_grp_auto_mixed_inplace();
 
   /** @brief Sets on-the-fly B packing flag for Native kernels.
   *
@@ -246,7 +257,25 @@ class matmul_config_t final : public op_config_t {
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t bmm_algo;            /**< Batched Matmul algorithm. */
   data_type_t matmul_accum_type; /**< Accumulation type for reference kernel. */
-  int32_t matmul_weight_cache; /**< Matmul weight cache type. */
+  /// Matmul weight cache type (0=disabled, 1=out-of-place, 2=in-place).
+  /// Atomic because the grouped dispatcher can mutate it at runtime
+  /// (`set_weight_cache(1)` on the WEIGHT_CACHE=2 AUTO safety downgrade)
+  /// concurrently with other threads reading it via `get_weight_cache()`;
+  /// a plain int32_t there is a C++ data race.  Relaxed ordering is
+  /// sufficient — the value is an independent flag, not a release gate
+  /// for other memory.
+  std::atomic<int32_t> matmul_weight_cache{1};
+  /// Grouped-matmul AUTO "mixed in-place" mode for WEIGHT_CACHE=2.  When
+  /// set, the grouped AUTO path keeps WC=2 (instead of downgrading to 1)
+  /// and routes asymmetrically: the AOCL full-weight (prompt) reorder
+  /// mutates the weight buffer IN PLACE while every other consumer (CK
+  /// decode pack, AOCL per-tile decode) stays OUT-OF-PLACE, pre-warmed
+  /// from the raw weights by cross-warm before the mutation.  Set once by
+  /// `group_matmul_run_parallel_dispatch` when the eligibility gate holds
+  /// (AUTO + WC2 + PREPACK + CROSS_WARM + unlimited LRU capacity); read by
+  /// the CK runtime and the prepack warmers.  Atomic for the same
+  /// concurrent read/write reason as `matmul_weight_cache`.
+  std::atomic<bool> grp_auto_mixed_inplace{false};
   int32_t matmul_otf_bpack;    /**< On-the-fly B packing for Native kernels. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
   uint32_t lru_cache_capacity; /**< LRU cache capacity. */

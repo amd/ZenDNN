@@ -391,7 +391,8 @@ status_t get_or_pack_weight_bf16(
     bool interleave_split_halves,
     const bfloat16_t **out_packed,
     bool *was_hit_out,
-    bool disable_cache) {
+    bool disable_cache,
+    bool in_place) {
 
   if (was_hit_out != nullptr) *was_hit_out = false;
 
@@ -597,7 +598,12 @@ status_t get_or_pack_weight_bf16(
   std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
   if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
-    *out_packed = static_cast<const bfloat16_t *>(cached_pack);
+    // A nullptr value is the in-place sentinel: the pack lives in the
+    // caller's `weight` buffer itself (see the in-place MISS branch
+    // below).  Any non-null value is an out-of-place cached buffer.
+    *out_packed = (cached_pack != nullptr)
+        ? static_cast<const bfloat16_t *>(cached_pack)
+        : weight;
     if (was_hit_out != nullptr) *was_hit_out = true;
     // Include the full cache key on the HIT line so a model-level
     // log shows exactly which (weight_ptr, K, N, ldb, transB,
@@ -633,6 +639,67 @@ status_t get_or_pack_weight_bf16(
                    " interleave=", (interleave_split_halves ? 1 : 0),
                    " pack_nr=", pack_nr);
   }
+  // In-place (WEIGHT_CACHE=2): when the packed layout is byte-for-byte
+  // the same size as the raw weight (bf16 even-K: `bytes == K*N*2`),
+  // write the pack back into the caller's buffer and cache a nullptr
+  // sentinel.  Saves one packed buffer per weight.  We pack into a
+  // transient temp first (the pack permutes the source, so it cannot
+  // run safely directly over its own input) then memcpy into `weight`.
+  // Falls through to the out-of-place path only on a size mismatch
+  // (e.g. odd K, where the VNNI K-pair pad makes the pack larger).
+  //
+  // Alignment is intentionally NOT a precondition.  The in-place path
+  // hands the caller's own `weight` buffer to the kernel as the packed
+  // stream, and that buffer is not guaranteed 64-byte aligned — so the
+  // bf16 microkernel reads the B-stream with the UNALIGNED
+  // `_mm512_loadu_si512` (vmovdqu64).  On Zen 4 / Zen 5 that load is as
+  // fast as the aligned form when the address happens to be aligned
+  // (out-of-place packs, which still come from std::aligned_alloc(64));
+  // a non-64-aligned in-place base only pays a cache-line split-load
+  // cost.  We accept that to capture the memory saving on every
+  // bf16/even-K weight regardless of how the framework allocated it.
+  const size_t plain_bytes = static_cast<size_t>(K)
+                           * static_cast<size_t>(N) * sizeof(bfloat16_t);
+  // In-place write-back memcpy's K*N CONTIGUOUS elements back into `weight`,
+  // which is only correct when the raw weight is contiguous: leading dim ==
+  // the minor dim (K for transB, else N).  A strided/tiled view (ldb > min)
+  // would have its padding / adjacent rows clobbered, so it must stay
+  // out-of-place.  Same contiguity rule the AOCL WC=2 path uses.
+  const bool inplace_layout_ok = (ldb == (transB ? K : N));
+  const bool can_in_place = in_place && inplace_layout_ok
+                            && (bytes == plain_bytes);
+  if (can_in_place) {
+    void *tmp = std::aligned_alloc(alignment, bytes_aligned);
+    if (tmp != nullptr) {
+      pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                     interleave_split_halves, static_cast<bfloat16_t *>(tmp));
+      // const_cast write-back: `weight` is declared const because the
+      // DEFAULT (out-of-place) path only reads it, and the public grouped
+      // API hands weights through as `const void *` — so the cast must
+      // happen at some boundary; this is it.  It is well-defined here: the
+      // in-place path is reached ONLY under WEIGHT_CACHE=2, which is the
+      // caller's explicit opt-in that the weight buffer is MUTABLE
+      // single-consumer storage (a framework weight tensor on the heap,
+      // never a genuinely const-qualified object — writing through a cast
+      // to such an object would be UB).  This mirrors the established AOCL
+      // in-place reorder path (aocl_kernel.cpp), which const_casts the same
+      // caller weight pointer under the identical WC=2 contract.
+      std::memcpy(const_cast<bfloat16_t *>(weight), tmp, plain_bytes);
+      std::free(tmp);
+      pack_cache.add(key, nullptr);  // sentinel: pack lives in `weight`
+      *out_packed = weight;
+      return status_t::success;
+    }
+    // Interim aligned_alloc failed.  Do NOT fail the whole call: fall through
+    // to the out-of-place cache path below (allocate a fresh packed buffer
+    // and cache it) so WEIGHT_CACHE=2 is no less robust than WC=1/0.  This
+    // mirrors the AOCL in-place reorder fallback (aocl_kernel.cpp).  The
+    // caller's `weight` buffer is left UNMUTATED, so the nullptr in-place
+    // sentinel is NOT cached — the out-of-place buffer becomes the pack.
+    log_error("custom_kernel pack (in-place): interim aligned_alloc failed "
+              "for ", bytes_aligned, " bytes; falling back to out-of-place");
+  }
+
   // `bytes_aligned` + `alignment` are hoisted above the disable-cache
   // branch so cached and caller-owned packs use identical allocations.
   void *raw = std::aligned_alloc(alignment, bytes_aligned);

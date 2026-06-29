@@ -548,16 +548,21 @@ void clear_fingerprint_cache_for_test();
 /// Which cross_warm regime fired alongside the primary warm.  Recorded
 /// per invocation in `LastInvocationStats` and surfaced in the
 /// `[GRP_MATMUL.PREPACK]` apilog line as two separate fields:
-/// `cross_warm=<enabled|disabled>` (the env state, mirrors the
-/// `ZENDNNL_GRP_MATMUL_CROSS_WARM` knob) and `regime=<regime>` (this
-/// enum's stringified value).  Together they let a user debugging a
-/// HIT/MISS trace see at a glance whether cross-warm was on AND
-/// which backend path got opportunistically warmed for the OTHER
-/// algo regime.
+/// `cross_warm=<enabled|disabled>` and `regime=<regime>` (this enum's
+/// stringified value).  The `cross_warm` field reports whether a regime
+/// ACTUALLY fired (`regime != none`), i.e. it is the AND of the
+/// `ZENDNNL_GRP_MATMUL_CROSS_WARM` knob, the AUTO-only gate
+/// (`ZENDNNL_GRP_MATMUL_ALGO=0`), and the structural eligibility checks
+/// inside `cross_warm()` — so a pinned ALGO logs `cross_warm=disabled`
+/// even with the knob ON.  Together the two fields let a user debugging
+/// a HIT/MISS trace see at a glance whether cross-warm ran AND which
+/// backend path got opportunistically warmed for the OTHER algo regime.
 ///
 /// The four states map to the four reachable code paths in
 /// `cross_warm()`:
 ///   * `none`               — env `ZENDNNL_GRP_MATMUL_CROSS_WARM=0`, OR
+///                            a pinned ALGO (`ZENDNNL_GRP_MATMUL_ALGO`
+///                            in 1..5 — cross-warm is AUTO-only), OR
 ///                            inner_kernel != aocl_dlp_blocked, OR
 ///                            the structural skip path on ALGO 3 where
 ///                            the primary already covered the
@@ -629,11 +634,14 @@ struct LastInvocationStats {
   custom_kernel::PackProbeStats ck{};
 
   /// Which `cross_warm` regime ran for this invocation.  `none` when
-  /// the cross-warm helper was skipped (env off, non-DLP inner kernel,
-  /// or the primary already covered the cross-warm target).  Surfaces
+  /// the cross-warm helper was skipped (env off, a pinned ALGO since
+  /// cross-warm is AUTO-only, non-DLP inner kernel, or the primary
+  /// already covered the cross-warm target).  Surfaces
   /// in the `[GRP_MATMUL.PREPACK]` apilog line as `regime=<regime>`,
-  /// paired with the env-state field `cross_warm=<enabled|disabled>`
-  /// — see `CrossWarmRegime`'s doc-block above for the field layout.
+  /// paired with the `cross_warm=<enabled|disabled>` field — which
+  /// `log_pack_probe` sets to `enabled` iff a regime actually fired
+  /// (`regime != none`), NOT merely the env-knob state — see
+  /// `CrossWarmRegime`'s doc-block above for the field layout.
   CrossWarmRegime cross_warm_regime = CrossWarmRegime::none;
 
   /// True after a `prepack_for_algo_X` invocation that took the

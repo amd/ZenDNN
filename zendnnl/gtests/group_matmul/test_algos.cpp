@@ -33,6 +33,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 #include <omp.h>
 
@@ -2153,13 +2155,20 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     for (int nt : {
            64, 128
          }) {
-      const bool is_decode =
+      const bool is_decode_case =
         (M_val <= zendnnl::lowoha::matmul::kDecodeMaxM);
-      const char *phase = is_decode ? "decode" : "prompt";
-      // Decode + active_ops (=128) > num_threads → rule-0.6 carve-out
-      // → ALGO 5.  Everything else (prompt, or decode at 128t where
-      // active_ops == num_threads) → rule 1 → ALGO 3.
-      const int expected_algo = (is_decode && 128 > nt) ? 5 : 3;
+      const char *phase = is_decode_case ? "decode" : "prompt";
+      // DECODE with active_ops (=128) > num_threads routes to ALGO 5
+      // via auto_select Rule 0.6 (parallel_per_expert) under the
+      // DEFAULT n_tile strategy; the single-round ALGO 3 path is
+      // infeasible when experts exceed threads.  At nt=128 (128 ==
+      // 128, not >) Rule 0.6 does not fire and Rule 1 keeps ALGO 3.
+      // (Forcing ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3 re-routes this
+      // regime to ALGO 3 + DecodeDynamic — covered separately; this
+      // suite asserts the unforced default.)  Prompt stays ALGO 3 via
+      // Rule 1 (num_ops >= num_threads) with the legacy phase env.
+      const int expected_algo =
+        (is_decode_case && 128 > nt) ? 5 : 3;
       out.push_back({
         M_val, K_QW, N_QW, /*num_ops=*/128, nt,
         expected_algo,
@@ -2658,6 +2667,769 @@ TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsGlobalForceWins) {
                                    s.num_threads),
             3)
       << "global ZENDNNL_GRP_MATMUL_ALGO=3 must win over Rule 0.6";
+}
+
+// ── Forced DecodeDynamic re-routes the experts-exceed-threads decode ──
+// ── regime back to ALGO 3 (where DecodeDynamic lives). ───────────────
+// Rule 0.6 sends decode `active_ops > num_threads` to ALGO 5 by default
+// (parallel_per_expert).  When the operator FORCES the N-tile
+// DecodeDynamic strategy (`ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`), this
+// regime must stay on ALGO 3 so the CCD-cohesive DecodeDynamic pool can
+// engage — it measures ~1.3x faster than ALGO 5 on Qwen-class decode.
+// This trio locks the gating: forced(safe)→3, unforced→5, forced but
+// n_tile-unsafe→5 (clamp).  AUTO env (env_algo=0) throughout.
+TEST(TestGroupMatmulAutoPhaseEnv, ForcedDecodeDynamicReroutesManyExpertsDecodeToAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  NTileStrategyOverride force_decdyn(3);  // ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "forced N_TILE_STRATEGY=3: decode num_ops(88) > num_threads(64) "
+         "must route to ALGO 3 (DecodeDynamic), not ALGO 5";
+}
+
+// Companion negative: with the strategy explicitly UNFORCED (=2, the
+// production default Rounds), the same shape must still take ALGO 5 —
+// i.e. the re-route is strictly gated on the force knob and the default
+// production routing is untouched.
+TEST(TestGroupMatmulAutoPhaseEnv, UnforcedManyExpertsDecodeStaysAlgo5) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  NTileStrategyOverride default_rounds(2);  // explicit production default
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "unforced (strategy=2): decode num_ops(88) > num_threads(64) "
+         "must stay on ALGO 5 — the re-route is force-gated";
+}
+
+// Smart-AUTO (n_tile_strategy=0) re-routes the experts-exceed-threads
+// decode regime to ALGO 3 (where DecodeDynamic lives), same as the forced
+// (=3) path — so AUTO can pick up the DecodeDynamic win automatically.
+// Companion to the =3 (reroutes) and =2 (stays ALGO 5) trio above; locks
+// in that strategy 0 behaves like 3 for ALGO selection, not like 2.
+TEST(TestGroupMatmulAutoPhaseEnv, SmartAutoManyExpertsDecodeRoutesToAlgo3) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  NTileStrategyOverride smart_auto(0);  // ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            3)
+      << "smart-auto (strategy=0): decode num_ops(88) > num_threads(64) "
+         "must route to ALGO 3 so DecodeDynamic can engage";
+}
+
+// Safety clamp: forced DecodeDynamic still honours n_tile_safe.  A
+// non-row-major layout is n_tile-unsafe (ALGO 3 cannot serve it), so the
+// re-route must fall through to ALGO 5 rather than hand an unsafe shape
+// to ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, ForcedDecodeDynamicHonorsNTileSafetyClamp) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  NTileStrategyOverride force_decdyn(3);
+
+  auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+                            /*num_ops=*/88, /*num_threads=*/64);
+  // Make the shape n_tile-unsafe (non-row-major → fails m_tile_safe,
+  // hence n_tile_safe).
+  for (auto &c : s.layout) c = 'c';
+  EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                                   s.num_threads),
+            5)
+      << "forced DecodeDynamic on an n_tile-unsafe shape must clamp to "
+         "ALGO 5 (not hand an unsafe shape to ALGO 3)";
+}
+
+// ── DecodeDynamic non-custom WIDE swiglu parity with Rounds ──────────
+// DecodeDynamic hosts the non-custom wide-fused activation via a
+// team-wide barrier + apply_swiglu_oai post-pass (it used to route such
+// calls to Rounds).  Verify true parity: the SAME non-custom wide-swiglu
+// decode shape must produce identical output under N_TILE_STRATEGY=3
+// (DecodeDynamic) and =2 (Rounds).  Without the post-pass DecodeDynamic
+// would leave raw (gate, up) pairs in dst and diverge.  The gemm_mode
+// capture asserts DecodeDynamic actually engaged (else the comparison
+// would be vacuous).
+TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+
+  constexpr int num_ops = 8, M = 4, K = 128, N = 256;  // decode, even N
+  const int num_threads = 8;  // 1 CCD → enough_experts (8 >= 4*num_ccds=4)
+
+  // Shared deterministic inputs across both runs.
+  std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops);
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(M) * K);
+    wei[e].resize(static_cast<size_t>(K) * N);
+    for (size_t i = 0; i < src[e].size(); ++i)
+      src[e][i] = bfloat16_t(0.02f * (float)((int)((i + e) % 5) - 2));
+    for (size_t i = 0; i < wei[e].size(); ++i)
+      wei[e][i] = bfloat16_t(0.01f * (float)((int)((i + e) % 7) - 3));
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+  }
+  auto gv = GemmVecs::uniform(num_ops, M, N, K);  // ldc = N (wide fused)
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (int e = 0; e < num_ops; ++e) params[e].num_threads = num_threads;
+
+  auto run = [&](int strategy, std::string &mode_out)
+      -> std::vector<std::vector<bfloat16_t>> {
+    NTileStrategyOverride strat(strategy);
+    CustomKernelOverride  ck_off(false);   // force the non-custom path
+    AlgoEnvGuard          algo3(3);
+    reset_grp_matmul_caches();
+    std::vector<std::vector<bfloat16_t>> dst(num_ops);
+    std::vector<void *> dsts(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+      dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+      dsts[e] = dst[e].data();
+    }
+    const char *mode = nullptr;
+    group_matmul_run_parallel_dispatch(
+        gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+        srcs, gv.lda, weis, gv.ldb, biases, gv.beta, dsts, gv.ldc,
+        gv.is_wc, params, num_threads, &mode,
+        grp_matmul_gated_act_t::swiglu_oai_mul, data_type_t::bf16);
+    mode_out = (mode != nullptr) ? mode : "";
+    return dst;
+  };
+
+  std::string mode_decdyn, mode_rounds;
+  const auto dst_decdyn = run(3, mode_decdyn);
+  const auto dst_rounds = run(2, mode_rounds);
+
+  ASSERT_NE(mode_decdyn.find("decdyn"), std::string::npos)
+      << "DecodeDynamic did not engage (gemm_mode=" << mode_decdyn
+      << "); the non-custom wide-swiglu parity check would be vacuous.";
+
+  // Compare the activated output region [0, N/2) of every expert.
+  const int half = N / 2;
+  double max_d = 0.0;
+  for (int e = 0; e < num_ops; ++e) {
+    for (int m = 0; m < M; ++m) {
+      for (int j = 0; j < half; ++j) {
+        const float a = static_cast<float>(dst_decdyn[e][m * N + j]);
+        const float b = static_cast<float>(dst_rounds[e][m * N + j]);
+        max_d = std::max(max_d, std::fabs(static_cast<double>(a) - b));
+      }
+    }
+  }
+  EXPECT_LT(max_d, 1e-2)
+      << "DecodeDynamic non-custom wide swiglu must match Rounds "
+         "(mode_decdyn=" << mode_decdyn << " mode_rounds=" << mode_rounds
+      << "); max_abs_diff=" << max_d;
+}
+
+// ── WEIGHT_CACHE=2 (in-place) grouped-route policy ──────────────────
+// `group_matmul_run_parallel_dispatch` downgrades the process-wide
+// weight-cache mode 2 -> 1 ONLY for AUTO (env_algo=0), where an AOCL
+// prompt reorder and an ALGO 3 decode reorder touch the same weight
+// buffer with different layouts.  Pinned ALGO 1/2/4/5 (single AOCL
+// layout) and pinned ALGO 3 + CK keep WC=2: ALGO 3 + CK is made safe in
+// the pack layer (bf16/even-K packs in place into the single-consumer
+// weight buffer; int8/odd-K fall back to an out-of-place cache that
+// never mutates the weight).  Downgrade is process-wide + sticky, so
+// each test re-arms WC=2 via the RAII guard.
+namespace {
+// RAII: set weight-cache mode, restore the prior value on scope exit so
+// the sticky downgrade does not leak into sibling tests.
+struct WeightCacheGuard {
+  int32_t prev;
+  explicit WeightCacheGuard(int32_t v)
+      : prev(zendnnl::ops::matmul_config_t::instance().get_weight_cache()) {
+    zendnnl::ops::matmul_config_t::instance().set_weight_cache(v);
+  }
+  ~WeightCacheGuard() {
+    zendnnl::ops::matmul_config_t::instance().set_weight_cache(prev);
+  }
+  WeightCacheGuard(const WeightCacheGuard &) = delete;
+  WeightCacheGuard &operator=(const WeightCacheGuard &) = delete;
+};
+
+struct MinRunResult {
+  std::vector<std::vector<bfloat16_t>> dst;  // per-expert [M,N] output
+  bool weights_mutated = false;              // in-place reorder happened?
+};
+
+// Minimal valid bf16 grouped matmul (even-K, CK-eligible shape) that
+// reaches group_matmul_run_parallel_dispatch.  Deterministic varied fill
+// so an incorrect pack layout would change the output.  Captures the
+// per-expert dst and whether the weight buffers were mutated in place by
+// the reorder/pack.  `weight_offset_elems` shifts the weight base by that
+// many bf16 elements inside an over-allocated buffer — set to an odd value
+// to force a non-64-byte-aligned weight pointer (exercises the unaligned
+// in-place pack + unaligned microkernel B-load path).
+inline MinRunResult run_min_grp_matmul(int weight_offset_elems = 0) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  constexpr int num_ops = 4, M = 8, K = 256, N = 256;  // K even, N%32==0
+  const size_t wei_elems = static_cast<size_t>(K) * N;
+  std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops), dst(num_ops);
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  std::vector<void *> dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(M) * K);
+    // Over-allocate by the offset so the (possibly misaligned) weight
+    // base can point mid-buffer without overrunning.
+    wei[e].resize(wei_elems + static_cast<size_t>(weight_offset_elems));
+    dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+    for (size_t i = 0; i < src[e].size(); ++i)
+      src[e][i] = bfloat16_t(0.02f * (float)((int)((i + e) % 5) - 2));
+    bfloat16_t *wptr = wei[e].data() + weight_offset_elems;
+    for (size_t i = 0; i < wei_elems; ++i)
+      wptr[i] = bfloat16_t(0.01f * (float)((int)((i + e) % 7) - 3));
+    srcs[e] = src[e].data();
+    weis[e] = wptr;
+    dsts[e] = dst[e].data();
+  }
+  // Snapshot only the logical weight region (from the offset base).
+  std::vector<std::vector<bfloat16_t>> wei_orig(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    const bfloat16_t *wptr = wei[e].data() + weight_offset_elems;
+    wei_orig[e].assign(wptr, wptr + wei_elems);
+  }
+  auto gv = GemmVecs::uniform(num_ops, M, N, K);
+  auto params = make_uniform_params(num_ops, data_type_t::bf16);
+  for (int e = 0; e < num_ops; ++e) params[e].num_threads = 8;
+  EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                                gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                                biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                                /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+            zendnnl::error_handling::status_t::success);
+  MinRunResult r;
+  r.dst = dst;
+  for (int e = 0; e < num_ops; ++e) {
+    const bfloat16_t *wptr = wei[e].data() + weight_offset_elems;
+    if (std::memcmp(wptr, wei_orig[e].data(),
+                    wei_elems * sizeof(bfloat16_t)) != 0) {
+      r.weights_mutated = true;
+    }
+  }
+  return r;
+}
+
+inline double max_abs_diff(const std::vector<std::vector<bfloat16_t>> &a,
+                           const std::vector<std::vector<bfloat16_t>> &b) {
+  double m = 0.0;
+  for (size_t e = 0; e < a.size(); ++e)
+    for (size_t i = 0; i < a[e].size(); ++i)
+      m = std::max(m, std::abs((double)static_cast<float>(a[e][i])
+                               - (double)static_cast<float>(b[e][i])));
+  return m;
+}
+
+// Dtype-generic sibling of run_min_grp_matmul: lets the WC tests cover
+// f32 (non-bf16 mixed-mode guard) and odd-K (in-place size-gate fallback)
+// without duplicating the harness.  `T` is the element type matching `dt`;
+// `K_dim` may be odd (forces CK to refuse + AOCL/in-place to fall back to
+// out-of-place); `weight_offset_elems` shifts the weight base for the
+// unaligned variant.  Captures the per-expert dst and whether any weight
+// buffer was mutated in place.
+template <typename T>
+struct MinRunResultT {
+  std::vector<std::vector<T>> dst;
+  bool weights_mutated = false;
+};
+
+template <typename T>
+inline MinRunResultT<T> run_min_grp_matmul_typed(data_type_t dt,
+                                                 int K_dim = 256,
+                                                 int weight_offset_elems = 0) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  const int num_ops = 4, M = 8, N = 256;
+  const int K = K_dim;
+  const size_t wei_elems = static_cast<size_t>(K) * N;
+  std::vector<std::vector<T>> src(num_ops), wei(num_ops), dst(num_ops);
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  std::vector<void *> dsts(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(M) * K);
+    wei[e].resize(wei_elems + static_cast<size_t>(weight_offset_elems));
+    dst[e].assign(static_cast<size_t>(M) * N, T(0.0f));
+    for (size_t i = 0; i < src[e].size(); ++i)
+      src[e][i] = T(0.02f * (float)((int)((i + e) % 5) - 2));
+    T *wptr = wei[e].data() + weight_offset_elems;
+    for (size_t i = 0; i < wei_elems; ++i)
+      wptr[i] = T(0.01f * (float)((int)((i + e) % 7) - 3));
+    srcs[e] = src[e].data();
+    weis[e] = wptr;
+    dsts[e] = dst[e].data();
+  }
+  std::vector<std::vector<T>> wei_orig(num_ops);
+  for (int e = 0; e < num_ops; ++e) {
+    const T *wptr = wei[e].data() + weight_offset_elems;
+    wei_orig[e].assign(wptr, wptr + wei_elems);
+  }
+  auto gv = GemmVecs::uniform(num_ops, M, N, K);
+  auto params = make_uniform_params(num_ops, dt);
+  for (int e = 0; e < num_ops; ++e) params[e].num_threads = 8;
+  EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                                gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                                biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                                /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+            zendnnl::error_handling::status_t::success);
+  MinRunResultT<T> r;
+  r.dst = dst;
+  for (int e = 0; e < num_ops; ++e) {
+    const T *wptr = wei[e].data() + weight_offset_elems;
+    if (std::memcmp(wptr, wei_orig[e].data(), wei_elems * sizeof(T)) != 0)
+      r.weights_mutated = true;
+  }
+  return r;
+}
+
+template <typename T>
+inline double max_abs_diff_t(const std::vector<std::vector<T>> &a,
+                             const std::vector<std::vector<T>> &b) {
+  double m = 0.0;
+  for (size_t e = 0; e < a.size(); ++e)
+    for (size_t i = 0; i < a[e].size(); ++i)
+      m = std::max(m, std::abs((double)static_cast<float>(a[e][i])
+                               - (double)static_cast<float>(b[e][i])));
+  return m;
+}
+}  // namespace
+
+// RAII: temporarily set a finite LRU cache capacity so the AUTO
+// mixed-in-place eligibility gate (which requires unlimited capacity)
+// fails, exercising the historical downgrade fallback.
+struct LruCapacityGuard {
+  uint32_t prev;
+  explicit LruCapacityGuard(uint32_t v)
+      : prev(zendnnl::ops::matmul_config_t::instance().get_lru_cache_capacity()) {
+    zendnnl::ops::matmul_config_t::instance().set_lru_cache_capacity(v);
+  }
+  ~LruCapacityGuard() {
+    zendnnl::ops::matmul_config_t::instance().set_lru_cache_capacity(prev);
+  }
+  LruCapacityGuard(const LruCapacityGuard &) = delete;
+  LruCapacityGuard &operator=(const LruCapacityGuard &) = delete;
+};
+
+// AUTO + WC=2 falls back to the historical out-of-place downgrade (1)
+// when the mixed-in-place preconditions are NOT met — here a finite LRU
+// capacity (so the in-place sentinel could be evicted and re-derived from
+// a mutated buffer).  Confirms the safe fallback still works.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoDowngradesWc2WhenIneligible) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);          // AUTO — mixes AOCL prompt + decode
+  WeightCacheGuard wc(2);
+  LruCapacityGuard cap(4096);          // finite -> mixed-in-place ineligible
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 1)
+      << "AUTO + WC=2 must downgrade to 1 when mixed-in-place is ineligible";
+  EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
+      << "mixed-in-place flag must be clear on the downgrade path";
+}
+
+// AUTO + WC=2 with all preconditions (PREPACK + CROSS_WARM default ON,
+// unlimited LRU capacity) ENABLES mixed-in-place: WC stays 2 and the flag
+// is set (instead of downgrading).
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);
+  WeightCacheGuard wc(2);              // capacity unlimited by default
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 2)
+      << "AUTO + WC=2 with prepack+cross_warm+unlimited capacity must keep WC=2";
+  EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace())
+      << "mixed-in-place flag must be set when eligible";
+}
+
+// The mixed-in-place gate also requires the custom kernel ON.  With CK off,
+// decode falls to the AOCL per-tile path whose tight (nr_align=2) variant is
+// not cross-warmed, so a decode after the prompt's in-place mutation could
+// reorder from the already-mutated buffer.  AUTO + WC=2 + CK OFF must
+// therefore take the safe DOWNGRADE to out-of-place (1).
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard reset_algo(0);              // AUTO
+  CustomKernelOverride ck_off(false);      // CK off -> mixed ineligible
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 1)
+      << "AUTO + WC=2 with custom kernel OFF must downgrade to out-of-place "
+         "(the AOCL per-tile tight decode variant is not cross-warmed)";
+  EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
+      << "mixed-in-place flag must be clear when CK is off";
+}
+
+// Correctness: AUTO + WC=2 mixed-in-place must produce the SAME result as
+// AUTO + WC=1 (out-of-place).  The in-place mutation of the weight buffer
+// (AOCL full-weight) must not perturb the CK decode output, which is
+// served from the out-of-place pack warmed from the raw weights.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceMatchesWc1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard reset_algo(0);
+  MinRunResult ref, mixed;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);            // out-of-place reference
+    ref = run_min_grp_matmul();
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);            // AUTO + WC=2 -> mixed in-place
+    mixed = run_min_grp_matmul();
+  }
+  EXPECT_TRUE(zendnnl::ops::matmul_config_t::instance()
+                  .get_grp_auto_mixed_inplace())
+      << "mixed-in-place must have engaged for this AUTO + WC=2 run";
+  const double d = max_abs_diff(ref.dst, mixed.dst);
+  EXPECT_LT(d, 1e-2)
+      << "AUTO mixed-in-place (WC=2) must match WC=1; max_abs_diff=" << d;
+}
+
+// Concurrency: N threads issue the SAME grouped call on SHARED weight
+// buffers under AUTO + WC=2 mixed-in-place.  The per-fingerprint warm
+// latch must serialise the in-place mutation against concurrent compute
+// so every thread's output matches the WC=1 reference (no thread computes
+// on a half-mutated buffer).
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceConcurrentMatchesWc1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard reset_algo(0);
+  constexpr int num_ops = 4, M = 8, K = 256, N = 256;
+  const size_t wei_elems = static_cast<size_t>(K) * N;
+
+  // WC=1 reference output (its own buffers).
+  std::vector<std::vector<bfloat16_t>> ref_dst;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);
+    ref_dst = run_min_grp_matmul().dst;
+  }
+
+  // Shared src + weight buffers (same fingerprint across all threads).
+  reset_grp_matmul_caches();
+  std::vector<std::vector<bfloat16_t>> src(num_ops), wei(num_ops);
+  std::vector<const void *> srcs(num_ops), weis(num_ops),
+      biases(num_ops, nullptr);
+  for (int e = 0; e < num_ops; ++e) {
+    src[e].resize(static_cast<size_t>(M) * K);
+    wei[e].resize(wei_elems);
+    for (size_t i = 0; i < src[e].size(); ++i)
+      src[e][i] = bfloat16_t(0.02f * (float)((int)((i + e) % 5) - 2));
+    for (size_t i = 0; i < wei_elems; ++i)
+      wei[e][i] = bfloat16_t(0.01f * (float)((int)((i + e) % 7) - 3));
+    srcs[e] = src[e].data();
+    weis[e] = wei[e].data();
+  }
+  auto gv = GemmVecs::uniform(num_ops, M, N, K);
+
+  WeightCacheGuard wc(2);              // AUTO + WC=2 -> mixed in-place
+  constexpr int kThreads = 8;
+  std::vector<std::vector<std::vector<bfloat16_t>>> dsts(kThreads);
+  std::vector<std::thread> ths;
+  for (int t = 0; t < kThreads; ++t) {
+    ths.emplace_back([&, t]() {
+      auto params = make_uniform_params(num_ops, data_type_t::bf16);
+      for (int e = 0; e < num_ops; ++e) params[e].num_threads = 4;
+      auto &dst = dsts[t];
+      dst.resize(num_ops);
+      std::vector<void *> dptr(num_ops);
+      for (int e = 0; e < num_ops; ++e) {
+        dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        dptr[e] = dst[e].data();
+      }
+      group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                          gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                          biases, gv.beta, dptr, gv.ldc, gv.is_wc, params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+    });
+  }
+  for (auto &th : ths) th.join();
+  for (int t = 0; t < kThreads; ++t) {
+    const double d = max_abs_diff(ref_dst, dsts[t]);
+    EXPECT_LT(d, 1e-2)
+        << "concurrent mixed-in-place thread " << t
+        << " diverged from WC=1; max_abs_diff=" << d;
+  }
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo1RespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo1(1);               // pinned AOCL — single layout
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+      << "pinned ALGO 1 (single AOCL backend) must keep WC=2";
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CustomKernelOnRespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo3(3);
+  CustomKernelOverride ck_on(true);    // bf16 CK in-place pack (single consumer)
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+      << "ALGO 3 + CK keeps WC=2 (in-place handled safely in the pack layer)";
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CustomKernelOffRespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo3(3);
+  CustomKernelOverride ck_off(false);  // pure AOCL DLP — single layout
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+      << "ALGO 3 with custom kernel off (AOCL DLP) must keep WC=2";
+}
+
+// In-place CK pack correctness: pinned ALGO 3 + CK, bf16/even-K.  The
+// WC=2 (in-place) result must match the WC=1 (out-of-place) reference
+// bit-for-bit-ish (same pack bytes, only the storage location differs),
+// and the WC=2 run must actually mutate the weight buffer (proving the
+// in-place path engaged rather than silently falling back).
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CkInPlaceWc2MatchesWc1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard algo3(3);
+  CustomKernelOverride ck_on(true);
+
+  MinRunResult ref, test;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);            // out-of-place reference
+    ref = run_min_grp_matmul();
+    EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 1);
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);            // in-place under test (fresh buffers)
+    test = run_min_grp_matmul();
+    EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+        << "ALGO 3 + CK must keep WC=2 (no downgrade)";
+  }
+
+  EXPECT_TRUE(test.weights_mutated)
+      << "WC=2 + bf16/even-K must pack in place (mutate the weight buffer)";
+  const double d = max_abs_diff(ref.dst, test.dst);
+  EXPECT_LT(d, 1e-2)
+      << "in-place CK pack (WC=2) must match the out-of-place (WC=1) "
+         "result; max_abs_diff=" << d;
+}
+
+// In-place CK pack is alignment-independent: a deliberately NON-64-byte-
+// aligned weight base (offset by 1 bf16 element) must still pack in place
+// AND run correctly through the microkernel.  Guards the unaligned
+// B-load path — the kernel reads the packed stream with
+// `_mm512_loadu_si512`, so an unaligned in-place base is correct, just
+// potentially slower.  Before the unaligned-load switch this configuration
+// #GP-faulted; this test locks in that it no longer does.
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CkInPlaceWc2UnalignedWeight) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard algo3(3);
+  CustomKernelOverride ck_on(true);
+
+  MinRunResult ref, test;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);                 // out-of-place reference
+    ref = run_min_grp_matmul(/*weight_offset_elems=*/1);
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);                 // in-place on an UNALIGNED base
+    test = run_min_grp_matmul(/*weight_offset_elems=*/1);
+  }
+  EXPECT_TRUE(test.weights_mutated)
+      << "WC=2 must pack in place even when the weight base is unaligned";
+  const double d = max_abs_diff(ref.dst, test.dst);
+  EXPECT_LT(d, 1e-2)
+      << "unaligned in-place CK pack (WC=2) must match the WC=1 result; "
+         "max_abs_diff=" << d;
+}
+
+// ── Cleanup-driven coverage additions ───────────────────────────────
+
+// Regression for the `effective_weight_cache_type` live-read fix: it must
+// reflect the CURRENT process weight-cache setting, not a one-time static
+// snapshot.  Previously a pinned WC=2 `run_dlp` cached "2" on the first
+// call, so a later AUTO downgrade to 1 was ignored.  Toggle WC within the
+// process and confirm the effective value (clamped by the per-call cap)
+// tracks it every time.
+TEST(TestGroupMatmulWeightCacheDowngrade, EffectiveWeightCacheTypeLiveRead) {
+  using namespace zendnnl::lowoha::matmul;
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  WeightCacheGuard restore(cfg.get_weight_cache());  // restore on scope exit
+  cfg.set_weight_cache(2);
+  EXPECT_EQ(effective_weight_cache_type(2), 2);
+  EXPECT_EQ(effective_weight_cache_type(1), 1)
+      << "per-call cap must clamp the effective value down";
+  cfg.set_weight_cache(1);
+  EXPECT_EQ(effective_weight_cache_type(2), 1)
+      << "effective_weight_cache_type must observe the LIVE downgrade to 1, "
+         "not a stale first-call snapshot of 2";
+  cfg.set_weight_cache(0);
+  EXPECT_EQ(effective_weight_cache_type(2), 0)
+      << "WC=0 (disabled) must propagate live as well";
+}
+
+// Pinned ALGO 2/4/5 (single AOCL reorder layout per weight) must KEEP
+// WC=2 just like ALGO 1 — mixed mode is AUTO-only, so pinned algos leave
+// the process WC untouched and clear the mixed flag deterministically.
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo2RespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo2(2);
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 2)
+      << "pinned ALGO 2 (single AOCL layout) must keep WC=2";
+  EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
+      << "mixed-in-place is AUTO-only; pinned ALGO 2 must clear the flag";
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo4RespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo4(4);
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 2)
+      << "pinned ALGO 4 (multilevel CCD, single AOCL layout) must keep WC=2";
+  EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace());
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo5RespectsWc2) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  reset_grp_matmul_caches();
+  AlgoEnvGuard algo5(5);
+  WeightCacheGuard wc(2);
+  run_min_grp_matmul();
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  EXPECT_EQ(cfg.get_weight_cache(), 2)
+      << "pinned ALGO 5 (per-expert, single AOCL layout) must keep WC=2";
+  EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace());
+}
+
+// AUTO mixed in-place with the custom kernel ENABLED: CK decode packs are
+// warmed out-of-place from the raw weights BEFORE the AOCL full-weight
+// prompt reorder mutates the buffer in place.  Result must still match the
+// WC=1 out-of-place reference.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceCustomKernelOnMatchesWc1) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard reset_algo(0);
+  CustomKernelOverride ck_on(true);
+  MinRunResult ref, mixed;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);
+    ref = run_min_grp_matmul();
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    mixed = run_min_grp_matmul();
+  }
+  EXPECT_TRUE(zendnnl::ops::matmul_config_t::instance()
+                  .get_grp_auto_mixed_inplace())
+      << "mixed-in-place must engage for AUTO + WC=2 with CK on";
+  const double d = max_abs_diff(ref.dst, mixed.dst);
+  EXPECT_LT(d, 1e-2)
+      << "AUTO mixed-in-place + CK on must match WC=1; max_abs_diff=" << d;
+}
+
+// Non-bf16 (f32) under AUTO + WC=2: the dispatcher still sets the mixed
+// flag (it is dtype-agnostic), but the AOCL runtime non-bf16 guard forces
+// f32 OUT-OF-PLACE, so the weight buffer must NOT be mutated and the result
+// must match the WC=1 reference.
+TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard reset_algo(0);
+  MinRunResultT<float> ref, test;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);
+    ref = run_min_grp_matmul_typed<float>(data_type_t::f32);
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    test = run_min_grp_matmul_typed<float>(data_type_t::f32);
+  }
+  EXPECT_FALSE(test.weights_mutated)
+      << "f32 under AUTO mixed mode must stay out-of-place (non-bf16 guard) — "
+         "the weight buffer must not be mutated in place";
+  const double d = max_abs_diff_t(ref.dst, test.dst);
+  EXPECT_LT(d, 1e-3)
+      << "f32 AUTO WC=2 (forced OOP) must match WC=1; max_abs_diff=" << d;
+}
+
+// Odd-K bf16 under WC=2 + pinned ALGO 3 + CK: the custom kernel refuses
+// odd K (VNNI K-pair pad) and the AOCL in-place size gate fails (blocked
+// size != plain size), so the pack falls back OUT-OF-PLACE and the weight
+// buffer must NOT be mutated.  Result must still match the WC=1 reference.
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3OddKWc2StaysOutOfPlace) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  AlgoEnvGuard algo3(3);
+  CustomKernelOverride ck_on(true);
+  MinRunResultT<bfloat16_t> ref, test;
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(1);
+    ref = run_min_grp_matmul_typed<bfloat16_t>(data_type_t::bf16, /*K_dim=*/255);
+  }
+  {
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    test = run_min_grp_matmul_typed<bfloat16_t>(data_type_t::bf16,
+                                                /*K_dim=*/255);
+  }
+  EXPECT_FALSE(test.weights_mutated)
+      << "odd-K bf16 under WC=2 must fall back to out-of-place (no mutation)";
+  const double d = max_abs_diff_t(ref.dst, test.dst);
+  EXPECT_LT(d, 1e-2)
+      << "odd-K bf16 WC=2 (forced OOP) must match WC=1; max_abs_diff=" << d;
 }
 
 // Rule 0.7 (prompt M-tile regime routing): a PROMPT-class frame with

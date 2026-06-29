@@ -518,12 +518,11 @@ static void ukernel_impl(
   // MR=8 that 16-zmm staging array sat on top of the 16 s32 `acc`
   // zmms + comp/scale/bias temps (~40 zmm) and spilled the 32-zmm
   // register file, generating extra load/store traffic that starved
-  // the VPDPBUSD units (measured: int8 issued MORE L1 loads than the
-  // bf16 sibling and ran at IPC 1.9 vs 3.2, FP-dispatch-stall 5% vs
-  // 41% — i.e. the FMA units were idle, not saturated).  Fusing the
-  // dequant into the store keeps at most 1-2 FP32 temps live, so the
-  // accumulators stay resident and the kernel becomes FMA-bound like
-  // bf16.  `dequant_finish` is the single source of the dequant math;
+  // the VPDPBUSD units (the FMA units stalled on spill traffic rather
+  // than staying saturated).  Fusing the dequant into the store keeps
+  // at most 1-2 FP32 temps live, so the accumulators stay resident and
+  // the kernel stays compute-bound.  `dequant_finish` is the single
+  // source of the dequant math;
   // the per-(m, v) compensation term `corr` is selected inline by
   // `Compute` (`128 * comp`, precomputed in `comp_sym_scaled`, for
   // sym; `src_zp[m] * comp` for asym).  The selection stays inline

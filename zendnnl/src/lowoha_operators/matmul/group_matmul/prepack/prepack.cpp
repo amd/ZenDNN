@@ -17,12 +17,15 @@
 #include "prepack.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/zendnnl_global.hpp"
@@ -251,6 +254,67 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
   return s;
 }
 
+// Weight-pool IDENTITY fingerprint: hashes ONLY the physical weight pool
+// (pointers + per-expert K/N/ldb/transB + expert count) plus the process
+// weight-cache mode.  It deliberately OMITS the per-call tuning knobs that
+// `fingerprint()` also folds in (scheduling_algo, num_threads, nr_align,
+// src/wei/dst dtype, act, act_dtype, bias_dtype, dynamic_quant,
+// compute_dtype).
+//
+// This is the key for the AUTO mixed-in-place warm latch + completion record.
+// The in-place mutation is a property of the WEIGHT BUFFER, not of any tuning
+// context: a prompt call (ALGO 1/2/4/5) and a decode call (ALGO 3) — or two
+// calls differing only in thread count / tile alignment — that SHARE the same
+// weight buffer must contend on the SAME latch, otherwise one could read or
+// out-of-place-reorder a half-mutated buffer while the other is mid in-place
+// mutation.  Keying on the full `fingerprint()` (even with scheduling_algo=0)
+// would split them by num_threads/nr_align/dtype context and re-open that
+// race.
+//
+// NOTE: the XOR+SUM reduction below mirrors `fingerprint()` (see its comments
+// for the permutation-invariance + malloc-aliasing collision rationale); keep
+// the two in sync if the weight-pool hashing changes.
+inline size_t weight_pool_fingerprint(const PrepackParams &p) {
+  size_t s = mix_hash(0, static_cast<size_t>(p.num_ops_total));
+  if (p.weight && !p.weight->empty()) {
+    const size_t bound =
+        std::min<size_t>(static_cast<size_t>(p.num_ops_total),
+                         p.weight->size());
+    uintptr_t ptr_xor = 0, ptr_sum = 0;
+    size_t k_xor = 0, k_sum = 0, n_xor = 0, n_sum = 0,
+           ldb_xor = 0, ldb_sum = 0, transb_xor = 0;
+    for (size_t i = 0; i < bound; ++i) {
+      const uintptr_t pi = reinterpret_cast<uintptr_t>((*p.weight)[i]);
+      ptr_xor ^= pi; ptr_sum += pi;
+      if (p.K && i < p.K->size()) {
+        const size_t v = static_cast<size_t>((*p.K)[i]); k_xor ^= v; k_sum += v;
+      }
+      if (p.N && i < p.N->size()) {
+        const size_t v = static_cast<size_t>((*p.N)[i]); n_xor ^= v; n_sum += v;
+      }
+      if (p.ldb && i < p.ldb->size()) {
+        const size_t v = static_cast<size_t>((*p.ldb)[i]);
+        ldb_xor ^= v; ldb_sum += v;
+      }
+      if (p.transB && i < p.transB->size())
+        transb_xor ^= static_cast<size_t>((*p.transB)[i] ? 1u : 0u);
+    }
+    s = mix_hash(s, static_cast<size_t>(ptr_xor));
+    s = mix_hash(s, static_cast<size_t>(ptr_sum));
+    s = mix_hash(s, k_xor);
+    s = mix_hash(s, k_sum);
+    s = mix_hash(s, n_xor);
+    s = mix_hash(s, n_sum);
+    s = mix_hash(s, ldb_xor);
+    s = mix_hash(s, ldb_sum);
+    s = mix_hash(s, transb_xor);
+    s = mix_hash(s, bound);
+  }
+  s = mix_hash(s, static_cast<size_t>(
+      zendnnl::ops::matmul_config_t::instance().get_weight_cache()));
+  return s;
+}
+
 // Process-wide fingerprint set, protected by a mutex.
 //
 // Was previously `thread_local`.  That worked for benchdnn (single
@@ -290,6 +354,79 @@ inline bool already_warmed(const PrepackParams &p, int scheduling_algo) {
   return !s_warmed_fps.insert(fp).second;
 }
 
+// ── Per-fingerprint warm latch (AUTO mixed-in-place mode ONLY) ─────────
+// In the default out-of-place mode the warm mutates nothing shared, so
+// the cheap insert-and-go `s_warmed_fps` set above is sufficient: a
+// concurrent same-fingerprint call may skip warming and compute lazily
+// with no correctness risk.
+//
+// In the AUTO mixed-in-place mode the warm MUTATES the caller's weight
+// buffer in place (the AOCL full-weight prompt reorder).  A concurrent
+// same-fingerprint call must therefore BLOCK until that warm completes,
+// or it would compute on a half-mutated buffer.  This latch implements
+// "first caller warms, all other same-fingerprint callers wait": the
+// first caller for a fingerprint creates and owns the latch (returned in
+// the prelude's `WarmGuard`, signalled when the per-algo warm function
+// returns); concurrent callers find the existing latch and wait on it.
+struct WarmLatch {
+  std::mutex              m;
+  std::condition_variable cv;
+  bool                    done = false;
+};
+static std::mutex s_warm_latch_mtx;
+// IN-FLIGHT warms only: a fingerprint's latch lives here while its warm is
+// running and is ERASED the moment the warm completes (see WarmGuard::signal).
+static std::unordered_map<size_t, std::shared_ptr<WarmLatch>> s_warm_latch_map;
+// COMPLETED warms: the lightweight (size_t) record that a fingerprint's
+// in-place warm has finished.  Guarded by `s_warm_latch_mtx` (same mutex as
+// the in-flight map) so the check + map ops are one critical section.  This
+// is what bounds memory: once warmed, the heavyweight WarmLatch (mutex+cv) is
+// dropped and only an 8-byte fingerprint is retained — so workloads with many
+// distinct fingerprints no longer accumulate a latch per fingerprint forever.
+static std::unordered_set<size_t> s_warm_done_fps;
+
+// RAII handle: the warming caller holds it for the duration of its warm
+// (it lives inside the per-algo function's `PreludeResult`); on
+// destruction it marks the latch done and releases any waiters.  Move-only
+// so ownership is unambiguous; a default-constructed (null) guard is the
+// no-op case for the skip / out-of-place paths.
+struct WarmGuard {
+  std::shared_ptr<WarmLatch> latch;
+  size_t                     fp = 0;  // fingerprint this guard's warm owns
+  WarmGuard() = default;
+  WarmGuard(std::shared_ptr<WarmLatch> l, size_t fp_)
+      : latch(std::move(l)), fp(fp_) {}
+  WarmGuard(const WarmGuard &) = delete;
+  WarmGuard &operator=(const WarmGuard &) = delete;
+  WarmGuard(WarmGuard &&o) noexcept : latch(std::move(o.latch)), fp(o.fp) {}
+  WarmGuard &operator=(WarmGuard &&o) noexcept {
+    if (this != &o) { signal(); latch = std::move(o.latch); fp = o.fp; }
+    return *this;
+  }
+  ~WarmGuard() { signal(); }
+  void signal() {
+    if (!latch) return;
+    // Record completion and DROP the in-flight latch under the map mutex
+    // BEFORE waking waiters: a brand-new same-fingerprint caller then either
+    // sees `s_warm_done_fps` (skip, no mutex/cv) or — if it raced in just
+    // before this — finds the still-present latch and waits.  Erasing here is
+    // what keeps `s_warm_latch_map` bounded to in-flight warms.  Any waiter
+    // already blocked holds its own shared_ptr, so the latch stays alive for
+    // its `cv.wait` regardless of the erase.
+    {
+      std::lock_guard<std::mutex> lk(s_warm_latch_mtx);
+      s_warm_done_fps.insert(fp);
+      s_warm_latch_map.erase(fp);
+    }
+    {
+      std::lock_guard<std::mutex> lk(latch->m);
+      latch->done = true;
+    }
+    latch->cv.notify_all();
+    latch.reset();
+  }
+};
+
 // Reason the prelude short-circuited (when `skip == true`).  Used by
 // the skip-path apilog emitter to print a descriptive `state=...`
 // field so a level-3 reader can tell "first call, env-disabled" from
@@ -302,11 +439,15 @@ enum class PreludeSkipReason {
 };
 
 // Result of the shared opening sequence: one of `skip` (the per-ALGO
-// function should return immediately) or a resolved inner kernel.
+// function should return immediately) or a resolved inner kernel.  In the
+// AUTO mixed-in-place mode the warming caller also receives a `guard`
+// whose destruction (when the per-algo warm function returns) releases
+// any concurrent callers waiting on the same fingerprint.
 struct PreludeResult {
   bool              skip          = true;
   matmul_algo_t     inner_kernel  = matmul_algo_t::none;
   PreludeSkipReason skip_reason   = PreludeSkipReason::env_disabled;
+  WarmGuard         guard;  // non-null only for the warming caller (mixed)
 };
 
 inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
@@ -319,19 +460,77 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
   // gate was removed.  Under the uniform-eager semantic, PREPACK=ON
   // ALWAYS warms `max(M.size(), total_matmul)` experts up front,
   // regardless of whether the framework opted into the
-  // `total_matmul > active_matmul` contract.  Legacy callers
-  // (active=total=0 → both fall through to `num_ops_total = M.size()`
-  // in `build_prepack_params`) now also exercise the prepack module;
-  // they pay a one-time first-iter serial reorder cost in exchange
-  // for `do_tile()` cache hits afterwards.  Set
+  // `total_matmul > active_matmul` contract.  Set
   // `ZENDNNL_GRP_MATMUL_PREPACK=0` to restore the lazy-only path.
-  if (already_warmed(p, scheduling_algo)) {
-    r.skip_reason = PreludeSkipReason::fingerprint_already;
+  const bool mixed_inplace = is_grp_auto_mixed_inplace_active();
+
+  if (!mixed_inplace) {
+    // Out-of-place fast path: insert-and-go.  A concurrent skipper may
+    // compute lazily; nothing shared is mutated, so there is no race.
+    if (already_warmed(p, scheduling_algo)) {
+      r.skip_reason = PreludeSkipReason::fingerprint_already;
+      return r;
+    }
+    r.skip         = false;
+    r.inner_kernel = resolve_kernel();
     return r;
   }
 
-  r.skip         = false;
-  r.inner_kernel = resolve_kernel();
+  // Mixed in-place: serialise via the per-fingerprint latch so a
+  // concurrent same-W call never computes (or reads W for its own
+  // out-of-place warm) while the in-place warm is still mutating the
+  // weight buffer.
+  //
+  // Key on the WEIGHT-POOL IDENTITY fingerprint (NOT the full `fingerprint()`).
+  // In mixed mode the prompt (ALGO 1/2/4/5) and the decode (ALGO 3) prepacks
+  // BOTH touch the SAME weight buffers and BOTH do an in-place full-weight
+  // AOCL reorder of them: the prompt as its primary warm, the decode via
+  // `cross_warm` -> `warm_aocl` (warm_wct=2).  The latch must serialise EVERY
+  // call that shares those weights, so its key must depend only on weight
+  // identity — `fingerprint()` (even with scheduling_algo=0) also folds in
+  // num_threads / nr_align / dtype / act context, which would split same-W
+  // callers that differ in any of those into DISTINCT latches and let one
+  // read/reorder W while another is mid in-place mutation (the AOCL reorder
+  // cache mutex only serialises the AOCL reorder itself, not a concurrent CK
+  // pack reading W).  `weight_pool_fingerprint` keys on (weight pool + WC
+  // mode) only, so one latch + one completion record covers all of them.
+  const size_t fp = weight_pool_fingerprint(p);
+  std::shared_ptr<WarmLatch> latch;
+  bool i_warm = false;
+  {
+    std::lock_guard<std::mutex> lk(s_warm_latch_mtx);
+    // Already warmed (in-place mutation already done on a prior call)?  Skip
+    // with NO latch: the completed set is the only state retained for a
+    // warmed fingerprint; its latch was erased when the warm finished.
+    if (s_warm_done_fps.count(fp) != 0) {
+      r.skip_reason = PreludeSkipReason::fingerprint_already;
+      return r;
+    }
+    auto it = s_warm_latch_map.find(fp);
+    if (it == s_warm_latch_map.end()) {
+      latch  = std::make_shared<WarmLatch>();
+      s_warm_latch_map.emplace(fp, latch);
+      i_warm = true;
+    } else {
+      latch = it->second;
+    }
+  }
+  if (i_warm) {
+    // This caller owns the warm; the guard signals the latch (and records
+    // completion + erases the in-flight entry) when the per-algo warm
+    // function returns (warm + in-place mutation done).
+    r.skip         = false;
+    r.inner_kernel = resolve_kernel();
+    r.guard        = WarmGuard(std::move(latch), fp);
+    return r;
+  }
+  // Another caller is warming (or already finished): block until done,
+  // then skip and compute against the now-stable (mutated) buffer.
+  {
+    std::unique_lock<std::mutex> lk(latch->m);
+    latch->cv.wait(lk, [&] { return latch->done; });
+  }
+  r.skip_reason = PreludeSkipReason::fingerprint_already;
   return r;
 }
 
@@ -773,10 +972,9 @@ inline bool ck_eligible_bf16(const PrepackParams &p) {
   // Split-halves silu_and_mul / gelu_and_mul + bias is NOT yet
   // eligible — the bias-into-init epilogue would need to read the
   // canonical [gate_bias | up_bias] in permuted order.  Bias-free
-  // silu/gelu covers the production envelope (Qwen3, Mixtral, DBRX,
-  // DeepSeek — none of these use W13 bias) and ships as the first
-  // cut.  With-bias silu/gelu stays on the separate-pass path until
-  // a follow-up adds permuted bias-init.
+  // silu/gelu (the common case for MoE W13) is handled here;
+  // with-bias silu/gelu stays on the separate-pass path until a
+  // follow-up adds permuted bias-init.
   //
   // Cross-warm semantics: when a non-ALGO-3 prepack call site
   // invokes cross_warm with act ∈ {silu_and_mul, gelu_and_mul}
@@ -1083,12 +1281,18 @@ inline bool ck_eligible(const PrepackParams &p) {
 // so the unified `[GRP_MATMUL.PREPACK]` log line reports total work
 // done (primary + cross) for this prepack invocation.
 //
-// Gated by `ZENDNNL_GRP_MATMUL_CROSS_WARM` (default ON).
+// Gated by `ZENDNNL_GRP_MATMUL_CROSS_WARM` (default ON) AND only
+// active under AUTO scheduling (`ZENDNNL_GRP_MATMUL_ALGO=0`): a pinned
+// ALGO runs the same scheduling path for every call, so the
+// cross-warm target cache is never consulted and the helper short-
+// circuits to a no-op (the fallback path takes a one-time lazy
+// reorder instead).
 //
 // `out_regime` is written to indicate which branch ran: `none` if
-// cross-warm was skipped entirely (env off, non-DLP inner_kernel, or
-// the structural skip on ALGO 3 where the primary already covered the
-// cross-warm target), otherwise the specific regime that fired.
+// cross-warm was skipped entirely (env off, a pinned ALGO, non-DLP
+// inner_kernel, or the structural skip on ALGO 3 where the primary
+// already covered the cross-warm target), otherwise the specific
+// regime that fired.
 // Callers thread `out_regime` into `log_pack_probe(...)` so the
 // `[GRP_MATMUL.PREPACK]` line can surface it.
 inline void cross_warm(const PrepackParams                  &p,
@@ -1103,19 +1307,24 @@ inline void cross_warm(const PrepackParams                  &p,
   if (!get_grp_matmul_cross_warm())                          return;
   if (inner_kernel != matmul_algo_t::aocl_dlp_blocked)       return;
 
+  // Auto-select-only gate.  Cross-warm always targets a DIFFERENT
+  // scheduling ALGO's reorder cache than the one this prepack
+  // invocation serves — it prefills the regime the OTHER inference
+  // phase (decode ↔ prompt) would route to in the same process.  That
+  // only pays off under AUTO (`ZENDNNL_GRP_MATMUL_ALGO=0`), where the
+  // phase selector may legitimately route successive calls to different
+  // ALGOs.  When the user PINS a single ALGO (1..5) every call runs
+  // that one ALGO, so the cross-warm target cache is never consulted
+  // and eagerly packing it is pure warm-up waste (extra CPU during
+  // warm-up plus a resident LRU footprint that scales with
+  // experts × tiles).  Any pinned-ALGO fallback (e.g. an unsafe-shape
+  // safety clamp from a forced ALGO 3 down to ALGO 1) instead pays a
+  // one-time lazy reorder on its first cache miss — not performant, but
+  // correct and bounded.  No correctness impact either way: the runtime
+  // populates whatever it needs on demand.
+  if (get_grp_matmul_algo() != 0)                            return;
+
   if (current_algo == 3) {
-    // Pinned-ALGO-3 short-circuit: when the user has forced
-    // `ZENDNNL_GRP_MATMUL_ALGO=3`, EVERY call (prompt and decode) runs
-    // ALGO 3 / CK — there is no ALGO 1 prompt path to cross-warm for, so
-    // eagerly packing the AOCL full-weight / sym-quant LRU is pure
-    // warm-up waste (the runtime never consults it).  Only cross-warm
-    // the ALGO-1 path when the algo is AUTO (env==0), where the phase
-    // selector may legitimately route a future prompt call to ALGO 1.
-    // Decode→ALGO-3 prepack of the CK pack cache itself is handled by
-    // the per-ALGO primary body, not here.
-    if (get_grp_matmul_algo() == 3) {
-      return;
-    }
     // ALGO 3 → cross-warm the upcoming ALGO 1 prompt path's full-
     // weight AOCL reorder cache.  Family selection:
     //
@@ -1242,24 +1451,87 @@ static void prepack_aocl_only_algo(const PrepackParams &p,
   custom_kernel::PackProbeStats   st_ck;
   bool primary_did_aocl_fw = false;
   const char *primary_label = "none";
-  if (pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked) {
+
+  // AUTO mixed-in-place ordering: for a prompt-class call (ALGO 1/2/4/5)
+  // the primary is the AOCL full-weight reorder, which mutates the weight
+  // buffer IN PLACE under mixed mode.  It MUST run AFTER `cross_warm` has
+  // packed the decode layout (CK / per-tile) OUT-OF-PLACE from the raw
+  // weights — otherwise CK/per-tile would read the already-mutated buffer
+  // and corrupt.  So in mixed mode we run cross_warm FIRST, then the
+  // in-place full-weight primary LAST.  In normal (out-of-place) mode
+  // nothing mutates W, so the historical primary-then-cross order stands.
+  const bool mixed_inplace = is_grp_auto_mixed_inplace_active();
+
+  // The full-weight (prompt) primary warm.  bf16 takes the in-place path
+  // under mixed mode (via the flag inside `warm_pack_all_aocl_dlp_experts`);
+  // int8 sym-quant stays out-of-place (no in-place int8 path).
+  auto warm_primary_full_weight = [&]() {
+    if (pre.inner_kernel != matmul_algo_t::aocl_dlp_blocked) return;
     if (int8_aocl_warm_candidate(p)) {
-      // M1 — DQ-INT8 prompt (ALGO 1/2/4/5) reorders the full weight
-      // through the AOCL DLP `s8s8s32os32_sym_quant` path, NOT the bf16
-      // LRU.  This holds even when the int8 CK is ON, because CK is
-      // N-tile / ALGO-3 only — the prompt phase always uses AOCL DLP.
+      // M1 — DQ-INT8 prompt reorders the full weight through the AOCL DLP
+      // sym-quant path (out-of-place), NOT the bf16 LRU.  CK is ALGO-3
+      // only, so the prompt phase always uses AOCL DLP.
       st_aocl = warm_aocl_sym_quant(p);
       primary_label = "aocl_full_weight_sym_quant";
     } else {
       st_aocl = warm_aocl(p);
-      primary_label = "aocl_full_weight";
+      primary_label = mixed_inplace ? "aocl_full_weight_inplace"
+                                    : "aocl_full_weight";
     }
     primary_did_aocl_fw = true;
-  }
+  };
+
   CrossWarmRegime cwr = CrossWarmRegime::none;
-  cross_warm(p, pre.inner_kernel, scheduling_algo,
-             primary_did_aocl_fw, /*primary_did_custom=*/false,
-             st_aocl, st_ck, cwr);
+  if (mixed_inplace) {
+    // Out-of-place decode warm first (reads raw W).
+    cross_warm(p, pre.inner_kernel, scheduling_algo,
+               /*primary_did_aocl_fw=*/false, /*primary_did_custom=*/false,
+               st_aocl, st_ck, cwr);
+    // The in-place full-weight mutation below DESTROYS the raw weights, so it
+    // is only safe once cross_warm has FULLY populated the decode layout the
+    // runtime will later read from those raw weights.  cross_warm warmers are
+    // best-effort: an expert can be skipped (invalid metadata) or a pack /
+    // reorder can fail (OOM) — both reported via `skipped_invalid` (see
+    // prepack_aocl_dlp.hpp / prepack_custom_kernel.hpp).  If the decode layout
+    // was NOT fully warmed (no regime ran, or any entry was skipped/failed), a
+    // later decode cache-miss would reorder from the MUTATED buffer and
+    // corrupt.  In that case do NOT mutate: downgrade the process to
+    // out-of-place (1) and skip the in-place prompt warm, so this prompt AND
+    // all decode run out-of-place from the still-RAW weights.  Capture
+    // completeness HERE — `warm_primary_full_weight()` overwrites `st_aocl`
+    // with the prompt full-weight stats.
+    const bool cross_warm_complete =
+        cwr != CrossWarmRegime::none
+        && st_ck.skipped_invalid == 0
+        && st_aocl.skipped_invalid == 0;
+    if (cross_warm_complete) {
+      // ... then the in-place full-weight prompt mutation last.
+      warm_primary_full_weight();
+    } else {
+      // Publish WC=1 before clearing the mixed flag (WC==2 is what gates every
+      // in-place path; mirrors the dispatch downgrade order).  Leave W RAW.
+      zendnnl::ops::matmul_config_t::instance().set_weight_cache(1);
+      zendnnl::ops::matmul_config_t::instance().set_grp_auto_mixed_inplace(
+          false);
+      static std::atomic<bool> s_wc2_xwarm_downgrade_warned{false};
+      if (!s_wc2_xwarm_downgrade_warned.exchange(
+              true, std::memory_order_relaxed)) {
+        zendnnl::error_handling::apilog_warning(
+            "[GRP_MATMUL.WEIGHT_CACHE] AUTO mixed-in-place: cross-warm did not "
+            "fully populate the decode layout (regime=",
+            static_cast<int>(cwr), " ck_skipped=", st_ck.skipped_invalid,
+            " aocl_skipped=", st_aocl.skipped_invalid,
+            "); skipping the in-place prompt mutation and downgrading "
+            "process-wide to out-of-place (weight_cache_type=1) for the rest "
+            "of the run so decode never reorders from a mutated buffer.");
+      }
+    }
+  } else {
+    warm_primary_full_weight();
+    cross_warm(p, pre.inner_kernel, scheduling_algo,
+               primary_did_aocl_fw, /*primary_did_custom=*/false,
+               st_aocl, st_ck, cwr);
+  }
   log_pack_probe(scheduling_algo, p, pre.inner_kernel, st_aocl, st_ck,
                  cwr, primary_label);
 }
@@ -1299,9 +1571,9 @@ void prepack_for_algo_2(const PrepackParams &p) {
 //       variability.  (col_start, n_tile) rotates per call so any
 //       single warm-pack key set covers only a fraction of the
 //       runtime keys.  Skipping the AOCL DLP warm entirely here
-//       avoids spending ~tens of ms on reorders the runtime never
-//       queries; the legacy A/B mode already accepts cache thrash
-//       as its cost (see the doc-comment on `aocl_stable_n_thr` in
+//       avoids spending time on reorders the runtime never queries;
+//       the legacy mode already accepts cache thrash as its cost
+//       (see the doc-comment on `aocl_stable_n_thr` in
 //       group_matmul_parallel_common.hpp).
 //
 //   * Custom kernel: warmed iff custom-kernel env on AND BF16
@@ -1429,8 +1701,18 @@ void prepack_for_algo_5(const PrepackParams &p) {
 }
 
 void clear_fingerprint_cache_for_test() {
-  std::lock_guard<std::mutex> lk(s_warmed_fps_mtx);
-  s_warmed_fps.clear();
+  {
+    std::lock_guard<std::mutex> lk(s_warmed_fps_mtx);
+    s_warmed_fps.clear();
+  }
+  // Also drop the AUTO mixed-in-place warm latches AND the completed-warm
+  // record so a fresh test run re-warms (and re-mutates) from raw weights
+  // instead of short-circuiting on a stale "already warmed" fingerprint.
+  {
+    std::lock_guard<std::mutex> lk(s_warm_latch_mtx);
+    s_warm_latch_map.clear();
+    s_warm_done_fps.clear();
+  }
 }
 
 namespace test_api {

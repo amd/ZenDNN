@@ -369,11 +369,19 @@ int32_t matmul_config_t::get_bmm_algo() {
 }
 
 void matmul_config_t::set_weight_cache(int32_t weight_cache) {
-  matmul_weight_cache = weight_cache;
+  matmul_weight_cache.store(weight_cache, std::memory_order_relaxed);
 }
 
 int32_t matmul_config_t::get_weight_cache() {
-  return matmul_weight_cache;
+  return matmul_weight_cache.load(std::memory_order_relaxed);
+}
+
+void matmul_config_t::set_grp_auto_mixed_inplace(bool enable) {
+  grp_auto_mixed_inplace.store(enable, std::memory_order_relaxed);
+}
+
+bool matmul_config_t::get_grp_auto_mixed_inplace() {
+  return grp_auto_mixed_inplace.load(std::memory_order_relaxed);
 }
 
 void matmul_config_t::set_otf_bpack(int32_t enable) {

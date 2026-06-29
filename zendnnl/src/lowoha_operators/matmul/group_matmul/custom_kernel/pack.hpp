@@ -169,6 +169,24 @@ inline constexpr int kNRMax = 64;
 /// (no inter-call amortisation, no stale pointer hits).
 /// `was_hit_out` is forced to `false` in disable-cache mode (the
 /// pack always runs).
+/// `in_place` (WEIGHT_CACHE=2): when set AND the packed layout is
+/// byte-for-byte the same size as the raw weight (bf16 even-K, where
+/// `packed_bytes == K*N*sizeof(bf16)`), the pack is written back into
+/// the caller's `weight` buffer itself and the cache stores a nullptr
+/// sentinel (so `*out_packed == weight` and the LRU never frees the
+/// caller's buffer).  This saves one packed buffer per weight.
+/// Alignment is NOT required: the bf16 microkernel reads the packed
+/// B-stream with the unaligned `_mm512_loadu_si512`, so handing it the
+/// caller's (possibly unaligned) weight buffer is correct — an
+/// unaligned base only costs cache-line split loads on the weight
+/// stream, free when the buffer happens to be aligned.  CALLER CONTRACT
+/// (mirrors the AOCL in-place path): the weight buffer is mutated to the
+/// packed layout, so the caller must NOT read it raw afterwards, and
+/// must NOT clear the pack cache while still reusing the buffer (a
+/// post-clear miss would re-pack the already-packed bytes).  Falls back
+/// to the out-of-place cache on a size mismatch (e.g. odd K), so it is
+/// always safe to request.  Ignored unless the cache is active
+/// (`!disable_cache`).
 status_t get_or_pack_weight_bf16(
     const bfloat16_t *weight,
     int K, int N, int ldb, int pack_nr,
@@ -176,7 +194,8 @@ status_t get_or_pack_weight_bf16(
     bool interleave_split_halves,
     const bfloat16_t **out_packed,
     bool *was_hit_out = nullptr,
-    bool disable_cache = false);
+    bool disable_cache = false,
+    bool in_place = false);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_bf16(..., disable_cache=true)`.  Safe with

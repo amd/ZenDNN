@@ -288,7 +288,7 @@ inline m_tile_single_tier_plan_t plan_m_tile_single_tier_assignment(
     // Overflow-safe ceil-div: the F8 env knob
     // `ZENDNNL_GRP_MATMUL_M_TILE_SLICE_TARGET` accepts any positive
     // int, so `M[i] + kSliceTarget - 1` can overflow signed `int`
-    // on pathological tuning sweeps.  The ceil-div result is bounded
+    // on pathological inputs.  The ceil-div result is bounded
     // by `M[i]` so the int cast after the ≥ 1 clamp is always safe.
     t_assign[i] = std::min(M[i],
         static_cast<int>(std::max<int64_t>(1,

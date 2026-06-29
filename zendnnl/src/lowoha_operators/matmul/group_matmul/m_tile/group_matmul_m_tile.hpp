@@ -125,7 +125,7 @@ namespace matmul {
 // in `test_api` because production code never touches them — the env
 // cache is the production path; the atoms are flipped by gtests
 // (via the RAII helpers in `moe_test_utils.hpp`) and long-running
-// services that want to A/B the knob without re-launching the
+// services that want to change the knob without re-launching the
 // process.
 //
 // Naming convention (matches the rest of `test_api`):
@@ -200,8 +200,8 @@ inline std::atomic<int> s_grp_matmul_m_tile_hybrid_lights_per_thread_override{-1
 // reads the env-cache; production state).
 //
 //   -1 DISABLED — force legacy two-pass (W13+act then W2) regardless
-//                  of eligibility.  Used by tests and A/B benchmarks
-//                  to capture the pre-fusion baseline timings.
+//                  of eligibility.  Used by tests to capture the
+//                  pre-fusion baseline.
 //    0 AUTO     — engage vertical fusion when ALL eligibility gates
 //                  in `try_flat_m_tile_pipeline_bf16` pass (one of:
 //                  bf16 end-to-end OR WOQ-INT4 s4/u4 on BOTH halves;
@@ -377,7 +377,7 @@ inline std::atomic<int>  s_last_m_tile_path{-1};
 //       M-weighted proportional-scale + decrement Phase-2 logic
 //       over heavy experts only.  Falls back silently to
 //       single-tier when the call doesn't match the gating
-//       (Mixtral 8 actives, decode shapes, low-skew, etc.).
+//       (few actives, decode shapes, low-skew, etc.).
 //
 // Invalid values (< -1, "abc", etc.) → silently treated as default
 // (0 / AUTO), matching the strict-parse convention of the other
@@ -408,7 +408,7 @@ inline int get_grp_matmul_m_tile_hybrid() {
 //
 // These four getters expose the previously-hard-coded heuristic
 // constants in `group_matmul_m_tile.cpp` so production deployments
-// can A/B them on new MoE workload shapes without source edits.
+// can tune them on new MoE workload shapes without source edits.
 // All four use the standard cached-static-const + atomic-override
 // pattern; every call does one relaxed atomic load + branch to
 // check the test override, then returns either the override or

@@ -414,16 +414,22 @@ static void ukernel_impl(
   if (kp + 1 < K_pair) {
     __m512bh bv_cur[NV];
     // Prolog: load B for kp=0 so the first outer iteration starts
-    // with bv_cur already in flight.  Bpacked is 64-byte aligned by
-    // `pack.cpp` (std::aligned_alloc(64, ...)) — use the aligned-load
-    // intrinsic here and below so any future alignment regression
-    // trips immediately rather than silently costing perf.
+    // with bv_cur already in flight.  The B-stream loads here and
+    // below use the UNALIGNED intrinsic (`_mm512_loadu_si512` →
+    // vmovdqu64).  Out-of-place packs come from std::aligned_alloc(64),
+    // but the WEIGHT_CACHE=2 in-place path hands us the caller's own
+    // weight buffer, which is not guaranteed 64-byte aligned.  On
+    // Zen 4 / Zen 5 vmovdqu64 has identical throughput to vmovdqa64
+    // when the address happens to be aligned (the common case), so the
+    // only cost is a cache-line split load on a genuinely unaligned
+    // base — accepted to let in-place packing apply regardless of how
+    // the framework allocated the weight.
     {
       const bfloat16_t *bp = Bpacked
           + static_cast<size_t>(kp) * kp_stride_bf16;
       #pragma GCC unroll 4
       for (int v = 0; v < NV; ++v) {
-        bv_cur[v] = (__m512bh)_mm512_load_si512(
+        bv_cur[v] = (__m512bh)_mm512_loadu_si512(
             reinterpret_cast<const __m512i *>(bp + v * v_stride_bf16));
       }
     }
@@ -450,7 +456,7 @@ static void ukernel_impl(
             + static_cast<size_t>(kp + 1) * kp_stride_bf16;
         #pragma GCC unroll 4
         for (int v = 0; v < NV; ++v) {
-          bv_next[v] = (__m512bh)_mm512_load_si512(
+          bv_next[v] = (__m512bh)_mm512_loadu_si512(
               reinterpret_cast<const __m512i *>(bp1 + v * v_stride_bf16));
         }
       }
@@ -475,7 +481,7 @@ static void ukernel_impl(
             + static_cast<size_t>(kp + 2) * kp_stride_bf16;
         #pragma GCC unroll 4
         for (int v = 0; v < NV; ++v) {
-          bv_cur[v] = (__m512bh)_mm512_load_si512(
+          bv_cur[v] = (__m512bh)_mm512_loadu_si512(
               reinterpret_cast<const __m512i *>(bp2 + v * v_stride_bf16));
         }
       }
@@ -503,7 +509,7 @@ static void ukernel_impl(
     __m512bh bv[NV];
     #pragma GCC unroll 4
     for (int v = 0; v < NV; ++v) {
-      bv[v] = (__m512bh)_mm512_load_si512(
+      bv[v] = (__m512bh)_mm512_loadu_si512(
           reinterpret_cast<const __m512i *>(bp + v * v_stride_bf16));
     }
     #pragma GCC unroll 8
@@ -541,7 +547,7 @@ static void ukernel_impl(
     __m512bh bv[NV];
     #pragma GCC unroll 4
     for (int v = 0; v < NV; ++v) {
-      bv[v] = (__m512bh)_mm512_load_si512(
+      bv[v] = (__m512bh)_mm512_loadu_si512(
           reinterpret_cast<const __m512i *>(bp + v * v_stride_bf16));
     }
     #pragma GCC unroll 8

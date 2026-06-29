@@ -287,8 +287,8 @@ struct CallContext {
   /// Dtype of the src/wei scale buffers the microkernel will read.
   /// Set by the N-tile hoist (the dispatcher cannot see the scale
   /// dtype): `kBf16` when the raw bf16 scales are passed straight
-  /// through (swiglu_oai_mul / none — the common gpt-oss path, kernel
-  /// converts on load), `kF32` when the scales are already f32 OR were
+  /// through (swiglu_oai_mul / none — the common non-interleaved path,
+  /// kernel converts on load), `kF32` when the scales are already f32 OR were
   /// converted+permuted to f32 by the silu/gelu interleave pre-pass.
   /// Ignored on the bf16 (non-quant) path.
   ScaleKind      scale_kind    = ScaleKind::kF32;
@@ -329,9 +329,9 @@ struct CallContext {
   std::array<int, kMaxExperts> subtile_cols_per_expert{};
 
   /// Caller-owned packed-weight pointers — populated only when the
-  /// library-wide weight-cache toggle is off
-  /// (`matmul_config_t::get_weight_cache() != 1`).  In that mode
-  /// `prepare_for_call()` routes each per-expert pack through
+  /// library-wide weight-cache toggle is OFF
+  /// (`matmul_config_t::get_weight_cache() == 0`, i.e. `cache_off`).  In
+  /// that mode `prepare_for_call()` routes each per-expert pack through
   /// `get_or_pack_weight_bf16(..., disable_cache=true)`, which
   /// allocates a fresh aligned buffer per call and skips the LRU
   /// singleton; the resulting raw pointer is stored here AND
@@ -349,8 +349,8 @@ struct CallContext {
   /// stays `nullptr` and `release_owned_buffers()` is a cheap no-op.
   std::array<const bfloat16_t *, kMaxExperts> owned_packed_ptrs{};
   /// DQ-INT8 sibling of `owned_packed_ptrs` — caller-owned int8
-  /// packed-weight pointers, used in the `weight_cache_type != 1`
-  /// branch.  Freed via `free_owned_packed_weight_int8()`.  Same
+  /// packed-weight pointers, used in the `weight_cache_type == 0`
+  /// (cache-off) branch.  Freed via `free_owned_packed_weight_int8()`.  Same
   /// lifetime contract as the bf16 array; the destructor /
   /// `release_owned_buffers()` zero both on exit.
   std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_int8{};

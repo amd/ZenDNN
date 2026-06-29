@@ -1121,6 +1121,112 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
 INSTANTIATE_TEST_SUITE_P(GroupMatmulQuant, TestGroupMatmulQuant,
                          ::testing::ValuesIn(quant_matmul_test));
 
+// ── INT8 sym-quant under WEIGHT_CACHE=2 must stay out-of-place ───────
+// The s8 sym-quant blocked pack carries a compensation row, so the
+// blocked size is strictly larger than the raw k*n weight.  Under WC=2
+// the in-place size gate in the shared `inplace_reorder_and_cache` helper
+// (reorderAndCacheWeightsSymQuant path) therefore FAILS and falls back
+// out-of-place — the caller's int8 weight buffer must never be mutated.
+// This holds whether the grouped dispatcher keeps WC=2 (sym-quant
+// in-place branch -> OOP fallback) or downgrades AUTO 2->1; both yield
+// identical invariants: (1) the weight bytes are untouched, and (2) the
+// output matches the forced reference kernel.  Closes the gap that the
+// existing INT8_SYM_QUANT_* tests run only at the WC=1 default (which
+// never enters the refactored in-place branch).
+TEST(TestGroupMatmulWeightCacheInt8, SymQuantWc2StaysOutOfPlace) {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::common::data_type_t;
+  using zendnnl::error_handling::status_t;
+
+  reset_grp_matmul_caches();
+  omp_set_num_threads(8);
+  auto &cfg = zendnnl::ops::matmul_config_t::instance();
+  // Restore the process WC mode AND clear the mixed-in-place flag on exit
+  // so this test cannot leak sticky state into siblings.
+  struct StateRestore {
+    int32_t wc;
+    ~StateRestore() {
+      auto &c = zendnnl::ops::matmul_config_t::instance();
+      c.set_weight_cache(wc);
+      c.set_grp_auto_mixed_inplace(false);
+    }
+  } restore{cfg.get_weight_cache()};
+  cfg.set_weight_cache(2);
+
+  tensor_factory_t tensor_factory{};
+  constexpr uint64_t num_ops = 3, m = 8, sym_k = 256, n = 256, group_size = 64;
+  const uint64_t ngroups = sym_k / group_size;
+  const std::vector<int64_t> wei_sd = {static_cast<int64_t>(ngroups),
+                                       static_cast<int64_t>(n)};
+  const std::vector<int64_t> src_sd = {static_cast<int64_t>(m),
+                                       static_cast<int64_t>(ngroups)};
+  const data_type_t ref_dt = data_type_t::bf16;
+  const data_type_t scale_dt = data_type_t::f32;
+  // Backend algo 1 == aocl_dlp_blocked (the s8 sym-quant DLP path).
+  const matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked;
+
+  std::vector<tensor_t> inp(num_ops), wt(num_ops), bias(num_ops), out(num_ops),
+      out_ref(num_ops);
+  for (size_t i = 0; i < num_ops; ++i) {
+    auto wei_ref =
+        tensor_factory.uniform_dist_tensor({sym_k, n}, ref_dt, 25.0, false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, ref_dt,
+                                   data_type_t::s8, wei_sd, scale_dt, wei_scale,
+                                   wei_zp, &weight_tensor),
+              status_t::success);
+    auto src_ref =
+        tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt, 25.0, false);
+    tensor_t input_tensor, src_scale, src_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, ref_dt,
+                                   data_type_t::s8, src_sd, scale_dt, src_scale,
+                                   src_zp, &input_tensor),
+              status_t::success);
+    inp[i] = input_tensor;
+    wt[i] = weight_tensor;
+    bias[i] = tensor_factory.uniform_dist_tensor({1, n}, data_type_t::bf16, 2.0);
+    out[i] = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+    out_ref[i] =
+        tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+  }
+
+  // Snapshot the packed-s8 weight bytes BEFORE the run.
+  std::vector<std::vector<uint8_t>> wsnap(num_ops);
+  for (size_t i = 0; i < num_ops; ++i) {
+    const uint8_t *p =
+        static_cast<const uint8_t *>(wt[i].get_raw_handle_const());
+    wsnap[i].assign(p, p + wt[i].get_buffer_sz_bytes());
+  }
+
+  ASSERT_EQ(group_matmul_kernel_test(inp, wt, bias, out, algo, 1.0f, 0.0f),
+            status_t::success);
+
+  // Invariant 1: WC=2 must NOT mutate the int8 weight buffer in place.
+  for (size_t i = 0; i < num_ops; ++i) {
+    const uint8_t *p =
+        static_cast<const uint8_t *>(wt[i].get_raw_handle_const());
+    EXPECT_EQ(std::memcmp(p, wsnap[i].data(), wsnap[i].size()), 0)
+        << "INT8 sym-quant weight expert " << i << " was mutated in place "
+           "under WC=2 (must stay out-of-place: compensation row > raw size)";
+  }
+
+  // Invariant 2: output must match the forced reference kernel.
+  std::vector<post_op_type_t> ref_po;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    std::vector<tensor_t> bin;
+    ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
+                                               out_ref[i], ref_po, bin, true,
+                                               algo, 1.0, 0.0);
+  }
+  ASSERT_EQ(ref_status, status_t::success);
+  bool ok = true;
+  for (size_t i = 0; i < num_ops && ok; ++i)
+    compare_tensor_2D_matrix(out[i], out_ref[i], m, n, sym_k, rtol_bf16,
+                             epsilon_bf16, ok, false, 1.0f);
+  EXPECT_TRUE(ok) << "INT8 sym-quant WC=2 output must match the reference";
+}
+
 // ============================================================================
 // [9b] TestGroupDynamicQuant: direct unit tests for the grouped dynamic-quant
 //      pre-pass (`group_reorder_quantization_wrapper`).  Focus on the M<=1

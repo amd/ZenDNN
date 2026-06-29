@@ -19,6 +19,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
 #include <cstdlib>
+#include <cstring>   // std::memcpy (WC=2 in-place reorder write-back)
 #include <mutex>
 
 namespace zendnnl {
@@ -607,6 +608,33 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type =
     effective_weight_cache_type(lowoha_param.weight_cache_type);
+
+  // Grouped AUTO mixed-in-place mode keeps the process WC at 2, but in that
+  // mode the ONLY layout allowed to mutate the weight buffer in place is the
+  // bf16 full-weight (prompt) AOCL reorder.  That is safe because it runs
+  // LAST: cross-warm first packs every decode layout (CK pack, AOCL per-tile)
+  // OUT-OF-PLACE from the RAW weights, so by the time the full-weight reorder
+  // mutates the buffer nothing else still needs the raw bytes.
+  //
+  // Non-bf16 weights have no in-place-safe pre-warm (the full-weight in-place
+  // warmer is bf16-only).  f32 has no warmer at all, so leaving it at WC=2
+  // here would let this reorder mutate the buffer in place lazily at runtime,
+  // after which a later / concurrent out-of-place reorder of the SAME buffer
+  // would read corrupted bytes.  (int8 sym-quant is already warmed + served
+  // out-of-place -- its blocked layout carries a compensation row so it can
+  // never satisfy the in-place size gate -- but forcing it here keeps it
+  // unambiguously on the out-of-place branch.)  Force every non-bf16 dtype
+  // out-of-place under mixed mode so only bf16 ever mutates in place.
+  //
+  // Gated on is_grp_auto_mixed_inplace_active() (process WC==2 AND the grouped
+  // AUTO mixed flag, which only the grouped dispatcher sets), so this is INERT
+  // for single matmul / BMM and for pinned WC=2 -- none of those set the mixed
+  // flag, so the branch never fires for them.
+  if (weight_cache_type == 2
+      && dtypes.wei != data_type_t::bf16
+      && is_grp_auto_mixed_inplace_active()) {
+    weight_cache_type = 1;
+  }
 
   size_t run_src_scale_nelems = get_num_elements(
                                   lowoha_param.quant_params.src_scale.dims);

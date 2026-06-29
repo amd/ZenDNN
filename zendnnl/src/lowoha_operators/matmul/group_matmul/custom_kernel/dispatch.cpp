@@ -483,11 +483,38 @@ status_t prepare_for_call(
   // (`prepack/prepack.cpp::fingerprint`) folds the toggle into its
   // hash so flipping the env mid-process re-arms both code paths
   // on the next call.
-  const bool cache_off =
-      (zendnnl::ops::matmul_config_t::instance().get_weight_cache() != 1);
+  // Weight-cache mode drives how the CK pack is stored:
+  //   0 → no cache: pack into per-call caller-owned buffers (LRU bypass).
+  //   1 → out-of-place cache (default): pack into an LRU-owned buffer.
+  //   2 → in-place: bf16/even-K packs are written back into the caller's
+  //       weight buffer (saves a packed buffer); int8 (compensation row
+  //       makes the pack larger than the raw weight) and odd-K bf16 fall
+  //       back to the out-of-place cache inside get_or_pack_weight_*.
+  // NOTE: reaching here with WC==2 means one of two things:
+  //   * pinned ALGO 3 + custom-kernel — each weight has a single consumer,
+  //     so the CK pack mutates it in place (`ck_in_place` below is true); or
+  //   * AUTO mixed in-place mode — the grouped dispatcher kept WC=2 but also
+  //     set `grp_auto_mixed_inplace`, reserving the one in-place mutation for
+  //     the AOCL full-weight (prompt) reorder.  CK decode must then stay
+  //     OUT-OF-PLACE (`ck_in_place` is forced false), otherwise CK would be a
+  //     second mutator of the shared buffer and corrupt it.
+  // (AUTO WITHOUT the mixed flag has already downgraded WC 2→1 upstream, so
+  // it never reaches here with WC==2.)
+  const int wc_mode =
+      zendnnl::ops::matmul_config_t::instance().get_weight_cache();
+  const bool cache_off  = (wc_mode == 0);
+  // AUTO mixed-in-place mode (grp ALGO 0 + WC=2 + prepack/cross_warm):
+  // exactly ONE layout may mutate the shared weight buffer, and that
+  // owner is the AOCL full-weight (prompt) reorder.  The CK pack must
+  // therefore stay OUT-OF-PLACE here even though WC==2, otherwise CK
+  // (decode) would be a second mutator and the two layouts would corrupt
+  // each other.  Pinned ALGO 3 + CK (env_algo==3, mixed flag false) keeps
+  // true in-place as before.
+  const bool ck_in_place =
+      (wc_mode == 2) && !is_grp_auto_mixed_inplace_active();
   if (cache_off && s_refuse_log) {
     apilog_verbose("[GRP_MATMUL.CK NOCACHE] "
-                   "weight_cache_type != 1 — packing into per-call "
+                   "weight_cache_type == 0 — packing into per-call "
                    "caller-owned buffers (LRU singleton bypassed)");
   }
 
@@ -587,9 +614,9 @@ status_t prepare_for_call(
   // fused epilogue (split-halves bias would need to be read in
   // permuted order to match the interleaved layout).  Refuse the
   // combination cleanly so the caller falls back to the
-  // separate-pass path with canonical bias-into-init.  Production
-  // envelope (Qwen3, Mixtral, DBRX, DeepSeek) is bias-free on W13,
-  // so this refusal does not affect typical decode.
+  // separate-pass path with canonical bias-into-init.  Typical MoE
+  // layers are bias-free on W13, so this refusal does not affect
+  // common decode shapes.
   if ((act == grp_matmul_gated_act_t::silu_and_mul
        || act == grp_matmul_gated_act_t::gelu_and_mul)
       && bias_dtype != data_type_t::none) {
@@ -833,12 +860,16 @@ status_t prepare_for_call(
           /*interleave_split_halves=*/interleave_split_halves,
           &out.packed_ptrs[i],
           /*was_hit_out=*/&was_hit_unused,
-          /*disable_cache=*/cache_off);
+          /*disable_cache=*/cache_off,
+          /*in_place=*/ck_in_place);
       if (pst != status_t::success) {
         return refuse("weight_pack_failed",
                       "get_or_pack_weight_bf16 returned failure — "
                       "see preceding log_error for OOM/arg detail");
       }
+      // Only the no-cache (WC=0) path hands back a caller-owned buffer to
+      // free.  The in-place (WC=2) path returns the caller's own weight
+      // pointer (cached behind a nullptr sentinel) — NOT owned here.
       if (cache_off) {
         out.owned_packed_ptrs[i] = out.packed_ptrs[i];
       }

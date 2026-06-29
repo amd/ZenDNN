@@ -56,8 +56,8 @@
 ///                atomics that shadow the env-cache.  Flipped by
 ///                gtests (via RAII helpers in
 ///                `gtests/group_matmul/moe_test_utils.hpp`) and
-///                long-running services that want to A/B without
-///                re-launching the process.
+///                long-running services that want to switch
+///                configuration without re-launching the process.
 ///
 ///   Section A.4  N-tile env getters: `get_grp_n_tile_*()` /
 ///                `get_grp_matmul_n_*()`.  Cached-static-const +
@@ -319,9 +319,9 @@ inline std::atomic<int> s_grp_matmul_decode_proportional_override{-1};
 // ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT = { "0", "1" } — cached, default ON.
 //   ALGO 3 folds a supported gated activation into the per-thread
 //   epilogue (saves a second OMP pass over dst).  Adds one OMP barrier
-//   between matmul-write and activation-read for correctness.  Net
-//   win on every benchmarked workload; env retained as A/B escape
-//   hatch.  Mid-process env changes have no effect (static const).
+//   between matmul-write and activation-read for correctness.  ON by
+//   default; the env is retained as an escape hatch.  Mid-process env
+//   changes have no effect (static const).
 inline bool get_grp_n_tile_fused_act() {
   static const bool v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT");
@@ -331,38 +331,34 @@ inline bool get_grp_n_tile_fused_act() {
   return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2 } — cached, default 2 (rounds).
+// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2, 3 } — cached, default 2 (rounds).
 //
 // Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
 // controls whether the planner's auto-mirror perf gate fires.
-// Three values with distinct semantics:
+// Four values with distinct semantics:
 //
 //     0 = auto (opt-in heuristic).  Honour the planner's auto-mirror
 //         gate (route to Sequential when `auto_select_algo` would
-//         have picked ALGO 1 for this shape — Mixtral-class with
-//         num_ops ≤ 8, or prompt-class with num_ops < num_threads).
+//         have picked ALGO 1 for this shape — few experts (num_ops ≤
+//         kFewExpertsAlgo1), or prompt-class with num_ops < num_threads).
 //         If the call survives auto-mirror, try DecodeD WITH its
-//         perf-eligibility heuristic (decode-class max_M ≤ 32,
+//         eligibility heuristic (decode-class max_M ≤ 32,
 //         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
 //         max_N / decode_n_tile ≤ team_size_est); fall through to
 //         Rounds (FewExperts / ManyExperts) when the heuristic
-//         refuses.  Retained as an opt-in for shapes where DecodeD
-//         was empirically the better path; no longer the default
-//         because DecodeD never engaged on the production workloads
-//         (GPT-OSS-20B/120B, Qwen3-30B-A3B) — its eligibility gate
-//         consistently refused — so the auto branch reduced to
-//         "Rounds with extra precondition checks" in practice.
+//         refuses.  Not the default because DecodeD's eligibility gate
+//         rarely engages, so the auto branch reduces to "Rounds with
+//         extra precondition checks" in practice.
 //
 //     1 = decode (FORCE).  SKIP the auto-mirror gate AND skip the
-//         perf-eligibility heuristic — run DecodeD on every shape
-//         where it is STRUCTURALLY feasible (`num_threads >=
-//         num_ops`; smaller teams would over-subscribe DecodeD's
-//         OMP region and collide the `tid → expert` mapping).
-//         Useful for benchmarking DecodeD on shapes the heuristic
-//         would normally route away (e.g. Qwen-30B-A3B decode with
-//         active experts > num_ccds, where eligibility's `num_ops
-//         ≤ num_ccds` gate refuses but DecodeD's executor still
-//         runs correctly with thin per-expert teams of size
+//         eligibility heuristic — run DecodeD on every shape where it
+//         is STRUCTURALLY feasible (`num_threads >= num_ops`; smaller
+//         teams would over-subscribe DecodeD's OMP region and collide
+//         the `tid → expert` mapping).  Lets the caller run DecodeD on
+//         shapes the heuristic would route away (e.g. a decode call
+//         with active experts > num_ccds, where eligibility's `num_ops
+//         ≤ num_ccds` gate refuses but DecodeD's executor still runs
+//         correctly with thin per-expert teams of size
 //         `num_threads / num_ops`).  Logs an apilog L3 line
 //         describing the resulting allocation, OR a fallback line
 //         if num_threads < num_ops forces a Rounds fall-through.
@@ -373,12 +369,31 @@ inline bool get_grp_n_tile_fused_act() {
 //         N-tile, not silently bounce back to Sequential on a perf
 //         preference.  Skip the DecodeD attempt entirely; always run
 //         the Rounds path (FewExperts / ManyExperts).  This is the
-//         production envelope: it gives deterministic ALGO 3 = "true
-//         N-tile with rounds" behaviour across all decode and prompt
-//         shapes that survive the structural gates, which is the
-//         path validated by every in-tree MoE benchmark and gtest.
+//         production default: deterministic ALGO 3 = "true N-tile with
+//         rounds" behaviour across all decode and prompt shapes that
+//         survive the structural gates, and the path exercised by the
+//         in-tree MoE gtests.
 //
-// What survives `n_tile_strategy = {1, 2}` (genuinely STRUCTURAL —
+//     3 = decode_dynamic (FORCE).  SKIP the auto-mirror gate AND the
+//         viability heuristics (same as 1/2).  Per op, a gate decides
+//         between the barrier-free CCD-cohesive DecodeDynamic executor
+//         (`DecodeDynamic` -> `execute_decode_dynamic`) and Rounds, from
+//         the active expert count and per-expert weight (see the
+//         DecodeDynamic knob block below).  DecodeDynamic targets the
+//         decode-class regime `num_ops > num_ccds` (max_M <= decode
+//         threshold); it maps whole experts onto CCDs and processes them
+//         in per-CCD waves, so it also runs when `num_ops > num_threads`.
+//         Covers the CK custom-kernel path (swiglu fused in-register, so
+//         no matmul->activation barrier) plus standard-backend fused /
+//         non-fused calls (non-custom wide-fused runs one team-wide
+//         barrier + apply_swiglu_oai post-pass inside the executor).
+//         Only a use_custom DQ-INT8 fused call falls back to Rounds
+//         (defense-in-depth).  AUTO (value 0) also engages DecodeDynamic
+//         under the SAME gate (decode-class many-active-expert shapes,
+//         active_ops >= 4*num_ccds); below the gate AUTO uses its normal
+//         Rounds / AOCL path.
+//
+// What survives `n_tile_strategy = {1, 2, 3}` (genuinely STRUCTURAL —
 // memory safety / kernel correctness, not perf):
 //
 //   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
@@ -427,7 +442,7 @@ inline bool get_grp_n_tile_fused_act() {
 // the unset / invalid default changed.
 //
 // Validation paths differ slightly between the env and the override:
-//   * Env path  — invalid values (< 0 OR > 2) parse to 2 (rounds),
+//   * Env path  — invalid values (< 0 OR > 3) parse to 2 (rounds),
 //                 matching the "unset → safe default" convention used
 //                 by the other knobs in this header.  Note this
 //                 differs from the historical default of 0 (auto)
@@ -436,7 +451,7 @@ inline bool get_grp_n_tile_fused_act() {
 //                 falls through to the cached env path; any other
 //                 negative value also falls through (so a bogus
 //                 negative typo cannot accidentally pin a strategy).
-//                 Non-negative override values > 2 clamp to 2
+//                 Non-negative override values > 3 clamp to 2
 //                 (rounds), mirroring the env path on the upper end.
 inline int get_grp_n_tile_strategy() {
   // Unset / invalid → 2 (rounds): production default; ALGO 3 always
@@ -447,14 +462,78 @@ inline int get_grp_n_tile_strategy() {
   // default 2, NOT silently to mode 0 via legacy atoi-returns-0
   // behaviour.  See `parse_env_int_strict`.
   constexpr int kDefault = 2;
+  constexpr int kMaxValue = 3;  // 0=auto, 1=decode_d, 2=rounds, 3=decode_dynamic
   const int ovr = test_api::s_grp_n_tile_strategy_override.load(
       std::memory_order_relaxed);
-  if (ovr >= 0) return (ovr <= 2) ? ovr : kDefault;
+  if (ovr >= 0) return (ovr <= kMaxValue) ? ovr : kDefault;
   static const int v = []() {
     const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY");
     int parsed = 0;
     if (!parse_env_int_strict(e, parsed)) return kDefault;
-    return (parsed >= 0 && parsed <= 2) ? parsed : kDefault;
+    return (parsed >= 0 && parsed <= kMaxValue) ? parsed : kDefault;
+  }();
+  return v;
+}
+
+// ── DecodeDynamic generic decision-tree knobs ────────────────────────
+//
+// These take effect whenever DecodeDynamic is eligible for selection,
+// i.e. under BOTH:
+//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3` (forced DecodeDynamic), and
+//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0` (smart AUTO), where the
+//     planner may route decode-class shapes to DecodeDynamic.
+// Under the production default (2 = rounds) — and under `=1` (DecodeD) —
+// the flow is untouched and these getters are never consulted.
+//
+// The route DecodeDynamic-vs-Rounds is decided PER OP from two signals
+// available in `topo` — the active expert count, the machine CCD count,
+// and this op's per-expert weight bytes vs a CCD's L3.  No layer/model
+// identity is used:
+//
+//   use_decode_dynamic =
+//        (active_ops  >= EPC_MULT  * num_ccds)         // enough experts/CCD
+//     || (wei_per_expert >= WEI_L3_MULT * kL3PerCcdBytes) // weight >> CCD L3
+//
+// Structural rationale for the two branches:
+//   * experts-per-CCD (epc = active_ops/num_ccds): the CCD-cohesive map
+//     assigns whole experts to CCDs, so its load balance is governed by
+//     how evenly `active_ops` divides `num_ccds`.  At low epc a single
+//     extra expert overloads one CCD (the imbalance is ~ceil(epc)/epc),
+//     so DecodeDynamic only pays off once epc is large enough that this
+//     rounding imbalance is small — EPC_MULT (default 4).  epc grows with
+//     batch size, so this is the decode-throughput-sensitive branch.
+//   * per-expert weight vs CCD L3: the Rounds path batches experts to
+//     fit their weights in aggregate L3, so when a single expert's
+//     weight already exceeds a CCD's L3 it serialises down to ~1 expert
+//     per round; DecodeDynamic instead streams experts concurrently, one
+//     per CCD.  WEI_L3_MULT (default 2, i.e. >= 2 CCD-L3 worth) selects
+//     that regime.
+// Both thresholds are env-overridable for tuning to other shapes.
+
+// ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT — cached, default 4.
+//   DecodeDynamic when active_ops >= this * num_ccds (experts-per-CCD).
+inline int get_grp_decdyn_epc_mult() {
+  constexpr int kDefault = 4;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed) || parsed < 1) return kDefault;
+    return parsed;
+  }();
+  return v;
+}
+
+// ZENDNNL_GRP_MATMUL_DECDYN_WEI_L3_MULT — cached, default 2.
+//   DecodeDynamic when wei_per_expert >= this * kL3PerCcdBytes (32 MB),
+//   i.e. the per-expert weight is large enough that Rounds' L3-batching
+//   serialises.  0 disables this branch (epc rule only).
+inline int get_grp_decdyn_wei_l3_mult() {
+  constexpr int kDefault = 2;
+  static const int v = []() {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECDYN_WEI_L3_MULT");
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed) || parsed < 0) return kDefault;
+    return parsed;
   }();
   return v;
 }
@@ -467,20 +546,15 @@ inline int get_grp_n_tile_strategy() {
 //         default for AOCL DLP cache-key stability (n_thr_fixed
 //         schedule keeps thread-id → expert mapping shape-invariant
 //         when permutation is shape-invariant too).  That rationale
-//         no longer dominates: under `CK=1` (production default)
-//         the per-tile cache is shape-keyed in the CK pack arena,
-//         not thread-id-keyed, so the ordering is free to optimise
-//         purely for load balance.
+//         no longer applies under `CK=1` (production default): the
+//         per-tile cache is shape-keyed in the CK pack arena, not
+//         thread-id-keyed, so the ordering is free to optimise purely
+//         for load balance.
 //     2 = descending — by M, heaviest first; minimises
 //                      Σ max_M_per_round under fixed-batch rounds.
-//                      Was historically suggested for multi-round
-//                      configurations, but a CK=1 + Qwen3-30B
-//                      `N_ROUNDS={1,2,3} × N_ORDER={1,2,3,4}` cross
-//                      (16 cells × 200 frames × 200 iters) confirmed
-//                      single-round + ORDER=3 dominates the entire
-//                      matrix; descending lost by 1.6% under
-//                      single-round and was never competitive under
-//                      multi-round either.
+//                      Historically considered for multi-round
+//                      configurations; the default (3) is preferred in
+//                      practice (see below).
 //     3 = pair-balanced — desc, then interleave largest with smallest
 //         (heavy/light alternation).  CURRENT DEFAULT.  Single-round
 //         wall time is bounded by the slowest thread's per-expert
@@ -490,7 +564,7 @@ inline int get_grp_n_tile_strategy() {
 //     4 = balanced-spread — prefix-sum-balanced: any K-way consecutive
 //                           split yields Σ M per chunk ≈ total / K
 //                           (heavies evenly distributed throughout).
-//   Mid-process env changes have no effect; relaunch for A/B.
+//   Mid-process env changes have no effect; relaunch to change it.
 inline int get_grp_matmul_n_order() {
   // Default: 3 (pair-balanced).  Strict env parsing — non-numeric
   // input (e.g. `"abc"`) falls back to the documented default 3,
@@ -549,15 +623,14 @@ inline int get_grp_matmul_n_order() {
 //       with `M[e] > value` are tagged HEAVY; each active light
 //       expert reserves exactly 1 thread; the remaining heavy-budget
 //       is water-filled across heavies by M, capped at
-//       `min(ccd_size, max_tiles, N[e] / ab_min_tile)`.
-//
-//       Validated empirical sweet spot on Qwen3-30B-A3B prompt
-//       (BS=32, i/p=128, max_M ≈ 3500): value = 1024.
+//       `min(ccd_size, max_tiles, N[e] / ab_min_tile)`.  A value near
+//       1024 is a reasonable starting point for large-max_M prompt
+//       shapes.
 //
 // Invalid values (< -1, "abc", etc.) → silently treated as the default
 // (0 / AUTO — the prompt adaptive-tier policy described above), matching
 // the strict-parse convention of the other ZENDNNL_GRP_MATMUL_* env
-// vars.  Mid-process env changes have no effect; relaunch for A/B.
+// vars.  Mid-process env changes have no effect; relaunch to change it.
 //
 // All three modes share the same executor consumer
 // (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
@@ -588,9 +661,7 @@ inline int get_grp_matmul_n_tile_heavy_threshold() {
 //   thread split in the ALGO 3 CK Single-round plan (allocate threads
 //   to each active expert in proportion to its M, clamped to its
 //   N-tile capacity).
-//   OFF (default): uniform Phase B base/base+1 distribution — measured
-//                  faster than the proportional split across the
-//                  evaluated decode MoE shapes, so it is the default.
+//   OFF (default): uniform Phase B base/base+1 distribution.
 //   ON ("1"):      M-proportional split for decode CK (opt-in).
 //   Independent of ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD (which is
 //   prompt-only).  Mid-process env changes have no effect (static const).
@@ -721,7 +792,7 @@ inline void engage_ntile_custom_kernel(
     data_type_t                       compute_dtype = data_type_t::none) {
   if (!get_grp_matmul_custom_kernel()) return;
   // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
-  // operators can A/B int8 without disabling bf16.  The int8 CK path
+  // operators can toggle int8 without disabling bf16.  The int8 CK path
   // arrives two ways and BOTH must honour the sub-toggle:
   //   * runtime hoist  — `dynamic_quant=true` (bf16 src quantized
   //     per-tile);
@@ -773,15 +844,13 @@ inline int ntile_effective_nr_align(
 /// Auto-pick N_ORDER from num_ops.  Returns 3 (pair_balanced) or 0
 /// (walk input order); explicit modes 1/2/4 only reachable via env.
 ///
-/// Rule was derived from an internal MoE-decode sweep across a wide
-/// num_ops × shape × mode grid.  Pair-balanced ordering improves
-/// throughput at the low- and high-num_ops ends of the range:
-///   * Few-experts (≤ ~kSmallExpertsCutoff): the bin-packing benefit
-///     of pair-balanced outweighs the walk-input alternative.
-///   * Many-experts (≥ ~kLargeExpertsCutoff): pair-balanced is again
-///     dominant and the alternative shows essentially no wins.
-///   * Mid-band: the two strategies trade wins/losses, so we default
-///     to walk-input (lower overhead and zero permutation cost).
+/// The ordering choice depends on num_ops:
+///   * Few-experts (≤ ~kSmallExpertsCutoff): pair-balanced ordering's
+///     bin-packing keeps per-round max-M balanced.
+///   * Many-experts (≥ ~kLargeExpertsCutoff): pair-balanced applies
+///     again.
+///   * Mid-band: default to walk-input (lower overhead, zero
+///     permutation cost).
 /// The cutoffs are calibrated against the dispatcher's stable-N-tile
 /// plan and should be re-evaluated together if that planner changes.
 inline int auto_pick_n_order(int num_ops) {

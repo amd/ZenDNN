@@ -2827,6 +2827,177 @@ TEST_F(TestPrepackCrossWarmRegimes, CrossWarmOnAlgo1NoCustomMatchesPrimaryOnly) 
          "thread context is missing.";
 }
 
+// ── Cross-warm is AUTO-only ─────────────────────────────────────────
+// Cross-warm always targets a DIFFERENT scheduling ALGO's reorder
+// cache than the one this prepack serves (decode ↔ prompt phase
+// transition).  It only pays off under AUTO; when a single ALGO is
+// pinned the runtime serves every call from that ALGO and the cross-
+// warm target cache is never queried, so the helper must short-circuit
+// (`cross_warm_regime == none`) and the pinned path prepacks only what
+// it itself uses.  These two tests pin via `AlgoEnvGuard` (the
+// `test_api_algo_override` atomic that `get_grp_matmul_algo()` reads),
+// closing the gap where the AUTO-only gate had no stats-level coverage.
+TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo1DisablesCrossWarm) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  reset_grp_matmul_caches();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // CK=1 so, absent the AUTO gate, the OLD behaviour WOULD have cross-
+  // warmed the custom-kernel pack (regime 3) for the upcoming ALGO 3
+  // decode.  With ALGO 1 pinned that decode path never runs.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.666f);
+  h.pp.num_threads = 64;
+  h.pp.nr_align    = 1;
+  ASSERT_TRUE(h.pp.custom_kernel_on);
+
+  AlgoEnvGuard algo_guard(1);
+  prepack::prepack_for_algo_1(h.pp);
+
+  auto stats = prepack::test_api::get_last_invocation_stats();
+  EXPECT_TRUE(stats.valid);
+  EXPECT_EQ(stats.scheduling_algo, 1);
+  EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none))
+      << "Pinned ALGO 1: cross-warm is AUTO-only and must short-circuit.";
+  EXPECT_EQ(stats.aocl.total_attempted, 4)
+      << "Pinned ALGO 1: only the primary regime-1 full-weight warm "
+         "(N=4) runs; no cross-warm regime-2 contribution.";
+  EXPECT_EQ(stats.ck.cache_misses, 0)
+      << "Pinned ALGO 1: cross-warm regime 3 (custom-kernel pack) must "
+         "NOT fire — that cache belongs to the ALGO 3 decode path the "
+         "pin never reaches.";
+}
+
+TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo3DisablesCrossWarm) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  reset_grp_matmul_caches();
+  prepack::test_api::clear_last_invocation_stats();
+
+  // Decode-side pin.  ALGO 3 + CK=1: primary warms regime 3 (custom-
+  // kernel pack); the regime-1 (full-weight AOCL) cross-warm for the
+  // upcoming ALGO 1 prompt must NOT fire under the pin.  Fix B already
+  // skips the per-tile AOCL warm under CK=1, so with the cross-warm
+  // gone aocl.total_attempted drops to 0.
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.777f);
+  h.pp.num_threads = 64;
+  h.pp.nr_align    = 1;
+  ASSERT_TRUE(h.pp.custom_kernel_on);
+
+  AlgoEnvGuard algo_guard(3);
+  prepack::prepack_for_algo_3(h.pp);
+
+  auto stats = prepack::test_api::get_last_invocation_stats();
+  EXPECT_TRUE(stats.valid);
+  EXPECT_EQ(stats.scheduling_algo, 3);
+  EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none))
+      << "Pinned ALGO 3: cross-warm is AUTO-only and must short-circuit.";
+  EXPECT_EQ(stats.aocl.total_attempted, 0)
+      << "Pinned ALGO 3 + CK=1: Fix B skips the per-tile AOCL warm and "
+         "the AUTO gate skips the regime-1 cross-warm — no AOCL work.";
+  EXPECT_EQ(stats.ck.cache_misses, 4)
+      << "Pinned ALGO 3 + CK=1: the primary custom-kernel pack warm "
+         "(regime 3) still fires for all experts.";
+}
+
+// ALGO 2 / 4 / 5 share the `prepack_aocl_only_algo` body with ALGO 1,
+// so the AUTO-only gate must short-circuit cross-warm for each of them
+// identically.  This parametric test guards against a future
+// per-ALGO divergence in that shared path (e.g. someone splitting the
+// four forwarders into bespoke bodies and dropping the gate from one).
+TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo245DisableCrossWarm) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  struct AlgoCase {
+    int algo;
+    void (*fn)(const prepack::PrepackParams &);
+  };
+  const AlgoCase cases[] = {
+      {2, &prepack::prepack_for_algo_2},
+      {4, &prepack::prepack_for_algo_4},
+      {5, &prepack::prepack_for_algo_5},
+  };
+
+  for (const auto &c : cases) {
+    reset_grp_matmul_caches();
+    prepack::test_api::clear_last_invocation_stats();
+
+    // CK=1 so, absent the AUTO gate, the OLD behaviour WOULD have
+    // cross-warmed the custom-kernel pack (regime 3) for the upcoming
+    // ALGO 3 decode.  With this ALGO pinned that decode never runs.
+    auto h = make_harness(/*total=*/4, /*active=*/4,
+                          /*K=*/32, /*N=*/64, /*fill=*/0.321f);
+    h.pp.num_threads = 64;
+    h.pp.nr_align    = 1;
+    ASSERT_TRUE(h.pp.custom_kernel_on) << "algo=" << c.algo;
+
+    AlgoEnvGuard algo_guard(c.algo);
+    c.fn(h.pp);
+
+    auto stats = prepack::test_api::get_last_invocation_stats();
+    EXPECT_TRUE(stats.valid) << "algo=" << c.algo;
+    EXPECT_EQ(stats.scheduling_algo, c.algo) << "algo=" << c.algo;
+    EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+              static_cast<int>(prepack::CrossWarmRegime::none))
+        << "Pinned ALGO " << c.algo << ": cross-warm is AUTO-only and "
+           "must short-circuit (shared prepack_aocl_only_algo path).";
+    EXPECT_EQ(stats.aocl.total_attempted, 4)
+        << "Pinned ALGO " << c.algo << ": only the primary regime-1 "
+           "full-weight warm (N=4) runs; no cross-warm contribution.";
+    EXPECT_EQ(stats.ck.cache_misses, 0)
+        << "Pinned ALGO " << c.algo << ": cross-warm regime 3 "
+           "(custom-kernel pack) must NOT fire.";
+  }
+}
+
+// Safety-clamp corner case.  When the user pins an ALGO but the shape
+// is unsafe for it, `select_grp_matmul_algo` clamps the call down to
+// ALGO 1 and the ALGO 1 executor runs `prepack_for_algo_1` while the
+// GLOBAL pin env is still the original (here 3).  The AUTO gate reads
+// the ENV pin, NOT the clamped runtime algo, so cross-warm must STILL
+// short-circuit: the pinned ALGO 3 decode the cross-warm would target
+// never actually runs.  Locks in that the gate keys off the env pin.
+TEST_F(TestPrepackCrossWarmRegimes, FallbackClampPinnedAlgo3RunsAlgo1NoCrossWarm) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+  reset_grp_matmul_caches();
+  prepack::test_api::clear_last_invocation_stats();
+
+  auto h = make_harness(/*total=*/4, /*active=*/4,
+                        /*K=*/32, /*N=*/64, /*fill=*/0.888f);
+  h.pp.num_threads = 64;
+  h.pp.nr_align    = 1;
+  ASSERT_TRUE(h.pp.custom_kernel_on);
+
+  AlgoEnvGuard algo_guard(3);          // env pinned to ALGO 3 ...
+  prepack::prepack_for_algo_1(h.pp);   // ... but the shape clamped to ALGO 1
+
+  auto stats = prepack::test_api::get_last_invocation_stats();
+  EXPECT_TRUE(stats.valid);
+  EXPECT_EQ(stats.scheduling_algo, 1)
+      << "Clamp executed the ALGO 1 prepack body.";
+  EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none))
+      << "Fallback clamp: the gate keys off the ENV pin (3), not the "
+         "clamped runtime algo (1); cross-warm must short-circuit.";
+  EXPECT_EQ(stats.aocl.total_attempted, 4)
+      << "Only the primary regime-1 full-weight warm (N=4) runs.";
+  EXPECT_EQ(stats.ck.cache_misses, 0)
+      << "No CK cross-warm under the pin.";
+}
+
 // ===============================================================================
 // [30] TestPrepackFingerprintInvariance - pin the order-independent
 //      fingerprint behaviour added to address Copilot review

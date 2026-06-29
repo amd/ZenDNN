@@ -154,17 +154,13 @@ using zendnnl::ops::matmul_algo_t;
 ///   * by the auto-selector's decode-class N-tile sizing,
 ///   * by the custom-kernel dispatch as the gate for engaging the
 ///     fused tile path (see `custom_kernel/dispatch.cpp`).
-/// 256 is the AVX-512 BF16 sweet spot for the inner GEMM kernel; tune
-/// only with a measured perf justification.
+/// 256 matches the AVX-512 BF16 inner GEMM kernel's preferred N width.
 inline constexpr int kDecodeNTile = 256;
 
 /// DQ-INT8 sibling of `kDecodeNTile`.  Today set equal to the bf16
-/// constant so the dtype-aware split is a structural no-op — final
-/// values are baked from the D.1 tuning sweep
-/// (`scripts/int8_ntile_tune.sh`) once a workload-class measurement
-/// is available.  Keep this constant near `kDecodeNTile` so a future
-/// change that retunes either family can flip both in one place if
-/// the measurement says so.
+/// constant so the dtype-aware split is a structural no-op.  Kept as a
+/// separate constant near `kDecodeNTile` so the int8 width can be
+/// changed independently of the bf16 callers.
 inline constexpr int kDecodeNTileInt8 = 256;
 
 /// Maximum number of experts the ALGO 3 (N-tile) planner can
@@ -181,10 +177,10 @@ inline constexpr int kDecodeNTileInt8 = 256;
 /// would otherwise be routed by rules 1-3) goes to ALGO 5 (per-expert
 /// parallel) because the N-tile planner's R3 gate would silently
 /// fall back to its Sequential strategy (one expert at a time, full
-/// team each).  Sequential is materially slower than ALGO 5 for
-/// many-experts decode-class shapes — ALGO 5 fans `num_ops` over the
-/// OMP team and lets each thread own a slice of experts serially,
-/// with no fixed-size lookup arrays of its own.
+/// team each).  ALGO 5 instead fans `num_ops` over the OMP team and
+/// lets each thread own a slice of experts serially, with no
+/// fixed-size lookup arrays of its own, so it is the better fit for
+/// many-experts decode-class shapes.
 ///
 /// The carve-out catches both rule-1-territory shapes
 /// (`num_ops >= num_threads`, e.g., 300 experts on 128 threads) and
@@ -226,8 +222,8 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 //                        shape that survives the structural gates.
 //
 // The auto-mirror replays auto-select's three-rule tree faithfully,
-// so Rule 1 (`num_ops ≥ num_threads → ALGO 3`) protects Qwen-class
-// prompt — those calls run the actual ntile path even though
+// so Rule 1 (`num_ops ≥ num_threads → ALGO 3`) keeps many-expert
+// prompt calls on the actual ntile path even though
 // `max_M > kDecodeMaxM` would otherwise mark them as prompt.
 //
 // `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY` (auto / decode / rounds) drives
@@ -259,6 +255,22 @@ enum class GroupNTileStrategy {
   //      run concurrently with no internal barriers.  Skipped when
   //      the env knob is set to "rounds".
   DecodeD,
+
+  // (E)  Decode dynamic (CCD-cohesive) — small max_M, num_ops > num_ccds
+  //      (also valid when num_ops > num_threads: experts run in per-CCD
+  //      waves).  Generalises DecodeD past the `num_ops ≤ num_ccds`
+  //      + skew gates.  Each active expert is owned by exactly one CCD
+  //      (M-descending sort, then round-robin onto CCDs), and that CCD's
+  //      lanes cooperatively N-split it, so an expert's weight stays
+  //      resident in one CCD's L3 and there are no round barriers.
+  //      Routes through `execute_decode_dynamic`.  Engaged for the CK
+  //      custom-kernel path (swiglu fused in-register, no matmul→
+  //      activation barrier) and standard-backend fused / non-fused
+  //      calls; a non-custom wide-fused call runs one team-wide barrier
+  //      + apply_swiglu_oai post-pass inside the executor.  Only a
+  //      use_custom DQ-INT8 fused call falls back to Rounds
+  //      (defense-in-depth).
+  DecodeDynamic,
 
   // (A)  Few experts (num_ops ≤ num_ccds, non-decode):
   //      L3-aware batches, proportional thr_per_expert per round.
