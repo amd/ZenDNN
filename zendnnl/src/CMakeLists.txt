@@ -193,20 +193,43 @@ if(ZENDNNL_LIB_BUILD_SHARED)
   #   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   # endif()
 
+  # NOTE: For the SHARED library the statically-absorbed (WHOLE_ARCHIVE)
+  # dependencies below are LINKED PRIVATE, NOT PUBLIC. A shared library fully
+  # embeds these static archives, so their object code (and the C++ global
+  # /static objects and atexit-registered destructors they carry) already
+  # lives inside libzendnnl.so. If the link were PUBLIC it would also be
+  # exported in the package's INTERFACE_LINK_LIBRARIES, causing every consumer
+  # (e.g. the examples executable) to WHOLE_ARCHIVE-link a SECOND copy into
+  # itself. With two copies of the same global state in two modules, their
+  # destructors run twice at process exit (__cxa_finalize), producing
+  # "free(): double free detected in tcache 2".
+  #
+  # The COMPILE usage requirements (include directories / compile defs) are
+  # still propagated PUBLIC via $<COMPILE_ONLY:...>, because ZenDNN's public
+  # headers include some of these dependencies' headers (e.g.
+  # operators/matmul/aocl_dlp/matmul_aocl_dlp_utils.hpp includes aocl_dlp.h),
+  # so consumers must keep the headers on their include path without linking
+  # the archive a second time.
+  #
+  # The archive target keeps these PUBLIC because a static library does not
+  # absorb its dependencies, so consumers must link them exactly once.
   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
-  #  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
+    PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+    PUBLIC  "$<COMPILE_ONLY:au::aoclutils>")
+  #  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
 
   if(ZENDNNL_DEPENDS_AOCLDLP)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_AOCLDLP_INJECTED)
       target_link_libraries(zendnnl
-        PUBLIC aocldlp::aocl_dlp_static)
+        PRIVATE aocldlp::aocl_dlp_static)
     else()
       target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
     endif()
+    target_link_libraries(zendnnl
+      PUBLIC "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
   endif()
@@ -217,11 +240,13 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_ONEDNN_INJECTED)
       target_link_libraries(zendnnl
-        PUBLIC DNNL::dnnl)
+        PRIVATE DNNL::dnnl)
     else()
       target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
     endif()
+    target_link_libraries(zendnnl
+      PUBLIC "$<COMPILE_ONLY:DNNL::dnnl>")
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   endif()
@@ -230,11 +255,13 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_LIBXSMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_LIBXSMM_INJECTED)
       target_link_libraries(zendnnl
-        PUBLIC libxsmm::libxsmm_archive)
+        PRIVATE libxsmm::libxsmm_archive)
     else()
       target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,libxsmm::libxsmm_archive>")
     endif()
+    target_link_libraries(zendnnl
+      PUBLIC "$<COMPILE_ONLY:libxsmm::libxsmm_archive>")
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_LIBXSMM=0)
   endif()
@@ -243,11 +270,13 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_PARLOOPER_INJECTED)
       target_link_libraries(zendnnl
-        PUBLIC parlooper::parlooper_archive)
+        PRIVATE parlooper::parlooper_archive)
     else()
       target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,parlooper::parlooper_archive>")
     endif()
+    target_link_libraries(zendnnl
+      PUBLIC "$<COMPILE_ONLY:parlooper::parlooper_archive>")
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=0)
   endif()
@@ -256,11 +285,13 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
     if(ZENDNNL_FWK_BUILD AND ZENDNNL_FBGEMM_INJECTED)
       target_link_libraries(zendnnl
-        PUBLIC fbgemm::fbgemm_archive)
+        PRIVATE fbgemm::fbgemm_archive)
     else()
       target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
     endif()
+    target_link_libraries(zendnnl
+      PUBLIC "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=0)
   endif()

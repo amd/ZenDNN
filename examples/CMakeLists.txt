@@ -108,6 +108,11 @@ elseif(TARGET zendnnl::zendnnl)
   target_link_libraries(examples
     PRIVATE zendnnl::zendnnl)
   message(STATUS "Examples linking to shared library (zendnnl)")
+  # The installed examples binary (install/examples/bin/examples) must be able
+  # to find libzendnnl.so (installed to install/zendnnl/lib) at runtime. Embed
+  # an $ORIGIN-relative RUNPATH so it works without LD_LIBRARY_PATH.
+  set_target_properties(examples PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../zendnnl/lib")
 else()
   message(FATAL_ERROR "No zendnnl library target found! Build with at least one of ZENDNNL_LIB_BUILD_ARCHIVE=ON or ZENDNNL_LIB_BUILD_SHARED=ON")
 endif()

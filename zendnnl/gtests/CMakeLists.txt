@@ -103,6 +103,12 @@ if(ZENDNNL_BUILD_GTEST)
     # Fall back to shared library
     target_link_libraries(gtests PRIVATE zendnnl)
     message(STATUS "Gtests linking to shared library (zendnnl)")
+    # When linking the shared libzendnnl.so, the installed gtests binary
+    # (install/gtests/gtests) must be able to locate the library at runtime.
+    # libzendnnl.so is installed to install/zendnnl/lib, so embed an $ORIGIN-
+    # relative RUNPATH instead of relying on LD_LIBRARY_PATH.
+    set_target_properties(gtests PROPERTIES
+      INSTALL_RPATH "$ORIGIN/../zendnnl/lib")
   else()
     message(FATAL_ERROR "No zendnnl library target found for gtests!")
   endif()

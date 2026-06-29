@@ -83,6 +83,11 @@ elseif(TARGET zendnnl::zendnnl)
   # Fall back to shared library
   target_link_libraries(benchdnn zendnnl::zendnnl)
   message(STATUS "Benchdnn linking to shared library (zendnnl)")
+  # The installed benchdnn binary (install/benchdnn/bin/benchdnn) must be able
+  # to find libzendnnl.so (installed to install/zendnnl/lib) at runtime. Embed
+  # an $ORIGIN-relative RUNPATH so it works without LD_LIBRARY_PATH.
+  set_target_properties(benchdnn PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../zendnnl/lib")
 else()
   message(FATAL_ERROR "No zendnnl library target found for benchdnn!")
 endif()
