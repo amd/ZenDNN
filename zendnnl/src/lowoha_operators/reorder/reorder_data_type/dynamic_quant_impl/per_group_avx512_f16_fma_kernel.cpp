@@ -199,8 +199,9 @@ static inline __m512i quantize_to_s16_ph_pg(__m512h v, __m512h vinv_scale) {
 //      compute_symmetric_scale_pg_ph, written to scales[m * G + g].
 //   3. Pass 2 - Quantize: broadcast 1/scale into __m512h, compute
 //      q_ph = val * inv_scale_ph, narrow to s16 with VCVTPH2W (banker's
-//      rounding), then narrow s16 -> s8 with VPMOVSWB and aligned/unaligned
-//      store.
+//      rounding), then narrow s16 -> s8 with the truncating VPMOVWB
+//      (finite values in [-127,127] by construction; non-finite -> 0,
+//      matching vLLM) and aligned/unaligned store.
 //
 // Register usage (peak, per thread):
 //   zmm (PH, 32 lanes):  vam0-vam3 + v0-v3 (~8) in Pass 1; vinv + v + q_ph
@@ -266,7 +267,7 @@ void dynamic_per_group_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
         for (; j + 31 < group_size; j += 32) {
           __m512h v = _mm512_loadu_ph(grp_src + j);
           __m512i s16 = quantize_to_s16_ph_pg(v, vinv);
-          __m256i s8  = _mm512_cvtsepi16_epi8(s16);
+          __m256i s8  = _mm512_cvtepi16_epi8(s16);
           if (aligned32)
             _mm256_store_si256(reinterpret_cast<__m256i *>(grp_dst + j), s8);
           else
@@ -275,8 +276,8 @@ void dynamic_per_group_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
       }
       for (; j < group_size; ++j) {
         float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale_f32));
-        q = std::max(-128, std::min(127, q));
         grp_dst[j] = static_cast<int8_t>(q);
       }
     }
@@ -397,6 +398,7 @@ void dynamic_per_group_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst
       }
       for (; j < group_size; ++j) {
         float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale_f32)) + zp;
         q = std::max(0, std::min(255, q));
         grp_dst[j] = static_cast<uint8_t>(q);

@@ -34,9 +34,11 @@
 //     F32-FMA path's bit-pattern for stats).
 //   - scale / zp are computed in F32 (identical helper as F32-FMA path).
 //   - Pass 2 multiplies by (1/scale_f16) in __m512h (FMA-class op), then
-//     converts to int16 with banker's rounding and narrows to int8 / uint8
-//     with signed/unsigned saturation. The FP16-FMA path is intentionally
-//     NOT bit-exact with the scalar reference — tolerate |delta| <= 1.
+//     converts to int16 with banker's rounding. The S8 path narrows int16 ->
+//     int8 with the truncating VPMOVWB (non-finite -> 0, matching vLLM); the
+//     U8 path widens to int32, clamps to [0,255], and narrows with VPMOVUSDB.
+//     The FP16-FMA path is intentionally NOT bit-exact with the scalar
+//     reference — tolerate |delta| <= 1.
 //==============================================================================
 
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
@@ -104,7 +106,7 @@ static inline void compute_asymmetric_scale_zp_ph(float min_val, float max_val,
 // 32-lane store helpers (mirror the F32-FMA path's cache-line stores).
 //==============================================================================
 
-/** Store 32 saturated int8 lanes from a __m256i with optional 32B aligned
+/** Store 32 int8 lanes from a __m256i with optional 32B aligned
  *  store. The destination is uint16_t-spaced (1 byte per lane). */
 __attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
 static inline void store_32x_s8_ph(int8_t *dst, __m256i v, bool aligned32) {
@@ -129,7 +131,9 @@ static inline void store_32x_u8_ph(uint8_t *dst, __m256i v, bool aligned32) {
 //
 // Inputs are __m512h source data; vinv_scale is broadcast 1/scale in FP16.
 // Output is __m512i with each lane holding a signed int16 in the low 16
-// bits of each 16-bit slot, ready for VPMOVSWB or VPMOVUSWB narrowing.
+// bits of each 16-bit slot. The S8 path narrows with the truncating VPMOVWB
+// (_mm512_cvtepi16_epi8) so non-finite lanes (int16 0x8000) -> low byte 0x00
+// -> 0, matching vLLM; the U8 path widens to s32 and uses VPMOVUSDB.
 //==============================================================================
 
 __attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
@@ -151,7 +155,9 @@ static inline __m512i quantize_to_s16_ph(__m512h v, __m512h vinv_scale) {
 //      Widen to F32 for horizontal reduce (precision).
 //   2. Compute scale = absmax / 127 in F32. Write scales[m].
 //   3. Pass 2 — Multiply by (1/scale_f16) in __m512h, convert PH->S16 with
-//      banker's rounding, narrow S16->S8 with VPMOVSWB (signed saturation).
+//      banker's rounding, narrow S16->S8 with the truncating VPMOVWB. Finite
+//      values are in [-127,127] by construction; non-finite int16 lanes
+//      (0x8000) narrow to low byte 0x00 -> 0, matching vLLM.
 //
 // FMA cadence: VMULPH on PH operands is the FP16-FMA building block; it
 // pairs with the round-narrow chain for ~2x throughput over the F32-FMA
@@ -228,7 +234,7 @@ void dynamic_per_token_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
       for (; j + 31 < N; j += 32) {
         __m512h v = _mm512_loadu_ph(row_src + j);
         __m512i s16 = quantize_to_s16_ph(v, vinv);     // 32 x int16 lanes
-        __m256i s8  = _mm512_cvtsepi16_epi8(s16);      // saturate to int8
+        __m256i s8  = _mm512_cvtepi16_epi8(s16);      // truncating narrow -> int8 (non-finite -> 0)
         store_32x_s8_ph(row_dst + j, s8, aligned32);
       }
     }
@@ -237,8 +243,8 @@ void dynamic_per_token_quant_f16_s8_avx512fp16(const uint16_t *src, int8_t *dst,
     // the guard above tripped, this loop processes the entire row.
     for (; j < N; ++j) {
       float v = common::float16_t::f16_to_f32_val(row_src[j]);
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale_f32));
-      q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
   };
@@ -410,6 +416,7 @@ void dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst
 
     for (; j < N; ++j) {
       float v = common::float16_t::f16_to_f32_val(row_src[j]);
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale_f32)) + zp;
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
@@ -452,7 +459,7 @@ void dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst
 //      every chunk picks up its rows' scales from scales[], broadcasts
 //      1/scale into __m512h, computes q_ph = val * inv_scale_ph,
 //      narrows to s16 with VCVTPH2W (banker's rounding), then narrows
-//      s16 -> s8 with VPMOVSWB and stores.
+//      s16 -> s8 with the truncating VPMOVWB (non-finite -> 0) and stores.
 //
 // Why split: when M is small (e.g. M=1) but N is large, the fused per-row
 // kernel can only parallelize across M threads while Pass 2 here distributes
@@ -558,14 +565,14 @@ void dynamic_per_token_quant_f16_s8_unfused_avx512fp16(const uint16_t *src,
         for (; k + 31 < count; k += 32) {
           __m512h v   = _mm512_loadu_ph(csrc + k);
           __m512i s16 = quantize_to_s16_ph(v, vinv);
-          __m256i s8  = _mm512_cvtsepi16_epi8(s16);     // signed saturate -> s8
+          __m256i s8  = _mm512_cvtepi16_epi8(s16);     // truncating narrow -> s8 (non-finite -> 0)
           store_32x_s8_ph(cdst + k, s8, aligned32);
         }
       }
       for (; k < count; ++k) {
         float v = common::float16_t::f16_to_f32_val(csrc[k]);
+        if (!std::isfinite(v)) { cdst[k] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m]));
-        q = std::max(-128, std::min(127, q));
         cdst[k] = static_cast<int8_t>(q);
       }
       begin = row_end;
@@ -737,6 +744,7 @@ void dynamic_per_token_quant_f16_u8_unfused_avx512fp16(const uint16_t *src,
       }
       for (; k < count; ++k) {
         float v = common::float16_t::f16_to_f32_val(csrc[k]);
+        if (!std::isfinite(v)) { cdst[k] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m])) + zps[m];
         q = std::max(0, std::min(255, q));
         cdst[k] = static_cast<uint8_t>(q);

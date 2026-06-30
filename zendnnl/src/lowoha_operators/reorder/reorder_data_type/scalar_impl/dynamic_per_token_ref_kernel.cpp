@@ -88,8 +88,8 @@ void dynamic_per_token_quant_bf16_s8_ref(const uint16_t *src, int8_t *dst,
 
     for (int64_t j = 0; j < N; ++j) {
       float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(row_src[j]));
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
-      q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
   }
@@ -116,8 +116,8 @@ void dynamic_per_token_quant_f32_s8_ref(const float *src, int8_t *dst,
     scales[m] = scale;
 
     for (int64_t j = 0; j < N; ++j) {
+      if (!std::isfinite(row_src[j])) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(row_src[j] / scale));
-      q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
   }
@@ -151,6 +151,7 @@ void dynamic_per_token_quant_bf16_u8_ref(const uint16_t *src, uint8_t *dst,
 
     for (int64_t j = 0; j < N; ++j) {
       float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(row_src[j]));
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
@@ -184,6 +185,7 @@ void dynamic_per_token_quant_f32_u8_ref(const float *src, uint8_t *dst,
     zps[m]    = zp;
 
     for (int64_t j = 0; j < N; ++j) {
+      if (!std::isfinite(row_src[j])) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(row_src[j] / scale)) + zp;
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);
@@ -214,8 +216,8 @@ void dynamic_per_token_quant_f16_s8_ref(const uint16_t *src, int8_t *dst,
 
     for (int64_t j = 0; j < N; ++j) {
       float v = common::float16_t::f16_to_f32_val(row_src[j]);
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
-      q = std::max(-128, std::min(127, q));
       row_dst[j] = static_cast<int8_t>(q);
     }
   }
@@ -249,6 +251,7 @@ void dynamic_per_token_quant_f16_u8_ref(const uint16_t *src, uint8_t *dst,
 
     for (int64_t j = 0; j < N; ++j) {
       float v = common::float16_t::f16_to_f32_val(row_src[j]);
+      if (!std::isfinite(v)) { row_dst[j] = 0; continue; }
       int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
       q = std::max(0, std::min(255, q));
       row_dst[j] = static_cast<uint8_t>(q);

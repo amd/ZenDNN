@@ -40,7 +40,7 @@ using zendnnl::lowoha::matmul::zendnnl_parallel_for;
  * BF16 is the upper 16 bits of IEEE 754 float32, so zero-extending and
  * shifting left by 16 reconstructs the original float.
  */
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline __m512 bf16x16_to_f32_pg(__m256i bf16) {
   return _mm512_castsi512_ps(
       _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
@@ -61,7 +61,7 @@ static inline __m512 bf16x16_to_f32_pg(__m256i bf16) {
  * Returns a 16-bit mask where lane k is 1 iff v[k] is finite (not NaN/Inf).
  * Works by checking |v| < Inf in IEEE 754 representation.
  */
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline __mmask16 finite_mask_pg(__m512 v, __m512i abs_mask,
                                         __m512 vinf) {
   __m512 absv = _mm512_castsi512_ps(
@@ -120,7 +120,7 @@ static inline void compute_asymmetric_scale_zp_pg(float min_val, float max_val,
 // Requires 64-byte alignment; falls back to 4 x unaligned stores otherwise.
 //==============================================================================
 
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline void store_4x16_s8_pg(int8_t *dst, __m128i i0, __m128i i1,
                                      __m128i i2, __m128i i3,
                                      bool cacheline_aligned) {
@@ -138,7 +138,7 @@ static inline void store_4x16_s8_pg(int8_t *dst, __m128i i0, __m128i i1,
 }
 
 /** Unsigned byte variant of the cache-line-wide store helper. */
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline void store_4x16_u8_pg(uint8_t *dst, __m128i i0, __m128i i1,
                                      __m128i i2, __m128i i3,
                                      bool cacheline_aligned) {
@@ -156,7 +156,7 @@ static inline void store_4x16_u8_pg(uint8_t *dst, __m128i i0, __m128i i1,
  * sources and BF16 sources converted to F32 on load.
  */
 template <typename LoadF32>
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline float group_absmax(const LoadF32 &load_f32, int64_t group_size,
                                   __m512i abs_mask, __m512 vinf) {
   __m512 vam0 = _mm512_setzero_ps();
@@ -196,7 +196,7 @@ static inline float group_absmax(const LoadF32 &load_f32, int64_t group_size,
  * Non-finite lanes are masked out to match the scalar reference behavior.
  */
 template <typename LoadF32>
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 static inline void group_minmax(const LoadF32 &load_f32, int64_t group_size,
                                  __m512i abs_mask, __m512 vinf,
                                  float &row_min, float &row_max) {
@@ -251,8 +251,8 @@ static inline void group_minmax(const LoadF32 &load_f32, int64_t group_size,
 //   2. Compute scale: scale = absmax / 127 (clamped to >= 1e-10).
 //   3. Write scale to scales[m * G + g].
 //   4. Pass 2 - Quantize: re-read F32 from L1 cache, compute
-//      Q[j] = round(val[j] / scale), narrow to int8 with signed saturation,
-//      store to dst.
+//      Q[j] = round(val[j] / scale), narrow to int8 via truncation
+//      (VPMOVDB, no saturation), store to dst.
 //
 // Register usage (peak, per thread):
 //   zmm (512-bit):  ~14 total
@@ -270,12 +270,13 @@ static inline void group_minmax(const LoadF32 &load_f32, int64_t group_size,
 //   3. Absmax via AND+MAX:  clears sign bit with VPANDD then VMAXPS.
 //   4. Non-finite masking:  finite_mask_pg() + VMAXPS{k} skips NaN/Inf lanes.
 //   5. 4x unrolling:  64 elements/iter across independent accumulators for ILP.
-//   6. VPMOVSDB saturation:  hardware int32->int8 clamping to [-128,127].
+//   6. VPMOVDB truncating narrow:  int32->int8 low-byte narrow; finite values
+//      are in [-127,127] by construction, non-finite -> 0 (matching vLLM).
 //   7. Cache-line stores:  packs 4x __m128i into a single 64B aligned store.
 //   8. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
                                             float *scales,
                                             int64_t M, int64_t K, int64_t G) {
@@ -287,7 +288,7 @@ void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -295,7 +296,7 @@ void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
       const float *grp_src = src + offset;
       int8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
         return _mm512_loadu_ps(grp_src + j);
       };
 
@@ -320,18 +321,18 @@ void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
         __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
         __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
         store_4x16_s8_pg(grp_dst + j,
-                          _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
-                          _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
+                          _mm512_cvtepi32_epi8(r0), _mm512_cvtepi32_epi8(r1),
+                          _mm512_cvtepi32_epi8(r2), _mm512_cvtepi32_epi8(r3),
                           cl_ok);
       }
       for (; j + 15 < group_size; j += 16) {
         __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
         _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
-                         _mm512_cvtsepi32_epi8(r));
+                         _mm512_cvtepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
+        if (!std::isfinite(grp_src[j])) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(grp_src[j] / scale));
-        q = std::max(-128, std::min(127, q));
         grp_dst[j] = static_cast<int8_t>(q);
       }
     }
@@ -348,8 +349,8 @@ void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
 //   2. Compute scale: scale = absmax / 127 (clamped to >= 1e-10).
 //   3. Write scale to scales[m * G + g].
 //   4. Pass 2 - Quantize: re-read BF16 from L1, convert to F32, compute
-//      Q[j] = round(val[j] / scale), narrow to int8 with signed saturation,
-//      store to dst.
+//      Q[j] = round(val[j] / scale), narrow to int8 via truncation
+//      (VPMOVDB, no saturation), store to dst.
 //
 // Register usage (peak, per thread):
 //   zmm (512-bit):  ~14 total
@@ -365,12 +366,13 @@ void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
 //      to reconstruct F32 values without scratch buffers.
 //   3. Absmax via AND+MAX with non-finite masking.
 //   4. 4x unrolling:  64 elements/iter for ILP.
-//   5. VPMOVSDB saturation:  hardware int32->int8 clamping to [-128,127].
+//   5. VPMOVDB truncating narrow:  int32->int8 low-byte narrow; finite values
+//      are in [-127,127] by construction, non-finite -> 0 (matching vLLM).
 //   6. Cache-line stores:  64B aligned writes when destination is aligned.
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
                                              float *scales,
                                              int64_t M, int64_t K, int64_t G) {
@@ -382,7 +384,7 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -390,7 +392,7 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
       const uint16_t *grp_src = src + offset;
       int8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
         return bf16x16_to_f32_pg(_mm256_loadu_si256(
             reinterpret_cast<const __m256i *>(grp_src + j)));
       };
@@ -417,19 +419,19 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
         __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
         __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
         store_4x16_s8_pg(grp_dst + j,
-                          _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
-                          _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
+                          _mm512_cvtepi32_epi8(r0), _mm512_cvtepi32_epi8(r1),
+                          _mm512_cvtepi32_epi8(r2), _mm512_cvtepi32_epi8(r3),
                           cl_ok);
       }
       for (; j + 15 < group_size; j += 16) {
         __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
         _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
-                         _mm512_cvtsepi32_epi8(r));
+                         _mm512_cvtepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
         float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
-        q = std::max(-128, std::min(127, q));
         grp_dst[j] = static_cast<int8_t>(q);
       }
     }
@@ -470,7 +472,7 @@ void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t K, int64_t G) {
@@ -482,7 +484,7 @@ void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -490,7 +492,7 @@ void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
       const float *grp_src = src + offset;
       uint8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
         return _mm512_loadu_ps(grp_src + j);
       };
 
@@ -543,6 +545,7 @@ void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
                          _mm512_cvtusepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
+        if (!std::isfinite(grp_src[j])) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(grp_src[j] / scale)) + zp;
         q = std::max(0, std::min(255, q));
         grp_dst[j] = static_cast<uint8_t>(q);
@@ -585,7 +588,7 @@ void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f")))
+__attribute__((target("avx512f,avx512bw,avx512vl")))
 void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                                              float *scales, int32_t *zps,
                                              int64_t M, int64_t K, int64_t G) {
@@ -597,7 +600,7 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -605,7 +608,7 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
       const uint16_t *grp_src = src + offset;
       uint8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl"))) {
         return bf16x16_to_f32_pg(_mm256_loadu_si256(
             reinterpret_cast<const __m256i *>(grp_src + j)));
       };
@@ -661,6 +664,7 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
       }
       for (; j < group_size; ++j) {
         float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
         q = std::max(0, std::min(255, q));
         grp_dst[j] = static_cast<uint8_t>(q);
@@ -695,7 +699,7 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
 //   3. Write scale to scales[m * G + g].
 //   4. Pass 2 - Quantize: re-read F16 from L1 cache (still hot from Pass 1),
 //      convert to F32, compute Q[j] = round(val[j] / scale), narrow to int8
-//      with signed saturation, store to dst.
+//      via truncation (VPMOVDB, no saturation), store to dst.
 //
 // Register usage (peak, per thread):
 //   zmm (512-bit):  ~14 total
@@ -714,13 +718,13 @@ void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
 //      No AVX512-FP16 ISA needed.
 //   3. Shared reduction helper:  load_f32 lambda abstracts the F16->F32
 //      load path while reusing the generic group_absmax template.
-//   4. Absmax via AND+MAX, non-finite masking, 4x unroll, VPMOVSDB
-//      saturation, cache-line stores -- same techniques as KERNEL 2.
+//   4. Absmax via AND+MAX, non-finite masking, 4x unroll, VPMOVDB truncating
+//      narrow (non-finite -> 0), cache-line stores -- same techniques as KERNEL 2.
 //   5. zendnnl_parallel_for over M*G total groups for thread-pool reuse
 //      across granular tasks.
 //==============================================================================
 
-__attribute__((target("avx512f,f16c")))
+__attribute__((target("avx512f,avx512bw,avx512vl,f16c")))
 void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
                                             float *scales,
                                             int64_t M, int64_t K, int64_t G) {
@@ -732,7 +736,7 @@ void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,f16c"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -740,7 +744,7 @@ void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
       const uint16_t *grp_src = src + offset;
       int8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,f16c"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) {
         return _mm512_cvtph_ps(_mm256_loadu_si256(
             reinterpret_cast<const __m256i *>(grp_src + j)));
       };
@@ -767,19 +771,19 @@ void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
         __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
         __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
         store_4x16_s8_pg(grp_dst + j,
-                          _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
-                          _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
+                          _mm512_cvtepi32_epi8(r0), _mm512_cvtepi32_epi8(r1),
+                          _mm512_cvtepi32_epi8(r2), _mm512_cvtepi32_epi8(r3),
                           cl_ok);
       }
       for (; j + 15 < group_size; j += 16) {
         __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
         _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
-                         _mm512_cvtsepi32_epi8(r));
+                         _mm512_cvtepi32_epi8(r));
       }
       for (; j < group_size; ++j) {
         float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
-        q = std::max(-128, std::min(127, q));
         grp_dst[j] = static_cast<int8_t>(q);
       }
     }
@@ -820,7 +824,7 @@ void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
 //   5. zendnnl_parallel_for over M*G total groups for thread-pool reuse.
 //==============================================================================
 
-__attribute__((target("avx512f,f16c")))
+__attribute__((target("avx512f,avx512bw,avx512vl,f16c")))
 void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
                                             float *scales, int32_t *zps,
                                             int64_t M, int64_t K, int64_t G) {
@@ -832,7 +836,7 @@ void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
   zendnnl_parallel_for(0, total_groups, 1,
-      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,f16c"))) {
+      [&](int64_t begin, int64_t end) __attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) {
     for (int64_t task = begin; task < end; ++task) {
       const int64_t m = task / G;
       const int64_t g = task - m * G;
@@ -840,7 +844,7 @@ void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
       const uint16_t *grp_src = src + offset;
       uint8_t *grp_dst = dst + offset;
 
-      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,f16c"))) {
+      auto load_f32 = [&](int64_t j) __attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) {
         return _mm512_cvtph_ps(_mm256_loadu_si256(
             reinterpret_cast<const __m256i *>(grp_src + j)));
       };
@@ -896,6 +900,7 @@ void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
       }
       for (; j < group_size; ++j) {
         float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+        if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
         int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
         q = std::max(0, std::min(255, q));
         grp_dst[j] = static_cast<uint8_t>(q);

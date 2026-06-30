@@ -72,6 +72,20 @@ class platform_info_t final {
    */
   bool get_avx512_f16_status() const;
 
+  /** @brief Get AVX-512 BW + VL status.
+   *
+   *  True only when the CPU supports both AVX-512BW and AVX-512VL. The
+   *  native reorder / dynamic-quant kernels are compiled for
+   *  avx512f + avx512bw + avx512vl (they emit VPMOVDB narrowing plus
+   *  byte/word and 128/256-bit masked AVX-512 instructions). On a CPU
+   *  that has AVX-512F but lacks BW/VL (e.g. some Intel Xeon Phi SKUs)
+   *  calling those kernels would raise an illegal-instruction fault, so
+   *  callers must gate native selection on this status.
+   *
+   *  @return true if platform supports both AVX-512BW and AVX-512VL.
+   */
+  bool get_avx512_bw_vl_status() const;
+
   /** @brief Get isa version
    *  @return isa version.
    */
@@ -108,6 +122,8 @@ class platform_info_t final {
 
   bool          is_avx2;
   bool          is_avx512f;
+  bool          is_avx512bw;
+  bool          is_avx512vl;
   bool          is_avx512_f16_native;
   uint32_t      isa_version;
   uint32_t      cpu_family;

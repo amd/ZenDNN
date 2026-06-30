@@ -318,13 +318,21 @@ const char *reorder_algo_to_string(reorder_algo_t algo) {
 
 reorder_algo_t select_reorder_algo(const reorder_params_t &params,
                                     size_t nelems) {
-  static const bool has_avx512f =
-    zendnnl::common::zendnnl_platform_info().get_avx512f_status();
+  // Native reorder / dynamic-quant kernels are compiled for
+  // avx512f + avx512bw + avx512vl (they emit VPMOVDB narrowing plus
+  // byte/word and 128/256-bit masked AVX-512 instructions). Selecting
+  // them on a CPU that has AVX-512F but lacks BW/VL (e.g. some Intel
+  // Xeon Phi SKUs) would raise an illegal-instruction fault, so the
+  // full feature set is required before choosing the native path.
+  static const bool has_native_isa =
+    zendnnl::common::zendnnl_platform_info().get_avx512f_status() &&
+    zendnnl::common::zendnnl_platform_info().get_avx512_bw_vl_status();
   // If user explicitly specified an algorithm (not DT), use it
   if (params.algo != reorder_algo_t::DT && params.algo != reorder_algo_t::none) {
-    if (params.algo == reorder_algo_t::native && !has_avx512f) {
-      log_info("Reorder native kernel requires AVX-512 (avx512f); "
-                "falling back to reference kernel on this platform.");
+    if (params.algo == reorder_algo_t::native && !has_native_isa) {
+      log_info("Reorder native kernel requires AVX-512 "
+                "(avx512f + avx512bw + avx512vl); falling back to reference "
+                "kernel on this platform.");
       return reorder_algo_t::reference;
     }
     return params.algo;
@@ -333,7 +341,7 @@ reorder_algo_t select_reorder_algo(const reorder_params_t &params,
   // Decision tree based selection logic:
   // Use AVX512 for larger buffers (>= 64 elements) for better performance
   // Use reference for smaller buffers to avoid AVX512 overhead
-  if (nelems >= 64 && has_avx512f) {
+  if (nelems >= 64 && has_native_isa) {
     return reorder_algo_t::native;
   }
 
