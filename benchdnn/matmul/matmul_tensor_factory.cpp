@@ -36,6 +36,12 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
     uint64_t num_groups = 1;
 
     if (dt == data_type_t::s4 || dt == data_type_t::u4) {
+      if (dt == data_type_t::s4 && cfg.src_dynamic_quant &&
+          cfg.scale_granularity != "group") {
+        cfg.scale_granularity = "group";
+        commonlog_warning(
+          "W4A8 requires per-group weight scales; using per-group.");
+      }
       // If no even divisors found, fall back to K only if K is even
       // Otherwise, fall back to per-channel for per-group cases
       cfg.group_size = cfg.group_size ? cfg.group_size : cfg.k;
@@ -236,16 +242,19 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
     tensor_t src_scale;
     tensor_t src_zp;
 
-    // Dynamic source quantization (W8A8, symmetric). Only fires when the
-    // dtype combo matches the runtime gate in reorder_quantization.cpp:
-    // src in {bf16, f32} and wei == s8. The scale tensor is zero-initialized;
-    // the runtime fills it during the dynamic-quant pass. Compute target
-    // is fixed to s8 in set_lowoha_matmul_params.
+    // Dynamic source quantization. W8A8 supports src in {bf16, f32} + s8
+    // weights; W4A8 supports bf16 src/dst + s4 weights. The source scale
+    // tensor is zero-initialized and filled by the runtime quantization pass.
+    // Compute target is fixed to s8 in set_lowoha_matmul_params.
     if (cfg.src_dynamic_quant) {
-      const bool src_ok = (cfg.dt[0] == data_type_t::bf16 ||
-                           cfg.dt[0] == data_type_t::f32);
-      const bool wei_ok = (cfg.dt[1] == data_type_t::s8);
-      if (src_ok && wei_ok) {
+      const bool is_w8a8_dynamic =
+        (cfg.dt[0] == data_type_t::bf16 || cfg.dt[0] == data_type_t::f32) &&
+        cfg.dt[1] == data_type_t::s8;
+      const bool is_w4a8_dynamic =
+        cfg.dt[0] == data_type_t::bf16 &&
+        cfg.dt[1] == data_type_t::s4 &&
+        cfg.dt[2] == data_type_t::bf16;
+      if (is_w8a8_dynamic || is_w4a8_dynamic) {
         const uint64_t M = cfg.m;
         const uint64_t K = cfg.k;
         std::vector<uint64_t> src_scale_dims;
@@ -286,9 +295,11 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
       }
       else {
         commonlog_warning(
-          "src_dynamic_quant=true requires src in {bf16, f32} and wei=s8. "
+          "src_dynamic_quant=true requires W8A8 (src in {bf16, f32}, wei=s8) "
+          "or W4A8 (src=bf16, wei=s4, dst=bf16). "
           "Got src=", datatypeToStr(cfg.dt[0]),
           ", wei=", datatypeToStr(cfg.dt[1]),
+          ", dst=", datatypeToStr(cfg.dt[2]),
           ". Ignoring src_dynamic_quant.");
       }
     }

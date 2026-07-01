@@ -1105,43 +1105,47 @@ export OMP_MAX_ACTIVE_LEVELS=2
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --backend aocl_dlp
 ```
-5. Run matmul tests with oneDNN backend and LOWOHA enabled:
+5. Run W4A8 BF16 activation + S4 weight matmul tests with AOCL DLP backend:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.W4A8_BF16/* --backend aocl_dlp --lowoha true
+```
+6. Run matmul tests with oneDNN backend and LOWOHA enabled:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --backend onednn --lowoha true
 ```
-6. Run matmul tests using input file configurations for 2D matmul:
+7. Run matmul tests using input file configurations for 2D matmul:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/* --input_file test.txt --op matmul
 ```
-7. Run batch matmul tests using input file configurations for 3D matmul:
+8. Run batch matmul tests using input file configurations for 3D matmul:
 ``` bash
 ./install/gtests/gtests --gtest_filter=BatchMatmul/* --input_file batch_tests.txt --op matmul --ndims 3
 ```
-8. Run regular reorder tests from an input file:
+9. Run regular reorder tests from an input file:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Reorder/* --input_file input.txt --op reorder --lowoha false
 ```
-9. Run LOWOHA reorder tests from an input file:
+10. Run LOWOHA reorder tests from an input file:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Reorder/* --input_file input.txt --op reorder --lowoha true
 ```
-10. Run embedding bag tests from an input file:
+11. Run embedding bag tests from an input file:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/* --input_file input.txt --op embeddingbag
 ```
-11. Run embedding tests from an input file:
+12. Run embedding tests from an input file:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/* --input_file input.txt --op embedding
 ```
-12. Run normalization tests from an input file:
+13. Run normalization tests from an input file:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Normalization/* --input_file input.txt --op normalization
 ```
-13. Run matmul tests with 16 threads:
+14. Run matmul tests with 16 threads:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --num_threads 16
 ```
-14. Run input-file matmul with fixed thread count and test count:
+15. Run input-file matmul with fixed thread count and test count:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/* --input_file matmul_input.txt --op matmul --num_threads 8 --test 1
 ```

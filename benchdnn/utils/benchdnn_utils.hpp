@@ -78,7 +78,7 @@ struct global_options {
   CacheMode cache_mode;
   int num_weight_buffers; /**< Number of weight buffers to use. */
   bool src_dynamic_quant; /**< Enable dynamic source quantization
-                          (matmul, src=bf16/f32 + wei=s8 -> s8 compute). */
+                          (matmul W8A8 or W4A8 -> s8 compute). */
   std::string src_scale_granularity; /**< Source scale granularity:
                                      per-tensor | per-token | per-group. */
   uint64_t src_group_size; /**< K-direction group size for per-group source scales. */

@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_example.hpp"
+#include "operators/matmul/matmul_config.hpp"
+
 #include <vector>
 
 namespace zendnnl {
@@ -356,6 +358,104 @@ int run_lowoha_matmul_woq_bf16u4_test() {
     log_info("LOWOHA WOQ BF16xU4 matmul executed successfully!");
     log_info("Output[0,0] = ", output[0]);
 
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_matmul_w4a8_test() {
+  try {
+    using zendnnl::ops::matmul_algo_t;
+
+    // W4A8: M > 1; K/G divisible; (K/G) % 4 == 0 for sym_quant packing.
+    constexpr int M = 8;
+    constexpr int K = 128;
+    constexpr int N = 64;
+    constexpr int GROUP_SIZE = 32;
+    constexpr int NUM_GROUPS = K / GROUP_SIZE;
+
+    log_info("LOWOHA W4A8 (dynamic bf16 A8 + symmetric s4 W4) matmul example");
+    log_info("Matrix dimensions: M=", M, " K=", K, " N=", N);
+    log_info("Weight groups G=", NUM_GROUPS, ", group_size=", GROUP_SIZE);
+
+    // Per-token source scales [M, 1] (bf16)
+    std::vector<bfloat16_t> src_scale(static_cast<size_t>(M));
+    for (int m = 0; m < M; ++m) {
+      src_scale[static_cast<size_t>(m)] =
+        bfloat16_t(0.02f + 0.001f * static_cast<float>(m));
+    }
+
+    // Per-group weight scales [G, N] (bf16)
+    std::vector<bfloat16_t> wei_scale(static_cast<size_t>(NUM_GROUPS * N));
+    for (int g = 0; g < NUM_GROUPS; ++g) {
+      for (int n = 0; n < N; ++n) {
+        wei_scale[static_cast<size_t>(g * N + n)] =
+          bfloat16_t(1.0f + 0.05f * static_cast<float>(g));
+      }
+    }
+
+    // Packed s4 weights
+    const size_t packed_weight_size = static_cast<size_t>((K * N + 1) / 2);
+    std::vector<int8_t> weights(packed_weight_size);
+    const int8_t s4_val = static_cast<int8_t>(1 & 0x0F);
+    const int8_t packed_val = static_cast<int8_t>(s4_val | (s4_val << 4));
+    std::fill(weights.begin(), weights.end(), packed_val);
+
+    // BF16 activations (int16 storage)
+    std::vector<int16_t> input(static_cast<size_t>(M * K));
+    std::fill(input.begin(), input.end(), static_cast<int16_t>(0x3F80));  // 1.0f in bf16
+
+    std::vector<int16_t> output(static_cast<size_t>(M * N), 0);
+
+    matmul_data_types dtypes;
+    dtypes.src = data_type_t::bf16;
+    dtypes.wei = data_type_t::s4;
+    dtypes.dst = data_type_t::bf16;
+    dtypes.bias = data_type_t::none;
+    dtypes.compute = data_type_t::s8;
+
+    matmul_params params;
+    params.dtypes = dtypes;
+    params.dynamic_quant = true;
+    params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+
+    params.quant_params.src_scale.buff = src_scale.data();
+    params.quant_params.src_scale.dt = data_type_t::bf16;
+    params.quant_params.src_scale.dims = {M, 1};
+
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::bf16;
+    params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
+
+    matmul_batch_params_t batch_params;
+    batch_params.Batch_A = 1;
+    batch_params.Batch_B = 1;
+
+    log_info("Executing LOWOHA W4A8 matmul (bf16 -> s8 activations, s4 weights)...");
+    const status_t status = matmul_direct(
+                                'r', false, false,
+                                M, N, K,
+                                1.0f,
+                                input.data(), K,
+                                weights.data(), N,
+                                nullptr,
+                                0.0f,
+                                output.data(), N,
+                                true,
+                                batch_params,
+                                params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA W4A8 matmul execution failed.");
+      return NOT_OK;
+    }
+
+    log_info("LOWOHA W4A8 matmul executed successfully.");
+    log_info("Output[0,0] (bf16 raw) = ", output[0]);
   }
   catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;

@@ -3098,8 +3098,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           return status_t::failure;
         }
 
-        // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
-        bool is_woq = (src_data_type == data_type_t::bf16 &&
+        // W4A8: dynamic bf16 src + s4 wei; wire scales like INT8 (not WOQ).
+        bool is_w4a8 =
+          wei_data_type == data_type_t::s4 &&
+          src_data_type == data_type_t::bf16 &&
+          input_tensor.is_quantized();
+
+        // bf16 + src_scale is W4A8 dynamic quant, not WOQ.
+        bool is_woq = !is_w4a8 &&
+                      (src_data_type == data_type_t::bf16 &&
                        (wei_data_type == data_type_t::s4 || wei_data_type == data_type_t::u4));
 
         // Check if weight is INT8 (s8)
@@ -3163,8 +3170,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           }
         }
 
-        // For INT8: Extract quantization parameters from all tensors
-        if (is_wei_s8) {
+        // INT8 quant params (includes W4A8 s4 wei path).
+        if (is_wei_s8 || is_w4a8) {
           // Extract source scale
           if (input_tensor.is_quantized()) {
             const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
@@ -3244,6 +3251,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           params.dynamic_quant = true;
           params.dtypes.compute = data_type_t::s8;
         }
+        if (is_w4a8 &&
+            src_data_type == data_type_t::bf16 &&
+            input_tensor.is_quantized()) {
+          params.dynamic_quant = true;
+          params.dtypes.compute = data_type_t::s8;
+        }
 
         // Create batch_params structure
         matmul_batch_params_t batch_params;
@@ -3309,7 +3322,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           }
           params.postop_.push_back(postop_item);
         }
-        bool is_weights_const = is_woq || is_wei_s8 || (rand() % 2 == 0);
+        bool is_weights_const = is_woq || is_wei_s8 || is_w4a8 || (rand() % 2 == 0);
         if (matmul_config_t::instance().get_weight_cache() != 0 && is_weights_const &&
             (algo == matmul_algo_t::aocl_dlp_blocked ||
              algo == matmul_algo_t::onednn_blocked ||

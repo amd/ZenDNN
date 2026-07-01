@@ -64,7 +64,7 @@ void set_int8_params(matmul_params &params, const tensor_t &input_tensor,
                      const tensor_t &weight_tensor, const tensor_t &output_tensor);
 
 /**
- * @brief Configures dynamic source quantization (W8A8, symmetric).
+ * @brief Configures dynamic source quantization (W8A8 or W4A8, symmetric).
  *
  * Sets `params.dynamic_quant=true`, fixes `dtypes.compute=s8`, and forwards
  * src/wei scale buffers + dims from the (already attached) tensor metadata.
@@ -72,7 +72,7 @@ void set_int8_params(matmul_params &params, const tensor_t &input_tensor,
  *
  * @param params LowOHA matmul parameters to update.
  * @param input_tensor Source tensor (bf16/f32) carrying the src-scale tensor.
- * @param weight_tensor Weight tensor (s8) carrying the wei-scale tensor.
+ * @param weight_tensor Weight tensor (s8 or s4) carrying the wei-scale tensor.
  */
 void set_dyn_quant_src_params(matmul_params &params,
                               const tensor_t &input_tensor,

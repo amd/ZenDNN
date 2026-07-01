@@ -145,10 +145,10 @@ void set_int8_params(matmul_params &params, const tensor_t &input_tensor,
   set_dst_int8_params(params, output_tensor);
 }
 
-// Configure dynamic source quantization for the (src in {bf16,f32}, wei=s8 ->
-// s8 compute) path. The src tensor must already carry a properly-shaped scale
-// tensor (created by create_input_tensor); the runtime fills the scale buffer
-// during the dynamic-quant pass.
+// Configure dynamic source quantization for W8A8 and W4A8 paths. The src
+// tensor must already carry a properly-shaped scale tensor (created by
+// create_input_tensor); the runtime fills the scale buffer during the
+// dynamic-quant pass.
 void set_dyn_quant_src_params(matmul_params &params,
                               const tensor_t &input_tensor,
                               const tensor_t &weight_tensor) {
@@ -158,7 +158,24 @@ void set_dyn_quant_src_params(matmul_params &params,
   set_wei_int8_params(params, weight_tensor);
   log_info("LOWOHA dyn-quant: enabled (src=",
            datatypeToStr(input_tensor.get_data_type()),
-           ", wei=s8, compute=s8)");
+           ", wei=", datatypeToStr(weight_tensor.get_data_type()),
+           ", compute=s8)");
+}
+
+// W8A8: src in {bf16,f32} + wei=s8
+// W4A8: bf16 src/dst + wei=s4
+static bool is_dynamic_quant_dtype(const tensor_t &input_tensor,
+                                   const tensor_t &weight_tensor,
+                                   const tensor_t &output_tensor) {
+  const auto src_dt = input_tensor.get_data_type();
+  const auto wei_dt = weight_tensor.get_data_type();
+  const auto dst_dt = output_tensor.get_data_type();
+  bool w8a8 = wei_dt == data_type_t::s8 &&
+              (src_dt == data_type_t::bf16 || src_dt == data_type_t::f32);
+  bool w4a8 = wei_dt == data_type_t::s4 &&
+              src_dt == data_type_t::bf16 &&
+              dst_dt == data_type_t::bf16;
+  return w8a8 || w4a8;
 }
 
 void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
@@ -195,12 +212,7 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
                   input_tensor.get_data_type() == data_type_t::s8) &&
                  weight_tensor.get_data_type() == data_type_t::s8;
 
-  // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
-  bool is_woq = (input_tensor.get_data_type() == data_type_t::bf16 &&
-                 (weight_tensor.get_data_type() == data_type_t::s4 ||
-                  weight_tensor.get_data_type() == data_type_t::u4));
-
-  // Dynamic source quantization (W8A8, symmetric): src in {bf16,f32} + wei=s8.
+  // Dynamic source quantization (W8A8 / W4A8).
   // Mirrors the runtime gate in reorder_quantization.cpp. Mutually exclusive
   // with the static int8 (s8/u8 src) path above. We additionally require the
   // source tensor to (a) be 2D and (b) carry an attached src-scale buffer.
@@ -209,9 +221,7 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
   // set_dyn_quant_src_params() would leave params.quant_params.src_scale.buff
   // unset and crash at runtime.
   const bool dyn_quant_src_dtype_match =
-    weight_tensor.get_data_type() == data_type_t::s8 &&
-    (input_tensor.get_data_type() == data_type_t::bf16 ||
-     input_tensor.get_data_type() == data_type_t::f32);
+    is_dynamic_quant_dtype(input_tensor, weight_tensor, output_tensor);
   const bool dyn_quant_src_is_2d = input_tensor.get_dim() == 2;
   // Guard the scale-buffer probe with is_quantized() first; otherwise the
   // tensor API logs an apilog_error every time we ask a non-quantized input
@@ -224,6 +234,13 @@ void set_lowoha_matmul_params(matmul_params &params, int &lda, int &ldb,
     dyn_quant_src_dtype_match &&
     dyn_quant_src_is_2d &&
     dyn_quant_src_has_scale;
+
+  // WOQ (Weight-Only Quantization): BF16 src + S4/U4 weights without W4A8
+  // dynamic source quantization.
+  bool is_woq = (input_tensor.get_data_type() == data_type_t::bf16 &&
+                 (weight_tensor.get_data_type() == data_type_t::s4 ||
+                  weight_tensor.get_data_type() == data_type_t::u4) &&
+                 !is_dyn_quant_src);
 
   if (cfg.src_dynamic_quant && dyn_quant_src_dtype_match && !is_dyn_quant_src) {
     commonlog_warning(

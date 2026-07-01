@@ -18,6 +18,7 @@
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include <cstdlib>
 #include <cstring>   // std::memcpy (WC=2 in-place reorder write-back)
 #include <mutex>
@@ -140,6 +141,98 @@ void cvt_4bit_to_bf16(const int8_t *weights, bfloat16_t *wei_bf16, int k,
   }
 }
 
+// W4A8: widen packed s4 to K×N s8 (sign-extended nibble codes, no dequant).
+void cvt_s4_to_s8(const int8_t *weights, int8_t *wei_s8, int k, int n,
+                  int ldb, bool is_transposed) {
+  #pragma omp parallel for collapse(2)
+  for (int row = 0; row < k; ++row) {
+    for (int col = 0; col < n; ++col) {
+      // Packed s4 index (ab: row*ldb+col; ba: col*ldb+row).
+      size_t physical_idx = is_transposed ?
+                            (static_cast<size_t>(col) * ldb + row) :
+                            (static_cast<size_t>(row) * ldb + col);
+      size_t packed_byte_idx = physical_idx / 2;
+      bool is_low_nibble = (physical_idx % 2) == 0;
+
+      int8_t s8_value = extract_4bit_nibble(weights[packed_byte_idx],
+                                            is_low_nibble, data_type_t::s4);
+      size_t out_idx = static_cast<size_t>(row) * n + col;
+      wei_s8[out_idx] = s8_value;
+    }
+  }
+}
+
+// W4A8 AOCL sym-quant derives its source group size from the source-scale
+// buffer shape. Normalize compact per-tensor/per-token shapes before reorder.
+status_t broadcast_w4a8_src_scale(matmul_params &params, int M,
+                                  std::vector<uint8_t> &expanded_src_scale) {
+  const auto &src_dims = params.quant_params.src_scale.dims;
+  if (src_dims.size() != 2) {
+    log_error("[AOCL.run_dlp W4A8] source scale dims must be "
+              "{1,1}, {M,1}, or {M,G}");
+    return status_t::failure;
+  }
+
+  if (params.quant_params.wei_scale.dims.size() != 2) {
+    log_error("[AOCL.run_dlp W4A8] source scale broadcast requires "
+              "per-group weight scale dims {G,N}");
+    return status_t::failure;
+  }
+
+  const int64_t src_rows = src_dims[0];
+  const int64_t src_cols = src_dims[1];
+  const int64_t G_dim = params.quant_params.wei_scale.dims[0];
+
+  const void *scale_buff = params.quant_params.src_scale.buff;
+  if (!scale_buff) {
+    log_error("[AOCL.run_dlp W4A8] source scale buffer is null");
+    return status_t::failure;
+  }
+
+  if (src_cols != 1) {
+    if (src_rows != M || src_cols != G_dim) {
+      log_error("[AOCL.run_dlp W4A8] per-group source scale dims must be "
+                "{M,G} (rows=", src_rows, ", cols=", src_cols,
+                ", M=", M, ", G=", G_dim, ")");
+      return status_t::failure;
+    }
+    return status_t::success;
+  }
+
+  const bool is_per_tensor = src_rows == 1;
+  if (!is_per_tensor && src_rows != M) {
+    log_error("[AOCL.run_dlp W4A8] source scale rows must be 1 or M "
+              "(rows=", src_rows, ", M=", M, ")");
+    return status_t::failure;
+  }
+
+  const int64_t target_rows = M;
+  const int64_t target_cols = G_dim;
+
+  const size_t elem_size = size_of(params.quant_params.src_scale.dt);
+  expanded_src_scale.resize(static_cast<size_t>(target_rows * target_cols) *
+                            elem_size);
+  const uint8_t *src_scale_src = static_cast<const uint8_t *>(scale_buff);
+  uint8_t *expanded = expanded_src_scale.data();
+
+  #pragma omp parallel for collapse(2)
+  for (int64_t m = 0; m < target_rows; ++m) {
+    for (int64_t g = 0; g < target_cols; ++g) {
+      const int64_t src_m = is_per_tensor ? 0 : m;
+      std::memcpy(expanded + static_cast<size_t>(m * target_cols + g) *
+                  elem_size,
+                  src_scale_src + static_cast<size_t>(src_m) * elem_size,
+                  elem_size);
+    }
+  }
+
+  params.quant_params.src_scale.buff = expanded;
+  params.quant_params.src_scale.dims = {target_rows, target_cols};
+  apilog_info("[AOCL.run_dlp W4A8] broadcast source scales to shape [",
+              target_rows, ",", target_cols, "]");
+  return status_t::success;
+}
+
 namespace {
 template <typename T>
 lru_cache_t<Key_matmul, void *> &get_aocl_weight_cache() {
@@ -167,6 +260,15 @@ std::mutex &get_aocl_woq_weight_cache_mutex() {
   static std::mutex m;
   return m;
 }
+// Separate W4A8 weight cache (s4 widened to blocked s8 layout).
+lru_cache_t<Key_matmul, void *> &get_aocl_w4a8_weight_cache() {
+  static lru_cache_t<Key_matmul, void *> c;
+  return c;
+}
+std::mutex &get_aocl_w4a8_weight_cache_mutex() {
+  static std::mutex m;
+  return m;
+}
 
 template <typename T>
 void clear_aocl_typed_weight_cache_under_lock() {
@@ -176,6 +278,11 @@ void clear_aocl_typed_weight_cache_under_lock() {
 void clear_aocl_woq_weight_cache_under_lock() {
   std::lock_guard<std::mutex> lock(get_aocl_woq_weight_cache_mutex());
   get_aocl_woq_weight_cache().clear();
+}
+void clear_aocl_w4a8_weight_cache_under_lock() {
+  std::lock_guard<std::mutex>
+  lock(get_aocl_w4a8_weight_cache_mutex());
+  get_aocl_w4a8_weight_cache().clear();
 }
 
 void clear_aocl_symquant_weight_cache_under_lock() {
@@ -194,6 +301,7 @@ void clear_aocl_matmul_weight_caches() {
   clear_aocl_typed_weight_cache_under_lock<int8_t>();
   clear_aocl_symquant_weight_cache_under_lock();
   clear_aocl_woq_weight_cache_under_lock();
+  clear_aocl_w4a8_weight_cache_under_lock();
   clear_ggml_weight_unpack_cache();
   clear_zp_compensation_cache();
 }
@@ -593,6 +701,97 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
   }
 }
 
+// W4A8: s4 -> s8 widen, AOCL sym_quant int8 reorder, optional cache.
+void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
+                                    void *&reorder_weights, const int k, const int n, const int ldb,
+                                    const bool is_weights_const, const char order, const char trans,
+                                    data_type_t wei_dt, data_type_t src_dt,
+                                    int weight_cache_type,
+                                    int sym_quant_group_size) {
+  lru_cache_t<Key_matmul, void *> &matmul_weight_cache_w4a8 =
+    get_aocl_w4a8_weight_cache();
+  std::mutex &w4a8_cache_mutex =
+    get_aocl_w4a8_weight_cache_mutex();
+
+  bool is_transposed = (trans == 't');
+
+  // Only signed s4 weights are supported -- unsigned u4 needs explicit
+  // zero-point semantics and a different conversion routine.
+  if (wei_dt != data_type_t::s4) {
+    apilog_error("[AOCL.reorder W4A8] supports only s4 weights; "
+                 "wei_dt is not s4");
+    reorder_weights = nullptr;
+    return;
+  }
+  if (src_dt != data_type_t::s8) {
+    apilog_error("[AOCL.reorder W4A8] supports only s8 source; "
+                 "src_dt is unsupported");
+    reorder_weights = nullptr;
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(w4a8_cache_mutex);
+  // Short-circuit: only consult (and timestamp-bump) the cache when
+  // weights are const. A non-const-weight call always recomputes and
+  // discards the buffer.
+  void *cached_w4a8 = nullptr;
+  bool found_obj = is_weights_const &&
+                   matmul_weight_cache_w4a8.try_get(key, cached_w4a8);
+
+  if (!found_obj) {
+    apilog_verbose("[AOCL.reorder W4A8 MISS] W4A8 reorder "
+                   "(weight_cache_type=", weight_cache_type, ", src_dt=",
+                   static_cast<int>(src_dt), ")");
+    size_t alignment = 64;
+    // Temp K×N s8 buffer; freed before return (cache holds blocked reorder).
+    size_t cvt_weights_size = (sizeof(int8_t) * k * n + alignment - 1) & ~
+                              (alignment - 1);
+    int8_t *cvt_weights = (int8_t *)aligned_alloc(alignment, cvt_weights_size);
+    if (!cvt_weights) {
+      apilog_error("[AOCL.reorder W4A8] failed to allocate convert weights");
+      reorder_weights = nullptr;
+      return;
+    }
+    cvt_s4_to_s8(weights, cvt_weights, k, n, ldb, is_transposed);
+
+    // After cvt_s4_to_s8, weights are in K×N row-major layout
+    // (non-transposed), so ldb_cvt = n regardless of the original packed
+    // buffer's layout.
+    int ldb_cvt = n;
+    char trans_cvt = 'n';
+
+    size_t b_reorder_buf_siz_req = 0;
+    size_t reorder_size = 0;
+    DLP_SYMM_STAT_QUANT symq_meta;
+    symq_meta.group_size = sym_quant_group_size > 0 ? sym_quant_group_size : k;
+    b_reorder_buf_siz_req =
+      aocl_get_reorder_buf_size_s8s8s32os32_sym_quant(order, trans_cvt, 'B',
+          k, n, &symq_meta, nullptr);
+    reorder_size = (b_reorder_buf_siz_req + alignment - 1) & ~
+                   (alignment - 1);
+    reorder_weights = (int8_t *)aligned_alloc(alignment, reorder_size);
+    if (!reorder_weights) {
+      apilog_error("[AOCL.reorder W4A8] failed to allocate reorder weights");
+      free(cvt_weights);
+      reorder_weights = nullptr;
+      return;
+    }
+    aocl_reorder_s8s8s32os32_sym_quant(order, trans_cvt, 'B', cvt_weights,
+                                       (int8_t *)reorder_weights, k, n,
+                                       ldb_cvt, &symq_meta, nullptr);
+    free(cvt_weights);
+
+    if (is_weights_const && weight_cache_type == 1) {
+      matmul_weight_cache_w4a8.add(key, reorder_weights);
+    }
+  }
+  else {
+    apilog_verbose("[AOCL.reorder W4A8 HIT] W4A8 cache hit — "
+                   "reusing cached pack");
+    reorder_weights = cached_w4a8;
+  }
+}
+
 void run_dlp(char layout, char transA, char transB, int M, int N,
              int K,
              float alpha, float beta, int lda, int ldb, int ldc,
@@ -648,6 +847,25 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16) &&
     dtypes.src == data_type_t::s8;
 
+  // W4A8: s4 wei + dynamic-quant s8 src. Used to skip WOQ s4 reorder below.
+  const bool is_w4a8 =
+    (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp ||
+     kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked) &&
+    is_w4a8_config(lowoha_param);
+
+  // W4A8 post-op wiring needs broadcast src scales and wei typed as s8.
+  matmul_params w4a8_lowoha_param = lowoha_param;
+  std::vector<uint8_t> w4a8_expanded_src_scale;
+  matmul_data_types dtypes_for_postop = dtypes;
+  if (is_w4a8) {
+    if (broadcast_w4a8_src_scale(w4a8_lowoha_param, M,
+                                 w4a8_expanded_src_scale) !=
+        status_t::success) {
+      return;
+    }
+    dtypes_for_postop.wei = data_type_t::s8;
+  }
+
   size_t cache_extra_hash = 0;
   if (is_s8_sym_quant_scales) {
     int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
@@ -660,7 +878,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked &&
-      is_weights_const) {
+      is_weights_const && !is_w4a8) {
     //call reorder and cache function
     bool blocked_flag = false;
     if (lowoha_param.dtypes.wei == data_type_t::f32) {
@@ -727,10 +945,13 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     }
   }
   else if (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp &&
-           (dtypes.wei == data_type_t::s4 || dtypes.wei == data_type_t::u4)) {
+           (dtypes.wei == data_type_t::s4 || dtypes.wei == data_type_t::u4) &&
+           dtypes.src == data_type_t::bf16) {
     // WOQ expands the 4-bit input into a bf16-blocked layout, so the
     // reordered buffer cannot fit inside the caller's weight buffer.
     // Treat in-place caching the same as out-of-place caching for this path.
+    //
+    // bf16 src only: WOQ path; W4A8 (s8 src) is handled in the kernel section.
     int32_t woq_weight_cache_type = (weight_cache_type == 2) ? 1 :
                                     weight_cache_type;
     //call woq reorder and cache function
@@ -752,7 +973,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   bool is_int8 = dtypes.wei == data_type_t::s8;
   if (is_int8) {
     // Extract zero-point values
-    if (lowoha_param.quant_params.src_zp.buff && dtypes.src != data_type_t::bf16 &&
+    if (lowoha_param.quant_params.src_zp.buff &&
+        dtypes.src != data_type_t::bf16 &&
         dtypes.src != data_type_t::f32) {
       src_zp = read_and_cast<int32_t>(lowoha_param.quant_params.src_zp.buff,
                                       lowoha_param.quant_params.src_zp.dt);
@@ -782,9 +1004,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     }
   }
 
-  // Create aocl_post_op structure for bias, post-ops, and WOQ pre-ops
-  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N, K,
-                            M, zp_comp_acc, zp_comp_ndim, kernel, B);
+  //TODO: remove the check for is_w4a8
+  dlp_metadata_t *aocl_po = create_dlp_post_op(
+                              is_w4a8 ? w4a8_lowoha_param : lowoha_param,
+                              bias,
+                              is_w4a8 ? dtypes_for_postop : dtypes,
+                              N, K, M, zp_comp_acc, zp_comp_ndim, kernel, B);
 
   if (dtypes.src == data_type_t::f32 && dtypes.wei == data_type_t::f32 &&
       dtypes.dst == data_type_t::f32) {
@@ -793,9 +1018,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                             is_weight_blocked ? (float *)reordered_mem : static_cast<const float *>(B),
                             ldb, mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
   }
-  // S4 blocked AOCL-DLP kernel path (skip this path for non-blocked kernels)
+  // WOQ s4 blocked path (not W4A8).
   else if (dtypes.wei == data_type_t::s4 &&
-           kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked) {
+           kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked &&
+           !is_w4a8) {
     if (dtypes.dst == data_type_t::bf16) {
       aocl_gemm_bf16s4f32obf16(layout,transA,transB,M,N,K,alpha,
                                static_cast<const int16_t *>(A),lda,mem_format_a,
@@ -830,6 +1056,57 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     else {
       log_error("Unsupported data type for matmul");
     }
+  }
+  // W4A8: reorder s4->s8, sym_quant GEMM (bf16 output only).
+  else if (is_w4a8) {
+    const size_t w4a8_src_scale_nelems = get_num_elements(
+                                           w4a8_lowoha_param.quant_params.src_scale.dims);
+    const int64_t src_grp = (w4a8_src_scale_nelems == static_cast<size_t>(M))
+                            ? K
+                            : K / (static_cast<int64_t>(w4a8_src_scale_nelems) / M);
+    const Key_matmul w4a8_cache_key(
+      transB == 't', K, N, ldb, B,
+      static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+      std::hash<int64_t> {}(src_grp));
+
+    void *w4a8_reordered_mem = nullptr;
+    const int32_t w4a8_weight_cache_type = (weight_cache_type == 2) ? 1 :
+                                           weight_cache_type;
+    const int w4a8_sym_group_size =
+      (w4a8_src_scale_nelems == static_cast<size_t>(M))
+      ? K
+      : K / (static_cast<int>(w4a8_src_scale_nelems) / M);
+    w4a8ReorderAndCacheWeightsAocl(w4a8_cache_key,
+                                   static_cast<const int8_t *>(B),
+                                   w4a8_reordered_mem, K, N, ldb,
+                                   is_weights_const, 'r', transB,
+                                   dtypes.wei, dtypes.src,
+                                   w4a8_weight_cache_type,
+                                   w4a8_sym_group_size);
+    if (w4a8_reordered_mem == nullptr) {
+      apilog_error("[AOCL.run_dlp W4A8] weight reorder failed");
+      cleanup_dlp_post_op(aocl_po);
+      return;
+    }
+
+    if (dtypes.dst != data_type_t::bf16) {
+      log_error("Unsupported output data type for W4A8; expected bf16");
+    }
+    else {
+      //W4A8 matmul call with s8 weights and bf16 output
+      aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M, N, K, alpha,
+                                       static_cast<const int8_t *>(A), lda,
+                                       mem_format_a,
+                                       static_cast<const int8_t *>(w4a8_reordered_mem),
+                                       ldb, 'r', beta,
+                                       static_cast<int16_t *>(C), ldc, aocl_po);
+    }
+
+    cleanup_dlp_post_op(aocl_po);
+    if (!is_weights_const || w4a8_weight_cache_type != 1) {
+      free(w4a8_reordered_mem);
+    }
+    return;
   }
   // BF16 kernels: bf16 source and weight or simulated WOQ S4 weights
   else if (dtypes.src == data_type_t::bf16 && (dtypes.wei == data_type_t::bf16 ||

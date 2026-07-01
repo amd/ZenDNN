@@ -152,6 +152,7 @@ struct matmul_data_types {
 | BF16 | BF16 | F32/BF16 | F32/BF16 | Mixed-precision BFloat16 |
 | F16 | F16 | F32/F16 | F16/F32 | Half-precision (requires AVX512-FP16) |
 | BF16 | S4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), symmetric |
+| BF16 | S4 | BF16 | BF16 | Dynamic A8 + W4 (W4A8); bf16 only — see [W4A8](#w4a8-dynamic-a8--symmetric-w4) |
 | BF16 | U4 | F32/BF16 | F32/BF16 | Weight-Only Quantization (WOQ), asymmetric |
 | U8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
 | S8 | S8 | F32/BF16/S8/U8/S32 | F32/BF16/S8/U8/S32 | INT8 Quantization |
@@ -271,6 +272,22 @@ struct matmul_quantization_params_t {
 
 > **Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
 
+### W4A8 (Dynamic A8 + symmetric W4)
+
+Dynamic activation quantization with symmetric 4-bit weights. Distinct from WOQ: the caller passes **bf16** activations with `dynamic_quant = true`; the library quantizes the source to **s8** at runtime and uses **s8×s8 sym_quant** AOCL kernels. **BF16 only** for source, destination, and bias tensors (f32 src/dst is rejected at validation). **Scale tensors** accept **F32 or BF16**.
+
+| Tensor  | Caller dtype | Compute dtype | Scale dtype | Scale granularity | Zero-point |
+|---------|--------------|---------------|-------------|-------------------|------------|
+| Source  | BF16         | S8            | F32, BF16   | Per-tensor `{1, 1}`, per-token `{M, 1}`, or per-group `{M, G}` | Not supported |
+| Weights | S4 (packed)  | S8            | F32, BF16   | Per-group `{G, N}` (G = K / group_size) | Not supported (symmetric) |
+| Output  | BF16         | —             | —           | —                 | —          |
+
+> **Notes:**
+> - **Backend:** AOCL-DLP only (`aocl_dlp` / `aocl_dlp_blocked`).
+> - **Entry contract:** `dynamic_quant = true`, `dtypes.compute = s8`, `src_scale` and `wei_scale` must be provided; no `src_zp` or `wei_zp`.
+> - **Shape constraints:** `src_scale` dims must be `{1, 1}`, `{M, 1}`, or `{M, G}` (with `G` matching `wei_scale.dims[0]`); `wei_scale` dims `{G, N}` with `N` matching the matmul `N`; `K` divisible by `G`; `K / G` (group size) a multiple of 4. Compact `{1, 1}` / `{M, 1}` scales are broadcast to `{M, G}` in the AOCL path before GEMM.
+> - **vs WOQ:** WOQ keeps bf16 activations at GEMM time; W4A8 quantizes activations to s8 and uses sym_quant blocked weight layout (not the WOQ bf16s4 prepack layout).
+
 **Supported Data Types for Scales and Zero Points by Backend:**
 
 | Quant Mode | Tensor  | Parameter  | DLP Backend                        | OneDNN Backend                      |
@@ -285,9 +302,12 @@ struct matmul_quantization_params_t {
 | WOQ (S4)   | Weights | Zero-Point | ✗ *(symmetric, no zero-point)*     | ✗ *(WOQ always dispatches to DLP)* |
 | WOQ (U4)   | Weights | Scale      | F32, BF16                          | ✗ *(WOQ always dispatches to DLP)*  |
 | WOQ (U4)   | Weights | Zero-Point | S8, BF16                           | ✗ *(WOQ always dispatches to DLP)*  |
+| W4A8      | Source  | Scale      | F32, BF16                          | ✗ *(W4A8 always dispatches to DLP)* |
+| W4A8      | Weights | Scale      | F32, BF16                          | ✗ *(W4A8 always dispatches to DLP)* |
 
 > **Notes:**
 > - **WOQ Routing:** WOQ is supported by the AOCL-DLP backend only.
+> - **W4A8 Routing:** W4A8 is supported by the AOCL-DLP backend only.
 > - **S4 vs U4:** S4 weights use symmetric quantization (no zero-point). U4 weights use asymmetric quantization with zero-point.
 > - **U4 Zero-Point Domain:** The dequantization formula for U4 depends on the zero-point data type. See the dequantization formulas in the WOQ key points section below for details.
 
@@ -884,6 +904,83 @@ int lowoha_int8_per_group_dynamic_quant_example() {
 - **Scale data types**: Both `f32` and `bf16` are supported for scale tensors.
 - **Dynamic source quantization**: When `src_scale.buff` is `nullptr` with `dynamic_quant = true`, the scale is computed from the source data at runtime using per-group statistics.
 - **Weight reorder caching**: The weight reorder cache key includes the group size, so different group sizes for the same weight tensor produce separate cache entries.
+
+### Example 8: W4A8 (dynamic bf16 activations + symmetric s4 weights)
+
+W4A8 runs on **AOCL DLP** only. The library quantizes **bf16** activations to **s8** at runtime (`dynamic_quant = true`, `dtypes.compute = s8`), uses packed **s4** weights with **per-group** `wei_scale` `{G, N}`, and `src_scale` `{1, 1}`, `{M, 1}`, or `{M, G}`. Output is **bf16**. Scale tensors may be **f32** or **bf16**. No `src_zp` / `wei_zp`. Requires **`K` divisible by `G`** and **`(K/G) % 4 == 0`**.
+
+```cpp
+int lowoha_w4a8_matmul_example() {
+  using namespace zendnnl::lowoha::matmul;
+  using zendnnl::ops::matmul_algo_t;
+
+  constexpr int M = 8, K = 128, N = 64;
+  constexpr int NUM_GROUPS = K / 32;  // G = 4, group_size = 32
+
+  std::vector<bfloat16_t> src_scale(M);           // per-token {M, 1} as flat M elems
+  for (int m = 0; m < M; ++m) {
+    src_scale[m] = bfloat16_t(0.02f + 0.001f * static_cast<float>(m));
+  }
+
+  std::vector<bfloat16_t> wei_scale(NUM_GROUPS * N);
+  for (int g = 0; g < NUM_GROUPS; ++g)
+    for (int n = 0; n < N; ++n)
+      wei_scale[g * N + n] = bfloat16_t(1.0f + 0.05f * static_cast<float>(g));
+
+  std::vector<int8_t> weights((K * N + 1) / 2);    // packed s4
+  const int8_t nib = 1 & 0x0F;
+  std::fill(weights.begin(), weights.end(),
+              static_cast<int8_t>(nib | (nib << 4)));
+
+  std::vector<uint16_t> input(M * K, 0x3F80u);     // bf16 1.0
+  std::vector<uint16_t> output(M * N, 0);
+
+  matmul_data_types dtypes;
+  dtypes.src = data_type_t::bf16;
+  dtypes.wei = data_type_t::s4;
+  dtypes.dst = data_type_t::bf16;
+  dtypes.bias = data_type_t::none;
+  dtypes.compute = data_type_t::s8;
+
+  matmul_params params;
+  params.dtypes = dtypes;
+  params.dynamic_quant = true;
+  params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+
+  params.quant_params.src_scale.buff = src_scale.data();
+  params.quant_params.src_scale.dt = data_type_t::bf16;
+  params.quant_params.src_scale.dims = {M, 1};
+
+  params.quant_params.wei_scale.buff = wei_scale.data();
+  params.quant_params.wei_scale.dt = data_type_t::bf16;
+  params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
+
+  matmul_batch_params_t batch_params;
+
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f,
+    input.data(), K,
+    weights.data(), N,
+    nullptr,
+    0.0f,
+    output.data(), N,
+    true,   // constant weights (reorder/cache)
+    batch_params,
+    params);
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+**Key points for W4A8:**
+
+- **Not WOQ**: Do not set `dynamic_quant = false` with bf16×s4 — that selects WOQ (`aocl_gemm_bf16s4f32obf16` path), not W4A8.
+- **Source scales**: `src_scale` dims `{1, 1}`, `{M, 1}`, or `{M, G}`; dtype **f32** or **bf16**. `{1, 1}` and `{M, 1}` are broadcast to `{M, G}` before the sym_quant GEMM.
+- **Weight scales**: `wei_scale` dims `{G, N}`; dtype **f32** or **bf16**.
+- **Weight prepack**: The public `weight_prepack_*` s4 path targets **WOQ** blocked layout (`bf16s4f32of32`); W4A8 uses a **sym_quant s8** blocked layout after s4→s8 widen — use runtime reorder in `matmul_direct` unless a dedicated W4A8 prepack is added.
+- **Runnable example**: See `examples/lowoha_matmul_example.cpp` (`run_lowoha_matmul_w4a8_test`), invoked from `examples/examples.cpp`.
 
 ## Weight Caching and Reordering
 

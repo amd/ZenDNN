@@ -260,6 +260,121 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
 
 /** @fn TEST_P
  *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param W4A8 user-defined name of test according to test
+ *  @brief W4A8: dynamic bf16 src to s8, s4 wei, vs reference kernel
+ */
+TEST_P(TestMatmul, W4A8_BF16) {
+  if (!use_LOWOHA) {
+    GTEST_SKIP() << "W4A8 lives in run_dlp(), reachable only via "
+                 "the LOWOHA path.";
+  }
+  if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
+    GTEST_SKIP();
+  }
+
+  // AOCL s8s8_sym_quant requires K-group size % 4 == 0.
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) {
+    sym_k = 4;
+  }
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xDA8C);
+  std::vector<uint64_t> valid_gs;
+  for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+    if (sym_k % gs == 0) {
+      valid_gs.push_back(gs);
+    }
+  }
+  if (valid_gs.empty()) {
+    GTEST_SKIP() << "No valid W4A8 group_size for K=" << sym_k;
+  }
+  uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+  uint64_t num_groups = sym_k / group_size;
+
+  std::vector<uint64_t> src_scale_size;
+  std::vector<uint64_t> wei_scale_size = {num_groups, n};
+  std::string src_granularity_label;
+  switch (local_rng() % 3) {
+  case 0:
+    src_scale_size = {1, 1};
+    src_granularity_label = "per-tensor";
+    break;
+  case 1:
+    src_scale_size = {m, 1};
+    src_granularity_label = "per-token";
+    break;
+  default:
+    src_scale_size = {m, num_groups};
+    src_granularity_label = "per-group";
+    break;
+  }
+  std::string granularity_label = "A=" + src_granularity_label +
+                                  " + W=per-group";
+
+  neutralize_mish_quant_int8(po_types);
+
+  data_type_t ref_dt = data_type_t::bf16;
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 :
+                         data_type_t::bf16;
+
+  auto wei_scale = tensor_factory.uniform_dist_tensor(wei_scale_size,
+                   scale_dt, 2.0);
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
+                       data_type_t::s4, 7.0, transB, wei_scale);
+
+  auto src_scale = tensor_factory.zero_tensor(src_scale_size, scale_dt);
+  auto input_tensor = tensor_factory.uniform_dist_tensor({m, sym_k}, ref_dt,
+                      2.0, transA, src_scale, tensor_t());
+  auto src_ref = input_tensor;
+
+  auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                     == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor_shape_2d = {m, n};
+  auto binary_tensor_shape_broadcast = {uint64_t{1}, n};
+  auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast :
+                             binary_tensor_shape_2d;
+  auto binary_tensors = make_binary_postop_tensors(tensor_factory, po_types,
+                        binary_tensor_shape);
+
+  data_type_t out_dt = data_type_t::bf16;
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, out_dt,
+                           2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, out_dt,
+                           2.0);
+
+  log_info("W4A8: m=", m, " sym_k=", sym_k, " n=", n,
+           " granularity=", granularity_label,
+           " group_size=", group_size, " num_groups=", num_groups,
+           " out_dt=bf16",
+           " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor,
+                        bias_tensor, output_tensor, po_types, binary_tensors,
+                        use_LOWOHA, algo, 1.0f, 0.0f);
+
+  status_t ref_status = matmul_forced_ref_kernel_test(src_ref,
+                        weight_tensor, bias_tensor, output_tensor_ref,
+                        po_types, binary_tensors, use_LOWOHA, algo, 1.0f,
+                        0.0f);
+
+  EXPECT_EQ(status, status_t::success)
+      << "W4A8: kernel path returned failure "
+      "(expected success on dynamic bf16 src + s4 wei via aocl_dlp / aocl_dlp_blocked)";
+  EXPECT_EQ(ref_status, status_t::success)
+      << "W4A8: WOQ reference path (bf16 src + s4 wei) returned failure";
+
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_bf16, 128 * epsilon_bf16, ok,
+                             /*enable_f32_relaxation=*/false, /*alpha=*/1.0f,
+                             /*is_quant=*/true);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
  *  @param WOQ_BF16_U4 user-defined name of test according to test
  *  @brief Test to validate matmul WOQ (Weight-Only Quantization) with BF16 input
  *         and U4 weights wrt Reference kernel

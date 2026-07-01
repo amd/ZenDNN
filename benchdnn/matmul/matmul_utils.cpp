@@ -20,6 +20,41 @@ namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
 
+static bool is_w4a8_benchdnn_config(const MatmulConfig &cfg) {
+  return cfg.src_dynamic_quant &&
+         cfg.dt.size() >= 3 &&
+         cfg.dt[0] == data_type_t::bf16 &&
+         cfg.dt[1] == data_type_t::s4 &&
+         cfg.dt[2] == data_type_t::bf16;
+}
+
+static void normalize_w4a8_quant_config(MatmulConfig &cfg) {
+  if (!is_w4a8_benchdnn_config(cfg)) {
+    if (cfg.dt.size() >= 2 &&
+        (cfg.dt[1] == data_type_t::s4 ||
+         cfg.dt[1] == data_type_t::s8 ||
+         cfg.dt[1] == data_type_t::u4) &&
+        cfg.scale_granularity == "none") {
+      cfg.scale_granularity = "channel";
+      commonlog_warning(
+        "No weight scale granularity specified. Defaulting to 'per-channel'.");
+    }
+    return;
+  }
+
+  if (cfg.scale_granularity != "group") {
+    cfg.scale_granularity = "group";
+    commonlog_warning(
+      "W4A8 requires per-group weight scales; using per-group.");
+  }
+  if (cfg.group_size == 0) {
+    cfg.group_size = cfg.k;
+  }
+  if (cfg.src_scale_granularity == "per-group" && cfg.src_group_size == 0) {
+    cfg.src_group_size = cfg.group_size;
+  }
+}
+
 void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
                      bool &isPipeline, const global_options &options) {
   std::string line;
@@ -283,6 +318,9 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
           else if (scale_gran == "per-tensor" || scale_gran == "tensor") {
             cfg.scale_granularity = "tensor";
           }
+          else if (scale_gran == "none") {
+            cfg.scale_granularity = "none";
+          }
           else {
             cfg.scale_granularity = "channel";
             commonlog_warning(
@@ -408,6 +446,7 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         }
       }
 
+      normalize_w4a8_quant_config(cfg);
       configs.push_back(cfg);
     }
     catch (const std::exception &e) {
@@ -644,6 +683,7 @@ void inputModelFileParser(std::ifstream &infile,
       cfg.src_group_size = options.src_group_size;
       cfg.src_scale_dt = options.src_scale_dt;
 
+      normalize_w4a8_quant_config(cfg);
       configs.push_back(cfg);
     }
     catch (const std::exception &e) {
@@ -732,6 +772,7 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     cfg.src_group_size = options.src_group_size;
     cfg.src_scale_dt = options.src_scale_dt;
 
+    normalize_w4a8_quant_config(cfg);
     configs.push_back(cfg);
   }
   catch (const std::exception &e) {

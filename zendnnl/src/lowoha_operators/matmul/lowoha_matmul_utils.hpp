@@ -17,6 +17,8 @@
 #ifndef LOWOHA_MATMUL_UTILS_HPP
 #define LOWOHA_MATMUL_UTILS_HPP
 
+#include <numeric>
+#include <functional>
 #include <utility>
 #include <mutex>
 #include <omp.h>
@@ -155,6 +157,9 @@ void apply_bmm_postop_offsets(matmul_params &params, int batch_idx,
 * @param is_weights_const Boolean indicating if weights are constant
 * @return status_t::success if all validations pass, status_t::failure otherwise
 */
+status_t validate_w4a8_inputs(const matmul_params &params, int M, int N,
+                              int K);
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
@@ -222,6 +227,56 @@ inline bool is_dynamic_quant_config(const matmul_params &params) {
   }
   return params.dtypes.compute == data_type_t::s8 ||
          params.dtypes.compute == data_type_t::u8;
+}
+
+/**
+ * @brief W4A8: dynamic_quant s4 weights, bf16 output, s8 compute, symmetric.
+ *        Entry (bf16 src) also requires src/wei scales; runtime (s8 src) does not.
+ */
+inline bool is_w4a8_config(const matmul_params &params) {
+  if (!params.dynamic_quant) {
+    return false;
+  }
+  if (params.dtypes.wei != data_type_t::s4) {
+    return false;
+  }
+  if (params.dtypes.dst != data_type_t::bf16) {
+    return false;
+  }
+  if (params.dtypes.compute != data_type_t::s8) {
+    return false;
+  }
+  if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
+    return false;
+  }
+  if (params.dtypes.src == data_type_t::bf16) {
+    return !params.quant_params.src_scale.dims.empty() &&
+           params.quant_params.src_scale.dt != data_type_t::none &&
+           !params.quant_params.wei_scale.dims.empty() &&
+           params.quant_params.wei_scale.dt != data_type_t::none;
+  }
+  return params.dtypes.src == data_type_t::s8;
+}
+
+/** @brief Product of quant-param dims; 0 when dims is empty. */
+inline int64_t quant_param_num_elements(const std::vector<int64_t> &dims) {
+  if (dims.empty()) {
+    return 0;
+  }
+  return std::accumulate(dims.begin(), dims.end(), int64_t{1},
+                         std::multiplies<int64_t>());
+}
+
+/** @brief AOCL sym_quant requires K/G divisible and group_size % 4 == 0. */
+inline bool is_w4a8_sym_quant_group_valid(int K, int64_t num_groups) {
+  if (num_groups <= 0) {
+    return false;
+  }
+  if (static_cast<int64_t>(K) % num_groups != 0) {
+    return false;
+  }
+  const int64_t group_size = static_cast<int64_t>(K) / num_groups;
+  return group_size % 4 == 0;
 }
 
 /**

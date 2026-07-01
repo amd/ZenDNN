@@ -79,6 +79,23 @@ int run_lowoha_matmul_woq_bf16s4_test();
  */
 int run_lowoha_matmul_woq_bf16u4_test();
 
+/** @fn run_lowoha_matmul_w4a8_test
+ *  @brief Demonstrates W4A8 (dynamic bf16 activations + symmetric s4 weights).
+ *
+ *  Dynamic A8 + W4: bf16 source with @c dynamic_quant=true is quantized to s8 at
+ *  runtime; packed s4 weights are widened and reordered for AOCL sym_quant GEMM;
+ *  output is bf16. AOCL DLP blocked is recommended.
+ *
+ *  Configuration:
+ *    - Input: BF16 [M, K], @c dynamic_quant = true, @c dtypes.compute = s8
+ *    - Weights: S4 packed [K, N], @c is_weights_const = true
+ *    - Output: BF16 [M, N]
+ *    - @c src_scale: per-token {M, 1} (requires M > 1)
+ *    - @c wei_scale: per-group {G, N} with K divisible by G and (K/G) % 4 == 0
+ *    - No @c src_zp / @c wei_zp
+ */
+int run_lowoha_matmul_w4a8_test();
+
 /** @fn run_lowoha_matmul_int8_caching_test
  *  @brief Demonstrates INT8 matmul with zero-point compensation caching.
  *

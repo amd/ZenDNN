@@ -69,6 +69,114 @@ void apply_bmm_postop_offsets(matmul_params &params, int batch_idx,
   }
 }
 
+status_t validate_w4a8_inputs(const matmul_params &params, int M, int N,
+                               int K) {
+  if (params.dtypes.wei == data_type_t::s4 &&
+      params.dtypes.src == data_type_t::s8) {
+    log_error("W4A8 requires bf16 source with dynamic_quant=true "
+              "(pre-quantized s8 source is not supported)");
+    return status_t::failure;
+  }
+
+  if (params.dtypes.wei == data_type_t::s4 &&
+      params.dynamic_quant &&
+      (params.dtypes.src == data_type_t::f32 ||
+       params.dtypes.dst == data_type_t::f32)) {
+    log_error("W4A8 supports bf16 source and bf16 output only");
+    return status_t::failure;
+  }
+
+  if (params.dtypes.wei == data_type_t::s4 &&
+      params.dtypes.src == data_type_t::u8 &&
+      (params.quant_params.src_scale.buff || params.dynamic_quant)) {
+    log_error("S4 weights do not support u8 source; W4A8 requires bf16 source with dynamic_quant=true");
+    return status_t::failure;
+  }
+
+  const bool w4a8_entry = params.dynamic_quant &&
+                          params.dtypes.wei == data_type_t::s4 &&
+                          params.dtypes.src == data_type_t::bf16;
+
+  if (w4a8_entry && params.dtypes.compute != data_type_t::s8) {
+    log_error("W4A8 dynamic quantization requires s8 compute");
+    return status_t::failure;
+  }
+
+  if (!w4a8_entry) {
+    return status_t::success;
+  }
+
+  if (params.dtypes.dst != data_type_t::bf16) {
+    log_error("W4A8 dynamic quantization requires bf16 output");
+    return status_t::failure;
+  }
+
+  if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
+    log_error("W4A8 supports symmetric quantization only");
+    return status_t::failure;
+  }
+
+  const auto &wei_scale = params.quant_params.wei_scale;
+  if (!wei_scale.buff) {
+    log_error("W4A8 requires quant_params.wei_scale.buff");
+    return status_t::failure;
+  }
+  if (wei_scale.dt != data_type_t::f32 && wei_scale.dt != data_type_t::bf16) {
+    log_error("W4A8 weight scale supports only f32 or bf16 data type");
+    return status_t::failure;
+  }
+  if (wei_scale.dims.size() != 2) {
+    log_error("W4A8 requires weight scale dims {G,N}");
+    return status_t::failure;
+  }
+
+  const int64_t G = wei_scale.dims[0];
+  const int64_t scale_N = wei_scale.dims[1];
+  if (G <= 0 || scale_N != static_cast<int64_t>(N)) {
+    log_error("W4A8 requires weight scale dims {G,N} "
+              "(G=", G, ", scale_N=", scale_N, ", N=", N, ")");
+    return status_t::failure;
+  }
+
+  if (static_cast<int64_t>(K) % G != 0) {
+    log_error("W4A8 requires K divisible by weight group count (K=", K,
+              ", G=", G, ")");
+    return status_t::failure;
+  }
+  if (!is_w4a8_sym_quant_group_valid(K, G)) {
+    const int64_t group_size = static_cast<int64_t>(K) / G;
+    log_error("W4A8 requires K/G to be a multiple of 4 (got group_size=",
+              group_size, ")");
+    return status_t::failure;
+  }
+
+  const auto &src_scale = params.quant_params.src_scale;
+  if (src_scale.dt != data_type_t::f32 && src_scale.dt != data_type_t::bf16) {
+    log_error("W4A8 source scale supports only f32 or bf16 data type");
+    return status_t::failure;
+  }
+  if (src_scale.dims.size() != 2) {
+    log_error("W4A8 requires source scale dims {1,1}, {M,1}, or {M,G}");
+    return status_t::failure;
+  }
+
+  const int64_t src_rows = src_scale.dims[0];
+  const int64_t src_cols = src_scale.dims[1];
+  const bool is_per_tensor_src = (src_rows == 1 && src_cols == 1);
+  const bool is_per_token_src =
+    (src_rows == static_cast<int64_t>(M) && src_cols == 1);
+  const bool is_per_group_src =
+    (src_rows == static_cast<int64_t>(M) && src_cols == G);
+  if (!is_per_tensor_src && !is_per_token_src && !is_per_group_src) {
+    log_error("W4A8 requires source scale dims {1,1}, {M,1}, or {M,G} "
+              "(rows=", src_rows, ", cols=", src_cols,
+              ", M=", M, ", G=", G, ")");
+    return status_t::failure;
+  }
+
+  return status_t::success;
+}
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
@@ -95,14 +203,20 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
-  // Check quantization parameters
-  // WOQ (Weight-Only Quantization) is supported for BF16 src with S4/U4 weights
-  // Only weight scale and weight zero point are allowed for WOQ
-  const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
-                      (params.dtypes.wei == data_type_t::s4 || params.dtypes.wei == data_type_t::u4);
+  const bool is_w4a8 = is_w4a8_config(params);
 
   // INT8 quantization: s8 weights
   const bool is_int8 = params.dtypes.wei == data_type_t::s8;
+
+  if (validate_w4a8_inputs(params, M, N, K) != status_t::success) {
+    return status_t::failure;
+  }
+
+  // WOQ: static bf16 activations + s4/u4 weights (no dynamic_quant).
+  const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
+                      (params.dtypes.wei == data_type_t::s4 ||
+                       params.dtypes.wei == data_type_t::u4) &&
+                      !params.dynamic_quant;
 
   // WOQ and INT8 require constant weights for weight reordering/caching
   if (is_woq && !is_weights_const) {
@@ -110,11 +224,11 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
-  // Source and destination quantization params are only supported for INT8
+  // Src/dst quant params: INT8 or W4A8 only.
   if ((params.quant_params.src_scale.buff || params.quant_params.dst_scale.buff ||
        params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) &&
-      !is_int8) {
-    log_error("Source/destination quantization params are only supported for INT8 (u8/s8 src + s8 weights)");
+      !is_int8 && !is_w4a8) {
+    log_error("Source/destination quantization params are only supported for INT8 (u8/s8 src + s8 weights) or W4A8 (bf16 src + s4 wei)");
     return status_t::failure;
   }
 
@@ -135,11 +249,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return true;
   };
 
-  if (params.quant_params.src_scale.buff) {
-    int64_t nelems = std::accumulate(
-                       params.quant_params.src_scale.dims.begin(),
-                       params.quant_params.src_scale.dims.end(),
-                       int64_t{1}, std::multiplies<int64_t>());
+  if (!is_w4a8 && params.quant_params.src_scale.buff) {
+    int64_t nelems = quant_param_num_elements(params.quant_params.src_scale.dims);
     if (nelems != 1) {
       bool is_supported_src = (params.dtypes.src == data_type_t::s8 ||
                                params.dtypes.src == data_type_t::bf16 ||
@@ -170,11 +281,14 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
       // for supplying a separate weight scale buffer.
       const bool wei_scale_supplied_externally =
         (params.packing.pack_format_b != 1);
-      if (wei_scale_supplied_externally && is_per_token &&
-          wei_scale_nelems != static_cast<int64_t>(N)) {
-        log_error("Per-token source scale requires per-channel weight scale "
-                  "(expected ", N, " elements, got ", wei_scale_nelems, ")");
-        return status_t::failure;
+      if (wei_scale_supplied_externally && is_per_token) {
+        const bool has_per_channel_wei =
+          wei_scale_nelems == static_cast<int64_t>(N);
+        if (!has_per_channel_wei) {
+          log_error("Per-token source scale requires per-channel weight scale "
+                    "(expected ", N, " elements, got ", wei_scale_nelems, ")");
+          return status_t::failure;
+        }
       }
       if (wei_scale_supplied_externally && is_per_group) {
         int64_t src_num_groups = nelems / static_cast<int64_t>(M);
@@ -197,10 +311,10 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
-  // Weight quantization params only allowed for WOQ or INT8
+  // Weight quant params: WOQ, INT8, or W4A8.
   if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) &&
-      !is_woq && !is_int8) {
-    log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights) or INT8");
+      !is_woq && !is_int8 && !is_w4a8) {
+    log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights), INT8, or W4A8 (bf16 src + s4 wei)");
     return status_t::failure;
   }
   if (params.dtypes.wei == data_type_t::u4) {
@@ -240,7 +354,6 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
               dtype_info(params.dtypes.dst));
     return status_t::failure;
   }
-  // F32 src with dst BF16/F16 is not supported
   if (is_f32_src && (is_bf16_out || is_f16_out)) {
     log_error("Unsupported GEMM configuration: F32 source with BF16/F16 destination");
     return status_t::failure;
@@ -263,10 +376,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
-  // Lazy sym_quant / dynamic_quant detection: only pay for it if a
-  // mish post-op is actually present.  Keeps the common case (no mish
-  // in the chain) at a single load+compare per post-op, even when this
-  // validator runs.
+  // Reject mish on AOCL INT8 sym_quant / dynamic-quant / W4A8 paths.
   bool dlp_int8_path_checked = false;
   bool dlp_int8_path = false;
   for (size_t i = 0; i < params.postop_.size(); ++i) {
@@ -286,14 +396,13 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     else if (po.po_type == post_op_type_t::mish) {
       if (!dlp_int8_path_checked) {
         dlp_int8_path =
-          is_sym_quant_config(params) || is_dynamic_quant_config(params);
+          is_sym_quant_config(params) || is_dynamic_quant_config(params) ||
+          is_w4a8;
         dlp_int8_path_checked = true;
       }
       if (dlp_int8_path) {
-        log_error("Post-op[", i, "]: mish is not supported on the AOCL-DLP "
-                  "INT8 sym_quant / dynamic_quant kernel path (s8/s8 with "
-                  "per-token/per-group src scale + f32/bf16 dst, or "
-                  "dynamic_quant of bf16/f32 src to s8/u8 with s8 wei).");
+        log_error("Post-op[", i, "]: mish is not supported on AOCL INT8 "
+                  "sym_quant / dynamic_quant / W4A8 paths");
         return status_t::failure;
       }
     }
@@ -683,7 +792,10 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   }
 
   bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
-                (params.dtypes.wei == data_type_t::s4 || params.dtypes.wei == data_type_t::u4);
+                (params.dtypes.wei == data_type_t::s4 ||
+                 params.dtypes.wei == data_type_t::u4) &&
+                !params.dynamic_quant;
+  bool is_w4a8 = is_w4a8_config(params);
   bool is_f16 = (params.dtypes.src == data_type_t::f16) &&
                 (params.dtypes.wei == data_type_t::f16) &&
                 (params.dtypes.dst == data_type_t::f16 ||
@@ -766,6 +878,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
       kernel != matmul_algo_t::aocl_dlp_blocked) {
     kernel = matmul_algo_t::aocl_dlp_blocked;
     log_info("WOQ detected, switching to DLP kernel");
+  }
+  // W4A8: AOCL DLP only; honor aocl_dlp / aocl_dlp_blocked if already set.
+  if (is_w4a8 && kernel != matmul_algo_t::aocl_dlp &&
+      kernel != matmul_algo_t::aocl_dlp_blocked) {
+    kernel = matmul_algo_t::aocl_dlp_blocked;
+    log_info("W4A8 detected, switching to AOCL DLP blocked kernel");
   }
 
   size_t src_scale_nelems = 1;

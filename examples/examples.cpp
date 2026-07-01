@@ -71,6 +71,7 @@ int main() {
     matmul_woq_bf16_kernel_example();
     run_lowoha_matmul_woq_bf16s4_test();
     run_lowoha_matmul_woq_bf16u4_test();
+    run_lowoha_matmul_w4a8_test();
     run_lowoha_matmul_int8_caching_test();
 
     /** Group matmul (`group_matmul_direct`) operator examples.

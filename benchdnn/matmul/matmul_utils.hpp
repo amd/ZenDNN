@@ -87,13 +87,13 @@ struct MatmulConfig {
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 
   /**
-   * Dynamic source quantization (W8A8, symmetric).
+   * Dynamic source quantization (W8A8 and W4A8, symmetric).
    *
    * When `src_dynamic_quant` is true and the dtype combination is
-   * (src=bf16/f32, wei=s8), benchdnn drives the runtime's dynamic
-   * source-quantization path: source activations are quantized to s8 at
-   * runtime against the configured src-scale granularity. Compute target is
-   * always s8 (symmetric); src zero-points are not used.
+   * (src=bf16/f32, wei=s8) or (src=bf16, wei=s4, dst=bf16), benchdnn drives
+   * the runtime's dynamic source-quantization path: source activations are
+   * quantized to s8 at runtime against the configured src-scale granularity.
+   * Compute target is always s8 (symmetric); src zero-points are not used.
    *
    * Granularity is encoded as the shape of the attached src-scale tensor:
    *   per-tensor -> {1, 1}

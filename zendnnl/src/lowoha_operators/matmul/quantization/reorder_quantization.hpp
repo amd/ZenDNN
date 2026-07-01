@@ -35,18 +35,26 @@ struct reorder_quant_buffers_t {
   uint8_t *zp_buf    = nullptr;
 
   reorder_quant_buffers_t() = default;
-  ~reorder_quant_buffers_t() { free(src_buf); free(scale_buf); free(zp_buf); }
+  ~reorder_quant_buffers_t() {
+    free(src_buf);
+    free(scale_buf);
+    free(zp_buf);
+  }
 
   reorder_quant_buffers_t(const reorder_quant_buffers_t &) = delete;
   reorder_quant_buffers_t &operator=(const reorder_quant_buffers_t &) = delete;
   reorder_quant_buffers_t(reorder_quant_buffers_t &&o) noexcept
-      : src_buf(o.src_buf), scale_buf(o.scale_buf), zp_buf(o.zp_buf) {
+    : src_buf(o.src_buf), scale_buf(o.scale_buf), zp_buf(o.zp_buf) {
     o.src_buf = o.scale_buf = o.zp_buf = nullptr;
   }
   reorder_quant_buffers_t &operator=(reorder_quant_buffers_t &&o) noexcept {
     if (this != &o) {
-      free(src_buf); free(scale_buf); free(zp_buf);
-      src_buf = o.src_buf; scale_buf = o.scale_buf; zp_buf = o.zp_buf;
+      free(src_buf);
+      free(scale_buf);
+      free(zp_buf);
+      src_buf = o.src_buf;
+      scale_buf = o.scale_buf;
+      zp_buf = o.zp_buf;
       o.src_buf = o.scale_buf = o.zp_buf = nullptr;
     }
     return *this;
@@ -74,7 +82,7 @@ struct group_reorder_quant_buffers_t {
 
   group_reorder_quant_buffers_t(const group_reorder_quant_buffers_t &) = delete;
   group_reorder_quant_buffers_t &operator=(
-      const group_reorder_quant_buffers_t &) = delete;
+    const group_reorder_quant_buffers_t &) = delete;
 };
 
 /**
@@ -84,6 +92,9 @@ struct group_reorder_quant_buffers_t {
  * (src is BF16/F32, weight is S8, compute is S8/U8). If eligible, quantizes
  * the source via reorder and updates src/params in-place. If not eligible,
  * returns success with no changes.
+ *
+ * Also eligible: W4A8 (bf16 src, s4 wei, s8 compute) — same reorder entry;
+ * per-token src_scale may be broadcast to per-group shape after quantize.
  *
  * Supports two modes based on params.dynamic_quant:
  * - Dynamic (true):  Computes scale (and zp for u8) on-the-fly.
@@ -111,29 +122,33 @@ struct group_reorder_quant_buffers_t {
  * @return status_t::failure  Validation failed — caller should propagate
  */
 status_t reorder_quantization_wrapper(
-    const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
-    matmul_params &params, matmul_batch_params_t &batch_params,
-    const bool transA, const int M, const int K, const int num_threads,
-    reorder_quant_buffers_t &buffers);
+  const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
+  matmul_params &params, matmul_batch_params_t &batch_params,
+  const bool transA, const int M, const int K, const int num_threads,
+  reorder_quant_buffers_t &buffers);
 
 status_t group_reorder_quantization_wrapper(
-    const std::vector<const void *> &src,
-    const std::vector<int> &lda,
-    const std::vector<bool> &transA,
-    const std::vector<int> &M,
-    const std::vector<int> &K,
-    const int num_threads,
-    std::vector<matmul_params> &params,
-    std::vector<const void *> &quantized_src,
-    std::vector<int> &quantized_lda,
-    group_reorder_quant_buffers_t &buffers,
-    bool &quantized);
+  const std::vector<const void *> &src,
+  const std::vector<int> &lda,
+  const std::vector<bool> &transA,
+  const std::vector<int> &M,
+  const std::vector<int> &K,
+  const int num_threads,
+  std::vector<matmul_params> &params,
+  std::vector<const void *> &quantized_src,
+  std::vector<int> &quantized_lda,
+  group_reorder_quant_buffers_t &buffers,
+  bool &quantized);
 
 inline bool group_reorder_quantization_required(
-    const std::vector<matmul_params> &params, size_t num_ops) {
-  if (params.size() < num_ops) return false;
+  const std::vector<matmul_params> &params, size_t num_ops) {
+  if (params.size() < num_ops) {
+    return false;
+  }
   for (size_t i = 0; i < num_ops; ++i) {
-    if (is_dynamic_quant_config(params[i])) return true;
+    if (is_dynamic_quant_config(params[i])) {
+      return true;
+    }
   }
   return false;
 }

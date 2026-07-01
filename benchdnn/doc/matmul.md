@@ -113,7 +113,7 @@ All configuration parameters can be provided directly via command-line options.
 ```
 > **Note:** For BMM benchmarking, always specify `--ndims=3` and provide `bs`.
 
-**Dynamic source quantization (W8A8, symmetric)** can be enabled with these additional flags (LOWOHA, 2D only):
+**Dynamic source quantization (W8A8 and W4A8, symmetric)** can be enabled with these additional flags (LOWOHA, 2D only):
 
 - `--dynamic_quant=true|false`
 - `--src_scale_granularity=per-tensor|per-token|per-group`
@@ -134,12 +134,20 @@ All configuration parameters can be provided directly via command-line options.
 ./install/benchdnn/bin/benchdnn --op=matmul --m=4096 --k=4096 --n=4096 --iters=100 \
   --sdt=bf16 --wdt=s8 --ddt=bf16 --kernel_name=aocl_dlp \
   --dynamic_quant=true --src_scale_granularity=per-group --src_group_size=128 --src_scale_dt=bf16
+
+# Per-token W4A8 (dynamic bf16 activations + symmetric s4 weights)
+./install/benchdnn/bin/benchdnn --op=matmul --m=128 --k=4096 --n=6144 --iters=100 \
+  --sdt=bf16 --wdt=s4 --ddt=bf16 --kernel_name=aocl_dlp_blocked \
+  --weight_scale_granularity=per-group --weight_group_size=4096 --weight_scale_dt=bf16 \
+  --dynamic_quant=true --src_scale_granularity=per-token --src_scale_dt=bf16
 ```
 
 Constraints:
 - LOWOHA path only (`--lowoha=true`, the default).
 - 2D only (`--ndims=2`); BMM and grp_matmul are not supported in this mode.
-- `src` must be `bf16` or `f32`; `wei` must be `s8`. Compute target is fixed to `s8` (symmetric).
+- W8A8: `src` must be `bf16` or `f32`; `wei` must be `s8`.
+- W4A8: `src` and `dst` must be `bf16`; `wei` must be `s4`; weight scales must be per-group `{G, N}` with `K/G` divisible by 4.
+- Compute target is fixed to `s8` (symmetric).
 - Source zero-points are not used.
 
 ---

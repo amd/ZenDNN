@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -40,20 +41,18 @@ using zendnnl::lowoha::reorder::get_single_granularity;
 using zendnnl::lowoha::reorder::granularity_type_t;
 
 status_t reorder_quantization_wrapper(
-    const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
-    matmul_params &params, matmul_batch_params_t &batch_params,
-    const bool transA, const int M, const int K, const int num_threads,
-    reorder_quant_buffers_t &buffers) {
+  const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
+  matmul_params &params, matmul_batch_params_t &batch_params,
+  const bool transA, const int M, const int K, const int num_threads,
+  reorder_quant_buffers_t &buffers) {
 
-  const bool eligible =
-      params.dynamic_quant && //TODO: Masking static quantization for now, Remove later.
-      params.dtypes.wei == data_type_t::s8 &&
-      (params.dtypes.src == data_type_t::bf16 ||
-       params.dtypes.src == data_type_t::f32) &&
-      (params.dtypes.compute == data_type_t::s8 ||
-       params.dtypes.compute == data_type_t::u8);
+  const bool is_w4a8 = is_w4a8_config(params);
+  const bool eligible = is_w4a8 || is_dynamic_quant_config(params);
 
-  if (!eligible) return status_t::success;
+  //TODO: Masking static quantization for now, Remove later.
+  if (!eligible) {
+    return status_t::success;
+  }
 
   const bool is_dynamic = params.dynamic_quant;
   const data_type_t quant_dtype = params.dtypes.compute;
@@ -104,10 +103,12 @@ status_t reorder_quantization_wrapper(
   void *scale_buff = const_cast<void *>(params.quant_params.src_scale.buff);
   if (!scale_buff) {
     int64_t n = 1;
-    for (auto d : params.quant_params.src_scale.dims) n *= d;
+    for (auto d : params.quant_params.src_scale.dims) {
+      n *= d;
+    }
     buffers.scale_buf = static_cast<uint8_t *>(
-        malloc(static_cast<size_t>(n) *
-               size_of(params.quant_params.src_scale.dt)));
+                          malloc(static_cast<size_t>(n) *
+                                 size_of(params.quant_params.src_scale.dt)));
     if (!buffers.scale_buf) {
       log_error("Reorder quantization: failed to allocate scale buffer");
       return status_t::failure;
@@ -126,14 +127,15 @@ status_t reorder_quantization_wrapper(
     rp.src_shape = {batch_A, phys_rows, phys_cols};
     rp.dst_shape = rp.src_shape;
     const int64_t batch_stride =
-        (batch_params.batch_stride_src != static_cast<size_t>(-1))
-            ? static_cast<int64_t>(batch_params.batch_stride_src)
-            : phys_rows * lda;
+      (batch_params.batch_stride_src != static_cast<size_t>(-1))
+      ? static_cast<int64_t>(batch_params.batch_stride_src)
+      : phys_rows * lda;
     if (lda != static_cast<int>(phys_cols) ||
         batch_stride != phys_rows * phys_cols) {
       rp.src_strides = {batch_stride, static_cast<int64_t>(lda), 1};
     }
-  } else {
+  }
+  else {
     rp.src_shape = {phys_rows, phys_cols};
     rp.dst_shape = rp.src_shape;
     if (lda != static_cast<int>(phys_cols)) {
@@ -154,22 +156,24 @@ status_t reorder_quantization_wrapper(
   // physical dims/shape (post-swap) would mis-classify them as per_channel.
 #if ZENDNNL_LOWOHA_DQ_BF16S8
   const std::vector<int64_t> logical_shape_for_gran = {
-      static_cast<int64_t>(M), static_cast<int64_t>(K)};
+    static_cast<int64_t>(M), static_cast<int64_t>(K)
+  };
   const bool try_native_bf16_f32_s8 =
-      is_dynamic && !needs_zp && quant_dtype == data_type_t::s8 &&
-      !is_batched &&
-      (orig_src_dtype == data_type_t::bf16 ||
-       orig_src_dtype == data_type_t::f32) &&
-      get_single_granularity(params.quant_params.src_scale.dims,
-                             logical_shape_for_gran) ==
-          granularity_type_t::per_token;
+    !is_w4a8 &&
+    is_dynamic && !needs_zp && quant_dtype == data_type_t::s8 &&
+    !is_batched &&
+    (orig_src_dtype == data_type_t::bf16 ||
+     orig_src_dtype == data_type_t::f32) &&
+    get_single_granularity(params.quant_params.src_scale.dims,
+                           logical_shape_for_gran) ==
+    granularity_type_t::per_token;
 #else
   const bool try_native_bf16_f32_s8 = false;
 #endif
 
   if (try_native_bf16_f32_s8) {
     const status_t compute_status =
-        zendnnl::lowoha::reorder::reorder_direct(src, nullptr, rp);
+      zendnnl::lowoha::reorder::reorder_direct(src, nullptr, rp);
     if (compute_status == status_t::success) {
       if (transA && params.quant_params.src_scale.dims.size() == 2) {
         const int64_t M_dim = params.quant_params.src_scale.dims[0];
@@ -206,10 +210,12 @@ status_t reorder_quantization_wrapper(
     zp_buff = const_cast<void *>(params.quant_params.src_zp.buff);
     if (!zp_buff) {
       int64_t n = 1;
-      for (auto d : params.quant_params.src_zp.dims) n *= d;
+      for (auto d : params.quant_params.src_zp.dims) {
+        n *= d;
+      }
       buffers.zp_buf = static_cast<uint8_t *>(
-          malloc(static_cast<size_t>(n) *
-                 size_of(params.quant_params.src_zp.dt)));
+                         malloc(static_cast<size_t>(n) *
+                                size_of(params.quant_params.src_zp.dt)));
       if (!buffers.zp_buf) {
         log_error("Reorder quantization: failed to allocate zero-point buffer");
         return status_t::failure;
@@ -225,14 +231,14 @@ status_t reorder_quantization_wrapper(
   }
 
   buffers.src_buf = static_cast<uint8_t *>(
-      malloc(static_cast<size_t>(batch_A * phys_rows * phys_cols)));
+                      malloc(static_cast<size_t>(batch_A * phys_rows * phys_cols)));
   if (!buffers.src_buf) {
     log_error("Reorder quantization: failed to allocate quantized source buffer");
     return status_t::failure;
   }
 
   const status_t reorder_status = zendnnl::lowoha::reorder::reorder_direct(
-      src, buffers.src_buf, rp);
+                                    src, buffers.src_buf, rp);
 
   if (reorder_status == status_t::success) {
     src = buffers.src_buf;
@@ -242,7 +248,7 @@ status_t reorder_quantization_wrapper(
 
     if (is_batched) {
       batch_params.batch_stride_src =
-          static_cast<size_t>(phys_rows * phys_cols);
+        static_cast<size_t>(phys_rows * phys_cols);
     }
 
     if (transA && params.quant_params.src_scale.dims.size() == 2) {
@@ -272,11 +278,15 @@ status_t reorder_quantization_wrapper(
 
     if (apilog_info_enabled()) {
       int64_t ns = 1;
-      for (auto d : params.quant_params.src_scale.dims) ns *= d;
+      for (auto d : params.quant_params.src_scale.dims) {
+        ns *= d;
+      }
       int64_t nz = 0;
       if (needs_zp) {
         nz = 1;
-        for (auto d : params.quant_params.src_zp.dims) nz *= d;
+        for (auto d : params.quant_params.src_zp.dims) {
+          nz *= d;
+        }
       }
       apilog_info(is_dynamic ? "Dynamic" : "Static",
                   needs_zp ? " asymmetric" : " symmetric",
@@ -285,7 +295,8 @@ status_t reorder_quantization_wrapper(
                   dtype_info(quant_dtype),
                   " (scale_elems=", ns, ", zp_elems=", nz, ")");
     }
-  } else {
+  }
+  else {
     log_error("Reorder quantization of source failed, "
               "falling back to original path");
   }
@@ -294,21 +305,23 @@ status_t reorder_quantization_wrapper(
 }
 
 status_t group_reorder_quantization_wrapper(
-    const std::vector<const void *> &src,
-    const std::vector<int> &lda,
-    const std::vector<bool> &transA,
-    const std::vector<int> &M,
-    const std::vector<int> &K,
-    const int num_threads,
-    std::vector<matmul_params> &params,
-    std::vector<const void *> &quantized_src,
-    std::vector<int> &quantized_lda,
-    group_reorder_quant_buffers_t &buffers,
-    bool &quantized) {
+  const std::vector<const void *> &src,
+  const std::vector<int> &lda,
+  const std::vector<bool> &transA,
+  const std::vector<int> &M,
+  const std::vector<int> &K,
+  const int num_threads,
+  std::vector<matmul_params> &params,
+  std::vector<const void *> &quantized_src,
+  std::vector<int> &quantized_lda,
+  group_reorder_quant_buffers_t &buffers,
+  bool &quantized) {
   quantized = false;
 
   const size_t num_ops = M.size();
-  if (num_ops == 0) return status_t::success;
+  if (num_ops == 0) {
+    return status_t::success;
+  }
   if (src.size() < num_ops || lda.size() < num_ops ||
       transA.size() < num_ops || K.size() < num_ops ||
       params.size() < num_ops) {
@@ -328,7 +341,7 @@ status_t group_reorder_quantization_wrapper(
   const data_type_t compute_dtype = params[0].dtypes.compute;
   const data_type_t scale_dtype = params[0].quant_params.src_scale.dt;
   const bool requires_dynamic_quant =
-      group_reorder_quantization_required(params, num_ops);
+    group_reorder_quantization_required(params, num_ops);
   auto fallback_per_expert = [&]() -> status_t {
     // Release any grouped-path arenas a PRIOR call left on a reused
     // `buffers` object and drop their per-expert views.  The fallback
@@ -363,10 +376,12 @@ status_t group_reorder_quantization_wrapper(
       bp.Batch_A = 1;
       bp.Batch_B = 1;
       const status_t st = reorder_quantization_wrapper(
-          src_i, lda[i], reordered_lda, src_type_size, params[i], bp,
-          transA[i], M[i], K[i], num_threads,
-          buffers.fallback_buf[i]);
-      if (st != status_t::success) return st;
+                            src_i, lda[i], reordered_lda, src_type_size, params[i], bp,
+                            transA[i], M[i], K[i], num_threads,
+                            buffers.fallback_buf[i]);
+      if (st != status_t::success) {
+        return st;
+      }
       quantized_src[i] = src_i;
       quantized_lda[i] = reordered_lda;
       if (params[i].dtypes.src == params[i].dtypes.compute) {
@@ -414,7 +429,9 @@ status_t group_reorder_quantization_wrapper(
       return fallback_per_expert();
     }
     if (lda[i] != K[i]) {
-      if (active_src_strides.empty()) active_src_strides.resize(num_ops);
+      if (active_src_strides.empty()) {
+        active_src_strides.resize(num_ops);
+      }
       active_src_strides[i] = {static_cast<int64_t>(lda[i]), 1};
     }
     // Inactive experts (M==0, routed no tokens): `group_dynamic_quant`
@@ -424,7 +441,9 @@ status_t group_reorder_quantization_wrapper(
     // unrouted expert carrying stale/degenerate scale dims (e.g. a
     // granularity that is neither per_token nor M<=1 per_tensor) would
     // needlessly force the WHOLE group onto the slow per-expert fallback.
-    if (M[i] == 0) continue;
+    if (M[i] == 0) {
+      continue;
+    }
     if (!params[i].dynamic_quant ||
         params[i].dtypes.wei != data_type_t::s8 ||
         params[i].dtypes.src != src_dtype ||
@@ -448,12 +467,13 @@ status_t group_reorder_quantization_wrapper(
     // per_channel / per_group stay rejected (genuinely K-varying scales
     // the grouped per-token kernel cannot serve).
     const std::vector<int64_t> logical_shape = {
-        static_cast<int64_t>(M[i]), static_cast<int64_t>(K[i])};
+      static_cast<int64_t>(M[i]), static_cast<int64_t>(K[i])
+    };
     const granularity_type_t gran = get_single_granularity(
-        params[i].quant_params.src_scale.dims, logical_shape);
+                                      params[i].quant_params.src_scale.dims, logical_shape);
     const bool per_token_ok =
-        gran == granularity_type_t::per_token
-        || (gran == granularity_type_t::per_tensor && M[i] <= 1);
+      gran == granularity_type_t::per_token
+      || (gran == granularity_type_t::per_tensor && M[i] <= 1);
     if (!per_token_ok) {
       return fallback_per_expert();
     }
@@ -538,8 +558,8 @@ status_t group_reorder_quantization_wrapper(
   size_t src_off = 0, scale_off = 0;
   for (size_t i = 0; i < num_ops; ++i) {
     const size_t src_bytes =
-        static_cast<size_t>(std::max(0, M[i])) *
-        static_cast<size_t>(K[i]);
+      static_cast<size_t>(std::max(0, M[i])) *
+      static_cast<size_t>(K[i]);
     if (src_bytes > 0) {
       // Subtraction-based bound (no `src_off + src_bytes` which could wrap
       // size_t on a pathological total) — keeps the guard overflow-safe.
@@ -553,10 +573,10 @@ status_t group_reorder_quantization_wrapper(
     dst[i] = buffers.src_buf[i];
 
     void *scale_buff =
-        const_cast<void *>(params[i].quant_params.src_scale.buff);
+      const_cast<void *>(params[i].quant_params.src_scale.buff);
     if (!scale_buff) {
       const size_t scale_bytes =
-          static_cast<size_t>(std::max(0, M[i])) * scale_elem;
+        static_cast<size_t>(std::max(0, M[i])) * scale_elem;
       if (scale_bytes > 0) {
         // Subtraction-based bound (see the src_buf guard above) so the
         // check cannot wrap size_t on a pathological scale total.
@@ -588,23 +608,25 @@ status_t group_reorder_quantization_wrapper(
   std::vector<int> K_trimmed;
   if (src.size() != num_ops) {
     src_trimmed.assign(
-        src.begin(),
-        src.begin() +
-            static_cast<std::vector<const void *>::difference_type>(num_ops));
+      src.begin(),
+      src.begin() +
+      static_cast<std::vector<const void *>::difference_type>(num_ops));
     src_arg = &src_trimmed;
   }
   if (K.size() != num_ops) {
     K_trimmed.assign(
-        K.begin(),
-        K.begin() + static_cast<std::vector<int>::difference_type>(num_ops));
+      K.begin(),
+      K.begin() + static_cast<std::vector<int>::difference_type>(num_ops));
     K_arg = &K_trimmed;
   }
   const std::vector<std::vector<int64_t>> dst_strides;
 
   const status_t st = zendnnl::lowoha::reorder::group_dynamic_quant(
-      *src_arg, M, *K_arg, active_src_strides, dst, dst_strides,
-      scale, gparams);
-  if (st != status_t::success) return st;
+                        *src_arg, M, *K_arg, active_src_strides, dst, dst_strides,
+                        scale, gparams);
+  if (st != status_t::success) {
+    return st;
+  }
 
   quantized_src.resize(num_ops);
   quantized_lda.resize(num_ops);
