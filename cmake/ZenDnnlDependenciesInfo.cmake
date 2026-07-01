@@ -39,7 +39,7 @@ option(AOCLDLP_GIT_PROGRESS ON)
 set(AOCLUTILS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aoclutils"
   CACHE PATH "AOCL UTILS root dir")
 set(AOCLUTILS_GIT_REPO "https://github.com/amd/aocl-utils")
-set(AOCLUTILS_GIT_TAG "5.0")
+set(AOCLUTILS_GIT_TAG "5.3")
 
 # gtest repo information
 set(GTEST_ROOT_DIR "${ZENDNNL_DEPS_DIR}/gtest"
