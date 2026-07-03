@@ -124,6 +124,12 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
 /** Clear cached GGML unpacked/reordered weight buffers. */
 void clear_ggml_weight_unpack_cache();
 
+/** Number of cached GGML unpacked/reordered weight buffers currently resident.
+ *  One entry is added per distinct (weight pointer, K, N, ldb, trans) unpacked
+ *  weight, so a fully-warmed fused-MoE layer holds 2 * num_experts entries
+ *  (gate/up + down).  Intended for tests / diagnostics. */
+size_t ggml_weight_unpack_cache_size();
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

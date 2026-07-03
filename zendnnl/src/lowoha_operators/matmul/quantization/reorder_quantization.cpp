@@ -407,6 +407,12 @@ status_t group_reorder_quantization_wrapper(
     return fallback_per_expert();
   }
 
+  // Shared source-scale granularity across the group: 1 => per-token,
+  // > 1 => per-group along K with that many groups per row.  All active
+  // experts must agree so the grouped kernel can use a single layout;
+  // a heterogeneous group (or any unsupported granularity) routes to the
+  // per-expert fallback.
+  int64_t group_count = 0;
   for (size_t i = 0; i < num_ops; ++i) {
     // Basic shape/stride validity applies to EVERY expert — active OR
     // inactive.  `group_dynamic_quant` validates `K>0` and
@@ -471,13 +477,36 @@ status_t group_reorder_quantization_wrapper(
     };
     const granularity_type_t gran = get_single_granularity(
                                       params[i].quant_params.src_scale.dims, logical_shape);
-    const bool per_token_ok =
-      gran == granularity_type_t::per_token
-      || (gran == granularity_type_t::per_tensor && M[i] <= 1);
-    if (!per_token_ok) {
+    int64_t g_i;
+    if (gran == granularity_type_t::per_token ||
+        (gran == granularity_type_t::per_tensor && M[i] <= 1)) {
+      // {M,1}, or the M==1 decode case where {1,1} classifies as
+      // per_tensor but is identical to per-token.
+      g_i = 1;
+    } else if (gran == granularity_type_t::per_group) {
+      // Per-group along K: {M, G}.  All active experts must agree on G so
+      // the grouped kernel can use one layout; K must split evenly.
+      g_i = zendnnl::lowoha::reorder::get_num_groups_col(
+              params[i].quant_params.src_scale.dims);
+      if (g_i <= 1 || (K[i] % g_i) != 0) {
+        return fallback_per_expert();
+      }
+    } else {
+      // per_channel / per_group-on-rows / per_tensor on M>1 are not
+      // served by the grouped per-token/per-group kernels.
+      return fallback_per_expert();
+    }
+    if (group_count == 0) {
+      group_count = g_i;
+    } else if (group_count != g_i) {
       return fallback_per_expert();
     }
   }
+
+  // group_count == 0 means no active expert; treat as the per-token
+  // (1 scale per row) layout, which the grouped kernel no-ops on.
+  const int64_t src_scale_groups = group_count > 0 ? group_count : 1;
+  const bool group_per_group = group_count > 1;
 
   buffers.src_buf.assign(num_ops, nullptr);
   buffers.scale_buf.assign(num_ops, nullptr);
@@ -504,8 +533,13 @@ status_t group_reorder_quantization_wrapper(
       return status_t::failure;
     }
     if (params[i].quant_params.src_scale.buff == nullptr) {
-      size_t scale_bytes = 0;
-      if (__builtin_mul_overflow(m_sz, scale_elem, &scale_bytes) ||
+      // Per-group source scale is {M, G}; per-token {M, 1}.  Size for
+      // M * src_scale_groups elements — src_scale_groups == 1 on the
+      // per-token path, so this is byte-identical there (no overhead).
+      size_t scale_cnt = 0, scale_bytes = 0;
+      if (__builtin_mul_overflow(m_sz, static_cast<size_t>(src_scale_groups),
+                                 &scale_cnt) ||
+          __builtin_mul_overflow(scale_cnt, scale_elem, &scale_bytes) ||
           __builtin_add_overflow(scale_total, scale_bytes, &scale_total)) {
         log_error("Group reorder quantization: scale arena size overflow");
         return status_t::failure;
@@ -575,8 +609,12 @@ status_t group_reorder_quantization_wrapper(
     void *scale_buff =
       const_cast<void *>(params[i].quant_params.src_scale.buff);
     if (!scale_buff) {
+      // Per-group source scale is {M, G}; per-token {M, 1}.  Recomputes the
+      // SAME product Pass 1 validated below (src_scale_groups == 1 on the
+      // per-token path → identical to the original M * scale_elem).
       const size_t scale_bytes =
-        static_cast<size_t>(std::max(0, M[i])) * scale_elem;
+        static_cast<size_t>(std::max(0, M[i])) *
+        static_cast<size_t>(src_scale_groups) * scale_elem;
       if (scale_bytes > 0) {
         // Subtraction-based bound (see the src_buf guard above) so the
         // check cannot wrap size_t on a pathological scale total.
@@ -597,6 +635,8 @@ status_t group_reorder_quantization_wrapper(
   gparams.dst_dtype = compute_dtype;
   gparams.scale_dtype = scale_dtype;
   gparams.num_threads = num_threads;
+  gparams.num_groups =
+      group_per_group ? static_cast<int32_t>(group_count) : 0;
 
   // group_dynamic_quant requires src/K vectors of EXACTLY num_ops; pass
   // the caller's vectors directly when already that size (the common

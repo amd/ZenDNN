@@ -702,10 +702,13 @@ inline status_t setup_op1_arena_and_layout(
 //
 // Op2 inherits Op1's `dynamic_quant` flag and `dtypes.compute` so the
 // down_proj runs through the same dispatch path as the gate+up GEMM.
-// Per-group src_scale (`dims = {M, ngroups>1}`) is rejected here
-// because Op1.K != Op2.K — ngroups can't transfer; callers must use
-// per-token (`{M, 1}`) instead.  Returns `status_t::failure` on that
-// rejection.
+// Per-group src_scale (`dims = {M, ngroups>1}`) cannot inherit Op1's
+// group count because Op1.K != Op2.K; instead Op2's group count is
+// derived from the paired down-projection weight scale ({G2, N_down}),
+// yielding an Op2 source scale of `{M, G2}` quantized independently
+// per pass.  (Vertical fusion's inline requant is per-token only, so
+// per-group routes to the two-pass legacy path.)  Per-group source
+// zero-points remain unsupported and return `status_t::failure`.
 inline status_t setup_op2_dispatch_scratch(
     FusedMoEScratch &scratch,
     const grp_matmul_fused_moe_params &fused,
@@ -773,6 +776,27 @@ inline status_t setup_op2_dispatch_scratch(
     // values on Op2 as on Op1.
     p.dynamic_quant  = params[i].dynamic_quant;
     p.dtypes.compute = params[i].dtypes.compute;
+    // GGML-packed down weights are unpacked + AOCL sym-quant-reordered by
+    // the caller (group_matmul_direct) into the same layout as Op1's
+    // weight, and `down_scale[i]` carries the resulting {K_down/32, N_down}
+    // scale.  Inherit Op1's reorder/pack flags so Op2 consumes the
+    // already-reordered down_weight instead of re-reordering plain bytes.
+    // Gated on Op1 being packed → exact no-op for the non-GGML path.
+    if (params[i].packing.pack_format_b == 1) {
+      p.mem_format_b          = params[i].mem_format_b;       // 'r' (reordered)
+      p.packing.pack_format_b = params[i].packing.pack_format_b;
+    } else {
+      // Plain (non-GGML) down weight: reset the reorder/pack flags
+      // EXPLICITLY.  `scratch.params_down` is a persistent thread-local
+      // reused across calls (resize is a no-op at steady size), so a stale
+      // `mem_format_b == 'r'` / `pack_format_b == 1` left by a PRIOR GGML
+      // fused call on this thread would otherwise leak into this plain call
+      // — mis-routing the Op2 dispatch (e.g. the AOCL kernel would treat the
+      // weight as pre-reordered) and tripping `check_m_tile_safe`'s
+      // row-major gate so vertical fusion silently declines.
+      p.mem_format_b          = 'n';
+      p.packing.pack_format_b = 0;
+    }
 
     // Reset everything first, then fill in just the wei_scale /
     // wei_zp (from the caller-facing fields) and the inherited
@@ -790,13 +814,34 @@ inline status_t setup_op2_dispatch_scratch(
     }
     if (p.dynamic_quant) {
       const auto &scale_dims = params[i].quant_params.src_scale.dims;
-      if (scale_dims.size() == 2 && scale_dims[1] > 1) {
-        log_error("group_matmul_fused_moe: per-group src_scale on "
-                  "params[", i, "] (dims={", scale_dims[0], ",",
-                  scale_dims[1], "}) unsupported; use per-token "
-                  "({M, 1}).");
-        return status_t::failure;
+      const bool op1_per_group =
+          (scale_dims.size() == 2 && scale_dims[1] > 1);
+      p.quant_params.src_scale.buff = nullptr;
+      p.quant_params.src_scale.dt   = params[i].quant_params.src_scale.dt;
+      if (op1_per_group) {
+        // Op1 quantizes its source [M, K_in] per-group, but Op2's source
+        // is the Op1 output [M, K_down] with K_down != K_in, so Op1's
+        // group count cannot transfer.  Derive Op2's OWN group count from
+        // the paired down-projection weight scale: a per-group weight has
+        // dims {G2, N_down} (or {1, G2, N_down}), i.e. K_down split into
+        // G2 groups, so the matching Op2 source scale is {M, G2} with
+        // group_size = K_down / G2 (equal to the weight's group size).
+        // The per-pass DQ (grouped pre-pass or per-expert fallback) then
+        // quantizes the Op2 source per-group independently of Op1.
+        const int64_t op1_M = scale_dims[0];
+        int64_t g2 = 1;
+        if (!fused.down_scale.empty()) {
+          const auto &wsd = fused.down_scale[i].dims;
+          if (wsd.size() == 2 && wsd[0] > 1)      g2 = wsd[0];  // {G2, N}
+          else if (wsd.size() == 3 && wsd[1] > 1) g2 = wsd[1];  // {1, G2, N}
+        }
+        p.quant_params.src_scale.dims = {op1_M, g2};
+      } else {
+        p.quant_params.src_scale.dims = params[i].quant_params.src_scale.dims;
       }
+      // Source zero-point flows only for asymmetric quant.  Per-group
+      // source zero-points on the fused down-proj are still unsupported
+      // (the down-proj re-quant path is symmetric s8 only).
       if (params[i].quant_params.src_zp.dt != data_type_t::none) {
         const auto &zp_dims = params[i].quant_params.src_zp.dims;
         if (zp_dims.size() == 2 && zp_dims[1] > 1) {
@@ -806,11 +851,6 @@ inline status_t setup_op2_dispatch_scratch(
                     "({M, 1}).");
           return status_t::failure;
         }
-      }
-      p.quant_params.src_scale.buff = nullptr;
-      p.quant_params.src_scale.dt   = params[i].quant_params.src_scale.dt;
-      p.quant_params.src_scale.dims = params[i].quant_params.src_scale.dims;
-      if (params[i].quant_params.src_zp.dt != data_type_t::none) {
         p.quant_params.src_zp.buff = nullptr;
         p.quant_params.src_zp.dt   = params[i].quant_params.src_zp.dt;
         p.quant_params.src_zp.dims = params[i].quant_params.src_zp.dims;

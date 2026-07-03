@@ -27,6 +27,9 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_algos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_quant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_group_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_ggml_per_group.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_moe_ggml.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_prepack.cpp
     # Custom-kernel direct-surface tests — see gtests/group_matmul/
     # custom_kernel/ck_test_helpers.hpp for scope (unit-level on

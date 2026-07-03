@@ -104,6 +104,17 @@ void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
  *                    When provided with act != none, the kernel applies the
  *                    activation in-place to the first N/2 columns of each
  *                    expert's output (requires even N and f32/bf16 dst).
+ *  @param pack_format_b Optional per-expert weight pack format (default empty
+ *                    = all 0/unpacked).  Pass `1` for an expert whose weight
+ *                    tensor holds GGML Q8_0 block-quantized bytes so the API
+ *                    unpacks them internally (mirrors the single-matmul
+ *                    `matmul_kernel_test` pack_format_b argument).
+ *  @param active_rows Optional per-expert row-count override (default empty =
+ *                    derive M from each output tensor's leading dim).  When
+ *                    provided, `M[i]` is forced to `active_rows[i]`, letting a
+ *                    test model sparse MoE routing where some experts receive
+ *                    zero tokens (`active_rows[i] == 0`) while still owning
+ *                    full-size weight / scale buffers.
  *  @return group_matmul_direct status
  */
 status_t group_matmul_kernel_test(
@@ -115,6 +126,8 @@ status_t group_matmul_kernel_test(
   float alpha = 1.0f,
   float beta = 0.0f,
   const group_matmul_moe_postop_params *moe_postop = nullptr,
-  const grp_matmul_gated_act_params *gated_act = nullptr);
+  const grp_matmul_gated_act_params *gated_act = nullptr,
+  const std::vector<int> &pack_format_b = {},
+  const std::vector<int> &active_rows = {});
 
 #endif // ZENDNNL_GTESTS_GROUP_MATMUL_TEST_HELPERS_HPP

@@ -426,6 +426,70 @@ bool dispatch_group_dynamic_per_token(
   return true;
 }
 
+bool dispatch_group_dynamic_per_group(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<void *> &scale,
+    const group_dynamic_quant_params_t &params) {
+  if (params.dst_dtype != data_type_t::s8) return false;
+  if (params.scale_dtype != data_type_t::f32 &&
+      params.scale_dtype != data_type_t::bf16) {
+    return false;
+  }
+  if (params.src_dtype != data_type_t::bf16 &&
+      params.src_dtype != data_type_t::f32) {
+    return false;
+  }
+  const int64_t G = params.num_groups;
+  if (G <= 1) return false;
+
+  const size_t num_ops = M.size();
+  const bool scale_is_bf16 = (params.scale_dtype == data_type_t::bf16);
+  int64_t total_scales = 0;
+  for (int m : M) total_scales += static_cast<int64_t>(std::max(0, m)) * G;
+
+  // For bf16 scale output the native kernels write f32 into a scratch
+  // buffer (one {M_i, G} block per expert), then we narrow to bf16.
+  std::vector<float *> scale_f32(num_ops, nullptr);
+  std::vector<float> scale_tmp;
+  if (scale_is_bf16) {
+    scale_tmp.resize(static_cast<size_t>(total_scales));
+    size_t off = 0;
+    for (size_t i = 0; i < num_ops; ++i) {
+      scale_f32[i] = scale_tmp.data() + off;
+      off += static_cast<size_t>(std::max(0, M[i])) * G;
+    }
+  } else {
+    for (size_t i = 0; i < num_ops; ++i) {
+      scale_f32[i] = static_cast<float *>(scale[i]);
+    }
+  }
+
+  if (params.src_dtype == data_type_t::bf16) {
+    dynamic_per_group_group_quant_bf16_s8_native(
+        src, M, K, lda, dst, dst_lda, scale_f32, G, params.num_threads);
+  } else {
+    dynamic_per_group_group_quant_f32_s8_native(
+        src, M, K, lda, dst, dst_lda, scale_f32, G, params.num_threads);
+  }
+
+  if (scale_is_bf16) {
+    for (size_t i = 0; i < num_ops; ++i) {
+      uint16_t *out = static_cast<uint16_t *>(scale[i]);
+      const int64_t n = static_cast<int64_t>(std::max(0, M[i])) * G;
+      for (int64_t e = 0; e < n; ++e) {
+        out[e] = float_to_bf16(scale_f32[i][e]);
+      }
+    }
+  }
+
+  return true;
+}
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl

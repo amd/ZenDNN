@@ -4250,6 +4250,138 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulFusedMoEVerticalDQINT8,
                          VerticalFusionDQINT8ParamName);
 
 // ===============================================================================
+// [17b] Env-driven vertical-fusion engagement switch (ALGO 2).
+//
+// Every other VF fixture FORCES the knob via `MoEVerticalFusionOverride` so CI
+// stays deterministic.  This one deliberately does NOT — it reads the env knob
+// `ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION` (default -1 = DISABLED, cached) on
+// an otherwise VF-eligible DQ-INT8 fused-MoE prompt shape (ALGO 2, M=128, 32-
+// thread pin, generous scratch), so you can flip the path from the shell and
+// have the test assert the executor obeyed it:
+//
+//   # fusion ON  (engages, tag == kVerticalFusionDQINT8):
+//   ZENDNNL_GRP_MATMUL_ALGO=2 ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION=1
+//     gtests --gtest_filter='*FusedMoEVerticalFusionEnv*'
+//   # fusion OFF (two-pass, tag != kVerticalFusionDQINT8) — knob unset/-1:
+//   ZENDNNL_GRP_MATMUL_ALGO=2
+//     gtests --gtest_filter='*FusedMoEVerticalFusionEnv*'
+//
+// Run it IN ISOLATION (the filter above): a prior VF fixture's RAII override
+// could otherwise mask the env knob within the same process.
+TEST(FusedMoEVerticalFusionEnv, RespectsEnvKnob) {
+  using namespace zendnnl::lowoha::matmul;
+  using namespace moe_test_utils;
+  using zendnnl::common::data_type_t;
+
+  reset_grp_matmul_caches();
+  constexpr int E = 4, dim = 64, M = 128;
+  constexpr int N_gate_up = 2 * dim, K_in = 64, K_down = dim, H = K_in;
+  const bool is_bf16 = true;
+  const auto act_type = grp_matmul_gated_act_t::silu_and_mul;
+
+  // ALGO 2 + generous scratch so the shape is VF-eligible; crucially NO
+  // `MoEVerticalFusionOverride` here, so the env knob alone decides.
+  AlgoEnvGuard                 algo2(2);
+  MoEPipelineScratchKbOverride scratch(1024);
+
+  tensor_factory_t f{};
+  std::vector<tensor_t> src_t(E), src_sc(E),
+      w1(E), w1s(E), w1z(E), w2(E), w2s(E), w2z(E);
+  for (int i = 0; i < E; ++i) {
+    src_sc[i] = f.zero_tensor({static_cast<uint64_t>(M), 1}, data_type_t::f32);
+    src_t[i]  = f.uniform_dist_tensor(
+        {static_cast<uint64_t>(M), static_cast<uint64_t>(K_in)},
+        data_type_t::bf16, 2.0, /*transposed=*/false, src_sc[i], tensor_t{});
+    auto w1r = f.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_in), static_cast<uint64_t>(N_gate_up)},
+        data_type_t::bf16, 2.0);
+    ASSERT_EQ(quant_params_compute(f, w1r, data_type_t::bf16, data_type_t::s8,
+                                   {1, N_gate_up}, data_type_t::f32,
+                                   w1s[i], w1z[i], &w1[i]),
+              status_t::success);
+    auto w2r = f.uniform_dist_tensor(
+        {static_cast<uint64_t>(K_down), static_cast<uint64_t>(H)},
+        data_type_t::bf16, 2.0);
+    ASSERT_EQ(quant_params_compute(f, w2r, data_type_t::bf16, data_type_t::s8,
+                                   {1, H}, data_type_t::f32,
+                                   w2s[i], w2z[i], &w2[i]),
+              status_t::success);
+  }
+
+  TypedBuffers d1, d2;
+  d1.alloc(E, static_cast<size_t>(M) * N_gate_up, is_bf16);
+  d2.alloc(E, static_cast<size_t>(M) * H,         is_bf16);
+  std::vector<const void *> srcs(E), wei1(E), wei2(E), no_bias(E, nullptr);
+  for (int i = 0; i < E; ++i) {
+    srcs[i] = src_t[i].get_raw_handle_unsafe();
+    wei1[i] = w1[i].get_raw_handle_unsafe();
+    wei2[i] = w2[i].get_raw_handle_unsafe();
+  }
+
+  auto gv = GemmVecs::uniform(E, M, N_gate_up, K_in);
+  gv.is_wc.assign(E, true);
+
+  std::vector<matmul_params> pt(E);
+  for (int i = 0; i < E; ++i) {
+    pt[i] = make_uniform_params(1, data_type_t::bf16)[0];
+    pt[i].dtypes.src     = data_type_t::bf16;
+    pt[i].dtypes.wei     = data_type_t::s8;
+    pt[i].dtypes.dst     = data_type_t::bf16;
+    pt[i].dtypes.compute = data_type_t::s8;
+    pt[i].dynamic_quant  = true;
+    pt[i].num_threads    = 32;  // deterministic engagement vs host core count
+    copy_attached_scale(src_t[i], pt[i].quant_params.src_scale);
+    copy_attached_scale(w1[i],    pt[i].quant_params.wei_scale);
+    copy_attached_zp   (w1[i],    pt[i].quant_params.wei_zp);
+  }
+
+  auto fused = make_fused_moe_op2(E, H, wei2, no_bias);
+  fused.dst_down = d2.ptrs(is_bf16);
+  fused.ldc_down = std::vector<int>(E, H);
+  fused.down_scale.resize(E);
+  fused.down_zp.resize(E);
+  for (int i = 0; i < E; ++i) {
+    copy_attached_scale(w2[i], fused.down_scale[i]);
+    copy_attached_zp   (w2[i], fused.down_zp[i]);
+  }
+
+  grp_matmul_gated_act_params act{};
+  act.act = act_type;
+
+  auto d1p = d1.ptrs(is_bf16);
+  const std::vector<int> ldc1(E, N_gate_up);
+  int tag = 0;
+  {
+    MTilePathCaptureGuard cap;
+    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                                  gv.Ms, gv.Ns, gv.Ks, gv.alpha,
+                                  srcs, gv.lda, wei1, gv.ldb, no_bias, gv.beta,
+                                  d1p, ldc1, gv.is_wc, pt,
+                                  /*moe_postop=*/nullptr, &act, &fused),
+              status_t::success);
+    tag = test_api::s_last_m_tile_path.load(std::memory_order_relaxed);
+  }
+
+  // Read the knob directly (default -1 = DISABLED, matching the cached getter).
+  int knob = -1;
+  if (const char *e = std::getenv("ZENDNNL_GRP_MATMUL_M_TILE_VERTICAL_FUSION");
+      e != nullptr && e[0] != '\0') {
+    knob = std::atoi(e);
+  }
+  const int vf_tag = test_api::m_tile_path_tag::kVerticalFusionDQINT8;
+  if (knob == -1) {
+    EXPECT_NE(tag, vf_tag)
+        << "VF knob DISABLED (-1) but the executor engaged vertical fusion "
+           "(tag=" << tag << ").";
+  } else {
+    EXPECT_EQ(tag, vf_tag)
+        << "VF knob=" << knob << " (enabled) but vertical fusion did NOT "
+           "engage (tag=" << tag
+        << ").  Make sure ZENDNNL_GRP_MATMUL_ALGO=2 is also set.";
+  }
+}
+
+// ===============================================================================
 // [18] TestFusedMoEVerticalBF16Fallthrough - eligibility gate negative cases.
 //
 // For each fallthrough trigger:

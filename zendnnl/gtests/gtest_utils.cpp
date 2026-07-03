@@ -22,6 +22,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
+#include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -101,6 +102,14 @@ void reset_grp_matmul_caches() {
   // identical to the one the BF16 clear above guards against.
   zendnnl::lowoha::matmul::custom_kernel::clear_custom_kernel_pack_cache_int8();
   zendnnl::lowoha::matmul::group_matmul_prepack::clear_fingerprint_cache_for_test();
+  // The GGML unpack/reorder cache is ALSO pointer-keyed (weight_ptr + shape)
+  // and process-wide, so it has the exact same heap-address-reuse hazard as
+  // the AOCL/CK/native LRUs above: a later test whose fresh weight buffer
+  // lands on a freed GGML packed-weight address would get a stale reordered
+  // weight back (silent wrong-answer bite, and the fused-MoE dispatch can even
+  // mis-route off the stale metadata).  Clear it here so every test that
+  // resets group-matmul caches starts from a clean GGML cache too.
+  zendnnl::lowoha::matmul::clear_ggml_weight_unpack_cache();
   clear_matmul_test_caches();
 }
 

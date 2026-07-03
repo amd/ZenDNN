@@ -336,19 +336,27 @@ struct reorder_params_t {
  * single OpenMP schedule.
  *
  * Current implementation scope:
- *   - per-token symmetric dynamic quantization only
+ *   - per-token (num_groups <= 1) or per-group symmetric dynamic quant
  *   - bf16/f32 source to s8 destination
  *   - scale dtype f32 or bf16
+ *
+ * num_groups selects the granularity:
+ *   - <= 1 : per-token, one scale per row, scale buffer {M_i, 1}
+ *   - >  1 : per-group along K, G = num_groups groups per row,
+ *            group_size = K_i / G (must divide K_i), scale buffer {M_i, G}
+ *            laid out row-major (linear index m*G + g).  G is uniform
+ *            across experts.
  */
 struct group_dynamic_quant_params_t {
   data_type_t src_dtype;
   data_type_t dst_dtype;
   data_type_t scale_dtype;
   int32_t num_threads;
+  int32_t num_groups;
 
   group_dynamic_quant_params_t()
       : src_dtype(data_type_t::none), dst_dtype(data_type_t::none),
-        scale_dtype(data_type_t::f32), num_threads(0) {}
+        scale_dtype(data_type_t::f32), num_threads(0), num_groups(0) {}
 };
 
 /**

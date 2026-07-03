@@ -24,6 +24,7 @@
 #include <cstring>
 #include <immintrin.h>
 #include <limits>
+#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -239,6 +240,107 @@ static inline void group_minmax(const LoadF32 &load_f32, int64_t group_size,
                          _mm512_max_ps(vmax2, vmax3));
   row_min = _mm512_reduce_min_ps(vmin0);
   row_max = _mm512_reduce_max_ps(vmax0);
+}
+
+//==============================================================================
+// Single-group symmetric s8 quant body (one contiguous K-block of
+// `group_size` elements).  Shared by the single-tensor per-group kernels
+// and the grouped (MoE) per-group scheduler so both produce bit-identical
+// results.  `scale_out` receives the computed group scale.
+//==============================================================================
+
+__attribute__((target("avx512f")))
+static inline void quant_one_group_f32_s8(const float *grp_src, int8_t *grp_dst,
+                                          float *scale_out, int64_t group_size,
+                                          __m512i abs_mask, __m512 vinf) {
+  auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+    return _mm512_loadu_ps(grp_src + j);
+  };
+
+  float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+  int64_t j = group_size & ~int64_t{15};
+  for (; j < group_size; ++j) {
+    if (std::isfinite(grp_src[j]))
+      absmax = std::max(absmax, std::abs(grp_src[j]));
+  }
+
+  float scale;
+  compute_symmetric_scale_pg(absmax, scale);
+  *scale_out = scale;
+
+  const __m512 vscale = _mm512_set1_ps(scale);
+  const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+  j = 0;
+  for (; j + 63 < group_size; j += 64) {
+    __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+    __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 16), vscale));
+    __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
+    __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
+    store_4x16_s8_pg(grp_dst + j,
+                      _mm512_cvtepi32_epi8(r0), _mm512_cvtepi32_epi8(r1),
+                      _mm512_cvtepi32_epi8(r2), _mm512_cvtepi32_epi8(r3),
+                      cl_ok);
+  }
+  for (; j + 15 < group_size; j += 16) {
+    __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                     _mm512_cvtepi32_epi8(r));
+  }
+  for (; j < group_size; ++j) {
+    if (!std::isfinite(grp_src[j])) { grp_dst[j] = 0; continue; }
+    int32_t q = static_cast<int32_t>(std::nearbyint(grp_src[j] / scale));
+    grp_dst[j] = static_cast<int8_t>(q);
+  }
+}
+
+__attribute__((target("avx512f")))
+static inline void quant_one_group_bf16_s8(const uint16_t *grp_src,
+                                           int8_t *grp_dst, float *scale_out,
+                                           int64_t group_size,
+                                           __m512i abs_mask, __m512 vinf) {
+  auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+    return bf16x16_to_f32_pg(_mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(grp_src + j)));
+  };
+
+  float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+  int64_t j = group_size & ~int64_t{15};
+  for (; j < group_size; ++j) {
+    float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
+    if (std::isfinite(v))
+      absmax = std::max(absmax, std::abs(v));
+  }
+
+  float scale;
+  compute_symmetric_scale_pg(absmax, scale);
+  *scale_out = scale;
+
+  const __m512 vscale = _mm512_set1_ps(scale);
+  const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+  j = 0;
+  for (; j + 63 < group_size; j += 64) {
+    __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+    __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 16), vscale));
+    __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 32), vscale));
+    __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j + 48), vscale));
+    store_4x16_s8_pg(grp_dst + j,
+                      _mm512_cvtepi32_epi8(r0), _mm512_cvtepi32_epi8(r1),
+                      _mm512_cvtepi32_epi8(r2), _mm512_cvtepi32_epi8(r3),
+                      cl_ok);
+  }
+  for (; j + 15 < group_size; j += 16) {
+    __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                     _mm512_cvtepi32_epi8(r));
+  }
+  for (; j < group_size; ++j) {
+    float v = common::bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(grp_src[j]));
+    if (!std::isfinite(v)) { grp_dst[j] = 0; continue; }
+    int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+    grp_dst[j] = static_cast<int8_t>(q);
+  }
 }
 
 //==============================================================================
@@ -907,6 +1009,105 @@ void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
       }
     }
   });
+}
+
+//==============================================================================
+// Grouped (MoE) per-group symmetric s8 dynamic quantization.
+//
+// Independent [M_i, K_i] sources, each carrying a {M_i, G} scale layout
+// (one scale per (row, K-block), linear index m*G + g).  All experts share
+// a single OpenMP schedule over sum(M_i) rows; each row task walks its G
+// K-blocks serially (contiguous in memory), computing one scale and
+// quantizing one block at a time via the shared single-group body.  Because
+// every block is still produced by that identical body, the grouped result
+// is bit-identical to the single-tensor per-group kernels regardless of how
+// rows are distributed across threads (parity contract).  G is uniform
+// across experts; group_size = K_i / G (must divide K_i exactly).
+//==============================================================================
+
+static int pg_omp_team_size(int num_threads) {
+  return num_threads > 0 ? num_threads : omp_get_max_threads();
+}
+
+template <typename RowFn>
+static void dynamic_per_group_group_quant_s8_impl(const std::vector<int> &M,
+                                                  int num_threads,
+                                                  RowFn row_fn) {
+  const size_t num_ops = M.size();
+  std::vector<int64_t> row_prefix(num_ops);
+  int64_t total_rows = 0;
+  for (size_t i = 0; i < num_ops; ++i) {
+    total_rows += static_cast<int64_t>(std::max(0, M[i]));
+    row_prefix[i] = total_rows;
+  }
+  if (total_rows <= 0) return;
+
+  const int nt = std::min<int64_t>(pg_omp_team_size(num_threads), total_rows);
+  #pragma omp parallel num_threads(nt)
+  {
+    const int tid = omp_get_thread_num();
+    const int nthr = omp_get_num_threads();
+    const int64_t begin = total_rows * tid / nthr;
+    const int64_t end = total_rows * (tid + 1) / nthr;
+
+    for (int64_t gr = begin; gr < end; ++gr) {
+      const auto it = std::upper_bound(row_prefix.begin(), row_prefix.end(), gr);
+      const size_t op = static_cast<size_t>(it - row_prefix.begin());
+      const int64_t op_base = (op == 0) ? 0 : row_prefix[op - 1];
+      const int64_t local_m = gr - op_base;
+      row_fn(op, local_m);
+    }
+  }
+}
+
+__attribute__((target("avx512f")))
+void dynamic_per_group_group_quant_bf16_s8_native(
+    const std::vector<const void *> &src, const std::vector<int> &M,
+    const std::vector<int> &K, const std::vector<int> &lda,
+    const std::vector<void *> &dst, const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales, int64_t G, int num_threads) {
+  if (G <= 0) return;
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+  dynamic_per_group_group_quant_s8_impl(
+      M, num_threads,
+      [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
+        const int64_t group_size = K[op] / G;
+        const uint16_t *row_src =
+            static_cast<const uint16_t *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst = static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        float *row_scales = scales[op] + local_m * G;
+        for (int64_t g = 0; g < G; ++g) {
+          quant_one_group_bf16_s8(row_src + g * group_size,
+                                  row_dst + g * group_size, row_scales + g,
+                                  group_size, abs_mask, vinf);
+        }
+      });
+}
+
+__attribute__((target("avx512f")))
+void dynamic_per_group_group_quant_f32_s8_native(
+    const std::vector<const void *> &src, const std::vector<int> &M,
+    const std::vector<int> &K, const std::vector<int> &lda,
+    const std::vector<void *> &dst, const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales, int64_t G, int num_threads) {
+  if (G <= 0) return;
+  const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+  const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+  dynamic_per_group_group_quant_s8_impl(
+      M, num_threads,
+      [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
+        const int64_t group_size = K[op] / G;
+        const float *row_src =
+            static_cast<const float *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst = static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        float *row_scales = scales[op] + local_m * G;
+        for (int64_t g = 0; g < G; ++g) {
+          quant_one_group_f32_s8(row_src + g * group_size,
+                                 row_dst + g * group_size, row_scales + g,
+                                 group_size, abs_mask, vinf);
+        }
+      });
 }
 
 } // namespace reorder

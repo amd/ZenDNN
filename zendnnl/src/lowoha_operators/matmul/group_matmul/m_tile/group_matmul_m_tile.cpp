@@ -93,6 +93,7 @@
 // dynamic-kernels header included below.
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"  // float_to_bf16
 
 namespace zendnnl {
 namespace lowoha {
@@ -378,12 +379,26 @@ struct HoistedSrcQuant_mtile {
   bool valid = false;
 };
 
+// Number of K-groups encoded in a source-scale tensor: per-group `{M, G>1}`
+// returns G; per-token `{M, 1}`, per-tensor, or empty returns 1.  Used by the
+// vertical-fusion pipeline to size / drive the Op2 re-quant and Stage-3 src
+// scale dims uniformly for both granularities (G==1 is the per-token path).
+inline int mtile_src_group_count(
+    const matmul_quantization_params_t::matmul_quant_t &q) {
+  if (q.dims.size() == 2 && q.dims[1] > 1) {
+    return static_cast<int>(q.dims[1]);
+  }
+  return 1;
+}
+
 inline void dqint8_compact_and_requant_slice(
     const void *sc_buf,            // post-activation bf16 tile (strided)
     int slice_M, int k_w2, int row_stride_bf16_elems,
     uint8_t *compact_bf16_buf,     // [slice_M × k_w2] bf16 contig
     int8_t  *int8_buf,             // [slice_M × k_w2] s8 contig
-    float   *scale_buf) {          // [slice_M] f32 per-row scales
+    float   *scale_buf,            // [slice_M × src_groups] f32 scratch
+    int src_groups,                // 1 = per-token {M,1}; G>1 = per-group {M,G}
+    data_type_t scale_dt) {        // GEMM-side src-scale dtype: f32 or bf16
   // (1) Compact the row-strided post-act tile to a contiguous
   // [slice_M, k_w2] bf16 buffer.  Per-row memcpy of `k_w2 × 2 B`
   // from `sc_buf + m × row_stride_bf16_elems × 2 B` — L1/L2 hot
@@ -398,12 +413,44 @@ inline void dqint8_compact_and_requant_slice(
             + static_cast<size_t>(m) * src_row_stride_bytes,
         row_bytes);
   }
-  // (2) Fused per-token symmetric bf16→s8 + per-row scale write.
-  // Contiguous input/output as required by the kernel contract.
-  zendnnl::lowoha::reorder::dynamic_per_token_quant_bf16_s8_native(
-      reinterpret_cast<const uint16_t *>(compact_bf16_buf),
-      int8_buf, scale_buf,
-      static_cast<int64_t>(slice_M), static_cast<int64_t>(k_w2));
+  // (2) Fused symmetric bf16→s8 + f32 scale write on the contiguous tile.
+  //   * per-token  (src_groups == 1): one absmax/scale per row → {slice_M}.
+  //   * per-group  (src_groups  > 1): per-K-group absmax → {slice_M, G},
+  //     pairing with the per-group {G, N} down-weight scale.  Row-local, so
+  //     the M-tile per-thread slicing stays race-free.
+  if (src_groups > 1) {
+    zendnnl::lowoha::reorder::dynamic_per_group_quant_bf16_s8_native(
+        reinterpret_cast<const uint16_t *>(compact_bf16_buf),
+        int8_buf, scale_buf,
+        static_cast<int64_t>(slice_M), static_cast<int64_t>(k_w2),
+        static_cast<int64_t>(src_groups));
+  } else {
+    zendnnl::lowoha::reorder::dynamic_per_token_quant_bf16_s8_native(
+        reinterpret_cast<const uint16_t *>(compact_bf16_buf),
+        int8_buf, scale_buf,
+        static_cast<int64_t>(slice_M), static_cast<int64_t>(k_w2));
+  }
+  // (3) Narrow f32 → bf16 in place when the GEMM expects bf16 src scales
+  // (the GGML / AOCL-reordered weight carries a bf16 {G,N} wei_scale, and
+  // the AOCL sym-quant kernel requires the A/B scale dtypes to agree).  The
+  // native quant kernels only emit f32, so convert the small [slice_M×G]
+  // scratch.  Forward in-place is safe: the bf16 write at byte offset 2·i
+  // never overruns the not-yet-read f32 at byte offset 4·i.  f32 callers
+  // (per-token VF, plain per-group with f32 wei_scale) skip this untouched.
+  if (scale_dt == data_type_t::bf16) {
+    const int64_t n = static_cast<int64_t>(slice_M)
+                      * static_cast<int64_t>(src_groups);
+    // Store the bf16 result through a byte pointer (uint8_t may alias any
+    // type) so the forward in-place narrowing stays well-defined: a
+    // `uint16_t *` view of the `float *` buffer would violate strict
+    // aliasing and let the compiler reorder the overlapping loads/stores.
+    uint8_t *out_bytes = reinterpret_cast<uint8_t *>(scale_buf);
+    for (int64_t i = 0; i < n; ++i) {
+      const uint16_t bf16 =
+          zendnnl::lowoha::reorder::float_to_bf16(scale_buf[i]);
+      std::memcpy(out_bytes + static_cast<size_t>(2 * i), &bf16, sizeof(bf16));
+    }
+  }
 }
 
 } // namespace (end Section A — Shared M-tile helpers & planner)
@@ -1630,12 +1677,18 @@ bool flat_m_tile_pipeline_bf16(
       // (caller-enforced; see fused-MoE dispatcher), = N_w13[e]
       // when `fused_act == none`.
       const size_t k_w2_e = static_cast<size_t>(K_w2[e]);
+      // Op2 source-scale group count: per-token (1) or per-group (G>1).
+      // The Stage-2b re-quant writes {slice_M × G} f32 scales, so size the
+      // scratch slot for G (G==1 collapses to the per-row per-token case).
+      const int g2_e = mtile_src_group_count(
+          params_w2[e].quant_params.src_scale);
       const size_t compact_b =
           static_cast<size_t>(slice_M) * k_w2_e * 2u;     // bf16
       const size_t int8_b   =
           static_cast<size_t>(slice_M) * k_w2_e * 1u;     // s8
       const size_t scale_b  =
-          static_cast<size_t>(slice_M) * sizeof(float);   // per-row f32
+          static_cast<size_t>(slice_M)
+          * static_cast<size_t>(g2_e) * sizeof(float);    // {slice_M × G} f32
       per_thread_2b_compact_bytes[tid] = compact_b;
       per_thread_2b_int8_bytes[tid]    = int8_b;
       per_thread_2b_scale_bytes[tid]   = scale_b;
@@ -2001,10 +2054,20 @@ bool flat_m_tile_pipeline_bf16(
         uint8_t *compact_bf16_buf = pt.src_buf;
         int8_buf_for_w2  = reinterpret_cast<int8_t *>(pt.scale_buf);
         scale_f32_for_w2 = reinterpret_cast<float *>(pt.zp_buf);
+        const int g2_w2 = mtile_src_group_count(
+            params_w2[e].quant_params.src_scale);
+        // Match the GEMM's src-scale dtype to the Op2 weight-scale dtype so
+        // AOCL sym-quant sees agreeing A/B scale types: f32 for per-token /
+        // plain per-group, bf16 for GGML-reordered weights.  Anything else
+        // (incl. `none`) defaults to f32 — the historical per-token behaviour.
+        const data_type_t op2_scale_dt =
+            (params_w2[e].quant_params.wei_scale.dt == data_type_t::bf16)
+                ? data_type_t::bf16 : data_type_t::f32;
         dqint8_compact_and_requant_slice(
             sc.buf, slice_M, K_w2[e],
             /*row_stride_bf16_elems=*/N_w13[e],
-            compact_bf16_buf, int8_buf_for_w2, scale_f32_for_w2);
+            compact_bf16_buf, int8_buf_for_w2, scale_f32_for_w2,
+            /*src_groups=*/g2_w2, /*scale_dt=*/op2_scale_dt);
       }
 
       // ── STAGE 3: W2 matmul from scratch tile to dst_w2 slice ──
@@ -2088,10 +2151,18 @@ bool flat_m_tile_pipeline_bf16(
         lda_for_w2 = K_w2[e];
         w2_local.dtypes.src = data_type_t::s8;
         w2_local.quant_params.src_scale.buff = scale_f32_for_w2;
-        w2_local.quant_params.src_scale.dt   = data_type_t::f32;
+        // f32 for per-token / plain per-group, bf16 for GGML-reordered Op2 —
+        // Stage 2b wrote the scratch in this dtype just above.
+        w2_local.quant_params.src_scale.dt =
+            (params_w2[e].quant_params.wei_scale.dt == data_type_t::bf16)
+                ? data_type_t::bf16 : data_type_t::f32;
+        // {slice_M, G}: per-token (G==1) or per-group (G>1, pairing with the
+        // {G, N} down-weight scale).  run_dlp derives the AOCL sym-quant
+        // group_size = K_w2 / G from this dims pair — no separate plumbing.
         w2_local.quant_params.src_scale.dims = {
             static_cast<int64_t>(slice_M),
-            static_cast<int64_t>(1)};
+            static_cast<int64_t>(mtile_src_group_count(
+                params_w2[e].quant_params.src_scale))};
         // Symmetric DQ-INT8 — clear any inherited src_zp state so
         // the kernel's eligibility check doesn't misroute to an
         // asymmetric path.
@@ -2275,7 +2346,8 @@ bool try_flat_m_tile_pipeline_bf16(
       return kRegimeWOQ;
     }
     if (p.dtypes.wei == data_type_t::s8) {
-      // DQ-INT8: require per-token symmetric on the src side.
+      // DQ-INT8: require symmetric dynamic quant on the src side, in either
+      // per-token {M,1} or per-group {M,G>1} granularity.
       // `check_m_tile_safe` already enforces row-locality
       // (`src_scale.dims[0] == M[i]`) for Op1; we replay the
       // structural shape check here so Op2 (which `check_m_tile_
@@ -2284,8 +2356,21 @@ bool try_flat_m_tile_pipeline_bf16(
       if (!p.dynamic_quant) return kRegimeNone;
       if (p.dtypes.compute != data_type_t::s8) return kRegimeNone;  // sym only
       if (p.quant_params.src_scale.dims.size() != 2) return kRegimeNone;
-      if (p.quant_params.src_scale.dims[1] != 1) return kRegimeNone;
-      if (p.quant_params.src_scale.dt != data_type_t::f32) return kRegimeNone;
+      // Accept per-token {M,1} AND per-group {M,G>1}.  The pipeline drives
+      // the Op2 re-quant + Stage-3 src-scale dims off G uniformly (G==1 is
+      // the per-token fast path) and AOCL DLP's sym-quant consumes the
+      // matching {G,N} weight scale.  G is range-checked against K (K%G==0)
+      // at the call site below, where the per-pass K is in scope.
+      if (p.quant_params.src_scale.dims[1] < 1) return kRegimeNone;
+      // Source-scale dtype: f32 (per-token VF / plain per-group) OR bf16
+      // (GGML-reordered weights carry a bf16 {G,N} wei_scale and the AOCL
+      // sym-quant kernel requires the A/B scale dtypes to agree).  The Op1
+      // hoist emits scales in `src_scale.dt`, and Stage 2b narrows the Op2
+      // re-quant to match the wei dtype — so both granularities are served.
+      if (p.quant_params.src_scale.dt != data_type_t::f32
+          && p.quant_params.src_scale.dt != data_type_t::bf16) {
+        return kRegimeNone;
+      }
       // Wei scale required for the AOCL DLP s8s8→bf16 kernel; the
       // bf16 dst path reads it for the per-channel dequant of the
       // s32 accumulator.  Asymmetric src_zp is rejected at the
@@ -2322,6 +2407,22 @@ bool try_flat_m_tile_pipeline_bf16(
   // only runs in the DQ-INT8 arm); mixed-regime workloads are not
   // produced by today's MoE call sites.
   if (regime_w13 != regime_w2) return false;
+
+  // Per-group source quant requires K to divide evenly into G groups.  Op1
+  // groups over K_in and Op2 over K_w2 — independent counts, each derived
+  // from that pass's paired weight scale ({G1,N_w13} / {G2,N_w2}).  A
+  // non-dividing G would make the per-group re-quant kernel silently
+  // truncate group_size = K / G; reject so the call falls back to the
+  // two-pass, which validates each pass on its own.  G==1 (per-token) is a
+  // no-op here.
+  if (regime_w13 == kRegimeDQINT8 && num_ops_int > 0) {
+    const int g1 = mtile_src_group_count(
+        params_w13[0].quant_params.src_scale);
+    const int g2 = mtile_src_group_count(
+        params_w2[0].quant_params.src_scale);
+    if (g1 > 1 && K_in[0] % g1 != 0) return false;
+    if (g2 > 1 && K_w2[0] % g2 != 0) return false;
+  }
 
   const bool act_supported =
       (fused_act == grp_matmul_gated_act_t::none)

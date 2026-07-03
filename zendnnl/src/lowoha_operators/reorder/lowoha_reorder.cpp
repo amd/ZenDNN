@@ -315,6 +315,10 @@ status_t group_dynamic_quant(
     log_error("group_dynamic_quant: scale dtype must be f32 or bf16");
     return status_t::failure;
   }
+  // num_groups <= 1 => per-token (one scale per row); > 1 => per-group
+  // along K with G = num_groups groups per row (scale buffer {M_i, G}).
+  const int64_t group_count = params.num_groups;
+  const bool per_group = (group_count > 1);
   src_row_stride.resize(num_ops);
   dst_row_stride.resize(num_ops);
   for (size_t i = 0; i < num_ops; ++i) {
@@ -349,7 +353,18 @@ status_t group_dynamic_quant(
     }
     src_row_stride[i] = static_cast<int>(src_stride_m);
     dst_row_stride[i] = static_cast<int>(dst_stride_m);
+    // Inactive experts (no routed tokens) are never quantized by the kernel,
+    // so skip their config validation — the per-group divisibility and
+    // null-buffer checks below apply only to active experts.  Mirrors
+    // reorder_quantization.cpp, which skips M==0 before its granularity /
+    // config gates so a single unrouted expert carrying stale metadata
+    // (e.g. a K that doesn't divide num_groups) can't fail the whole group.
     if (M[i] == 0) continue;
+    if (per_group && (K[i] % group_count != 0)) {
+      log_error("group_dynamic_quant: per-group requires K % num_groups == 0 "
+                "at op ", i, " (K=", K[i], ", num_groups=", group_count, ")");
+      return status_t::failure;
+    }
     if (src[i] == nullptr || dst[i] == nullptr || scale[i] == nullptr) {
       log_error("group_dynamic_quant: null active buffer at op ", i);
       return status_t::failure;
@@ -367,11 +382,20 @@ status_t group_dynamic_quant(
                 ", dst_dtype=", reorder_data_type_to_string(params.dst_dtype),
                 ", scale_dtype=",
                 reorder_data_type_to_string(params.scale_dtype),
-                ", granularity=per_token");
+                ", granularity=", (per_group ? "per_group" : "per_token"),
+                ", num_groups=", group_count);
   }
 
-  if (!dispatch_group_dynamic_per_token(
-          src, M, K, src_row_stride, dst, dst_row_stride, scale, params)) {
+  if (per_group) {
+    if (!dispatch_group_dynamic_per_group(
+            src, M, K, src_row_stride, dst, dst_row_stride, scale, params)) {
+      log_error(
+          "group_dynamic_quant: no native grouped per-group kernel matched");
+      return status_t::failure;
+    }
+  } else if (!dispatch_group_dynamic_per_token(
+                 src, M, K, src_row_stride, dst, dst_row_stride, scale,
+                 params)) {
     log_error("group_dynamic_quant: no native grouped per-token kernel matched");
     return status_t::failure;
   }

@@ -1236,6 +1236,16 @@ inline void execute_expert_slice(
   matmul_params &params,
   matmul_algo_t algo) {
 
+  // Inactive expert (no routed tokens): nothing to compute.  Returning
+  // early keeps the per-expert ALGOs (1/4/5) from driving the backend
+  // GEMM with M == 0, where tile-count math divides by the row count and
+  // traps (SIGFPE).  The M-tile / N-tile ALGOs flatten over rows and skip
+  // empty experts implicitly, so this is the only path that needs the
+  // guard.  Sparse MoE routing (e.g. 6 of 15 experts firing) relies on it.
+  if (M <= 0) {
+    return;
+  }
+
   matmul_batch_params_t bp;
   bp.Batch_A = 1;
   bp.Batch_B = 1;

@@ -484,6 +484,12 @@ void clear_ggml_weight_unpack_cache() {
   get_ggml_reordered_weight_cache().clear();
 }
 
+size_t ggml_weight_unpack_cache_size() {
+  // get_size() takes the cache's own internal mutex; do not also hold the
+  // module mutex here to avoid a lock-order dependency.
+  return static_cast<size_t>(get_ggml_reordered_weight_cache().get_size());
+}
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

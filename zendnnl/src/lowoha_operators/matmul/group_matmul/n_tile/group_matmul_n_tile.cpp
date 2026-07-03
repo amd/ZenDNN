@@ -635,23 +635,54 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan,
     tile_params.quant_params.src_zp = h.src_zp;
   }
 
-  // ── Column-slice per-channel weight quantization metadata ───────────
-  // N-tile slices columns of B; per-channel weight scales /
-  // zero-points (`{N}` or `{1, N}`) need their pointer advanced by
-  // `col_start × elem_size` and the trailing dim rewritten to
-  // `n_tile`.  Per-tensor scales are a no-op.  Per-group `{G, N}`
-  // wei is rejected by `check_n_tile_extra` (the current scope only
-  // admits dynamic INT8 per-token + per-channel wei).
+  // ── Column-slice the weight quantization metadata ──────────────────
+  // N-tile slices columns of B, so the weight scale must be re-anchored
+  // to this thread's column range `[col_start, col_start + n_tile)`:
   //
-  // Source-side scales reach the kernel in one of two forms — both
-  // N-independent and untouched by this slicer:
-  //   (a) the `{M, 1}` dims left over from the caller when static
-  //       src quant was supplied (not currently in scope, but the
-  //       slicer would no-op either way);
-  //   (b) the hoisted dynamic-quant result substituted above (the
-  //       `HoistedSrcQuant` block) — also N-independent.
-  offset_quant_by_col(tile_params.quant_params.wei_scale,
-                      col_start, n_tile);
+  //   * Per-channel `{N}` / `{1, N}`: the slice is a contiguous
+  //     `n_tile`-long sub-array — advance the pointer by
+  //     `col_start × elem` and rewrite the trailing dim (offset_quant_
+  //     by_col).  Per-tensor scales are a no-op.
+  //
+  //   * Per-group `{G, N}` (G K-groups × N channels, row-major): the
+  //     column slice is G NON-contiguous strips of length n_tile at
+  //     stride N.  The AOCL sym-quant kernel indexes the weight scale as
+  //     `group × n + col` with `n` = the GEMM's N (= n_tile here), so it
+  //     requires a CONTIGUOUS `{G, n_tile}` buffer.  Repack the G strips
+  //     into a per-thread scratch and point the tile's wei_scale at it.
+  //     (`check_n_tile_extra` only admits per-group wei when the weight
+  //     is plain row-major `'n'`, i.e. column-sliceable; a pre-reordered
+  //     `'r'` GGML weight never reaches here.)
+  //
+  // Source-side scales (`{M, 1}` per-token or `{M, G}` per-group, from
+  // the caller or the hoisted dynamic-quant result above) are
+  // N-independent and stay whole — untouched by this column slicer.
+  {
+    auto &wsc = tile_params.quant_params.wei_scale;
+    const bool wei_per_group =
+        wsc.buff != nullptr && wsc.dims.size() == 2 && wsc.dims[0] > 1;
+    if (wei_per_group) {
+      const int64_t Gw    = wsc.dims[0];
+      const int64_t N_full = wsc.dims[1];
+      const size_t  selem  = size_of(wsc.dt);
+      static thread_local std::vector<uint8_t> wei_scale_tile;
+      wei_scale_tile.resize(static_cast<size_t>(Gw)
+                            * static_cast<size_t>(n_tile) * selem);
+      const uint8_t *sbase = static_cast<const uint8_t *>(wsc.buff);
+      for (int64_t g = 0; g < Gw; ++g) {
+        std::memcpy(
+            wei_scale_tile.data()
+                + static_cast<size_t>(g) * static_cast<size_t>(n_tile) * selem,
+            sbase + (static_cast<size_t>(g) * static_cast<size_t>(N_full)
+                     + static_cast<size_t>(col_start)) * selem,
+            static_cast<size_t>(n_tile) * selem);
+      }
+      wsc.buff = wei_scale_tile.data();
+      wsc.dims = {Gw, static_cast<int64_t>(n_tile)};
+    } else {
+      offset_quant_by_col(wsc, col_start, n_tile);
+    }
+  }
   offset_quant_by_col(tile_params.quant_params.wei_zp,
                       col_start, n_tile);
 
@@ -3517,12 +3548,31 @@ void flat_n_tile(
   //
   // Tight layout is detected at the flat_n_tile entry point via
   // `tight_fused_epilogue = fused_epilogue && ldc[0] < N[0]`.
+  // Per-group quant (src `{M, G}` / wei `{G, N}`) MUST run on the AOCL
+  // do_tile path, never the custom INT8 microkernel: the microkernel
+  // slices the source scale as one scalar per row (per-token only) and
+  // would silently corrupt per-group output.  Detect it from the weight
+  // scale (per-group wei is `{G, N}` with G > 1) on any firing expert and
+  // force the standard path — do_tile's `{G, n_tile}` weight-scale repack
+  // then feeds the AOCL sym-quant GEMM.  Per-channel / per-token calls are
+  // unaffected (this flag stays false), so the custom-kernel path is
+  // byte-identical for them.
+  bool ck_per_group = false;
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (i < M.size() && M[i] <= 0) continue;  // skip inactive experts
+    const auto &ws = params[i].quant_params.wei_scale;
+    if (ws.dims.size() == 2 && ws.dims[0] > 1) {
+      ck_per_group = true;
+      break;
+    }
+  }
   // Not const: a fused DQ-INT8 call may drop the whole call off the
   // custom kernel below if any active expert's int8 src hoist is not
   // CK-servable (see the fused-fallback guard before the OMP region).
   bool use_custom =
       kctx.enabled
-      && (!fused_epilogue || tight_fused_epilogue);
+      && (!fused_epilogue || tight_fused_epilogue)
+      && !ck_per_group;
 
   // Log the two distinct "kctx.enabled but use_custom=false" paths so
   // the operator shows the downgrade root cause.  A silent kernel=

@@ -30,6 +30,7 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
+#include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -1200,6 +1201,119 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     const std::vector<int> &M_eff = *M_eff_ptr;
 
     if (fused_moe != nullptr) {
+      // ── GGML packed-weight unpack for the fused-MoE path ────────────
+      // A GGML MoE expert carries BOTH projections block-quantized:
+      //   * Op1 (gate/up) → weight[i]            (K = K[i], N = N[i])
+      //   * Op2 (down)    → fused.down_weight[i]  (K = op2_k_for_act(N[i]),
+      //                                            N = fused.N_down[i])
+      // `params[i].packing.pack_format_b == 1` is the shared signal that
+      // both are packed (Op1/Op2 share one quant scheme by contract).
+      // Each weight is unpacked + AOCL sym-quant-reordered + cached once
+      // (keyed by pointer/shape) and its pointer + {K/32, N} bf16 scale is
+      // redirected into LOCAL copies — the const caller inputs are never
+      // mutated.  GGML weights are per-group (group_size 32), so vertical
+      // fusion (M-tile, per-token only) declines and the legacy two-pass
+      // runs each pass through the AOCL sym-quant GEMM, with the per-group
+      // source dynamic-quant pairing {M, K/32} ⇄ {K/32, N}.
+      //
+      // The whole block is gated on `fused_any_ggml`: a non-GGML fused
+      // call makes no copies and takes the exact same path as before
+      // (zero overhead / no behavioral change).  The pack format is uniform
+      // across an MoE layer's experts (a model is either all-GGML or none),
+      // so one check on params[0] suffices — no need to scan every expert.
+      const bool fused_any_ggml =
+          num_ops > 0 && params[0].packing.pack_format_b == 1;
+
+      std::vector<const void *> fused_weight_unpacked;
+      std::vector<matmul_params> fused_params_unpacked;
+      grp_matmul_fused_moe_params fused_moe_unpacked;
+      const std::vector<const void *> *fused_weight_eff = &weight;
+      std::vector<matmul_params> *fused_params_eff = &params;
+      const grp_matmul_fused_moe_params *fused_moe_eff = fused_moe;
+
+      if (fused_any_ggml) {
+        const grp_matmul_gated_act_t fused_act =
+            run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none;
+        fused_weight_unpacked = weight;
+        fused_params_unpacked = params;
+        fused_moe_unpacked = *fused_moe;
+        // down_scale must be num_ops-sized so the Op2 params build reads the
+        // unpacked per-group weight scale below; default entries (nullptr,
+        // empty dims) reproduce the "un-quantized Op2 weight" state for any
+        // non-GGML expert, matching the prior empty-vector behaviour.
+        if (fused_moe_unpacked.down_scale.size() < num_ops) {
+          fused_moe_unpacked.down_scale.resize(num_ops);
+        }
+
+        for (size_t i = 0; i < num_ops; ++i) {
+          if (fused_params_unpacked[i].packing.pack_format_b != 1) continue;
+
+          // Warm EVERY expert's weights — active OR not — so a later decode
+          // iteration that routes to a currently-cold expert hits the
+          // unpack/reorder cache instead of paying a first-fire unpack
+          // spike (rotating-experts MoE).  Each weight is unpacked +
+          // reordered + cached once (keyed by pointer/shape); subsequent
+          // calls are cache hits.  An ACTIVE expert that cannot be unpacked
+          // is a hard error; an inactive (M==0) expert is warmed only
+          // opportunistically and skipped silently when its weights are
+          // absent or not const-cacheable (the GEMM skips M==0 anyway, so
+          // the redirected pointers/scales set below are unused this call).
+          const bool active = (M_eff[i] > 0);
+          const bool warmable =
+              fused_weight_unpacked[i] != nullptr &&
+              fused_moe_unpacked.down_weight[i] != nullptr &&
+              is_weights_const[i] && transB[i];
+          if (!warmable) {
+            if (!active) continue;  // cold expert with no usable weight
+            // Active expert MUST be unpackable — surface the precise reason.
+            if (validate_ggml_packed_inputs(fused_params_unpacked[i],
+                                            is_weights_const[i], 1,
+                                            transB[i]) != status_t::success) {
+              return status_t::failure;
+            }
+            log_error("group_matmul_direct: active GGML expert ", i,
+                      " has a null packed weight");
+            return status_t::failure;
+          }
+
+          // Op1 weight (gate/up): [K[i] → N[i]].
+          const void *w1 = fused_weight_unpacked[i];
+          status_t un1 = unpack_ggml_weights_and_cache(
+              w1, N[i], K[i], ldb[i], transB[i] ? 't' : 'n',
+              fused_params_unpacked[i]);
+          if (un1 != status_t::success) {
+            if (active) return un1;
+            continue;  // warming failure on a cold expert: leave it packed
+          }
+          fused_weight_unpacked[i] = w1;
+
+          // Op2 weight (down): [K_down → N_down], K_down follows the act.
+          const int k_down = op2_k_for_act(N[i], fused_act);
+          const void *w2 = fused_moe_unpacked.down_weight[i];
+          matmul_params w2_params;
+          status_t un2 = unpack_ggml_weights_and_cache(
+              w2, fused_moe_unpacked.N_down[i], k_down,
+              fused_moe_unpacked.ldb_down[i], transB[i] ? 't' : 'n',
+              w2_params);
+          if (un2 != status_t::success) {
+            if (active) return un2;
+            continue;
+          }
+          fused_moe_unpacked.down_weight[i] = w2;
+          // Hand the unpacked {K_down/32, N_down} bf16 scale to the Op2
+          // params build (it derives Op2's per-group source granularity
+          // from down_scale.dims).
+          grp_matmul_fused_moe_params::down_weight_quant_t ds;
+          ds.buff = w2_params.quant_params.wei_scale.buff;
+          ds.dt   = w2_params.quant_params.wei_scale.dt;
+          ds.dims = w2_params.quant_params.wei_scale.dims;
+          fused_moe_unpacked.down_scale[i] = ds;
+        }
+        fused_weight_eff = &fused_weight_unpacked;
+        fused_params_eff = &fused_params_unpacked;
+        fused_moe_eff = &fused_moe_unpacked;
+      }
+
       // Note on act=none + fused_moe: Op2 consumes the raw first-half
       // columns of Op1's [M, 2*dim] output as its input.  This is NOT
       // MoE-semantically equivalent to a gated workflow and is a
@@ -1212,12 +1326,13 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // weighted-reduce internally as the natural Stage 4 of the
       // pipeline, so the dispatch body has nothing more to do here.
       status_t fused_st = group_matmul_fused_moe_execute(
-                            *fused_moe,
+                            *fused_moe_eff,
                             run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
                             act_dtype,
                             layout, transA, transB, M_eff, N, K, alpha,
-                            src, lda, weight, ldb, bias, beta, dst, ldc,
-                            is_weights_const, params, num_threads, &gemm_mode, moe_postop);
+                            src, lda, *fused_weight_eff, ldb, bias, beta, dst, ldc,
+                            is_weights_const, *fused_params_eff, num_threads, &gemm_mode,
+                            moe_postop);
       if (fused_st != status_t::success) {
         return fused_st;
       }
@@ -1248,13 +1363,61 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         }
       }
 
+      // ── GGML packed-weight unpack (per expert) ──────────────────────
+      // Runs AFTER source quant so each expert's `dtypes.src` is already
+      // s8 (the contract `ggml_is_sym_quant` checks).  For every expert
+      // flagged `pack_format_b == 1`, unpack the GGML block-quantized
+      // weight to a cached AOCL sym-quant-reordered s8 buffer and fill
+      // its per-group `{G, N}` wei_scale, mirroring the single-matmul
+      // path in lowoha_matmul.cpp.  Unpacked weights + params flow
+      // through the normal dispatch unchanged.
+      std::vector<const void *> weight_unpacked;
+      const std::vector<const void *> *weight_eff = &weight;
+      // Pack format is uniform across the group (all GGML or none), so one
+      // check on the first expert suffices instead of scanning all of them.
+      const bool any_ggml =
+          num_ops > 0 && params_dispatch[0].packing.pack_format_b == 1;
+      if (any_ggml) {
+        weight_unpacked = weight;
+        for (size_t i = 0; i < num_ops; ++i) {
+          if (params_dispatch[i].packing.pack_format_b != 1) continue;
+          // Inactive experts (no routed tokens) are skipped by the GEMM
+          // dispatch, so there is nothing to unpack for them — and their
+          // src_scale may legitimately be empty, which `ggml_is_sym_quant`
+          // would reject.  Leave the packed bytes untouched.
+          if (M_eff[i] == 0) continue;
+          if (validate_ggml_packed_inputs(params_dispatch[i],
+                                          is_weights_const[i], 1,
+                                          transB[i]) != status_t::success) {
+            return status_t::failure;
+          }
+          if (!ggml_is_sym_quant(params_dispatch[i])) {
+            log_error("group_matmul_direct: GGML packed weights on expert ", i,
+                      " require sym-quant per-group int8 with an s8 source "
+                      "(enable ZENDNNL_ENABLE_GROUP_DQ so the source is "
+                      "quantized to s8 before the unpack).");
+            return status_t::failure;
+          }
+          const void *w = weight_unpacked[i];
+          status_t un = unpack_ggml_weights_and_cache(
+              w, N[i], K[i], ldb[i], transB[i] ? 't' : 'n',
+              params_dispatch[i]);
+          if (un != status_t::success) return un;
+          weight_unpacked[i] = w;
+        }
+        weight_eff = &weight_unpacked;
+      }
+
+      // Use the rewritten params copy whenever source group-quant OR
+      // GGML unpack modified it; otherwise the untouched caller params.
+      const bool use_dispatch_params = group_quantized || any_ggml;
       const bool act_fused = group_matmul_run_parallel_dispatch(
                                layout, transA, transB, M_eff, N, K, alpha,
                                group_quantized ? quantized_src : src,
                                group_quantized ? quantized_lda : lda,
-                               weight, ldb, bias, beta, dst, ldc,
+                               *weight_eff, ldb, bias, beta, dst, ldc,
                                is_weights_const,
-                               group_quantized ? params_dispatch : params,
+                               use_dispatch_params ? params_dispatch : params,
                                num_threads, &gemm_mode,
                                run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
                                act_dtype);

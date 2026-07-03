@@ -1088,6 +1088,152 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8AlgoCustom,
                          Int8AlgoCustomParamName);
 
 // ===============================================================================
+// Per-group dynamic-INT8 cross-ALGO parity (plain s8 weights, NON-GGML)
+//
+// Guards the contract "wherever per-token is supported, per-group is supported":
+// a symmetric INT8 PER-GROUP dynamic-quant group matmul (bf16 src + {M,G}
+// src_scale, s8 wei + {G,N} wei_scale) MUST produce correct results on EVERY
+// group ALGO (1/2/3/5) and under both ENABLE_GROUP_DQ settings.  Per-group
+// either engages the optimized path (e.g. flat_m_tile for dynamic + GROUP_DQ=0)
+// or falls back to a per-group-capable AOCL path (ALGO 1 / per-expert) — and is
+// NEVER misrouted to a per-token-only custom/native kernel (which would silently
+// corrupt output by slicing the source scale as one-scalar-per-row).  Every
+// configuration is compared to the ALGO-1 reference (the validated full-N AOCL
+// sym-quant per-group path), so a misroute shows up as a gross mismatch.
+// ===============================================================================
+struct Int8PerGroupAlgoParam {
+  int M, num_ops, dim, G;  // G = number of K-groups; K is fixed at 64 below.
+};
+
+static std::string Int8PerGroupAlgoName(
+    const ::testing::TestParamInfo<Int8PerGroupAlgoParam> &info) {
+  const auto &p = info.param;
+  return "M" + std::to_string(p.M) + "_E" + std::to_string(p.num_ops) +
+         "_dim" + std::to_string(p.dim) + "_G" + std::to_string(p.G);
+}
+
+class TestGroupMatmulInt8PerGroupAlgos
+    : public ::testing::TestWithParam<Int8PerGroupAlgoParam> {};
+
+// Build per-expert plain-s8 (NON-GGML) per-group inputs: bf16 src with an
+// attached zero {M, G} src_scale (so the harness flags dynamic_quant) and an
+// s8 weight carrying a {G, N} per-group wei_scale.
+static void build_int8_pergroup_inputs(
+    tensor_factory_t &tf, const Int8PerGroupAlgoParam &p, int N, int K,
+    std::vector<tensor_t> &src, std::vector<tensor_t> &wei,
+    std::vector<tensor_t> &bias, std::vector<tensor_t> &dst) {
+  src.assign(p.num_ops, tensor_t{});
+  wei.assign(p.num_ops, tensor_t{});
+  bias.assign(p.num_ops, tensor_t{});
+  dst.assign(p.num_ops, tensor_t{});
+  const std::vector<int64_t> wei_sd{static_cast<int64_t>(p.G),
+                                    static_cast<int64_t>(N)};
+  const std::vector<uint64_t> src_ss{static_cast<uint64_t>(p.M),
+                                     static_cast<uint64_t>(p.G)};
+  for (int e = 0; e < p.num_ops; ++e) {
+    auto wref = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(K), static_cast<uint64_t>(N)},
+        data_type_t::bf16, /*range=*/2.0);
+    tensor_t ws8, wsc, wzp;
+    ASSERT_EQ(quant_params_compute(tf, wref, data_type_t::bf16,
+                                   data_type_t::s8, wei_sd, data_type_t::f32,
+                                   wsc, wzp, &ws8),
+              status_t::success)
+        << "per-group weight quant setup failed (e=" << e << ")";
+    wei[e] = ws8;
+    auto ssc = tf.zero_tensor(src_ss, data_type_t::f32);
+    src[e] = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(p.M), static_cast<uint64_t>(K)},
+        data_type_t::bf16, /*range=*/2.0, /*trans=*/false, ssc, tensor_t());
+    bias[e] = tensor_t{};
+    dst[e] = tf.uniform_dist_tensor(
+        {static_cast<uint64_t>(p.M), static_cast<uint64_t>(N)},
+        data_type_t::bf16, /*range=*/2.0);
+  }
+}
+
+TEST_P(TestGroupMatmulInt8PerGroupAlgos, CrossAlgoParity) {
+  using namespace moe_test_utils;
+  const auto &p = GetParam();
+  const int N = p.dim;
+  const int K = 64;
+  ASSERT_EQ(K % p.G, 0) << "K must split evenly into G groups";
+
+  // One run of the per-group group matmul under a given ALGO + GROUP_DQ
+  // setting; snapshots the per-expert bf16 output.  Inputs are rebuilt each
+  // run (and caches reset) so heap-address reuse can't return a stale
+  // reordered weight across configurations.
+  auto run = [&](int algo, bool group_dq,
+                 std::vector<std::vector<bfloat16_t>> &out) {
+    reset_grp_matmul_caches();
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+        build_int8_pergroup_inputs(tf, p, N, K, src, wei, bias, dst));
+    AlgoEnvGuard ag(algo);
+    EnvVarGuard gdq("ZENDNNL_ENABLE_GROUP_DQ", group_dq ? "1" : "0");
+    ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                                       matmul_algo_t::aocl_dlp_blocked,
+                                       /*alpha=*/1.0f, /*beta=*/0.0f),
+              status_t::success)
+        << "per-group group matmul failed (algo=" << algo
+        << " group_dq=" << group_dq << ")";
+    out.assign(p.num_ops, std::vector<bfloat16_t>(
+                              static_cast<size_t>(p.M) * N, bfloat16_t(0.0f)));
+    for (int e = 0; e < p.num_ops; ++e) {
+      const auto *r =
+          static_cast<const bfloat16_t *>(dst[e].get_raw_handle_unsafe());
+      std::memcpy(out[e].data(), r,
+                  static_cast<size_t>(p.M) * N * sizeof(bfloat16_t));
+    }
+  };
+
+  // Reference: ALGO 1 (full-N AOCL sym-quant) with the default grouped DQ
+  // pre-pass — the validated per-group path.
+  std::vector<std::vector<bfloat16_t>> ref;
+  ASSERT_NO_FATAL_FAILURE(run(/*algo=*/1, /*group_dq=*/true, ref));
+
+  // INT8 sym-quant cross-config band: the s8 data is identical across configs
+  // (same quant kernel), so only reduction-order deltas separate the paths —
+  // a misroute to a per-token-only kernel would blow well past this.
+  const float rel = 0.06f;
+  const float abs = 0.5f;
+  // algo 0 = auto-select: confirms the dispatcher's phase-based pick lands on
+  // a per-group-safe path (decode -> N-tile ALGO 3 plain s8, prompt -> M-tile
+  // ALGO 2) and matches the ALGO 1 reference.
+  for (int algo : {0, 1, 2, 3, 5}) {
+    for (bool gdq : {true, false}) {
+      std::vector<std::vector<bfloat16_t>> got;
+      ASSERT_NO_FATAL_FAILURE(run(algo, gdq, got));
+      for (int e = 0; e < p.num_ops; ++e) {
+        for (int i = 0; i < p.M * N; ++i) {
+          const float a = static_cast<float>(got[e][i]);
+          const float b = static_cast<float>(ref[e][i]);
+          ASSERT_NEAR(a, b, std::abs(b) * rel + abs)
+              << "per-group mismatch: algo=" << algo << " group_dq=" << gdq
+              << " e=" << e << " idx=" << i;
+        }
+      }
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    GroupMatmulInt8PerGroupAlgos, TestGroupMatmulInt8PerGroupAlgos,
+    ::testing::ValuesIn(std::vector<Int8PerGroupAlgoParam>{
+        {/*M=*/4, /*num_ops=*/8, /*dim=*/64, /*G=*/2},     // prompt-ish, G=2
+        {/*M=*/16, /*num_ops=*/4, /*dim=*/64, /*G=*/4},    // G=4
+        {/*M=*/1, /*num_ops=*/8, /*dim=*/64, /*G=*/2},     // decode (M=1)
+        {/*M=*/64, /*num_ops=*/4, /*dim=*/128, /*G=*/8},   // larger N, G=8
+        // Wide N (> the N-tile min tile width) so the N-tile planner
+        // column-splits across threads — exercises do_tile's per-group
+        // {G,N}->{G,n_tile} weight-scale repack on the AOCL path.
+        {/*M=*/8, /*num_ops=*/2, /*dim=*/1024, /*G=*/4},   // wide-N column split
+        {/*M=*/1, /*num_ops=*/4, /*dim=*/768, /*G=*/2},    // decode wide-N
+    }),
+    Int8PerGroupAlgoName);
+
+// ===============================================================================
 // [8c-bf16] TestGroupMatmulInt8AlgoCustomBf16Scale — DQ-INT8 with BF16 scales
 //
 // Regression guard for the bf16-scale stitching bug: the dynamic-quant

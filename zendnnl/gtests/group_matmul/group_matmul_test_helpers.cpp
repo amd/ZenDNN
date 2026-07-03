@@ -116,13 +116,23 @@ status_t group_matmul_kernel_test(
   float alpha,
   float beta,
   const group_matmul_moe_postop_params *moe_postop,
-  const grp_matmul_gated_act_params *gated_act) {
+  const grp_matmul_gated_act_params *gated_act,
+  const std::vector<int> &pack_format_b,
+  const std::vector<int> &active_rows) {
   using namespace zendnnl::lowoha::matmul;
   try {
     const size_t num_ops = inputs.size();
     if (num_ops == 0 || weights.size() != num_ops ||
         biases.size() != num_ops || outputs.size() != num_ops) {
       log_error("group_matmul_kernel_test: vector size mismatch");
+      return status_t::failure;
+    }
+    if (!pack_format_b.empty() && pack_format_b.size() != num_ops) {
+      log_error("group_matmul_kernel_test: pack_format_b size mismatch");
+      return status_t::failure;
+    }
+    if (!active_rows.empty() && active_rows.size() != num_ops) {
+      log_error("group_matmul_kernel_test: active_rows size mismatch");
       return status_t::failure;
     }
 
@@ -144,7 +154,9 @@ status_t group_matmul_kernel_test(
 
       transAs[i] = (inputs[i].get_order() == "ba");
       transBs[i] = (weights[i].get_order() == "ba");
-      Ms[i] = static_cast<int>(outputs[i].get_size(0));
+      Ms[i] = active_rows.empty()
+              ? static_cast<int>(outputs[i].get_size(0))
+              : active_rows[i];
       Ks[i] = static_cast<int>(inputs[i].get_size(1));
       Ns[i] = static_cast<int>(outputs[i].get_size(1));
       ldas_v[i] = transAs[i] ? inputs[i].get_stride(1)
@@ -174,6 +186,9 @@ status_t group_matmul_kernel_test(
       // cases. Mirrors how matmul_kernel_test in gtest_utils.cpp
       // populates params.lowoha_algo before invoking matmul_direct.
       params_v[i].lowoha_algo = algo;
+      if (!pack_format_b.empty()) {
+        params_v[i].packing.pack_format_b = pack_format_b[i];
+      }
 
       bool is_woq = (src_dt == data_type_t::bf16 &&
                      (wei_dt == data_type_t::s4 || wei_dt == data_type_t::u4));

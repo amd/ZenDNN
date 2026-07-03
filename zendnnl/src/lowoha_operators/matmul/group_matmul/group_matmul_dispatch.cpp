@@ -556,6 +556,30 @@ static bool check_n_tile_extra(
         && q.dims[1] == 1;
   };
 
+  // Per-group source side: dims `{M[i], G}` with G > 1 (one scale per
+  // K-group, row-local).  Pairs with a `{G, N}` per-group weight scale.
+  // The source scale is N-independent, so N-tile column slicing leaves it
+  // whole; `do_tile` slices the WEIGHT scale to `{G, n_tile}`.  Reaches
+  // this gate either as dynamic (`buff == nullptr`, hoisted by flat_n_tile)
+  // or grouped-pre-quantized S8 (`buff != nullptr`).
+  auto is_per_group_src =
+      [](const matmul_quantization_params_t::matmul_quant_t &q,
+         int M_expert) -> bool {
+    return q.dims.size() == 2
+        && q.dims[0] == static_cast<int64_t>(M_expert)
+        && q.dims[1] > 1;
+  };
+
+  // Per-group weight side: dims `{G, N}` with G > 1 and N > 1, non-null
+  // buff (statically quantised by the caller).  do_tile column-slices the
+  // {G, N} scale into a contiguous {G, n_tile} per-thread scratch for the
+  // AOCL sym-quant GEMM.
+  auto is_per_group_wei =
+      [](const matmul_quantization_params_t::matmul_quant_t &q) -> bool {
+    return q.buff != nullptr && q.dims.size() == 2
+        && q.dims[0] > 1 && q.dims[1] > 1;
+  };
+
   // Same active-range constraint as `check_m_tile_safe` above —
   // tail slots carry framework prepack metadata, not real per-call
   // state, and would falsely flip n-tile-safe to false.
@@ -593,26 +617,48 @@ static bool check_n_tile_extra(
         return false;
       }
 
-      // Source dims: `{M[i], 1}` per-token (including `M[i] == 1`
-      // → `{1, 1}`, the single-token-per-expert decode case).
+      // Source dims: `{M[i], 1}` per-token (incl. the `M[i] == 1`
+      // decode case `{1, 1}`) OR `{M[i], G}` per-group (G > 1).
       // For grouped_s8_src the scale buffer must be non-null (checked
       // above). For dynamic input, nullness is a hoist-allocation
       // contract, not a per-token-scope contract.
-      if (!is_per_token_dyn_src(qp.src_scale, M[i])) {
+      const bool src_per_token = is_per_token_dyn_src(qp.src_scale, M[i]);
+      const bool src_per_group = is_per_group_src(qp.src_scale, M[i]);
+      if (!src_per_token && !src_per_group) {
+        return false;
+      }
+      // Per-group is symmetric-only on the N-tile path (the AOCL sym-quant
+      // kernel + the per-group source reorder are both symmetric); a
+      // non-null src_zp on a per-group call is out of scope → ALGO 1.
+      if (src_per_group && qp.src_zp.buff != nullptr) {
         return false;
       }
       if (grouped_s8_src && qp.src_zp.buff != nullptr) {
         return false;
       }
-      if (qp.src_zp.buff != nullptr &&
+      if (src_per_token && qp.src_zp.buff != nullptr &&
           !is_per_token_dyn_src(qp.src_zp, M[i])) {
         return false;
       }
 
-      // Weight side: exactly per-channel `{N}` / `{1, N}` with a
-      // non-null buff.  Per-tensor and per-group `{G, N}` wei are
-      // both rejected.
-      if (!is_per_channel_wei(qp.wei_scale)) {
+      // Weight side: per-channel `{N}` / `{1, N}` (per-token src) OR
+      // per-group `{G, N}` (per-group src).  Per-tensor wei is rejected.
+      const bool wei_per_channel = is_per_channel_wei(qp.wei_scale);
+      const bool wei_per_group   = is_per_group_wei(qp.wei_scale);
+      if (!wei_per_channel && !wei_per_group) {
+        return false;
+      }
+      // Granularity must match across src and wei: per-group K-grouping on
+      // one side with per-channel/per-token on the other is not a coherent
+      // sym-quant pairing.  Reject the mismatch → ALGO 1.
+      if (src_per_group != wei_per_group) {
+        return false;
+      }
+      // Per-group weight is column-sliced by a `{G, n_tile}` repack in
+      // do_tile, which needs a plain row-major s8 weight.  A pre-reordered
+      // weight (`mem_format_b == 'r'`, e.g. an unpacked GGML weight) is not
+      // column-sliceable, so it must take the full-N ALGO 1 path instead.
+      if (wei_per_group && params[i].mem_format_b != 'n') {
         return false;
       }
       // Weight zero-point is NOT supported anywhere on the N-tile

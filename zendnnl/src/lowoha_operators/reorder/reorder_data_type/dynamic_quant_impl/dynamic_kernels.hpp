@@ -179,6 +179,32 @@ void dynamic_per_token_group_quant_f16_s8_native(
     const std::vector<float *> &scales,
     int num_threads);
 
+// Grouped per-group (per-K-block) BF16/F32 -> S8 symmetric dynamic
+// quantization.  Sources are independent [M_i, K_i] matrices; each expert's
+// scale buffer is {M_i, G} (linear index m*G + g).  G is uniform across
+// experts; group_size = K_i / G and must divide K_i exactly.  One global
+// row loop schedules across sum(M_i); each row iterates its G groups.
+void dynamic_per_group_group_quant_bf16_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int64_t G,
+    int num_threads);
+void dynamic_per_group_group_quant_f32_s8_native(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<float *> &scales,
+    int64_t G,
+    int num_threads);
+
 // Dynamic dispatch functions (moved from lowoha_reorder.cpp)
 bool dispatch_fused_per_token(const void *src, void *dst,
                                const reorder_params_t &params,
@@ -190,6 +216,15 @@ bool dispatch_fused_per_group(const void *src, void *dst,
                                const reorder_params_t &params,
                                int64_t M, int64_t K);
 bool dispatch_group_dynamic_per_token(
+    const std::vector<const void *> &src,
+    const std::vector<int> &M,
+    const std::vector<int> &K,
+    const std::vector<int> &lda,
+    const std::vector<void *> &dst,
+    const std::vector<int> &dst_lda,
+    const std::vector<void *> &scale,
+    const group_dynamic_quant_params_t &params);
+bool dispatch_group_dynamic_per_group(
     const std::vector<const void *> &src,
     const std::vector<int> &M,
     const std::vector<int> &K,

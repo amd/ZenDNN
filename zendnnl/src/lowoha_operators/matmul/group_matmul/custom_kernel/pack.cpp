@@ -481,7 +481,7 @@ status_t get_or_pack_weight_bf16(
   // contents — that's the expected semantic when caching is off.
   if (disable_cache) {
     if (s_pack_log) {
-      apilog_verbose("[GRP_MATMUL.PACK NOCACHE] weight=", weight,
+      apilog_verbose("[GRP_MATMUL.PACK NOCACHE] weight=", static_cast<const void *>(weight),
                      " K=", K, " N=", N, " ldb=", ldb,
                      " transB=", (transB ? 1 : 0),
                      " interleave=", (interleave_split_halves ? 1 : 0),
@@ -615,7 +615,7 @@ status_t get_or_pack_weight_bf16(
     // framework is reallocating weights → cache churn is root-caused
     // to weight-lifecycle, not to anything the dispatcher can fix.
     if (s_pack_log) {
-      apilog_verbose("[GRP_MATMUL.PACK HIT] weight=", weight,
+      apilog_verbose("[GRP_MATMUL.PACK HIT] weight=", static_cast<const void *>(weight),
                      " K=", K, " N=", N, " ldb=", ldb,
                      " transB=", (transB ? 1 : 0),
                      " interleave=", (interleave_split_halves ? 1 : 0),
@@ -633,7 +633,7 @@ status_t get_or_pack_weight_bf16(
   // MISSes for the same (K, N, ldb, transB, pack_nr) with only
   // weight_ptr cycling indicate weight-pointer churn.
   if (s_pack_log) {
-    apilog_verbose("[GRP_MATMUL.PACK MISS] weight=", weight,
+    apilog_verbose("[GRP_MATMUL.PACK MISS] weight=", static_cast<const void *>(weight),
                    " K=", K, " N=", N, " ldb=", ldb,
                    " transB=", (transB ? 1 : 0),
                    " interleave=", (interleave_split_halves ? 1 : 0),
@@ -842,7 +842,7 @@ status_t get_or_pack_weight_int8(
 
   if (disable_cache) {
     if (s_pack_log) {
-      apilog_verbose("[GRP_MATMUL.PACK NOCACHE INT8] weight=", weight,
+      apilog_verbose("[GRP_MATMUL.PACK NOCACHE INT8] weight=", static_cast<const void *>(weight),
                      " K=", K, " N=", N, " ldb=", ldb,
                      " transB=", (transB ? 1 : 0),
                      " interleave=", (interleave_split_halves ? 1 : 0),
@@ -909,7 +909,7 @@ status_t get_or_pack_weight_int8(
     *out_packed = static_cast<const int8_t *>(pack_cache.get(key));
     if (was_hit_out != nullptr) *was_hit_out = true;
     if (s_pack_log) {
-      apilog_verbose("[GRP_MATMUL.PACK HIT INT8] weight=", weight,
+      apilog_verbose("[GRP_MATMUL.PACK HIT INT8] weight=", static_cast<const void *>(weight),
                      " K=", K, " N=", N, " ldb=", ldb,
                      " transB=", (transB ? 1 : 0),
                      " interleave=", (interleave_split_halves ? 1 : 0),
@@ -919,7 +919,7 @@ status_t get_or_pack_weight_int8(
   }
 
   if (s_pack_log) {
-    apilog_verbose("[GRP_MATMUL.PACK MISS INT8] weight=", weight,
+    apilog_verbose("[GRP_MATMUL.PACK MISS INT8] weight=", static_cast<const void *>(weight),
                    " K=", K, " N=", N, " ldb=", ldb,
                    " transB=", (transB ? 1 : 0),
                    " interleave=", (interleave_split_halves ? 1 : 0),

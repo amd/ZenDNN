@@ -854,14 +854,72 @@ inline bool check_m_tile_safe(
     if (params[i].dtypes.dst  != params[ref].dtypes.dst)  return false;
     if (params[i].dtypes.bias != params[ref].dtypes.bias) return false;
     if (params[i].mem_format_a != 'n') return false;
-    if (params[i].mem_format_b != 'n') return false;
-    if (params[i].packing.pack_format_b != 0) return false;
+    // A reordered ('r') AOCL sym-quant s8 weight (mem_format_b=='r'; the
+    // GGML-origin flag pack_format_b may still be set) is M-tile-safe when it
+    // pairs with a row-local per-group {M[i],G} SOURCE scale.  M-tiling
+    // partitions only the SOURCE rows, so the whole pre-reordered weight +
+    // {G,N} wei_scale is consumed exactly as ALGO 1 (full-N) consumes it:
+    // `offset_quant_by_row` slices the {M,G} src scale to the per-thread
+    // {slice_M,G} view, and `execute_expert_slice` routes through
+    // `matmul_execute` (NOT `matmul_direct`), so the weight is never
+    // re-unpacked.  Two regimes reach here with such a weight:
+    //
+    //   (1) Fused-MoE vertical fusion — `dynamic_quant == true`; the source
+    //       is reordered per-thread (hoisted) inside the slice executor, so
+    //       the {M,G} src_scale arrives with `buff == nullptr`.
+    //
+    //   (2) Non-fused GGML / per-group — the grouped DQ pre-pass already
+    //       quantized the source to s8 and CLEARED `dynamic_quant`, leaving a
+    //       materialized {M,G} scale (`buff != nullptr`).  Functionally
+    //       identical to ALGO 1's per-expert call, just sliced over M, so
+    //       there is no reason to demote it to ALGO 1.
+    //
+    // Everything else still requires plain row-major ('n') + unpacked
+    // (pack_format_b == 0).  (N-tile still rejects 'r' outright — it
+    // column-slices the weight; see `check_n_tile_extra`.)
+    const bool reordered_pergroup_dyn_s8 =
+        params[i].dtypes.wei == data_type_t::s8
+        && params[i].dynamic_quant
+        && params[i].mem_format_b == 'r'
+        && params[i].quant_params.src_scale.dims.size() == 2
+        && params[i].quant_params.src_scale.dims[1] > 1;
+    const bool reordered_pergroup_static_s8 =
+        params[i].dtypes.wei == data_type_t::s8
+        && !params[i].dynamic_quant
+        && params[i].mem_format_b == 'r'
+        && params[i].quant_params.src_scale.buff != nullptr
+        && params[i].quant_params.src_scale.dims.size() == 2
+        && params[i].quant_params.src_scale.dims[0]
+               == static_cast<int64_t>(M[i])
+        && params[i].quant_params.src_scale.dims[1] > 1;
+    const bool reordered_pergroup_s8 =
+        reordered_pergroup_dyn_s8 || reordered_pergroup_static_s8;
+    if (params[i].mem_format_b != 'n' && !reordered_pergroup_s8) {
+      return false;
+    }
+    if (params[i].packing.pack_format_b != 0 && !reordered_pergroup_s8) {
+      return false;
+    }
     if (params[i].dynamic_quant) {
       const auto &sd = params[i].quant_params.src_scale.dims;
       if (sd.empty() || sd[0] != static_cast<int64_t>(M[i])) return false;
       const auto &zd = params[i].quant_params.src_zp.dims;
       if (!zd.empty() && zd[0] != static_cast<int64_t>(M[i])) return false;
     }
+    // Grouped pre-quantized per-group source (s8 src + {M, G>1} scale,
+    // dynamic_quant already cleared by the grouped pre-pass) IS accepted:
+    // `offset_quant_by_row` slices the materialized {M, G} scale to the
+    // per-thread {slice_M, G} view (M-tile, full N), and the N-tile path
+    // repacks the {G, N} weight scale to {G, n_tile} per column tile, so
+    // both tile executors drive the AOCL sym-quant per-group GEMM directly.
+    // (A reordered 'r' weight, e.g. an unpacked GGML weight, is ACCEPTED by
+    // M-tile here via `reordered_pergroup_static_s8` above — M-tile consumes
+    // the whole weight per expert, so the non-fused GGML path runs ALGO 2
+    // instead of demoting to ALGO 1.  N-tile still rejects it: its
+    // `check_n_tile_extra` column-slices the weight, which the 'r' reorder
+    // does not permit, so GGML on N-tile takes the full-N ALGO 1 path.)  This
+    // stays off the per-token-only custom INT8 microkernel: M-tile never
+    // invokes it, and flat_n_tile forces per-group onto its AOCL do_tile path.
     for (const auto &po : params[i].postop_) {
       if (po.po_type == post_op_type_t::softmax
           || po.po_type == post_op_type_t::pooling) {
