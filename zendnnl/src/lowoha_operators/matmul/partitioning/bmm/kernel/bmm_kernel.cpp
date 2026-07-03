@@ -64,6 +64,21 @@ void bmm_tile_execute(
     return;
   }
 #endif
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // No AOCL-DLP backend in this build. BMM tiles execute inside OpenMP
+  // parallel regions, so letting run_dlp throw would call std::terminate.
+  // Log and return without computing instead of crashing.
+  log_error("AOCL-DLP kernel required but ZenDNNL was built without AOCL-DLP "
+            "support (ZENDNNL_DEPENDS_AOCLDLP=0); BMM tile output not "
+            "computed.");
+  // Signal the looper that a tile could not compute (e.g. a runtime libxsmm
+  // decline fell through to the unavailable AOCL fallback) so it can surface
+  // the failure to matmul_direct() instead of returning success uncomputed.
+  if (ctx.aocl_unavailable != nullptr) {
+    ctx.aocl_unavailable->store(true, std::memory_order_relaxed);
+  }
+  return;
+#else
   log_info("Using AOCL DLP kernel");
   run_dlp(ctx.layout, ctx.trans_input, ctx.trans_weight, m_len, ctx.N, ctx.K,
           ctx.alpha, ctx.beta,
@@ -71,6 +86,7 @@ void bmm_tile_execute(
           tile_params.mem_format_a, tile_params.mem_format_b,
           A, weight_ptr, C, tile_params.dtypes, tile_params, ctx.bias,
           tile_kernel, ctx.is_weights_const);
+#endif
 }
 
 } // namespace bmm

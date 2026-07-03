@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ set(lowoha_group_matmul_sources
   group_matmul/n_tile/group_matmul_n_tile.cpp
   group_matmul/group_matmul_moe_postop.cpp
   group_matmul/group_matmul_moe_act.cpp
-  group_matmul/group_matmul_moe_act_dlp.cpp
   group_matmul/group_matmul_fused_moe.cpp
   group_matmul/prepack/prepack.cpp
   group_matmul/prepack/prepack_aocl_dlp.cpp
@@ -31,8 +30,15 @@ set(lowoha_group_matmul_sources
   group_matmul/custom_kernel/pack.cpp
   group_matmul/custom_kernel/ukernel/bf16_microkernel.cpp
   group_matmul/custom_kernel/ukernel/int8_microkernel.cpp
-  group_matmul/custom_kernel/dispatch.cpp
-  PARENT_SCOPE)
+  group_matmul/custom_kernel/dispatch.cpp)
+
+# AOCL-DLP backed MoE gated activations: only built when AOCL-DLP is enabled.
+if(ZENDNNL_DEPENDS_AOCLDLP)
+  list(APPEND lowoha_group_matmul_sources
+    group_matmul/group_matmul_moe_act_dlp.cpp)
+endif()
+
+set(lowoha_group_matmul_sources ${lowoha_group_matmul_sources} PARENT_SCOPE)
 
 set(lowoha_group_matmul_public_headers
   group_matmul/group_matmul_direct.hpp

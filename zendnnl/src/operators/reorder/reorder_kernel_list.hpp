@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 #ifndef _REORDER_KERNEL_LIST_HPP_
 #define _REORDER_KERNEL_LIST_HPP_
 
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp/reorder_kernel.hpp"
+#endif
 
 #endif

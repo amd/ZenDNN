@@ -17,7 +17,9 @@
 #include "gtest_utils.hpp"
 #include "memory/memory_utils.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
+#endif
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
@@ -77,7 +79,9 @@ void clear_matmul_test_caches() {
   // Each gtest case is a fresh "model" with new weight buffers, so the
   // per-thread post-op metadata cache (keyed by weight_ptr) holds stale
   // entries that point to freed test memory. Drop them between cases.
+#if ZENDNNL_DEPENDS_AOCLDLP
   zendnnl::lowoha::matmul::clear_aocl_postop_metadata_cache();
+#endif
 #if ZENDNNL_DEPENDS_ONEDNN
   zendnnl::lowoha::matmul::clear_onednn_matmul_weight_cache();
 #endif

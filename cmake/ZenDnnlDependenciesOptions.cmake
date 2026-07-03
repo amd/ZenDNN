@@ -23,8 +23,12 @@ include_guard(GLOBAL)
 include(ZenDnnlDependenciesDefaults OPTIONAL)
 
 # sanity check on dependencies
+# AOCL-DLP is now an optional dependency. When disabled, AOCL-DLP backed
+# kernels are not built and selecting one at runtime returns an error
+# (reference-kernel fallback is planned as a follow-up).
 if(NOT ZENDNNL_DEPENDS_AOCLDLP)
-  message(FATAL_ERROR "ZenDNNL has a hard dependency on aocl-dlp.")
+  message(STATUS "${ZENDNNL_MSG_PREFIX}AOCL-DLP dependency disabled; "
+                 "AOCL-DLP kernels will be unavailable at runtime.")
 endif()
 
 if(NOT ZENDNNL_DEPENDS_AOCLUTILS)

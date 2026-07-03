@@ -460,17 +460,10 @@ std::string post_op_names_to_string(const matmul_params &params) {
 
 const char *kernel_to_string(matmul_algo_t kernel) {
   switch (kernel) {
-#if ZENDNNL_DEPENDS_AOCLDLP
   case matmul_algo_t::aocl_dlp:
     return "aocl_dlp";
   case matmul_algo_t::aocl_dlp_blocked:
     return "aocl_dlp_blocked";
-#else
-  case matmul_algo_t::aocl_dlp:
-    return "aocl_blis";
-  case matmul_algo_t::aocl_dlp_blocked:
-    return "aocl_blis_blocked";
-#endif
   case matmul_algo_t::onednn:
     return "onednn";
   case matmul_algo_t::onednn_blocked:

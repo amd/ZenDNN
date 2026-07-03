@@ -629,10 +629,24 @@ status_t matmul_impl_t::validate_forced_kernel() {
 }
 
 status_t matmul_impl_t::preprocess() {
-  auto weight_tensor = context.get_param("weights");
-
   if (forced_kernel.empty() || forced_kernel == "aocl_dlp" ||
       forced_kernel == "aocl_dlp_blocked") {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    // Mirror op_execute_info()'s empty-kernel default: blocked-layout weights
+    // imply aocl_dlp_blocked, otherwise aocl_dlp.
+    std::string selected_kernel = forced_kernel;
+    if (selected_kernel.empty()) {
+      auto weights = context.get_param("weights");
+      selected_kernel = (weights && (weights->get_layout() &
+                                     uint16_t(tensor_layout_t::blocked)))
+                        ? "aocl_dlp_blocked" : "aocl_dlp";
+    }
+    apilog_error("<", get_name(), "> AOCL-DLP kernel '", selected_kernel,
+                 "' selected but ZenDNNL was built without AOCL-DLP support "
+                 "(ZENDNNL_DEPENDS_AOCLDLP=0).");
+    return status_t::unimplemented;
+#else
+    auto weight_tensor = context.get_param("weights");
     LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
     //get bias tensor
     auto optional_bias_tensor = context.get_param("bias");
@@ -657,6 +671,7 @@ status_t matmul_impl_t::preprocess() {
     //set runtime post ops from inputs
     return context.aocl_dlp_utils_ptr->set_runtime_post_op_buffer(inputs,
            optional_bias_tensor ? true : false, output_tensor);
+#endif
   }
   return status_t::success;
 }
@@ -740,14 +755,29 @@ std::string matmul_impl_t::op_execute_info() {
 
 status_t matmul_impl_t::kernel_factory() {
   LOG_DEBUG_INFO("<", get_name(), "> Executing kernel factory matmul_impl_t");
-  auto weight_tensor  = context.get_param("weights").value();
-  auto weight_dtype   = context.get_param("weights")->get_data_type();
-  auto input_dtype    = get_input("matmul_input")->get_data_type();
-  auto output_dtype   = get_output("matmul_output")->get_data_type();
 
   //get forced kernel if any
   if (forced_kernel.empty() || forced_kernel == "aocl_dlp_blocked" ||
       forced_kernel == "aocl_dlp") {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    // Mirror op_execute_info()'s empty-kernel default: blocked-layout weights
+    // imply aocl_dlp_blocked, otherwise aocl_dlp.
+    std::string selected_kernel = forced_kernel;
+    if (selected_kernel.empty()) {
+      auto weights = context.get_param("weights");
+      selected_kernel = (weights && (weights->get_layout() &
+                                     uint16_t(tensor_layout_t::blocked)))
+                        ? "aocl_dlp_blocked" : "aocl_dlp";
+    }
+    apilog_error("<", obj_name, "> AOCL-DLP kernel '", selected_kernel,
+                 "' selected but ZenDNNL was built without AOCL-DLP support "
+                 "(ZENDNNL_DEPENDS_AOCLDLP=0).");
+    return status_t::unimplemented;
+#else
+    auto weight_tensor  = context.get_param("weights").value();
+    auto weight_dtype   = context.get_param("weights")->get_data_type();
+    auto input_dtype    = get_input("matmul_input")->get_data_type();
+    auto output_dtype   = get_output("matmul_output")->get_data_type();
     /**TODO: check Use of blocked BMM weights with new AOCL BMM API */
     if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_dlp_blocked") {
       apilog_info("<", obj_name, "> kernel unimplemented using aocl_dlp_blocked.");
@@ -802,6 +832,7 @@ status_t matmul_impl_t::kernel_factory() {
       apilog_error("<", obj_name, "> kernel unimplemented.");
       return status_t::unimplemented;
     }
+#endif
   }
   else {
     if (forced_kernel == "reference") {

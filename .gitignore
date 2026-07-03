@@ -1,5 +1,7 @@
 build/
 dependencies/
+.vscode/
+compile_commands.json
 docs/html/
 docs/latex/
 timings_*

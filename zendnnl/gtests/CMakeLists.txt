@@ -30,7 +30,6 @@ if(ZENDNNL_BUILD_GTEST)
     gtest_main.cpp
     gtest_utils.cpp
     test_matmul.cpp
-    test_postop_cache.cpp
     test_lru_cache.cpp
     test_batchmatmul.cpp
     test_embag.cpp
@@ -39,6 +38,13 @@ if(ZENDNNL_BUILD_GTEST)
     test_sdpa.cpp
     test_omp_api.cpp
     test_softmax.cpp)
+
+  # test_postop_cache.cpp exercises the AOCL-DLP post-op metadata cache
+  # (create_dlp_post_op / clear_aocl_postop_metadata_cache), which only
+  # exists when AOCL-DLP is built in.
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    list(APPEND gtests_sources test_postop_cache.cpp)
+  endif()
   # Group-matmul-specific gtest artifacts (5 test files + 2 helper TUs +
   # moe_test_utils.hpp + README) live in the `group_matmul/` subdirectory.
   # Reorder gtest artifacts (5 behavior-focused test files + shared

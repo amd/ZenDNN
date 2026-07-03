@@ -17,6 +17,7 @@
 #ifndef MATMUL_BMM_KERNEL_HPP
 #define MATMUL_BMM_KERNEL_HPP
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -63,6 +64,14 @@ struct BmmKernelContext {
   matmul_algo_t kernel;
   const void *bias;
   bool is_weights_const;
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // Set by bmm_tile_execute() when a tile falls through to the (unavailable)
+  // AOCL-DLP path in an AOCL-DLP-disabled build, so the looper can surface the
+  // failure to matmul_direct() (it rewrites the kernel to aocl_dlp, which the
+  // post-dispatch guard converts to status_t::unimplemented). nullptr => not
+  // tracked.
+  std::atomic<bool> *aocl_unavailable = nullptr;
+#endif
 };
 
 /// Execute a single BMM tile: compute A/C sub-matrix pointers, apply

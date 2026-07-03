@@ -122,7 +122,6 @@ status_t warm_pack_all_aocl_dlp_experts(
   if (!should_warm_weight_cache(weight_cache_type)) {
     return status_t::success;
   }
-  const int32_t warm_wct = warm_wct_for_full_weight_bf16(weight_cache_type);
 
   // Reachable-entry bound: `[0, bound)` is the largest range every
   // metadata vector covers.  Compute it once up front so the
@@ -138,6 +137,9 @@ status_t warm_pack_all_aocl_dlp_experts(
       N.size(),
       ldb.size(),
       transB.size()});
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+  const int32_t warm_wct = warm_wct_for_full_weight_bf16(weight_cache_type);
 
   // Only BF16 wired today (matches the current target envelope and
   // our active bench config).  Other dtypes return success with every reachable
@@ -215,6 +217,12 @@ status_t warm_pack_all_aocl_dlp_experts(
     if (warmed) ++stats.packed_ok;
     else        ++stats.skipped_invalid;
   }
+#else
+  // AOCL DLP not compiled in — count every reachable entry as skipped.
+  (void)wei_dtype;
+  stats.total_attempted += static_cast<int>(bound);
+  stats.skipped_invalid += static_cast<int>(bound);
+#endif
 
   return status_t::success;
 }
@@ -426,6 +434,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
       ldb.size(),
       transB.size()});
 
+#if ZENDNNL_DEPENDS_AOCLDLP
   // BF16 only today (the production envelope); other dtypes count
   // every reachable entry as `skipped_invalid` so the PROBE line still
   // surfaces accurate counts.  Note this counts at the EXPERT level
@@ -538,6 +547,15 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
       ++stats.packed_ok;
     }
   }
+#else
+  // AOCL DLP not compiled in — count every reachable entry as skipped.
+  (void)wei_dtype;
+  (void)num_threads;
+  (void)stable;
+  (void)nr_align;
+  stats.total_attempted += static_cast<int>(bound);
+  stats.skipped_invalid += static_cast<int>(bound);
+#endif
 
   return status_t::success;
 }

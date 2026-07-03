@@ -105,6 +105,12 @@ status_t validate_prepack_inputs(const char *caller,
 size_t aocl_compute_size(const prepack_params_t &params) {
   using namespace zendnnl::lowoha::matmul;
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  (void)params;
+  apilog_error("weight_prepack(aocl_dlp): ZenDNNL was built without AOCL-DLP "
+               "support (ZENDNNL_DEPENDS_AOCLDLP=0); prepack is unavailable.");
+  return 0;
+#else
   const char order = 'r';
   const char trans = params.transposed ? 't' : 'n';
   const md_t k     = static_cast<md_t>(params.K);
@@ -161,12 +167,21 @@ size_t aocl_compute_size(const prepack_params_t &params) {
   apilog_error("weight_prepack(aocl_dlp): unsupported wei_dtype=",
                dtype_info(params.wei_dtype));
   return 0;
+#endif
 }
 
 status_t aocl_prepack(const void *weights, const prepack_params_t &params,
                       void *dst) {
   using namespace zendnnl::lowoha::matmul;
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  (void)weights;
+  (void)params;
+  (void)dst;
+  apilog_error("weight_prepack(aocl_dlp): ZenDNNL was built without AOCL-DLP "
+               "support (ZENDNNL_DEPENDS_AOCLDLP=0); prepack is unavailable.");
+  return status_t::unimplemented;
+#else
   const char order = 'r';
   const char trans = params.transposed ? 't' : 'n';
   const md_t k     = static_cast<md_t>(params.K);
@@ -233,6 +248,7 @@ status_t aocl_prepack(const void *weights, const prepack_params_t &params,
   apilog_error("weight_prepack(aocl_dlp): unsupported wei_dtype=",
                dtype_info(params.wei_dtype));
   return status_t::unimplemented;
+#endif
 }
 
 // =====================================================================

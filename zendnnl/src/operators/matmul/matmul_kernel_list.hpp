@@ -17,12 +17,14 @@
 #define _MATMUL_KERNEL_LIST_HPP_
 
 #include "matmul_ref_kernel.hpp"
+#include "onednn/matmul_onednn_kernel.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp/matmul_fp32_avx512_kernel.hpp"
 #include "aocl_dlp/matmul_bf16_avx512_kernel.hpp"
 #include "aocl_dlp/matmul_bf16s4_avx512_kernel.hpp"
-#include "onednn/matmul_onednn_kernel.hpp"
 #include "aocl_dlp/matmul_int8_avx512_kernel.hpp"
 #include "aocl_dlp/matmul_f16_avx512_kernel.hpp"
+#endif
 
 #endif
 

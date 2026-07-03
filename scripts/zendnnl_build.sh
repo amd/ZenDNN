@@ -62,6 +62,10 @@ function parse_args() {
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
                 ;;
+            --no-aocldlp )
+                ZENDNNL_DEPENDS_AOCLDLP=0
+                shift
+                ;;
             --local-aocldlp )
                 ZENDNNL_LOCAL_AOCLDLP=1
                 shift
@@ -203,6 +207,7 @@ function parse_args() {
                 echo " dependency options :"
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
                 echo " --enable-parlooper : enable parlooper."
+                echo " --no-aocldlp       : build without the aocl-dlp dependency (aocl-dlp kernels unavailable at runtime)."
                 echo
                 echo " local dependency options (builds from local source) :"
                 echo " --local-aocldlp    : use local aocldlp from dependencies/aocldlp."
@@ -287,6 +292,7 @@ ZENDNNL_DOXYGEN=0
 # configure options
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_PARLOOPER=0
+ZENDNNL_DEPENDS_AOCLDLP=1
 ZENDNNL_LOCAL_AOCLDLP=0
 ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
@@ -503,6 +509,21 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=OFF"
+    fi
+
+    # optional dependency toggles
+    if [ ${ZENDNNL_DEPENDS_AOCLDLP} -eq 0 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF"
+        # --no-aocldlp must win deterministically: later option generation
+        # (local/inject AOCL-DLP below) would otherwise re-append
+        # -DZENDNNL_DEPENDS_AOCLDLP=ON (inject) or -DZENDNNL_LOCAL_AOCLDLP=ON.
+        # Clear those inputs so the disable flag cannot be overridden.
+        if [ ${ZENDNNL_LOCAL_AOCLDLP} -eq 1 ] || [ -n "${ZENDNNL_INJECT_AOCLDLP}" ];then
+            echo "warning: --no-aocldlp overrides --local-aocldlp/--inject-aocldlp; ignoring the latter."
+        fi
+        ZENDNNL_LOCAL_AOCLDLP=0
+        ZENDNNL_LOCAL_AOCLDLP_DIR=""
+        ZENDNNL_INJECT_AOCLDLP=""
     fi
 
     # local dependency options

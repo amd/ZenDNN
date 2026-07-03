@@ -148,6 +148,13 @@ static void execute_partitioned(
   ctx.bias = bias;
   ctx.is_weights_const = is_weights_const;
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // Track a per-tile fall-through to the unavailable AOCL fallback (e.g. a
+  // runtime libxsmm decline) so we can surface it after the parallel region.
+  std::atomic<bool> aocl_unavailable{false};
+  ctx.aocl_unavailable = &aocl_unavailable;
+#endif
+
   auto process_tile = [&](int batch_idx, int m_start, int m_len,
   const uint8_t *src_ptr, const uint8_t *weight_ptr, uint8_t *dst_ptr) {
     bmm_tile_execute(batch_idx, m_start, m_len,
@@ -168,6 +175,16 @@ static void execute_partitioned(
     run_parallel_omp(src, weight, dst, config, batch_params,
                      plan.M_block, process_tile);
   }
+
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // A tile hit the unavailable AOCL fallback. Mark config.kernel so
+  // bmm_execute's write-back surfaces it to matmul_direct()'s post-dispatch
+  // guard (-> status_t::unimplemented) instead of reporting success with an
+  // uncomputed/partial dst.
+  if (aocl_unavailable.load(std::memory_order_relaxed)) {
+    config.kernel = matmul_algo_t::aocl_dlp;
+  }
+#endif
 }
 
 // ─── BMM entry point ────────────────────────────────────────────────────────
@@ -209,7 +226,15 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
   if (kernel == matmul_algo_t::batched_sgemm) {
     apilog_info("Executing BMM LOWOHA kernel with batch SGEMM, algo: ",
                 static_cast<int>(kernel));
-
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    // Batched SGEMM is backed by AOCL-DLP, which is not built in. Log and
+    // return without computing instead of letting matmul_batch_gemm_wrapper
+    // throw (this can run inside OpenMP parallel regions -> std::terminate).
+    apilog_error("AOCL-DLP batched SGEMM required but ZenDNNL was built "
+                 "without AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0); BMM "
+                 "output not computed.");
+    return;
+#else
     matmul_batch_gemm_wrapper(layout, trans_input, trans_weight,
                               M, N, K, alpha,
                               src, lda, weight, ldb, beta, dst, ldc,
@@ -220,6 +245,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                               dst_batch_stride_bytes,
                               params, bias, num_threads);
     return;
+#endif
   }
 
   // ── Path 2: oneDNN ──
@@ -255,6 +281,14 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                         layout, trans_input, trans_weight, transA,
                         alpha, beta, lda, ldb, ldc,
                         src_type_size, out_type_size, is_weights_const);
+
+    // execute_partitioned() may fall back from libxsmm to aocl_dlp via its
+    // up-front can_use_libxsmm() check (mutating the local config.kernel).
+    // Propagate that back to the caller's kernel reference so matmul_direct()
+    // observes the AOCL-DLP fallback: in an AOCL-DLP-disabled build its
+    // post-dispatch guard then returns status_t::unimplemented instead of
+    // reporting success with an uncomputed dst.
+    kernel = config.kernel;
   }
   // ── Path 4: Single-thread fallback ──
   else {
@@ -285,6 +319,11 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     ctx.bias = bias;
     ctx.is_weights_const = is_weights_const;
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    std::atomic<bool> aocl_unavailable{false};
+    ctx.aocl_unavailable = &aocl_unavailable;
+#endif
+
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
                                get_batch_index(b, batch_params.Batch_A) *
@@ -299,6 +338,15 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                        src_ptr, weight_ptr, dst_ptr,
                        ctx, params, batch_params);
     }
+
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    // Surface an unavailable-AOCL fall-through to matmul_direct() (kernel is
+    // the caller's by-reference algo -> post-dispatch guard reports
+    // status_t::unimplemented).
+    if (aocl_unavailable.load(std::memory_order_relaxed)) {
+      kernel = matmul_algo_t::aocl_dlp;
+    }
+#endif
   }
 }
 

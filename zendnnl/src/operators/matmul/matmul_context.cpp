@@ -137,8 +137,10 @@ status_t matmul_context_t::validate() {
 
 status_t matmul_context_t::preprocess() {
   LOG_DEBUG_INFO("Preprocessing matmul_context_t");
+#if ZENDNNL_DEPENDS_AOCLDLP
   //aocl context pointer
   aocl_dlp_utils_ptr = std::make_shared<aocl_dlp_utils_t>();
+#endif
   return status_t::success;
 }
 
@@ -171,12 +173,12 @@ dlp_metadata_t *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
   LOG_DEBUG_INFO("Getting aocl_dlp_post_op_ptr from matmul_context_t");
   return aocl_dlp_utils_ptr->get_aocl_dlp_post_op_ptr_unsafe();
 }
-#endif
 
 void *matmul_context_t::get_aocl_dlp_reordered_weights_ptr_unsafe() const {
   LOG_DEBUG_INFO("Getting aocl_dlp_reordered_weights_ptr from matmul_context_t");
   return aocl_dlp_utils_ptr->get_aocl_dlp_reordered_weights_ptr_unsafe();
 }
+#endif
 
 std::size_t matmul_context_t::hash() {
   LOG_DEBUG_INFO("Creating hash for matmul_context_t");

@@ -113,13 +113,12 @@ status_t ggml_reorder_size(int N, int K, char trans, size_t &reorder_size) {
     symq_meta.group_size = kGgmlGroupSize;
     size_t raw_size = aocl_get_reorder_buf_size_s8s8s32os32_sym_quant(
                           'r', trans, 'B', K, N, &symq_meta, nullptr);
+    reorder_size = align_up(raw_size);
+    return status_t::success;
 #else
     log_error("GGML packed weights require AOCL DLP sym-quant reorder");
     return status_t::failure;
 #endif
-
-    reorder_size = align_up(raw_size);
-    return status_t::success;
 }
 
 status_t ggml_reorder_unpacked_weights(int N, int K, int ldb, char trans,

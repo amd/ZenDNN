@@ -15,7 +15,9 @@
 # *******************************************************************************/
 #include "reorder_operator_impl.hpp"
 #include "reorder_kernel_list.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp/reorder_utils.hpp"
+#endif
 
 namespace zendnnl {
 namespace ops {
@@ -155,7 +157,13 @@ status_t reorder_impl_t::kernel_factory() {
   auto algo_format = context.get_algo_format();
 
   if (algo_format == "aocl") {
+#if ZENDNNL_DEPENDS_AOCLDLP
     kernel = std::shared_ptr<reorder_kernel_t>(get_reorder_aocl_kernel());
+#else
+    apilog_error("AOCL-DLP reorder kernel selected but ZenDNNL was built "
+                 "without AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0).");
+    return status_t::unimplemented;
+#endif
   }
   else if (algo_format == "onednn") {
     apilog_error("onednn kernel is not supported");
@@ -186,6 +194,11 @@ size_t reorder_impl_t::get_reorder_size() {
   auto algo_format = context.get_algo_format();
 
   if (algo_format == "aocl") {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    apilog_error("AOCL-DLP reorder selected but ZenDNNL was built without "
+                 "AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0).");
+    reorder_status = status_t::unimplemented;
+#else
     auto input_tensor = get_input("reorder_input");
 
     if (!input_tensor) {
@@ -206,6 +219,7 @@ size_t reorder_impl_t::get_reorder_size() {
 
     reorder_size = aocl_dlp_reorder_utils_t::get_aocl_reorder_size(context,
                    *input_tensor);
+#endif
   }
   else if (algo_format == "onednn") {
     apilog_error("onednn reorder is not supported");

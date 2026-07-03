@@ -51,10 +51,10 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief get post op pointer */
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *get_aocl_dlp_post_op_ptr_unsafe() const;
-#endif
 
   /** @brief get reordered weights pointer */
   void *get_aocl_dlp_reordered_weights_ptr_unsafe() const;
+#endif
 
   /** @brief Set parameter alpha value.*/
   matmul_context_t &set_alpha(float alpha_);
@@ -81,7 +81,9 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief Returns matmul context information */
   std::string context_info() override;
 
+#if ZENDNNL_DEPENDS_AOCLDLP
   std::shared_ptr<aocl_dlp_utils_t> aocl_dlp_utils_ptr; /**< aocl dlp utils */
+#endif
   friend class matmul_operator_t;
   friend class matmul_impl_t;
 

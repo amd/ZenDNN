@@ -98,11 +98,29 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
     }
   }
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // No AOCL-DLP backend in this build. This tail is the universal AOCL
+  // fallback: it is reachable not only when an AOCL kernel is selected, but
+  // also when another backend falls through without computing (e.g. a libxsmm
+  // runtime decline, or onednn selected with oneDNN compiled out). It can also
+  // run inside OpenMP parallel regions (group-matmul / BMM), where letting
+  // run_dlp throw would call std::terminate. Log and return without computing
+  // instead of crashing.
+  log_error("Kernel ", kernel_to_string(kernel), " requires the AOCL-DLP "
+            "fallback, but ZenDNNL was built without AOCL-DLP support "
+            "(ZENDNNL_DEPENDS_AOCLDLP=0); matmul output not computed.");
+  // kernel is a reference: mark the unavailable AOCL-DLP fallback so
+  // matmul_direct()'s post-dispatch guard reports status_t::unimplemented
+  // even when the fell-through kernel name was libxsmm/onednn/etc.
+  kernel = matmul_algo_t::aocl_dlp;
+  return;
+#else
   log_info("Using AOCL DLP kernel");
   run_dlp(layout, transA, transB, M, N, K, alpha, beta,
           lda, ldb, ldc, mem_format_a, mem_format_b,
           A, B, C, dtypes, lowoha_param, bias, kernel, is_weights_const);
   return;
+#endif
 }
 
 void matmul_execute(const char layout,
@@ -167,6 +185,13 @@ void matmul_execute(const char layout,
       part_config, params, batch_params,
       is_weights_const, alpha, beta
     );
+    // execute_partitioned_matmul() may fall back to aocl_dlp (it sets
+    // config.kernel and calls matmul_kernel_wrapper). Propagate the effective
+    // kernel back to the caller's reference so matmul_direct()'s post-dispatch
+    // guard observes an AOCL-DLP fallback: in an AOCL-DLP-disabled build it
+    // then returns status_t::unimplemented instead of reporting success with
+    // an uncomputed dst.
+    kernel = part_config.kernel;
     return;
   }
 
@@ -378,6 +403,18 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                                        batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const,
                                        transB);
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // AOCL-DLP backed kernels are unavailable in this build. Reject up front
+  // with a clear status instead of falling through to the error-out stub.
+  if (kernel == matmul_algo_t::aocl_dlp ||
+      kernel == matmul_algo_t::aocl_dlp_blocked ||
+      kernel == matmul_algo_t::batched_sgemm) {
+    log_error("Selected kernel ", kernel_to_string(kernel),
+              " requires AOCL-DLP, but ZenDNNL was built without AOCL-DLP "
+              "support (ZENDNNL_DEPENDS_AOCLDLP=0).");
+    return status_t::unimplemented;
+  }
+#endif
   matmul_algo_t api_log_kernel = kernel;
   static unsigned int auto_version = get_auto_tuner_ver();
 
@@ -408,6 +445,22 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                    is_weights_const, src_type_size, out_type_size, num_threads,
                    kernel, params, batch_params, auto_version);
   }
+
+#if !ZENDNNL_DEPENDS_AOCLDLP
+  // A native/onednn decline inside matmul_execute can fall back to AOCL-DLP
+  // (kernel is taken by reference and mutated, e.g. for an unsupported dtype
+  // or transA). In an AOCL-DLP-disabled build that fallback cannot compute,
+  // so report the failure to the caller instead of returning success with an
+  // uncomputed output buffer.
+  if (kernel == matmul_algo_t::aocl_dlp ||
+      kernel == matmul_algo_t::aocl_dlp_blocked ||
+      kernel == matmul_algo_t::batched_sgemm) {
+    log_error("Matmul fell back to AOCL-DLP (", kernel_to_string(kernel),
+              "), unavailable in this build (ZENDNNL_DEPENDS_AOCLDLP=0); "
+              "output not computed.");
+    return status_t::unimplemented;
+  }
+#endif
 
   if (is_profile) {
     profiler.tbp_stop();
