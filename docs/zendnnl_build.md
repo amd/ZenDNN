@@ -117,6 +117,7 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_BUILD_ASAN | Enable AddressSanitizer instrumentation. Effective for Debug builds. | BOOL | OFF |
 | ZENDNNL_CODE_COVERAGE | Enable code coverage instrumentation. | BOOL | OFF |
 | ZENDNNL_NATIVE_F32_ACCUM | Force F32 accumulation in native F16 kernels that otherwise use the AVX512-FP16 fast path. | BOOL | OFF |
+| ZENDNNL_FUSED_ADD_RMS_F16 | Enable the native AVX512-FP16 (F16-accumulating) fast path for FusedAddRMSNorm. Off by default because the in-place residual add plus F16 sum-of-squares accumulation loses too much precision; intended only for A/B precision experiments. | BOOL | OFF |
 | ZENDNNL_LIB_BUILD_ARCHIVE | Build ZenDNN archive (static) library. | BOOL | ON |
 | ZENDNNL_LIB_BUILD_SHARED | Build ZenDNN shared library. Build should be configured to build at least one of the archive or shared library. | BOOL | OFF |
 
@@ -166,6 +167,7 @@ These options pin a specific arithmetic precision at the kernel level. They are 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
 | ZENDNNL_NATIVE_F32_ACCUM | Master switch that disables every `__m512h`-native FP16-FMA kernel in the library (currently used by reorder, normalization, embedding_bag, and matmul) and forces those operators onto their F32-accumulating AVX-512 fallback. Use for numerical-reproducibility studies or when you want bit-exact agreement with the scalar reference at the cost of ~2× throughput on FP16-FMA-capable hosts. When OFF (default), FP16-FMA is auto-selected at dispatch time via `can_use_f16_fma_kernel()` whenever the host has AVX512-FP16 ISA and the library was built with GCC 12+. When ON, `can_use_f16_fma_kernel()` returns false unconditionally and the FP16-FMA TUs compile to empty link stubs. | BOOL | OFF |
+| ZENDNNL_FUSED_ADD_RMS_F16 | Opt-in switch that compiles in the native AVX512-FP16 (F16-accumulating) fast path for FusedAddRMSNorm, gated on a strict `src_dt == dst_dt == gamma_dt == f16` combo. OFF by default because the in-place residual add plus F16 sum-of-squares accumulation loses too much precision vs. the FP32-accumulating AVX-512 kernel; intended only for A/B precision experiments. Requires GCC 12+ for `__m512h`. Subordinate to `ZENDNNL_NATIVE_F32_ACCUM`: if that master switch is ON, `can_use_f16_fma_kernel()` is false and FusedAddRMSNorm stays on the FP32 kernel regardless of this flag. | BOOL | OFF |
 
 ```bash
 # Default build — FP16-FMA when the host has AVX512-FP16 ISA, GCC 12+

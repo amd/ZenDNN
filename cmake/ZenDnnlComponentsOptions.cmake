@@ -29,6 +29,9 @@ set(ZENDNNL_LIB_BUILD_SHARED  OFF CACHE BOOL "Build zendnl shared library")
 set(ZENDNNL_NATIVE_F32_ACCUM OFF CACHE BOOL
   "Force F32 accumulation in F16 native kernels (embedding-bag, normalization)")
 
+set(ZENDNNL_FUSED_ADD_RMS_F16 OFF CACHE BOOL
+  "Enable the native AVX512-FP16 (F16-accumulating) fast path for FusedAddRMSNorm")
+
 # sanity check
 if((NOT ZENDNNL_LIB_BUILD_ARCHIVE) AND (NOT ZENDNNL_LIB_BUILD_SHARED))
   message(FATAL_ERROR,

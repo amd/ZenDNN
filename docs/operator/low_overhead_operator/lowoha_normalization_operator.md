@@ -92,7 +92,8 @@ status_t normalization_direct(
 
 ### Dispatch Logic
 
-- `LAYER_NORM` / `RMS_NORM` / `FUSED_ADD_RMS_NORM` → AVX-512-FP16 (`__m512h`) when [F16 FMA Mode](#f16-fma-mode) eligibility holds, otherwise the FP32-accumulating AVX-512 kernel.
+- `LAYER_NORM` / `RMS_NORM` → AVX-512-FP16 (`__m512h`) when [F16 FMA Mode](#f16-fma-mode) eligibility holds, otherwise the FP32-accumulating AVX-512 kernel.
+- `FUSED_ADD_RMS_NORM` → the FP32-accumulating AVX-512 kernel by default. When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, it uses the AVX-512-FP16 (`__m512h`) kernel under a strict all-f16 gate (see [F16 FMA Mode](#f16-fma-mode)); otherwise it falls through to the FP32-accumulating AVX-512 kernel.
 - `BATCH_NORM` → Reference (scalar) kernel.
 - For non-F16 configurations, any path falls back to the reference kernel when AVX-512 is unavailable.
 - F16 configurations (any actually-used buffer is `f16`) require AVX-512-FP16 up-front; the API returns `status_t::isa_unsupported` and does **not** fall back to the reference kernel.
@@ -233,7 +234,7 @@ For all other norm types, pass `nullptr`.
 
 Native AVX-512-FP16 acceleration is selected when **all** of the following hold:
 
-- `norm_type` is `LAYER_NORM`, `RMS_NORM`, or `FUSED_ADD_RMS_NORM` (BatchNorm is never F16-eligible).
+- `norm_type` is `LAYER_NORM` or `RMS_NORM` (BatchNorm is never F16-eligible; FusedAddRMSNorm is F16-eligible only when built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, and then only under a strict `src_dt == dst_dt == gamma_dt == f16` gate).
 - At least one of `src_dt` / `dst_dt` is `f16`.
 - Actually-used `gamma_dt` / `beta_dt` is `f16` or `f32` (`bf16` forces the FP32 path).
 - Host CPU exposes AVX-512-FP16.
@@ -251,17 +252,20 @@ When eligible, the inner loop runs in `__m512h` registers (32 lanes/register, ~2
 | `(bf16, bf16)` / `(bf16, f32)` / `(f32, bf16)` | any | any | AVX-512 (FP32-accumulating) |
 | `(f16, bf16)` / `(bf16, f16)` | any | any | **Rejected** — `status_t::failure` |
 
-`FUSED_ADD_RMS_NORM` keeps a stricter gate: `src_dt == dst_dt == gamma_dt == f16` (the residual buffer aliases `src` and is read-modify-written in place, so it must share the F16 storage layout). Mixed-dtype fused-add falls through to the AVX-512 (FP32) kernel.
+By default `FUSED_ADD_RMS_NORM` has no AVX-512-FP16 fast path and always runs on the FP32-accumulating AVX-512 kernel. The in-place residual add plus F16 sum-of-squares accumulation produced unacceptable precision loss, so the native FP16 fused-add kernel is compiled out by default.
+
+> **Opt-in fast path:** Build with `-DZENDNNL_FUSED_ADD_RMS_F16=ON` to re-enable the native AVX-512-FP16 (F16-accumulating) fused-add kernel. It uses a strict `src_dt == dst_dt == gamma_dt == f16` gate (the residual buffer aliases `src` and is read-modify-written in place, so it must share the f16 storage layout); mixed-dtype fused-add still falls through to the FP32-accumulating AVX-512 kernel. Intended for A/B precision experiments only — expect reduced accuracy vs. the FP32 path.
 
 `BATCH_NORM` always uses the reference kernel (no AVX-512 BatchNorm fast path).
 
 ### Build-Time Opt-Out
 
-Pass `-DZENDNNL_NATIVE_F32_ACCUM=ON` to CMake to disable the native AVX-512-FP16 fast path for LayerNorm / RMSNorm / FusedAddRMSNorm. With this flag set:
+Pass `-DZENDNNL_NATIVE_F32_ACCUM=ON` to CMake to disable the native AVX-512-FP16 fast path for LayerNorm / RMSNorm. With this flag set:
 
 - Those calls take the FP32-accumulating AVX-512 kernel instead (useful for A/B precision comparisons and reproducibility studies).
 - F16 inputs are also **enabled on hosts without AVX-512-FP16**: the FP32 kernel converts F16 storage via F16C (`_mm512_cvtph_ps` / `_mm512_cvtps_ph`). Without the flag, F16 calls on such hosts return `status_t::isa_unsupported`.
 - It has no effect on BatchNorm (always reference) or `bf16`-gamma/beta combos (already on the FP32 path).
+- If the library was also built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, this flag takes precedence: `ZENDNNL_NATIVE_F32_ACCUM=ON` disables the opt-in FusedAddRMSNorm F16 path too (both share the `can_use_f16_fma_kernel()` gate), so FusedAddRMSNorm stays on the FP32-accumulating kernel.
 
 The same switch also covers the F16 path in the [LowOHA EmbeddingBag operator](lowoha_embedding_bag_operator.md).
 
@@ -616,4 +620,5 @@ The operator performs the following validations:
 
 - **Input validation** runs by default; toggle with `ZENDNNL_DIAGNOSTICS_ENABLE` (defaults to `1`). Set to `0` to skip optional validation on production hot paths — the always-on checks (F16/BF16 cross-mixing, FusedAddRMSNorm with null residual) remain in place.
 - **Profiling** is controlled by `ZENDNNL_ENABLE_PROFILER=1` and `ZENDNNL_PROFILE_LOG_LEVEL=4`. When active, `normalization_direct` logs execution time and operator parameters.
-- **F16-FMA build-time toggle:** Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to disable the native AVX-512-FP16 fast path for LayerNorm / RMSNorm / FusedAddRMSNorm on AVX-512-FP16-capable hosts; those dispatches take the FP32-accumulating AVX-512 kernel instead. The flag also enables F16 inputs on hosts without AVX-512-FP16 (storage handled via F16C convert in the FP32 kernel). It has no effect on BatchNorm or `bf16`-gamma/beta combos. See the [F16 FMA Mode](#f16-fma-mode) section for details.
+- **F16-FMA build-time toggle:** Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to disable the native AVX-512-FP16 fast path for LayerNorm / RMSNorm on AVX-512-FP16-capable hosts; those dispatches take the FP32-accumulating AVX-512 kernel instead. The flag also enables F16 inputs on hosts without AVX-512-FP16 (storage handled via F16C convert in the FP32 kernel). It has no effect on BatchNorm or `bf16`-gamma/beta combos. See the [F16 FMA Mode](#f16-fma-mode) section for details.
+- **FusedAddRMSNorm F16 opt-in:** FusedAddRMSNorm has no native AVX-512-FP16 path by default. Build with `-DZENDNNL_FUSED_ADD_RMS_F16=ON` to enable it under a strict `src_dt == dst_dt == gamma_dt == f16` gate (A/B precision experiments only). `-DZENDNNL_NATIVE_F32_ACCUM=ON` overrides it and keeps FusedAddRMSNorm on the FP32-accumulating kernel.

@@ -67,8 +67,6 @@ status_t normalization_kernel_wrapper(
   //
   // Plain RMS_NORM and LAYER_NORM accept three (src_dt, dst_dt) combos:
   //   (f16, f16), (f16, f32), (f32, f16).
-  // FUSED_ADD_RMS_NORM keeps the strict all-f16 gate because residual
-  // aliases src in storage and is read-modify-written in place.
   const bool src_or_dst_f16   = (params.src_dt == data_type_t::f16 ||
                                  params.dst_dt == data_type_t::f16);
   const bool src_dst_f16_path = src_or_dst_f16 &&
@@ -83,9 +81,6 @@ status_t normalization_kernel_wrapper(
   const bool rms_f16_fma_eligible = src_dst_f16_path && gamma_f16_fma_ok;
   const bool ln_f16_fma_eligible  = rms_f16_fma_eligible &&
                                     (!params.use_shift || beta_f16_fma_ok);
-  const bool fused_add_all_f16    = (params.src_dt   == data_type_t::f16 &&
-                                     params.dst_dt   == data_type_t::f16 &&
-                                     params.gamma_dt == data_type_t::f16);
 
   // Record the FMA precision the chosen kernel will use so the reference
   // kernel can bit-match it during gtest comparisons. Default to f32
@@ -115,7 +110,16 @@ status_t normalization_kernel_wrapper(
     params.accum_type = data_type_t::f32;
   }
 
-  // FUSED_ADD_RMS_NORM stays on the strict all-f16 fast path.
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
+  // Opt-in native AVX512-FP16 fast path for FUSED_ADD_RMS_NORM (built with
+  // -DZENDNNL_FUSED_ADD_RMS_F16=ON). Kept behind the flag because the in-place
+  // residual add plus F16 sum-of-squares accumulation loses too much precision
+  // vs. the FP32-accumulating AVX-512 kernel. Strict all-f16 gate: the residual
+  // buffer aliases src and is read-modify-written in place, so it must share the
+  // f16 storage layout. Mixed-dtype fused-add falls through to the FP32 path.
+  const bool fused_add_all_f16 = (params.src_dt   == data_type_t::f16 &&
+                                  params.dst_dt   == data_type_t::f16 &&
+                                  params.gamma_dt == data_type_t::f16);
   if (can_use_f16_fma_kernel() && fused_add_all_f16 &&
       params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
     log_info("Using AVX512-FP16 kernel for ",
@@ -127,17 +131,15 @@ status_t normalization_kernel_wrapper(
     if (status == status_t::success) {
       return status;
     }
-    // isa_unsupported here only on toolchains < GCC 12 (no __m512h); fall
-    // through to the FP32-accumulating AVX-512 path. Any other failure is a
-    // real error.
-    if (status != status_t::isa_unsupported) {
+    if (status != status_t::isa_unsupported &&
+        status != status_t::unimplemented) {
       log_error(norm_type_to_str(params.norm_type), " kernel failed");
       return status;
     }
-    // Fell through; the AVX-512 FP32 kernel will run next. Reset the
-    // accum_type so the reference kernel sees the actual precision used.
+    // Fell through; reset accum_type so the AVX-512 FP32 path sees f32.
     params.accum_type = data_type_t::f32;
   }
+#endif
 
   // Plain LAYER_NORM with mixed-dtype (f16/f32, f32/f16) eligibility.
   if (can_use_f16_fma_kernel() && ln_f16_fma_eligible &&

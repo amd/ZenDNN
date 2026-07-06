@@ -71,7 +71,7 @@ layer_norm, 2x4096, 1, f32:f16, 1e-5, true, true,  100, 20, f16, f32
 > - **F16-FMA fast path:** On hosts with AVX512-FP16, the native FP16-FMA kernel performs the inner loop in `__m512h` registers (~2x throughput vs. the FP32-accumulating AVX-512 kernel). The eligibility predicate depends on the norm type:
 >     - `rms_norm` — `src_dt`/`dst_dt` ∈ `{f16, f32}` with at least one `f16`, and `gamma_dt` ∈ `{f16, f32}`. `beta_dt` is irrelevant (RMSNorm never reads beta).
 >     - `layer_norm` — same as `rms_norm`, plus `beta_dt` ∈ `{f16, f32}` only when `use_shift=true` (if `use_shift=false`, `beta_dt` is irrelevant).
->     - `fused_add_rms_norm` — strict `src_dt = dst_dt = gamma_dt = f16` (residual aliases src in place and must share the f16 storage layout). Mixed `(src, dst)` falls through to the FP32 path. `beta_dt` is irrelevant.
+>     - `fused_add_rms_norm` — by default no F16-FMA path; always uses the FP32-accumulating AVX-512 kernel. When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, it gains an opt-in F16-FMA path with a strict `src_dt = dst_dt = gamma_dt = f16` gate (residual aliases src in place and must share the f16 storage layout); mixed `(src, dst)` still falls through to the FP32 path. `beta_dt` is irrelevant.
 >     - `batch_norm` — always uses the reference kernel; the F16-FMA path does not apply.
 >
 >   `bf16` in a *checked* operand always disqualifies the FP16-FMA path for that call. To force the FP32 path library-wide for A/B comparisons on an AVX512-FP16 host, build with `-DZENDNNL_NATIVE_F32_ACCUM=ON`.

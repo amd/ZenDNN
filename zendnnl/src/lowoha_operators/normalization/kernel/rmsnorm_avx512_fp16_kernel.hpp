@@ -24,13 +24,14 @@ namespace lowoha {
 namespace normalization {
 
 // ---------------------------------------------------------------------------
-// AVX512-FP16 (native __m512h) RMS Normalization (plain and fused-add).
+// AVX512-FP16 (native __m512h) plain RMS Normalization (and, when built with
+// -DZENDNNL_FUSED_ADD_RMS_F16=ON, fused-add RMS Normalization).
 //
 //   Plain RMS:
 //     rms    = sqrt( (1/N) * Σ input[b,i]² + eps )
 //     y[b,i] = gamma[i] * input[b,i] / rms
 //
-//   Fused Add + RMS:
+//   Fused Add + RMS (only compiled when ZENDNNL_FUSED_ADD_RMS_F16 is defined):
 //     residual[b,i] += input[b,i]                  (in-place, FP16)
 //     rms    = sqrt( (1/N) * Σ residual[b,i]² + eps )
 //     y[b,i] = gamma[i] * residual[b,i] / rms
@@ -50,7 +51,14 @@ namespace normalization {
 //   Fused Add + RMS (params.norm_type == FUSED_ADD_RMS_NORM):
 //     src_dt == dst_dt == gamma_dt == f16 (strict).
 //     Residual aliases src in-place storage and is read-modify-written;
-//     mixed-dtype fused-add is rejected upstream by the dispatch.
+//     mixed-dtype fused-add is rejected upstream by the dispatch. Only
+//     available when the library is built with -DZENDNNL_FUSED_ADD_RMS_F16=ON;
+//     otherwise this entry point returns status_t::unimplemented for
+//     FUSED_ADD_RMS_NORM and the caller uses the FP32-accumulating kernel.
+//
+// The `residual` parameter is only read for FUSED_ADD_RMS_NORM; pass nullptr
+// for plain RMS_NORM (it is ignored). It is kept in the signature regardless
+// of the build flag so callers do not need to change.
 //
 // Dispatch MUST gate this entry point on
 // zendnnl_platform_info().get_avx512_f16_status() — calling it on a CPU

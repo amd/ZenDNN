@@ -37,9 +37,11 @@ using zendnnl::common::f16x32_load_typed;
 using zendnnl::common::f16x32_load_tail_typed;
 using zendnnl::common::f16x32_load_mask_typed;
 using zendnnl::common::f16x32_store_typed;
-using zendnnl::common::f16x32_store_mask_typed;
 using zendnnl::common::f16x32_store_tail_typed;
 using zendnnl::common::reduce_add_ph_to_fp32;
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
+using zendnnl::common::f16x32_store_mask_typed;
+#endif
 
 // =============================================================================
 // Plain RMS Norm (native FP16) — single row, processes one [1, norm_size] slice.
@@ -173,6 +175,7 @@ static inline void rms_norm_row_fp16(
   }
 }
 
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
 // =============================================================================
 // Fused Add + RMS Norm (native FP16) — single row.
 //
@@ -183,6 +186,11 @@ static inline void rms_norm_row_fp16(
 // Pass 2 re-reads residual from L1 (warm from pass 1 stores). This matches
 // the reference precision semantics: out is computed from the FP16-rounded
 // in-place sum, not the unrounded FP32 sum.
+//
+// NOTE: compiled only when the library is built with
+// -DZENDNNL_FUSED_ADD_RMS_F16=ON. It is kept behind this flag because the
+// in-place residual add plus F16 sum-of-squares accumulation produced
+// unacceptable precision loss versus the FP32-accumulating AVX-512 kernel.
 // =============================================================================
 
 static inline void fused_add_rms_row_fp16(
@@ -306,10 +314,12 @@ static inline void fused_add_rms_row_fp16(
     }
   }
 }
+#endif // ZENDNNL_FUSED_ADD_RMS_F16
 
 // =====================================================================
-// Dispatches RMS_NORM (with mixed-dtype f16/f32 boundaries) and
-// FUSED_ADD_RMS_NORM (all-f16, residual aliases src).
+// Dispatches plain RMS_NORM (with mixed-dtype f16/f32 boundaries), and
+// FUSED_ADD_RMS_NORM (all-f16, residual aliases src) when built with
+// -DZENDNNL_FUSED_ADD_RMS_F16=ON.
 //
 // Plain RMS_NORM supports three (src_dt, dst_dt) combos:
 //   (f16, f16) — no boundary conversion (fastest)
@@ -321,10 +331,10 @@ static inline void fused_add_rms_row_fp16(
 // for a total of 6 templated instantiations. The FMA inner loop stays in
 // __m512h regardless; the conversions happen only at load/store boundaries.
 //
-// FUSED_ADD_RMS_NORM keeps the all-f16 restriction because residual is
-// read-modify-written in place and must share src dtype; mixed-dtype
-// fused-add falls back to the F32-accumulating AVX-512 kernel via the
-// dispatch eligibility check.
+// FUSED_ADD_RMS_NORM (only when ZENDNNL_FUSED_ADD_RMS_F16 is defined) keeps the
+// all-f16 restriction because residual is read-modify-written in place and must
+// share src dtype; mixed-dtype fused-add falls back to the F32-accumulating
+// AVX-512 kernel via the dispatch eligibility check.
 // =====================================================================
 
 status_t rms_norm_avx512_fp16(
@@ -334,11 +344,30 @@ status_t rms_norm_avx512_fp16(
   const void *gamma,
   norm_params &params
 ) {
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
+  // Plain RMS_NORM plus the opt-in FUSED_ADD_RMS_NORM fast path. Any other
+  // norm_type is reported as unimplemented so the caller falls back to the
+  // FP32-accumulating AVX-512 kernel instead of silently computing the wrong
+  // operation.
+  if (params.norm_type != norm_type_t::RMS_NORM &&
+      params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM) {
+    return status_t::unimplemented;
+  }
+  const bool is_fused = (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM
+                         && residual);
+#else
+  // Plain RMS_NORM only. Any other norm_type (e.g. FUSED_ADD_RMS_NORM) is
+  // reported as unimplemented so the caller falls back to the FP32-accumulating
+  // AVX-512 kernel instead of silently computing the wrong operation.
+  (void)residual;
+  if (params.norm_type != norm_type_t::RMS_NORM) {
+    return status_t::unimplemented;
+  }
+#endif
+
   const float    inv_n  = 1.0f / static_cast<float>(params.norm_size);
   const uint64_t N      = params.norm_size;
   const int64_t  batch  = static_cast<int64_t>(params.batch);
-  const bool     is_fused = (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM
-                             && residual);
 
   // Pick the right template instantiation based on (src_dt, dst_dt, gamma_dt).
   // The dispatch upstream guarantees gamma_dt ∈ {f16, f32} here.
@@ -348,6 +377,7 @@ status_t rms_norm_avx512_fp16(
   size_t in_elem_sz   = 0;
   size_t out_elem_sz  = 0;
 
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
   if (is_fused) {
     if (params.src_dt   != data_type_t::f16 ||
         params.dst_dt   != data_type_t::f16 ||
@@ -355,7 +385,9 @@ status_t rms_norm_avx512_fp16(
       return status_t::unimplemented;
     }
   }
-  else {
+  else
+#endif
+  {
     const data_type_t src_dt   = params.src_dt;
     const data_type_t dst_dt   = params.dst_dt;
     const data_type_t gamma_dt = params.gamma_dt;
@@ -404,21 +436,22 @@ status_t rms_norm_avx512_fp16(
   }
 
   auto row_loop = [&](int64_t b) {
-    if (!is_fused) {
-      const char *in_byte_ptr  = static_cast<const char *>(input)
-                                 + b * N * in_elem_sz;
-      char *out_byte_ptr       = static_cast<char *>(output)
-                                 + b * N * out_elem_sz;
-      row_fn(in_byte_ptr, out_byte_ptr, gamma,
-             N, inv_n, params.epsilon, params.use_scale);
-    }
-    else {
+#if defined(ZENDNNL_FUSED_ADD_RMS_F16)
+    if (is_fused) {
       fused_add_rms_row_fp16(
         static_cast<const uint16_t *>(input)  + b * N,
         static_cast<uint16_t *>(output)       + b * N,
         static_cast<uint16_t *>(residual)     + b * N,
         gamma, N, inv_n, params.epsilon, params.use_scale);
+      return;
     }
+#endif
+    const char *in_byte_ptr  = static_cast<const char *>(input)
+                               + b * N * in_elem_sz;
+    char *out_byte_ptr       = static_cast<char *>(output)
+                               + b * N * out_elem_sz;
+    row_fn(in_byte_ptr, out_byte_ptr, gamma,
+           N, inv_n, params.epsilon, params.use_scale);
   };
 
   if (batch <= 1) {

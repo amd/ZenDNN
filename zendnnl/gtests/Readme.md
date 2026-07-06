@@ -957,7 +957,7 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
    `1, 31, 33, 47, 63, 95, 129`. These force the masked AVX512-FP16 tail path in
    the F16 kernels (`f16_maskz_loadu_vec` / `f16_mask_storeu_vec`), covering
    tail-only, single-block + tail, and multi-block + tail remainders.
- - Sizes are exercised across RMSNorm, LayerNorm, and FusedAddRMSNorm.
+ - Sizes are exercised across RMSNorm and LayerNorm (the norm types that use the F16 kernels by default). FusedAddRMSNorm is intentionally excluded from this shared suite (it pins `gamma_dt=f32`, which cannot trigger the native fused-add FP16 path). When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, the dedicated standalone test `NormalizationFusedTailF16.MaskedTail` covers the fused-add masked-tail path with strict all-f16 dtypes (skipped at runtime on non-AVX512-FP16 hosts).
  - It exists as a **separate instantiation prefix** (not a new testcase) because
    in GoogleTest the test name (`TEST_P`) selects a *behavior* while the
    instantiation prefix selects the *set of parameter values*; the random

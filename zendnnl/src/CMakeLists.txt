@@ -319,6 +319,23 @@ if(ZENDNNL_NATIVE_F32_ACCUM)
   endif()
 endif()
 
+# Build-time toggle that re-introduces the native AVX512-FP16 (F16-accumulating)
+# fast path for FusedAddRMSNorm. The kernel and its dispatch branch are kept in
+# the tree but compiled out by default (OFF), because the in-place residual add
+# plus F16 sum-of-squares accumulation was found to lose too much precision. Turn
+# it ON only for A/B precision experiments; the cache variable is declared in
+# cmake/ZenDnnlComponentsOptions.cmake alongside every other ZENDNNL_* option.
+if(ZENDNNL_FUSED_ADD_RMS_F16)
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_compile_definitions(zendnnl_archive
+      PUBLIC ZENDNNL_FUSED_ADD_RMS_F16)
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_compile_definitions(zendnnl
+      PUBLIC ZENDNNL_FUSED_ADD_RMS_F16)
+  endif()
+endif()
+
 # create top level include file
 prolog_header_file(${zendnnl_inc_file})
 
