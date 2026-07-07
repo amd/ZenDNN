@@ -100,7 +100,7 @@ ZenDNN library is integrated with TensorFlow and PyTorch via their respective pl
 
 Build from source will be supported on
 - Ubuntu® 22.04, 24.04
-- Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
+- Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5, 10.2
 
 
 # 2. Build and Install

@@ -84,7 +84,7 @@ Framework integration build assumes that ZenDNN is part of an embedding inferenc
 ## 2. Required Toolchains
 
 - **Build System** : CMake >= 3.26
-- **Compilers**    : GNU g++ >= 11.2.0
+- **Compilers**    : GNU g++/gcc >= 11.2.0 and g++/gcc < 14.0.0
 - **Other tools**  : OpenMP is required. Doxygen is required only when building API documentation.
 
 ## 3. Build Options
