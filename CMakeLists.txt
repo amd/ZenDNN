@@ -17,7 +17,7 @@
 cmake_minimum_required(VERSION 3.26)
 
 # project information
-project(ZENDNNL VERSION 6.0.0
+project(ZENDNNL VERSION 6.0.1
   DESCRIPTION "Accelerated Deep Learning Inference on AMD Zen Architecture"
   LANGUAGES C CXX)
 
