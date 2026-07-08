@@ -44,97 +44,104 @@ jobs:
           github-token: ${{ secrets.ZIAIE_PAT }}
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
-            
-            console.log(`🔍 Looking for ZenTorch workflow for PR #${pr.number}`);
-            console.log(`🔑 Using ZIAIE_PAT for cross-repo access`);
-            
-            try {
-              // Test access with organization PAT
-              const user = await github.rest.users.getAuthenticated();
-              console.log(`✅ Authenticated as: ${user.data.login}`);
-              
-              const repo = await github.rest.repos.get({
-                owner: 'AMD-Zenai',
-                repo: 'ZenDNN_PyTorch_Plugin'
-              });
-              console.log(`✅ Repository accessible: ${repo.data.full_name} (${repo.data.visibility})`);
-              
-              // Wait for trigger to process
-              console.log('⏳ Waiting 2 minutes for ZenTorch trigger...');
-              await new Promise(resolve => setTimeout(resolve, 120000));
-              
-              // Get recent workflow runs
-              const response = await github.rest.actions.listWorkflowRunsForRepo({
-                owner: 'AMD-Zenai',
-                repo: 'ZenDNN_PyTorch_Plugin',
-                per_page: 15
-              });
-              
-              console.log(`📊 Found ${response.data.workflow_runs.length} total workflow runs`);
-              
-              // Filter for repository_dispatch events
-              const dispatchRuns = response.data.workflow_runs.filter(run => 
-                run.event === 'repository_dispatch'
-              );
-              
-              console.log(`🎯 Found ${dispatchRuns.length} repository_dispatch runs:`);
-              
-              dispatchRuns.forEach((run, i) => {
-                const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
-                console.log(`  ${i+1}. Run ${run.id}: "${run.name}" - ${run.status} (${age}m ago)`);
-              });
-              
-              // Look for recent runs (within 20 minutes)
-              const recentRuns = dispatchRuns.filter(run => {
-                const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
-                return age <= 20;
-              });
-              
-              if (recentRuns.length > 0) {
-                const mostRecent = recentRuns[0];
-                const age = Math.round((Date.now() - new Date(mostRecent.created_at)) / (1000 * 60));
-                
-                console.log(`✅ Found recent ZenTorch run: ${mostRecent.id} (${age}m ago)`);
-                console.log(`   Name: ${mostRecent.name}`);
-                console.log(`   Status: ${mostRecent.conclusion || mostRecent.status}`);
-                console.log(`   URL: ${mostRecent.html_url}`);
-                
-                return {
-                  found: true,
-                  external_run_id: mostRecent.id,
-                  external_run_url: mostRecent.html_url,
-                  external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-                  external_status: mostRecent.conclusion || mostRecent.status,
-                  minutes_ago: age,
-                  token_used: 'ZIAIE_PAT'
-                };
-              } else {
-                console.log(`⚠️ No recent repository_dispatch runs found (last 20 minutes)`);
-                
-                if (dispatchRuns.length > 0) {
-                  const latest = dispatchRuns[0];
-                  const age = Math.round((Date.now() - new Date(latest.created_at)) / (1000 * 60));
-                  console.log(`   Most recent was ${age} minutes ago`);
+            const headSha = pr.head_sha;
+
+            console.log(`🔍 Resolving ZenTorch build for PR #${pr.number} (head ${headSha})`);
+
+            // Reliable correlation: ZenTorch reports a commit status back onto THIS
+            // PR's head SHA with context "AMD-Zenai/ZenDNN_PyTorch_Plugin CI" and a
+            // target_url pointing to the exact ZenTorch run. Matching by commit SHA
+            // is deterministic, unlike the previous "most recent dispatch run within
+            // 20 minutes" heuristic which could pick another PR's run or miss entirely.
+            const CONTEXT_MATCH = 'zendnn_pytorch_plugin';
+
+            const runIdFromUrl = (url) => {
+              const m = (url || '').match(/\/actions\/runs\/(\d+)/);
+              return m ? Number(m[1]) : undefined;
+            };
+
+            // Primary: SHA-matched commit status.
+            const findByCommitStatus = async () => {
+              try {
+                const resp = await github.rest.repos.listCommitStatusesForRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: headSha,
+                  per_page: 100
+                });
+                // Newest first; take the first ZenTorch status.
+                const st = resp.data.find(s =>
+                  (s.context || '').toLowerCase().includes(CONTEXT_MATCH)
+                );
+                if (st) {
+                  console.log(`✅ ZenTorch commit status: state=${st.state} url=${st.target_url || '(none)'}`);
+                  return {
+                    found: true,
+                    external_run_id: runIdFromUrl(st.target_url),
+                    external_run_url: st.target_url || '',
+                    external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
+                    external_status: st.state,   // pending | success | failure | error
+                    match: 'commit_status',
+                    token_used: 'ZIAIE_PAT'
+                  };
                 }
-                
-                return { 
-                  found: false, 
-                  external_run_url: '', 
-                  reason: 'no_recent_runs',
-                  total_dispatch_runs: dispatchRuns.length,
-                  token_used: 'ZIAIE_PAT'
-                };
+              } catch (e) {
+                console.log(`⚠️ listCommitStatuses failed: ${e.message}`);
               }
-              
-            } catch (error) {
-              console.log(`❌ Error accessing ZenTorch repo: ${error.message} (${error.status})`);
-              return { 
-                found: false, 
-                external_run_url: '', 
-                error: error.message,
-                token_used: 'ZIAIE_PAT'
-              };
+              return null;
+            };
+
+            // Fallback: repository_dispatch run named "zendnnl-pr" that started at/after
+            // this PR's head commit. Only used until the SHA-matched status appears, so
+            // an in-progress link can still be shown.
+            const findByDispatchHeuristic = async () => {
+              try {
+                const commit = await github.rest.repos.getCommit({
+                  owner: context.repo.owner, repo: context.repo.repo, ref: headSha
+                });
+                const commitTime = new Date(commit.data.commit.committer.date).getTime();
+                const runs = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner: 'AMD-Zenai', repo: 'ZenDNN_PyTorch_Plugin',
+                  event: 'repository_dispatch', per_page: 30
+                });
+                const candidates = runs.data.workflow_runs
+                  .filter(r => (r.display_title || r.name || '') === 'zendnnl-pr')
+                  .filter(r => new Date(r.created_at).getTime() >= commitTime - 60000)
+                  .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                if (candidates.length > 0) {
+                  const run = candidates[0];
+                  console.log(`↪️ Heuristic ZenTorch run: ${run.id} (${run.conclusion || run.status})`);
+                  return {
+                    found: true,
+                    external_run_id: run.id,
+                    external_run_url: run.html_url,
+                    external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
+                    external_status: run.conclusion || run.status,
+                    match: 'dispatch_heuristic',
+                    token_used: 'ZIAIE_PAT'
+                  };
+                }
+              } catch (e) {
+                console.log(`⚠️ dispatch heuristic failed: ${e.message}`);
+              }
+              return null;
+            };
+
+            // Poll for a few minutes to let the ZenTorch run start and post its status.
+            let heuristic = null;
+            const maxTries = 6;   // ~6 x 45s = 4.5 min
+            for (let i = 1; i <= maxTries; i++) {
+              const byStatus = await findByCommitStatus();
+              // A status with a URL is the reliable answer.
+              if (byStatus && byStatus.external_run_url) return byStatus;
+              if (!heuristic) heuristic = await findByDispatchHeuristic();
+              console.log(`⏳ Attempt ${i}/${maxTries}: ZenTorch link not ready yet, waiting 45s...`);
+              await new Promise(r => setTimeout(r, 45000));
             }
+
+            if (heuristic) return heuristic;
+            console.log('⚠️ Could not resolve a ZenTorch build for this PR head SHA.');
+            return { found: false, external_run_url: '', reason: 'not_found', token_used: 'ZIAIE_PAT' };
 
       - name: Wait for ALL workflows to complete
         id: wait_for_completion
@@ -424,146 +431,48 @@ jobs:
         run: |
           pr_json='${{ steps.pr_info.outputs.result }}'
           completion_json='${{ steps.wait_for_completion.outputs.result }}'
+          REPO="${{ github.repository }}"
+
+          echo "📤 Building Teams notification..."
 
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number // "N/A"')
-          PR_TITLE=$(echo "$pr_json" | jq -r '.title // "N/A"' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title // "N/A"')
           PR_URL=$(echo "$pr_json" | jq -r '.url // "N/A"')
           PR_AUTHOR=$(echo "$pr_json" | jq -r '.author // "N/A"')
           HEAD_SHA=$(echo "$pr_json" | jq -r '.head_sha // "N/A"')
           SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-7)
 
-          # Safe parsing with defaults
           ALL_COMPLETE=$(echo "$completion_json" | jq -r '.all_complete // false')
           TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
           RUNNING_COUNT=$(echo "$completion_json" | jq -r '.running_count // 0')
           FORCED_COMPLETION=$(echo "$completion_json" | jq -r '.forced_completion // false')
 
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
-          
-          SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "success")] | length')
-          FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "failure")] | length')
-          CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
-          SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          WORKFLOW_TEXTBLOCKS=""
-          if [ "$TOTAL_COUNT" -gt 0 ]; then
-             echo "Building workflows with colored status text (no icons)..."
-             WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
-             for i in $(seq 0 $((WORKFLOW_COUNT - 1))); do
-               NAME=$(echo "$WORKFLOWS" | jq -r ".[$i].name")
-               STATUS=$(echo "$WORKFLOWS" | jq -r ".[$i].status | ascii_upcase")
-               URL=$(echo "$WORKFLOWS" | jq -r ".[$i].url")
-               REPO=$(echo "$WORKFLOWS" | jq -r ".[$i].repository // \"\"")
-               
-               # Escape quotes for JSON
-               NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
-               
-               # ✅ COLOR CODING for status text only
-               case "$STATUS" in
-                 "SUCCESS")
-                   STATUS_COLOR="Good"
-                   ;;
-                 "FAILURE")
-                   STATUS_COLOR="Attention"
-                   ;;
-                 "CANCELLED")
-                   STATUS_COLOR="Warning"
-                   ;;
-                 "SKIPPED")
-                   STATUS_COLOR="Default"
-                   ;;
-                 "IN_PROGRESS"|"QUEUED"|"PENDING")
-                   STATUS_COLOR="Default"
-                   ;;
-                 *)
-                   STATUS_COLOR="Default"
-                   ;;
-               esac
-               
-               if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
-                 REPO_TEXT=" ($REPO)"
-               else
-                 REPO_TEXT=""
-               fi
-               
-               # ✅ Create RichTextBlock with colored status only (no icons)
-               COMBINED_BLOCK='{
-                 "type": "RichTextBlock",
-                 "inlines": [
-                   {
-                     "type": "TextRun",
-                     "text": "• "
-                   },
-                   {
-                     "type": "TextRun",
-                     "text": "'$NAME_SAFE'",
-                     "selectAction": {
-                       "type": "Action.OpenUrl",
-                       "url": "'$URL'"
-                     }
-                   },
-                   {
-                     "type": "TextRun",
-                     "text": " - "
-                   },
-                   {
-                     "type": "TextRun",
-                     "text": "'$STATUS'",
-                     "color": "'$STATUS_COLOR'",
-                     "weight": "Bolder"
-                   },
-                   {
-                     "type": "TextRun",
-                     "text": "'$REPO_TEXT'"
-                   }
-                 ],
-                 "spacing": "None"
-               }'
-               
-               if [ -z "$WORKFLOW_TEXTBLOCKS" ]; then
-                 WORKFLOW_TEXTBLOCKS="$COMBINED_BLOCK"
-               else
-                 WORKFLOW_TEXTBLOCKS="$WORKFLOW_TEXTBLOCKS,$COMBINED_BLOCK"
-               fi
-             done
-           else
-            WORKFLOW_TEXTBLOCKS='{
-              "type": "TextBlock",
-              "text": "• No workflows found",
-              "wrap": true,
-              "size": "Small",
-              "color": "Default"
-              }'
-            fi
+          SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[]|select(.status=="success")]|length')
+          FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[]|select(.status=="failure")]|length')
+          CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[]|select(.status=="cancelled")]|length')
+          SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[]|select(.status=="skipped")]|length')
 
-          # Determine overall status
+          FALLBACK_URL="https://github.com/${REPO}/pull/${PR_NUMBER}/checks"
+
+          # Determine overall status + MessageCard theme color (this webhook renders the
+          # legacy Office 365 "MessageCard" format, NOT Adaptive Cards).
           if [ "$FAILED_COUNT" -gt 0 ]; then
-            ICON="🔴"
-            STATUS_TEXT="❌ SOME CHECKS FAILED"
-            COLOR="Attention"
+            ICON="🔴"; STATUS_TEXT="❌ SOME CHECKS FAILED"; THEME="D93F0B"
           elif [ "$CANCELLED_COUNT" -gt 0 ]; then
-            ICON="🟠"
-            STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
-            COLOR="Warning"
+            ICON="🟠"; STATUS_TEXT="🟠 SOME CHECKS CANCELLED"; THEME="F2A100"
           elif [ "$FORCED_COMPLETION" = "true" ]; then
-            ICON="🟡"
-            STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"
-            COLOR="Warning"
+            ICON="🟡"; STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"; THEME="F2C744"
           elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then
-            ICON="🟢"
-            STATUS_TEXT="✅ ALL CHECKS PASSED"
-            COLOR="Good"
+            ICON="🟢"; STATUS_TEXT="✅ ALL CHECKS PASSED"; THEME="2EB67D"
           elif [ "$ALL_COMPLETE" = "true" ] && [ "$TOTAL_COUNT" -eq 0 ]; then
-            ICON="⚪"
-            STATUS_TEXT="⚪ NO WORKFLOWS FOUND"
-            COLOR="Default"
+            ICON="⚪"; STATUS_TEXT="⚪ NO WORKFLOWS FOUND"; THEME="808080"
           else
-            ICON="🟡"
-            STATUS_TEXT="⏳ CHECKS IN PROGRESS"
-            COLOR="Warning"
+            ICON="🟡"; STATUS_TEXT="⏳ CHECKS IN PROGRESS"; THEME="F2C744"
           fi
 
-          # Completion status
+          # Completion status line
           if [ "$FORCED_COMPLETION" = "true" ]; then
             COMPLETION_TEXT="⏰ Timeout reached - $RUNNING_COUNT workflows may still be running"
           elif [ "$ALL_COMPLETE" = "true" ]; then
@@ -572,91 +481,84 @@ jobs:
             COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
           fi
 
-          # Escape for JSON
-          TITLE_SAFE="$ICON PR #$PR_NUMBER — $PR_TITLE"
+          # Build workflow results list as markdown (safe escaping via jq).
+          # Each row: emoji [name](url) — STATUS (repo, if from a different repository)
+          echo "🔨 Building workflow results list..."
+          WORKFLOWS_MD=$(echo "$WORKFLOWS" | jq -r --arg fallback "$FALLBACK_URL" --arg selfrepo "$REPO" '
+            [ .[] as $w
+              | ($w.status | ascii_upcase) as $s
+              | (if   $s=="SUCCESS"   then "✅"
+                 elif $s=="FAILURE"   then "❌"
+                 elif $s=="CANCELLED" then "🟠"
+                 elif $s=="SKIPPED"   then "⏭️"
+                 elif ($s=="IN_PROGRESS" or $s=="QUEUED" or $s=="PENDING") then "🔄"
+                 else "⚪" end) as $emoji
+              | (if ($w.url==null or $w.url=="") then $fallback else $w.url end) as $url
+              | (($w.repository // "")) as $repo
+              | (if ($repo != "" and $repo != $selfrepo) then " (" + $repo + ")" else "" end) as $repotext
+              | $emoji + " [" + $w.name + "](" + $url + ") — **" + $s + "**" + $repotext
+            ] | join("\n\n")')
+          [ -z "$WORKFLOWS_MD" ] && WORKFLOWS_MD="_No workflows found._"
 
-          # Create final status notification
-          cat > card.json <<EOF
-          {
-            "type": "message",
-            "attachments": [
-              {
-                 "contentType": "application/vnd.microsoft.card.adaptive",
-                 "content": {
-                    "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.4",
-                    "body": [
-                      {
-                         "type": "Container",
-                         "items": [
-                           {
-                              "type": "TextBlock",
-                              "text": "$TITLE_SAFE",
-                              "wrap": true,
-                              "weight": "Bolder",
-                              "size": "Medium"
-                           },
-                           {
-                              "type": "TextBlock",
-                              "text": "$STATUS_TEXT",
-                              "wrap": true,
-                              "weight": "Bolder",
-                              "color": "$COLOR",
-                              "size": "Large"
-                           },
-                           {
-                              "type": "FactSet",
-                              "facts": [
-                                    { "title": "Author:", "value": "$PR_AUTHOR" },
-                                    { "title": "Commit:", "value": "$SHORT_SHA" },
-                                    { "title": "Status:", "value": "$COMPLETION_TEXT" },
-                                    { "title": "Total Workflows:", "value": "$TOTAL_COUNT" },
-                                    { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
-                                    { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
-                                    { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" },
-                                    { "title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT" }
-                               ]
-                              },
-                              {
-                                 "type": "TextBlock",
-                                 "text": "**All Workflow Results:**",
-                                 "wrap": true,
-                                 "weight": "Bolder",
-                                 "size": "Small",
-                                 "spacing": "Medium"
-                              },
-                              $WORKFLOW_TEXTBLOCKS
-                            ]
-                          }
-                        ],
-                        "actions": [
-                          {
-                             "type": "Action.OpenUrl",
-                             "title": "View PR",
-                             "url": "$PR_URL"
-                          },
-                          {
-                             "type": "Action.OpenUrl",
-                             "title": "View All Checks",
-                             "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
-                          },
-                          {
-                              "type": "Action.OpenUrl",
-                              "title": "View Commit",
-                              "url": "https://github.com/${{ github.repository }}/commit/$HEAD_SHA"
-                          }
-                       ]
-                   }
-              }
-             ]
-          }
-          EOF
-           
-           curl -s -H "Content-Type: application/json" \
-            -d @card.json \
-            "$ZENDNNL_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
+          # Assemble a legacy MessageCard with jq so it is ALWAYS valid JSON
+          echo "🔨 Creating Teams MessageCard..."
+          jq -n \
+            --arg summary "PR #$PR_NUMBER status" \
+            --arg theme "$THEME" \
+            --arg title "$ICON PR #$PR_NUMBER — $PR_TITLE" \
+            --arg status "$STATUS_TEXT" \
+            --arg author "$PR_AUTHOR" --arg sha "$SHORT_SHA" --arg msg "$COMPLETION_TEXT" \
+            --arg total "$TOTAL_COUNT" --arg passed "$SUCCESS_COUNT" --arg failed "$FAILED_COUNT" \
+            --arg cancelled "$CANCELLED_COUNT" --arg skipped "$SKIPPED_COUNT" \
+            --arg wfmd "$WORKFLOWS_MD" \
+            --arg prurl "$PR_URL" --arg checksurl "$FALLBACK_URL" \
+            --arg commiturl "https://github.com/${REPO}/commit/${HEAD_SHA}" '
+            {
+              "@type": "MessageCard",
+              "@context": "http://schema.org/extensions",
+              summary: $summary,
+              themeColor: $theme,
+              title: $title,
+              sections: [
+                {
+                  activityTitle: $status,
+                  facts: [
+                    {name:"Author:",          value:$author},
+                    {name:"Commit:",          value:$sha},
+                    {name:"Status:",          value:$msg},
+                    {name:"Total Workflows:", value:$total},
+                    {name:"✅ Passed:",        value:$passed},
+                    {name:"❌ Failed:",        value:$failed},
+                    {name:"🟠 Cancelled:",     value:$cancelled},
+                    {name:"⏭️ Skipped:",       value:$skipped}
+                  ],
+                  markdown: true
+                },
+                {
+                  title: "All Workflow Results:",
+                  text: $wfmd,
+                  markdown: true
+                }
+              ],
+              potentialAction: [
+                {"@type":"OpenUri", name:"View PR",         targets:[{os:"default", uri:$prurl}]},
+                {"@type":"OpenUri", name:"View All Checks", targets:[{os:"default", uri:$checksurl}]},
+                {"@type":"OpenUri", name:"View Commit",     targets:[{os:"default", uri:$commiturl}]}
+              ]
+            }' > card.json
 
-           
+          echo "🔎 Validating card JSON..."
+          jq empty card.json || { echo "❌ Invalid card JSON"; cat card.json; exit 1; }
 
-         
+          echo "📤 Sending Teams notification..."
+          HTTP_CODE=$(curl -s -o resp.txt -w "%{http_code}" -H "Content-Type: application/json" -d @card.json "$ZENDNNL_WEBHOOK_URL")
+          echo "HTTP $HTTP_CODE"
+          cat resp.txt || true
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Teams notification sent successfully!"
+          else
+            echo "❌ Failed to send Teams notification"
+            exit 1
+          fi
