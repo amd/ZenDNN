@@ -42,21 +42,30 @@ namespace {
 // and exactly the one the JSON path accepts).  A logging-config knob must
 // never crash the library or its tools (benchdnn / gtests).
 bool parse_env_log_level(const char *raw, log_level_t &out) {
-  if (raw == nullptr) return false;
+  if (raw == nullptr) {
+    return false;
+  }
   std::string s(raw);
-  const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+  const auto not_space = [](unsigned char c) {
+    return std::isspace(c) == 0;
+  };
   s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
   s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-  if (s.empty()) return false;
+  if (s.empty()) {
+    return false;
+  }
 
   // All-digits -> numeric level (manual parse: cannot throw).
   if (std::all_of(s.begin(), s.end(),
-                  [](unsigned char c) { return std::isdigit(c) != 0; })) {
+  [](unsigned char c) {
+  return std::isdigit(c) != 0;
+  })) {
     unsigned long v = 0;
     for (char c : s) {
       v = v * 10UL + static_cast<unsigned long>(c - '0');
-      if (v >= static_cast<unsigned long>(log_level_t::log_level_count))
+      if (v >= static_cast<unsigned long>(log_level_t::log_level_count)) {
         return false;  // out of range (also bounds the accumulation)
+      }
     }
     out = log_level_t(static_cast<uint32_t>(v));
     return true;
@@ -66,13 +75,25 @@ bool parse_env_log_level(const char *raw, log_level_t &out) {
   // ignored (keep the current setting) rather than silently disabling logs.
   std::string lower = s;
   std::transform(lower.begin(), lower.end(), lower.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
+  [](unsigned char c) {
+    return std::tolower(c);
+  });
   if (lower == "disabled" || lower == "error" || lower == "warning" ||
       lower == "info" || lower == "verbose") {
     out = logger_support_t::str_to_log_level(lower);
     return true;
   }
   return false;
+}
+
+void apply_global_cache_off_to_matmul(
+  zendnnl::ops::matmul_config_t &matmul_config, bool global_cache_off) {
+  if (!global_cache_off) {
+    return;
+  }
+
+  matmul_config.set_weight_cache(0);
+  matmul_config.set_zp_comp_cache(false);
 }
 
 }  // namespace
@@ -112,6 +133,10 @@ config_manager_t::get_postop_cache_config() const {
   return config_postop_cache;
 }
 
+bool config_manager_t::is_global_cache_off() const {
+  return global_cache_off;
+}
+
 status_t config_manager_t::parse(std::string file_name_) {
 
   std::ifstream json_file(file_name_);
@@ -131,6 +156,7 @@ void config_manager_t::set_default_config() {
   set_default_logger_config();
   set_default_profiler_config();
   set_default_lru_cache_config();
+  set_default_global_cache_config();
   set_default_postop_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set default configuration.
@@ -142,22 +168,29 @@ void config_manager_t::set_user_config() {
   set_user_logger_config();
   set_user_profiler_config();
   set_user_lru_cache_config();
+  set_user_global_cache_config();
   set_user_postop_cache_config();
+  if (global_cache_off) {
+    config_postop_cache.enable = false;
+  }
 
   // Retrieve the singleton instance of matmul_config_t and set user configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
   matmul_config.set_user_config(config_json);
+  apply_global_cache_off_to_matmul(matmul_config, global_cache_off);
 }
 
 void config_manager_t::set_env_config() {
   set_env_logger_config();
   set_env_profiler_config();
-  set_user_lru_cache_config();
+  set_env_lru_cache_config();
+  set_env_global_cache_config();
   set_env_postop_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set env configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
   matmul_config.set_env_config();
+  apply_global_cache_off_to_matmul(matmul_config, global_cache_off);
 }
 
 status_t config_manager_t::set_default_logger_config() {
@@ -230,32 +263,37 @@ status_t config_manager_t::set_user_logger_config() {
 status_t config_manager_t::set_env_logger_config() {
   {
     log_level_t level;
-    if (parse_env_log_level(std::getenv("ZENDNNL_COMMON_LOG_LEVEL"), level))
+    if (parse_env_log_level(std::getenv("ZENDNNL_COMMON_LOG_LEVEL"), level)) {
       config_logger.log_level_map[log_module_t::common] = level;
+    }
   }
 
   {
     log_level_t level;
-    if (parse_env_log_level(std::getenv("ZENDNNL_API_LOG_LEVEL"), level))
+    if (parse_env_log_level(std::getenv("ZENDNNL_API_LOG_LEVEL"), level)) {
       config_logger.log_level_map[log_module_t::api] = level;
+    }
   }
 
   {
     log_level_t level;
-    if (parse_env_log_level(std::getenv("ZENDNNL_TEST_LOG_LEVEL"), level))
+    if (parse_env_log_level(std::getenv("ZENDNNL_TEST_LOG_LEVEL"), level)) {
       config_logger.log_level_map[log_module_t::test] = level;
+    }
   }
 
   {
     log_level_t level;
-    if (parse_env_log_level(std::getenv("ZENDNNL_PROFILE_LOG_LEVEL"), level))
+    if (parse_env_log_level(std::getenv("ZENDNNL_PROFILE_LOG_LEVEL"), level)) {
       config_logger.log_level_map[log_module_t::profile] = level;
+    }
   }
 
   {
     log_level_t level;
-    if (parse_env_log_level(std::getenv("ZENDNNL_DEBUG_LOG_LEVEL"), level))
+    if (parse_env_log_level(std::getenv("ZENDNNL_DEBUG_LOG_LEVEL"), level)) {
       config_logger.log_level_map[log_module_t::debug] = level;
+    }
   }
 
   return status_t::success;
@@ -329,15 +367,30 @@ status_t config_manager_t::set_env_lru_cache_config() {
   return status_t::success;
 }
 
+status_t config_manager_t::set_default_global_cache_config() {
+  global_cache_off = false;
+  return status_t::success;
+}
+
+status_t config_manager_t::set_user_global_cache_config() {
+  auto global_cache_json = config_json["global_cache_off"];
+  if (global_cache_json.empty()) {
+    return status_t::failure;
+  }
+
+  global_cache_off = global_cache_json.get<bool>();
+  return status_t::success;
+}
+
+status_t config_manager_t::set_env_global_cache_config() {
+  global_cache_off = is_global_cache_off_env();
+  return status_t::success;
+}
+
 status_t config_manager_t::set_default_postop_cache_config() {
-  // Cache is enabled by default. ZENDNNL_ENABLE_POSTOP_CACHE=0
-  // (or false/off/no) forces every create_dlp_post_op() call through
-  // the cold path — runtime kill switch for triage and as a safety
-  // valve for integrators (zentorch, vLLM, etc.). The default was
-  // previously false during the initial cache soak; flipped to true
-  // once the cache had been validated across integrator releases.
-  // Mirrors the struct-level default in config_params.hpp; both must
-  // move together.
+  // Cache is enabled by default. ZENDNNL_CACHE_OFF=1 acts only as a global
+  // kill switch; when it is enabled or unset, the local postop cache
+  // policy remains in control.
   config_postop_cache.enable = true;
   return status_t::success;
 }
@@ -357,25 +410,27 @@ status_t config_manager_t::set_user_postop_cache_config() {
 }
 
 status_t config_manager_t::set_env_postop_cache_config() {
+  // ZENDNNL_CACHE_OFF only acts as a process-wide kill switch. When it is
+  // enabled, all local cache knobs are forced off.
+  if (global_cache_off) {
+    config_postop_cache.enable = false;
+    return status_t::success;
+  }
+
   // Accept the same truthy/falsy spellings as the other ZENDNNL_ENABLE_*
   // toggles use today ("1"/"0"), plus the more readable "true"/"false"
-  // and "on"/"off" so integrators don't have to remember which we
-  // picked. Any unrecognized non-empty value leaves the prior value
-  // (default = true) untouched rather than silently disabling, so a
-  // typo can't accidentally turn the cache off.
+  // and "on"/"off" so integrators don't have to remember which we picked.
+  // Any unrecognized non-empty value leaves the local default
+  // untouched rather than silently disabling, so a typo can't accidentally
+  // turn the cache off.
   char *enable_str = std::getenv("ZENDNNL_ENABLE_POSTOP_CACHE");
   if (!enable_str) {
     return status_t::success;
   }
 
-  std::string v(enable_str);
-  std::transform(v.begin(), v.end(), v.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-
-  if (v == "0" || v == "false" || v == "off" || v == "no") {
-    config_postop_cache.enable = false;
-  } else if (v == "1" || v == "true" || v == "on" || v == "yes") {
-    config_postop_cache.enable = true;
+  bool postop_cache_enabled = config_postop_cache.enable;
+  if (parse_cache_bool(enable_str, postop_cache_enabled)) {
+    config_postop_cache.enable = postop_cache_enabled;
   }
 
   return status_t::success;

@@ -102,6 +102,12 @@ class config_manager_t final {
    */
   const config_postop_cache_t &get_postop_cache_config() const;
 
+  /** @brief Check if the process-wide cache kill switch is active.
+   *
+   *  @return true if all covered caches should be forced off.
+   */
+  bool is_global_cache_off() const;
+
   /**@}*/
 
  private:
@@ -180,7 +186,25 @@ class config_manager_t final {
    */
   status_t           set_env_lru_cache_config();
 
-  /** @brief Set default post-op cache config (disabled; opt-in via env).
+  /** @brief Set default process-wide cache kill switch state.
+   *
+   * @return success.
+   */
+  status_t          set_default_global_cache_config();
+
+  /** @brief Set process-wide cache kill switch state from JSON file.
+   *
+   * @return success.
+   */
+  status_t          set_user_global_cache_config();
+
+  /** @brief Set process-wide cache kill switch state from environment.
+   *
+   * @return success.
+   */
+  status_t          set_env_global_cache_config();
+
+  /** @brief Set default post-op cache config.
    *
    * @return success.
    */
@@ -203,6 +227,7 @@ class config_manager_t final {
   config_logger_t    config_logger;   /**< Logger config */
   config_profiler_t  config_profiler; /**< Profiler config */
   config_lru_cache_t config_lru_cache; /**< Global LRU cache config */
+  bool global_cache_off = false; /**< Process-wide cache kill switch. */
   config_postop_cache_t config_postop_cache; /**< Post-op metadata
                                        cache toggle */
 };

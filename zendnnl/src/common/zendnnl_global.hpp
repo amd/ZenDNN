@@ -136,32 +136,42 @@ static inline const char *get_relative_path(const char *abs_path_) {
  */
 inline bool is_profile_enabled() {
   static const bool cached
-      = zendnnl_global_block().get_config_manager().get_profiler_config().enable_profiler;
+    = zendnnl_global_block().get_config_manager().get_profiler_config().enable_profiler;
+  return cached;
+}
+
+/** @fn is_global_cache_off
+ * @brief Check if the process-wide cache kill switch is enabled.
+ *
+ * Sampled once per process (via the `static const` cache) after
+ * configuration resolution. Supports both the environment variable
+ * ZENDNNL_CACHE_OFF and JSON `global_cache_off`.
+ *
+ * @return True if all covered caches should be forced off.
+ */
+inline bool is_global_cache_off() {
+  static const bool cached
+    = zendnnl_global_block().get_config_manager().is_global_cache_off();
   return cached;
 }
 
 /** @fn is_postop_cache_enabled
  * @brief Check if the AOCL DLP post-op metadata cache is enabled.
  *
- * Sampled once per process (via the `static const` cache) so that the
- * env var ZENDNNL_ENABLE_POSTOP_CACHE acts as a fixed-for-the-run
- * toggle. Hot-path callers (create_dlp_post_op) read this on every
- * invocation; a `static const bool` read compiles to a single load
- * with no per-call getenv overhead.
+ * Sampled once per process (via the `static const` cache) after config
+ * resolution (defaults + either a JSON config file OR environment variables).
+ * Hot-path callers (create_dlp_post_op) read this on every invocation; a
+ * `static const bool` read compiles to a single load with no per-call getenv overhead.
  *
- * Default: true. Set ZENDNNL_ENABLE_POSTOP_CACHE=0 (or false/off/no)
- * to force every create_dlp_post_op() call through the cold path.
- * Intended as a runtime kill switch for triage and as a safety valve
- * for integrators (zentorch, vLLM, etc.) who hit unexpected behavior
- * in the field. The default was previously false during the initial
- * cache soak and was flipped to true once the cache had been
- * validated in the wild.
+ * Default: true. ZENDNNL_ENABLE_POSTOP_CACHE controls the local cache
+ * policy, while ZENDNNL_CACHE_OFF=1 (or JSON `global_cache_off=true`)
+ * forces every create_dlp_post_op() call through the cold path.
  *
  * @return True if the post-op cache is enabled.
  */
 inline bool is_postop_cache_enabled() {
   static const bool cached
-      = zendnnl_global_block().get_config_manager().get_postop_cache_config().enable;
+    = zendnnl_global_block().get_config_manager().get_postop_cache_config().enable;
   return cached;
 }
 
