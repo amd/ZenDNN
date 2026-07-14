@@ -127,6 +127,14 @@ status_t reorder_quantization_wrapper(
   const bool transA, const int M, const int K, const int num_threads,
   reorder_quant_buffers_t &buffers);
 
+/**
+ * @brief Grouped dynamic-quant pre-pass for MoE / group matmul sources.
+ *
+ * Mutates the supplied @p params vector in place (dtypes, scale buffers,
+ * dynamic_quant). The caller must pass a working copy (`exec_params`)
+ * built by `group_matmul_direct` — user-owned config vectors are not
+ * modified at the API boundary.
+ */
 status_t group_reorder_quantization_wrapper(
   const std::vector<const void *> &src,
   const std::vector<int> &lda,

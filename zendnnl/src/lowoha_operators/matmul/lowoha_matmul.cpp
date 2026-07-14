@@ -279,7 +279,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       matmul_batch_params_t &batch_params, matmul_params &params) {
+                       const matmul_batch_params_t &batch_params, const matmul_params &params) {
   // Profiler overhead in production (ZENDNNL_ENABLE_PROFILER unset):
   //  - profiler_t constructor: eliminated by dead store elimination at -O3
   //    when profiler is never used.
@@ -313,6 +313,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   // explicitly disabled, this resolves to a single predicted-taken branch,
   // skipping the full validation path (null-pointer checks, dimension
   // checks, and quantization-parameter validation).
+  // Must run BEFORE creating exec_params: diagnostics report the
+  // caller-supplied configuration, not the library's internal state.
   status_t status = zendnnl::common::op_instrumentation::validate([&]() {
     return validate_matmul_direct_inputs(src, weight, dst, M, N, K,
                                          batch_params.Batch_A, batch_params.Batch_B,
@@ -322,11 +324,15 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     return status;
   }
 
-  // [in,out] Mutates params.postop_[].leading_dim: defaults to N for binary
-  // post-ops when the caller leaves it at -1. Must always execute regardless
-  // of the ZENDNNL_DIAGNOSTICS_ENABLE flag (i.e. even when diagnostics are
-  // explicitly disabled with ZENDNNL_DIAGNOSTICS_ENABLE=0).
-  for (auto &po : params.postop_) {
+  // Working copies for this call — reorder, kernel_select, and post-op
+  // normalization mutate effective execution state only; caller params are
+  // left unchanged so the same struct can be reused across iterations.
+  matmul_params exec_params = params;
+  matmul_batch_params_t exec_batch_params = batch_params;
+
+  // Defaults N for binary post-ops when leading_dim is -1. Mutates exec_params
+  // only. Must always execute regardless of ZENDNNL_DIAGNOSTICS_ENABLE.
+  for (auto &po : exec_params.postop_) {
     if (po.po_type == post_op_type_t::binary_add ||
         po.po_type == post_op_type_t::binary_mul) {
       if (po.leading_dim == -1) {
@@ -349,58 +355,52 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     }
   }
 
-  size_t src_type_size = size_of(params.dtypes.src);
-  size_t weight_type_size = size_of(params.dtypes.wei);
-  size_t out_type_size = size_of(params.dtypes.dst);
+  size_t src_type_size = size_of(exec_params.dtypes.src);
+  const size_t weight_type_size = size_of(exec_params.dtypes.wei);
+  const size_t out_type_size = size_of(exec_params.dtypes.dst);
 
-  const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
+  const int batch_count =
+      std::max(exec_batch_params.Batch_A, exec_batch_params.Batch_B);
   const int32_t omp_mt = thread_guard::max_threads();
-  const int32_t num_threads = resolve_num_threads(params.num_threads, omp_mt);
+  const int32_t num_threads =
+      resolve_num_threads(exec_params.num_threads, omp_mt);
 
   status_t ggml_val_status = zendnnl::common::op_instrumentation::validate([&]() {
-    return validate_ggml_packed_inputs(params, is_weights_const,
-                                       batch_params.Batch_B, transB);
+    return validate_ggml_packed_inputs(exec_params, is_weights_const,
+                                       exec_batch_params.Batch_B, transB);
   });
   if (ggml_val_status != status_t::success) {
     return ggml_val_status;
   }
 
-  // [in,out] Mutates params.dtypes.src, params.quant_params.src_scale.buff,
-  // params.quant_params.src_zp.buff, and batch_params.batch_stride_src:
-  // dynamic quantization converts the source matrix from its original dtype
-  // (f32/bf16) to a lower-precision integer type (s8/u8) in a contiguous
-  // buffer, populating scale and zero-point buffers. For batched paths,
-  // batch_stride_src is overwritten with the packed stride. This may also
-  // change the effective leading dimension (reordered_lda) when the original
-  // source has padding (lda > K), since the quantized buffer is packed
-  // without padding.
+  // Reorder quant mutates exec_params / exec_batch_params and may redirect
+  // exec_src to an internal contiguous buffer (quant_buffers).
+  const void *exec_src = src;
   int reordered_lda = lda;
   reorder_quant_buffers_t quant_buffers;
-  if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
-                                   params, batch_params, transA, M, K,
+  if (reorder_quantization_wrapper(exec_src, lda, reordered_lda, src_type_size,
+                                   exec_params, exec_batch_params, transA, M, K,
                                    num_threads, quant_buffers) != status_t::success) {
     return status_t::failure;
   }
 
-  // [in,out] Mutates weight, params.mem_format_b, and
-  // params.quant_params.wei_scale: GGML weight unpacking now produces the
-  // AOCL-reordered cache entry directly, after source quantization has
-  // finalized the dtype and scale metadata used by the reorder path.
-  if (params.packing.pack_format_b == 1) {
-    if (!ggml_is_sym_quant(params)) {
+  // GGML unpack mutates weight pointer and exec_params mem_format / wei_scale.
+  const void *exec_weight = weight;
+  if (exec_params.packing.pack_format_b == 1) {
+    if (!ggml_is_sym_quant(exec_params)) {
       log_error("GGML packed weights are supported only for sym-quant "
                 "per-group int8 matmul");
       return status_t::failure;
     }
-    status_t unpack_status = unpack_ggml_weights_and_cache(weight, N, K, ldb,
-                             transB ? 't' : 'n', params);
+    status_t unpack_status = unpack_ggml_weights_and_cache(
+        exec_weight, N, K, ldb, transB ? 't' : 'n', exec_params);
     if (unpack_status != status_t::success) {
       return unpack_status;
     }
   }
 
-  matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
-                                       batch_params.Batch_B, batch_count, M,
+  matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
+                                       exec_batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const,
                                        transB);
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -425,25 +425,28 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
   // Dispatch to BMM or Matmul based on batch_count
   thread_guard tg(num_threads, omp_mt);
+  const int exec_lda =
+      exec_params.dynamic_quant ? reordered_lda : lda;
+
   if (batch_count > 1) {
     // Batch Matrix Multiplication (BMM)
     bmm::bmm_execute(layout, transA, transB,
-                     M, N, K, alpha, src,
-                     params.dynamic_quant ? reordered_lda : lda,
-                     weight, ldb,
+                     M, N, K, alpha, exec_src,
+                     exec_lda,
+                     exec_weight, ldb,
                      bias, beta, dst, ldc,
-                     is_weights_const, batch_params,
-                     src_type_size, weight_type_size, out_type_size, num_threads, kernel, params);
+                     is_weights_const, exec_batch_params,
+                     src_type_size, weight_type_size, out_type_size, num_threads, kernel, exec_params);
   }
   else {
     // Single Matrix Multiplication (Matmul)
     matmul_execute(layout, transA, transB,
-                   M, N, K, alpha, src,
-                   params.dynamic_quant ? reordered_lda : lda,
-                   weight, ldb,
+                   M, N, K, alpha, exec_src,
+                   exec_lda,
+                   exec_weight, ldb,
                    bias, beta, dst, ldc,
                    is_weights_const, src_type_size, out_type_size, num_threads,
-                   kernel, params, batch_params, auto_version);
+                   kernel, exec_params, exec_batch_params, auto_version);
   }
 
 #if !ZENDNNL_DEPENDS_AOCLDLP

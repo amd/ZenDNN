@@ -760,7 +760,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<void *> &dst,
                              const std::vector<int> &ldc,
                              const std::vector<bool> &is_weights_const,
-                             std::vector<matmul_params> &params,
+                             const std::vector<matmul_params> &params,
                              const group_matmul_moe_postop_params *moe_postop,
                              const grp_matmul_gated_act_params *gated_act,
                              const grp_matmul_fused_moe_params *fused_moe) {
@@ -1068,6 +1068,8 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // taken branch when explicitly disabled via
   // ZENDNNL_DIAGNOSTICS_ENABLE=0.  See the doc-block above
   // validate_group_matmul_direct_inputs() for the seven phases.
+  // Must run BEFORE creating exec_params: diagnostics report the
+  // caller-supplied configuration, not the library's internal state.
   status_t val = op_instrumentation::validate([&]() {
     return validate_group_matmul_direct_inputs(
              layout, transA, transB, M, N, K, alpha,
@@ -1127,6 +1129,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
   // branch when API logging is below info level.
   static const bool s_l1_log = apilog_info_enabled();
 
+  std::vector<matmul_params> exec_params(
+      params.begin(),
+      params.begin() +
+          static_cast<std::vector<matmul_params>::difference_type>(num_ops));
+
   if (src.size() == 1) {
     // ── Sequential chain dispatch ─────────────────────────────────────
     static unsigned int auto_version = get_auto_tuner_ver();
@@ -1137,20 +1144,21 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       const void *cur_src = (i == 0) ? src[i] : dst[i - 1];
       int cur_lda = (i == 0) ? lda[i] : ldc[i - 1];
 
+      exec_params[i].num_threads = num_threads;
       matmul_algo_t kernel = kernel_select(
-                               params[i], bp.Batch_A, bp.Batch_B,
-                               1, M[i], N[i], K[i], num_threads, bias[i], is_weights_const[i],
-                               transB[i]);
+                               exec_params[i], bp.Batch_A, bp.Batch_B,
+                               1, M[i], N[i], K[i], num_threads, bias[i],
+                               is_weights_const[i], transB[i]);
 
-      params[i].num_threads = num_threads;
       matmul_execute(
         layout[i], transA[i], transB[i],
         M[i], N[i], K[i], alpha[i],
         cur_src, cur_lda, weight[i], ldb[i],
         bias[i], beta[i], dst[i], ldc[i],
         is_weights_const[i],
-        size_of(params[i].dtypes.src), size_of(params[i].dtypes.dst),
-        num_threads, kernel, params[i], bp, auto_version);
+        size_of(exec_params[i].dtypes.src),
+        size_of(exec_params[i].dtypes.dst),
+        num_threads, kernel, exec_params[i], bp, auto_version);
     }
     gemm_mode = "sequential";
   }
@@ -1228,14 +1236,14 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       std::vector<matmul_params> fused_params_unpacked;
       grp_matmul_fused_moe_params fused_moe_unpacked;
       const std::vector<const void *> *fused_weight_eff = &weight;
-      std::vector<matmul_params> *fused_params_eff = &params;
+      std::vector<matmul_params> *fused_params_eff = &exec_params;
       const grp_matmul_fused_moe_params *fused_moe_eff = fused_moe;
 
       if (fused_any_ggml) {
         const grp_matmul_gated_act_t fused_act =
             run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none;
         fused_weight_unpacked = weight;
-        fused_params_unpacked = params;
+        fused_params_unpacked = exec_params;
         fused_moe_unpacked = *fused_moe;
         // down_scale must be num_ops-sized so the Op2 params build reads the
         // unpacked per-group weight scale below; default entries (nullptr,
@@ -1343,19 +1351,18 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       //
       // Source dynamic quantization is gated by ZENDNNL_ENABLE_GROUP_DQ
       // (default on).  When on, the grouped pre-pass quantizes all expert
-      // sources up front (rewriting `params_dispatch` to s8 + clearing
+      // sources up front (rewriting `exec_params` to s8 + clearing
       // dynamic_quant) so `execute_expert_slice` does not re-quant.  When
       // off, the pre-pass is skipped and dynamic quant flows through the
       // per-expert `reorder_quantization_wrapper` inside
       // `execute_expert_slice` (legacy behaviour).
       std::vector<const void *> quantized_src;
       std::vector<int> quantized_lda;
-      std::vector<matmul_params> params_dispatch = params;
       group_reorder_quant_buffers_t group_quant_buffers;
       bool group_quantized = false;
       if (get_grp_matmul_enable_group_dq()) {
         status_t group_quant_st = group_reorder_quantization_wrapper(
-                                    src, lda, transA, M_eff, K, num_threads, params_dispatch,
+                                    src, lda, transA, M_eff, K, num_threads, exec_params,
                                     quantized_src, quantized_lda, group_quant_buffers,
                                     group_quantized);
         if (group_quant_st != status_t::success) {
@@ -1376,22 +1383,22 @@ status_t group_matmul_direct(const std::vector<char> &layout,
       // Pack format is uniform across the group (all GGML or none), so one
       // check on the first expert suffices instead of scanning all of them.
       const bool any_ggml =
-          num_ops > 0 && params_dispatch[0].packing.pack_format_b == 1;
+          num_ops > 0 && exec_params[0].packing.pack_format_b == 1;
       if (any_ggml) {
         weight_unpacked = weight;
         for (size_t i = 0; i < num_ops; ++i) {
-          if (params_dispatch[i].packing.pack_format_b != 1) continue;
+          if (exec_params[i].packing.pack_format_b != 1) continue;
           // Inactive experts (no routed tokens) are skipped by the GEMM
           // dispatch, so there is nothing to unpack for them — and their
           // src_scale may legitimately be empty, which `ggml_is_sym_quant`
           // would reject.  Leave the packed bytes untouched.
           if (M_eff[i] == 0) continue;
-          if (validate_ggml_packed_inputs(params_dispatch[i],
+          if (validate_ggml_packed_inputs(exec_params[i],
                                           is_weights_const[i], 1,
                                           transB[i]) != status_t::success) {
             return status_t::failure;
           }
-          if (!ggml_is_sym_quant(params_dispatch[i])) {
+          if (!ggml_is_sym_quant(exec_params[i])) {
             log_error("group_matmul_direct: GGML packed weights on expert ", i,
                       " require sym-quant per-group int8 with an s8 source "
                       "(enable ZENDNNL_ENABLE_GROUP_DQ so the source is "
@@ -1401,23 +1408,20 @@ status_t group_matmul_direct(const std::vector<char> &layout,
           const void *w = weight_unpacked[i];
           status_t un = unpack_ggml_weights_and_cache(
               w, N[i], K[i], ldb[i], transB[i] ? 't' : 'n',
-              params_dispatch[i]);
+              exec_params[i]);
           if (un != status_t::success) return un;
           weight_unpacked[i] = w;
         }
         weight_eff = &weight_unpacked;
       }
 
-      // Use the rewritten params copy whenever source group-quant OR
-      // GGML unpack modified it; otherwise the untouched caller params.
-      const bool use_dispatch_params = group_quantized || any_ggml;
       const bool act_fused = group_matmul_run_parallel_dispatch(
                                layout, transA, transB, M_eff, N, K, alpha,
                                group_quantized ? quantized_src : src,
                                group_quantized ? quantized_lda : lda,
                                *weight_eff, ldb, bias, beta, dst, ldc,
                                is_weights_const,
-                               use_dispatch_params ? params_dispatch : params,
+                               exec_params,
                                num_threads, &gemm_mode,
                                run_gated_act ? gated_act->act : grp_matmul_gated_act_t::none,
                                act_dtype);

@@ -926,16 +926,16 @@ inline status_t run_fused_moe_legacy_two_pass(
   // Pass 1 source group dynamic quant (opt-in; default on).  Quantizes
   // every expert's BF16/F32 src to S8 in one grouped pass (with a
   // per-expert fallback for shapes the grouped kernel doesn't cover)
-  // and rewrites the `pass1_params` COPY — the caller's `params` stays
-  // intact so the Op2 scratch (already built from it) is unaffected.
+  // and rewrites `params` (library exec_params from group_matmul_direct;
+  // caller config is unchanged).  Op2 scratch is built from the same
+  // exec vector before Pass 1 mutates it.
   std::vector<const void *> pass1_quant_src;
   std::vector<int> pass1_quant_lda;
-  std::vector<matmul_params> pass1_params = params;
   group_reorder_quant_buffers_t pass1_quant_buffers;
   bool pass1_group_quantized = false;
   if (enable_group_dq) {
     const status_t pass1_quant_st = group_reorder_quantization_wrapper(
-        src, lda, transA, M, K, num_threads, pass1_params,
+        src, lda, transA, M, K, num_threads, params,
         pass1_quant_src, pass1_quant_lda, pass1_quant_buffers,
         pass1_group_quantized);
     if (pass1_quant_st != status_t::success) return pass1_quant_st;
@@ -977,7 +977,7 @@ inline status_t run_fused_moe_legacy_two_pass(
       pass1_group_quantized ? pass1_quant_lda : lda,
       weight, ldb, bias, beta, op1_dst, op1_ldc,
       is_weights_const,
-      pass1_group_quantized ? pass1_params : params,
+      params,
       num_threads, &pass1_mode,
       act, act_dtype);
 
@@ -1021,13 +1021,12 @@ inline status_t run_fused_moe_legacy_two_pass(
   // `execute_expert_slice` (params_down still carries dynamic_quant).
   std::vector<const void *> pass2_quant_src;
   std::vector<int> pass2_quant_lda;
-  std::vector<matmul_params> pass2_params = scratch.params_down;
   group_reorder_quant_buffers_t pass2_quant_buffers;
   bool pass2_group_quantized = false;
   if (enable_group_dq) {
     const status_t pass2_quant_st = group_reorder_quantization_wrapper(
         scratch.src_down, op1_ldc, scratch.transA_down, M, scratch.K_down,
-        num_threads, pass2_params, pass2_quant_src, pass2_quant_lda,
+        num_threads, scratch.params_down, pass2_quant_src, pass2_quant_lda,
         pass2_quant_buffers, pass2_group_quantized);
     if (pass2_quant_st != status_t::success) return pass2_quant_st;
   }
@@ -1053,7 +1052,7 @@ inline status_t run_fused_moe_legacy_two_pass(
       fused.bias_down, scratch.beta_down,
       op2_dst, op2_ldc,
       is_weights_const,
-      pass2_group_quantized ? pass2_params : scratch.params_down,
+      scratch.params_down,
       num_threads, &pass2_mode,
       grp_matmul_gated_act_t::none, act_dtype);
   if (s_optime) {

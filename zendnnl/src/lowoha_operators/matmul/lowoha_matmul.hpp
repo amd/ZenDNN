@@ -86,21 +86,17 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  * @param dst              Pointer to matrix C data
  * @param ldc              Leading dimension of C
  * @param is_weights_const Whether the weights are constant (enables caching)
- * @param[in,out] batch_params  On input supplies Batch_A, Batch_B, and
- *     optional batch strides. The function may compute default batch
- *     strides when the caller supplies sentinel values (e.g. -1).
- * @param[in,out] params   Matmul configuration whose following fields
- *     may be mutated:
- *     - @c postop_[].leading_dim : defaulted to N for binary post-ops
- *       when the caller leaves it at -1.
- *     - @c dynamic_quant / @c dtypes : reorder-quantization dispatch may
- *       set the dynamic_quant flag and rewrite the source data type.
- *     - @c quant_params.wei_scale : GGML weight unpacking populates the
- *       weight-scale buffer and associated metadata.
+ * @param batch_params  Batch sizes and optional batch strides (read-only).
+ * @param params        Matmul configuration (read-only). The library
+ *     builds an internal working copy for reorder dispatch, kernel
+ *     selection, and post-op normalization so the caller's struct can be
+ *     reused across calls without reset.
  *
- * @note Thread safety: callers must not share the same @c matmul_params or
- *       @c matmul_batch_params_t instance across concurrent calls, since
- *       the function mutates both in place.
+ * @note Thread safety: This entry point does not mutate the @c matmul_params or
+ *       @c matmul_batch_params_t objects themselves. Callers may share them
+ *       concurrently only if any writable buffers referenced by them (e.g.,
+ *       @c quant_params.src_scale.buff / @c quant_params.src_zp.buff) are
+ *       thread-local, or left nullptr so the library allocates per-call scratch.
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
@@ -109,7 +105,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       matmul_batch_params_t &batch_params, matmul_params &params);
+                       const matmul_batch_params_t &batch_params, const matmul_params &params);
 
 /**
  * @brief Execute group matmul operations (e.g. MoE experts)
@@ -133,8 +129,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  * @param dst              Vector of pointers to matrix C data
  * @param ldc              Vector of leading dimensions for C
  * @param is_weights_const Vector of flags indicating if weights are constant (enables caching)
- * @param params           Vector of additional parameters including post-ops and data types.
- *                         For MoE workloads the caller may also set the optional
+ * @param params           Vector of per-expert configuration (read-only at the
+ *                         API boundary). `group_matmul_direct` copies into
+ *                         internal `exec_params` before reorder dispatch and
+ *                         kernel execution so the same vector can be reused
+ *                         across calls. For MoE workloads the caller may also set the optional
  *                         prepack-extras hint on `params[0]`:
  *                           - `params[0].active_matmul` = number of firing experts
  *                             (must satisfy `active_matmul <= M.size()`).
@@ -218,7 +217,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                              const std::vector<void *> &dst,
                              const std::vector<int> &ldc,
                              const std::vector<bool> &is_weights_const,
-                             std::vector<matmul_params> &params,
+                             const std::vector<matmul_params> &params,
                              const group_matmul_moe_postop_params *moe_postop = nullptr,
                              const grp_matmul_gated_act_params *gated_act = nullptr,
                              const grp_matmul_fused_moe_params *fused_moe = nullptr);
