@@ -26,17 +26,19 @@ namespace lowoha {
 namespace normalization {
 
 /**
- * @brief Execute normalization (LayerNorm / RMSNorm / BatchNorm / FusedAddRMSNorm)
- *        via the unified LOWOHA low-overhead API.
+ * @brief Execute normalization (LayerNorm / RMSNorm / BatchNorm /
+ *        FusedAddRMSNorm / FusedLayerNormAdd) via the unified LOWOHA
+ *        low-overhead API.
  *
- * This is the user API for all four normalization
+ * This is the user API for all normalization
  * variants.  The caller populates @c params with the tensor shape, norm type,
  * data types, and other configuration; this function internally derives the
  * flattened dimensions (batch, norm_size, num_channels), validates inputs,
  * and dispatches to the appropriate kernel.
  *
  * Required fields in @c params before calling:
- *   - norm_type   : LAYER_NORM, RMS_NORM, BATCH_NORM, or FUSED_ADD_RMS_NORM
+ *   - norm_type   : LAYER_NORM, RMS_NORM, BATCH_NORM, FUSED_ADD_RMS_NORM,
+ *                   or FUSED_LAYER_NORM_ADD
  *   - shape       : tensor dimensions (e.g. params.shape = {batch, hidden_dim})
  *   - norm_ndims  : number of trailing dims to normalize (LayerNorm/RMSNorm/FusedAddRMSNorm)
  *   - src_dt      : source data type (f32, bf16, or f16)
@@ -62,16 +64,22 @@ namespace normalization {
  *                     y = gamma * residual / sqrt(mean(residual^2) + eps)
  *                     (fuses residual addition with RMSNorm in a single call)
  *
+ *   FusedLayerNormAdd: y = gamma * (x - mean) / sqrt(var + eps) + beta + residual[i]
+ *                     (LayerNorm followed by a residual add; residual is a
+ *                      read-only addend in the output domain, element type
+ *                      dst_dt, added right before the store)
+ *
  * @param input             Pointer to input tensor data (read-only).
  *                          Element type must match params.src_dt.
  * @param output            Pointer to output tensor data (same shape as input).
  *                          Element type must match params.dst_dt.
  * @param gamma             Pointer to scale (gamma) parameters (read-only)
- *                          - LayerNorm / RMSNorm / FusedAddRMSNorm: shape = [norm_size]
+ *                          - LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd:
+ *                            shape = [norm_size]
  *                          - BatchNorm:           shape = [num_channels]
  *                          May be nullptr if params.use_scale == false.
  * @param beta              Pointer to shift (beta) parameters (read-only)
- *                          - LayerNorm:  shape = [norm_size]
+ *                          - LayerNorm / FusedLayerNormAdd:  shape = [norm_size]
  *                          - BatchNorm:  shape = [num_channels]
  *                          - RMSNorm / FusedAddRMSNorm: unused (may be nullptr)
  *                          May be nullptr if params.use_shift == false.
@@ -81,12 +89,16 @@ namespace normalization {
  * @param running_var       (BatchNorm only) Pre-computed per-channel variance from
  *                          training, shape = [num_channels]. Required for BatchNorm.
  *                          nullptr for all other norm types.
- * @param residual          (FusedAddRMSNorm only) Residual buffer that is updated
- *                          in-place: on return, residual[i] = old_residual[i] + input[i].
- *                          The normalized output is computed from this updated residual.
- *                          Must have the same shape and element type as the input
- *                          (i.e. params.src_dt). Required for FUSED_ADD_RMS_NORM.
- *                          nullptr for all other norm types.
+ * @param residual          Residual buffer. Semantics depend on norm_type:
+ *                          - FUSED_ADD_RMS_NORM: updated in-place; on return
+ *                            residual[i] = old_residual[i] + input[i], and the
+ *                            normalized output is computed from it. Same shape
+ *                            and element type as the input (params.src_dt).
+ *                          - FUSED_LAYER_NORM_ADD: read-only addend applied to
+ *                            the LayerNorm output (y += residual). Same shape as
+ *                            the output and element type params.dst_dt. Must not
+ *                            alias the output buffer.
+ *                          Required for both fused types; nullptr otherwise.
  * @param params            Normalization parameters (type, dims, data types, etc.)
  *                          Must have shape and norm_type populated.
  *
@@ -111,8 +123,9 @@ status_t normalization_direct(const void *input, void *output,
  * @param beta              Shift parameter data (read-only, may be nullptr)
  * @param running_mean      Pre-computed running mean (BatchNorm only, read-only)
  * @param running_var       Pre-computed running variance (BatchNorm only, read-only)
- * @param residual          Residual buffer (FusedAddRMSNorm only), modified in-place.
- *                          Same shape and element type as input. nullptr otherwise.
+ * @param residual          Residual buffer. FusedAddRMSNorm: modified in-place,
+ *                          same shape/element type as input. FusedLayerNormAdd:
+ *                          read-only addend, element type dst_dt. nullptr otherwise.
  * @param params            Normalization parameters
  *
  * @return status_t::success, status_t::failure, or status_t::unimplemented

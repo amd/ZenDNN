@@ -122,6 +122,25 @@ status_t validate_normalization_inputs(const void *input, const void *output,
         }
     }
 
+    // FusedLayerNormAdd-specific validations. The residual is a read-only
+    // addend applied to the LayerNorm output (norm-then-add), so it lives in the
+    // output domain and its element type must be dst_dt.
+    if (params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
+        if (!residual) {
+            log_error(
+                    "Normalization: FUSED_LAYER_NORM_ADD requires a non-null "
+                    "residual buffer");
+            return status_t::failure;
+        }
+        if (residual == output) {
+            log_error(
+                    "Normalization: FUSED_LAYER_NORM_ADD residual must not "
+                    "alias "
+                    "the output buffer");
+            return status_t::failure;
+        }
+    }
+
     // BatchNorm-specific validations
     if (params.norm_type == norm_type_t::BATCH_NORM) {
         if (!running_mean) {
@@ -153,6 +172,7 @@ std::string norm_type_to_str(norm_type_t type) {
         case norm_type_t::BATCH_NORM: return "BatchNorm";
         case norm_type_t::RMS_NORM: return "RMSNorm";
         case norm_type_t::FUSED_ADD_RMS_NORM: return "FusedAddRMSNorm";
+        case norm_type_t::FUSED_LAYER_NORM_ADD: return "FusedLayerNormAdd";
         default: return "Unknown";
     }
 }

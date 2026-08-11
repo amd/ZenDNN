@@ -108,13 +108,20 @@ int create_running_var_tensor(tensor_factory_t &tensor_factory,
 
 int create_residual_tensor(tensor_factory_t &tensor_factory,
         const NormalizationConfig &cfg, tensor_t &residual) {
-    if (cfg.norm_type != "fused_add_rms_norm") {
-        residual = tensor_t();
+    if (cfg.norm_type == "fused_add_rms_norm") {
+        // Residual is updated in-place and shares the src storage layout.
+        residual = tensor_factory.uniform_dist_tensor(
+                flat_shape(cfg), cfg.src_dt, 2.0f, "residual_tensor");
+        return OK;
+    }
+    if (cfg.norm_type == "fused_layer_norm_add") {
+        // Residual is a read-only addend in the output domain (dst_dt).
+        residual = tensor_factory.uniform_dist_tensor(
+                flat_shape(cfg), cfg.dst_dt, 2.0f, "residual_tensor");
         return OK;
     }
 
-    residual = tensor_factory.uniform_dist_tensor(
-            flat_shape(cfg), cfg.src_dt, 2.0f, "residual_tensor");
+    residual = tensor_t();
     return OK;
 }
 

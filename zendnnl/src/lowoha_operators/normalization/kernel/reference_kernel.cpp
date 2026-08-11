@@ -477,6 +477,124 @@ static void fused_add_rms_norm_impl(const void *input, void *output,
     }
 }
 
+// ============================================================================
+// FusedLayerNormAdd (norm-then-add)
+//
+// For each sample (row) in the batch:
+//   mean  = (1/N) * sum(x_i)
+//   var   = (1/N) * sum((x_i - mean)^2)
+//   y_i   = gamma[i] * (x_i - mean) / sqrt(var + eps) + beta[i] + residual[i]
+//
+// The residual is a read-only addend in the output domain (element type
+// dst_dt) applied right before the store. Mirrors layer_norm_impl exactly
+// except for the trailing residual add.
+// ============================================================================
+static void fused_layer_norm_add_impl(const void *input, void *output,
+        const void *residual, const void *gamma, const void *beta,
+        const norm_params &params, int num_threads) {
+    const uint64_t batch = params.batch;
+    const uint64_t norm_size = params.norm_size;
+    const float eps = params.epsilon;
+    const data_type_t src_dt = params.src_dt;
+    const data_type_t dst_dt = params.dst_dt;
+    const data_type_t gamma_dt = params.gamma_dt;
+    const data_type_t beta_dt = params.beta_dt;
+    // Residual is a read-only addend in the output domain.
+    const data_type_t res_dt = params.dst_dt;
+
+    const bool use_f16_accum = (params.accum_type == data_type_t::f16);
+    const uint64_t vec128 = simd_vec128(norm_size);
+
+#pragma omp parallel for num_threads(num_threads)
+    for (uint64_t b = 0; b < batch; ++b) {
+        const uint64_t off = b * norm_size;
+
+        // Pass 1: mean and variance (see layer_norm_impl for the FP32 vs. f16-accum
+        // formula rationale).
+        float mean = 0.0f;
+        float var = 0.0f;
+        if (use_f16_accum) {
+            float sum_lane[F16_ACCUM_LANES] = {0};
+            float sq_lane[F16_ACCUM_LANES] = {0};
+            for (uint64_t i = 0; i < norm_size; ++i) {
+                float x = to_f16_rounded(load_scalar(input, src_dt, off + i));
+                const int lane = simd_accum_lane(i, vec128);
+                sum_lane[lane] = to_f16_rounded(sum_lane[lane] + x);
+                sq_lane[lane] = to_f16_rounded(std::fmaf(x, x, sq_lane[lane]));
+            }
+            const float total_sum = reduce_lanes_f32(sum_lane);
+            const float total_sq = reduce_lanes_f32(sq_lane);
+            mean = total_sum / static_cast<float>(norm_size);
+            var = std::max(0.0f,
+                    total_sq / static_cast<float>(norm_size) - mean * mean);
+        } else {
+            float sum = 0.0f;
+            for (uint64_t i = 0; i < norm_size; ++i) {
+                sum += load_scalar(input, src_dt, off + i);
+            }
+            mean = sum / static_cast<float>(norm_size);
+
+            float sum_sq_dev = 0.0f;
+            for (uint64_t i = 0; i < norm_size; ++i) {
+                const float d = load_scalar(input, src_dt, off + i) - mean;
+                sum_sq_dev += d * d;
+            }
+            var = sum_sq_dev / static_cast<float>(norm_size);
+        }
+
+        float inv_std = 1.0f / std::sqrt(var + eps);
+        if (use_f16_accum) {
+            mean = to_f16_rounded(mean);
+            inv_std = to_f16_rounded(inv_std);
+        }
+
+        // Pass 2: normalize, apply optional gamma/beta, then add the residual.
+        for (uint64_t i = 0; i < norm_size; ++i) {
+            float x = load_scalar(input, src_dt, off + i);
+            float norm_val;
+            if (use_f16_accum) {
+                float xr = to_f16_rounded(x);
+                float d = to_f16_rounded(xr - mean);
+                if (params.use_scale) {
+                    float g = to_f16_rounded(load_scalar(gamma, gamma_dt, i));
+                    float g_eff = to_f16_rounded(g * inv_std);
+                    if (params.use_shift) {
+                        float bt
+                                = to_f16_rounded(load_scalar(beta, beta_dt, i));
+                        norm_val = to_f16_rounded(std::fmaf(d, g_eff, bt));
+                    } else {
+                        norm_val = to_f16_rounded(d * g_eff);
+                    }
+                } else {
+                    norm_val = to_f16_rounded(d * inv_std);
+                    if (params.use_shift) {
+                        float bt
+                                = to_f16_rounded(load_scalar(beta, beta_dt, i));
+                        norm_val = to_f16_rounded(norm_val + bt);
+                    }
+                }
+                // Residual add mirrors the native kernel's __m512h add: one f16
+                // rounding over (norm_val + residual). The residual is in the output
+                // domain (res_dt == dst_dt), so for mixed-dtype cases (e.g. dst_dt ==
+                // f32) it is FP32 storage and is rounded to f16 on load.
+                float r = to_f16_rounded(
+                        load_scalar(residual, res_dt, off + i));
+                norm_val = to_f16_rounded(norm_val + r);
+            } else {
+                norm_val = (x - mean) * inv_std;
+                if (params.use_scale) {
+                    norm_val *= load_scalar(gamma, gamma_dt, i);
+                }
+                if (params.use_shift) {
+                    norm_val += load_scalar(beta, beta_dt, i);
+                }
+                norm_val += load_scalar(residual, res_dt, off + i);
+            }
+            store_scalar(output, dst_dt, off + i, norm_val);
+        }
+    }
+}
+
 // ===================================================
 // Reference entry point – dispatches on norm type
 // ===================================================
@@ -504,8 +622,28 @@ status_t normalization_reference_wrapper(const void *input, void *output,
             return status_t::success;
 
         case norm_type_t::FUSED_ADD_RMS_NORM:
+            // Guard here too: this wrapper is also reachable directly (e.g. the
+            // forced-reference test path) which bypasses the entry-point
+            // validation, and the impl dereferences residual unconditionally.
+            if (!residual) {
+                log_error(
+                        "Normalization Reference: FUSED_ADD_RMS_NORM requires "
+                        "a non-null residual buffer");
+                return status_t::failure;
+            }
             fused_add_rms_norm_impl(
                     input, output, residual, gamma, params, num_threads);
+            return status_t::success;
+
+        case norm_type_t::FUSED_LAYER_NORM_ADD:
+            if (!residual) {
+                log_error(
+                        "Normalization Reference: FUSED_LAYER_NORM_ADD "
+                        "requires a non-null residual buffer");
+                return status_t::failure;
+            }
+            fused_layer_norm_add_impl(
+                    input, output, residual, gamma, beta, params, num_threads);
             return status_t::success;
 
         default:

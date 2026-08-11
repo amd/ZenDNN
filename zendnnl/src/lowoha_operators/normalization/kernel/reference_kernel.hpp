@@ -27,7 +27,8 @@ namespace normalization {
  * @brief Reference implementation wrapper for normalization
  *
  * Dispatches to the appropriate implementation based on params.src_dt / params.dst_dt,
- * and handles LayerNorm / RMSNorm / BatchNorm / FusedAddRMSNorm via params.norm_type.
+ * and handles LayerNorm / RMSNorm / BatchNorm / FusedAddRMSNorm / FusedLayerNormAdd
+ * via params.norm_type.
  *
  * @param input             Input tensor (read-only). Same element type as params.src_dt.
  * @param output            Output tensor. Same shape as input, element type params.dst_dt.
@@ -41,12 +42,16 @@ namespace normalization {
  *                          nullptr otherwise).
  * @param running_var       Pre-computed running variance (read-only, required for BatchNorm,
  *                          nullptr otherwise).
- * @param residual          Residual buffer, required only for FUSED_ADD_RMS_NORM,
- *                          nullptr for all other norm types.
- *                          - Must have the same shape and element type as the input
- *                            (i.e. params.src_dt).
- *                          - Modified in-place: on return, residual[i] = old_residual[i] + input[i].
- *                          - The normalized output is computed from this updated residual.
+ * @param residual          Residual buffer, required for FUSED_ADD_RMS_NORM and
+ *                          FUSED_LAYER_NORM_ADD, nullptr for all other norm types.
+ *                          - FUSED_ADD_RMS_NORM (add-then-norm): same shape and element
+ *                            type as the input (params.src_dt). Modified in-place: on
+ *                            return, residual[i] = old_residual[i] + input[i]; the
+ *                            normalized output is computed from this updated residual.
+ *                          - FUSED_LAYER_NORM_ADD (norm-then-add): read-only addend in
+ *                            the output domain (element type params.dst_dt); left
+ *                            unmodified. Added to the LayerNorm result before the store:
+ *                            output[i] = LayerNorm(x)[i] + residual[i].
  * @param params            Normalization parameters (type, shape, data types, etc.)
  *
  * @return status_t::success on successful execution, status_t::failure otherwise

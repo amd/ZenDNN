@@ -48,13 +48,22 @@ namespace normalization {
 // Conversions at the load boundary stay in __m512h; the FMA chain never
 // widens.
 //
+// FUSED_LAYER_NORM_ADD additionally adds a read-only residual to the LayerNorm
+// output at the store boundary (norm-then-add):
+//   y[b,i] = gamma[i] * (input[b,i] - mean) * inv_std + beta[i] + residual[b,i]
+// The residual element type matches params.dst_dt (the output domain), so it
+// reuses the OutType load helper and adds no new specializations. The add
+// happens after all reduction math, so it introduces only the usual single
+// store-time f16 rounding (no accumulation precision concern).
+//
 // Dispatch MUST gate this entry point on
 // zendnnl_platform_info().get_avx512_f16_status() — calling it on a CPU
 // without the AVX512-FP16 ISA will SIGILL. On toolchains older than GCC 12,
 // this returns status_t::isa_unsupported.
 // ---------------------------------------------------------------------------
 status_t layer_norm_avx512_fp16(const void *input, void *output,
-        const void *gamma, const void *beta, norm_params &params);
+        const void *residual, const void *gamma, const void *beta,
+        norm_params &params);
 
 } // namespace normalization
 } // namespace lowoha

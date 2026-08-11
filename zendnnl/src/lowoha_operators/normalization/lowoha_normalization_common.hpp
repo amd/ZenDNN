@@ -66,13 +66,20 @@ inline bool can_use_f16_fma_kernel() {
  *
  * - FUSED_ADD_RMS_NORM: Fused Add and RMS Normalization.
  *                Formula: y = gamma * (x + residual) / sqrt(mean((x + residual)  ^2) + eps)
+ *
+ * - FUSED_LAYER_NORM_ADD: LayerNorm followed by a residual add (norm-then-add).
+ *                The residual is a read-only addend applied to the LayerNorm
+ *                output, right before the result is stored. residual has the
+ *                same shape as the output and element type dst_dt.
+ *                Formula: y = gamma * (x - mean) / sqrt(var + eps) + beta + residual
  */
 enum class norm_type_t : int {
     NONE = -1, ///< No normalization type selected
     LAYER_NORM = 0, ///< Layer Normalization
     BATCH_NORM = 1, ///< Batch Normalization
     RMS_NORM = 2, ///< Root Mean Square Normalization
-    FUSED_ADD_RMS_NORM = 3 ///< Fused Add and RMS Normalization
+    FUSED_ADD_RMS_NORM = 3, ///< Fused Add and RMS Normalization
+    FUSED_LAYER_NORM_ADD = 4 ///< Layer Normalization followed by residual add
 };
 
 /**

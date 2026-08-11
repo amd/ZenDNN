@@ -78,14 +78,15 @@ protected:
     /**
    * @brief Create optional tensors that depend on the normalization type
    */
-    void create_optional_tensors(data_type_t src_dt) {
+    void create_optional_tensors(data_type_t src_dt, data_type_t dst_dt) {
         gamma_tensor = use_scale ? tensor_factory.uniform_dist_tensor(
                                            {gamma_size}, gamma_dt, 1.0f)
                                  : tensor_t();
 
         bool needs_beta = use_shift
                 && (norm_type == norm_type_t::LAYER_NORM
-                        || norm_type == norm_type_t::BATCH_NORM);
+                        || norm_type == norm_type_t::BATCH_NORM
+                        || norm_type == norm_type_t::FUSED_LAYER_NORM_ADD);
         beta_tensor = needs_beta ? tensor_factory.uniform_dist_tensor(
                                            {gamma_size}, beta_dt, 1.0f)
                                  : tensor_t();
@@ -114,10 +115,39 @@ protected:
             std::memcpy(residual_tensor_ref.get_raw_handle_unsafe(),
                     residual_tensor.get_raw_handle_unsafe(),
                     total_elements * elem_bytes);
+        } else if (norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
+            // Residual is a read-only addend in the output domain (dst_dt). Native
+            // and reference read identical values; neither modifies the buffer.
+            residual_tensor
+                    = tensor_factory.uniform_dist_tensor(shape, dst_dt, 2.0f);
+            residual_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
+            size_t elem_bytes = size_of(dst_dt);
+            std::memcpy(residual_tensor_ref.get_raw_handle_unsafe(),
+                    residual_tensor.get_raw_handle_unsafe(),
+                    total_elements * elem_bytes);
         } else {
             residual_tensor = tensor_t();
             residual_tensor_ref = tensor_t();
         }
+    }
+
+    /**
+   * @brief For FUSED_LAYER_NORM_ADD the residual is a read-only addend; the
+   *        native kernel must leave it byte-for-byte identical to the pristine
+   *        copy the reference path consumed (residual_tensor_ref, which the
+   *        read-only reference kernel never touches). Catches a kernel that
+   *        accidentally writes to the residual buffer even when its output is
+   *        correct. No-op (returns true) for every other norm type, whose
+   *        residual is either absent or legitimately updated in place.
+   */
+    bool residual_unmodified(data_type_t dst_dt) {
+        if (norm_type != norm_type_t::FUSED_LAYER_NORM_ADD) { return true; }
+        const void *native_res = residual_tensor.get_raw_handle_unsafe();
+        const void *golden_res = residual_tensor_ref.get_raw_handle_unsafe();
+        if (native_res == nullptr || golden_res == nullptr) { return false; }
+        const size_t nbytes
+                = static_cast<size_t>(total_elements) * size_of(dst_dt);
+        return std::memcmp(native_res, golden_res, nbytes) == 0;
     }
 
     norm_type_t norm_type;
@@ -153,7 +183,7 @@ TEST_P(TestNormalization, F32_F32) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -171,6 +201,9 @@ TEST_P(TestNormalization, F32_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F32_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -189,7 +222,7 @@ TEST_P(TestNormalization, BF16_BF16) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -207,6 +240,9 @@ TEST_P(TestNormalization, BF16_BF16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_BF16_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -225,7 +261,7 @@ TEST_P(TestNormalization, BF16_F32) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -243,6 +279,9 @@ TEST_P(TestNormalization, BF16_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F32_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -261,7 +300,7 @@ TEST_P(TestNormalization, F32_BF16) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -279,6 +318,9 @@ TEST_P(TestNormalization, F32_BF16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_BF16_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -298,7 +340,7 @@ TEST_P(TestNormalization, F16_F16) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -319,6 +361,9 @@ TEST_P(TestNormalization, F16_F16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -338,7 +383,7 @@ TEST_P(TestNormalization, F16_F32) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -359,6 +404,9 @@ TEST_P(TestNormalization, F16_F32) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -378,7 +426,7 @@ TEST_P(TestNormalization, F32_F16) {
     auto output_tensor = tensor_factory.zero_tensor(shape, dst_dt);
     auto output_tensor_ref = tensor_factory.zero_tensor(shape, dst_dt);
 
-    create_optional_tensors(src_dt);
+    create_optional_tensors(src_dt, dst_dt);
 
     norm_params np = build_params(src_dt, dst_dt);
 
@@ -399,6 +447,9 @@ TEST_P(TestNormalization, F32_F16) {
     if (is_test_successful) {
         compare_norm_tensors(output_tensor, output_tensor_ref, shape,
                 total_elements, NORM_F16_TOL, is_test_successful);
+        EXPECT_TRUE(residual_unmodified(dst_dt))
+                << "FUSED_LAYER_NORM_ADD must not modify the read-only "
+                   "residual buffer";
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -428,8 +479,8 @@ static std::vector<NormalizationType> make_norm_tail_cases() {
     // which don't skip on missing F16 ISA, stay valid on non-F16 hosts). The
     // dedicated NormalizationFusedTailF16 test below covers the fused-add masked
     // tail with all-f16 dtypes when built with -DZENDNNL_FUSED_ADD_RMS_F16=ON.
-    const std::vector<norm_type_t> norm_types
-            = {norm_type_t::RMS_NORM, norm_type_t::LAYER_NORM};
+    const std::vector<norm_type_t> norm_types = {norm_type_t::RMS_NORM,
+            norm_type_t::LAYER_NORM, norm_type_t::FUSED_LAYER_NORM_ADD};
 
     std::vector<NormalizationType> cases;
     cases.reserve(norm_types.size() * tail_sizes.size());
@@ -445,7 +496,8 @@ static std::vector<NormalizationType> make_norm_tail_cases() {
             c.shape = {c.batch, ns};
             c.epsilon = (nt == norm_type_t::RMS_NORM) ? 1e-6f : 1e-5f;
             c.use_scale = true;
-            c.use_shift = (nt == norm_type_t::LAYER_NORM);
+            c.use_shift = (nt == norm_type_t::LAYER_NORM
+                    || nt == norm_type_t::FUSED_LAYER_NORM_ADD);
             // Keep gamma/beta f32: the F32_F32/BF16 fixture variants don't skip on
             // missing F16 ISA, so f16 gamma/beta there would fail on non-F16 hosts.
             // The masked shim is still exercised via the f16 src/dst variants.

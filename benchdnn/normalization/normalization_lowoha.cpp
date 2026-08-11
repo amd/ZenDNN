@@ -106,7 +106,9 @@ int normalization_lowoha_benchdnn(std::vector<NormalizationConfig> configs,
             const void *running_var_data = (cfg.norm_type == "batch_norm")
                     ? running_var_tensor.get_raw_handle_const()
                     : nullptr;
-            void *residual_data = (cfg.norm_type == "fused_add_rms_norm")
+            void *residual_data
+                    = (cfg.norm_type == "fused_add_rms_norm"
+                              || cfg.norm_type == "fused_layer_norm_add")
                     ? residual_tensor.get_raw_handle_unsafe()
                     : nullptr;
 

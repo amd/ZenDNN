@@ -16,13 +16,13 @@ Run the normalization benchmark using the following input method:
 
 > **Note:**
 > - Normalization benchmarking is only supported via the LOWOHA (Low Overhead API) path. The `--lowoha=true` flag must be used (it is also the default).
-> - Supported normalization types: `layer_norm`, `batch_norm`, `rms_norm`, `fused_add_rms_norm`.
+> - Supported normalization types: `layer_norm`, `batch_norm`, `rms_norm`, `fused_add_rms_norm`, `fused_layer_norm_add`.
 
 ---
 
 ### Input File (`--input_file`)
 Provide a file with one configuration per line. Lines starting with `#` are comments. Each line should contain:
-- `norm_type` (Normalization variant: `layer_norm`, `batch_norm`, `rms_norm`, `fused_add_rms_norm`)
+- `norm_type` (Normalization variant: `layer_norm`, `batch_norm`, `rms_norm`, `fused_add_rms_norm`, `fused_layer_norm_add`)
 - `shape` (Tensor dimensions separated by `x`, e.g., `2x4096`, `32x64x56x56`)
 - `norm_ndims` (Number of trailing dimensions to normalize; must be `0` for `batch_norm`, `1` to `ndims` for others)
 - `src_dt:dst_dt` (Source and destination data types, e.g., `f32:f32`, `bf16:bf16`, `bf16:f32`, `f32:bf16`, `f16:f16`, `f16:f32`, `f32:f16`. `f16` cannot be cross-mixed with `bf16` between src and dst.)
@@ -50,6 +50,7 @@ layer_norm, 2x4096, 1, f32:f32, 1e-5, true, true, 100, 50, bf16, bf16, none
 rms_norm, 8x2048, 1, bf16:f32, 1e-6, true, false, 50, 10, bf16
 batch_norm, 32x64x56x56, 0, f32:f32, 1e-5, true, true, 200
 fused_add_rms_norm, 4x4096, 1, f32:f32, 1e-6, true, false, 100, 20, f32, f32, dynamic_dispatch, 8
+fused_layer_norm_add, 4x4096, 1, f32:f32, 1e-5, true, true, 100, 20, f32, f32, dynamic_dispatch, 8
 layer_norm, 4x8x512, 2, f32:f32, 1e-5, true, true, 100, 20, bf16, bf16
 layer_norm, 2x4096, 1, f32:f32, 1e-5, true, true, 100, 20, f32, f32, none, 0, true
 rms_norm, 4x4096, 1, f16:f16, 1e-6, true, false, 100, 20, f16
@@ -72,6 +73,7 @@ layer_norm, 2x4096, 1, f32:f16, 1e-5, true, true,  100, 20, f16, f32
 >     - `rms_norm` — `src_dt`/`dst_dt` ∈ `{f16, f32}` with at least one `f16`, and `gamma_dt` ∈ `{f16, f32}`. `beta_dt` is irrelevant (RMSNorm never reads beta).
 >     - `layer_norm` — same as `rms_norm`, plus `beta_dt` ∈ `{f16, f32}` only when `use_shift=true` (if `use_shift=false`, `beta_dt` is irrelevant).
 >     - `fused_add_rms_norm` — by default no F16-FMA path; always uses the FP32-accumulating AVX-512 kernel. When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, it gains an opt-in F16-FMA path with a strict `src_dt = dst_dt = gamma_dt = f16` gate (residual aliases src in place and must share the f16 storage layout); mixed `(src, dst)` still falls through to the FP32 path. `beta_dt` is irrelevant.
+>     - `fused_layer_norm_add` — same eligibility as `layer_norm` (no build flag). The residual (a read-only addend of dtype `dst_dt`) is added at the store boundary, so the native FP16 path is always available when the plain LayerNorm path is eligible.
 >     - `batch_norm` — always uses the reference kernel; the F16-FMA path does not apply.
 >
 >   `bf16` in a *checked* operand always disqualifies the FP16-FMA path for that call. To force the FP32 path library-wide for A/B comparisons on an AVX512-FP16 host, build with `-DZENDNNL_NATIVE_F32_ACCUM=ON`.

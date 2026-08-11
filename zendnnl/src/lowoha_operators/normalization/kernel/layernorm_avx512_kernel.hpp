@@ -24,7 +24,7 @@ namespace lowoha {
 namespace normalization {
 
 // ---------------------------------------------------------------------------
-// AVX-512 optimized Layer Normalization.
+// AVX-512 optimized Layer Normalization (plain and fused norm-then-add).
 //
 //   mean     = (1/N) * Σ input[b,i]
 //   var      = (1/N) * Σ input[b,i]² - mean²
@@ -34,16 +34,25 @@ namespace normalization {
 // Both mean and sum-of-squares are computed in a single pass over the input,
 // and the variance is derived via  var = E[x²] - E[x]²  (clamped to ≥ 0).
 //
+// FUSED_LAYER_NORM_ADD additionally adds a read-only residual to the LayerNorm
+// output at the store boundary of pass 2 (norm-then-add):
+//   y[b,i] = gamma[i] * (input[b,i] - mean) * inv_std + beta[i] + residual[b,i]
+// The residual element type matches params.dst_dt (output domain).
+//
 // @param input      Input tensor (contiguous, row-major)
 // @param output     Output tensor
+// @param residual   Residual addend (read-only, FUSED_LAYER_NORM_ADD only;
+//                   nullptr for plain LAYER_NORM). Element type matches
+//                   params.dst_dt.
 // @param gamma      Scale parameter (FP32, BF16, or F16, nullptr if !use_scale)
 // @param beta       Shift parameter (FP32, BF16, or F16, nullptr if !use_shift)
 // @param params     Normalization parameters
 //
 // @return status_t::success on successful execution
 // ---------------------------------------------------------------------------
-status_t layer_norm_avx512(const void *input, void *output, const void *gamma,
-        const void *beta, norm_params &params);
+status_t layer_norm_avx512(const void *input, void *output,
+        const void *residual, const void *gamma, const void *beta,
+        norm_params &params);
 
 } // namespace normalization
 } // namespace lowoha

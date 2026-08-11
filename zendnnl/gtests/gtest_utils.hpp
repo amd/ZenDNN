@@ -595,7 +595,7 @@ std::vector<ReorderInput> read_reorder_inputs(
  *  Input format (comma-separated, six fields per line):
  *  norm_type,norm_shape,use_scale,use_shift,gamma_dt,beta_dt
  *
- *  - norm_type: layer, batch, rms, fusedaddrms
+ *  - norm_type: layer, batch, rms, fusedaddrms, fusedlayeradd
  *  - norm_shape: positive dimensions joined with ':' (e.g. 2:4096, 32:64:56:56)
  *  - use_scale, use_shift: true/1 or false/0; other values reject the line
  *  - gamma_dt, beta_dt: optional (bf16, f32); empty fields use constructor defaults
@@ -643,7 +643,8 @@ std::vector<EmbeddingInput> read_embedding_inputs(const std::string &file);
 
 /** @brief Map a normalization type string to norm_type_t (case-insensitive).
  *
- *  Accepted values: layer, batch, rms, fusedaddrms.
+ *  Accepted values: layer, batch, rms, fusedaddrms, fusedlayeradd
+ *  (alias: fusedlayernormadd).
  */
 norm_type_t strToNormType(const std::string &str);
 
@@ -861,8 +862,8 @@ status_t quant_params_compute(tensor_factory_t &factory,
  *  @brief Test function for normalization kernel (native path)
  *
  *  Calls normalization_direct() which dispatches to the best available
- *  kernel: AVX-512-FP16 / AVX-512 for LayerNorm and RMSNorm /
- *  FusedAddRMSNorm, reference for BatchNorm.
+ *  kernel: AVX-512-FP16 / AVX-512 for LayerNorm, RMSNorm,
+ *  FusedAddRMSNorm, and FusedLayerNormAdd, reference for BatchNorm.
  *
  *  @return status_t::success, status_t::isa_unsupported when an f16 buffer
  *  is used on a host without AVX-512-FP16 (unless the library was built

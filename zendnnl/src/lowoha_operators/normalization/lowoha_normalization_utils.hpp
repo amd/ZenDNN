@@ -38,6 +38,8 @@ using namespace zendnnl::common;
  *
  * For BatchNorm inference, running_mean and running_var are required.
  * For FusedAddRMSNorm, a non-null writable residual buffer is required.
+ * For FusedLayerNormAdd, a non-null read-only residual buffer is required and
+ * must not alias the output buffer.
  *
  * @param input         Input tensor pointer (read-only)
  * @param output        Output tensor pointer
@@ -46,10 +48,13 @@ using namespace zendnnl::common;
  *                      or RMSNorm/FusedAddRMSNorm)
  * @param running_mean  Pre-computed running mean (required for BatchNorm, nullptr otherwise)
  * @param running_var   Pre-computed running variance (required for BatchNorm, nullptr otherwise)
- * @param residual      Residual buffer (required for FUSED_ADD_RMS_NORM, nullptr otherwise).
- *                      Must be writable: the kernel updates it in-place
- *                      (residual[i] += input[i]). Must have the same shape and element
- *                      type as the input (params.src_dt).
+ * @param residual      Residual buffer (required for FUSED_ADD_RMS_NORM and
+ *                      FUSED_LAYER_NORM_ADD, nullptr otherwise).
+ *                      - FUSED_ADD_RMS_NORM: writable; updated in-place
+ *                        (residual[i] += input[i]); same shape and element type as
+ *                        the input (params.src_dt).
+ *                      - FUSED_LAYER_NORM_ADD: read-only addend in the output domain
+ *                        (element type params.dst_dt); must not alias the output.
  * @param params        Normalization parameters
  * @return status_t::success if valid, status_t::failure otherwise
  */
@@ -62,7 +67,8 @@ status_t validate_normalization_inputs(const void *input, const void *output,
  * @brief Convert norm_type_t to a string
  *
  * @param type  The normalization type enum value
- * @return A string representation (e.g. "LayerNorm", "RMSNorm", "BatchNorm", "FusedAddRMSNorm")
+ * @return A string representation (e.g. "LayerNorm", "RMSNorm", "BatchNorm",
+ *         "FusedAddRMSNorm", "FusedLayerNormAdd")
  */
 std::string norm_type_to_str(norm_type_t type);
 

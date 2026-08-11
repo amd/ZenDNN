@@ -515,12 +515,13 @@ NormalizationType::NormalizationType(
     if (normalization_input.norm_type) {
         norm_type = *normalization_input.norm_type;
     } else {
-        int type_choice = std::rand() % 4;
+        int type_choice = std::rand() % 5;
         switch (type_choice) {
             case 0: norm_type = norm_type_t::LAYER_NORM; break;
             case 1: norm_type = norm_type_t::RMS_NORM; break;
             case 2: norm_type = norm_type_t::FUSED_ADD_RMS_NORM; break;
             case 3: norm_type = norm_type_t::BATCH_NORM; break;
+            case 4: norm_type = norm_type_t::FUSED_LAYER_NORM_ADD; break;
         }
     }
 
@@ -607,7 +608,8 @@ NormalizationType::NormalizationType(
             ? *normalization_input.use_scale
             : (std::rand() % 4 != 0); // 75% true
     if (norm_type == norm_type_t::LAYER_NORM
-            || norm_type == norm_type_t::BATCH_NORM) {
+            || norm_type == norm_type_t::BATCH_NORM
+            || norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
         use_shift = normalization_input.use_shift
                 ? *normalization_input.use_shift
                 : (std::rand() % 4 != 0); // 75% true
@@ -1676,9 +1678,12 @@ void Parser::read_from_umap(
             out = norm_type_t::RMS_NORM;
         } else if (s == "fusedaddrms") {
             out = norm_type_t::FUSED_ADD_RMS_NORM;
+        } else if (s == "fusedlayeradd" || s == "fusedlayernormadd") {
+            out = norm_type_t::FUSED_LAYER_NORM_ADD;
         } else {
             log_info("Invalid ", key,
-                    " (use layer, batch, rms, fusedaddrms); ignored.");
+                    " (use layer, batch, rms, fusedaddrms, fusedlayeradd); "
+                    "ignored.");
         }
         if (out) { log_info("Using ", key, "=", s); }
     }
@@ -2705,6 +2710,9 @@ norm_type_t strToNormType(const std::string &str) {
     if (s == "batch") { return norm_type_t::BATCH_NORM; }
     if (s == "rms") { return norm_type_t::RMS_NORM; }
     if (s == "fusedaddrms") { return norm_type_t::FUSED_ADD_RMS_NORM; }
+    if (s == "fusedlayeradd" || s == "fusedlayernormadd") {
+        return norm_type_t::FUSED_LAYER_NORM_ADD;
+    }
     EXCEPTION("Unknown norm_type '" + str + "'");
 }
 

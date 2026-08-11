@@ -382,7 +382,7 @@ Requires `--op normalization`:
 
 | Flag | Values / description |
 |------|----------------------|
-| `--norm_type` | `layer`, `batch`, `rms`, `fusedaddrms` |
+| `--norm_type` | `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd` |
 | `--norm_shape` | Comma-separated dims, e.g. `2,4096` (`batch` needs ≥2). Input file uses **`:`** — see [Normalization](#normalization-input-file-format) |
 | `--use_scale`, `--use_shift` | Boolean |
 | `--gamma_dt`, `--beta_dt` | **`f32`**, **`bf16`**, or **`f16`** (`f16` only on AVX512-FP16-capable hosts; otherwise rejected with a log message and a random fallback) |
@@ -520,12 +520,13 @@ num_embeddings,embedding_dim,num_indices,padding_index,is_weights,indices_dtype,
 norm_type,norm_shape,use_scale,use_shift,gamma_dt,beta_dt
 ```
 
-`norm_type`: `layer`, `batch`, `rms`, `fusedaddrms`. `norm_shape`: colon-separated dims (e.g. `2:4096`, `32:64:56:56`) — not commas; CLI `--norm_shape` uses commas instead. `gamma_dt` / `beta_dt`: `f32`, `bf16`.
+`norm_type`: `layer`, `batch`, `rms`, `fusedaddrms`, `fusedlayeradd`. `norm_shape`: colon-separated dims (e.g. `2:4096`, `32:64:56:56`) — not commas; CLI `--norm_shape` uses commas instead. `gamma_dt` / `beta_dt`: `f32`, `bf16`.
 
 ```
 layer,2:3,,,,
 batch,8:2,,,,
 rms,4096,true,false,bf16,f32
+fusedlayeradd,4:4096,true,true,f32,f32
 ```
 
 ### **Shared field reference**
@@ -907,7 +908,7 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
 ### Normalization Tests
  - Normalization TestSuite has seven testcases (F32_F32, BF16_BF16, BF16_F32,
    F32_BF16, F16_F16, F16_F32, F32_F16)
- - Supports four normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, BatchNorm
+ - Supports five normalization types: LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, BatchNorm
  - Test parameters (shape, norm_ndims, use_scale, use_shift, gamma/beta data types) are randomly generated
  - Validates native kernel output against the reference (scalar) kernel output
  - F16 tests skip at runtime if the platform lacks AVX512-FP16 ISA support
@@ -957,7 +958,7 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
    `1, 31, 33, 47, 63, 95, 129`. These force the masked AVX512-FP16 tail path in
    the F16 kernels (`f16_maskz_loadu_vec` / `f16_mask_storeu_vec`), covering
    tail-only, single-block + tail, and multi-block + tail remainders.
- - Sizes are exercised across RMSNorm and LayerNorm (the norm types that use the F16 kernels by default). FusedAddRMSNorm is intentionally excluded from this shared suite (it pins `gamma_dt=f32`, which cannot trigger the native fused-add FP16 path). When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, the dedicated standalone test `NormalizationFusedTailF16.MaskedTail` covers the fused-add masked-tail path with strict all-f16 dtypes (skipped at runtime on non-AVX512-FP16 hosts).
+ - Sizes are exercised across RMSNorm, LayerNorm, and FusedLayerNormAdd (the norm types that use the F16 kernels by default). FusedLayerNormAdd is included because its residual add is a store-time epilogue (residual dtype `dst_dt`), so it shares the same F16 eligibility as LayerNorm with no build flag. FusedAddRMSNorm is intentionally excluded from this shared suite (it pins `gamma_dt=f32`, which cannot trigger the native fused-add FP16 path). When the library is built with `-DZENDNNL_FUSED_ADD_RMS_F16=ON`, the dedicated standalone test `NormalizationFusedTailF16.MaskedTail` covers the fused-add masked-tail path with strict all-f16 dtypes (skipped at runtime on non-AVX512-FP16 hosts).
  - It exists as a **separate instantiation prefix** (not a new testcase) because
    in GoogleTest the test name (`TEST_P`) selects a *behavior* while the
    instantiation prefix selects the *set of parameter values*; the random

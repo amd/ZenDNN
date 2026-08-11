@@ -57,7 +57,7 @@ ZenDNN
 |   |   |- lowoha_operators : direct, low overhead (function-based) operator implementations (the performance-first API path).
 |   |   |   |- matmul        : matmul_direct and group_matmul_direct (incl. fused MoE), and backends.
 |   |   |   |- reorder       : data type conversion, quantization/dequantization, and weight prepack.
-|   |   |   |- normalization : LayerNorm, RMSNorm, and FusedAddRMSNorm kernels.
+|   |   |   |- normalization : LayerNorm, RMSNorm, FusedAddRMSNorm, FusedLayerNormAdd, and BatchNorm kernels.
 |   |   |   |- sdpa          : scaled dot-product (flash) attention and BMM-based SDPA.
 |   |   |   |- softmax       : low overhead softmax.
 |   |   |   |- pooling       : low overhead pooling.

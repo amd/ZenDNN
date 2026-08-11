@@ -55,7 +55,7 @@ int create_output_tensor(tensor_factory_t &tensor_factory,
  * @brief Creates the gamma (scale) parameter tensor.
  *
  * Shape depends on norm type:
- *   - LayerNorm / RMSNorm / FusedAddRMSNorm: [norm_size]
+ *   - LayerNorm / RMSNorm / FusedAddRMSNorm / FusedLayerNormAdd: [norm_size]
  *   - BatchNorm: [num_channels]
  * Always FP32. Populated with uniform random values.
  *
@@ -71,7 +71,7 @@ int create_gamma_tensor(tensor_factory_t &tensor_factory,
  * @brief Creates the beta (shift) parameter tensor.
  *
  * Shape depends on norm type:
- *   - LayerNorm: [norm_size]
+ *   - LayerNorm / FusedLayerNormAdd: [norm_size]
  *   - BatchNorm: [num_channels]
  *   - RMSNorm / FusedAddRMSNorm: unused (empty tensor returned)
  * Always FP32. Populated with uniform random values.
@@ -113,10 +113,13 @@ int create_running_var_tensor(tensor_factory_t &tensor_factory,
         const NormalizationConfig &cfg, tensor_t &running_var);
 
 /**
- * @brief Creates the residual tensor (FusedAddRMSNorm only).
+ * @brief Creates the residual tensor (FusedAddRMSNorm / FusedLayerNormAdd only).
  *
- * Same shape and data type as input (src_dt). Populated with uniform random values.
- * Returns an empty tensor for non-FusedAddRMSNorm types.
+ * Shape matches the flattened tensor; element type depends on norm type:
+ *   - FusedAddRMSNorm: input domain (src_dt), read-modify-written in place.
+ *   - FusedLayerNormAdd: output domain (dst_dt), a read-only addend.
+ * Populated with uniform random values. Returns an empty tensor for all other
+ * norm types.
  *
  * @param tensor_factory Factory object for tensor creation.
  * @param cfg NormalizationConfig structure specifying tensor dimensions.

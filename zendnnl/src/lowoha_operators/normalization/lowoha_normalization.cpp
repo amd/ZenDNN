@@ -130,15 +130,19 @@ status_t normalization_kernel_wrapper(const void *input, void *output,
     }
 #endif
 
-    // Plain LAYER_NORM with mixed-dtype (f16/f32, f32/f16) eligibility.
+    // LAYER_NORM / FUSED_LAYER_NORM_ADD with mixed-dtype (f16/f32, f32/f16)
+    // eligibility. FUSED_LAYER_NORM_ADD needs no separate gate: its residual add
+    // is a pure store-time epilogue (residual dtype == dst_dt), so the native
+    // FP16 path is always safe when the plain LayerNorm path is eligible.
     if (can_use_f16_fma_kernel() && ln_f16_fma_eligible
-            && params.norm_type == norm_type_t::LAYER_NORM) {
+            && (params.norm_type == norm_type_t::LAYER_NORM
+                    || params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD)) {
         log_info("Using AVX512-FP16 kernel for ",
                 norm_type_to_str(params.norm_type));
 
         params.accum_type = data_type_t::f16;
-        status_t status
-                = layer_norm_avx512_fp16(input, output, gamma, beta, params);
+        status_t status = layer_norm_avx512_fp16(
+                input, output, residual, gamma, beta, params);
         if (status == status_t::success) { return status; }
         if (status != status_t::isa_unsupported
                 && status != status_t::unimplemented) {
@@ -163,11 +167,14 @@ status_t normalization_kernel_wrapper(const void *input, void *output,
         return status;
     }
 
-    if (has_avx512f && params.norm_type == norm_type_t::LAYER_NORM) {
+    if (has_avx512f
+            && (params.norm_type == norm_type_t::LAYER_NORM
+                    || params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD)) {
         log_info(
                 "Using AVX512 kernel for ", norm_type_to_str(params.norm_type));
         params.accum_type = data_type_t::f32;
-        status_t status = layer_norm_avx512(input, output, gamma, beta, params);
+        status_t status = layer_norm_avx512(
+                input, output, residual, gamma, beta, params);
         if (status != status_t::success) {
             log_error(norm_type_to_str(params.norm_type), " kernel failed");
         }
@@ -251,6 +258,27 @@ status_t normalization_direct(const void *input, void *output,
                 "Normalization: FUSED_ADD_RMS_NORM requires a non-null "
                 "residual buffer");
         return status_t::failure;
+    }
+
+    // Reject invalid FUSED_LAYER_NORM_ADD residual usage:
+    // - null residual makes the kernels treat it as plain LAYER_NORM and silently
+    //   drop the residual-add step.
+    // - residual == output is undefined behavior because the fused row kernels use
+    //   __restrict__ on both pointers.
+    if (params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
+        if (!residual) {
+            log_error(
+                    "Normalization: FUSED_LAYER_NORM_ADD requires a non-null "
+                    "residual buffer");
+            return status_t::failure;
+        }
+        if (residual == output) {
+            log_error(
+                    "Normalization: FUSED_LAYER_NORM_ADD residual must not "
+                    "alias "
+                    "the output buffer");
+            return status_t::failure;
+        }
     }
 
     // Validate inputs only when ZENDNNL_DIAGNOSTICS_ENABLE=1. In production this

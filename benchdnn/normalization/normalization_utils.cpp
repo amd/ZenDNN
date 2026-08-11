@@ -119,6 +119,9 @@ std::string strToNormType(const std::string &str) {
     if (lower == "fused_add_rms_norm" || lower == "fusedaddrmsnorm") {
         return "fused_add_rms_norm";
     }
+    if (lower == "fused_layer_norm_add" || lower == "fusedlayernormadd") {
+        return "fused_layer_norm_add";
+    }
     return "";
 }
 
@@ -147,6 +150,9 @@ norm_type_t strToLowohaType(const std::string &norm_type) {
     if (norm_type == "rms_norm") { return norm_type_t::RMS_NORM; }
     if (norm_type == "fused_add_rms_norm") {
         return norm_type_t::FUSED_ADD_RMS_NORM;
+    }
+    if (norm_type == "fused_layer_norm_add") {
+        return norm_type_t::FUSED_LAYER_NORM_ADD;
     }
     return norm_type_t::NONE;
 }
@@ -182,7 +188,7 @@ void inputParser(
             if (cfg.norm_type.empty()) {
                 commonlog_error("Unknown norm_type: ", fields[id],
                         ". Supported: layer_norm, batch_norm, rms_norm, "
-                        "fused_add_rms_norm");
+                        "fused_add_rms_norm, fused_layer_norm_add");
                 continue;
             }
             id++;
