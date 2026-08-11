@@ -16,6 +16,7 @@
 
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
 
@@ -41,8 +42,8 @@ using zendnnl::lowoha::matmul::zendnnl_parallel_for;
  * BF16 is the upper 16 bits of IEEE 754 float32, so zero-extending and
  * shifting left by 16 reconstructs the original float.
  */
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline __m512
-bf16x16_to_f32_pg(__m256i bf16) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline __m512 bf16x16_to_f32_pg(__m256i bf16) {
     return _mm512_castsi512_ps(
             _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
 }
@@ -62,8 +63,9 @@ bf16x16_to_f32_pg(__m256i bf16) {
  * Returns a 16-bit mask where lane k is 1 iff v[k] is finite (not NaN/Inf).
  * Works by checking |v| < Inf in IEEE 754 representation.
  */
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline __mmask16
-finite_mask_pg(__m512 v, __m512i abs_mask, __m512 vinf) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline __mmask16 finite_mask_pg(
+        __m512 v, __m512i abs_mask, __m512 vinf) {
     __m512 absv = _mm512_castsi512_ps(
             _mm512_and_si512(_mm512_castps_si512(v), abs_mask));
     return _mm512_cmp_ps_mask(absv, vinf, _CMP_LT_OQ);
@@ -125,9 +127,9 @@ static inline void compute_asymmetric_scale_zp_pg(
 // Requires 64-byte alignment; falls back to 4 x unaligned stores otherwise.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline void
-store_4x16_s8_pg(int8_t *dst, __m128i i0, __m128i i1, __m128i i2, __m128i i3,
-        bool cacheline_aligned) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline void store_4x16_s8_pg(int8_t *dst, __m128i i0, __m128i i1,
+        __m128i i2, __m128i i3, bool cacheline_aligned) {
     if (cacheline_aligned) {
         __m256i lo = _mm256_set_m128i(i1, i0);
         __m256i hi = _mm256_set_m128i(i3, i2);
@@ -142,9 +144,9 @@ store_4x16_s8_pg(int8_t *dst, __m128i i0, __m128i i1, __m128i i2, __m128i i3,
 }
 
 /** Unsigned byte variant of the cache-line-wide store helper. */
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline void
-store_4x16_u8_pg(uint8_t *dst, __m128i i0, __m128i i1, __m128i i2, __m128i i3,
-        bool cacheline_aligned) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline void store_4x16_u8_pg(uint8_t *dst, __m128i i0, __m128i i1,
+        __m128i i2, __m128i i3, bool cacheline_aligned) {
     store_4x16_s8_pg(
             reinterpret_cast<int8_t *>(dst), i0, i1, i2, i3, cacheline_aligned);
 }
@@ -159,9 +161,9 @@ store_4x16_u8_pg(uint8_t *dst, __m128i i0, __m128i i1, __m128i i2, __m128i i3,
  * sources and BF16 sources converted to F32 on load.
  */
 template <typename LoadF32>
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline float
-group_absmax(const LoadF32 &load_f32, int64_t group_size, __m512i abs_mask,
-        __m512 vinf) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline float group_absmax(const LoadF32 &load_f32, int64_t group_size,
+        __m512i abs_mask, __m512 vinf) {
     __m512 vam0 = _mm512_setzero_ps();
     __m512 vam1 = _mm512_setzero_ps();
     __m512 vam2 = _mm512_setzero_ps();
@@ -208,9 +210,9 @@ group_absmax(const LoadF32 &load_f32, int64_t group_size, __m512i abs_mask,
  * Non-finite lanes are masked out to match the scalar reference behavior.
  */
 template <typename LoadF32>
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static inline void
-group_minmax(const LoadF32 &load_f32, int64_t group_size, __m512i abs_mask,
-        __m512 vinf, float &row_min, float &row_max) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline void group_minmax(const LoadF32 &load_f32, int64_t group_size,
+        __m512i abs_mask, __m512 vinf, float &row_min, float &row_max) {
     __m512 vmin0 = _mm512_set1_ps(std::numeric_limits<float>::max());
     __m512 vmax0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
     __m512 vmin1 = vmin0, vmax1 = vmax0;
@@ -259,12 +261,11 @@ group_minmax(const LoadF32 &load_f32, int64_t group_size, __m512i abs_mask,
 // results.  `scale_out` receives the computed group scale.
 //==============================================================================
 
-__attribute__((target("avx512f"))) static inline void quant_one_group_f32_s8(
-        const float *grp_src, int8_t *grp_dst, float *scale_out,
-        int64_t group_size, __m512i abs_mask, __m512 vinf) {
-    auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
-        return _mm512_loadu_ps(grp_src + j);
-    };
+ZENDNNL_TARGET("avx512f")
+static inline void quant_one_group_f32_s8(const float *grp_src, int8_t *grp_dst,
+        float *scale_out, int64_t group_size, __m512i abs_mask, __m512 vinf) {
+    auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                            "avx512f") { return _mm512_loadu_ps(grp_src + j); };
 
     float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
     int64_t j = group_size & ~int64_t {15};
@@ -308,10 +309,11 @@ __attribute__((target("avx512f"))) static inline void quant_one_group_f32_s8(
     }
 }
 
-__attribute__((target("avx512f"))) static inline void quant_one_group_bf16_s8(
-        const uint16_t *grp_src, int8_t *grp_dst, float *scale_out,
-        int64_t group_size, __m512i abs_mask, __m512 vinf) {
-    auto load_f32 = [&](int64_t j) __attribute__((target("avx512f"))) {
+ZENDNNL_TARGET("avx512f")
+static inline void quant_one_group_bf16_s8(const uint16_t *grp_src,
+        int8_t *grp_dst, float *scale_out, int64_t group_size, __m512i abs_mask,
+        __m512 vinf) {
+    auto load_f32 = [&](int64_t j) ZENDNNL_TARGET("avx512f") {
         return bf16x16_to_f32_pg(_mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(grp_src + j)));
     };
@@ -396,8 +398,8 @@ __attribute__((target("avx512f"))) static inline void quant_one_group_bf16_s8(
 //   8. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl"))) void
-dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
         float *scales, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -407,69 +409,65 @@ dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const float *grp_src = src + offset;
-                    int8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const float *grp_src = src + offset;
+            int8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl"))) {
-                        return _mm512_loadu_ps(grp_src + j);
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl") {
+                return _mm512_loadu_ps(grp_src + j);
+            };
 
-                    float absmax = group_absmax(
-                            load_f32, group_size, abs_mask, vinf);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        if (std::isfinite(grp_src[j]))
-                            absmax = std::max(absmax, std::abs(grp_src[j]));
-                    }
+            float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                if (std::isfinite(grp_src[j]))
+                    absmax = std::max(absmax, std::abs(grp_src[j]));
+            }
 
-                    float scale;
-                    compute_symmetric_scale_pg(absmax, scale);
-                    scales[task] = scale;
+            float scale;
+            compute_symmetric_scale_pg(absmax, scale);
+            scales[task] = scale;
 
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
 
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        __m512i r1 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 16), vscale));
-                        __m512i r2 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 32), vscale));
-                        __m512i r3 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 48), vscale));
-                        store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
-                                _mm512_cvtepi32_epi8(r1),
-                                _mm512_cvtepi32_epi8(r2),
-                                _mm512_cvtepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        if (!std::isfinite(grp_src[j])) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                std::nearbyint(grp_src[j] / scale));
-                        grp_dst[j] = static_cast<int8_t>(q);
-                    }
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                __m512i r1 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 16), vscale));
+                __m512i r2 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 32), vscale));
+                __m512i r3 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 48), vscale));
+                store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
+                        _mm512_cvtepi32_epi8(r1), _mm512_cvtepi32_epi8(r2),
+                        _mm512_cvtepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                if (!std::isfinite(grp_src[j])) {
+                    grp_dst[j] = 0;
+                    continue;
                 }
-            });
+                int32_t q = static_cast<int32_t>(
+                        std::nearbyint(grp_src[j] / scale));
+                grp_dst[j] = static_cast<int8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -505,8 +503,8 @@ dynamic_per_group_quant_f32_s8_native(const float *src, int8_t *dst,
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl"))) void
-dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
         float *scales, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -516,75 +514,68 @@ dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const uint16_t *grp_src = src + offset;
-                    int8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const uint16_t *grp_src = src + offset;
+            int8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl"))) {
-                        return bf16x16_to_f32_pg(_mm256_loadu_si256(
-                                reinterpret_cast<const __m256i *>(
-                                        grp_src + j)));
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl") {
+                return bf16x16_to_f32_pg(_mm256_loadu_si256(
+                        reinterpret_cast<const __m256i *>(grp_src + j)));
+            };
 
-                    float absmax = group_absmax(
-                            load_f32, group_size, abs_mask, vinf);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        float v = common::bfloat16_t::bf16_to_f32_val(
-                                static_cast<int16_t>(grp_src[j]));
-                        if (std::isfinite(v))
-                            absmax = std::max(absmax, std::abs(v));
-                    }
+            float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                float v = common::bfloat16_t::bf16_to_f32_val(
+                        static_cast<int16_t>(grp_src[j]));
+                if (std::isfinite(v)) absmax = std::max(absmax, std::abs(v));
+            }
 
-                    float scale;
-                    compute_symmetric_scale_pg(absmax, scale);
-                    scales[task] = scale;
+            float scale;
+            compute_symmetric_scale_pg(absmax, scale);
+            scales[task] = scale;
 
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
 
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        __m512i r1 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 16), vscale));
-                        __m512i r2 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 32), vscale));
-                        __m512i r3 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 48), vscale));
-                        store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
-                                _mm512_cvtepi32_epi8(r1),
-                                _mm512_cvtepi32_epi8(r2),
-                                _mm512_cvtepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        float v = common::bfloat16_t::bf16_to_f32_val(
-                                static_cast<int16_t>(grp_src[j]));
-                        if (!std::isfinite(v)) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                std::nearbyint(v / scale));
-                        grp_dst[j] = static_cast<int8_t>(q);
-                    }
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                __m512i r1 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 16), vscale));
+                __m512i r2 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 32), vscale));
+                __m512i r3 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 48), vscale));
+                store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
+                        _mm512_cvtepi32_epi8(r1), _mm512_cvtepi32_epi8(r2),
+                        _mm512_cvtepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                float v = common::bfloat16_t::bf16_to_f32_val(
+                        static_cast<int16_t>(grp_src[j]));
+                if (!std::isfinite(v)) {
+                    grp_dst[j] = 0;
+                    continue;
                 }
-            });
+                int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+                grp_dst[j] = static_cast<int8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -621,8 +612,8 @@ dynamic_per_group_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl"))) void
-dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
         float *scales, int32_t *zps, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -632,95 +623,89 @@ dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const float *grp_src = src + offset;
-                    uint8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const float *grp_src = src + offset;
+            uint8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl"))) {
-                        return _mm512_loadu_ps(grp_src + j);
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl") {
+                return _mm512_loadu_ps(grp_src + j);
+            };
 
-                    float row_min, row_max;
-                    group_minmax(load_f32, group_size, abs_mask, vinf, row_min,
-                            row_max);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        if (std::isfinite(grp_src[j])) {
-                            row_min = std::min(row_min, grp_src[j]);
-                            row_max = std::max(row_max, grp_src[j]);
-                        }
-                    }
-
-                    float scale;
-                    int32_t zp;
-                    compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
-                    scales[task] = scale;
-                    zps[task] = zp;
-
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const __m512i vzp = _mm512_set1_epi32(zp);
-                    const __m512i vlo = _mm512_set1_epi32(0);
-                    const __m512i vhi = _mm512_set1_epi32(255);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
-
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        __m512i r1 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 16), vscale)),
-                                vzp);
-                        __m512i r2 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 32), vscale)),
-                                vzp);
-                        __m512i r3 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 48), vscale)),
-                                vzp);
-                        r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
-                        r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
-                        r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
-                        r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
-                        store_4x16_u8_pg(grp_dst + j,
-                                _mm512_cvtusepi32_epi8(r0),
-                                _mm512_cvtusepi32_epi8(r1),
-                                _mm512_cvtusepi32_epi8(r2),
-                                _mm512_cvtusepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtusepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        if (!std::isfinite(grp_src[j])) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                            std::nearbyint(grp_src[j] / scale))
-                                + zp;
-                        q = std::max(0, std::min(255, q));
-                        grp_dst[j] = static_cast<uint8_t>(q);
-                    }
+            float row_min, row_max;
+            group_minmax(
+                    load_f32, group_size, abs_mask, vinf, row_min, row_max);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                if (std::isfinite(grp_src[j])) {
+                    row_min = std::min(row_min, grp_src[j]);
+                    row_max = std::max(row_max, grp_src[j]);
                 }
-            });
+            }
+
+            float scale;
+            int32_t zp;
+            compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
+            scales[task] = scale;
+            zps[task] = zp;
+
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const __m512i vzp = _mm512_set1_epi32(zp);
+            const __m512i vlo = _mm512_set1_epi32(0);
+            const __m512i vhi = _mm512_set1_epi32(255);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                __m512i r1 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 16), vscale)),
+                        vzp);
+                __m512i r2 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 32), vscale)),
+                        vzp);
+                __m512i r3 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 48), vscale)),
+                        vzp);
+                r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
+                r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
+                r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
+                r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
+                store_4x16_u8_pg(grp_dst + j, _mm512_cvtusepi32_epi8(r0),
+                        _mm512_cvtusepi32_epi8(r1), _mm512_cvtusepi32_epi8(r2),
+                        _mm512_cvtusepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtusepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                if (!std::isfinite(grp_src[j])) {
+                    grp_dst[j] = 0;
+                    continue;
+                }
+                int32_t q = static_cast<int32_t>(
+                                    std::nearbyint(grp_src[j] / scale))
+                        + zp;
+                q = std::max(0, std::min(255, q));
+                grp_dst[j] = static_cast<uint8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -757,8 +742,8 @@ dynamic_per_group_quant_f32_u8_native(const float *src, uint8_t *dst,
 //   7. True division + banker's rounding:  bit-exact with reference behavior.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl"))) void
-dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
         float *scales, int32_t *zps, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -768,101 +753,93 @@ dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const uint16_t *grp_src = src + offset;
-                    uint8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const uint16_t *grp_src = src + offset;
+            uint8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl"))) {
-                        return bf16x16_to_f32_pg(_mm256_loadu_si256(
-                                reinterpret_cast<const __m256i *>(
-                                        grp_src + j)));
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl") {
+                return bf16x16_to_f32_pg(_mm256_loadu_si256(
+                        reinterpret_cast<const __m256i *>(grp_src + j)));
+            };
 
-                    float row_min, row_max;
-                    group_minmax(load_f32, group_size, abs_mask, vinf, row_min,
-                            row_max);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        float v = common::bfloat16_t::bf16_to_f32_val(
-                                static_cast<int16_t>(grp_src[j]));
-                        if (std::isfinite(v)) {
-                            row_min = std::min(row_min, v);
-                            row_max = std::max(row_max, v);
-                        }
-                    }
-
-                    float scale;
-                    int32_t zp;
-                    compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
-                    scales[task] = scale;
-                    zps[task] = zp;
-
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const __m512i vzp = _mm512_set1_epi32(zp);
-                    const __m512i vlo = _mm512_set1_epi32(0);
-                    const __m512i vhi = _mm512_set1_epi32(255);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
-
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        __m512i r1 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 16), vscale)),
-                                vzp);
-                        __m512i r2 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 32), vscale)),
-                                vzp);
-                        __m512i r3 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 48), vscale)),
-                                vzp);
-                        r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
-                        r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
-                        r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
-                        r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
-                        store_4x16_u8_pg(grp_dst + j,
-                                _mm512_cvtusepi32_epi8(r0),
-                                _mm512_cvtusepi32_epi8(r1),
-                                _mm512_cvtusepi32_epi8(r2),
-                                _mm512_cvtusepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtusepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        float v = common::bfloat16_t::bf16_to_f32_val(
-                                static_cast<int16_t>(grp_src[j]));
-                        if (!std::isfinite(v)) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                            std::nearbyint(v / scale))
-                                + zp;
-                        q = std::max(0, std::min(255, q));
-                        grp_dst[j] = static_cast<uint8_t>(q);
-                    }
+            float row_min, row_max;
+            group_minmax(
+                    load_f32, group_size, abs_mask, vinf, row_min, row_max);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                float v = common::bfloat16_t::bf16_to_f32_val(
+                        static_cast<int16_t>(grp_src[j]));
+                if (std::isfinite(v)) {
+                    row_min = std::min(row_min, v);
+                    row_max = std::max(row_max, v);
                 }
-            });
+            }
+
+            float scale;
+            int32_t zp;
+            compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
+            scales[task] = scale;
+            zps[task] = zp;
+
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const __m512i vzp = _mm512_set1_epi32(zp);
+            const __m512i vlo = _mm512_set1_epi32(0);
+            const __m512i vhi = _mm512_set1_epi32(255);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                __m512i r1 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 16), vscale)),
+                        vzp);
+                __m512i r2 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 32), vscale)),
+                        vzp);
+                __m512i r3 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 48), vscale)),
+                        vzp);
+                r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
+                r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
+                r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
+                r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
+                store_4x16_u8_pg(grp_dst + j, _mm512_cvtusepi32_epi8(r0),
+                        _mm512_cvtusepi32_epi8(r1), _mm512_cvtusepi32_epi8(r2),
+                        _mm512_cvtusepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtusepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                float v = common::bfloat16_t::bf16_to_f32_val(
+                        static_cast<int16_t>(grp_src[j]));
+                if (!std::isfinite(v)) {
+                    grp_dst[j] = 0;
+                    continue;
+                }
+                int32_t q
+                        = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
+                q = std::max(0, std::min(255, q));
+                grp_dst[j] = static_cast<uint8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -916,8 +893,8 @@ dynamic_per_group_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
 //      across granular tasks.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) void
-dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,f16c")
+void dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
         float *scales, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -927,73 +904,66 @@ dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl,f16c"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const uint16_t *grp_src = src + offset;
-                    int8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,f16c") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const uint16_t *grp_src = src + offset;
+            int8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl,f16c"))) {
-                        return _mm512_cvtph_ps(_mm256_loadu_si256(
-                                reinterpret_cast<const __m256i *>(
-                                        grp_src + j)));
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl,f16c") {
+                return _mm512_cvtph_ps(_mm256_loadu_si256(
+                        reinterpret_cast<const __m256i *>(grp_src + j)));
+            };
 
-                    float absmax = group_absmax(
-                            load_f32, group_size, abs_mask, vinf);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
-                        if (std::isfinite(v))
-                            absmax = std::max(absmax, std::abs(v));
-                    }
+            float absmax = group_absmax(load_f32, group_size, abs_mask, vinf);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+                if (std::isfinite(v)) absmax = std::max(absmax, std::abs(v));
+            }
 
-                    float scale;
-                    compute_symmetric_scale_pg(absmax, scale);
-                    scales[task] = scale;
+            float scale;
+            compute_symmetric_scale_pg(absmax, scale);
+            scales[task] = scale;
 
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
 
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        __m512i r1 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 16), vscale));
-                        __m512i r2 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 32), vscale));
-                        __m512i r3 = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j + 48), vscale));
-                        store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
-                                _mm512_cvtepi32_epi8(r1),
-                                _mm512_cvtepi32_epi8(r2),
-                                _mm512_cvtepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_cvtps_epi32(
-                                _mm512_div_ps(load_f32(j), vscale));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
-                        if (!std::isfinite(v)) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                std::nearbyint(v / scale));
-                        grp_dst[j] = static_cast<int8_t>(q);
-                    }
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                __m512i r1 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 16), vscale));
+                __m512i r2 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 32), vscale));
+                __m512i r3 = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j + 48), vscale));
+                store_4x16_s8_pg(grp_dst + j, _mm512_cvtepi32_epi8(r0),
+                        _mm512_cvtepi32_epi8(r1), _mm512_cvtepi32_epi8(r2),
+                        _mm512_cvtepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_cvtps_epi32(
+                        _mm512_div_ps(load_f32(j), vscale));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+                if (!std::isfinite(v)) {
+                    grp_dst[j] = 0;
+                    continue;
                 }
-            });
+                int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+                grp_dst[j] = static_cast<int8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -1030,8 +1000,8 @@ dynamic_per_group_quant_f16_s8_native(const uint16_t *src, int8_t *dst,
 //   5. zendnnl_parallel_for over M*G total groups for thread-pool reuse.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512bw,avx512vl,f16c"))) void
-dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,f16c")
+void dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
         float *scales, int32_t *zps, int64_t M, int64_t K, int64_t G) {
     if (M <= 0 || K <= 0 || G <= 0 || (K % G) != 0) return;
 
@@ -1041,99 +1011,91 @@ dynamic_per_group_quant_f16_u8_native(const uint16_t *src, uint8_t *dst,
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
     zendnnl_parallel_for(0, total_groups, 1,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512bw,avx512vl,f16c"))) {
-                for (int64_t task = begin; task < end; ++task) {
-                    const int64_t m = task / G;
-                    const int64_t g = task - m * G;
-                    const int64_t offset = m * K + g * group_size;
-                    const uint16_t *grp_src = src + offset;
-                    uint8_t *grp_dst = dst + offset;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,f16c") {
+        for (int64_t task = begin; task < end; ++task) {
+            const int64_t m = task / G;
+            const int64_t g = task - m * G;
+            const int64_t offset = m * K + g * group_size;
+            const uint16_t *grp_src = src + offset;
+            uint8_t *grp_dst = dst + offset;
 
-                    auto load_f32 = [&](int64_t j) __attribute__((
-                            target("avx512f,avx512bw,avx512vl,f16c"))) {
-                        return _mm512_cvtph_ps(_mm256_loadu_si256(
-                                reinterpret_cast<const __m256i *>(
-                                        grp_src + j)));
-                    };
+            auto load_f32 = [&](int64_t j) ZENDNNL_TARGET(
+                                    "avx512f,avx512bw,avx512vl,f16c") {
+                return _mm512_cvtph_ps(_mm256_loadu_si256(
+                        reinterpret_cast<const __m256i *>(grp_src + j)));
+            };
 
-                    float row_min, row_max;
-                    group_minmax(load_f32, group_size, abs_mask, vinf, row_min,
-                            row_max);
-                    int64_t j = group_size & ~int64_t {15};
-                    for (; j < group_size; ++j) {
-                        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
-                        if (std::isfinite(v)) {
-                            row_min = std::min(row_min, v);
-                            row_max = std::max(row_max, v);
-                        }
-                    }
-
-                    float scale;
-                    int32_t zp;
-                    compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
-                    scales[task] = scale;
-                    zps[task] = zp;
-
-                    const __m512 vscale = _mm512_set1_ps(scale);
-                    const __m512i vzp = _mm512_set1_epi32(zp);
-                    const __m512i vlo = _mm512_set1_epi32(0);
-                    const __m512i vhi = _mm512_set1_epi32(255);
-                    const bool cl_ok
-                            = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
-
-                    j = 0;
-                    for (; j + 63 < group_size; j += 64) {
-                        __m512i r0 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        __m512i r1 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 16), vscale)),
-                                vzp);
-                        __m512i r2 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 32), vscale)),
-                                vzp);
-                        __m512i r3 = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(_mm512_div_ps(
-                                        load_f32(j + 48), vscale)),
-                                vzp);
-                        r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
-                        r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
-                        r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
-                        r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
-                        store_4x16_u8_pg(grp_dst + j,
-                                _mm512_cvtusepi32_epi8(r0),
-                                _mm512_cvtusepi32_epi8(r1),
-                                _mm512_cvtusepi32_epi8(r2),
-                                _mm512_cvtusepi32_epi8(r3), cl_ok);
-                    }
-                    for (; j + 15 < group_size; j += 16) {
-                        __m512i r = _mm512_add_epi32(
-                                _mm512_cvtps_epi32(
-                                        _mm512_div_ps(load_f32(j), vscale)),
-                                vzp);
-                        r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
-                        _mm_storeu_si128(
-                                reinterpret_cast<__m128i *>(grp_dst + j),
-                                _mm512_cvtusepi32_epi8(r));
-                    }
-                    for (; j < group_size; ++j) {
-                        float v = common::float16_t::f16_to_f32_val(grp_src[j]);
-                        if (!std::isfinite(v)) {
-                            grp_dst[j] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                            std::nearbyint(v / scale))
-                                + zp;
-                        q = std::max(0, std::min(255, q));
-                        grp_dst[j] = static_cast<uint8_t>(q);
-                    }
+            float row_min, row_max;
+            group_minmax(
+                    load_f32, group_size, abs_mask, vinf, row_min, row_max);
+            int64_t j = group_size & ~int64_t {15};
+            for (; j < group_size; ++j) {
+                float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+                if (std::isfinite(v)) {
+                    row_min = std::min(row_min, v);
+                    row_max = std::max(row_max, v);
                 }
-            });
+            }
+
+            float scale;
+            int32_t zp;
+            compute_asymmetric_scale_zp_pg(row_min, row_max, scale, zp);
+            scales[task] = scale;
+            zps[task] = zp;
+
+            const __m512 vscale = _mm512_set1_ps(scale);
+            const __m512i vzp = _mm512_set1_epi32(zp);
+            const __m512i vlo = _mm512_set1_epi32(0);
+            const __m512i vhi = _mm512_set1_epi32(255);
+            const bool cl_ok = (reinterpret_cast<uintptr_t>(grp_dst) & 63) == 0;
+
+            j = 0;
+            for (; j + 63 < group_size; j += 64) {
+                __m512i r0 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                __m512i r1 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 16), vscale)),
+                        vzp);
+                __m512i r2 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 32), vscale)),
+                        vzp);
+                __m512i r3 = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(
+                                _mm512_div_ps(load_f32(j + 48), vscale)),
+                        vzp);
+                r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
+                r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
+                r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
+                r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
+                store_4x16_u8_pg(grp_dst + j, _mm512_cvtusepi32_epi8(r0),
+                        _mm512_cvtusepi32_epi8(r1), _mm512_cvtusepi32_epi8(r2),
+                        _mm512_cvtusepi32_epi8(r3), cl_ok);
+            }
+            for (; j + 15 < group_size; j += 16) {
+                __m512i r = _mm512_add_epi32(
+                        _mm512_cvtps_epi32(_mm512_div_ps(load_f32(j), vscale)),
+                        vzp);
+                r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(grp_dst + j),
+                        _mm512_cvtusepi32_epi8(r));
+            }
+            for (; j < group_size; ++j) {
+                float v = common::float16_t::f16_to_f32_val(grp_src[j]);
+                if (!std::isfinite(v)) {
+                    grp_dst[j] = 0;
+                    continue;
+                }
+                int32_t q
+                        = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
+                q = std::max(0, std::min(255, q));
+                grp_dst[j] = static_cast<uint8_t>(q);
+            }
+        }
+    });
 }
 
 //==============================================================================
@@ -1185,8 +1147,8 @@ static void dynamic_per_group_group_quant_s8_impl(
     }
 }
 
-__attribute__((target("avx512f"))) void
-dynamic_per_group_group_quant_bf16_s8_native(
+ZENDNNL_TARGET("avx512f")
+void dynamic_per_group_group_quant_bf16_s8_native(
         const std::vector<const void *> &src, const std::vector<int> &M,
         const std::vector<int> &K, const std::vector<int> &lda,
         const std::vector<void *> &dst, const std::vector<int> &dst_lda,
@@ -1195,23 +1157,23 @@ dynamic_per_group_group_quant_bf16_s8_native(
     const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
     dynamic_per_group_group_quant_s8_impl(M, num_threads,
-            [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
-                const int64_t group_size = K[op] / G;
-                const uint16_t *row_src = static_cast<const uint16_t *>(src[op])
-                        + local_m * lda[op];
-                int8_t *row_dst = static_cast<int8_t *>(dst[op])
-                        + local_m * dst_lda[op];
-                float *row_scales = scales[op] + local_m * G;
-                for (int64_t g = 0; g < G; ++g) {
-                    quant_one_group_bf16_s8(row_src + g * group_size,
-                            row_dst + g * group_size, row_scales + g,
-                            group_size, abs_mask, vinf);
-                }
-            });
+            [&](size_t op, int64_t local_m) ZENDNNL_TARGET("avx512f") {
+        const int64_t group_size = K[op] / G;
+        const uint16_t *row_src
+                = static_cast<const uint16_t *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst
+                = static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        float *row_scales = scales[op] + local_m * G;
+        for (int64_t g = 0; g < G; ++g) {
+            quant_one_group_bf16_s8(row_src + g * group_size,
+                    row_dst + g * group_size, row_scales + g, group_size,
+                    abs_mask, vinf);
+        }
+    });
 }
 
-__attribute__((target("avx512f"))) void
-dynamic_per_group_group_quant_f32_s8_native(
+ZENDNNL_TARGET("avx512f")
+void dynamic_per_group_group_quant_f32_s8_native(
         const std::vector<const void *> &src, const std::vector<int> &M,
         const std::vector<int> &K, const std::vector<int> &lda,
         const std::vector<void *> &dst, const std::vector<int> &dst_lda,
@@ -1220,19 +1182,19 @@ dynamic_per_group_group_quant_f32_s8_native(
     const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
     const __m512 vinf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
     dynamic_per_group_group_quant_s8_impl(M, num_threads,
-            [&](size_t op, int64_t local_m) __attribute__((target("avx512f"))) {
-                const int64_t group_size = K[op] / G;
-                const float *row_src = static_cast<const float *>(src[op])
-                        + local_m * lda[op];
-                int8_t *row_dst = static_cast<int8_t *>(dst[op])
-                        + local_m * dst_lda[op];
-                float *row_scales = scales[op] + local_m * G;
-                for (int64_t g = 0; g < G; ++g) {
-                    quant_one_group_f32_s8(row_src + g * group_size,
-                            row_dst + g * group_size, row_scales + g,
-                            group_size, abs_mask, vinf);
-                }
-            });
+            [&](size_t op, int64_t local_m) ZENDNNL_TARGET("avx512f") {
+        const int64_t group_size = K[op] / G;
+        const float *row_src
+                = static_cast<const float *>(src[op]) + local_m * lda[op];
+        int8_t *row_dst
+                = static_cast<int8_t *>(dst[op]) + local_m * dst_lda[op];
+        float *row_scales = scales[op] + local_m * G;
+        for (int64_t g = 0; g < G; ++g) {
+            quant_one_group_f32_s8(row_src + g * group_size,
+                    row_dst + g * group_size, row_scales + g, group_size,
+                    abs_mask, vinf);
+        }
+    });
 }
 
 } // namespace reorder

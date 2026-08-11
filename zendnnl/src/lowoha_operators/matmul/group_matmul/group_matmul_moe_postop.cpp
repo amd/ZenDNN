@@ -31,6 +31,7 @@
 
 #include <cstring>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 #include <type_traits>
 
 #include <immintrin.h>
@@ -123,9 +124,10 @@ void moe_weighted_reduce_scalar(const group_matmul_moe_postop_params *postop,
 
 // ── AVX-512 vectorized implementation ───────────────────────────────────
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) void
-moe_weighted_reduce_avx512_f32(const group_matmul_moe_postop_params *postop,
-        const int D, const int num_threads) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void moe_weighted_reduce_avx512_f32(
+        const group_matmul_moe_postop_params *postop, const int D,
+        const int num_threads) {
 
     auto *out_base = static_cast<float *>(postop->output);
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
@@ -178,9 +180,10 @@ moe_weighted_reduce_avx512_f32(const group_matmul_moe_postop_params *postop,
     }
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) void
-moe_weighted_reduce_avx512_bf16(const group_matmul_moe_postop_params *postop,
-        const int D, const int num_threads) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void moe_weighted_reduce_avx512_bf16(
+        const group_matmul_moe_postop_params *postop, const int D,
+        const int num_threads) {
 
     auto *out_base = static_cast<uint16_t *>(postop->output);
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
@@ -295,9 +298,10 @@ moe_weighted_reduce_avx512_bf16(const group_matmul_moe_postop_params *postop,
 // this path on the same widely-available intrinsic set as
 // `common/float16.cpp` and off the `avx512fp16`-only `_mm512_cvtxph_ps`
 // / `_mm512_cvtxps_ph` forms.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) void
-moe_weighted_reduce_avx512_f16(const group_matmul_moe_postop_params *postop,
-        const int D, const int num_threads) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void moe_weighted_reduce_avx512_f16(
+        const group_matmul_moe_postop_params *postop, const int D,
+        const int num_threads) {
 
     auto *out_base = static_cast<uint16_t *>(postop->output);
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);

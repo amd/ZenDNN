@@ -303,7 +303,9 @@ TEST(CkPackBf16, SiluGeluInterleavedPackMatchesSwigluBytes) {
 
     constexpr int kK = 64;
     constexpr int kN = 256;
-    constexpr int kI = kN / 2;
+    // static storage so the value-generator lambdas below can use kI without an
+    // explicit capture (MSVC rejects implicit capture of a constexpr local: C3493).
+    static constexpr int kI = kN / 2;
 
     // Deterministic source data — same value generator across all
     // three logical weight buffers so the only physical difference is

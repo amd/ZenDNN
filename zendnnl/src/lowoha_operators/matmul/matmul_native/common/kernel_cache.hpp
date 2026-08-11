@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include "common/zendnnl_compat.hpp"
 #include <unordered_map>
 
 namespace zendnnl {
@@ -50,7 +51,7 @@ inline constexpr int BKC_NR_PAD = 16;
 
 /// Custom deleter for aligned_alloc'd memory.
 struct AlignedFreeDeleter {
-    void operator()(float *p) const { std::free(p); }
+    void operator()(float *p) const { zendnnl_aligned_free(p); }
 };
 
 /// Prepacked weight buffer: NR_PACK-wide K-contiguous panels.
@@ -320,7 +321,7 @@ inline constexpr int VNNI_PAIR = 2;
 
 /// Custom deleter for uint16_t aligned_alloc'd memory.
 struct AlignedFreeU16Deleter {
-    void operator()(uint16_t *p) const { std::free(p); }
+    void operator()(uint16_t *p) const { zendnnl_aligned_free(p); }
 };
 
 /// BF16 VNNI prepacked weight buffer.
@@ -429,10 +430,10 @@ private:
 
 /// Custom deleter for aligned_alloc'd INT8 memory.
 struct AlignedFreeS8Deleter {
-    void operator()(int8_t *p) const { std::free(p); }
+    void operator()(int8_t *p) const { zendnnl_aligned_free(p); }
 };
 struct AlignedFreeI32Deleter {
-    void operator()(int32_t *p) const { std::free(p); }
+    void operator()(int32_t *p) const { zendnnl_aligned_free(p); }
 };
 
 /// INT8 VNNI group size for vpdpbusd.

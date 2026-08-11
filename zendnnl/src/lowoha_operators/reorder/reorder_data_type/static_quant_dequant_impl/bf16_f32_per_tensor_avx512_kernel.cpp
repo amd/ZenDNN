@@ -14,6 +14,7 @@
  * limitations under the License.
  ******************************************************************************/
 
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
 
 #include <cmath>
@@ -27,8 +28,8 @@ namespace reorder {
 /**
  * @brief Convert 16 BF16 values to 16 float32 values using AVX512.
  */
-__attribute__((target("avx512f"))) static inline __m512 bf16_to_float_vec(
-        __m256i bf16) {
+ZENDNNL_TARGET("avx512f")
+static inline __m512 bf16_to_float_vec(__m256i bf16) {
     // Convert 16 uint16_t to 32-bit integers
     __m512i extended = _mm512_cvtepu16_epi32(bf16);
     // Shift left by 16 bits to place BF16 bits in the upper half of float32
@@ -40,8 +41,8 @@ __attribute__((target("avx512f"))) static inline __m512 bf16_to_float_vec(
 /**
  * @brief Convert 16 float32 values to 16 BF16 values using round-to-nearest-even.
  */
-__attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f")
+static inline __m256i float_to_bf16_vec(__m512 val) {
     // Reinterpret float32 as int32 for bit manipulation
     __m512i int_val = _mm512_castps_si512(val);
     // Extract LSB of the BF16 part to determine rounding direction
@@ -72,9 +73,9 @@ __attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
  *
  * Formula: bf16_val = bf16(f32_val / scale + zero_point)
  */
-__attribute__((target("avx512f"))) void convert_f32_to_bf16_avx512(
-        const float *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void convert_f32_to_bf16_avx512(const float *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     // If no scaling needed, delegate to the existing simple conversion kernel
     if (scale == 1.0f && zero_point == 0) {
         float32_to_bf16_avx512(input, output, nelems);
@@ -126,9 +127,9 @@ __attribute__((target("avx512f"))) void convert_f32_to_bf16_avx512(
  *
  * Formula: f32_val = (bf16_as_f32 - zero_point) * scale
  */
-__attribute__((target("avx512f"))) void convert_bf16_to_f32_avx512(
-        const uint16_t *input, float *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void convert_bf16_to_f32_avx512(const uint16_t *input, float *output,
+        size_t nelems, float scale, int zero_point) {
     // If no scaling needed, delegate to the existing simple conversion kernel
     if (scale == 1.0f && zero_point == 0) {
         bf16_to_float32_avx512(input, output, nelems);

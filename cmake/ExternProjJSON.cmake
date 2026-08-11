@@ -36,8 +36,8 @@ if(ZENDNNL_DEPENDS_JSON)
       BINARY_DIR "${CMAKE_BINARY_DIR}/json"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      INSTALL_COMMAND cmake --build . --config release --target install)
+      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config Release --target install)
   else()
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download JSON with tag ${JSON_GIT_TAG}")
@@ -50,8 +50,8 @@ if(ZENDNNL_DEPENDS_JSON)
       GIT_TAG ${JSON_GIT_TAG}
       GIT_PROGRESS ${JSON_GIT_PROGRESS}
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      INSTALL_COMMAND cmake --build . --config release --target install
+      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config Release --target install
       UPDATE_DISCONNECTED TRUE)
   endif()
 

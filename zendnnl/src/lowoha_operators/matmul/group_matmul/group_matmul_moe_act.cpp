@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 
 #include <immintrin.h>
 #include <omp.h>
@@ -220,8 +221,8 @@ alignas(64) static const uint16_t kDeintUpIdx[32]
 // AVX-512 row kernels (target-attributed)
 // ═══════════════════════════════════════════════════════════════════════
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-silu_and_mul_row_avx512_f32(float *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void silu_and_mul_row_avx512_f32(float *row, int dim) {
     float *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -233,8 +234,8 @@ silu_and_mul_row_avx512_f32(float *row, int dim) {
         gate[n] = silu_scalar(gate[n]) * up[n];
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
     bfloat16_t *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -252,8 +253,8 @@ silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
     }
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-gelu_and_mul_row_avx512_f32(float *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void gelu_and_mul_row_avx512_f32(float *row, int dim) {
     float *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -265,8 +266,8 @@ gelu_and_mul_row_avx512_f32(float *row, int dim) {
         gate[n] = gelu_scalar(gate[n]) * up[n];
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
     bfloat16_t *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -288,8 +289,8 @@ gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
 // `[g0, u0, g1, u1, ...]` buffer, then the unified
 // `swiglu_oai_avx512(gate, up)` does clamp + (1+u)·g·σ(α·g) on the
 // pre-deinterleaved zmm pair.  Scalar tail handles `dim % 16` only.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
     const __m512i idx = _mm512_load_si512(kGatherIdx);
 
     int n = 0;
@@ -312,8 +313,8 @@ swiglu_oai_mul_row_avx512_f32(float *row, int dim) {
 // `bf16x16_to_f32` lifts each to FP32, and the unified
 // `swiglu_oai_avx512(gate, up)` does the rest.  Replaces a 16-iter
 // scalar loop with 1 load + 2 permutes + the shared math.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -368,8 +369,8 @@ swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
 // `group_matmul_direct` F16 ISA gate enforces that upstream — but the
 // activation post-pass does not depend on it.
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
     float16_t *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -387,8 +388,8 @@ silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
     }
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
     float16_t *gate = row, *up = row + dim;
     int n = 0;
     for (; n + 16 <= dim; n += 16) {
@@ -412,8 +413,8 @@ gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
 // gate/up index tables (kDeintGateIdx / kDeintUpIdx) are reused
 // verbatim.  Only the load lift (`f16x16_to_f32`) and the final
 // cvt-store (`f32_to_f16x16`) differ from the BF16 path.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_mul_row_avx512_f16(float16_t *row, int dim) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_mul_row_avx512_f16(float16_t *row, int dim) {
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -482,8 +483,9 @@ void swiglu_oai_tile_scalar_bf16(
 // Same `(g, u)` deinterleave + shared `swiglu_oai_avx512(gate, up)`
 // pattern as the in-place row helper above; only the source / dst
 // pointers differ.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_tile_avx512_f32(const float *src, float *dst, int pairs) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_tile_avx512_f32(
+        const float *src, float *dst, int pairs) {
     const __m512i idx = _mm512_load_si512(kGatherIdx);
 
     int n = 0;
@@ -503,8 +505,9 @@ swiglu_oai_tile_avx512_f32(const float *src, float *dst, int pairs) {
 // BF16 swiglu_oai OOP tile helper.  Vectorised 32-lane load +
 // vpermtxvar_epi16 deinterleave, then shared
 // `swiglu_oai_avx512(gate, up)` + `f32_to_bf16x16` store.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_tile_avx512_bf16(const bfloat16_t *src, bfloat16_t *dst, int pairs) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_tile_avx512_bf16(
+        const bfloat16_t *src, bfloat16_t *dst, int pairs) {
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -561,8 +564,9 @@ void swiglu_oai_tile_scalar_f16(
     }
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static void
-swiglu_oai_tile_avx512_f16(const float16_t *src, float16_t *dst, int pairs) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static void swiglu_oai_tile_avx512_f16(
+        const float16_t *src, float16_t *dst, int pairs) {
     const __m512i g_idx = _mm512_load_si512(kDeintGateIdx);
     const __m512i u_idx = _mm512_load_si512(kDeintUpIdx);
 
@@ -601,8 +605,8 @@ swiglu_oai_tile_avx512_f16(const float16_t *src, float16_t *dst, int pairs) {
 // compile-time ISA license aligned with the `avx512f_available()`
 // dispatch gate below, so it cannot SIGILL on an AVX-512F host that
 // lacks AVX-512-FP16.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) void
-execute_act_rows_avx512(grp_matmul_gated_act_t act, data_type_t dst_dtype,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+void execute_act_rows_avx512(grp_matmul_gated_act_t act, data_type_t dst_dtype,
         const std::vector<void *> &dst, const std::vector<int64_t> &row_offsets,
         const std::vector<int> &N, const std::vector<int> &ldc,
         int64_t total_rows, int num_threads) {

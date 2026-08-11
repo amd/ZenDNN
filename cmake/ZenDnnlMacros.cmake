@@ -18,6 +18,23 @@ include_guard(GLOBAL)
 # required packages
 macro(zendnnl_required_packages)
   message(DEBUG "finding required packages...")
+  # On MSVC, request the LLVM OpenMP runtime (/openmp:llvm, OpenMP 3.1) instead
+  # of the default /openmp (vcomp, OpenMP 2.0). Reasons: (1) ZenDNN uses OpenMP
+  # 3.0+ APIs (omp_get/set_max_active_levels) and unsigned parallel-for counters
+  # that vcomp rejects; (2) AOCL-DLP is built with /openmp:llvm, so ZenDNN must
+  # use the same OpenMP runtime to avoid two runtimes in one process. This
+  # variable requires CMake >= 3.30. No effect on non-MSVC toolchains.
+  if(MSVC)
+    if(CMAKE_VERSION VERSION_LESS "3.30")
+      message(FATAL_ERROR
+        "ZenDNN MSVC builds require CMake >= 3.30: OpenMP_RUNTIME_MSVC (which "
+        "selects the LLVM OpenMP runtime /openmp:llvm) is only honored by CMake "
+        ">= 3.30. On older CMake it is silently ignored and MSVC falls back to "
+        "/openmp (vcomp), which breaks OpenMP 3.x linking and mixes two OpenMP "
+        "runtimes with AOCL-DLP. Use CMake >= 3.30.")
+    endif()
+    set(OpenMP_RUNTIME_MSVC "llvm")
+  endif()
   # find openmp
   find_package(OpenMP REQUIRED GLOBAL)
   # pthreads
@@ -30,17 +47,45 @@ macro(find_build_dependencies  _install_prefix)
   if(ZENDNNL_DEPENDS_AOCLUTILS)
     message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presence...")
     set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
+    # Root hints for both the old and new aocl-utils package names.
     set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
-    #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
-    find_package(aocl-utils REQUIRED GLOBAL CONFIG
+    set(AoclUtils_ROOT  "${AOCLUTILS_INSTALL_DIR}")
+    # Transitional dual-packaging support for aocl-utils. Older releases
+    # (<= 5.3) install package "aocl-utils" with the au:: namespace
+    # (au::aoclutils on Unix, au::libaoclutils on Windows). Newer releases
+    # install package "AoclUtils" with the AoclUtils:: namespace. Accept
+    # either, then normalize to au::aoclutils so the link lines in
+    # src/CMakeLists.txt stay unchanged and the Linux (old-packaging) build is
+    # unaffected. REMOVE the old-packaging path once AOCLUTILS_GIT_TAG is
+    # bumped to a release shipping the AoclUtils:: package on all platforms
+    # (verify that release's installed config name/namespace before removing).
+    find_package(aocl-utils QUIET GLOBAL CONFIG
       PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
-    if(aocl-utils_FOUND)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${aocl-utils_ROOT}")
+    if(NOT aocl-utils_FOUND)
+      find_package(AoclUtils QUIET GLOBAL CONFIG
+        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake" "lib64" "lib64/cmake" "lib64/CMake")
+    endif()
+    if(aocl-utils_FOUND OR AoclUtils_FOUND)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${AOCLUTILS_INSTALL_DIR}")
       if(TARGET au::aoclutils)
+        # old-packaging Unix: au::aoclutils is a real imported target.
         target_include_directories(au::aoclutils
-          INTERFACE ${aocl-utils_ROOT}/include)
+          INTERFACE ${AOCLUTILS_INSTALL_DIR}/include)
+      else()
+        # new packaging (AoclUtils::) or old-packaging Windows (au::libaoclutils):
+        # alias a real, GLOBAL imported target to au::aoclutils. Prefer the
+        # static target because ZenDNNL absorbs aocl-utils via WHOLE_ARCHIVE;
+        # newer packages use the bare target name for the shared DLL.
+        foreach(_au_real AoclUtils::aoclutils_static AoclUtils::libaoclutils AoclUtils::aoclutils au::libaoclutils)
+          if(TARGET ${_au_real})
+            target_include_directories(${_au_real}
+              INTERFACE ${AOCLUTILS_INSTALL_DIR}/include)
+            add_library(au::aoclutils ALIAS ${_au_real})
+            break()
+          endif()
+        endforeach()
       endif()
-      include_directories(${aocl-utils_ROOT}/include)
+      include_directories(${AOCLUTILS_INSTALL_DIR}/include)
     else()
       message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
     endif()
@@ -123,17 +168,45 @@ macro(find_install_dependencies  _install_prefix)
   if(ZENDNNL_DEPENDS_AOCLUTILS)
     message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presence...")
     set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
+    # Root hints for both the old and new aocl-utils package names.
     set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
-    #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
-    find_package(aocl-utils REQUIRED GLOBAL CONFIG
+    set(AoclUtils_ROOT  "${AOCLUTILS_INSTALL_DIR}")
+    # Transitional dual-packaging support for aocl-utils. Older releases
+    # (<= 5.3) install package "aocl-utils" with the au:: namespace
+    # (au::aoclutils on Unix, au::libaoclutils on Windows). Newer releases
+    # install package "AoclUtils" with the AoclUtils:: namespace. Accept
+    # either, then normalize to au::aoclutils so the link lines in
+    # src/CMakeLists.txt stay unchanged and the Linux (old-packaging) build is
+    # unaffected. REMOVE the old-packaging path once AOCLUTILS_GIT_TAG is
+    # bumped to a release shipping the AoclUtils:: package on all platforms
+    # (verify that release's installed config name/namespace before removing).
+    find_package(aocl-utils QUIET GLOBAL CONFIG
       PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
-    if(aocl-utils_FOUND)
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${aocl-utils_ROOT}")
+    if(NOT aocl-utils_FOUND)
+      find_package(AoclUtils QUIET GLOBAL CONFIG
+        PATH_SUFFIXES "lib" "lib/cmake" "lib/CMake" "lib64" "lib64/cmake" "lib64/CMake")
+    endif()
+    if(aocl-utils_FOUND OR AoclUtils_FOUND)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${AOCLUTILS_INSTALL_DIR}")
       if(TARGET au::aoclutils)
+        # old-packaging Unix: au::aoclutils is a real imported target.
         target_include_directories(au::aoclutils
-          INTERFACE ${aocl-utils_ROOT}/include)
+          INTERFACE ${AOCLUTILS_INSTALL_DIR}/include)
+      else()
+        # new packaging (AoclUtils::) or old-packaging Windows (au::libaoclutils):
+        # alias a real, GLOBAL imported target to au::aoclutils. Prefer the
+        # static target because ZenDNNL absorbs aocl-utils via WHOLE_ARCHIVE;
+        # newer packages use the bare target name for the shared DLL.
+        foreach(_au_real AoclUtils::aoclutils_static AoclUtils::libaoclutils AoclUtils::aoclutils au::libaoclutils)
+          if(TARGET ${_au_real})
+            target_include_directories(${_au_real}
+              INTERFACE ${AOCLUTILS_INSTALL_DIR}/include)
+            add_library(au::aoclutils ALIAS ${_au_real})
+            break()
+          endif()
+        endforeach()
       endif()
-      include_directories(${aocl-utils_ROOT}/include)
+      include_directories(${AOCLUTILS_INSTALL_DIR}/include)
     else()
       message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
     endif()

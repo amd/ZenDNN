@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_FP32_GEMM_UKERNEL_HPP
 
 #include <cstdint>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
@@ -26,34 +27,34 @@ namespace matmul {
 namespace native {
 
 // Function pointer type for FP32 GEMM microkernel dispatch.
-using ukernel_fn_t = void (*)(const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, float beta, const float *__restrict__ bias,
+using ukernel_fn_t = void (*)(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, float beta, const float *__restrict bias,
         fused_postop_t fused_op);
 
 // Hand-scheduled 6x64 asm microkernel (peak throughput).
-__attribute__((target("avx512f,fma"))) void avx512_ukernel_6x64_asm(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, float beta, const float *__restrict__ bias,
+ZENDNNL_TARGET("avx512f,fma")
+void avx512_ukernel_6x64_asm(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, float beta, const float *__restrict bias,
         fused_postop_t fused_op);
 
 // Tail microkernel for edge tiles (dynamic MR/NR, masked).
-__attribute__((target("avx512f,avx512bw,fma"))) void avx512_tail_kernel(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, int mr_act, int nr_act, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op);
+ZENDNNL_TARGET("avx512f,avx512bw,fma")
+void avx512_tail_kernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, int mr_act, int nr_act, float beta, const float *__restrict bias,
+        fused_postop_t fused_op);
 
 // Scalar fallback for very small tiles.
-void scalar_microkernel(const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, int mr_act, int nr_act, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op);
+void scalar_microkernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, int mr_act, int nr_act, float beta, const float *__restrict bias,
+        fused_postop_t fused_op);
 
 // Select best microkernel for given MR and NR.
-__attribute__((target("avx512f,fma"))) ukernel_fn_t select_ukernel(
-        int MR, int NR);
+ZENDNNL_TARGET("avx512f,fma")
+ukernel_fn_t select_ukernel(int MR, int NR);
 
 } // namespace native
 } // namespace matmul

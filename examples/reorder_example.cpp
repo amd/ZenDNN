@@ -59,7 +59,7 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
         size_t reorder_size = reorder_operator.get_reorder_size();
         size_t alignment = 64;
         reorder_size = get_aligned_size(alignment, reorder_size);
-        void *reorder_weights = aligned_alloc(alignment, reorder_size);
+        void *reorder_weights = example_aligned_alloc(alignment, reorder_size);
         if (reorder_weights == nullptr) {
             testlog_error("reorder_weights can not have align allocation.");
             return NOT_OK;
@@ -84,12 +84,12 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
         } else {
             testlog_error("operator ", reorder_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
         // Free reordered size buffer.
-        free(reorder_weights);
+        example_aligned_free(reorder_weights);
     } catch (const exception_t &ex) {
         std::cout << ex.what() << std::endl;
         return NOT_OK;
@@ -147,7 +147,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
         size_t alignment = 64;
         size_t reorder_size = reorder_operator.get_reorder_size();
         reorder_size = get_aligned_size(alignment, reorder_size);
-        void *reorder_weights = aligned_alloc(alignment, reorder_size);
+        void *reorder_weights = example_aligned_alloc(alignment, reorder_size);
         if (reorder_weights == nullptr) {
             testlog_error("reorder_weights can not have align allocation.");
             return NOT_OK;
@@ -173,12 +173,12 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
         } else {
             testlog_error("operator ", reorder_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
         // Free reordered size buffer.
-        free(reorder_weights);
+        example_aligned_free(reorder_weights);
     } catch (const exception_t &ex) {
         std::cout << ex.what() << std::endl;
         return NOT_OK;
@@ -227,7 +227,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
         size_t alignment = 64;
         size_t reorder_size = reorder_operator.get_reorder_size();
         reorder_size = get_aligned_size(alignment, reorder_size);
-        void *reorder_weights = aligned_alloc(alignment, reorder_size);
+        void *reorder_weights = example_aligned_alloc(alignment, reorder_size);
         if (reorder_weights == nullptr) {
             testlog_error("reorder_weights can not have align allocation.");
             return NOT_OK;
@@ -312,12 +312,12 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
         } else {
             testlog_error("operator ", matmul_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
         // Free reorderd size buffer
-        free(reorder_weights);
+        example_aligned_free(reorder_weights);
     } catch (const exception_t &ex) {
         std::cout << ex.what() << std::endl;
         return NOT_OK;
@@ -584,7 +584,7 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
         size_t reorder_size = reorder_operator.get_reorder_size();
         size_t alignment = 64;
         reorder_size = get_aligned_size(alignment, reorder_size);
-        void *reorder_weights = aligned_alloc(alignment, reorder_size);
+        void *reorder_weights = example_aligned_alloc(alignment, reorder_size);
 
         // Create a Pair of storage params [reorder size and reorder weights] and
         // use it in tensor creation
@@ -606,12 +606,12 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
         } else {
             testlog_error("operator ", reorder_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
         // Free buffer.
-        free(reorder_weights);
+        example_aligned_free(reorder_weights);
     } catch (const exception_t &ex) {
         std::cout << ex.what() << std::endl;
         return NOT_OK;
@@ -733,7 +733,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
         size_t reorder_size = reorder_operator.get_reorder_size();
         size_t alignment = 64;
         reorder_size = get_aligned_size(alignment, reorder_size);
-        void *reorder_weights = aligned_alloc(alignment, reorder_size);
+        void *reorder_weights = example_aligned_alloc(alignment, reorder_size);
 
         // Create a Pair of storage params [reorder size and reorder weights] and
         // use it in tensor creation
@@ -755,7 +755,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
         } else {
             testlog_error("operator ", reorder_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
@@ -771,14 +771,15 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
         if (unreorder_operator.is_bad_object()) {
             testlog_error("operator ", unreorder_operator.get_name(),
                     " creation failed");
-            free(reorder_weights);
+            example_aligned_free(reorder_weights);
             return NOT_OK;
         }
 
         // Compute the size to unreorder and create a buffer with size
         size_t unreorder_size = unreorder_operator.get_reorder_size();
         unreorder_size = get_aligned_size(alignment, unreorder_size);
-        void *unreorder_weights = aligned_alloc(alignment, unreorder_size);
+        void *unreorder_weights
+                = example_aligned_alloc(alignment, unreorder_size);
 
         // Create a Pair of storage params [reorder size and reorder weights] and
         // use it in tensor creation
@@ -800,14 +801,14 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
         } else {
             testlog_error("operator ", unreorder_operator.get_name(),
                     " execution failed.");
-            free(reorder_weights);
-            free(unreorder_weights);
+            example_aligned_free(reorder_weights);
+            example_aligned_free(unreorder_weights);
             return NOT_OK;
         }
 
         // Free buffers.
-        free(reorder_weights);
-        free(unreorder_weights);
+        example_aligned_free(reorder_weights);
+        example_aligned_free(unreorder_weights);
     } catch (const exception_t &ex) {
         std::cout << ex.what() << std::endl;
         return NOT_OK;

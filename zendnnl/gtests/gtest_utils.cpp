@@ -3795,23 +3795,39 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
         bool &is_comparison_successful) {
     const float atol = tol;
     const float rtol = tol * 10;
+#if defined(_WIN32)
+    // Windows/MSVC: flatten (i, j) into one parallel loop. MSVC's libomp faults
+    // on `collapse` and the global neutralization would serialize it; flattening
+    // keeps full parallelism. The GNU/Linux collapse(2) nest below is unchanged.
+    const long long flat_total
+            = static_cast<long long>(m) * static_cast<long long>(n);
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const uint64_t i = static_cast<uint64_t>(flat_it) / n;
+        const uint64_t j = static_cast<uint64_t>(flat_it) % n;
+#else
 #pragma omp parallel for collapse(2)
     for (uint64_t i = 0; i < m; ++i) {
         for (uint64_t j = 0; j < n; ++j) {
-            if (is_comparison_successful) {
-                float actual_val = output_tensor.at({i, j});
-                float ref_val = output_tensor_ref.at({i, j});
+#endif
+        if (is_comparison_successful) {
+            float actual_val = output_tensor.at({i, j});
+            float ref_val = output_tensor_ref.at({i, j});
 
-                float abs_err = fabs(ref_val - actual_val);
+            float abs_err = fabs(ref_val - actual_val);
 
-                if (abs_err > (atol + rtol * fabs(ref_val))) {
-                    log_verbose("actual(", i, ",", j, "): ", actual_val,
-                            " , ref(", i, ",", j, "): ", ref_val);
-                    is_comparison_successful = false;
-                }
+            if (abs_err > (atol + rtol * fabs(ref_val))) {
+                log_verbose("actual(", i, ",", j, "): ", actual_val, " , ref(",
+                        i, ",", j, "): ", ref_val);
+                is_comparison_successful = false;
             }
         }
+#if defined(_WIN32)
     }
+#else
+        }
+    }
+#endif
     return;
 }
 
@@ -3849,41 +3865,56 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
 
     log_verbose("abs_bound: ", abs_bound);
 
+#if defined(_WIN32)
+    // Windows/MSVC: flatten (i, j) into one parallel loop (see compare_tensor_2D).
+    // The GNU/Linux collapse(2) nest below is unchanged.
+    const long long flat_total
+            = static_cast<long long>(m) * static_cast<long long>(n);
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const uint64_t i = static_cast<uint64_t>(flat_it) / n;
+        const uint64_t j = static_cast<uint64_t>(flat_it) % n;
+#else
 #pragma omp parallel for collapse(2)
     for (uint64_t i = 0; i < m; ++i) {
         for (uint64_t j = 0; j < n; ++j) {
-            if (is_comparison_successful) {
-                float actual_val = output_tensor.at({i, j});
-                float ref_val = output_tensor_ref.at({i, j});
-                float abs_err = fabs(ref_val - actual_val);
+#endif
+        if (is_comparison_successful) {
+            float actual_val = output_tensor.at({i, j});
+            float ref_val = output_tensor_ref.at({i, j});
+            float abs_err = fabs(ref_val - actual_val);
 
-                float allowed_err;
-                if (enable_f32_relaxation && is_f32) {
-                    if (fabs(ref_val) < ZERO_REF_THRESH) {
-                        // Zero-reference F32 path
-                        allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32)
-                                + F32_EPS_SLACK;
-                    } else {
-                        // Normal F32 path with small slack
-                        allowed_err = abs_bound + rtol * fabs(ref_val)
-                                + F32_EPS_SLACK;
-                    }
+            float allowed_err;
+            if (enable_f32_relaxation && is_f32) {
+                if (fabs(ref_val) < ZERO_REF_THRESH) {
+                    // Zero-reference F32 path
+                    allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32)
+                            + F32_EPS_SLACK;
                 } else {
-                    // Default path
-                    allowed_err = abs_bound + rtol * fabs(ref_val);
+                    // Normal F32 path with small slack
+                    allowed_err
+                            = abs_bound + rtol * fabs(ref_val) + F32_EPS_SLACK;
                 }
+            } else {
+                // Default path
+                allowed_err = abs_bound + rtol * fabs(ref_val);
+            }
 
-                if (abs_err > allowed_err) {
-                    log_verbose("actual(", i, ",", j, "): ", actual_val,
-                            " , ref(", i, ",", j, "): ", ref_val);
-                    log_verbose("abs_error: ", abs_err,
-                            " , allowed_err: ", allowed_err,
-                            " , abs_bound: ", abs_bound);
-                    is_comparison_successful = false;
-                }
+            if (abs_err > allowed_err) {
+                log_verbose("actual(", i, ",", j, "): ", actual_val, " , ref(",
+                        i, ",", j, "): ", ref_val);
+                log_verbose("abs_error: ", abs_err,
+                        " , allowed_err: ", allowed_err,
+                        " , abs_bound: ", abs_bound);
+                is_comparison_successful = false;
             }
         }
+#if defined(_WIN32)
     }
+#else
+        }
+    }
+#endif
 }
 void compare_tensor_3D_matrix(tensor_t &output_tensor,
         tensor_t &output_tensor_ref, uint64_t batch_size, uint64_t m,
@@ -3922,44 +3953,63 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
 
     log_verbose("abs_bound: ", abs_bound);
 
+#if defined(_WIN32)
+    // Windows/MSVC: flatten (bs, i, j) into one parallel loop (see
+    // compare_tensor_2D). The GNU/Linux collapse(3) nest below is unchanged.
+    const long long flat_mn
+            = static_cast<long long>(m) * static_cast<long long>(n);
+    const long long flat_total = static_cast<long long>(batch_size) * flat_mn;
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const uint64_t bs = static_cast<uint64_t>(flat_it / flat_mn);
+        const uint64_t i
+                = static_cast<uint64_t>((flat_it / static_cast<long long>(n))
+                        % static_cast<long long>(m));
+        const uint64_t j
+                = static_cast<uint64_t>(flat_it % static_cast<long long>(n));
+#else
 #pragma omp parallel for collapse(3)
     for (uint64_t bs = 0; bs < batch_size; ++bs) {
         for (uint64_t i = 0; i < m; ++i) {
             for (uint64_t j = 0; j < n; ++j) {
-                if (is_comparison_successful) {
-                    float actual_val = output_tensor.at({bs, i, j});
-                    float ref_val = output_tensor_ref.at({bs, i, j});
-                    float abs_err = fabs(ref_val - actual_val);
+#endif
+        if (is_comparison_successful) {
+            float actual_val = output_tensor.at({bs, i, j});
+            float ref_val = output_tensor_ref.at({bs, i, j});
+            float abs_err = fabs(ref_val - actual_val);
 
-                    float allowed_err;
-                    if (enable_f32_relaxation && is_f32) {
-                        if (fabs(ref_val) < ZERO_REF_THRESH) {
-                            // Zero-reference F32 path
-                            allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32)
-                                    + F32_EPS_SLACK;
-                        } else {
-                            // Normal F32 path with small slack
-                            allowed_err = abs_bound + rtol * fabs(ref_val)
-                                    + F32_EPS_SLACK;
-                        }
-                    } else {
-                        // Default path
-                        allowed_err = abs_bound + rtol * fabs(ref_val);
-                    }
-
-                    if (abs_err > allowed_err) {
-                        log_verbose("actual(", bs, ",", i, ",", j,
-                                "): ", actual_val, " , ref(", bs, ",", i, ",",
-                                j, "): ", ref_val);
-                        log_verbose("abs_error: ", abs_err,
-                                " , allowed_err: ", allowed_err,
-                                " , abs_bound: ", abs_bound);
-                        is_comparison_successful = false;
-                    }
+            float allowed_err;
+            if (enable_f32_relaxation && is_f32) {
+                if (fabs(ref_val) < ZERO_REF_THRESH) {
+                    // Zero-reference F32 path
+                    allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32)
+                            + F32_EPS_SLACK;
+                } else {
+                    // Normal F32 path with small slack
+                    allowed_err
+                            = abs_bound + rtol * fabs(ref_val) + F32_EPS_SLACK;
                 }
+            } else {
+                // Default path
+                allowed_err = abs_bound + rtol * fabs(ref_val);
+            }
+
+            if (abs_err > allowed_err) {
+                log_verbose("actual(", bs, ",", i, ",", j, "): ", actual_val,
+                        " , ref(", bs, ",", i, ",", j, "): ", ref_val);
+                log_verbose("abs_error: ", abs_err,
+                        " , allowed_err: ", allowed_err,
+                        " , abs_bound: ", abs_bound);
+                is_comparison_successful = false;
+            }
+        }
+#if defined(_WIN32)
+    }
+#else
             }
         }
     }
+#endif
 }
 size_t get_aligned_size(size_t alignment, size_t size_) {
     return ((size_ + alignment - 1) & ~(alignment - 1));
@@ -4391,32 +4441,51 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
 
     std::atomic<bool> success(is_comparison_successful);
 
-// Output is [B, H, S_q, head_dim] -- iterate over its actual shape.
+    // Output is [B, H, S_q, head_dim] -- iterate over its actual shape.
+#if defined(_WIN32)
+    // Windows/MSVC: flatten (b, h, i, j) into one parallel loop (see
+    // compare_tensor_2D). The GNU/Linux collapse(4) nest below is unchanged.
+    const long long flat_hd = static_cast<long long>(head_dim);
+    const long long flat_shd = static_cast<long long>(seq_len_q) * flat_hd;
+    const long long flat_hshd = static_cast<long long>(num_heads) * flat_shd;
+    const long long flat_total = static_cast<long long>(batch) * flat_hshd;
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const uint64_t b = static_cast<uint64_t>(flat_it / flat_hshd);
+        const uint64_t h = static_cast<uint64_t>(
+                (flat_it / flat_shd) % static_cast<long long>(num_heads));
+        const uint64_t i = static_cast<uint64_t>(
+                (flat_it / flat_hd) % static_cast<long long>(seq_len_q));
+        const uint64_t j = static_cast<uint64_t>(flat_it % flat_hd);
+#else
 #pragma omp parallel for collapse(4)
     for (uint64_t b = 0; b < batch; ++b) {
         for (uint64_t h = 0; h < num_heads; ++h) {
             for (uint64_t i = 0; i < seq_len_q; ++i) {
                 for (uint64_t j = 0; j < head_dim; ++j) {
-                    if (success.load(std::memory_order_relaxed)) {
-                        float actual_val = output_tensor.at({b, h, i, j});
-                        float ref_val = output_tensor_ref.at({b, h, i, j});
-                        float abs_err = std::fabs(ref_val - actual_val);
-                        float allowed_err
-                                = abs_bound + rtol * std::fabs(ref_val);
+#endif
+        if (success.load(std::memory_order_relaxed)) {
+            float actual_val = output_tensor.at({b, h, i, j});
+            float ref_val = output_tensor_ref.at({b, h, i, j});
+            float abs_err = std::fabs(ref_val - actual_val);
+            float allowed_err = abs_bound + rtol * std::fabs(ref_val);
 
-                        if (abs_err > allowed_err) {
-                            log_verbose("SDPA mismatch at [", b, ",", h, ",", i,
-                                    ",", j, "]: actual=", actual_val,
-                                    " , ref=", ref_val, " , abs_err=", abs_err,
-                                    " , allowed_err=", allowed_err,
-                                    " , abs_bound=", abs_bound);
-                            success.store(false, std::memory_order_relaxed);
-                        }
-                    }
+            if (abs_err > allowed_err) {
+                log_verbose("SDPA mismatch at [", b, ",", h, ",", i, ",", j,
+                        "]: actual=", actual_val, " , ref=", ref_val,
+                        " , abs_err=", abs_err, " , allowed_err=", allowed_err,
+                        " , abs_bound=", abs_bound);
+                success.store(false, std::memory_order_relaxed);
+            }
+        }
+#if defined(_WIN32)
+    }
+#else
                 }
             }
         }
     }
+#endif
 
     if (!success.load()) { is_comparison_successful = false; }
 }

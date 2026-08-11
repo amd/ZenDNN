@@ -34,6 +34,30 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-DXbyak=XbyakoneDNN")
 
+    # On MSVC, force the oneDNN sub-build onto the LLVM OpenMP runtime
+    # (/openmp:llvm -> libomp) so it MATCHES ZenDNN, AOCL-DLP and the gtests,
+    # which all select /openmp:llvm (see `zendnnl_required_packages` in
+    # cmake/ZenDnnlMacros.cmake). This ExternalProject runs its own
+    # find_package(OpenMP) and does NOT inherit ZenDNN's OpenMP_RUNTIME_MSVC,
+    # so without this it defaults to MSVC's /openmp (vcomp / VCOMP140.dll) and
+    # the process ends up with TWO OpenMP runtimes (vcomp + libomp). Mixing
+    # them corrupts oneDNN's multithreaded work partitioning: brgemm f32
+    # matmul returns wrong results at 2 threads and takes an out-of-bounds
+    # read in the JIT AVX-512 kernel (SIGSEGV) at higher thread counts, while
+    # single-threaded is correct. Requires CMake >= 3.30; no effect on
+    # non-MSVC toolchains.
+    if(MSVC)
+      if(CMAKE_VERSION VERSION_LESS "3.30")
+        message(FATAL_ERROR
+          "ZenDNN MSVC builds require CMake >= 3.30: OpenMP_RUNTIME_MSVC (which "
+          "selects the LLVM OpenMP runtime /openmp:llvm for the oneDNN "
+          "sub-build) is only honored by CMake >= 3.30. On older CMake it is "
+          "silently ignored and oneDNN falls back to /openmp (vcomp), mixing two "
+          "OpenMP runtimes in one process. Use CMake >= 3.30.")
+      endif()
+      list(APPEND ONEDNN_CMAKE_ARGS "-DOpenMP_RUNTIME_MSVC=llvm")
+    endif()
+
     message(DEBUG "${ZENDNNL_MSG_PREFIX}ONEDNN_CMAKE_ARGS=${ONEDNN_CMAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
@@ -88,6 +112,26 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     set_target_properties(zendnnl-deps-onednn
       PROPERTIES
       ADDITIONAL_CLEAN_FILES "${ONEDNN_CLEAN_FILES}")
+
+    # Windows: oneDNN's static dnnl.lib ships a compiled version resource
+    # (version.rc.res). ZenDNN links dnnl.lib with WHOLE_ARCHIVE (see
+    # zendnnl/src/CMakeLists.txt), which force-includes that resource; MSVC's
+    # manifest-embed re-link then reports it as specified twice and fails with
+    # LNK1241 when linking zendnnl.dll / gtests.exe. Strip the (cosmetic)
+    # resource from the installed dnnl.lib right after oneDNN installs. Linux
+    # (libdnnl.a; no resources, no manifest-embed step) is unaffected, so this
+    # step is Windows-only.
+    if(WIN32)
+      get_filename_component(_zendnnl_msvc_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+      ExternalProject_Add_Step(zendnnl-deps-onednn strip_version_res
+        COMMAND ${CMAKE_COMMAND}
+                "-DLIB_EXE=${_zendnnl_msvc_bindir}/lib.exe"
+                "-DTARGET_LIB=${CMAKE_INSTALL_PREFIX}/deps/onednn/lib/dnnl.lib"
+                -P "${CMAKE_CURRENT_LIST_DIR}/StripDnnlVersionRes.cmake"
+        DEPENDEES install
+        COMMENT "Windows: strip oneDNN version.rc.res from dnnl.lib (avoids LNK1241)"
+        LOG 1)
+    endif()
   else()
     message(WARNING "${ZENDNNL_MSG_PREFIX}ONEDNN will be injected from ${ZENDNNL_ONEDNN_INJECT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
     #add a custom target that create a soft link

@@ -21,6 +21,7 @@
 #include <immintrin.h>
 #include <limits>
 #include <omp.h>
+#include "common/zendnnl_compat.hpp"
 #include <type_traits>
 
 #include "common/float16.hpp"
@@ -58,8 +59,8 @@ inline void maybe_prefetch_weight(
 }
 
 // BF16 (16 x uint16_t packed in a __m256i) -> 16 x FP32.
-__attribute__((target("avx512f,avx512bw,avx512bf16"))) static inline __m512
-embag_bf16x16_to_fp32(__m256i bf16) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512bf16")
+static inline __m512 embag_bf16x16_to_fp32(__m256i bf16) {
 #if __GNUC__ >= 12
     return _mm512_cvtpbh_ps((__m256bh)bf16);
 #else
@@ -137,8 +138,8 @@ embag_bf16x16_to_fp32(__m256i bf16) {
 
 template <typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512bf16"))) void
-embag_avx512_kernel(
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512bf16")
+void embag_avx512_kernel(
         const InType *input, // [num_embeddings, width] - embedding table
         const float *weights, // [indsz] or nullptr if is_weights == false
         const IndexType *indices, // [indsz] - indices into embedding table

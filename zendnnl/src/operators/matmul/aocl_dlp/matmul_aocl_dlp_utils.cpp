@@ -78,7 +78,7 @@ size_t aocl_dlp_utils_t::reorder_weights_execute(const void *weights,
     size_t alignment = 64;
     size_t aligned_size
             = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
-    reordered_weights_ptr = aligned_alloc(alignment, aligned_size);
+    reordered_weights_ptr = zendnnl_aligned_alloc(alignment, aligned_size);
     reorder_func(order, trans, 'B', (T *)weights, (T *)reordered_weights_ptr, k,
             n, ldb, nullptr);
 
@@ -549,7 +549,7 @@ void aocl_dlp_utils_t::zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp_acc = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         std::vector<int32_t> wei_comp(N, 0);
 
         for (auto k = 0; k < K; ++k) {
@@ -567,7 +567,7 @@ void aocl_dlp_utils_t::zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp_acc = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
 
         for (auto m = 0; m < M; ++m) {
             for (auto k = 0; k < K; ++k) {
@@ -588,7 +588,7 @@ void aocl_dlp_utils_t::zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp_acc = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         //Src comp
         for (auto m = 0; m < M; ++m) {
             for (auto k = 0; k < K; ++k) {
@@ -1173,7 +1173,7 @@ aocl_dlp_utils_t::aocl_dlp_utils_t()
 aocl_dlp_utils_t::~aocl_dlp_utils_t() {
     LOG_DEBUG_INFO("Destroying aocl_dlp_utils_t");
     if (reordered_weights_ptr) {
-        free(reordered_weights_ptr);
+        zendnnl_aligned_free(reordered_weights_ptr);
         reordered_weights_ptr = nullptr;
     }
     if (aocl_dlp_po_ptr) {
@@ -1181,7 +1181,7 @@ aocl_dlp_utils_t::~aocl_dlp_utils_t() {
         aocl_dlp_po_ptr = nullptr;
     }
     if (zp_comp_acc) {
-        free(zp_comp_acc);
+        zendnnl_aligned_free(zp_comp_acc);
         zp_comp_acc = nullptr;
     }
 }

@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_INTRINSIC_AVX512_MATH_HPP
 
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -40,8 +41,8 @@ enum class fused_postop_t : int {
 // Used by both the microkernel epilogue and the standalone postop pass.
 // ============================================================================
 
-__attribute__((target("avx512f,fma"))) static inline __m512 avx512_exp(
-        __m512 x) {
+ZENDNNL_TARGET("avx512f,fma")
+static inline __m512 avx512_exp(__m512 x) {
     const __m512 log2e = _mm512_set1_ps(1.44269504089f);
     const __m512 ln2_hi = _mm512_set1_ps(0.693359375f);
     const __m512 ln2_lo = _mm512_set1_ps(-2.12194440e-4f);
@@ -75,8 +76,8 @@ __attribute__((target("avx512f,fma"))) static inline __m512 avx512_exp(
     return _mm512_mul_ps(y, pow2n);
 }
 
-__attribute__((target("avx512f,fma"))) static inline __m512 avx512_tanh(
-        __m512 x) {
+ZENDNNL_TARGET("avx512f,fma")
+static inline __m512 avx512_tanh(__m512 x) {
     const __m512 one = _mm512_set1_ps(1.0f);
     const __m512 two = _mm512_set1_ps(2.0f);
     const __m512 neg_one = _mm512_set1_ps(-1.0f);
@@ -88,15 +89,15 @@ __attribute__((target("avx512f,fma"))) static inline __m512 avx512_tanh(
     return result;
 }
 
-__attribute__((target("avx512f,fma"))) static inline __m512 avx512_sigmoid(
-        __m512 x) {
+ZENDNNL_TARGET("avx512f,fma")
+static inline __m512 avx512_sigmoid(__m512 x) {
     const __m512 one = _mm512_set1_ps(1.0f);
     __m512 neg_x = _mm512_sub_ps(_mm512_setzero_ps(), x);
     return _mm512_div_ps(one, _mm512_add_ps(one, avx512_exp(neg_x)));
 }
 
-__attribute__((target("avx512f,fma"))) static inline __m512 avx512_erf(
-        __m512 x) {
+ZENDNNL_TARGET("avx512f,fma")
+static inline __m512 avx512_erf(__m512 x) {
     const __m512 a1 = _mm512_set1_ps(0.254829592f);
     const __m512 a2 = _mm512_set1_ps(-0.284496736f);
     const __m512 a3 = _mm512_set1_ps(1.421413741f);
@@ -124,8 +125,8 @@ __attribute__((target("avx512f,fma"))) static inline __m512 avx512_erf(
 }
 
 /// Apply a fused post-op to a single ZMM register.
-__attribute__((target("avx512f,fma"))) static inline __m512 apply_fused_postop(
-        __m512 v, fused_postop_t op) {
+ZENDNNL_TARGET("avx512f,fma")
+static inline __m512 apply_fused_postop(__m512 v, fused_postop_t op) {
     switch (op) {
         case fused_postop_t::relu: return _mm512_max_ps(v, _mm512_setzero_ps());
         case fused_postop_t::gelu_tanh: {

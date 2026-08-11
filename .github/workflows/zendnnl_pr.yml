@@ -587,6 +587,108 @@ jobs:
         echo "Workspace cleanup completed"
       shell: bash
 
+  Zendnnl_build_MSVC_PR:
+    runs-on: windows_runner
+    needs: [jira-id-check, license-header-check, clang-format-check]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch' }}
+    env:
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      # Point to the runner's CMake and Ninja (adjust to the runner's installs).
+      # The configure/build commands invoke these explicitly so they work
+      # regardless of what is on PATH.
+      CMAKE: "/c/Program Files/Python312/Lib/site-packages/cmake/data/bin/cmake.exe"
+      NINJA: "/c/Program Files/Python312/Scripts/ninja.exe"
+      # Only if the Windows SDK isn't auto-discovered: point the loader at an
+      # SDK wrapper .bat. Most machines don't need this.
+      # MSVCENV_BAT: C:/ZenDNN/msvcenv.bat
+    steps:
+    - name: Clean workspace before checkout
+      shell: bash
+      run: |
+        echo "Cleaning old workspace data..."
+        ls -al "$GITHUB_WORKSPACE" || true
+        rm -rf "$GITHUB_WORKSPACE"/* || true
+        rm -rf "$GITHUB_WORKSPACE"/.[!.]* || true
+        echo "Workspace cleaned."
+        ls -al "$GITHUB_WORKSPACE"
+
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Checkout PR tip commit
+      if: github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        echo " Checking out PR tip commit..."
+        echo "Current commit: $(git rev-parse HEAD)"
+        echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
+        git checkout ${{ github.event.pull_request.head.sha }}
+        echo " Now on commit: $(git rev-parse HEAD)"
+        echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+
+    - name: Configure, build and test (MSVC)
+      shell: bash
+      run: |
+        set -e
+
+        # Load the MSVC (x64) environment into THIS shell so cl/link/rc plus
+        # INCLUDE/LIB/PATH are available. This must stay in the same step as the
+        # configure/build/test commands below because a sourced environment does
+        # not persist across separate GitHub Actions run steps.
+        source scripts/load_msvc.sh
+        command -v cl
+
+        echo "Using CMAKE: $CMAKE"
+        echo "Using NINJA: $NINJA"
+
+        # Always start from a fresh build dir: a previously failed configure
+        # caches a "broken compiler" verdict that survives re-runs.
+        rm -rf build-msvc
+        "$CMAKE" -S . -B build-msvc -G Ninja -DCMAKE_MAKE_PROGRAM="$NINJA" \
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+          -DZENDNNL_BUILD_TYPE=RelWithDebInfo \
+          -DZENDNNL_DEPENDS_ONEDNN=ON \
+          -DZENDNNL_BUILD_GTEST=ON -DZENDNNL_BUILD_AI_GTESTS=ON \
+          |& tee "$GITHUB_WORKSPACE/msvc_build_output.log"
+
+        # The first build also fetches and builds the dependencies
+        # (aocl-utils, AOCL-DLP, oneDNN, LIBXSMM, FBGEMM, GoogleTest), so it
+        # takes a while. Artifacts are installed under build-msvc/install/.
+        "$CMAKE" --build build-msvc |& tee -a "$GITHUB_WORKSPACE/msvc_build_output.log"
+
+        echo "Running gtests with filter: $GTEST_FILTER"
+        ./build-msvc/install/gtests/gtests.exe --gtest_filter="$GTEST_FILTER" \
+          |& tee "$GITHUB_WORKSPACE/msvc_gtest_output.log"
+
+        if grep -F -q "[  FAILED  ]" "$GITHUB_WORKSPACE/msvc_gtest_output.log"; then
+          echo "ZenDNNL MSVC gtests failed!"
+          exit 1
+        else
+          echo "ZenDNNL MSVC gtests passed!"
+        fi
+
+    - name: Upload MSVC build logs
+      uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: msvc-build-logs
+        path: |
+          ${{ github.workspace }}/msvc_build_output.log
+          ${{ github.workspace }}/msvc_gtest_output.log
+        retention-days: 7
+
+    - name: Cleanup workspace
+      if: always()
+      shell: bash
+      run: |
+        echo "Cleaning up workspace..."
+        rm -rf "$GITHUB_WORKSPACE/build-msvc" || true
+        rm -f "$GITHUB_WORKSPACE/msvc_build_output.log" || true
+        rm -f "$GITHUB_WORKSPACE/msvc_gtest_output.log" || true
+        echo "Workspace cleanup completed"
+
   trigger-zenTorch:
     #needs: [Zendnnl_build_PR]
     runs-on: amd-zenai-arc-xsmall-dind

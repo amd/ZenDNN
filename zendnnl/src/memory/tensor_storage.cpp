@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "tensor_storage.hpp"
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace memory {
@@ -37,7 +38,7 @@ void tensor_storage_t::allocate(std::size_t size_) {
     if (aligned_to) {
         //adjust size to be a multiple of aligned_to
         if (size % aligned_to) { size = (1 + size / aligned_to) * aligned_to; }
-        raw_ptr = std::aligned_alloc(aligned_to, size);
+        raw_ptr = zendnnl_aligned_alloc(aligned_to, size);
     } else {
         raw_ptr = std::malloc(size);
     }
@@ -61,7 +62,16 @@ void tensor_storage_t::reset() {
 
     parent_type::reset();
 
-    if (allocated && raw_ptr) std::free(raw_ptr);
+    // Free must mirror how raw_ptr was allocated (see allocate()): the aligned
+    // path uses zendnnl_aligned_alloc (which is _aligned_malloc on Windows and
+    // MUST be released with _aligned_free), the unaligned path uses std::malloc.
+    // aligned_to is still valid here; it is cleared below.
+    if (allocated && raw_ptr) {
+        if (aligned_to)
+            zendnnl_aligned_free(raw_ptr);
+        else
+            std::free(raw_ptr);
+    }
 
     allocated = false;
     aligned_to = 0;

@@ -390,7 +390,7 @@ inline std::atomic<int> s_last_m_tile_path {-1};
 // env-cache is a one-shot read taken at first call to keep the
 // production hot path branch-predictor-friendly.
 inline int get_grp_matmul_m_tile_hybrid() {
-    constexpr int kDefault = 0; // AUTO
+    static constexpr int kDefault = 0; // AUTO
     const int ovr = test_api::s_grp_matmul_m_tile_hybrid_override.load(
             std::memory_order_relaxed);
     if (ovr != std::numeric_limits<int>::min()) return ovr;
@@ -453,7 +453,7 @@ inline int get_grp_matmul_m_tile_hybrid() {
 //     light-pool thread (smaller light pool, larger heavy pool);
 //     lower values give the light pool more threads.
 inline int get_grp_matmul_m_tile_slice_target() {
-    constexpr int kDefault = 16;
+    static constexpr int kDefault = 16;
     const int ovr = test_api::s_grp_matmul_m_tile_slice_target_override.load(
             std::memory_order_relaxed);
     if (ovr >= 1) return ovr;
@@ -510,7 +510,7 @@ inline m_tile_regime classify_m_tile_regime(
 }
 
 inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
-    constexpr int kDefault = 256;
+    static constexpr int kDefault = 256;
     const int ovr
             = test_api::s_grp_matmul_m_tile_hybrid_min_max_m_override.load(
                     std::memory_order_relaxed);
@@ -526,7 +526,7 @@ inline int get_grp_matmul_m_tile_hybrid_min_max_m() {
 }
 
 inline int get_grp_matmul_m_tile_hybrid_min_skew() {
-    constexpr int kDefault = 4;
+    static constexpr int kDefault = 4;
     const int ovr = test_api::s_grp_matmul_m_tile_hybrid_min_skew_override.load(
             std::memory_order_relaxed);
     if (ovr >= 1) return ovr;
@@ -541,7 +541,7 @@ inline int get_grp_matmul_m_tile_hybrid_min_skew() {
 }
 
 inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
-    constexpr int kDefault = 8;
+    static constexpr int kDefault = 8;
     const int ovr
             = test_api::s_grp_matmul_m_tile_hybrid_lights_per_thread_override
                       .load(std::memory_order_relaxed);
@@ -573,7 +573,7 @@ inline int get_grp_matmul_m_tile_hybrid_lights_per_thread() {
 // `=1` is reserved for testing the FORCED engagement against the
 // planner's AUTO heuristic.
 inline int get_grp_matmul_m_tile_vertical_fusion() {
-    constexpr int kDefault = -1; // DISABLED
+    static constexpr int kDefault = -1; // DISABLED
     const int ovr = test_api::s_grp_matmul_m_tile_vertical_fusion_override.load(
             std::memory_order_relaxed);
     if (ovr != std::numeric_limits<int>::min()) return ovr;
@@ -608,7 +608,7 @@ inline int get_grp_matmul_m_tile_vertical_fusion() {
 // Strict env parsing — only exactly `"-1"` or a positive integer is
 // honoured; everything else uses the default.
 inline int get_grp_matmul_m_tile_pipeline_scratch_kb() {
-    constexpr int kDefault = 512;
+    static constexpr int kDefault = 512;
     const int ovr
             = test_api::s_grp_matmul_m_tile_pipeline_scratch_kb_override.load(
                     std::memory_order_relaxed);

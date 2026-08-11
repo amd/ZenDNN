@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "common/float16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
 
 #include <algorithm>
@@ -29,8 +30,8 @@ namespace reorder {
 /**
  * @brief Convert 16 BF16 values to 16 float32 values using AVX512.
  */
-__attribute__((target("avx512f"))) static inline __m512 bf16_to_float_vec(
-        __m256i bf16) {
+ZENDNNL_TARGET("avx512f")
+static inline __m512 bf16_to_float_vec(__m256i bf16) {
     // Convert 16 uint16_t to 32-bit integers
     __m512i extended = _mm512_cvtepu16_epi32(bf16);
     // Shift left by 16 bits to place BF16 bits in the upper half of float32
@@ -42,8 +43,8 @@ __attribute__((target("avx512f"))) static inline __m512 bf16_to_float_vec(
 /**
  * @brief Convert 16 float32 values to 16 BF16 values using round-to-nearest-even.
  */
-__attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f")
+static inline __m256i float_to_bf16_vec(__m512 val) {
     // Reinterpret float32 as int32 for bit manipulation
     __m512i int_val = _mm512_castps_si512(val);
     // Extract LSB of the BF16 part to determine rounding direction
@@ -69,7 +70,8 @@ __attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
  *   4. Reinterpret integer bits as float32
  *   5. Scalar fallback handles remaining elements
  */
-__attribute__((target("avx512f"))) void bf16_to_float32_avx512(
+ZENDNNL_TARGET("avx512f")
+void bf16_to_float32_avx512(
         const uint16_t *input, float *output, size_t nelems) {
     size_t i = 0;
 
@@ -98,7 +100,8 @@ __attribute__((target("avx512f"))) void bf16_to_float32_avx512(
  *   4. Narrow 32-bit integers to 16-bit
  *   5. Scalar fallback handles remaining elements with same rounding
  */
-__attribute__((target("avx512f"))) void float32_to_bf16_avx512(
+ZENDNNL_TARGET("avx512f")
+void float32_to_bf16_avx512(
         const float *input, uint16_t *output, size_t nelems) {
     size_t i = 0;
 
@@ -132,9 +135,9 @@ __attribute__((target("avx512f"))) void float32_to_bf16_avx512(
  *   6. Narrow to int8 with saturation
  *   7. Scalar fallback uses nearbyint() for consistent rounding
  */
-__attribute__((target("avx512f"))) void quantize_bf16_to_int8_avx512(
-        const uint16_t *input, int8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void quantize_bf16_to_int8_avx512(const uint16_t *input, int8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors for scale and zero_point
@@ -198,9 +201,9 @@ __attribute__((target("avx512f"))) void quantize_bf16_to_int8_avx512(
  *   5. Convert float32 to BF16 with round-to-nearest-even
  *   6. Scalar fallback handles remaining elements
  */
-__attribute__((target("avx512f"))) void dequantize_int8_to_bf16_avx512(
-        const int8_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void dequantize_int8_to_bf16_avx512(const int8_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors
@@ -252,9 +255,9 @@ __attribute__((target("avx512f"))) void dequantize_int8_to_bf16_avx512(
  *   6. Narrow to uint8 with unsigned saturation
  *   7. Scalar fallback uses nearbyint() for consistent rounding
  */
-__attribute__((target("avx512f"))) void quantize_bf16_to_uint8_avx512(
-        const uint16_t *input, uint8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void quantize_bf16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors for scale and zero_point
@@ -318,9 +321,9 @@ __attribute__((target("avx512f"))) void quantize_bf16_to_uint8_avx512(
  *   5. Convert float32 to BF16 with round-to-nearest-even
  *   6. Scalar fallback handles remaining elements
  */
-__attribute__((target("avx512f"))) void dequantize_uint8_to_bf16_avx512(
-        const uint8_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void dequantize_uint8_to_bf16_avx512(const uint8_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors
@@ -376,9 +379,9 @@ __attribute__((target("avx512f"))) void dequantize_uint8_to_bf16_avx512(
  *   6. Narrow to int8 with signed saturation
  *   7. Scalar fallback uses nearbyint() for consistent rounding
  */
-__attribute__((target("avx512f"))) void quantize_f32_to_int8_avx512(
-        const float *input, int8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void quantize_f32_to_int8_avx512(const float *input, int8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors for scale and zero_point
@@ -433,9 +436,9 @@ __attribute__((target("avx512f"))) void quantize_f32_to_int8_avx512(
  *   5. Store 16 float32 values directly
  *   6. Scalar fallback handles remaining elements
  */
-__attribute__((target("avx512f"))) void dequantize_int8_to_f32_avx512(
-        const int8_t *input, float *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void dequantize_int8_to_f32_avx512(const int8_t *input, float *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors
@@ -481,9 +484,9 @@ __attribute__((target("avx512f"))) void dequantize_int8_to_f32_avx512(
  *   6. Narrow to uint8 with unsigned saturation
  *   7. Scalar fallback uses nearbyint() for consistent rounding
  */
-__attribute__((target("avx512f"))) void quantize_f32_to_uint8_avx512(
-        const float *input, uint8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void quantize_f32_to_uint8_avx512(const float *input, uint8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors for scale and zero_point
@@ -538,9 +541,9 @@ __attribute__((target("avx512f"))) void quantize_f32_to_uint8_avx512(
  *   5. Store 16 float32 values directly
  *   6. Scalar fallback handles remaining elements
  */
-__attribute__((target("avx512f"))) void dequantize_uint8_to_f32_avx512(
-        const uint8_t *input, float *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
 
     // Prepare broadcast vectors
@@ -590,21 +593,21 @@ __attribute__((target("avx512f"))) void dequantize_uint8_to_f32_avx512(
 // ===========================================================================
 
 /** Convert 16 FP16 values (256-bit) to 16 float32 values (512-bit). */
-__attribute__((target("avx512f,f16c"))) static inline __m512 f16_to_float_vec(
-        __m256i f16) {
+ZENDNNL_TARGET("avx512f,f16c")
+static inline __m512 f16_to_float_vec(__m256i f16) {
     return _mm512_cvtph_ps(f16);
 }
 
 /** Convert 16 float32 values to 16 FP16 values with round-to-nearest-even. */
-__attribute__((target("avx512f,f16c"))) static inline __m256i float_to_f16_vec(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f,f16c")
+static inline __m256i float_to_f16_vec(__m512 val) {
     return _mm512_cvtps_ph(val, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 }
 
 /** Quantize FP16 -> int8 (per-tensor). */
-__attribute__((target("avx512f,f16c"))) void quantize_f16_to_int8_avx512(
-        const uint16_t *input, int8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f,f16c")
+void quantize_f16_to_int8_avx512(const uint16_t *input, int8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512i zp_vec_i32 = _mm512_set1_epi32(zero_point);
@@ -634,9 +637,9 @@ __attribute__((target("avx512f,f16c"))) void quantize_f16_to_int8_avx512(
 }
 
 /** Quantize FP16 -> uint8 (per-tensor). */
-__attribute__((target("avx512f,f16c"))) void quantize_f16_to_uint8_avx512(
-        const uint16_t *input, uint8_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f,f16c")
+void quantize_f16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512i zp_vec_i32 = _mm512_set1_epi32(zero_point);
@@ -666,9 +669,9 @@ __attribute__((target("avx512f,f16c"))) void quantize_f16_to_uint8_avx512(
 }
 
 /** Dequantize int8 -> FP16 (per-tensor). */
-__attribute__((target("avx512f,f16c"))) void dequantize_int8_to_f16_avx512(
-        const int8_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f,f16c")
+void dequantize_int8_to_f16_avx512(const int8_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512 zp_vec = _mm512_set1_ps(static_cast<float>(zero_point));
@@ -690,9 +693,9 @@ __attribute__((target("avx512f,f16c"))) void dequantize_int8_to_f16_avx512(
 }
 
 /** Dequantize uint8 -> FP16 (per-tensor). */
-__attribute__((target("avx512f,f16c"))) void dequantize_uint8_to_f16_avx512(
-        const uint8_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f,f16c")
+void dequantize_uint8_to_f16_avx512(const uint8_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     size_t i = 0;
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512 zp_vec = _mm512_set1_ps(static_cast<float>(zero_point));

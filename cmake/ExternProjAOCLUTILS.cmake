@@ -21,16 +21,62 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig AOCL-UTILS...")
 
-  # adding pthread to cxx flags is a manylinux docker requirement.
-  list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_DOCS=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_TESTS=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_STATIC_LIBS=ON")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_SHARED_LIBS=ON")
-  list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-lpthread")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+
+  if(WIN32)
+    # Windows/MSVC: no -lpthread (a Linux-ism cl rejects); disable examples;
+    # silence CRT deprecation warnings; forward the build type so the sub-build
+    # does not silently default to Debug (/MTd) and mismatch the Release main
+    # build's C runtime.
+    #
+    # NOTE: this aocl-utils source accesses the Windows SDK processor-info union
+    # members directly (anonymous union, e.g. `.Processor`), so it must NOT be
+    # built with /DNONAMELESSUNION (that names the union and breaks the direct
+    # access with C2039). Older aocl-utils (used `pInfo->u.Processor`) required
+    # the flag; this version fixed the access, so the flag is intentionally
+    # absent. clang-tidy auto-enable is disabled in the aocl-utils source
+    # (its CMakeLists.txt), matching the approach that avoids tidy erroring on
+    # the cl build.
+    list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=OFF")
+
+    # Build aocl-utils static-only on Windows: this source's Cpuid CMake gives
+    # its shared and static targets the same OUTPUT_NAME (aoclutils_c), so both
+    # emit aoclutils_c.lib -> ninja "multiple rules generate" collision. Disable
+    # via BUILD_SHARED_LIBS (au_options.cmake force-syncs AU_BUILD_SHARED_LIBS
+    # from it). ZenDNNL only whole-archives the static aocl-utils anyway.
+    list(APPEND AU_CMAKE_ARGS "-DBUILD_SHARED_LIBS=OFF")
+
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=/D_CRT_SECURE_NO_WARNINGS")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=/D_CRT_SECURE_NO_WARNINGS")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+    # Force aocl-utils' STATIC libraries onto the dynamic CRT (/MD) so they
+    # match ZenDNNL's Windows build (which links /MD). Without this the static
+    # libs default to the static CRT (/MT) and folding them into the /MD
+    # zendnnl archive/DLL triggers CRT-mismatch link errors (LNK2038/LNK4098).
+    # Requires an aocl-utils that provides this option (the CRT-MD-capable
+    # source); ignored with a harmless warning on sources that lack it.
+    list(APPEND AU_CMAKE_ARGS "-DAU_STATIC_FORCE_CRT_MD=ON")
+  else()
+    # adding pthread to cxx flags is a manylinux docker requirement.
+    list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-lpthread")
+  endif()
+
+  # Windows produces .lib (with build-configuration-dependent names/paths), so
+  # do not pin the .a byproducts there; keep them on Unix for Ninja tracking.
+  if(WIN32)
+    set(AU_BYPRODUCTS "")
+  else()
+    set(AU_BYPRODUCTS
+      <INSTALL_DIR>/lib/libaoclutils.a
+      <INSTALL_DIR>/lib/libau_cpuid.a)
+  endif()
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
@@ -44,10 +90,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      INSTALL_COMMAND cmake --build . --config release --target install
-      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
-                       <INSTALL_DIR>/lib/libau_cpuid.a)
+      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config Release --target install
+      BUILD_BYPRODUCTS ${AU_BYPRODUCTS})
   else()
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download AOCL-UTILS with tag ${AOCLUTILS_GIT_TAG}")
@@ -60,10 +105,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       GIT_TAG ${AOCLUTILS_GIT_TAG}
       GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      INSTALL_COMMAND cmake --build . --config release --target install
-      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
-                       <INSTALL_DIR>/lib/libau_cpuid.a
+      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config Release --target install
+      BUILD_BYPRODUCTS ${AU_BYPRODUCTS}
       UPDATE_DISCONNECTED TRUE)
   endif()
 

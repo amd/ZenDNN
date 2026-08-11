@@ -110,7 +110,7 @@ size_t align_up(size_t size, size_t alignment = 64) {
 // finishes.  A bounded capacity below the warmed pool size (up to
 // 2 * total_experts entries for a fused gate/up + down layer) would let a
 // later expert's add() evict() an EARLIER, still-in-use expert's buffer
-// mid-call and std::free() it → use-after-free when the GEMM reads it.
+// mid-call and zendnnl_aligned_free() it → use-after-free when the GEMM reads it.
 // Pinning to an infinite capacity sidesteps that without per-pointer
 // refcounts, mirroring pack_cache_singleton() in custom_kernel/pack.cpp;
 // it explicitly overrides any global ZENDNNL_LRU_CACHE_CAPACITY setting.
@@ -187,7 +187,7 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
     const size_t scale_bytes = ggml_scale_bytes(N, K, /*use_bf16_scales=*/true);
     const size_t canon_size = align_up(weight_bytes + scale_bytes);
 
-    void *canon = aligned_alloc(64, canon_size);
+    void *canon = zendnnl_aligned_alloc(64, canon_size);
     if (!canon) {
         log_error("GGML unpack failed: s8 buffer allocation failed");
         return status_t::failure;
@@ -200,7 +200,7 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
         if (ggml_unpack_weight_buffer(
                     weight, 8, /*use_bf16_scales=*/true, N, K, &w, &s, canon)
                 != 0) {
-            std::free(canon);
+            zendnnl_aligned_free(canon);
             log_error("GGML Q8_0 unpack failed");
             return status_t::failure;
         }
@@ -214,13 +214,14 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
     const int64_t packed_size
             = ggml_unpack_weight_buffer_size(2, /*use_bf16_scales=*/true, N, K);
     if (packed_size < 0) {
-        std::free(canon);
+        zendnnl_aligned_free(canon);
         log_error("GGML Q4_0 unpack failed: invalid dimensions");
         return status_t::failure;
     }
-    void *tmp = aligned_alloc(64, align_up(static_cast<size_t>(packed_size)));
+    void *tmp = zendnnl_aligned_alloc(
+            64, align_up(static_cast<size_t>(packed_size)));
     if (!tmp) {
-        std::free(canon);
+        zendnnl_aligned_free(canon);
         log_error("GGML Q4_0 unpack failed: packed buffer allocation failed");
         return status_t::failure;
     }
@@ -229,8 +230,8 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
     if (ggml_unpack_weight_buffer(weight, 2, /*use_bf16_scales=*/true, N, K,
                 &packed_s4, &tmp_scales, tmp)
             != 0) {
-        std::free(tmp);
-        std::free(canon);
+        zendnnl_aligned_free(tmp);
+        zendnnl_aligned_free(canon);
         log_error("GGML Q4_0 unpack failed");
         return status_t::failure;
     }
@@ -244,7 +245,7 @@ static status_t ggml_unpack_to_s8_buffer(const void *weight, int64_t N,
             /*ldb=*/static_cast<int>(K), /*is_transposed=*/false);
     std::memcpy(static_cast<uint8_t *>(canon) + weight_bytes, tmp_scales,
             scale_bytes);
-    std::free(tmp);
+    zendnnl_aligned_free(tmp);
 
     apilog_info("GGML Q4_0 upcast: s4->s8 widened N=", N, ", K=", K, " (",
             static_cast<size_t>(N) * static_cast<size_t>(K) / 2,
@@ -480,7 +481,7 @@ static status_t unpack_ggml_raw_s8_and_cache(const void *&weight, int N, int K,
         {
             std::lock_guard<std::mutex> lock(cache_mutex);
             if (weight_cache.try_get(cache_key, cached_buffer)) {
-                std::free(owned); // another thread filled it first
+                zendnnl_aligned_free(owned); // another thread filled it first
             } else {
                 weight_cache.add(cache_key, owned);
                 cached_buffer = owned;
@@ -602,9 +603,9 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
             return status_t::failure;
         }
 
-        void *new_cached_buffer = aligned_alloc(64, total_cache_bytes);
+        void *new_cached_buffer = zendnnl_aligned_alloc(64, total_cache_bytes);
         if (!new_cached_buffer) {
-            std::free(unpack_owned);
+            zendnnl_aligned_free(unpack_owned);
             log_error("GGML weight reorder failed: cache allocation failed");
             return status_t::failure;
         }
@@ -612,14 +613,14 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
         if (ggml_reorder_unpacked_weights(N, K, ldb, trans, unpacked_weights,
                     static_cast<int8_t *>(new_cached_buffer))
                 != status_t::success) {
-            std::free(unpack_owned);
-            std::free(new_cached_buffer);
+            zendnnl_aligned_free(unpack_owned);
+            zendnnl_aligned_free(new_cached_buffer);
             return status_t::failure;
         }
 
         std::memcpy(static_cast<uint8_t *>(new_cached_buffer) + reorder_size,
                 unpacked_scales, scale_bytes);
-        std::free(unpack_owned);
+        zendnnl_aligned_free(unpack_owned);
 
         {
             std::lock_guard<std::mutex> lock(cache_mutex);
@@ -638,7 +639,7 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
             }
         }
 
-        if (new_cached_buffer) { std::free(new_cached_buffer); }
+        if (new_cached_buffer) { zendnnl_aligned_free(new_cached_buffer); }
     }
 
     weight = cached_buffer;

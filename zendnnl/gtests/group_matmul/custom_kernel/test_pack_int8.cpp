@@ -545,7 +545,9 @@ TEST(CkInt8Pack, SiluGeluProduceIdenticalPacks) {
 // the int8 analogue of `CkPackBf16.SiluGeluInterleavedPackMatchesSwigluBytes`.
 TEST(CkInt8Pack, SplitHalvesInterleaveMatchesSwigluLayout) {
     INT8_CK_SKIP_IF_NO_VNNI();
-    constexpr int K = 32, N = 64, I = N / 2, pack_nr = 32;
+    // static storage so the value-generator lambdas below can use I without an
+    // explicit capture (MSVC rejects implicit capture of a constexpr local: C3493).
+    static constexpr int K = 32, N = 64, I = N / 2, pack_nr = 32;
     auto vg = [](int k, int j) {
         return static_cast<int8_t>((k * 7 + j) & 0x3f);
     };

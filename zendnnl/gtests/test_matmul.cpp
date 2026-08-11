@@ -138,7 +138,9 @@ TEST_P(TestMatmul, F32_F32) {
 TEST_P(TestMatmul, WOQ_BF16_S4) {
     if (algo == matmul_algo_t::onednn
             || algo == matmul_algo_t::onednn_blocked) {
-        GTEST_SKIP();
+        GTEST_SKIP()
+                << "WOQ (bf16xs4) is unsupported on the oneDNN matmul backend; "
+                   "only AOCL-DLP implements the WOQ path.";
     }
     // Test WOQ with different scale/zp granularity combinations:
     // Combination 0: scale=per-tensor - {1,1}

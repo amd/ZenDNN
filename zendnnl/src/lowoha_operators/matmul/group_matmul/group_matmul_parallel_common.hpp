@@ -343,7 +343,7 @@ inline int get_grp_matmul_auto_prompt_algo() {
     // default 2 (flat_m_tile).  Bogus values (< 0 OR > 5) also clamp
     // to the default so a typo cannot accidentally pin an unintended
     // algo.
-    constexpr int kDefault = 2;
+    static constexpr int kDefault = 2;
     const int ovr = test_api_auto_prompt_algo_override().load(
             std::memory_order_relaxed);
     if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
@@ -365,7 +365,7 @@ inline int get_grp_matmul_auto_prompt_algo() {
 //   decode choice.
 inline std::atomic<int> &test_api_auto_decode_algo_override();
 inline int get_grp_matmul_auto_decode_algo() {
-    constexpr int kDefault = 3;
+    static constexpr int kDefault = 3;
     const int ovr = test_api_auto_decode_algo_override().load(
             std::memory_order_relaxed);
     if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
@@ -628,7 +628,7 @@ inline int get_grp_n_rounds_mode() {
     // is not exactly `"0"`, `"1"`, `"2"`, or `"3"` falls back to the
     // documented default (NOT silently to mode 0 via the legacy
     // atoi-returns-0-for-junk behaviour).  See `parse_env_int_strict`.
-    constexpr int kDefault = 1;
+    static constexpr int kDefault = 1;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ROUNDS");
         int parsed = 0;

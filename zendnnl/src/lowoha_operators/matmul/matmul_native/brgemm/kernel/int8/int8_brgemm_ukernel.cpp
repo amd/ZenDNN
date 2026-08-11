@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_brgemm_ukernel.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
@@ -36,15 +37,13 @@ namespace native {
 // B is in INT8 VNNI layout: groups of 4 consecutive K elements per column.
 // b_stride = NR_PACK * INT8_VNNI_GRP = 64 * 4 = 256 bytes per k-quad row.
 template <int MR, int NV>
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma"),
-        noinline)) void
-int8_brgemm_ukernel(const uint8_t *__restrict__ A, int lda,
-        const int8_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C_fp32, int ldc, int K, int BK,
-        const int32_t *__restrict__ col_sum, int32_t src_zp, float src_scale,
-        const float *__restrict__ wei_scale, int wei_scale_count,
-        const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+void int8_brgemm_ukernel(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict B_vnni, int b_stride, float *__restrict C_fp32,
+        int ldc, int K, int BK, const int32_t *__restrict col_sum,
+        int32_t src_zp, float src_scale, const float *__restrict wei_scale,
+        int wei_scale_count, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16) {
 
     __m512i acc[MR][NV];
     for (int m = 0; m < MR; ++m)
@@ -129,6 +128,7 @@ int8_brgemm_ukernel(const uint8_t *__restrict__ A, int lda,
 // NR=64 (NV=4): MR=1..6 safe (6*4+4+1=29 ZMMs < 32)
 // NR=32 (NV=2): MR=1..6
 // NR=16 (NV=1): MR=1..6
+// clang-format off
 #define INST(MR, NV) \
     template void int8_brgemm_ukernel<MR, NV>(const uint8_t *, int, \
             const int8_t *, int, float *, int, int, int, const int32_t *, \
@@ -136,12 +136,15 @@ int8_brgemm_ukernel(const uint8_t *__restrict__ A, int lda,
             uint16_t *, int);
 
 INST(1, 4)
-INST(2, 4) INST(3, 4) INST(4, 4) INST(6, 4) INST(1, 2) INST(2, 2) INST(
-        3, 2) INST(4, 2) INST(6, 2) INST(1, 1) INST(2, 1) INST(3, 1) INST(4,
-        1) INST(6, 1)
+INST(2, 4)
+INST(3, 4)
+INST(4, 4)
+INST(6, 4) INST(1, 2) INST(2, 2) INST(3, 2) INST(4, 2) INST(6, 2) INST(1, 1)
+        INST(2, 1) INST(3, 1) INST(4, 1) INST(6, 1)
 #undef INST
+        // clang-format on
 
-        __attribute__((target("avx512f,avx512vnni,fma"))) int8_brgemm_fn_t
+        ZENDNNL_TARGET("avx512f,avx512vnni,fma") int8_brgemm_fn_t
         select_int8_brgemm_kernel(int MR, int NR) {
     switch (NR) {
         case 64:
@@ -176,15 +179,14 @@ INST(2, 4) INST(3, 4) INST(4, 4) INST(6, 4) INST(1, 2) INST(2, 2) INST(
 }
 
 // ── Tail kernel (dynamic MR/NR for edge tiles) ──────────────────────
-__attribute__((
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma"))) void
-int8_brgemm_tail_kernel(const uint8_t *__restrict__ A, int lda,
-        const int8_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C_fp32, int ldc, int K, int BK, int mr_act,
-        int nr_act, const int32_t *__restrict__ col_sum, int32_t src_zp,
-        float src_scale, const float *__restrict__ wei_scale,
-        int wei_scale_count, const float *__restrict__ bias,
-        fused_postop_t fused_op, uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+void int8_brgemm_tail_kernel(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict B_vnni, int b_stride, float *__restrict C_fp32,
+        int ldc, int K, int BK, int mr_act, int nr_act,
+        const int32_t *__restrict col_sum, int32_t src_zp, float src_scale,
+        const float *__restrict wei_scale, int wei_scale_count,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16) {
 
     constexpr int MAX_MR = 6;
     constexpr int MAX_NV = 4;

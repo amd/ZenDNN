@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include "common/zendnnl_compat.hpp"
 
 #include <immintrin.h>
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
@@ -37,9 +38,9 @@ namespace native {
 // Layout: packed[block_offset + kq * blk_stride + n_local * 4 + i]
 // Simultaneously computes col_sum[n] = sum_k(B[k][n]) for zero-point
 // compensation.
-__attribute__((target("avx512f,avx512bw,avx512vl"))) void pack_b_int8_bkc(
-        const int8_t *B, int ldb, int K, int N, bool transB, int8_t *packed,
-        int32_t *col_sum) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+void pack_b_int8_bkc(const int8_t *B, int ldb, int K, int N, bool transB,
+        int8_t *packed, int32_t *col_sum) {
 
     const int blk_n = choose_blk_n(N);
     const int K_padded = (K + 3) & ~3;
@@ -96,10 +97,11 @@ __attribute__((target("avx512f,avx512bw,avx512vl"))) void pack_b_int8_bkc(
 }
 
 // ── Precompute dequantization vectors ──────────────────────────────────
-__attribute__((target("avx512f"))) static void precompute_int8_dequant_impl(
-        const int32_t *col_sum, const float *bias, float src_scale,
-        int32_t src_zp, const float *wei_scale, int wei_scale_count, int N,
-        int N_padded, float *combined_scale, float *effective_bias) {
+ZENDNNL_TARGET("avx512f")
+static void precompute_int8_dequant_impl(const int32_t *col_sum,
+        const float *bias, float src_scale, int32_t src_zp,
+        const float *wei_scale, int wei_scale_count, int N, int N_padded,
+        float *combined_scale, float *effective_bias) {
 
     const __m512 v_src_scale = _mm512_set1_ps(src_scale);
     const __m512 v_zp = _mm512_set1_ps(static_cast<float>(src_zp));
@@ -136,14 +138,11 @@ __attribute__((target("avx512f"))) static void precompute_int8_dequant_impl(
 
 // ── INT8 BKC GEMV core kernel (templated by panel count) ──────────────
 template <int NP>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,"
-               "fma"))) static void
-int8_gemv_bkc_nr64_core(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+static void int8_gemv_bkc_nr64_core(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
         int jc, int b_col_off) {
 
@@ -245,12 +244,11 @@ int8_gemv_bkc_nr64_core(const uint8_t *__restrict__ A,
 }
 
 // ── Flat INT8 GEMV epilogue: dequant + alpha/beta/postop/store ─────────
-__attribute__((always_inline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static inline void
-int8_gemv_flat_epilogue(const int32_t *__restrict__ acc_i32, int nvt,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+ZENDNNL_INLINE_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static inline void int8_gemv_flat_epilogue(const int32_t *__restrict acc_i32,
+        int nvt, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int N) {
 
     for (int v = 0; v < nvt; ++v) {
@@ -313,10 +311,9 @@ int8_gemv_flat_epilogue(const int32_t *__restrict__ acc_i32, int nvt,
 // ── INT8 intrinsics flat K-loop: compile-time unrolled, single K-loop ─
 // NVT i32 accumulators live in ZMM registers for the entire K dimension.
 template <int NVT>
-__attribute__((
-        noinline, target("avx512f,avx512bw,avx512vl,avx512vnni"))) static void
-int8_gemv_flat_kloop_intrinsic(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc, int32_t *__restrict__ acc, int K,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512vnni")
+static void int8_gemv_flat_kloop_intrinsic(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, int32_t *__restrict acc, int K,
         int n_stride) {
 
     __m512i a[NVT];
@@ -348,9 +345,9 @@ int8_gemv_flat_kloop_intrinsic(const uint8_t *__restrict__ A,
         _mm512_store_si512(acc + v * 16, a[v]);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni"))) static bool
-int8_gemv_flat_intrinsic_dispatch(const uint8_t *A, const int8_t *B_bkc,
-        int32_t *acc, int K, int n_stride, int nvt) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512vnni")
+static bool int8_gemv_flat_intrinsic_dispatch(const uint8_t *A,
+        const int8_t *B_bkc, int32_t *acc, int K, int n_stride, int nvt) {
 
 #define CASE_INT8_NVT(N) \
     case N: \
@@ -380,13 +377,11 @@ int8_gemv_flat_intrinsic_dispatch(const uint8_t *A, const int8_t *B_bkc,
 }
 
 // ── Flat INT8 GEMV entry: single K-loop + dequant epilogue ────────────
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,"
-               "fma"))) static bool
-int8_gemv_flat(const uint8_t *__restrict__ A, const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+static bool int8_gemv_flat(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int K, int N) {
 
     const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
@@ -394,7 +389,7 @@ int8_gemv_flat(const uint8_t *__restrict__ A, const int8_t *__restrict__ B_bkc,
     if (nvt < 1 || nvt > 16) return false;
 
     const int n_stride = N_padded * INT8_VNNI_GRP;
-    int32_t acc[256] __attribute__((aligned(64)));
+    alignas(64) int32_t acc[256];
 
     if (!int8_gemv_flat_intrinsic_dispatch(A, B_bkc, acc, K, n_stride, nvt))
         return false;
@@ -440,11 +435,11 @@ static inline void int8_dispatch_block(const uint8_t *A, const int8_t *B_bkc,
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-__attribute__((noinline)) void int8_gemv_bkc(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+ZENDNNL_NOINLINE
+void int8_gemv_bkc(const uint8_t *__restrict A, const int8_t *__restrict B_bkc,
+        const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int K, int N) {
 
     // Flat path: single K-loop for the entire N when the block dispatch would

@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "common/zendnnl_api.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 
 namespace zendnnl {
@@ -100,7 +101,8 @@ using zendnnl::memory::status_t;
  *       etc.) are documented with each mode above.
  * @note Buffers must not overlap.
  */
-status_t reorder_direct(const void *src, void *dst, reorder_params_t &params);
+ZENDNNL_API status_t reorder_direct(
+        const void *src, void *dst, reorder_params_t &params);
 
 /**
  * @brief Grouped per-token dynamic quantization for MoE/group GEMM sources.

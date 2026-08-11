@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include "common/zendnnl_compat.hpp"
 
 #include <immintrin.h>
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
@@ -31,9 +32,9 @@ namespace native {
 // ── Blocked K-contiguous (BKC) VNNI packing ────────────────────────────
 // Packs B into independent column blocks of adaptive width (256 or 384).
 // Layout: packed[block_offset + kp * blk_stride + n_local * VNNI_PAIR]
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static void pack_b_bkc(
-        const uint16_t *B, int ldb, int K, int n_cols, bool transB, int col0,
-        uint16_t *packed) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static void pack_b_bkc(const uint16_t *B, int ldb, int K, int n_cols,
+        bool transB, int col0, uint16_t *packed) {
 
     const int blk_n = choose_blk_n(n_cols);
     const int K_padded = (K + 1) & ~1;
@@ -98,11 +99,10 @@ __attribute__((target("avx512f,avx512bw,avx512vl"))) static void pack_b_bkc(
 // Templated on NP (panel count): compile-time unrolling keeps all
 // accumulators in ZMM registers.  b_col_off is 0 for block-aware layout.
 template <int NP>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static void
-bf16_gemv_bkc_nr64_core(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static void bf16_gemv_bkc_nr64_core(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int k_pairs, int n_stride, int K, int N, int jc, int b_col_off) {
 
@@ -205,11 +205,10 @@ bf16_gemv_bkc_nr64_core(const uint16_t *__restrict__ A,
 // ── Narrow-tail kernel ─────────────────────────────────────────────────
 // Processes exactly NVT vectors (NVT×16 columns) for the last partial panel.
 template <int NVT>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static void
-bf16_gemv_bkc_tail(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static void bf16_gemv_bkc_tail(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int k_pairs, int n_stride, int K, int N, int jc, int b_col_off) {
 
@@ -342,11 +341,10 @@ static inline void dispatch_block(const uint16_t *A, const uint16_t *B_bkc,
 }
 
 // ── Flat GEMV epilogue: alpha/beta/bias/postop/store from FP32 accumulators
-__attribute__((always_inline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static inline void
-bf16_gemv_flat_epilogue(const float *__restrict__ acc, int nvt,
-        uint16_t *__restrict__ C_bf16, float *__restrict__ C_fp32,
-        const float *__restrict__ bias_f, fused_postop_t fused_op, float alpha,
+ZENDNNL_INLINE_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static inline void bf16_gemv_flat_epilogue(const float *__restrict acc, int nvt,
+        uint16_t *__restrict C_bf16, float *__restrict C_fp32,
+        const float *__restrict bias_f, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int N) {
 
     for (int v = 0; v < nvt; ++v) {
@@ -408,10 +406,9 @@ bf16_gemv_flat_epilogue(const float *__restrict__ acc, int nvt,
 // ── Intrinsics flat K-loop: compile-time unrolled, single K-loop ──────
 // NVT accumulators live in ZMM registers for the entire K dimension.
 template <int NVT>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static void
-bf16_gemv_flat_kloop_intrinsic(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, float *__restrict__ acc, int K,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static void bf16_gemv_flat_kloop_intrinsic(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, float *__restrict acc, int K,
         int n_stride) {
 
     __m512 a[NVT];
@@ -442,9 +439,9 @@ bf16_gemv_flat_kloop_intrinsic(const uint16_t *__restrict__ A,
 }
 
 // Dispatch intrinsics K-loop by NVT (1..16).
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static bool
-bf16_gemv_flat_intrinsic_dispatch(const uint16_t *A, const uint16_t *B_bkc,
-        float *acc, int K, int n_stride, int nvt) {
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static bool bf16_gemv_flat_intrinsic_dispatch(const uint16_t *A,
+        const uint16_t *B_bkc, float *acc, int K, int n_stride, int nvt) {
 
 #define CASE_NVT(N) \
     case N: \
@@ -477,11 +474,10 @@ bf16_gemv_flat_intrinsic_dispatch(const uint16_t *A, const uint16_t *B_bkc,
 // Replaces the block dispatch chain when N fits in one BKC block (≤256)
 // and the block dispatch would produce a main panel + tail (N%64 != 0).
 // Merges both into a single K-loop with NVT accumulators in ZMM registers.
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static bool
-bf16_gemv_flat(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static bool bf16_gemv_flat(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int K, int N) {
 
@@ -490,7 +486,7 @@ bf16_gemv_flat(const uint16_t *__restrict__ A,
     if (nvt < 1 || nvt > 16) return false;
 
     const int n_stride = N_padded * VNNI_PAIR;
-    float acc[256] __attribute__((aligned(64)));
+    alignas(64) float acc[256];
 
     if (!bf16_gemv_flat_intrinsic_dispatch(A, B_bkc, acc, K, n_stride, nvt))
         return false;
@@ -502,11 +498,12 @@ bf16_gemv_flat(const uint16_t *__restrict__ A,
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-__attribute__((noinline)) static void bf16_gemv_bkc_jc_range(
-        const uint16_t *__restrict__ A, const uint16_t *__restrict__ B_bkc,
-        uint16_t *__restrict__ C_bf16, float *__restrict__ C_fp32,
-        const float *__restrict__ bias_f, fused_postop_t fused_op, float alpha,
-        float beta, bool dst_is_bf16, int K, int N, int jc_begin, int jc_end) {
+ZENDNNL_NOINLINE
+static void bf16_gemv_bkc_jc_range(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
+        fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
+        int K, int N, int jc_begin, int jc_end) {
 
     if (jc_begin >= jc_end || jc_begin < 0 || jc_end > N) return;
 
@@ -542,9 +539,10 @@ __attribute__((noinline)) static void bf16_gemv_bkc_jc_range(
     }
 }
 
-__attribute__((noinline)) void bf16_gemv_bkc(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_NOINLINE
+void bf16_gemv_bkc(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int K, int N) {
 

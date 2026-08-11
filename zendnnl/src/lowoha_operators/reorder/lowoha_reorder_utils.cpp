@@ -205,9 +205,9 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
                         "} (per-channel-col), "
                         "{",
                         M, ",1} (per-channel-row), {G,", N,
-                        "} (per-group-row), "
+                        "} (per-group-row, 1<G<M && M%G==0), "
                         "or {",
-                        M, ",G} (per-group-col)");
+                        M, ",G} (per-group-col, 1<G<N && N%G==0)");
                 return status_t::failure;
             }
 
@@ -254,9 +254,9 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
                         "} (per-channel-col), "
                         "{1,",
                         M, ",1} (per-channel-row), {1,G,", N,
-                        "} (per-group-row), "
+                        "} (per-group-row, 1<G<M && M%G==0), "
                         "or {1,",
-                        M, ",G} (per-group-col)");
+                        M, ",G} (per-group-col, 1<G<N && N%G==0)");
                 return status_t::failure;
             }
 

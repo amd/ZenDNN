@@ -31,6 +31,7 @@
 // expression of each `get_or_pack_weight_*` function.
 
 #include "pack.hpp"
+#include "common/zendnnl_compat.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -556,7 +557,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
-        void *raw = std::aligned_alloc(alignment, bytes_aligned);
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
         if (raw == nullptr) {
             log_error(
                     "custom_kernel pack (disable_cache): aligned_alloc "
@@ -721,7 +722,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     // bf16 microkernel reads the B-stream with the UNALIGNED
     // `_mm512_loadu_si512` (vmovdqu64).  On Zen 4 / Zen 5 that load is as
     // fast as the aligned form when the address happens to be aligned
-    // (out-of-place packs, which still come from std::aligned_alloc(64));
+    // (out-of-place packs, which still come from zendnnl_aligned_alloc(64));
     // a non-64-aligned in-place base only pays a cache-line split-load
     // cost.  We accept that to capture the memory saving on every
     // bf16/even-K weight regardless of how the framework allocated it.
@@ -736,7 +737,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     const bool can_in_place
             = in_place && inplace_layout_ok && (bytes == plain_bytes);
     if (can_in_place) {
-        void *tmp = std::aligned_alloc(alignment, bytes_aligned);
+        void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
         if (tmp != nullptr) {
             pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
                     interleave_split_halves, static_cast<bfloat16_t *>(tmp));
@@ -752,7 +753,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
             // in-place reorder path (aocl_kernel.cpp), which const_casts the same
             // caller weight pointer under the identical WC=2 contract.
             std::memcpy(const_cast<bfloat16_t *>(weight), tmp, plain_bytes);
-            std::free(tmp);
+            zendnnl_aligned_free(tmp);
             pack_cache.add(key, nullptr); // sentinel: pack lives in `weight`
             *out_packed = weight;
             return status_t::success;
@@ -771,7 +772,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
 
     // `bytes_aligned` + `alignment` are hoisted above the disable-cache
     // branch so cached and caller-owned packs use identical allocations.
-    void *raw = std::aligned_alloc(alignment, bytes_aligned);
+    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
     if (raw == nullptr) {
         log_error("custom_kernel pack: aligned_alloc failed for ",
                 bytes_aligned, " bytes");
@@ -802,7 +803,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
 // itself.
 void free_owned_packed_weight(const bfloat16_t *packed) {
     if (packed == nullptr) return;
-    std::free(const_cast<bfloat16_t *>(packed));
+    zendnnl_aligned_free(const_cast<bfloat16_t *>(packed));
 }
 
 // ── FP16 pack get / free / clear (mirror of BF16 trio) ────────────
@@ -870,7 +871,7 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
-        void *raw = std::aligned_alloc(alignment, bytes_aligned);
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
         if (raw == nullptr) {
             log_error(
                     "custom_kernel pack f16 (disable_cache): aligned_alloc "
@@ -941,7 +942,7 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
                 " interleave=", (interleave_split_halves ? 1 : 0),
                 " pack_nr=", pack_nr);
     }
-    void *raw = std::aligned_alloc(alignment, bytes_aligned);
+    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
     if (raw == nullptr) {
         log_error("custom_kernel pack f16: aligned_alloc failed for ",
                 bytes_aligned, " bytes");
@@ -958,7 +959,7 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
 
 void free_owned_packed_weight_f16(const float16_t *packed) {
     if (packed == nullptr) return;
-    std::free(const_cast<float16_t *>(packed));
+    zendnnl_aligned_free(const_cast<float16_t *>(packed));
 }
 
 void clear_custom_kernel_pack_cache_f16() {
@@ -1078,7 +1079,7 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
-        void *raw = std::aligned_alloc(alignment, bytes_aligned);
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
         if (raw == nullptr) {
             log_error(
                     "custom_kernel pack int8 (disable_cache): "
@@ -1152,7 +1153,7 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
                 " interleave=", (interleave_split_halves ? 1 : 0),
                 " pack_nr=", pack_nr);
     }
-    void *raw = std::aligned_alloc(alignment, bytes_aligned);
+    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
     if (raw == nullptr) {
         log_error("custom_kernel pack int8: aligned_alloc failed for ",
                 bytes_aligned, " bytes");
@@ -1169,7 +1170,7 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
 
 void free_owned_packed_weight_int8(const int8_t *packed) {
     if (packed == nullptr) return;
-    std::free(const_cast<int8_t *>(packed));
+    zendnnl_aligned_free(const_cast<int8_t *>(packed));
 }
 
 void clear_custom_kernel_pack_cache_int8() {

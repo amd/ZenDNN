@@ -17,10 +17,14 @@
 #define _EXAMPLE_UTILS_HPP_
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <variant>
 #include <vector>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 #include "zendnnl.hpp"
 
@@ -122,6 +126,27 @@ public:
  *  @brief Function to align the given size_ according to the alignment
  */
 size_t get_aligned_size(size_t alignment, size_t size_);
+
+/** @fn example_aligned_alloc / example_aligned_free
+ *  @brief Portable aligned allocation for the examples. Windows/MSVC has no C11
+ *  aligned_alloc; it uses _aligned_malloc (note the swapped argument order) and
+ *  requires the matching _aligned_free. Other platforms use aligned_alloc/free.
+ */
+inline void *example_aligned_alloc(size_t alignment, size_t size_) {
+#if defined(_WIN32)
+    return _aligned_malloc(size_, alignment);
+#else
+    return aligned_alloc(alignment, size_);
+#endif
+}
+
+inline void example_aligned_free(void *ptr) {
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
 
 } // namespace examples
 } // namespace zendnnl

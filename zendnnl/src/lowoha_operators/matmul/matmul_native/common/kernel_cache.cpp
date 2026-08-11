@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include <algorithm>
 #include <cstring>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
 #include "operators/matmul/matmul_config.hpp"
@@ -54,7 +55,7 @@ const PrepackedWeight *PrepackedWeightCache::get_or_prepack(
     const int np = (N + NR_PACK - 1) / NR_PACK;
     const size_t total = static_cast<size_t>(np) * K * NR_PACK;
 
-    float *buf = static_cast<float *>(std::aligned_alloc(
+    float *buf = static_cast<float *>(zendnnl_aligned_alloc(
             64, ((total * sizeof(float) + 63) & ~size_t(63))));
     if (!buf) return nullptr;
 
@@ -126,7 +127,7 @@ const BF16PrepackedWeight *BF16PrepackedWeightCache::get_or_prepack(
     const size_t total = static_cast<size_t>(np) * k_pairs * vnni_stride;
 
     // Allocate 64-byte aligned buffer
-    uint16_t *buf = static_cast<uint16_t *>(std::aligned_alloc(
+    uint16_t *buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
             64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
     if (!buf) return nullptr;
 
@@ -210,7 +211,7 @@ const BF16BKCWeight *BF16BKCWeightCache::get_or_pack(
     const int N_padded = ((N + BKC_NR_PAD - 1) / BKC_NR_PAD) * BKC_NR_PAD;
     const size_t total = static_cast<size_t>(K_padded) * N_padded;
 
-    uint16_t *buf = static_cast<uint16_t *>(std::aligned_alloc(
+    uint16_t *buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
             64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
     if (!buf) return nullptr;
 
@@ -274,31 +275,31 @@ const INT8KContiguousWeight *INT8KContiguousWeightCache::get_or_pack(
     // corruption. No effect on performance — allocation-time only.
     constexpr size_t bkc_guard = NR_PACK * INT8_VNNI_GRP;
 
-    int8_t *pbuf = static_cast<int8_t *>(std::aligned_alloc(
+    int8_t *pbuf = static_cast<int8_t *>(zendnnl_aligned_alloc(
             64, ((packed_total + bkc_guard + 63) & ~size_t(63))));
     if (!pbuf) return nullptr;
 
-    int32_t *cs_buf = static_cast<int32_t *>(std::aligned_alloc(
+    int32_t *cs_buf = static_cast<int32_t *>(zendnnl_aligned_alloc(
             64, ((N_padded * sizeof(int32_t) + 63) & ~size_t(63))));
     if (!cs_buf) {
-        std::free(pbuf);
+        zendnnl_aligned_free(pbuf);
         return nullptr;
     }
 
-    float *cscale_buf = static_cast<float *>(std::aligned_alloc(
+    float *cscale_buf = static_cast<float *>(zendnnl_aligned_alloc(
             64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
     if (!cscale_buf) {
-        std::free(pbuf);
-        std::free(cs_buf);
+        zendnnl_aligned_free(pbuf);
+        zendnnl_aligned_free(cs_buf);
         return nullptr;
     }
 
-    float *ebias_buf = static_cast<float *>(std::aligned_alloc(
+    float *ebias_buf = static_cast<float *>(zendnnl_aligned_alloc(
             64, ((N_padded * sizeof(float) + 63) & ~size_t(63))));
     if (!ebias_buf) {
-        std::free(pbuf);
-        std::free(cs_buf);
-        std::free(cscale_buf);
+        zendnnl_aligned_free(pbuf);
+        zendnnl_aligned_free(cs_buf);
+        zendnnl_aligned_free(cscale_buf);
         return nullptr;
     }
 
@@ -358,13 +359,13 @@ const INT8PrepackedWeight *INT8PrepackedWeightCache::get_or_prepack(
     const size_t pack_total = static_cast<size_t>(np) * k_quads * vnni_stride;
 
     int8_t *pbuf = static_cast<int8_t *>(
-            std::aligned_alloc(64, ((pack_total + 63) & ~size_t(63))));
+            zendnnl_aligned_alloc(64, ((pack_total + 63) & ~size_t(63))));
     if (!pbuf) return nullptr;
 
-    int32_t *cs_buf = static_cast<int32_t *>(
-            std::aligned_alloc(64, ((N * sizeof(int32_t) + 63) & ~size_t(63))));
+    int32_t *cs_buf = static_cast<int32_t *>(zendnnl_aligned_alloc(
+            64, ((N * sizeof(int32_t) + 63) & ~size_t(63))));
     if (!cs_buf) {
-        std::free(pbuf);
+        zendnnl_aligned_free(pbuf);
         return nullptr;
     }
 

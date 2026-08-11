@@ -73,6 +73,7 @@
 #define ZENDNNL_LOWOHA_MATMUL_GROUP_MATMUL_ACT_AVX512_HPP
 
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -85,8 +86,8 @@ namespace group_matmul_act_avx512 {
 
 /// `bf16x16_to_f32`: zero-extend each 16-bit BF16 lane to 32 bits and
 /// shift left by 16.  Standard BF16 unpack.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-bf16x16_to_f32(__m256i bf16) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 bf16x16_to_f32(__m256i bf16) {
     return _mm512_castsi512_ps(
             _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
 }
@@ -107,8 +108,8 @@ bf16x16_to_f32(__m256i bf16) {
 /// Cost: one extra integer add + shift per cvt vs a single
 /// `VCVTNEPS2BF16` — neutral end-to-end (the Op2 GEMM dominates by
 /// ~10×).
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m256i
-f32_to_bf16x16(__m512 f32) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m256i f32_to_bf16x16(__m512 f32) {
     __m512i i32 = _mm512_castps_si512(f32);
     __m512i bias = _mm512_add_epi32(_mm512_set1_epi32(0x7FFF),
             _mm512_and_si512(_mm512_srli_epi32(i32, 16), _mm512_set1_epi32(1)));
@@ -129,8 +130,8 @@ f32_to_bf16x16(__m512 f32) {
 /// the same widely-available intrinsic set as `common/float16.cpp`
 /// and avoids a toolchain dependency on `__m256h`/`avx512fp16` for a
 /// conversion that the base AVX-512F ISA already provides.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-f16x16_to_f32(__m256i f16) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 f16x16_to_f32(__m256i f16) {
     return _mm512_cvtph_ps(f16);
 }
 
@@ -141,8 +142,8 @@ f16x16_to_f32(__m256i f16) {
 /// immediate pins round-to-nearest-even independent of the runtime
 /// MXCSR mode, matching `float16_t::cvt_f32_to_f16_vec` in
 /// `common/float16.cpp`.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m256i
-f32_to_f16x16(__m512 f32) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m256i f32_to_f16x16(__m512 f32) {
     return _mm512_cvtps_ph(f32, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 }
 
@@ -158,8 +159,8 @@ f32_to_f16x16(__m512 f32) {
 /// defend against subnormal underflow.  Max relative error ~5e-5 —
 /// well below BF16 ulp (~7.8e-3 relative) and the
 /// `mt::tol_act(/*is_bf16=*/true)` band ({rel=0.15, abs=0.02}).
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-fast_exp_neg_avx512(__m512 x) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 fast_exp_neg_avx512(__m512 x) {
     const __m512 log2e = _mm512_set1_ps(-1.4426950408889634f);
 
     __m512 t = _mm512_mul_ps(x, log2e);
@@ -196,8 +197,8 @@ fast_exp_neg_avx512(__m512 x) {
 /// `fast_exp_neg_avx512`'s ~5e-5, so overall sigmoid accuracy is
 /// bounded by the exp polynomial — not by the divide.  rcp14 + NR
 /// avoids the high-latency hardware divide.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-sigmoid_avx512(__m512 x) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 sigmoid_avx512(__m512 x) {
     const __m512 one = _mm512_set1_ps(1.0f);
     const __m512 two = _mm512_set1_ps(2.0f);
     __m512 denom = _mm512_add_ps(one, fast_exp_neg_avx512(x));
@@ -214,8 +215,8 @@ sigmoid_avx512(__m512 x) {
 /// `silu_avx512(x) = x * sigmoid(x)`.  Identical to the scalar
 /// reference's `silu_scalar`.  Callers apply the `* up` multiplication
 /// afterwards (for `silu_and_mul`).
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-silu_avx512(__m512 x) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 silu_avx512(__m512 x) {
     return _mm512_mul_ps(x, sigmoid_avx512(x));
 }
 
@@ -241,9 +242,8 @@ silu_avx512(__m512 x) {
 // pre-existing AVX-512 platform gate elsewhere in the library is
 // sufficient to ensure this code path is only entered on
 // DQ-capable hardware.
-__attribute__((
-        target("avx512f,avx512bw,avx512vl,avx512dq,fma"))) static inline __m512
-erf_avx512(__m512 x) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+static inline __m512 erf_avx512(__m512 x) {
     const __m512 one = _mm512_set1_ps(1.0f);
     const __m512 two = _mm512_set1_ps(2.0f);
     const __m512 p = _mm512_set1_ps(0.3275911f);
@@ -327,8 +327,8 @@ erf_avx512(__m512 x) {
 /// `torch.nn.functional.gelu(...)`) within the FP32 / BF16 tolerances:
 ///   gelu_erf(x) = 0.5 · x · (1 + erf(x / √2))
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-gelu_avx512(__m512 x) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 gelu_avx512(__m512 x) {
     const __m512 half = _mm512_set1_ps(0.5f);
     const __m512 one = _mm512_set1_ps(1.0f);
     // 1/√2 = √0.5; full-precision constant so the FP32 product
@@ -362,8 +362,8 @@ gelu_avx512(__m512 x) {
 ///     extract gates and ups + `bf16x16_to_f32` ×2.
 ///   * fused-CK store helper: `vpermt2ps` ×2 on the `(acc_lo,
 ///     acc_hi)` FP32 accumulator pair, no memory round-trip.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline __m512
-swiglu_oai_avx512(__m512 gate, __m512 up) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 swiglu_oai_avx512(__m512 gate, __m512 up) {
     const __m512 cmin = _mm512_set1_ps(-7.0f);
     const __m512 cmax = _mm512_set1_ps(+7.0f);
     gate = _mm512_max_ps(_mm512_min_ps(gate, cmax), cmin);

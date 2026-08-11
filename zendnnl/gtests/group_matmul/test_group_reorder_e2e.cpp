@@ -152,7 +152,7 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
                 << "weight_prepack_size returned 0 for expert " << e;
         // 64-byte aligned: the custom-kernel microkernel reads the packed
         // weight with aligned AVX-512 loads (_mm512_load_si512).
-        prepacked[e] = std::aligned_alloc(64, bytes);
+        prepacked[e] = zendnnl_aligned_alloc(64, bytes);
         ASSERT_NE(prepacked[e], nullptr);
         src_w[e] = wptr[e]; // original raw weight (read by reorder)
     }
@@ -233,7 +233,7 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
             << "group_matmul output mismatch vs reference (prepacked weights)";
 
     for (int e = 0; e < E; ++e)
-        std::free(prepacked[e]);
+        zendnnl_aligned_free(prepacked[e]);
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -305,7 +305,7 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
         const size_t bytes = rdr::weight_prepack_size(rp[e]);
         ASSERT_GT(bytes, 0u)
                 << "weight_prepack_size (f16) returned 0 for expert " << e;
-        prepacked[e] = std::aligned_alloc(64, bytes);
+        prepacked[e] = zendnnl_aligned_alloc(64, bytes);
         ASSERT_NE(prepacked[e], nullptr);
         src_w[e] = wptr[e];
     }
@@ -372,7 +372,7 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
                        "(prepacked weights)";
 
     for (int e = 0; e < E; ++e)
-        std::free(prepacked[e]);
+        zendnnl_aligned_free(prepacked[e]);
 }
 
 } // namespace

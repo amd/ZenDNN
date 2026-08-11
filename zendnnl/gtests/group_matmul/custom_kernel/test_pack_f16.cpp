@@ -191,7 +191,10 @@ TEST(CkPackF16, SiluGeluInterleavedPackMatchesSwigluBytes) {
 
     constexpr int kK = 64;
     constexpr int kN = 256;
-    constexpr int kI = kN / 2;
+    // static storage lets the lambda below use kI without capturing it: real
+    // MSVC otherwise demands the capture (C3493), while Clang -Werror rejects
+    // capturing a constexpr constant (-Wunused-lambda-capture).
+    static constexpr int kI = kN / 2;
 
     auto val_gate = [](int k, int j) {
         return static_cast<float>(k * 31 + j) * 1.0e-3f;

@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -36,11 +37,10 @@ namespace matmul {
 namespace native {
 
 template <int NP>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) static void
-bf16_gemv_bkc_wide_core(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static void bf16_gemv_bkc_wide_core(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int k_pairs, int n_stride, int K, int N, int jc) {
 
@@ -137,9 +137,9 @@ bf16_gemv_bkc_wide_core(const uint16_t *__restrict__ A,
     }
 }
 
-void bf16_gemv_bkc_wide_dispatch(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+void bf16_gemv_bkc_wide_dispatch(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int k_pairs, int n_stride, int K, int N, int jc, int nb) {
 

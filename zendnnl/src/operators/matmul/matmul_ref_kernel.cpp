@@ -17,6 +17,7 @@
 #include "matmul_ref_kernel.hpp"
 #include <cstring>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 #include "memory/memory_utils.hpp"
 
 namespace zendnnl {
@@ -71,7 +72,7 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         std::vector<int32_t> wei_comp(N, 0);
         zp_comp_size = N;
 
@@ -90,7 +91,7 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         zp_comp_size = M * N;
 
         for (auto m = 0; m < M; ++m) {
@@ -112,7 +113,7 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp = (int32_t *)aligned_alloc(64, comp_size);
+        zp_comp = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         zp_comp_size = M * N;
         //Src comp
         for (auto m = 0; m < M; ++m) {
@@ -819,107 +820,120 @@ void matmul_ref_kernel_t::compute_matmul(int batch_size, int M, int N, int K,
                     && (output_dtype == data_type_t::f16
                             || output_dtype == data_type_t::f32));
 
+#if defined(_MSC_VER) && !defined(__clang__)
+    // MSVC (real cl only; gated as _MSC_VER && !__clang__, identical to the
+    // `collapse` neutralization in zendnnl_compat.hpp): flatten the (bs, i, j)
+    // nest into one parallel loop. MSVC's libomp faults on `collapse` over 64-bit
+    // trip counts, so that neutralization strips the clause and would otherwise
+    // leave this parallelized over `bs` alone -- i.e. serial for GEMV (M==1) or a
+    // single non-batched matmul (batch_size==1), which is the dominant reference
+    // cost. Flattening restores full parallelism. clang-cl/MinGW and GNU/Linux
+    // keep the real collapse(3) nest in the #else branch, left byte-for-byte
+    // unchanged.
+    const long long flat_mn
+            = static_cast<long long>(M) * static_cast<long long>(N);
+    const long long flat_total = static_cast<long long>(batch_size) * flat_mn;
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const int bs = static_cast<int>(flat_it / flat_mn);
+        const int i = static_cast<int>((flat_it / static_cast<long long>(N))
+                % static_cast<long long>(M));
+        const int j = static_cast<int>(flat_it % static_cast<long long>(N));
+#else
 #pragma omp parallel for collapse(3)
     for (auto bs = 0; bs < batch_size; ++bs) {
         for (auto i = 0; i < M; ++i) {
             for (auto j = 0; j < N; ++j) {
-                size_t op_idx = static_cast<size_t>(bs) * offset_out
-                        + static_cast<size_t>(i) * ldc + j;
-                size_t ac_idx = static_cast<size_t>(bs) * offset_out
-                        + static_cast<size_t>(i) * N + j;
+#endif
+        size_t op_idx = static_cast<size_t>(bs) * offset_out
+                + static_cast<size_t>(i) * ldc + j;
+        size_t ac_idx = static_cast<size_t>(bs) * offset_out
+                + static_cast<size_t>(i) * N + j;
 
-                // F16 accumulation path for FP16 FMA
-                if (use_f16_accum) {
-                    const int KC = 2048;
-                    float alpha_f32 = static_cast<float>(float16_t(alpha));
-                    for (int pc = 0; pc < K; pc += KC) {
-                        int kc0 = std::min(K - pc, KC);
+        // F16 accumulation path for FP16 FMA
+        if (use_f16_accum) {
+            const int KC = 2048;
+            float alpha_f32 = static_cast<float>(float16_t(alpha));
+            for (int pc = 0; pc < K; pc += KC) {
+                int kc0 = std::min(K - pc, KC);
 
-                        // Beta is applied for first KC block
-                        // beta 1 is applied for subsequent blocks
-                        float16_t beta0
-                                = (pc == 0) ? float16_t(beta) : float16_t(1.0f);
+                // Beta is applied for first KC block
+                // beta 1 is applied for subsequent blocks
+                float16_t beta0 = (pc == 0) ? float16_t(beta) : float16_t(1.0f);
 
-                        float16_t sum_f16 = float16_t(0.0f);
-                        for (int kk = 0; kk < kc0; ++kk) {
-                            int k_idx = pc + kk;
-                            size_t wt_idx = is_transpose_weights
-                                    ? (static_cast<size_t>(bs) * offset_wei
-                                              + static_cast<size_t>(j) * ldb
-                                              + k_idx)
-                                    : (static_cast<size_t>(bs) * offset_wei
-                                              + static_cast<size_t>(k_idx) * ldb
-                                              + j);
-                            size_t ip_idx = is_transpose_src
-                                    ? (static_cast<size_t>(bs) * offset_src
-                                              + static_cast<size_t>(k_idx) * lda
-                                              + i)
-                                    : (static_cast<size_t>(bs) * offset_src
-                                              + static_cast<size_t>(i) * lda
-                                              + k_idx);
-                            float a_f32 = read_and_cast<float>(
-                                    input, input_dtype, ip_idx);
-                            float b_f32 = read_and_cast<float>(
-                                    weights, weight_dtype, wt_idx);
-                            sum_f16 = float16_t(std::fmaf(
-                                    a_f32, b_f32, static_cast<float>(sum_f16)));
-                        }
-
-                        float sum_f32 = static_cast<float>(sum_f16);
-                        float beta_f32 = static_cast<float>(float16_t(beta0));
-
-                        if (beta_f32) {
-                            float c_f32 = (pc == 0)
-                                    ? read_and_cast<float>(
-                                              output, output_dtype, op_idx)
-                                    : accum_buff_f32[ac_idx];
-                            accum_buff_f32[ac_idx] = static_cast<float>(
-                                    float16_t(c_f32 * beta_f32
-                                            + sum_f32 * alpha_f32));
-                        } else {
-                            accum_buff_f32[ac_idx] = static_cast<float>(
-                                    float16_t(sum_f32 * alpha_f32));
-                        }
-                    }
-                    if (bias) {
-                        float sum = accum_buff_f32[ac_idx];
-                        accum_buff_f32[ac_idx] = static_cast<float>(float16_t(
-                                sum
-                                + read_and_cast<float>(bias, bias_dtype, j)));
-                    }
-                } else {
-                    // Default F32 accumulation path for all other data types
-                    float sum = 0.0;
-                    for (auto k = 0; k < K; ++k) {
-                        size_t wt_idx = is_transpose_weights
-                                ? (static_cast<size_t>(bs) * offset_wei
-                                          + static_cast<size_t>(j) * ldb + k)
-                                : (static_cast<size_t>(bs) * offset_wei
-                                          + static_cast<size_t>(k) * ldb + j);
-                        size_t ip_idx = is_transpose_src
-                                ? (static_cast<size_t>(bs) * offset_src
-                                          + static_cast<size_t>(k) * lda + i)
-                                : (static_cast<size_t>(bs) * offset_src
-                                          + static_cast<size_t>(i) * lda + k);
-                        sum += read_and_cast<float>(input, input_dtype, ip_idx)
-                                * read_and_cast<float>(
-                                        weights, weight_dtype, wt_idx);
-                    }
-
-                    if (alpha != 1.0f) { sum *= alpha; }
-                    if (beta) {
-                        sum += read_and_cast<float>(
-                                       output, output_dtype, op_idx)
-                                * beta;
-                    }
-                    if (bias) {
-                        sum += read_and_cast<float>(bias, bias_dtype, j);
-                    }
-                    accum_buff_f32[ac_idx] = sum;
+                float16_t sum_f16 = float16_t(0.0f);
+                for (int kk = 0; kk < kc0; ++kk) {
+                    int k_idx = pc + kk;
+                    size_t wt_idx = is_transpose_weights
+                            ? (static_cast<size_t>(bs) * offset_wei
+                                      + static_cast<size_t>(j) * ldb + k_idx)
+                            : (static_cast<size_t>(bs) * offset_wei
+                                      + static_cast<size_t>(k_idx) * ldb + j);
+                    size_t ip_idx = is_transpose_src
+                            ? (static_cast<size_t>(bs) * offset_src
+                                      + static_cast<size_t>(k_idx) * lda + i)
+                            : (static_cast<size_t>(bs) * offset_src
+                                      + static_cast<size_t>(i) * lda + k_idx);
+                    float a_f32
+                            = read_and_cast<float>(input, input_dtype, ip_idx);
+                    float b_f32 = read_and_cast<float>(
+                            weights, weight_dtype, wt_idx);
+                    sum_f16 = float16_t(std::fmaf(
+                            a_f32, b_f32, static_cast<float>(sum_f16)));
                 }
+
+                float sum_f32 = static_cast<float>(sum_f16);
+                float beta_f32 = static_cast<float>(float16_t(beta0));
+
+                if (beta_f32) {
+                    float c_f32 = (pc == 0)
+                            ? read_and_cast<float>(output, output_dtype, op_idx)
+                            : accum_buff_f32[ac_idx];
+                    accum_buff_f32[ac_idx] = static_cast<float>(
+                            float16_t(c_f32 * beta_f32 + sum_f32 * alpha_f32));
+                } else {
+                    accum_buff_f32[ac_idx] = static_cast<float>(
+                            float16_t(sum_f32 * alpha_f32));
+                }
+            }
+            if (bias) {
+                float sum = accum_buff_f32[ac_idx];
+                accum_buff_f32[ac_idx] = static_cast<float>(float16_t(
+                        sum + read_and_cast<float>(bias, bias_dtype, j)));
+            }
+        } else {
+            // Default F32 accumulation path for all other data types
+            float sum = 0.0;
+            for (auto k = 0; k < K; ++k) {
+                size_t wt_idx = is_transpose_weights
+                        ? (static_cast<size_t>(bs) * offset_wei
+                                  + static_cast<size_t>(j) * ldb + k)
+                        : (static_cast<size_t>(bs) * offset_wei
+                                  + static_cast<size_t>(k) * ldb + j);
+                size_t ip_idx = is_transpose_src
+                        ? (static_cast<size_t>(bs) * offset_src
+                                  + static_cast<size_t>(k) * lda + i)
+                        : (static_cast<size_t>(bs) * offset_src
+                                  + static_cast<size_t>(i) * lda + k);
+                sum += read_and_cast<float>(input, input_dtype, ip_idx)
+                        * read_and_cast<float>(weights, weight_dtype, wt_idx);
+            }
+
+            if (alpha != 1.0f) { sum *= alpha; }
+            if (beta) {
+                sum += read_and_cast<float>(output, output_dtype, op_idx)
+                        * beta;
+            }
+            if (bias) { sum += read_and_cast<float>(bias, bias_dtype, j); }
+            accum_buff_f32[ac_idx] = sum;
+        }
+#if defined(_MSC_VER) && !defined(__clang__)
+    }
+#else
             }
         }
     }
+#endif
 }
 
 void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
@@ -977,139 +991,146 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
                 wei_zero_point, zp_comp_size);
     }
 
+#if defined(_MSC_VER) && !defined(__clang__)
+    // MSVC (real cl only; gated as _MSC_VER && !__clang__, matching the `collapse`
+    // neutralization in zendnnl_compat.hpp): flatten the (bs, i, j) nest into one
+    // parallel loop (same rationale as compute_matmul). MSVC's libomp faults on
+    // `collapse` over 64-bit trip counts, so that neutralization would otherwise
+    // serialize this over `bs` alone (== 1 for GEMV / non-batched matmul).
+    // clang-cl/MinGW and GNU/Linux keep the real collapse(3) nest in the #else
+    // branch, unchanged.
+    const long long flat_mn
+            = static_cast<long long>(M) * static_cast<long long>(N);
+    const long long flat_total = static_cast<long long>(batch_size) * flat_mn;
+#pragma omp parallel for
+    for (long long flat_it = 0; flat_it < flat_total; ++flat_it) {
+        const int bs = static_cast<int>(flat_it / flat_mn);
+        const int i = static_cast<int>((flat_it / static_cast<long long>(N))
+                % static_cast<long long>(M));
+        const int j = static_cast<int>(flat_it % static_cast<long long>(N));
+#else
 #pragma omp parallel for collapse(3)
     for (auto bs = 0; bs < batch_size; ++bs) {
         for (auto i = 0; i < M; ++i) {
             for (auto j = 0; j < N; ++j) {
-                size_t op_idx = static_cast<size_t>(bs) * offset_out
-                        + static_cast<size_t>(i) * ldc + j;
-                size_t ac_idx = static_cast<size_t>(bs) * offset_out
-                        + static_cast<size_t>(i) * N + j;
-                float sum = 0.0f;
+#endif
+        size_t op_idx = static_cast<size_t>(bs) * offset_out
+                + static_cast<size_t>(i) * ldc + j;
+        size_t ac_idx = static_cast<size_t>(bs) * offset_out
+                + static_cast<size_t>(i) * N + j;
+        float sum = 0.0f;
 
-                if (src_scale_per_group) {
-                    for (int g = 0; g < src_num_groups; ++g) {
-                        int32_t group_sum = 0;
-                        int k_start = g * src_group_size;
-                        int k_end = k_start + src_group_size;
-                        for (int kk = k_start; kk < k_end; ++kk) {
-                            size_t wt_idx = is_transpose_weights
-                                    ? (static_cast<size_t>(bs) * offset_wei
-                                              + static_cast<size_t>(j) * ldb
-                                              + kk)
-                                    : (static_cast<size_t>(bs) * offset_wei
-                                              + static_cast<size_t>(kk) * ldb
-                                              + j);
-                            size_t ip_idx = is_transpose_src
-                                    ? (static_cast<size_t>(bs) * offset_src
-                                              + static_cast<size_t>(kk) * lda
-                                              + i)
-                                    : (static_cast<size_t>(bs) * offset_src
-                                              + static_cast<size_t>(i) * lda
-                                              + kk);
-                            int32_t src_val;
-                            if (input_dtype == data_type_t::bf16
-                                    || input_dtype == data_type_t::f32) {
-                                float ip_f32 = read_and_cast<float>(
-                                        input, input_dtype, ip_idx);
-                                float grp_src_scale = read_and_cast<float>(
-                                        quant_param.src_scale.buff,
-                                        quant_param.src_scale.dt,
-                                        i * src_num_groups + g);
-                                if (grp_src_scale == 0.f) {
-                                    grp_src_scale = 1.f;
-                                }
-                                src_val = static_cast<int32_t>(std::nearbyint(
-                                                  ip_f32 / grp_src_scale))
-                                        + src_zero_point;
-                            } else {
-                                src_val = read_and_cast<int32_t>(
-                                        input, input_dtype, ip_idx);
-                            }
-                            group_sum += src_val
-                                    * read_and_cast<int32_t>(
-                                            weights, weight_dtype, wt_idx);
-                        }
-                        float grp_scale = read_and_cast<float>(
+        if (src_scale_per_group) {
+            for (int g = 0; g < src_num_groups; ++g) {
+                int32_t group_sum = 0;
+                int k_start = g * src_group_size;
+                int k_end = k_start + src_group_size;
+                for (int kk = k_start; kk < k_end; ++kk) {
+                    size_t wt_idx = is_transpose_weights
+                            ? (static_cast<size_t>(bs) * offset_wei
+                                      + static_cast<size_t>(j) * ldb + kk)
+                            : (static_cast<size_t>(bs) * offset_wei
+                                      + static_cast<size_t>(kk) * ldb + j);
+                    size_t ip_idx = is_transpose_src
+                            ? (static_cast<size_t>(bs) * offset_src
+                                      + static_cast<size_t>(kk) * lda + i)
+                            : (static_cast<size_t>(bs) * offset_src
+                                      + static_cast<size_t>(i) * lda + kk);
+                    int32_t src_val;
+                    if (input_dtype == data_type_t::bf16
+                            || input_dtype == data_type_t::f32) {
+                        float ip_f32 = read_and_cast<float>(
+                                input, input_dtype, ip_idx);
+                        float grp_src_scale = read_and_cast<float>(
                                 quant_param.src_scale.buff,
                                 quant_param.src_scale.dt,
                                 i * src_num_groups + g);
-                        float grp_val
-                                = static_cast<float>(group_sum) * grp_scale;
-                        if (wei_scale_per_group) {
-                            grp_val *= read_and_cast<float>(
-                                    quant_param.wei_scale.buff,
-                                    quant_param.wei_scale.dt, g * N + j);
-                        }
-                        sum += grp_val;
+                        if (grp_src_scale == 0.f) { grp_src_scale = 1.f; }
+                        src_val = static_cast<int32_t>(std::nearbyint(
+                                          ip_f32 / grp_src_scale))
+                                + src_zero_point;
+                    } else {
+                        src_val = read_and_cast<int32_t>(
+                                input, input_dtype, ip_idx);
                     }
-                } else {
-                    int32_t sum_s32 = 0;
-                    for (auto k = 0; k < K; ++k) {
-                        size_t wt_idx = is_transpose_weights
-                                ? (static_cast<size_t>(bs) * offset_wei
-                                          + static_cast<size_t>(j) * ldb + k)
-                                : (static_cast<size_t>(bs) * offset_wei
-                                          + static_cast<size_t>(k) * ldb + j);
-                        size_t ip_idx = is_transpose_src
-                                ? (static_cast<size_t>(bs) * offset_src
-                                          + static_cast<size_t>(k) * lda + i)
-                                : (static_cast<size_t>(bs) * offset_src
-                                          + static_cast<size_t>(i) * lda + k);
-                        if (input_dtype == data_type_t::bf16
-                                || input_dtype == data_type_t::f32) {
-                            float ip_f32 = read_and_cast<float>(
-                                    input, input_dtype, ip_idx);
-                            size_t src_scl_idx = src_scale_per_token
-                                    ? static_cast<size_t>(i)
-                                    : 0;
-                            float src_scale = read_and_cast<float>(
-                                    quant_param.src_scale.buff,
-                                    quant_param.src_scale.dt, src_scl_idx);
-                            if (src_scale == 0.f) { src_scale = 1.f; }
-                            int32_t ip_s32
-                                    = static_cast<int32_t>(std::nearbyint(
-                                              ip_f32 / src_scale))
-                                    + src_zero_point;
-                            sum_s32 += ip_s32
-                                    * read_and_cast<int32_t>(
-                                            weights, weight_dtype, wt_idx);
-                        } else {
-                            sum_s32 += read_and_cast<int32_t>(
-                                               input, input_dtype, ip_idx)
-                                    * read_and_cast<int32_t>(
-                                            weights, weight_dtype, wt_idx);
-                        }
-                    }
-                    sum = static_cast<float>(sum_s32);
+                    group_sum += src_val
+                            * read_and_cast<int32_t>(
+                                    weights, weight_dtype, wt_idx);
                 }
-
-                if (alpha != 1.0f) { sum *= alpha; }
-                if (beta) {
-                    sum += read_and_cast<float>(output, output_dtype, op_idx)
-                            * beta;
+                float grp_scale = read_and_cast<float>(
+                        quant_param.src_scale.buff, quant_param.src_scale.dt,
+                        i * src_num_groups + g);
+                float grp_val = static_cast<float>(group_sum) * grp_scale;
+                if (wei_scale_per_group) {
+                    grp_val *= read_and_cast<float>(quant_param.wei_scale.buff,
+                            quant_param.wei_scale.dt, g * N + j);
                 }
-                if (zp_comp) {
-                    sum += (float)(zp_comp[(i * N + j) % zp_comp_size]);
-                }
-                if (src_scale_size && !src_scale_per_group) {
-                    size_t scale_idx
+                sum += grp_val;
+            }
+        } else {
+            int32_t sum_s32 = 0;
+            for (auto k = 0; k < K; ++k) {
+                size_t wt_idx = is_transpose_weights
+                        ? (static_cast<size_t>(bs) * offset_wei
+                                  + static_cast<size_t>(j) * ldb + k)
+                        : (static_cast<size_t>(bs) * offset_wei
+                                  + static_cast<size_t>(k) * ldb + j);
+                size_t ip_idx = is_transpose_src
+                        ? (static_cast<size_t>(bs) * offset_src
+                                  + static_cast<size_t>(k) * lda + i)
+                        : (static_cast<size_t>(bs) * offset_src
+                                  + static_cast<size_t>(i) * lda + k);
+                if (input_dtype == data_type_t::bf16
+                        || input_dtype == data_type_t::f32) {
+                    float ip_f32
+                            = read_and_cast<float>(input, input_dtype, ip_idx);
+                    size_t src_scl_idx
                             = src_scale_per_token ? static_cast<size_t>(i) : 0;
-                    sum *= read_and_cast<float>(quant_param.src_scale.buff,
-                            quant_param.src_scale.dt, scale_idx);
+                    float src_scale
+                            = read_and_cast<float>(quant_param.src_scale.buff,
+                                    quant_param.src_scale.dt, src_scl_idx);
+                    if (src_scale == 0.f) { src_scale = 1.f; }
+                    int32_t ip_s32 = static_cast<int32_t>(
+                                             std::nearbyint(ip_f32 / src_scale))
+                            + src_zero_point;
+                    sum_s32 += ip_s32
+                            * read_and_cast<int32_t>(
+                                    weights, weight_dtype, wt_idx);
+                } else {
+                    sum_s32 += read_and_cast<int32_t>(
+                                       input, input_dtype, ip_idx)
+                            * read_and_cast<int32_t>(
+                                    weights, weight_dtype, wt_idx);
                 }
-                if (wei_scale_size
-                        && !(src_scale_per_group && wei_scale_per_group)) {
-                    sum *= read_and_cast<float>(quant_param.wei_scale.buff,
-                            quant_param.wei_scale.dt, j % wei_scale_size);
-                }
-                if (bias) { sum += read_and_cast<float>(bias, bias_dtype, j); }
-                accum_buff_f32[ac_idx] = sum;
+            }
+            sum = static_cast<float>(sum_s32);
+        }
+
+        if (alpha != 1.0f) { sum *= alpha; }
+        if (beta) {
+            sum += read_and_cast<float>(output, output_dtype, op_idx) * beta;
+        }
+        if (zp_comp) { sum += (float)(zp_comp[(i * N + j) % zp_comp_size]); }
+        if (src_scale_size && !src_scale_per_group) {
+            size_t scale_idx = src_scale_per_token ? static_cast<size_t>(i) : 0;
+            sum *= read_and_cast<float>(quant_param.src_scale.buff,
+                    quant_param.src_scale.dt, scale_idx);
+        }
+        if (wei_scale_size && !(src_scale_per_group && wei_scale_per_group)) {
+            sum *= read_and_cast<float>(quant_param.wei_scale.buff,
+                    quant_param.wei_scale.dt, j % wei_scale_size);
+        }
+        if (bias) { sum += read_and_cast<float>(bias, bias_dtype, j); }
+        accum_buff_f32[ac_idx] = sum;
+#if defined(_MSC_VER) && !defined(__clang__)
+    }
+#else
             }
         }
     }
+#endif
 
-    if (zp_comp) { free(zp_comp); }
+    if (zp_comp) { zendnnl_aligned_free(zp_comp); }
 }
 
 } //namespace ops

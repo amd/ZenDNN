@@ -40,9 +40,12 @@ public:
     aocl_dlp_utils_t();
     ~aocl_dlp_utils_t();
     using tensor_map_type = std::map<std::string, tensor_t>;
-    /** @brief function pointer type for getting the reorder buffer size */
-    using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
-            const char, const char, const md_t, const md_t, dlp_metadata_t *);
+    /** @brief function pointer type for getting the reorder buffer size.
+   *  Return type must match AOCL-DLP's aocl_get_reorder_buf_size_* APIs, which
+   *  return msz_t (uint64_t on 64-bit). The previous `long unsigned int` matched
+   *  only on LP64; on Windows (LLP64) `unsigned long` is 32-bit and mismatched. */
+    using get_reorder_buff_size_func_ptr = msz_t (*)(const char, const char,
+            const char, const md_t, const md_t, dlp_metadata_t *);
     /** @brief template function pointer type for reordering */
     template <typename T>
     using reorder_func_ptr

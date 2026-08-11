@@ -21,6 +21,7 @@
 #include <cstring>
 #include <vector>
 
+#include "common/zendnnl_api.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "operators/matmul/matmul_context.hpp"
@@ -94,12 +95,12 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
 
-status_t matmul_direct(const char layout, const bool transA, const bool transB,
-        const int M, const int N, const int K, const float alpha,
-        const void *src, const int lda, const void *weight, const int ldb,
-        const void *bias, const float beta, void *dst, const int ldc,
-        const bool is_weights_const, const matmul_batch_params_t &batch_params,
-        const matmul_params &params);
+ZENDNNL_API status_t matmul_direct(const char layout, const bool transA,
+        const bool transB, const int M, const int N, const int K,
+        const float alpha, const void *src, const int lda, const void *weight,
+        const int ldb, const void *bias, const float beta, void *dst,
+        const int ldc, const bool is_weights_const,
+        const matmul_batch_params_t &batch_params, const matmul_params &params);
 
 /**
  * @brief Execute group matmul operations (e.g. MoE experts)
@@ -195,7 +196,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
  *
  * @return status_t::success if all operations succeed, status_t::failure if any operation fails
  */
-status_t group_matmul_direct(const std::vector<char> &layout,
+ZENDNNL_API status_t group_matmul_direct(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<float> &alpha,

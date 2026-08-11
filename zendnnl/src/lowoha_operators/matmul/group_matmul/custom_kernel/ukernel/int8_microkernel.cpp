@@ -52,6 +52,7 @@
 /// `aocl_reorder_s8s8s32os32_sym_quant` uses.
 
 #include "int8_microkernel.hpp"
+#include "common/zendnnl_compat.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -117,8 +118,9 @@ alignas(64) constexpr int32_t kUpLaneIdx[16]
 // gtest case that asserts cross-path equivalence against the bf16
 // CK path or the separate-pass reference passes with the same
 // tolerance.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline void
-swiglu_oai_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void swiglu_oai_store_pair_int(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
@@ -131,8 +133,9 @@ swiglu_oai_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 // silu_and_mul in registers — `silu(gate) * up`.  Same pair-pack
 // store contract as swiglu_oai; mirror of the bf16-side
 // `silu_and_mul_store_pair`.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline void
-silu_and_mul_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void silu_and_mul_store_pair_int(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
@@ -144,9 +147,9 @@ silu_and_mul_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 
 // gelu_and_mul in registers — `gelu_erf(gate) * up` (same `erf`-
 // based polynomial as `bf16_microkernel.cpp::gelu_and_mul_store_pair`).
-__attribute__((
-        target("avx512f,avx512bw,avx512vl,avx512dq,fma"))) static inline void
-gelu_and_mul_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq,fma")
+static inline void gelu_and_mul_store_pair_int(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
     __m512 gate = _mm512_permutex2var_ps(acc_lo, gate_idx, acc_hi);
@@ -165,9 +168,9 @@ gelu_and_mul_store_pair_int(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 // `ukernel_impl`'s, and the AVX-512 intrinsics would fail to inline.
 // The caller selects the compensation term (`128 * sum_wei` for sym,
 // `src_zp * sum_wei` for asym) so this helper stays compute-agnostic.
-__attribute__((target("avx512f,avx512dq,fma"))) static inline __m512
-dequant_finish(__m512i acc_s32, __m512i correction, __m512 src_scale_m,
-        __m512 wei_scale_v, __m512 bias_v, bool has_bias) {
+ZENDNNL_TARGET("avx512f,avx512dq,fma")
+static inline __m512 dequant_finish(__m512i acc_s32, __m512i correction,
+        __m512 src_scale_m, __m512 wei_scale_v, __m512 bias_v, bool has_bias) {
     __m512 f = _mm512_cvtepi32_ps(_mm512_sub_epi32(acc_s32, correction));
     f = _mm512_mul_ps(f, src_scale_m);
     f = _mm512_mul_ps(f, wei_scale_v);
@@ -187,14 +190,13 @@ dequant_finish(__m512i acc_s32, __m512i correction, __m512 src_scale_m,
 // ─────────────────────────────────────────────────────────────────────
 template <int MR, int NV, IntCompute Compute, ActKind Act,
         DstDt Dst = DstDt::kBf16>
-__attribute__((target("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma"),
-        noinline)) static void
-ukernel_impl(const uint8_t *__restrict__ A, int lda,
-        const int8_t *__restrict__ Bpacked, const void *__restrict__ src_scale,
-        const int32_t *__restrict__ src_zp, const void *__restrict__ wei_scale,
-        ScaleKind scale_kind, const void *__restrict__ bias, BiasKind bias_kind,
-        void *__restrict__ Cout_void, int ldc,
-        void *__restrict__ Cout_tight_void, int ldc_tight, int K) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
+static void ukernel_impl(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict Bpacked, const void *__restrict src_scale,
+        const int32_t *__restrict src_zp, const void *__restrict wei_scale,
+        ScaleKind scale_kind, const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K) {
 
     // Scalar per-row src_scale read with on-load bf16→f32 widening.  The
     // kernel dequantises in f32; f32 scales read directly, bf16 scales
@@ -549,7 +551,7 @@ ukernel_impl(const uint8_t *__restrict__ A, int lda,
             || Act == ActKind::gelu_and_mul) {
         // Gated acts always write half-width BF16 to the tight dst
         // (Dst == kBf16 enforced by the static_assert at function head).
-        bfloat16_t *__restrict__ Cout_tight
+        bfloat16_t *__restrict Cout_tight
                 = static_cast<bfloat16_t *>(Cout_tight_void);
         constexpr int n_pairs = NV / 2; // 1 for NV=2, 2 for NV=4
 #pragma GCC unroll 8

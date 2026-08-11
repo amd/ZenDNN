@@ -67,7 +67,9 @@ set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
 set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
 set(ZL_BUILD_BYPRODUCTS "")
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
-  list(APPEND ZL_BUILD_BYPRODUCTS "<INSTALL_DIR>/zendnnl/lib/libzendnnl_archive.a")
+  # Platform-correct static library name: libzendnnl_archive.a on GNU/Linux,
+  # zendnnl_archive.lib on Windows/MSVC.
+  list(APPEND ZL_BUILD_BYPRODUCTS "<INSTALL_DIR>/zendnnl/lib/${CMAKE_STATIC_LIBRARY_PREFIX}zendnnl_archive${CMAKE_STATIC_LIBRARY_SUFFIX}")
 endif()
 if(ZENDNNL_LIB_BUILD_SHARED)
   list(APPEND ZL_BUILD_BYPRODUCTS "<INSTALL_DIR>/zendnnl/lib/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")

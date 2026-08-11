@@ -20,6 +20,7 @@
 #include <string>
 #include "bfloat16.hpp"
 #include "float16.hpp"
+#include "zendnnl_api.hpp"
 
 /** @namespace zendnnl
  *  @brief ZenDNNL top level namespace.
@@ -216,13 +217,13 @@ struct data_traits<uint8_t> {
  *  @param data_type : the data type
  *  @return Size of the data type
  */
-uint32_t size_of(data_type_t data_type);
+ZENDNNL_API uint32_t size_of(data_type_t data_type);
 
 /** @brief Get name of the data type
  *  @param data_type : the data type
  *  @return Name of the data type
  */
-std::string dtype_info(data_type_t data_type);
+ZENDNNL_API std::string dtype_info(data_type_t data_type);
 
 } // namespace common
 
@@ -235,6 +236,14 @@ std::string dtype_info(data_type_t data_type);
  *  can refer to other namespaces, by convension other namespaces are internal to
  *  ZenDNNL and external code should refer to only zendnnl::interface namespace.
  */
+// Keep `interface` undef'd for the rest of the TU (do NOT push/pop-restore):
+// `interface` is a public zendnnl namespace that consumers reference (e.g.
+// `using namespace zendnnl::interface;`) after including this header, so the
+// Windows <windows.h> `interface` macro must stay undefined here -- restoring
+// it would re-shadow the namespace and break downstream consumers on Windows.
+#ifdef interface
+#undef interface
+#endif
 namespace interface {
 using data_type_t = zendnnl::common::data_type_t;
 } // namespace interface

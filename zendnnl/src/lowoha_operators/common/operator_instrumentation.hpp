@@ -18,6 +18,7 @@
 #define LOWOHA_OPERATOR_INSTRUMENTATION_HPP
 
 #include <cstdlib>
+#include "common/zendnnl_compat.hpp"
 
 #include "common/error_status.hpp"
 
@@ -61,7 +62,7 @@ struct op_instrumentation {
 
     template <typename Fn>
     static inline status_t validate(Fn &&fn) {
-        if (__builtin_expect(is_enabled(), 1)) { return fn(); }
+        if (ZENDNNL_EXPECT(is_enabled(), 1)) { return fn(); }
         return status_t::success;
     }
 };

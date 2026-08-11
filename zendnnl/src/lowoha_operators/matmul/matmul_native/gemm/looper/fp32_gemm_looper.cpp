@@ -21,6 +21,7 @@
 //
 
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/fp32_packing.hpp"
@@ -45,7 +46,8 @@ using namespace zendnnl::error_handling;
 using zendnnl::ops::matmul_config_t;
 using zendnnl::ops::post_op_type_t;
 
-__attribute__((target("avx512f"))) static void scale_tile(
+ZENDNNL_TARGET("avx512f")
+static void scale_tile(
         float *C, int ldc, int m_count, int n_count, float alpha) {
     __m512 av = _mm512_set1_ps(alpha);
     for (int m = 0; m < m_count; ++m) {
@@ -295,8 +297,8 @@ static void native_thread_loop(const GemmDescriptor &desc,
         static thread_local float *s_pa = nullptr;
         static thread_local size_t s_pa_cap = 0;
         if (do_pack_a && s_pa_cap < pa_elems) {
-            std::free(s_pa);
-            s_pa = static_cast<float *>(std::aligned_alloc(
+            zendnnl_aligned_free(s_pa);
+            s_pa = static_cast<float *>(zendnnl_aligned_alloc(
                     64, ((pa_elems * 4 + 63) & ~size_t(63))));
             s_pa_cap = s_pa ? pa_elems : 0;
         }
@@ -342,8 +344,8 @@ static void native_thread_loop(const GemmDescriptor &desc,
                                               ((mb_act + MR - 1) / MR) * MR)
                                 * kb_act;
                         if (tl_pa_cap < need) {
-                            std::free(tl_pa);
-                            tl_pa = static_cast<float *>(std::aligned_alloc(
+                            zendnnl_aligned_free(tl_pa);
+                            tl_pa = static_cast<float *>(zendnnl_aligned_alloc(
                                     64, ((need * 4 + 63) & ~size_t(63))));
                             tl_pa_cap = tl_pa ? need : 0;
                         }
@@ -512,8 +514,8 @@ void gemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
         const size_t total = static_cast<size_t>(np) * K * NR_PACK;
 
         if (s_tb_cap < total) {
-            std::free(s_tb);
-            s_tb = static_cast<float *>(std::aligned_alloc(
+            zendnnl_aligned_free(s_tb);
+            s_tb = static_cast<float *>(zendnnl_aligned_alloc(
                     64, ((total * sizeof(float) + 63) & ~size_t(63))));
             s_tb_cap = total;
         }

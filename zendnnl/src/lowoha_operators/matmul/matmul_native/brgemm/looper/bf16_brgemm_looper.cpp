@@ -17,6 +17,7 @@
 // Project headers (these pull in <vector>, <string> etc. from STL)
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_brgemm_looper.hpp"
 #include "common/bfloat16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/brgemm_planner.hpp"
@@ -47,7 +48,8 @@ using namespace zendnnl::error_handling;
 using zendnnl::ops::matmul_config_t;
 using zendnnl::ops::post_op_type_t;
 
-__attribute__((target("avx512f"))) static void scale_tile(
+ZENDNNL_TARGET("avx512f")
+static void scale_tile(
         float *C, int ldc, int m_count, int n_count, float alpha) {
     __m512 av = _mm512_set1_ps(alpha);
     for (int m = 0; m < m_count; ++m) {
@@ -61,8 +63,8 @@ __attribute__((target("avx512f"))) static void scale_tile(
     }
 }
 
-__attribute__((target("avx512f,avx512bf16"))) static void
-convert_fp32_to_bf16_tile(const float *src_fp32, int ldc_fp32,
+ZENDNNL_TARGET("avx512f,avx512bf16")
+static void convert_fp32_to_bf16_tile(const float *src_fp32, int ldc_fp32,
         uint16_t *dst_bf16, int ldc_bf16, int rows, int cols) {
     for (int m = 0; m < rows; ++m) {
         int n = 0;
@@ -114,8 +116,8 @@ static void bf16_brgemm_thread_loop(const GemmDescriptor &desc,
     if (has_bias) {
         if (bias_is_bf16) {
             if (s_bias_cap < static_cast<size_t>(N)) {
-                std::free(s_bias_fp32);
-                s_bias_fp32 = static_cast<float *>(std::aligned_alloc(
+                zendnnl_aligned_free(s_bias_fp32);
+                s_bias_fp32 = static_cast<float *>(zendnnl_aligned_alloc(
                         64, ((N * sizeof(float) + 63) & ~size_t(63))));
                 s_bias_cap = s_bias_fp32 ? N : 0;
             }
@@ -187,8 +189,8 @@ static void bf16_brgemm_thread_loop(const GemmDescriptor &desc,
     if (need_fp32_buf) {
         size_t needed = static_cast<size_t>(M) * N;
         if (s_c_cap < needed) {
-            std::free(s_c_buf);
-            s_c_buf = static_cast<float *>(std::aligned_alloc(
+            zendnnl_aligned_free(s_c_buf);
+            s_c_buf = static_cast<float *>(zendnnl_aligned_alloc(
                     64, ((needed * sizeof(float) + 63) & ~size_t(63))));
             s_c_cap = s_c_buf ? needed : 0;
         }
@@ -392,8 +394,8 @@ static void bf16_brgemm_thread_loop(const GemmDescriptor &desc,
             const size_t need
                     = static_cast<size_t>(K_padded / 2) * NR_PACK * VNNI_PAIR;
             if (s_otf_m1_cap < need) {
-                std::free(s_otf_m1);
-                s_otf_m1 = static_cast<uint16_t *>(std::aligned_alloc(
+                zendnnl_aligned_free(s_otf_m1);
+                s_otf_m1 = static_cast<uint16_t *>(zendnnl_aligned_alloc(
                         64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
                 s_otf_m1_cap = s_otf_m1 ? need : 0;
             }
@@ -552,8 +554,8 @@ static void bf16_brgemm_thread_loop(const GemmDescriptor &desc,
         uint16_t *otf = nullptr;
         if (do_otf && !prepacked_b && otf_buf_size > 0) {
             if (s_otf_cap < otf_buf_size) {
-                std::free(s_otf);
-                s_otf = static_cast<uint16_t *>(std::aligned_alloc(64,
+                zendnnl_aligned_free(s_otf);
+                s_otf = static_cast<uint16_t *>(zendnnl_aligned_alloc(64,
                         ((otf_buf_size * sizeof(uint16_t) + 63)
                                 & ~size_t(63))));
                 s_otf_cap = s_otf ? otf_buf_size : 0;
@@ -575,8 +577,8 @@ static void bf16_brgemm_thread_loop(const GemmDescriptor &desc,
             uint16_t *otf = nullptr;
             if (do_otf && !prepacked_b && otf_buf_size > 0) {
                 if (tl_otf_cap < otf_buf_size) {
-                    std::free(tl_otf);
-                    tl_otf = static_cast<uint16_t *>(std::aligned_alloc(64,
+                    zendnnl_aligned_free(tl_otf);
+                    tl_otf = static_cast<uint16_t *>(zendnnl_aligned_alloc(64,
                             ((otf_buf_size * sizeof(uint16_t) + 63)
                                     & ~size_t(63))));
                     tl_otf_cap = tl_otf ? otf_buf_size : 0;
@@ -667,7 +669,7 @@ void bf16_brgemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
 
         if (!s_tl_prepack || s_tl_cap_N < N || s_tl_cap_K < K) {
             auto pw = std::make_unique<BF16PrepackedWeight>();
-            uint16_t *buf = static_cast<uint16_t *>(std::aligned_alloc(
+            uint16_t *buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
                     64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
             if (buf) {
                 pw->buf.reset(buf);

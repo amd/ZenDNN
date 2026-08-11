@@ -18,9 +18,9 @@
 #include "common/platform_info.hpp"
 #include "common/zendnnl_global.hpp"
 
-#include <cpuid.h>
 #include <mutex>
 #include <omp.h>
+#include "common/zendnnl_cpuid_compat.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -30,7 +30,7 @@ namespace native {
 static int read_amd_cache_size(int level) {
     for (unsigned sub = 0; sub < 16; ++sub) {
         unsigned eax = 0, ebx = 0, ecx_out = 0, edx = 0;
-        __cpuid_count(0x8000001Du, sub, eax, ebx, ecx_out, edx);
+        zendnnl_cpuid_count(0x8000001Du, sub, eax, ebx, ecx_out, edx);
         int cache_type = eax & 0x1F;
         if (cache_type == 0) break;
         int cache_level = (eax >> 5) & 0x7;
@@ -49,7 +49,7 @@ static int read_amd_cache_size(int level) {
 static int read_intel_cache_size(int level) {
     for (unsigned sub = 0; sub < 16; ++sub) {
         unsigned eax = 0, ebx = 0, ecx_out = 0, edx = 0;
-        __cpuid_count(0x04u, sub, eax, ebx, ecx_out, edx);
+        zendnnl_cpuid_count(0x04u, sub, eax, ebx, ecx_out, edx);
         int cache_type = eax & 0x1F;
         if (cache_type == 0) break;
         int cache_level = (eax >> 5) & 0x7;
@@ -80,7 +80,7 @@ static UarchParams do_detect() {
     uint32_t cpu_family = pinfo.get_cpu_family();
 
     unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
-    __cpuid(0, eax, ebx, ecx, edx);
+    zendnnl_cpuid(0, eax, ebx, ecx, edx);
     bool is_amd = (ebx == 0x68747541);
 
     if (is_amd) {
@@ -109,9 +109,9 @@ static UarchParams do_detect() {
         p.vec_width_bits = p.avx512f ? 512 : 256;
     }
 
-    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
     p.avx512vnni = p.avx512f && (ecx & (1u << 11));
-    __cpuid_count(7, 1, eax, ebx, ecx, edx);
+    zendnnl_cpuid_count(7, 1, eax, ebx, ecx, edx);
     p.avx512bf16 = p.avx512f && (eax & (1u << 5));
 
     // CCX width for parallel GEMV column scheduling (spread slice indices across

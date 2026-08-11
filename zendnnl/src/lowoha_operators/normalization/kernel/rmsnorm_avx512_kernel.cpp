@@ -64,8 +64,8 @@ using zendnnl::common::data_type_t;
 //   Load-bound: input re-read hits L1 (warm from pass 1).
 // =============================================================================
 
-static inline void rms_norm_row_avx512(const void *__restrict__ in_row,
-        void *__restrict__ out_row, const void *__restrict__ gamma,
+static inline void rms_norm_row_avx512(const void *__restrict in_row,
+        void *__restrict out_row, const void *__restrict gamma,
         uint64_t norm_size, float inv_n, float epsilon, bool use_scale,
         data_type_t src_dt, data_type_t dst_dt, data_type_t gamma_dt) {
     const size_t src_sz = elem_size(src_dt);
@@ -236,9 +236,9 @@ static inline void rms_norm_row_avx512(const void *__restrict__ in_row,
 //   semantics.
 // =============================================================================
 
-static inline void fused_add_rms_row_avx512(const void *__restrict__ in_row,
-        void *__restrict__ out_row, void *__restrict__ res_row,
-        const void *__restrict__ gamma, uint64_t norm_size, float inv_n,
+static inline void fused_add_rms_row_avx512(const void *__restrict in_row,
+        void *__restrict out_row, void *__restrict res_row,
+        const void *__restrict gamma, uint64_t norm_size, float inv_n,
         float epsilon, bool use_scale, data_type_t src_dt, data_type_t dst_dt,
         data_type_t gamma_dt) {
     const size_t src_sz = elem_size(src_dt);

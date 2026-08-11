@@ -24,6 +24,7 @@
 #include <immintrin.h>
 #include <limits>
 #include <omp.h>
+#include "common/zendnnl_compat.hpp"
 #include <type_traits>
 
 #include "common/float16.hpp"
@@ -82,10 +83,10 @@ inline float half_to_float(uint16_t h) {
  * Processes a single row of INT8 quantized data and accumulates results.
 */
 template <typename InType>
-__attribute__((target("avx512f"))) inline void process_int8_row(
-        const InType *row, __m512 *acc, int full_blocks, int tail, float scale,
-        float bias, __m512 wt_vec, bool is_embedding, embag_algo_t algo,
-        bool first_valid_index) {
+ZENDNNL_TARGET("avx512f")
+inline void process_int8_row(const InType *row, __m512 *acc, int full_blocks,
+        int tail, float scale, float bias, __m512 wt_vec, bool is_embedding,
+        embag_algo_t algo, bool first_valid_index) {
     constexpr int simd_width = 16;
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512 bias_vec = _mm512_set1_ps(bias);
@@ -151,10 +152,10 @@ __attribute__((target("avx512f"))) inline void process_int8_row(
  * Uses vectorized unpacking of packed INT4 nibbles.
 */
 template <typename InType>
-__attribute__((target("avx512f"))) inline void process_int4_row(
-        const InType *row, __m512 *acc, int full_blocks, int tail, float scale,
-        float bias, __m512 wt_vec, bool is_embedding, embag_algo_t algo,
-        bool first_valid_index, data_type_t table_dtype) {
+ZENDNNL_TARGET("avx512f")
+inline void process_int4_row(const InType *row, __m512 *acc, int full_blocks,
+        int tail, float scale, float bias, __m512 wt_vec, bool is_embedding,
+        embag_algo_t algo, bool first_valid_index, data_type_t table_dtype) {
     __m512 scale_vec = _mm512_set1_ps(scale);
     __m512 bias_vec = _mm512_set1_ps(bias);
 
@@ -264,11 +265,10 @@ constexpr int MAX_ACC_BLOCKS = 256;
  *   - No weights
  */
 template <typename IndexType, typename OffsetType, typename OutType>
-__attribute__((target("avx512f,avx512bf16,f16c"))) __attribute__((hot))
-__attribute__((flatten)) void
-embag_int4_w128_sum_specialized(const int8_t *__restrict__ input,
-        const IndexType *__restrict__ indices,
-        const OffsetType *__restrict__ offsets, OutType *__restrict__ dst,
+ZENDNNL_TARGET("avx512f,avx512bf16,f16c")
+ZENDNNL_HOT ZENDNNL_FLATTEN void embag_int4_w128_sum_specialized(
+        const int8_t *__restrict input, const IndexType *__restrict indices,
+        const OffsetType *__restrict offsets, OutType *__restrict dst,
         int64_t indsz, int64_t offsz, int64_t padidx, int64_t dst_stride,
         bool include_last_offset) {
     // Constants for width=128, INT4, FP16 scale/bias
@@ -509,11 +509,10 @@ embag_int4_w128_sum_specialized(const int8_t *__restrict__ input,
  */
 template <bool IsInt4, typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-__attribute__((target("avx512f,avx512bf16,f16c"))) __attribute__((hot)) void
-embag_avx512_int8_int4_kernel(const InType *__restrict__ input,
-        const float *__restrict__ weights,
-        const IndexType *__restrict__ indices,
-        const OffsetType *__restrict__ offsets, OutType *__restrict__ dst,
+ZENDNNL_TARGET("avx512f,avx512bf16,f16c")
+ZENDNNL_HOT void embag_avx512_int8_int4_kernel(const InType *__restrict input,
+        const float *__restrict weights, const IndexType *__restrict indices,
+        const OffsetType *__restrict offsets, OutType *__restrict dst,
         int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
         bool is_weights, embag_algo_t algo, int64_t dst_stride,
         bool include_last_offset, data_type_t table_dtype,
@@ -692,10 +691,11 @@ using common::f16x32_store_tail_typed;
 using common::f16x32_store_typed;
 
 template <typename InType>
-__attribute__((target("avx512f,avx512bw,avx512fp16"))) inline void
-process_int8_row_f16_fma(const InType *row, __m512h *acc, int full_blocks,
-        int tail, _Float16 scale, _Float16 bias, __m512h wt_vec,
-        bool is_embedding, embag_algo_t algo, bool first_valid_index) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512fp16")
+inline void process_int8_row_f16_fma(const InType *row, __m512h *acc,
+        int full_blocks, int tail, _Float16 scale, _Float16 bias,
+        __m512h wt_vec, bool is_embedding, embag_algo_t algo,
+        bool first_valid_index) {
     constexpr int simd_width = 32;
     __m512h scale_vec = _mm512_set1_ph(scale);
     __m512h bias_vec = _mm512_set1_ph(bias);
@@ -746,11 +746,11 @@ process_int8_row_f16_fma(const InType *row, __m512h *acc, int full_blocks,
 }
 
 template <typename InType>
-__attribute__((target("avx512f,avx512bw,avx512fp16"))) inline void
-process_int4_row_f16_fma(const InType *row, __m512h *acc, int full_blocks,
-        int tail, _Float16 scale, _Float16 bias, __m512h wt_vec,
-        bool is_embedding, embag_algo_t algo, bool first_valid_index,
-        data_type_t table_dtype) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512fp16")
+inline void process_int4_row_f16_fma(const InType *row, __m512h *acc,
+        int full_blocks, int tail, _Float16 scale, _Float16 bias,
+        __m512h wt_vec, bool is_embedding, embag_algo_t algo,
+        bool first_valid_index, data_type_t table_dtype) {
     __m512h scale_vec = _mm512_set1_ph(scale);
     __m512h bias_vec = _mm512_set1_ph(bias);
     const __m128i lo_mask = _mm_set1_epi8(0x0F);
@@ -843,12 +843,11 @@ process_int4_row_f16_fma(const InType *row, __m512h *acc, int full_blocks,
 
 template <bool IsInt4, typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16")))
-__attribute__((hot)) void
-embag_avx512_int8_int4_f16_fma_kernel(const InType *__restrict__ input,
-        const float *__restrict__ weights,
-        const IndexType *__restrict__ indices,
-        const OffsetType *__restrict__ offsets, OutType *__restrict__ dst,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+ZENDNNL_HOT void embag_avx512_int8_int4_f16_fma_kernel(
+        const InType *__restrict input, const float *__restrict weights,
+        const IndexType *__restrict indices,
+        const OffsetType *__restrict offsets, OutType *__restrict dst,
         int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
         bool is_weights, embag_algo_t algo, int64_t dst_stride,
         bool include_last_offset, data_type_t table_dtype,

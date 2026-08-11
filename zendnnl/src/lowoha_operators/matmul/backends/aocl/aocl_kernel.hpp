@@ -23,21 +23,24 @@
 #if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
 #else
+#include <cstddef>
 #include <cstdint>
 using md_t = std::
         int64_t; // matches aocl-dlp md_t (int64_t); previously dim_t from blis.h
+using msz_t = std::
+        size_t; // matches aocl-dlp msz_t (pointer-width) in non-DLP stub builds
 #endif
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-using get_reorder_buff_size_func_ptr = long unsigned int (*)(
-        const char, const char, const char, const md_t, const md_t
+using get_reorder_buff_size_func_ptr
+        = msz_t (*)(const char, const char, const char, const md_t, const md_t
 #if ZENDNNL_DEPENDS_AOCLDLP
-        ,
-        dlp_metadata_t *
+                ,
+                dlp_metadata_t *
 #endif
-);
+        );
 
 template <typename T>
 using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
@@ -96,9 +99,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
 // argument; the B-side quantization group size now travels inside the
 // dlp_metadata_t (via b_quant_op->group_size), which is the sole trailing
 // metadata parameter.
-using get_reorder_buf_size_sym_quant_func_ptr
-        = long unsigned int (*)(const char, const char, const char, const md_t,
-                const md_t, dlp_metadata_t *);
+using get_reorder_buf_size_sym_quant_func_ptr = msz_t (*)(const char,
+        const char, const char, const md_t, const md_t, dlp_metadata_t *);
 
 template <typename T>
 using reorder_sym_quant_func_ptr = void (*)(const char, const char, const char,

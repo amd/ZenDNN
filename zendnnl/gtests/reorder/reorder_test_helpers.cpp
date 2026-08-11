@@ -113,8 +113,8 @@ ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
                 num_groups = reorder_input.num_groups.has_value()
                         ? *reorder_input.num_groups
                         : 1;
-                const bool group_ok = (batch != 0) && (num_groups >= 1)
-                        && (M % num_groups == 0);
+                const bool group_ok = (batch != 0) && (num_groups > 1)
+                        && (num_groups < M) && (M % num_groups == 0);
                 if (!group_ok) {
                     if (batch == 0) {
                         log_info(
@@ -124,8 +124,9 @@ ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
                     } else {
                         log_info("LOWOHA: invalid num_groups=", num_groups,
                                 " for M=", M,
-                                " (must be >= 1 and divide M); falling back to "
-                                "per-channel");
+                                " (must satisfy 1 < num_groups < M and divide "
+                                "M); "
+                                "falling back to per-channel");
                     }
                     granularity = quant_granularity_t::channel;
                     num_groups = 1;
@@ -151,9 +152,12 @@ ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
                     num_groups = 1;
                 } else {
                     granularity = quant_granularity_t::group;
-                    // For per-group, num_groups must divide M evenly
+                    // For per-group, num_groups must be a proper divisor of M with
+                    // 1 < G < M. G == M collapses to per-channel-row, which the reorder
+                    // validator rejects as a per-group shape (it requires dims[0] != M);
+                    // see lowoha_reorder_utils.cpp. Upper bound is exclusive of M.
                     std::vector<uint64_t> valid_groups;
-                    for (uint64_t g = 2; g <= M && g <= 16; ++g) {
+                    for (uint64_t g = 2; g < M && g <= 16; ++g) {
                         if (M % g == 0) { valid_groups.push_back(g); }
                     }
                     if (valid_groups.empty()) {
@@ -289,7 +293,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
                 // create a buffer with reorderd size
                 size_t alignment = 64;
                 reorder_size = get_aligned_size(alignment, reorder_size);
-                *weights = aligned_alloc(alignment, reorder_size);
+                *weights = zendnnl_aligned_alloc(alignment, reorder_size);
 
                 if (*weights == nullptr) {
                     log_info("weights can not have align allocation");
@@ -355,7 +359,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
                 // create a buffer with reorderd size
                 size_t alignment = 64;
                 reorder_size = get_aligned_size(alignment, reorder_size);
-                *weights = aligned_alloc(alignment, reorder_size);
+                *weights = zendnnl_aligned_alloc(alignment, reorder_size);
 
                 if (*weights == nullptr) {
                     log_info("weights can not have align allocation");

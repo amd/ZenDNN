@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "common/zendnnl_api.hpp"
 #include "lowoha_operators/normalization/lowoha_normalization_utils.hpp"
 
 namespace zendnnl {
@@ -109,7 +110,7 @@ namespace normalization {
  *         handled via F16C convert in the FP32 kernel),
  *         or status_t::failure otherwise.
  */
-status_t normalization_direct(const void *input, void *output,
+ZENDNNL_API status_t normalization_direct(const void *input, void *output,
         const void *gamma, const void *beta, const void *running_mean,
         const void *running_var, void *residual, norm_params &params);
 

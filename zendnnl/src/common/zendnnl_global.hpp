@@ -242,6 +242,18 @@ LOGGER_ENABLED_MACRO(debug, verbose)
 
 } // namespace error_handling
 
+// Windows <windows.h> (pulled in transitively via dependency headers) defines
+// `interface` as a macro (`#define interface struct`), which turns the
+// declaration below into `namespace struct`. Undef it here and DO NOT restore
+// it (no push/pop_macro): `interface` is a public zendnnl namespace that
+// consumers reference (e.g. `using namespace zendnnl::interface;`) after
+// including these headers, so the macro must stay undefined for the rest of the
+// translation unit -- restoring it would re-shadow the namespace and break
+// downstream consumers on Windows. This is a no-op where the macro is not
+// defined, so the Linux build is unaffected.
+#ifdef interface
+#undef interface
+#endif
 namespace interface {
 COMMON_LOGGER_MACRO(error)
 COMMON_LOGGER_MACRO(warning)

@@ -310,7 +310,8 @@ void w4a8_cvt_and_cache_plain_s8(Key_matmul key, const int8_t *weights,
     const size_t buf_size
             = (static_cast<size_t>(k) * n * sizeof(int8_t) + alignment - 1)
             & ~(alignment - 1);
-    int8_t *buf = static_cast<int8_t *>(aligned_alloc(alignment, buf_size));
+    int8_t *buf
+            = static_cast<int8_t *>(zendnnl_aligned_alloc(alignment, buf_size));
     if (!buf) {
         s8_plain = nullptr;
         return;
@@ -374,7 +375,8 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
                 = (static_cast<size_t>(K[e]) * N[e] * sizeof(int8_t) + alignment
                           - 1)
                 & ~(alignment - 1);
-        int8_t *buf = static_cast<int8_t *>(aligned_alloc(alignment, buf_size));
+        int8_t *buf = static_cast<int8_t *>(
+                zendnnl_aligned_alloc(alignment, buf_size));
         if (!buf) continue;
 
         cvt_s4_to_s8(static_cast<const int8_t *>(weight[e]), buf, K[e], N[e],
@@ -459,7 +461,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         size_t alignment = 64;
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
-        reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+        reorder_weights = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
         reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k,
                 n, ldb, nullptr);
     }
@@ -476,7 +478,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
             size_t alignment = 64;
             size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1)
                     & ~(alignment - 1);
-            reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+            reorder_weights
+                    = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
                     k, n, ldb, nullptr);
             // Create new entry
@@ -558,12 +561,13 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
 
         if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
             apilog_info("AOCL reorder weights WEIGHT_CACHE_IN_PLACE");
-            T *interim = (T *)aligned_alloc(alignment, reorder_size);
+            T *interim = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!interim) {
                 apilog_error(
                         "AOCL in-place reorder: aligned_alloc failed, "
                         "falling back to out-of-place");
-                reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+                reorder_weights
+                        = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
                 if (!reorder_weights) { return false; }
                 reorder_func(order, trans, 'B', (T *)weights,
                         (T *)reorder_weights, k, n, ldb, nullptr);
@@ -574,7 +578,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                     nullptr);
             std::memcpy(const_cast<void *>(weights), interim,
                     b_reorder_buf_siz_req);
-            std::free(interim);
+            zendnnl_aligned_free(interim);
             reorder_weights = const_cast<void *>(weights);
             // Store nullptr sentinel: the user buffer itself holds the
             // reordered bytes. This keeps the LRU evictor from free()-ing the
@@ -586,7 +590,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                     "AOCL reorder weights WEIGHT_CACHE_IN_PLACE "
                     "(blocked size != plain size, falling back to "
                     "out-of-place)");
-            reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+            reorder_weights
+                    = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (reorder_weights == nullptr) {
                 apilog_error(
                         "AOCL in-place reorder fall-back: aligned_alloc "
@@ -641,7 +646,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         size_t alignment = 64;
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
-        reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+        reorder_weights = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
         if (!reorder_weights) {
             apilog_error(
                     "AOCL sym_quant reorder weights: aligned_alloc failed");
@@ -661,7 +666,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
             size_t alignment = 64;
             size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1)
                     & ~(alignment - 1);
-            reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+            reorder_weights
+                    = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
                     k, n, ldb, symq_meta);
             matmul_weight_cache.add(key, reorder_weights);
@@ -720,13 +726,14 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
 
         if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
             apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE");
-            T *interim = (T *)aligned_alloc(alignment, reorder_size);
+            T *interim = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!interim) {
                 apilog_error(
                         "AOCL sym_quant in-place reorder: aligned_alloc "
                         "failed, "
                         "falling back to out-of-place");
-                reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+                reorder_weights
+                        = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
                 if (!reorder_weights) { return false; }
                 reorder_func(order, trans, 'B', (T *)weights,
                         (T *)reorder_weights, k, n, ldb, symq_meta);
@@ -737,7 +744,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
                     symq_meta);
             std::memcpy(const_cast<void *>(weights), interim,
                     b_reorder_buf_siz_req);
-            std::free(interim);
+            zendnnl_aligned_free(interim);
             reorder_weights = const_cast<void *>(weights);
             // See reorderAndCacheWeights: nullptr means the user buffer holds
             // the reordered bytes and must remain associated with this cache
@@ -748,7 +755,8 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
                     "AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE "
                     "(blocked size != plain size, falling back to "
                     "out-of-place)");
-            reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+            reorder_weights
+                    = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!reorder_weights) { return false; }
             reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
                     k, n, ldb, symq_meta);
@@ -797,8 +805,8 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         size_t alignment = 64;
         size_t cvt_weights_size = (sizeof(bfloat16_t) * k * n + alignment - 1)
                 & ~(alignment - 1);
-        bfloat16_t *cvt_weights
-                = (bfloat16_t *)aligned_alloc(alignment, cvt_weights_size);
+        bfloat16_t *cvt_weights = (bfloat16_t *)zendnnl_aligned_alloc(
+                alignment, cvt_weights_size);
         cvt_4bit_to_bf16(weights, cvt_weights, k, n, ldb, is_transposed, wei_dt,
                 quant_params.wei_scale.buff, quant_params.wei_scale.dims,
                 quant_params.wei_scale.dt, quant_params.wei_zp.buff,
@@ -810,10 +818,11 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                         order, 'n', 'B', k, n, nullptr);
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
-        reorder_weights = (int16_t *)aligned_alloc(alignment, reorder_size);
+        reorder_weights
+                = (int16_t *)zendnnl_aligned_alloc(alignment, reorder_size);
         aocl_reorder_bf16bf16f32of32(order, 'n', 'B', (int16_t *)cvt_weights,
                 (int16_t *)reorder_weights, k, n, ldb_cvt, nullptr);
-        free(cvt_weights);
+        zendnnl_aligned_free(cvt_weights);
         if (is_weights_const && weight_cache_type == 1) {
             // Create new entry
             matmul_weight_cache_woq.add(key, reorder_weights);
@@ -891,7 +900,8 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                     k, " N=", n, ")");
             size_t cvt_weights_size = (sizeof(int8_t) * k * n + alignment - 1)
                     & ~(alignment - 1);
-            cvt_weights = (int8_t *)aligned_alloc(alignment, cvt_weights_size);
+            cvt_weights = (int8_t *)zendnnl_aligned_alloc(
+                    alignment, cvt_weights_size);
             if (!cvt_weights) {
                 apilog_error(
                         "[W4A8.REORDER] failed to allocate convert weights");
@@ -923,17 +933,18 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                 order, trans_cvt, 'B', k, n, &symq_meta);
         reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
-        reorder_weights = (int8_t *)aligned_alloc(alignment, reorder_size);
+        reorder_weights
+                = (int8_t *)zendnnl_aligned_alloc(alignment, reorder_size);
         if (!reorder_weights) {
             apilog_error("[W4A8.REORDER] failed to allocate reorder weights");
-            if (own_cvt_buf) free(cvt_weights);
+            if (own_cvt_buf) zendnnl_aligned_free(cvt_weights);
             reorder_weights = nullptr;
             return;
         }
         apilog_verbose("Calling aocl_reorder_s8s8s32os32_sym_quant");
         aocl_reorder_s8s8s32os32_sym_quant(order, trans_cvt, 'B', cvt_weights,
                 (int8_t *)reorder_weights, k, n, ldb_cvt, &symq_meta);
-        if (own_cvt_buf) free(cvt_weights);
+        if (own_cvt_buf) zendnnl_aligned_free(cvt_weights);
 
         if (is_weights_const && weight_cache_type == 1) {
             matmul_weight_cache_w4a8.add(key, reorder_weights);
@@ -1266,7 +1277,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
 
         cleanup_dlp_post_op(aocl_po);
         if (!is_weights_const || w4a8_weight_cache_type != 1) {
-            free(w4a8_reordered_mem);
+            zendnnl_aligned_free(w4a8_reordered_mem);
         }
         return;
     }
@@ -1523,7 +1534,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             && reordered_mem != nullptr && lowoha_param.mem_format_b != 'r'
             && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked);
     if (weight_cache_disabled || simulated_woq_free_buff) {
-        free(reordered_mem);
+        zendnnl_aligned_free(reordered_mem);
         reordered_mem = nullptr;
     }
     // Free zero-point compensation buffer (only if not cached)

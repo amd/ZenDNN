@@ -17,6 +17,8 @@
 #ifndef _LIBXSMM_UTILS_HPP
 #define _LIBXSMM_UTILS_HPP
 
+#include <vector>
+
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 #if ZENDNNL_DEPENDS_LIBXSMM
@@ -52,6 +54,19 @@ static inline bool can_use_libxsmm(char transA, char transB, int M, int N,
 
     //LIBXSMM throws segfault for transA='t' cases
     if (transA == 't') { return false; }
+
+#if defined(_WIN32)
+    // Windows-only: the LIBXSMM bf16 GEMM path is unusable on this MSVC build --
+    // it crashes whichever route the dispatcher takes:
+    //   * JIT'd bf16 kernels stack-overflow (an x64 ABI/codegen bug in LIBXSMM's
+    //     generated kernel), and
+    //   * when the JIT declines a descriptor, the fallback libxsmm_reference_gemm
+    //     reads out of bounds.
+    // Route every bf16 matmul off LIBXSMM to the DLP backend, which handles all
+    // transpose/shape combinations correctly. Linux JITs these fine, so the guard
+    // is compiled out there.
+    if (lowoha_param.dtypes.src == data_type_t::bf16) { return false; }
+#endif
 
     if (set_sizes_limit) {
         int64_t matrix_b_elements = static_cast<int64_t>(K) * N;
@@ -297,15 +312,33 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
         case post_op_type_t::swish: {
             // SiLU = swish with alpha == 1.0:  out = out * sigmoid(out)
             //
-            // Implemented as two LIBXSMM kernels with a tile-local stack scratch.
-            // Each thread already owns its own stack, so the buffer is automatically
-            // private — no shared pool, no thread-id math, no synchronization.
-            // Sized exactly to the current tile (M*N elements, <= a few KB on the
-            // partitioner's BRGEMM_M_BLOCK*BRGEMM_N_BLOCK upper bound).
+            // Implemented as two LIBXSMM kernels with a tile-local scratch buffer,
+            // a per-call local so it is automatically thread-private — no shared pool,
+            // no thread-id math, no synchronization. Sized exactly to the current tile
+            // (M*N elements, <= a few KB on the partitioner's
+            // BRGEMM_M_BLOCK*BRGEMM_N_BLOCK upper bound). MSVC has no VLA, so it takes a
+            // heap buffer; GCC/Clang keep the stack VLA, leaving the Linux build as-is.
             //
             //   Step 1 (unary sigmoid):  scratch = sigmoid(output)   ldi=ldc, ldo=N
             //   Step 2 (binary mul):     output  = output * scratch  ldi=ldc, ldi2=N, ldo=ldc
+#if defined(_MSC_VER) && !defined(__clang__)
+            // MSVC has no VLAs. Reuse a thread-local, grow-only scratch so the per-tile
+            // buffer is allocated once and then amortized, instead of being malloc/freed
+            // on every post-op call in this hot path. thread_local keeps it thread-private
+            // (no locking); grow-only avoids reallocation churn across differently sized
+            // tiles. The sigmoid kernel below fully overwrites the used [0, M*N) range
+            // before the mul kernel reads it, so stale contents from a prior call are
+            // irrelevant. (GCC/Clang keep the stack VLA in the #else branch, unchanged.)
+            static thread_local std::vector<T> scratch_buf;
+            const size_t scratch_elems
+                    = static_cast<size_t>(M) * static_cast<size_t>(N);
+            if (scratch_buf.size() < scratch_elems) {
+                scratch_buf.resize(scratch_elems);
+            }
+            T *scratch = scratch_buf.data();
+#else
             T scratch[M * N];
+#endif
 
             libxsmm_meltw_unary_shape sig_shape
                     = libxsmm_create_meltw_unary_shape(

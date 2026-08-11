@@ -137,11 +137,19 @@ status_t execute_typed(const sdpa_encoder_context_t &context_,
     auto run_per_head_loop = [&](auto mask_tag) -> status_t {
         using mask_t = decltype(mask_tag);
         const mask_t *mask_base = static_cast<const mask_t *>(mask_base_void);
-// Per (b, h) base pointers come from each tensor's own (batch, head)
-// strides; the inner [seq, head_dim] slab is then walked using each
-// tensor's seq stride (head_dim for BHSD, num_heads*head_dim for BSHD).
-// Per (b, h): scores [S_q, S_kv] (FP32) -> output [S_q, D] (qkv_t).
+        // Per (b, h) base pointers come from each tensor's own (batch, head)
+        // strides; the inner [seq, head_dim] slab is then walked using each
+        // tensor's seq stride (head_dim for BHSD, num_heads*head_dim for BSHD).
+        // Per (b, h): scores [S_q, S_kv] (FP32) -> output [S_q, D] (qkv_t).
+        // MSVC (cl 19.4x) hits an internal compiler error (C1001) on an OpenMP
+        // `collapse(2)` loop nest placed inside this generic lambda. Parallelising
+        // only the outer loop avoids the crash and yields identical results (just a
+        // coarser work decomposition across threads).
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma omp parallel for
+#else
 #pragma omp parallel for collapse(2)
+#endif
         for (int64_t b = 0; b < batch; b++) {
             for (int64_t h = 0; h < num_heads; h++) {
                 const qkv_t *q_bh = q_data + b * q_sb + h * q_sh;

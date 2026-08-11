@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -31,14 +32,11 @@ namespace matmul {
 namespace native {
 
 template <int NP>
-__attribute__((noinline,
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,"
-               "fma"))) static void
-int8_gemv_bkc_wide_core(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+static void int8_gemv_bkc_wide_core(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
         int jc) {
 
@@ -136,11 +134,10 @@ int8_gemv_bkc_wide_core(const uint8_t *__restrict__ A,
     }
 }
 
-void int8_gemv_bkc_wide_dispatch(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+void int8_gemv_bkc_wide_dispatch(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
         int jc, int nb) {
 

@@ -17,6 +17,7 @@
 #include "bfloat16.hpp"
 #include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace common {
@@ -95,8 +96,8 @@ void bfloat16_t::f32_to_bf16(
     }
 }
 
-__attribute__((target("avx512f"))) __m256i bfloat16_t::f32_to_bf16_avx512(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f")
+__m256i bfloat16_t::f32_to_bf16_avx512(__m512 val) {
     // Reinterpret float32 as int32 for bit manipulation
     __m512i int_val = _mm512_castps_si512(val);
     // Extract LSB of the BF16 part to determine rounding direction
@@ -112,7 +113,8 @@ __attribute__((target("avx512f"))) __m256i bfloat16_t::f32_to_bf16_avx512(
     return _mm512_cvtepi32_epi16(bf16);
 }
 
-__attribute__((target("avx512f"))) void bfloat16_t::f32_to_bf16_vec(
+ZENDNNL_TARGET("avx512f")
+void bfloat16_t::f32_to_bf16_vec(
         const float *input, int16_t *output, size_t count) {
     size_t i = 0;
     for (; i + 15 < count; i += 16) {

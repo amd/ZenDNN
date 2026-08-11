@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <immintrin.h>
 #include <omp.h>
+#include "common/zendnnl_compat.hpp"
 #include <type_traits>
 
 #include "common/float16.hpp"
@@ -73,8 +74,8 @@ using common::f16x32_store_typed;
 
 template <typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-embag_avx512_f16_fma_kernel(const InType *input, const float *weights,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void embag_avx512_f16_fma_kernel(const InType *input, const float *weights,
         const IndexType *indices, const OffsetType *offsets, OutType *dst,
         int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
         bool is_weights, embag_algo_t algo, int64_t dst_stride,

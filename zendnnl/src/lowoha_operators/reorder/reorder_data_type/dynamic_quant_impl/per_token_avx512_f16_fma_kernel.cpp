@@ -42,6 +42,7 @@
 //==============================================================================
 
 #include "common/float16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/dynamic_quant_impl/dynamic_kernels.hpp"
@@ -113,9 +114,8 @@ static inline void compute_asymmetric_scale_zp_ph(
 
 /** Store 32 int8 lanes from a __m256i with optional 32B aligned
  *  store. The destination is uint16_t-spaced (1 byte per lane). */
-__attribute__((
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-store_32x_s8_ph(int8_t *dst, __m256i v, bool aligned32) {
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void store_32x_s8_ph(int8_t *dst, __m256i v, bool aligned32) {
     if (aligned32) {
         _mm256_store_si256(reinterpret_cast<__m256i *>(dst), v);
     } else {
@@ -123,9 +123,8 @@ store_32x_s8_ph(int8_t *dst, __m256i v, bool aligned32) {
     }
 }
 
-__attribute__((
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-store_32x_u8_ph(uint8_t *dst, __m256i v, bool aligned32) {
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void store_32x_u8_ph(uint8_t *dst, __m256i v, bool aligned32) {
     store_32x_s8_ph(reinterpret_cast<int8_t *>(dst), v, aligned32);
 }
 
@@ -143,9 +142,8 @@ store_32x_u8_ph(uint8_t *dst, __m256i v, bool aligned32) {
 // -> 0, matching vLLM; the U8 path widens to s32 and uses VPMOVUSDB.
 //==============================================================================
 
-__attribute__((
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512i
-quantize_to_s16_ph(__m512h v, __m512h vinv_scale) {
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512i quantize_to_s16_ph(__m512h v, __m512h vinv_scale) {
     // q = round_to_nearest_even(v * vinv_scale), result in __m512h.
     __m512h q_ph = _mm512_mul_ph(v, vinv_scale);
     // Convert PH -> 32 signed int16 lanes with banker's rounding, no exc.
@@ -172,11 +170,11 @@ quantize_to_s16_ph(__m512h v, __m512h vinv_scale) {
 // path on AVX512-FP16 capable CPUs (Granite Rapids, Turin).
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dynamic_per_token_quant_f16_s8_avx512fp16(
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dynamic_per_token_quant_f16_s8_avx512fp16(
         const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N) {
-    auto row_loop = [&](int64_t m)
-            __attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) {
+    auto row_loop = [&](int64_t m) ZENDNNL_TARGET(
+                            "avx512f,avx512vl,avx512bw,avx512fp16") {
         const uint16_t *row_src = src + m * N;
         int8_t *row_dst = dst + m * N;
 
@@ -308,9 +306,9 @@ dynamic_per_token_quant_f16_s8_avx512fp16(
 //      treats negative int16 as huge unsigned and saturates to 255.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst,
-        float *scales, int32_t *zps, int64_t M, int64_t N) {
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src,
+        uint8_t *dst, float *scales, int32_t *zps, int64_t M, int64_t N) {
 #pragma omp parallel for schedule(static)
     for (int64_t m = 0; m < M; ++m) {
         const uint16_t *row_src = src + m * N;
@@ -512,8 +510,8 @@ dynamic_per_token_quant_f16_u8_avx512fp16(const uint16_t *src, uint8_t *dst,
 //   6. No scratch buffer: scales[] is the only state between passes.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dynamic_per_token_quant_f16_s8_unfused_avx512fp16(
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dynamic_per_token_quant_f16_s8_unfused_avx512fp16(
         const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N) {
 // -- Pass 1: per-row absmax + scale (parallel over M) -------------------
 #pragma omp parallel for schedule(static)
@@ -564,46 +562,45 @@ dynamic_per_token_quant_f16_s8_unfused_avx512fp16(
     const int64_t total = M * N;
     constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
     zendnnl_parallel_for(0, total, grain_size,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512vl,avx512bw,avx512fp16"))) {
-                while (begin < end) {
-                    const int64_t m = begin / N;
-                    const int64_t row_end = std::min((m + 1) * N, end);
-                    const int64_t count = row_end - begin;
-                    const uint16_t *csrc = src + begin;
-                    int8_t *cdst = dst + begin;
-                    const bool aligned32
-                            = (reinterpret_cast<uintptr_t>(cdst) & 31) == 0;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16") {
+        while (begin < end) {
+            const int64_t m = begin / N;
+            const int64_t row_end = std::min((m + 1) * N, end);
+            const int64_t count = row_end - begin;
+            const uint16_t *csrc = src + begin;
+            int8_t *cdst = dst + begin;
+            const bool aligned32
+                    = (reinterpret_cast<uintptr_t>(cdst) & 31) == 0;
 
-                    int64_t k = 0;
-                    // Guard: 1/scale broadcast in FP16 -> +Inf when scale is tiny, so
-                    // skip the vector loop and let the scalar tail (in f32) handle the
-                    // whole row. Matches the F32-FMA / scalar reference output.
-                    if (common::fp16_inv_scale_is_finite(scales[m])) {
-                        const _Float16 inv_scale_f16
-                                = static_cast<_Float16>(1.0f / scales[m]);
-                        const __m512h vinv = _mm512_set1_ph(inv_scale_f16);
-                        for (; k + 31 < count; k += 32) {
-                            __m512h v = _mm512_loadu_ph(csrc + k);
-                            __m512i s16 = quantize_to_s16_ph(v, vinv);
-                            __m256i s8 = _mm512_cvtepi16_epi8(
-                                    s16); // truncating narrow -> s8 (non-finite -> 0)
-                            store_32x_s8_ph(cdst + k, s8, aligned32);
-                        }
-                    }
-                    for (; k < count; ++k) {
-                        float v = common::float16_t::f16_to_f32_val(csrc[k]);
-                        if (!std::isfinite(v)) {
-                            cdst[k] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                std::nearbyint(v / scales[m]));
-                        cdst[k] = static_cast<int8_t>(q);
-                    }
-                    begin = row_end;
+            int64_t k = 0;
+            // Guard: 1/scale broadcast in FP16 -> +Inf when scale is tiny, so
+            // skip the vector loop and let the scalar tail (in f32) handle the
+            // whole row. Matches the F32-FMA / scalar reference output.
+            if (common::fp16_inv_scale_is_finite(scales[m])) {
+                const _Float16 inv_scale_f16
+                        = static_cast<_Float16>(1.0f / scales[m]);
+                const __m512h vinv = _mm512_set1_ph(inv_scale_f16);
+                for (; k + 31 < count; k += 32) {
+                    __m512h v = _mm512_loadu_ph(csrc + k);
+                    __m512i s16 = quantize_to_s16_ph(v, vinv);
+                    __m256i s8 = _mm512_cvtepi16_epi8(
+                            s16); // truncating narrow -> s8 (non-finite -> 0)
+                    store_32x_s8_ph(cdst + k, s8, aligned32);
                 }
-            });
+            }
+            for (; k < count; ++k) {
+                float v = common::float16_t::f16_to_f32_val(csrc[k]);
+                if (!std::isfinite(v)) {
+                    cdst[k] = 0;
+                    continue;
+                }
+                int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m]));
+                cdst[k] = static_cast<int8_t>(q);
+            }
+            begin = row_end;
+        }
+    });
 }
 
 //==============================================================================
@@ -654,8 +651,8 @@ dynamic_per_token_quant_f16_s8_unfused_avx512fp16(
 //   7. No scratch buffer: scales[] + zps[] are the only state between passes.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dynamic_per_token_quant_f16_u8_unfused_avx512fp16(const uint16_t *src,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dynamic_per_token_quant_f16_u8_unfused_avx512fp16(const uint16_t *src,
         uint8_t *dst, float *scales, int32_t *zps, int64_t M, int64_t N) {
 // -- Pass 1: per-row min/max + scale/zp (parallel over M) ---------------
 #pragma omp parallel for schedule(static)
@@ -723,86 +720,84 @@ dynamic_per_token_quant_f16_u8_unfused_avx512fp16(const uint16_t *src,
     const int64_t total = M * N;
     constexpr int64_t grain_size = LOWOHA_REORDER_GRAIN_SIZE;
     zendnnl_parallel_for(0, total, grain_size,
-            [&](int64_t begin, int64_t end) __attribute__((
-                    target("avx512f,avx512vl,avx512bw,avx512fp16"))) {
-                while (begin < end) {
-                    const int64_t m = begin / N;
-                    const int64_t row_end = std::min((m + 1) * N, end);
-                    const int64_t count = row_end - begin;
-                    const uint16_t *csrc = src + begin;
-                    uint8_t *cdst = dst + begin;
+            [&](int64_t begin, int64_t end)
+                    ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16") {
+        while (begin < end) {
+            const int64_t m = begin / N;
+            const int64_t row_end = std::min((m + 1) * N, end);
+            const int64_t count = row_end - begin;
+            const uint16_t *csrc = src + begin;
+            uint8_t *cdst = dst + begin;
 
-                    int64_t k = 0;
-                    // Twin guards: (i) tiny scales make 1/scale overflow FP16, and
-                    // (ii) large |zp| make VCVTPH2W pre-saturate out-of-int16
-                    // quotients before the int32 zp add can bring them back into
-                    // range. Either failure forces the scalar tail in f32 with int32
-                    // zp, which matches the F32-FMA / scalar reference. See the
-                    // fused-asym kernel above for the full divergence rationale.
-                    if (common::fp16_inv_scale_is_finite(scales[m])
-                            && common::fp16_zp_safe_for_s16_narrow(zps[m])) {
-                        const _Float16 inv_scale_f16
-                                = static_cast<_Float16>(1.0f / scales[m]);
-                        const __m512h vinv = _mm512_set1_ph(inv_scale_f16);
-                        const __m512i vzp32 = _mm512_set1_epi32(zps[m]);
-                        const __m512i vlo32 = _mm512_setzero_si512();
-                        const __m512i vhi32 = _mm512_set1_epi32(255);
+            int64_t k = 0;
+            // Twin guards: (i) tiny scales make 1/scale overflow FP16, and
+            // (ii) large |zp| make VCVTPH2W pre-saturate out-of-int16
+            // quotients before the int32 zp add can bring them back into
+            // range. Either failure forces the scalar tail in f32 with int32
+            // zp, which matches the F32-FMA / scalar reference. See the
+            // fused-asym kernel above for the full divergence rationale.
+            if (common::fp16_inv_scale_is_finite(scales[m])
+                    && common::fp16_zp_safe_for_s16_narrow(zps[m])) {
+                const _Float16 inv_scale_f16
+                        = static_cast<_Float16>(1.0f / scales[m]);
+                const __m512h vinv = _mm512_set1_ph(inv_scale_f16);
+                const __m512i vzp32 = _mm512_set1_epi32(zps[m]);
+                const __m512i vlo32 = _mm512_setzero_si512();
+                const __m512i vhi32 = _mm512_set1_epi32(255);
 
-                        for (; k + 31 < count; k += 32) {
-                            __m512h v = _mm512_loadu_ph(csrc + k);
-                            __m512i s16 = quantize_to_s16_ph(v, vinv);
-                            __m512i s32_lo = _mm512_cvtepi16_epi32(
-                                    _mm512_castsi512_si256(s16));
-                            __m512i s32_hi = _mm512_cvtepi16_epi32(
-                                    _mm512_extracti64x4_epi64(s16, 1));
-                            s32_lo = _mm512_add_epi32(s32_lo, vzp32);
-                            s32_hi = _mm512_add_epi32(s32_hi, vzp32);
-                            // Signed [0, 255] clamp BEFORE VPMOVUSDB; that intrinsic
-                            // interprets its input as unsigned and would wrap negative
-                            // s32 values to 255 instead of clamping to 0.
-                            s32_lo = _mm512_max_epi32(
-                                    vlo32, _mm512_min_epi32(vhi32, s32_lo));
-                            s32_hi = _mm512_max_epi32(
-                                    vlo32, _mm512_min_epi32(vhi32, s32_hi));
-                            __m128i u8_lo = _mm512_cvtusepi32_epi8(s32_lo);
-                            __m128i u8_hi = _mm512_cvtusepi32_epi8(s32_hi);
-                            _mm_storeu_si128(
-                                    reinterpret_cast<__m128i *>(cdst + k),
-                                    u8_lo);
-                            _mm_storeu_si128(
-                                    reinterpret_cast<__m128i *>(cdst + k + 16),
-                                    u8_hi);
-                        }
-                    }
-                    for (; k < count; ++k) {
-                        float v = common::float16_t::f16_to_f32_val(csrc[k]);
-                        if (!std::isfinite(v)) {
-                            cdst[k] = 0;
-                            continue;
-                        }
-                        int32_t q = static_cast<int32_t>(
-                                            std::nearbyint(v / scales[m]))
-                                + zps[m];
-                        q = std::max(0, std::min(255, q));
-                        cdst[k] = static_cast<uint8_t>(q);
-                    }
-                    begin = row_end;
+                for (; k + 31 < count; k += 32) {
+                    __m512h v = _mm512_loadu_ph(csrc + k);
+                    __m512i s16 = quantize_to_s16_ph(v, vinv);
+                    __m512i s32_lo = _mm512_cvtepi16_epi32(
+                            _mm512_castsi512_si256(s16));
+                    __m512i s32_hi = _mm512_cvtepi16_epi32(
+                            _mm512_extracti64x4_epi64(s16, 1));
+                    s32_lo = _mm512_add_epi32(s32_lo, vzp32);
+                    s32_hi = _mm512_add_epi32(s32_hi, vzp32);
+                    // Signed [0, 255] clamp BEFORE VPMOVUSDB; that intrinsic
+                    // interprets its input as unsigned and would wrap negative
+                    // s32 values to 255 instead of clamping to 0.
+                    s32_lo = _mm512_max_epi32(
+                            vlo32, _mm512_min_epi32(vhi32, s32_lo));
+                    s32_hi = _mm512_max_epi32(
+                            vlo32, _mm512_min_epi32(vhi32, s32_hi));
+                    __m128i u8_lo = _mm512_cvtusepi32_epi8(s32_lo);
+                    __m128i u8_hi = _mm512_cvtusepi32_epi8(s32_hi);
+                    _mm_storeu_si128(
+                            reinterpret_cast<__m128i *>(cdst + k), u8_lo);
+                    _mm_storeu_si128(
+                            reinterpret_cast<__m128i *>(cdst + k + 16), u8_hi);
                 }
-            });
+            }
+            for (; k < count; ++k) {
+                float v = common::float16_t::f16_to_f32_val(csrc[k]);
+                if (!std::isfinite(v)) {
+                    cdst[k] = 0;
+                    continue;
+                }
+                int32_t q = static_cast<int32_t>(std::nearbyint(v / scales[m]))
+                        + zps[m];
+                q = std::max(0, std::min(255, q));
+                cdst[k] = static_cast<uint8_t>(q);
+            }
+            begin = row_end;
+        }
+    });
 }
 
-#else // !(GCC >= 12) — Strategy A not buildable on this toolchain
-
-// The FP16-FMA kernels cannot be compiled (no __m512h intrinsics on
-// toolchains older than GCC 12), but we still emit symbols for the
-// declared functions so the link succeeds. Instead of leaving them as
-// no-op stubs (which would silently corrupt output if the dispatcher
-// ever mis-routed to them), delegate to the always-available F32-FMA
-// siblings in per_token_avx512_f32_fma_kernel.cpp. The
-// can_use_f16_fma_kernel() helper returns false on this toolchain
-// (gated on __GNUC__ >= 12 in lowoha_reorder_common.hpp), so the
-// dispatcher should never select these in practice -- the delegation
-// is defense in depth.
+// clang-format off
+#else  // !(GCC >= 12) — Strategy A not buildable on this toolchain
+       //
+       // The FP16-FMA kernels cannot be compiled (no __m512h intrinsics on
+       // toolchains older than GCC 12), but we still emit symbols for the
+       // declared functions so the link succeeds. Instead of leaving them as
+       // no-op stubs (which would silently corrupt output if the dispatcher
+       // ever mis-routed to them), delegate to the always-available F32-FMA
+       // siblings in per_token_avx512_f32_fma_kernel.cpp. The can_use_f16_fma_kernel()
+       // helper returns false on this toolchain (gated on __GNUC__ >= 12 in
+       // lowoha_reorder_common.hpp), so the dispatcher should never select
+       // these in practice -- the delegation is defense in depth.
+// clang-format on
 
 void dynamic_per_token_quant_f16_s8_avx512fp16(
         const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N) {

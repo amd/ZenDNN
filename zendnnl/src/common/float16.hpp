@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include <initializer_list>
 #include <type_traits>
 
@@ -234,9 +235,8 @@ private:
 // Defined inline in this header so they always inline at the call site.
 //===----------------------------------------------------------------------===//
 
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512h
-f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512h f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
 #if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
     return _mm512_maskz_loadu_ph(k, addr);
 #else
@@ -244,9 +244,8 @@ f16_maskz_loadu_vec(__mmask32 k, const void *addr) {
 #endif
 }
 
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
 #if defined(ZENDNNL_HAS_AVX512FP16_MASK_LOAD_STORE_INTRINSICS)
     _mm512_mask_storeu_ph(addr, k, val);
 #else
@@ -287,9 +286,8 @@ f16_mask_storeu_vec(void *addr, __mmask32 k, __m512h val) {
 // ---- Typed load (f16 or f32 source) -------------------------------------
 
 template <typename InType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512h
-f16x32_load_typed(const void *p) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512h f16x32_load_typed(const void *p) {
     if constexpr (std::is_same_v<InType, float16_t>
             || std::is_same_v<InType, uint16_t>) {
         return _mm512_loadu_ph(p);
@@ -303,9 +301,9 @@ f16x32_load_typed(const void *p) {
 }
 
 template <typename InType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512h
-f16x32_load_tail_typed(const void *p, __mmask32 mask, int tail) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512h
+        f16x32_load_tail_typed(const void *p, __mmask32 mask, int tail) {
     if constexpr (std::is_same_v<InType, float16_t>
             || std::is_same_v<InType, uint16_t>) {
         return f16_maskz_loadu_vec(mask, p);
@@ -331,9 +329,8 @@ f16x32_load_tail_typed(const void *p, __mmask32 mask, int tail) {
 // tail count (e.g., gamma/beta tail paths in the normalization kernels).
 // Splits the 32-lane mask into two 16-lane halves on the f32 path.
 template <typename InType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512h
-f16x32_load_mask_typed(const void *p, __mmask32 mask) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512h f16x32_load_mask_typed(const void *p, __mmask32 mask) {
     if constexpr (std::is_same_v<InType, float16_t>
             || std::is_same_v<InType, uint16_t>) {
         return f16_maskz_loadu_vec(mask, p);
@@ -351,9 +348,8 @@ f16x32_load_mask_typed(const void *p, __mmask32 mask) {
 // ---- Typed store (f16 or f32 destination) -------------------------------
 
 template <typename OutType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-f16x32_store_typed(void *p, __m512h v) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void f16x32_store_typed(void *p, __m512h v) {
     if constexpr (std::is_same_v<OutType, float16_t>
             || std::is_same_v<OutType, uint16_t>) {
         _mm512_storeu_ph(p, v);
@@ -372,9 +368,8 @@ f16x32_store_typed(void *p, __m512h v) {
 // tail count (e.g., the masked-tail residual store in FusedAddRMSNorm).
 // Splits the 32-lane mask into two 16-lane halves on the f32 path.
 template <typename OutType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-f16x32_store_mask_typed(void *p, __m512h v, __mmask32 mask) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void f16x32_store_mask_typed(void *p, __m512h v, __mmask32 mask) {
     if constexpr (std::is_same_v<OutType, float16_t>
             || std::is_same_v<OutType, uint16_t>) {
         f16_mask_storeu_vec(p, mask, v);
@@ -391,9 +386,9 @@ f16x32_store_mask_typed(void *p, __m512h v, __mmask32 mask) {
 }
 
 template <typename OutType>
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline void
-f16x32_store_tail_typed(void *p, __m512h v, __mmask32 mask, int tail) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline void f16x32_store_tail_typed(
+        void *p, __m512h v, __mmask32 mask, int tail) {
     if constexpr (std::is_same_v<OutType, float16_t>
             || std::is_same_v<OutType, uint16_t>) {
         f16_mask_storeu_vec(p, mask, v);
@@ -421,9 +416,8 @@ f16x32_store_tail_typed(void *p, __m512h v, __mmask32 mask, int tail) {
 // hidden sizes >= 4 K). Costs 2 vcvtph2ps + 1 vaddps + 1 reduce per call,
 // negligible against the multi-K-lane main loop that produced v.
 
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline float
-reduce_add_ph_to_fp32(__m512h v) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline float reduce_add_ph_to_fp32(__m512h v) {
     __m256i lo16 = _mm512_castsi512_si256(_mm512_castph_si512(v));
     __m256i hi16 = _mm512_extracti64x4_epi64(_mm512_castph_si512(v), 1);
     __m512 lo32 = _mm512_cvtph_ps(lo16);
@@ -439,9 +433,8 @@ reduce_add_ph_to_fp32(__m512h v) {
 // Useful for absmax / min / max reductions that must ignore non-finite
 // inputs (otherwise a single NaN propagates through the whole reduction).
 
-__attribute__((always_inline,
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __mmask32
-finite_mask_ph(__m512h v) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __mmask32 finite_mask_ph(__m512h v) {
     // fpclass categories: 0x01 QNaN, 0x02 +0, 0x04 -0, 0x08 +Inf,
     // 0x10 -Inf, 0x20 Denormal, 0x40 -Finite, 0x80 SNaN. Match the
     // non-finite set (NaNs + Infs) and invert to keep finite lanes.
@@ -467,8 +460,8 @@ finite_mask_ph(__m512h v) {
 // We add a factor of 2 of headroom so an FP16-rounded inv_scale doesn't
 // overflow either.
 
-__attribute__((always_inline)) static inline bool fp16_inv_scale_is_finite(
-        float scale_f32) {
+ZENDNNL_ALWAYS_INLINE
+static inline bool fp16_inv_scale_is_finite(float scale_f32) {
     // 65504 is the FP16 max normal value. 1/scale ≤ 65504/2 keeps both
     // the exact and FP16-rounded reciprocal comfortably representable.
     constexpr float kMaxFiniteInvScale = 65504.0f * 0.5f;
@@ -492,8 +485,8 @@ __attribute__((always_inline)) static inline bool fp16_inv_scale_is_finite(
 // F32-FMA result by more than 1 LSB. This regime is structurally
 // reachable from FP16 source data clustered far from zero, e.g.
 // min=-65000, max=-64500 -> zp ≈ 33150 (outside int16).
-__attribute__((always_inline)) static inline bool fp16_zp_safe_for_s16_narrow(
-        int32_t zp) {
+ZENDNNL_ALWAYS_INLINE
+static inline bool fp16_zp_safe_for_s16_narrow(int32_t zp) {
     constexpr int32_t kMaxZpInS16Narrow = 32512;
     return (zp >= -kMaxZpInS16Narrow) && (zp <= kMaxZpInS16Narrow);
 }
@@ -517,8 +510,8 @@ __attribute__((always_inline)) static inline bool fp16_zp_safe_for_s16_narrow(
 // static dequant is the regime that can hit this; the int32
 // zero_point contract explicitly permits any int32, including
 // values far outside FP16's range.
-__attribute__((always_inline)) static inline bool
-fp16_zp_safe_for_dequant_widen(int32_t zp) {
+ZENDNNL_ALWAYS_INLINE
+static inline bool fp16_zp_safe_for_dequant_widen(int32_t zp) {
     constexpr int32_t kMaxZpInDequantWiden = 65000;
     return (zp >= -kMaxZpInDequantWiden) && (zp <= kMaxZpInDequantWiden);
 }
@@ -541,8 +534,8 @@ fp16_zp_safe_for_dequant_widen(int32_t zp) {
 // FP16_MIN_NORMAL <= |scale| <= FP16_MAX_NORMAL. When it returns
 // false the kernel must fall back to the scalar tail, which computes
 // (input - zp) * scale entirely in f32 before the final f16 store.
-__attribute__((always_inline)) static inline bool
-fp16_scale_safe_for_dequant_narrow(float scale_f32) {
+ZENDNNL_ALWAYS_INLINE
+static inline bool fp16_scale_safe_for_dequant_narrow(float scale_f32) {
     constexpr float kFp16MinNormal = 6.103515625e-5f; // 2^-14
     constexpr float kFp16MaxNormal = 65504.0f;
     if (scale_f32 == 0.0f) return true;
@@ -573,6 +566,14 @@ static inline uint16_t narrow_f32_scale_to_f16(float scale_f32) {
 
 } //namespace common
 
+// Keep `interface` undef'd for the rest of the TU (do NOT push/pop-restore):
+// `interface` is a public zendnnl namespace that consumers reference (e.g.
+// `using namespace zendnnl::interface;`) after including this header, so the
+// Windows <windows.h> `interface` macro must stay undefined here -- restoring
+// it would re-shadow the namespace and break downstream consumers on Windows.
+#ifdef interface
+#undef interface
+#endif
 namespace interface {
 using float16_t = zendnnl::common::float16_t;
 } // namespace interface

@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
@@ -30,12 +31,11 @@ namespace matmul {
 namespace native {
 
 template <int MR, int NV>
-__attribute__((target("avx512f,avx512bf16,fma"), noinline)) void
-bf16_brgemm_ukernel(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,fma")
+void bf16_brgemm_ukernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, float beta, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16) {
 
     __m512 acc[MR][NV];
 
@@ -145,6 +145,7 @@ bf16_brgemm_ukernel(const uint16_t *__restrict__ A, int lda,
 // the M ≡ 5 (mod 6) sequence (5, 11, 17, 23, 29, ...) under
 // planner.MR = 6, and is also the preferred MR for several mid-M
 // cases — see plan_bf16_brgemm() in brgemm_planner.cpp.
+// clang-format off
 #define INST(MR, NV) \
     template void bf16_brgemm_ukernel<MR, NV>(const uint16_t *, int, \
             const uint16_t *, int, float *, int, int, int, float, \
@@ -152,20 +153,27 @@ bf16_brgemm_ukernel(const uint16_t *__restrict__ A, int lda,
 
 // NR=64 (NV=4): MR ∈ {1..6, 8}
 INST(1, 4)
-INST(2, 4) INST(3, 4) INST(4, 4) INST(5, 4) INST(6, 4) INST(8, 4)
-        // NR=32 (NV=2): MR ∈ {1..6}
-        INST(1, 2) INST(2, 2) INST(3, 2) INST(4, 2) INST(5, 2) INST(6, 2)
+INST(2, 4)
+INST(3, 4)
+INST(4, 4)
+INST(5, 4)
+INST(6, 4)
+INST(8, 4)
+// NR=32 (NV=2): MR ∈ {1..6}
+INST(1, 2)
+INST(2, 2) INST(3, 2) INST(4, 2) INST(5, 2) INST(6, 2)
         // NR=16 (NV=1): MR ∈ {1..6}
         INST(1, 1) INST(2, 1) INST(3, 1) INST(4, 1) INST(5, 1) INST(6, 1)
 #undef INST
+        // clang-format on
 
-                using bf16_brgemm_fn_t
+        using bf16_brgemm_fn_t
         = void(*)(const uint16_t *, int, const uint16_t *, int, float *, int,
                 int, int, float, const float *, fused_postop_t, uint16_t *,
                 int);
 
-__attribute__((target("avx512f,avx512bf16,fma"))) bf16_brgemm_fn_t
-select_bf16_brgemm_kernel(int MR, int NR) {
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {
     switch (NR) {
         case 64:
             switch (MR) {
@@ -219,13 +227,12 @@ select_bf16_brgemm_kernel(int MR, int NR) {
 // `mask` only affects loads/stores, not the FMA hot path.
 // ============================================================================
 template <int MR>
-__attribute__((
-        target("avx512f,avx512bf16,avx512bw,avx512vl,fma"), noinline)) void
-bf16_brgemm_ukernel_n_masked(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, int nr_partial,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+void bf16_brgemm_ukernel_n_masked(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, int nr_partial, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16) {
 
     assert(nr_partial >= 1 && nr_partial < 16);
     const __mmask16 mask = static_cast<__mmask16>((1u << nr_partial) - 1);
@@ -310,12 +317,15 @@ bf16_brgemm_ukernel_n_masked(const uint16_t *__restrict__ A, int lda,
             const float *, fused_postop_t, uint16_t *, int);
 
 INST_MASKED_NV1(1)
-INST_MASKED_NV1(2) INST_MASKED_NV1(3) INST_MASKED_NV1(4) INST_MASKED_NV1(5)
-        INST_MASKED_NV1(6) INST_MASKED_NV1(8)
+INST_MASKED_NV1(2)
+INST_MASKED_NV1(3)
+INST_MASKED_NV1(4)
+INST_MASKED_NV1(5)
+INST_MASKED_NV1(6)
+INST_MASKED_NV1(8)
 #undef INST_MASKED_NV1
 
-                bf16_brgemm_n_masked_fn_t
-        select_bf16_brgemm_n_masked_kernel(int MR) {
+bf16_brgemm_n_masked_fn_t select_bf16_brgemm_n_masked_kernel(int MR) {
     switch (MR) {
         case 1: return bf16_brgemm_ukernel_n_masked<1>;
         case 2: return bf16_brgemm_ukernel_n_masked<2>;
@@ -332,12 +342,12 @@ INST_MASKED_NV1(2) INST_MASKED_NV1(3) INST_MASKED_NV1(4) INST_MASKED_NV1(5)
 // BF16 BRGEMM tail kernel (dynamic MR/NR for edge tiles)
 // Same pattern as FP32 BRGEMM tail but with dpbf16ps
 // ============================================================================
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) void
-bf16_brgemm_tail_kernel(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, int mr_act, int nr_act,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16) {
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+void bf16_brgemm_tail_kernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, int mr_act, int nr_act, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16) {
 
     static constexpr int MAX_MR = 12;
     static constexpr int MAX_NV = 4;

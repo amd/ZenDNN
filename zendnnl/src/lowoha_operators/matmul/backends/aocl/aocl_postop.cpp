@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 using namespace zendnnl::error_handling;
 
@@ -59,11 +60,11 @@ constexpr std::size_t kMaxScale = kMaxPostOps;
 
 // Per-layer post-op metadata holder. One contiguous allocation owns the
 // dlp_metadata_t plus every sub-buffer it can ever point at, so the LRU
-// cache can free the entire holder with a single std::free on eviction
-// (matching lru_cache_t's pointer-eviction contract).
+// cache can free the entire holder with a single zendnnl_aligned_free on
+// eviction (matching lru_cache_t's pointer-eviction contract).
 //
-// All members are trivial; the holder is allocated via std::calloc (zero-
-// initialized) and then init_metadata_holder() pins the invariant sub-
+// All members are trivial; the holder is allocated via zendnnl_aligned_alloc
+// then zeroed with memset, and init_metadata_holder() pins the invariant sub-
 // pointers (sf/zp/scl/etc.) and DLP_F32 defaults that the build path
 // expects to be in place.
 struct dlp_postop_metadata_holder_t {
@@ -134,7 +135,7 @@ struct dlp_postop_metadata_holder_t {
 
 // Pin the metadata's invariant sub-pointer fields (the ones the build path
 // expects to already point into the holder's embedded sub-buffers) and the
-// DLP_F32 defaults. Called once per holder, immediately after std::calloc.
+// DLP_F32 defaults. Called once per holder, immediately after the memset.
 void init_metadata_holder(dlp_postop_metadata_holder_t *h) {
     for (std::size_t i = 0; i < kMaxMatrixAdd; ++i) {
         h->matrix_add[i].sf = &h->matrix_add_sf[i];
@@ -219,7 +220,7 @@ auto infer_scale_dim
 // Per-call teardown for create_dlp_post_op()'s return value.
 //
 // Cached holders (the common path) are owned by the per-thread LRU cache,
-// which evicts them with std::free; this function is a no-op for them.
+// which evicts them with zendnnl_aligned_free; this function is a no-op for them.
 //
 // Per-call holders (currently only the BF16/INT8 per-token-sym path) are
 // flagged with is_per_call=true during build and are not added to the
@@ -235,7 +236,9 @@ void cleanup_dlp_post_op(dlp_metadata_t *metadata) {
     auto *h = reinterpret_cast<dlp_postop_metadata_holder_t *>(metadata);
     if (!h->is_per_call) { return; }
     std::free(h->a_quant_inv_scales_dyn);
-    std::free(h);
+    // Holder is zendnnl_aligned_alloc'd in create_dlp_post_op; release it with
+    // the matching wrapper (_aligned_free on Windows).
+    zendnnl_aligned_free(h);
 }
 
 namespace {
@@ -257,7 +260,7 @@ namespace {
 // Capacity comes from matmul_config_t::lru_cache_capacity (default
 // uint32_max, i.e. eviction disabled — same default as the existing weight
 // caches). On thread exit, the cache's destructor evict()'s every holder,
-// freeing each via std::free.
+// freeing each via zendnnl_aligned_free.
 lru_cache_t<Key_matmul, dlp_postop_metadata_holder_t *> &
 get_postop_metadata_cache() {
     thread_local lru_cache_t<Key_matmul, dlp_postop_metadata_holder_t *> c;
@@ -1080,13 +1083,23 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
     // Cold path: allocate + initialize a new holder now that we know it
     // will be wired.
+    // Aligned via zendnnl_aligned_alloc (not std::calloc) so the lru_cache_t
+    // evictor and cleanup_dlp_post_op release this holder with the matching
+    // zendnnl_aligned_free (_aligned_free on Windows). Freeing std::calloc'd
+    // memory with _aligned_free corrupts the heap on Windows. sizeof is always
+    // a multiple of alignof, which satisfies std::aligned_alloc on Linux.
+    // Aligned storage is not zero-initialized, so memset restores the zero-init
+    // that the build path (init_metadata_holder + trivial members) relied on
+    // with std::calloc.
     auto *new_holder = static_cast<dlp_postop_metadata_holder_t *>(
-            std::calloc(1, sizeof(dlp_postop_metadata_holder_t)));
+            zendnnl_aligned_alloc(alignof(dlp_postop_metadata_holder_t),
+                    sizeof(dlp_postop_metadata_holder_t)));
     if (!new_holder) {
         EXCEPTION_WITH_LOC(
                 "[postop-cache] failed to allocate "
                 "dlp_postop_metadata_holder_t");
     }
+    std::memset(new_holder, 0, sizeof(dlp_postop_metadata_holder_t));
     init_metadata_holder(new_holder);
 
     dlp_metadata_t *dlp_metadata = &new_holder->metadata;
@@ -1245,7 +1258,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                 // Release the per-call holder directly. The caller's
                 // cleanup_dlp_post_op(nullptr) is a documented no-op, so
                 // returning nullptr is the safe error contract here.
-                std::free(new_holder);
+                zendnnl_aligned_free(new_holder);
                 return nullptr;
             }
             for (md_t si = 0; si < src_quant_scale_len; ++si) {

@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "common/zendnnl_api.hpp"
 #include "lowoha_operators/pooling/lowoha_pooling_common.hpp"
 #include "lowoha_operators/pooling/lowoha_pooling_utils.hpp"
 
@@ -40,7 +41,8 @@ namespace pooling {
  *
  * @return status_t::success or status_t::failure
  */
-status_t pooling_direct(const void *input, void *output, pool_params &params);
+ZENDNNL_API status_t pooling_direct(
+        const void *input, void *output, pool_params &params);
 
 /**
  * @brief Execute pooling with automatic kernel selection (legacy interface)

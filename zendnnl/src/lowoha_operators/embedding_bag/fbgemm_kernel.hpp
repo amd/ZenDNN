@@ -102,16 +102,21 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
 
         const uint8_t *table_ptr = static_cast<const uint8_t *>(table);
         zendnnl_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
+            // index_size must be THIS chunk's index count, not the global total: the
+            // indices/offsets pointers below are advanced to fbgemm_offsets[start_idx],
+            // so passing the full indices_size makes FBGEMM's prefetch look-ahead clamp
+            // read past the end of the indices buffer for any chunk with start_idx > 0.
+            const int64_t chunk_index_size = static_cast<int64_t>(
+                    fbgemm_offsets[end_idx] - fbgemm_offsets[start_idx]);
             kernel(
                     /*output_size=*/end_idx - start_idx,
-                    /*index_size=*/indices_size,
+                    /*index_size=*/chunk_index_size,
                     /*data_size=*/num_rows,
                     /*input=*/table_ptr,
                     /*indices=*/&indices_ptr[fbgemm_offsets[start_idx]],
                     /*offsets=*/&fbgemm_offsets[start_idx],
                     /*weights=*/
-                            weights ? &weights[fbgemm_offsets[start_idx]]
-                                    : nullptr,
+                    weights ? &weights[fbgemm_offsets[start_idx]] : nullptr,
                     /*out=*/&dst_ptr[start_idx * output_stride]);
         });
     } else {
@@ -126,16 +131,19 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
 
         const InType *table_ptr = static_cast<const InType *>(table);
         zendnnl_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
+            // See the quantized branch: pass this chunk's index count, not the global
+            // total, or FBGEMM's prefetch reads past the indices buffer (start_idx > 0).
+            const int64_t chunk_index_size = static_cast<int64_t>(
+                    fbgemm_offsets[end_idx] - fbgemm_offsets[start_idx]);
             kernel(
                     /*output_size=*/end_idx - start_idx,
-                    /*index_size=*/indices_size,
+                    /*index_size=*/chunk_index_size,
                     /*data_size=*/num_rows,
                     /*input=*/table_ptr,
                     /*indices=*/&indices_ptr[fbgemm_offsets[start_idx]],
                     /*offsets=*/&fbgemm_offsets[start_idx],
                     /*weights=*/
-                            weights ? &weights[fbgemm_offsets[start_idx]]
-                                    : nullptr,
+                    weights ? &weights[fbgemm_offsets[start_idx]] : nullptr,
                     /*out=*/&dst_ptr[start_idx * output_stride]);
         });
     }

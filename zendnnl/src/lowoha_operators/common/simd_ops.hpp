@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "common/zendnnl_compat.hpp"
 
 #include <immintrin.h>
 
@@ -122,8 +123,7 @@ struct SimdOps<scalar_tag> {
 // target attribute.
 // ===========================================================================
 
-#define LOWOHA_SIMD_AVX512_ATTR \
-    __attribute__((target("avx512f,avx512bw,avx512vl,fma")))
+#define LOWOHA_SIMD_AVX512_ATTR ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
 
 template <>
 struct SimdOps<avx512_tag> {

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
@@ -28,10 +29,11 @@ namespace matmul {
 namespace native {
 
 template <int MR, int NV>
-__attribute__((target("avx512f,fma"), noinline)) void brgemm_ukernel(
-        const float *__restrict__ A, int lda, const float *__restrict__ pb,
-        int pb_stride, float *__restrict__ C, int ldc, int K, int BK,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op) {
+ZENDNNL_TARGET_NOINLINE("avx512f,fma")
+void brgemm_ukernel(const float *__restrict A, int lda,
+        const float *__restrict pb, int pb_stride, float *__restrict C, int ldc,
+        int K, int BK, float beta, const float *__restrict bias,
+        fused_postop_t fused_op) {
 
     __m512 acc[MR][NV];
     if (beta != 0.0f) {
@@ -100,18 +102,22 @@ __attribute__((target("avx512f,fma"), noinline)) void brgemm_ukernel(
             _mm512_storeu_ps(C + m * ldc + v * 16, acc[m][v]);
 }
 
-// Explicit instantiation for MR=6, NR=16
-template void brgemm_ukernel<6, 1>(const float *, int, const float *, int,
-        float *, int, int, int, float, const float *, fused_postop_t);
+// Explicit instantiation for MR=6, NR=16. The __restrict qualifiers must match
+// the template declaration exactly: MSVC mangles __restrict into the symbol
+// name (GCC/Clang do not), so omitting it here emits a symbol that the call
+// site (which uses the restrict-qualified declaration) cannot resolve -> LNK2001.
+template void brgemm_ukernel<6, 1>(const float *__restrict, int,
+        const float *__restrict, int, float *__restrict, int, int, int, float,
+        const float *__restrict, fused_postop_t);
 
 // ============================================================================
 // BRGEMM tail kernel (dynamic MR/NR for edge tiles)
 // ============================================================================
-__attribute__((target("avx512f,avx512bw,fma"))) void brgemm_tail_kernel(
-        const float *__restrict__ A, int lda, const float *__restrict__ pb,
-        int pb_stride, float *__restrict__ C, int ldc, int K, int BK,
-        int mr_count, int nr_count, float beta, const float *__restrict__ bias,
-        fused_postop_t fused_op) {
+ZENDNNL_TARGET("avx512f,avx512bw,fma")
+void brgemm_tail_kernel(const float *__restrict A, int lda,
+        const float *__restrict pb, int pb_stride, float *__restrict C, int ldc,
+        int K, int BK, int mr_count, int nr_count, float beta,
+        const float *__restrict bias, fused_postop_t fused_op) {
 
     static constexpr int MAX_MR = 12;
     static constexpr int MAX_NV = 4;

@@ -26,9 +26,22 @@ find_library(FBGEMM_LIB
   PATH_SUFFIXES lib
 )
 
+# Static library names differ by platform: libfbgemm.a etc. on Linux,
+# fbgemm.lib / cpuinfo.lib / asmjit.lib on Windows (find_library adds the
+# .lib suffix from the base name).
+if(WIN32)
+  set(_zl_fbgemm_archive_names fbgemm)
+  set(_zl_cpuinfo_names        cpuinfo)
+  set(_zl_asmjit_names         asmjit)
+else()
+  set(_zl_fbgemm_archive_names libfbgemm.a)
+  set(_zl_cpuinfo_names        libcpuinfo.a)
+  set(_zl_asmjit_names         libasmjit.a)
+endif()
+
 # Static library
 find_library(FBGEMM_ARCHIVE_LIB
-  NAMES libfbgemm.a
+  NAMES ${_zl_fbgemm_archive_names}
   PATHS ${FBGEMM_LIB_ROOT}
   NO_DEFAULT_PATH
   PATH_SUFFIXES lib
@@ -44,14 +57,14 @@ find_path(FBGEMM_INCLUDE_DIR
 
 # Find FBGEMM dependencies: cpuinfo and asmjit
 find_library(CPUINFO_LIB
-  NAMES libcpuinfo.a
+  NAMES ${_zl_cpuinfo_names}
   PATHS ${FBGEMM_LIB_ROOT}
   NO_DEFAULT_PATH
   PATH_SUFFIXES lib
 )
 
 find_library(ASMJIT_LIB
-  NAMES libasmjit.a
+  NAMES ${_zl_asmjit_names}
   PATHS ${FBGEMM_LIB_ROOT}
   NO_DEFAULT_PATH
   PATH_SUFFIXES lib
@@ -87,12 +100,20 @@ if(FBGEMM_FOUND)
   )
 
   # Create imported target for asmjit (required)
-  # asmjit uses shm_open/shm_unlink from librt for virtual memory management
+  # asmjit uses shm_open/shm_unlink from librt for virtual memory management on
+  # Linux; librt does not exist on Windows (asmjit uses the Win32 API there), so
+  # do not add the rt link dependency on Windows.
   add_library(fbgemm::asmjit STATIC IMPORTED GLOBAL)
-  set_target_properties(fbgemm::asmjit PROPERTIES
-    IMPORTED_LOCATION ${ASMJIT_LIB}
-    INTERFACE_LINK_LIBRARIES "rt"
-  )
+  if(WIN32)
+    set_target_properties(fbgemm::asmjit PROPERTIES
+      IMPORTED_LOCATION ${ASMJIT_LIB}
+    )
+  else()
+    set_target_properties(fbgemm::asmjit PROPERTIES
+      IMPORTED_LOCATION ${ASMJIT_LIB}
+      INTERFACE_LINK_LIBRARIES "rt"
+    )
+  endif()
 
   # Build list of dependencies
   set(FBGEMM_DEPENDENCIES fbgemm::cpuinfo fbgemm::asmjit)

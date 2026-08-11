@@ -79,7 +79,14 @@ static void run_parallel_omp(const void *src, const void *weight, void *dst,
 
     apilog_info("Using OpenMP parallel for");
 
+    // MSVC's OpenMP rejects collapsing this nest (non-unit-stride inner loop,
+    // C7720); parallelise the outer (batch) loop only there. Same results, just a
+    // coarser decomposition when batch_count is small.
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma omp parallel for
+#else
 #pragma omp parallel for collapse(2)
+#endif
     for (int b = 0; b < config.batch_count; ++b) {
         for (int m_start = 0; m_start < config.M; m_start += M_block) {
             int m_len = std::min(M_block, config.M - m_start);

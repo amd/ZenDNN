@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "common/zendnnl_api.hpp"
 #include "lowoha_conv_utils.hpp"
 
 namespace zendnnl {
@@ -39,7 +40,7 @@ namespace conv {
  *
  * @return status_t::success or status_t::failure
  */
-status_t conv_direct(const void *input, // [N, H, W, C]
+ZENDNNL_API status_t conv_direct(const void *input, // [N, H, W, C]
         const void *filter, // [KH, KW, C_in, C_out]
         const void *bias, // [C_out] or nullptr
         void *output, // [N, H_out, W_out, C_out]

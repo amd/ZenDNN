@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
@@ -108,8 +109,8 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
         size_t alignment = 64;
         size_t comp_size
                 = (N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc
-                = static_cast<int32_t *>(aligned_alloc(alignment, comp_size));
+        zp_comp_acc = static_cast<int32_t *>(
+                zendnnl_aligned_alloc(alignment, comp_size));
         if (!zp_comp_acc) return nullptr;
 
         // Compute column sums of weights
@@ -133,7 +134,7 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
             std::lock_guard<std::mutex> lock(get_lowoha_mutex());
             int32_t *cached_comp = nullptr;
             if (zp_comp_cache.try_get(key_obj, cached_comp)) {
-                std::free(static_cast<void *>(zp_comp_acc));
+                zendnnl_aligned_free(static_cast<void *>(zp_comp_acc));
                 log_info(
                         "Cache hit after compute: peer inserted zero-point "
                         "compensation; "
@@ -151,8 +152,8 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc
-                = static_cast<int32_t *>(aligned_alloc(alignment, comp_size));
+        zp_comp_acc = static_cast<int32_t *>(
+                zendnnl_aligned_alloc(alignment, comp_size));
         if (!zp_comp_acc) return nullptr;
 
         // Compute row sums of source
@@ -188,8 +189,8 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
         size_t alignment = 64;
         size_t comp_size
                 = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
-        zp_comp_acc
-                = static_cast<int32_t *>(aligned_alloc(alignment, comp_size));
+        zp_comp_acc = static_cast<int32_t *>(
+                zendnnl_aligned_alloc(alignment, comp_size));
         if (!zp_comp_acc) return nullptr;
 
         // Compute row sums of source

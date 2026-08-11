@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/fp32_brgemm_looper.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/fp32_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/brgemm_planner.hpp"
@@ -39,7 +40,8 @@ using namespace zendnnl::error_handling;
 using zendnnl::ops::matmul_config_t;
 using zendnnl::ops::post_op_type_t;
 
-__attribute__((target("avx512f"))) static void scale_tile(
+ZENDNNL_TARGET("avx512f")
+static void scale_tile(
         float *C, int ldc, int m_count, int n_count, float alpha) {
     __m512 av = _mm512_set1_ps(alpha);
     for (int m = 0; m < m_count; ++m) {
@@ -302,8 +304,8 @@ void brgemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
         const size_t total = static_cast<size_t>(np) * K * NR_PACK;
 
         if (s_tb_cap < total) {
-            std::free(s_tb);
-            s_tb = static_cast<float *>(std::aligned_alloc(
+            zendnnl_aligned_free(s_tb);
+            s_tb = static_cast<float *>(zendnnl_aligned_alloc(
                     64, ((total * sizeof(float) + 63) & ~size_t(63))));
             s_tb_cap = total;
         }

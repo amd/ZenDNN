@@ -38,11 +38,10 @@ namespace native {
 ///
 /// A must be u8. If source is s8, caller adds 128 to each element and
 /// adjusts src_zp accordingly (folded into effective_bias).
-void int8_gemv_bkc(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_kc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+void int8_gemv_bkc(const uint8_t *__restrict A, const int8_t *__restrict B_kc,
+        const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int K, int N);
 
 /// Pack s8 weight matrix B into blocked K-contiguous (BKC) INT8 VNNI layout.
@@ -53,11 +52,10 @@ void pack_b_int8_bkc(const int8_t *B, int ldb, int K, int N, bool transB,
         int8_t *packed, int32_t *col_sum);
 
 /// Wide-block dispatch for NP=5,6 (separate CU to avoid i-cache pollution).
-void int8_gemv_bkc_wide_dispatch(const uint8_t *__restrict__ A,
-        const int8_t *__restrict__ B_bkc,
-        const float *__restrict__ combined_scale,
-        const float *__restrict__ effective_bias, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, fused_postop_t fused_op, float alpha,
+void int8_gemv_bkc_wide_dispatch(const uint8_t *__restrict A,
+        const int8_t *__restrict B_bkc, const float *__restrict combined_scale,
+        const float *__restrict effective_bias, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, fused_postop_t fused_op, float alpha,
         float beta, bool dst_is_bf16, int k_quads, int n_stride, int K, int N,
         int jc, int nb);
 

@@ -33,6 +33,13 @@ if (ZENDNNL_DEPENDS_FBGEMM)
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
     list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
 
+    # On Windows, forward the main build's compiler so the FBGEMM sub-build
+    # uses cl. Gated to Windows so the Linux build's behavior is unchanged.
+    if(WIN32)
+      list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+      list(APPEND FBGEMM_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+    endif()
+
     message(DEBUG "${ZENDNNL_MSG_PREFIX}FBGEMM_CMAKE_ARGS=${FBGEMM_CMAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
@@ -81,14 +88,18 @@ if (ZENDNNL_DEPENDS_FBGEMM)
         UPDATE_DISCONNECTED TRUE)
     endif()
 
-    # Add custom step to install asmjit library (not installed by default)
-    ExternalProject_Add_Step(zendnnl-deps-fbgemm install_asmjit
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              "${CMAKE_CURRENT_BINARY_DIR}/fbgemm/asmjit/libasmjit.a"
-              "${CMAKE_INSTALL_PREFIX}/deps/fbgemm/lib/libasmjit.a"
-      DEPENDEES install
-      COMMENT "Installing asmjit library"
-    )
+    # Add custom step to install asmjit library (not installed by default on
+    # Linux). On Windows, FBGEMM's own install already installs asmjit.lib into
+    # deps/fbgemm/lib, so this copy is unnecessary (and the .a name is wrong).
+    if(NOT WIN32)
+      ExternalProject_Add_Step(zendnnl-deps-fbgemm install_asmjit
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_BINARY_DIR}/fbgemm/asmjit/libasmjit.a"
+                "${CMAKE_INSTALL_PREFIX}/deps/fbgemm/lib/libasmjit.a"
+        DEPENDEES install
+        COMMENT "Installing asmjit library"
+      )
+    endif()
 
     list(APPEND FBGEMM_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/fbgemm")
     list(APPEND FBGEMM_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/fbgemm")

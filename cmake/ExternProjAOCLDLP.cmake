@@ -27,6 +27,14 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
     list(APPEND AD_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
+    # On Windows, forward the main build's compiler so the AOCL-DLP sub-build
+    # uses cl rather than auto-detecting a different compiler. Gated to Windows
+    # so the Linux build's existing behavior is unchanged.
+    if(WIN32)
+      list(APPEND AD_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+      list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+    endif()
+
     # uncoment if openmp root need to be given
     # list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp")
 
@@ -68,8 +76,8 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
         INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
         CMAKE_ARGS ${AD_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-        INSTALL_COMMAND cmake --build . --config release --target install)
+        BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+        INSTALL_COMMAND cmake --build . --config Release --target install)
     else()
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download AOCL-DLP with tag ${AOCLDLP_GIT_TAG}")
       ExternalProject_ADD(zendnnl-deps-aocldlp
@@ -80,8 +88,8 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         GIT_TAG ${AOCLDLP_GIT_TAG}
         GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
         CMAKE_ARGS ${AD_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-        INSTALL_COMMAND cmake --build . --config release --target install
+        BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+        INSTALL_COMMAND cmake --build . --config Release --target install
         UPDATE_DISCONNECTED TRUE)
     endif()
 

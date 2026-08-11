@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_BF16_BRGEMM_UKERNEL_HPP
 
 #include <cstdint>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
@@ -25,30 +26,29 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-using bf16_brgemm_fn_t = void (*)(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+using bf16_brgemm_fn_t = void (*)(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, float beta, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16);
 
-__attribute__((target("avx512f,avx512bf16,fma"))) bf16_brgemm_fn_t
-select_bf16_brgemm_kernel(int MR, int NR);
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR);
 
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) void
-bf16_brgemm_tail_kernel(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, int mr_act, int nr_act,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+void bf16_brgemm_tail_kernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int K, int BK, int mr_act, int nr_act, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16);
 
 // Templated MR + runtime nr_partial ∈ [1..15] masked NV=1 kernel.
 // Selector returns nullptr for unsupported MR (currently anything
 // outside {1..6, 8}).
-using bf16_brgemm_n_masked_fn_t = void (*)(const uint16_t *__restrict__ A,
-        int lda, const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int K, int BK, int nr_partial,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+using bf16_brgemm_n_masked_fn_t = void (*)(const uint16_t *__restrict A,
+        int lda, const uint16_t *__restrict B_vnni, int b_stride,
+        float *__restrict C, int ldc, int K, int BK, int nr_partial, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16);
 
 bf16_brgemm_n_masked_fn_t select_bf16_brgemm_n_masked_kernel(int MR);
 

@@ -41,9 +41,9 @@ inline int choose_blk_n(int N) {
 /// (256 or 384 columns depending on N alignment), each packed with
 /// K-contiguous VNNI layout. Within each block, all k-pairs are
 /// contiguous with stride = blk_N_padded × VNNI_PAIR.
-void bf16_gemv_bkc(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+void bf16_gemv_bkc(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int K, int N);
 
@@ -55,9 +55,9 @@ void pack_b_bkc_ext(const uint16_t *B, int ldb, int K, int N, bool transB,
 
 /// Wide-block dispatch for NP=5,6 (separate CU to avoid i-cache pollution).
 /// Called from bf16_gemv_bkc when block width is 384.
-void bf16_gemv_bkc_wide_dispatch(const uint16_t *__restrict__ A,
-        const uint16_t *__restrict__ B_bkc, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+void bf16_gemv_bkc_wide_dispatch(const uint16_t *__restrict A,
+        const uint16_t *__restrict B_bkc, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16,
         int k_pairs, int n_stride, int K, int N, int jc, int nb);
 

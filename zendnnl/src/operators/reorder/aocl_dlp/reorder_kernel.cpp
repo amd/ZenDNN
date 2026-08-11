@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "reorder_kernel.hpp"
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace ops {
@@ -59,7 +60,8 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     size_t alignment = 64;
     size_t reorder_size_padded
             = (output_buff_size + alignment - 1) & ~(alignment - 1);
-    void *interim_output = aligned_alloc(alignment, reorder_size_padded);
+    void *interim_output
+            = zendnnl_aligned_alloc(alignment, reorder_size_padded);
     if (interim_output == nullptr) {
         log_error("reorder_weights can not have align allocation");
         return status_t::unimplemented;
@@ -109,7 +111,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
             log_error(
                     "f16 reorder requires AOCL DLP; rebuild with "
                     "ZENDNNL_DEPENDS_AOCLDLP");
-            free(interim_output);
+            zendnnl_aligned_free(interim_output);
             return status_t::unimplemented;
         }
 #endif
@@ -175,7 +177,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
             log_error(
                     "f16 unreorder requires AOCL DLP; rebuild with "
                     "ZENDNNL_DEPENDS_AOCLDLP");
-            free(interim_output);
+            zendnnl_aligned_free(interim_output);
             return status_t::unimplemented;
         }
 #endif
@@ -190,7 +192,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
             data_copy<int8_t>(output, interim_output, output_buff_size);
         }
     }
-    free(interim_output);
+    zendnnl_aligned_free(interim_output);
 
     return status_t::success;
 }

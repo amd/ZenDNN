@@ -90,6 +90,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 
 #include <omp.h>
 
@@ -127,7 +128,7 @@ namespace {
 struct FusedMoEArena {
     void *buf = nullptr;
     size_t cap = 0;
-    ~FusedMoEArena() { std::free(buf); }
+    ~FusedMoEArena() { zendnnl_aligned_free(buf); }
 };
 
 // Per-thread persistent Op2 setup scratch.  Holds the working arrays
@@ -203,7 +204,7 @@ inline FusedMoEScratch &get_thread_local_scratch() {
 // worker.
 inline void reset_thread_local_fused_moe_state() {
     FusedMoEArena &arena = get_thread_local_arena();
-    std::free(arena.buf);
+    zendnnl_aligned_free(arena.buf);
     arena.buf = nullptr;
     arena.cap = 0;
 
@@ -497,13 +498,13 @@ inline status_t validate_fused_moe_inputs(
                 const size_t m_sz = static_cast<size_t>(M[i]);
                 const size_t n_sz = static_cast<size_t>(N[i]);
                 size_t per_expert_bytes = 0;
-                if (__builtin_mul_overflow(m_sz, n_sz, &per_expert_bytes))
+                if (zendnnl_mul_overflow(m_sz, n_sz, &per_expert_bytes))
                     return status_t::failure;
-                if (__builtin_mul_overflow(per_expert_bytes, dst_elem_internal,
+                if (zendnnl_mul_overflow(per_expert_bytes, dst_elem_internal,
                             &per_expert_bytes))
                     return status_t::failure;
-                if (__builtin_add_overflow(total_bytes_internal,
-                            per_expert_bytes, &total_bytes_internal))
+                if (zendnnl_add_overflow(total_bytes_internal, per_expert_bytes,
+                            &total_bytes_internal))
                     return status_t::failure;
             }
         }
@@ -585,11 +586,12 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
     if (want_tight) arena_bytes /= 2;
 
     if (op1_internal && arena_bytes > arena.cap) {
-        std::free(arena.buf);
+        zendnnl_aligned_free(arena.buf);
         arena.buf = nullptr;
         arena.cap = 0;
         void *tmp = nullptr;
-        if (posix_memalign(&tmp, 64, arena_bytes) != 0 || tmp == nullptr)
+        if (zendnnl_posix_memalign(&tmp, 64, arena_bytes) != 0
+                || tmp == nullptr)
             return status_t::failure;
         arena.buf = tmp;
         arena.cap = arena_bytes;
@@ -629,13 +631,12 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
                     const size_t m_sz = static_cast<size_t>(M[i]);
                     const size_t row_sz = static_cast<size_t>(row_cols);
                     size_t per_expert_bytes = 0;
-                    if (__builtin_mul_overflow(m_sz, row_sz, &per_expert_bytes))
+                    if (zendnnl_mul_overflow(m_sz, row_sz, &per_expert_bytes))
                         return status_t::failure;
-                    if (__builtin_mul_overflow(per_expert_bytes,
+                    if (zendnnl_mul_overflow(per_expert_bytes,
                                 dst_elem_internal, &per_expert_bytes))
                         return status_t::failure;
-                    if (__builtin_add_overflow(
-                                cursor, per_expert_bytes, &cursor))
+                    if (zendnnl_add_overflow(cursor, per_expert_bytes, &cursor))
                         return status_t::failure;
                 }
             }

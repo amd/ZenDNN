@@ -94,6 +94,14 @@ private:
 
 } //namespace ops
 
+// Keep `interface` undef'd for the rest of the TU (do NOT push/pop-restore):
+// `interface` is a public zendnnl namespace that consumers reference (e.g.
+// `using namespace zendnnl::interface;`) after including this header, so the
+// Windows <windows.h> `interface` macro must stay undefined here -- restoring
+// it would re-shadow the namespace and break downstream consumers on Windows.
+#ifdef interface
+#undef interface
+#endif
 namespace interface {
 using matmul_context_t = zendnnl::ops::matmul_context_t;
 } // namespace interface

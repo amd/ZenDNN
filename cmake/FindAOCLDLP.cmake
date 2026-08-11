@@ -15,15 +15,30 @@
 #  *******************************************************************************
 
 set(AOCLDLP_LIB_ROOT "${AOCLDLP_INSTALL_DIR}/lib")
-find_library(AOCLDLP_LIB
-  NAMES libaocl-dlp.so
-  PATHS ${AOCLDLP_LIB_ROOT}
-  NO_DEFAULT_PATH)
+if(WIN32)
+  # Windows/MSVC install names: the DLL's import library is aocl-dlp.lib (in
+  # lib/, DLL itself in bin/) and the static archive is aocl-dlp_static.lib.
+  # find_library adds the .lib suffix, so pass the base names.
+  find_library(AOCLDLP_LIB
+    NAMES aocl-dlp
+    PATHS ${AOCLDLP_LIB_ROOT}
+    NO_DEFAULT_PATH)
 
-find_library(AOCLDLP_ARCHIVE_LIB
-  NAMES libaocl-dlp.a
-  PATHS ${AOCLDLP_LIB_ROOT}
-  NO_DEFAULT_PATH)
+  find_library(AOCLDLP_ARCHIVE_LIB
+    NAMES aocl-dlp_static
+    PATHS ${AOCLDLP_LIB_ROOT}
+    NO_DEFAULT_PATH)
+else()
+  find_library(AOCLDLP_LIB
+    NAMES libaocl-dlp.so
+    PATHS ${AOCLDLP_LIB_ROOT}
+    NO_DEFAULT_PATH)
+
+  find_library(AOCLDLP_ARCHIVE_LIB
+    NAMES libaocl-dlp.a
+    PATHS ${AOCLDLP_LIB_ROOT}
+    NO_DEFAULT_PATH)
+endif()
 
 set(AOCLDLP_INCLUDE_ROOT "${AOCLDLP_INSTALL_DIR}/include")
 find_path(AOCLDLP_INCLUDE_DIR

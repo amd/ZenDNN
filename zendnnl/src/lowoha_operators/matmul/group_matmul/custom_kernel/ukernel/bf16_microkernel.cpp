@@ -42,6 +42,7 @@
 ///   producing NV*8 BF16 outputs in total (NV=2 → 16; NV=4 → 32).
 
 #include "bf16_microkernel.hpp"
+#include "common/zendnnl_compat.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -126,8 +127,9 @@ alignas(64) constexpr int32_t kUpLaneIdx[16]
 // for any (A, B, bias) input.  Cross-path comparisons should expect
 // sub-ULP differences in the "better" direction; the gated-act gtest
 // tolerance is sized to accept both.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline void
-swiglu_oai_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void swiglu_oai_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
@@ -198,8 +200,9 @@ swiglu_oai_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 //   * Three FMAs to compute `y2 = c1·x + c2·x³` (vs zero in silu).
 //   * Otherwise identical: same `sigmoid_avx512`, same `gate * up`
 //     finish, same `f32_to_bf16x16` store path.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline void
-gelu_and_mul_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void gelu_and_mul_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
@@ -234,8 +237,9 @@ gelu_and_mul_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 //   * No alpha multiplier on gate (swiglu_oai uses α=1.702; standard
 //     silu uses α=1, i.e. no multiplier).
 //   * Final multiply is `silu(gate) * up`, not `(1+up) * (gate * sig)`.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) static inline void
-silu_and_mul_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void silu_and_mul_store_pair(
+        __m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
     const __m512i up_idx = _mm512_load_si512(kUpLaneIdx);
 
@@ -258,12 +262,11 @@ silu_and_mul_store_pair(__m512 acc_lo, __m512 acc_hi, bfloat16_t *dst_row) {
 // duplicating the body at every dispatch site.
 // ─────────────────────────────────────────────────────────────────────
 template <int MR, int NV, ActKind Act, typename DstT>
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"),
-        noinline)) static void
-ukernel_impl(const bfloat16_t *__restrict__ A, int lda,
-        const bfloat16_t *__restrict__ Bpacked, const void *__restrict__ bias,
-        BiasKind bias_kind, void *__restrict__ Cout_void, int ldc,
-        void *__restrict__ Cout_tight_void, int ldc_tight, int K) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
+        const bfloat16_t *__restrict Bpacked, const void *__restrict bias,
+        BiasKind bias_kind, void *__restrict Cout_void, int ldc,
+        void *__restrict Cout_tight_void, int ldc_tight, int K) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
     static_assert(Act == ActKind::none || (NV % 2 == 0),
@@ -287,8 +290,8 @@ ukernel_impl(const bfloat16_t *__restrict__ A, int lda,
     // Reinterpret the dispatcher's `void *` outputs as the templated
     // dst type.  ldc / ldc_tight stay in element units (not bytes) —
     // pointer arithmetic below uses them with implicit DstT scaling.
-    DstT *__restrict__ Cout = static_cast<DstT *>(Cout_void);
-    DstT *__restrict__ Cout_tight = static_cast<DstT *>(Cout_tight_void);
+    DstT *__restrict Cout = static_cast<DstT *>(Cout_void);
+    DstT *__restrict Cout_tight = static_cast<DstT *>(Cout_tight_void);
 
     // ── Accumulator-register budget ──────────────────────────────────
     // Base single-buffer footprint per row is `NV` FP32 zmms.  Small-MR
@@ -430,7 +433,7 @@ ukernel_impl(const bfloat16_t *__restrict__ A, int lda,
         // Prolog: load B for kp=0 so the first outer iteration starts
         // with bv_cur already in flight.  The B-stream loads here and
         // below use the UNALIGNED intrinsic (`_mm512_loadu_si512` →
-        // vmovdqu64).  Out-of-place packs come from std::aligned_alloc(64),
+        // vmovdqu64).  Out-of-place packs come from zendnnl_aligned_alloc(64),
         // but the WEIGHT_CACHE=2 in-place path hands us the caller's own
         // weight buffer, which is not guaranteed 64-byte aligned.  On
         // Zen 4 / Zen 5 vmovdqu64 has identical throughput to vmovdqa64

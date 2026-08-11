@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_gemv_direct.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
@@ -109,8 +110,8 @@ bool bkc_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
         return true;
     }
     if (s_bias_cap < static_cast<size_t>(N)) {
-        std::free(s_bias_fp32);
-        s_bias_fp32 = static_cast<float *>(std::aligned_alloc(64,
+        zendnnl_aligned_free(s_bias_fp32);
+        s_bias_fp32 = static_cast<float *>(zendnnl_aligned_alloc(64,
                 ((static_cast<size_t>(N) * sizeof(float) + 63) & ~size_t(63))));
         s_bias_cap = s_bias_fp32 ? static_cast<size_t>(N) : 0;
         if (!s_bias_fp32) return false;
@@ -176,8 +177,8 @@ bool bkc_resolve_packed_B_st(const GemmDescriptor &desc, int K, int N,
             && tl_tr == desc.transB && tl_gen == cur_gen);
     if (!hit) {
         if (tl_cap < need) {
-            std::free(tl_buf);
-            tl_buf = static_cast<uint16_t *>(std::aligned_alloc(
+            zendnnl_aligned_free(tl_buf);
+            tl_buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
                     64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
             tl_cap = tl_buf ? need : 0;
         }
@@ -220,8 +221,8 @@ bool bkc_pack_column_slice(const GemmDescriptor &desc, int K, int K_padded,
 
     if (!can_reuse) {
         if (cap < need) {
-            std::free(buf);
-            buf = static_cast<uint16_t *>(std::aligned_alloc(
+            zendnnl_aligned_free(buf);
+            buf = static_cast<uint16_t *>(zendnnl_aligned_alloc(
                     64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
             cap = buf ? need : 0;
         }
@@ -241,8 +242,8 @@ bool bkc_pack_column_slice(const GemmDescriptor &desc, int K, int K_padded,
 
 } // namespace
 
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) bool
-bf16_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+bool bf16_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
         const void *src, const void *weight, void *dst, const void *bias,
         matmul_params &params) {
 

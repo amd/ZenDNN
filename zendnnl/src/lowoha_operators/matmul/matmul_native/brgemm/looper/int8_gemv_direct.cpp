@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
@@ -62,8 +63,8 @@ bool int8_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
         return true;
     }
     if (s_bias_cap < static_cast<size_t>(N)) {
-        std::free(s_bias_f);
-        s_bias_f = static_cast<float *>(std::aligned_alloc(64,
+        zendnnl_aligned_free(s_bias_f);
+        s_bias_f = static_cast<float *>(zendnnl_aligned_alloc(64,
                 ((static_cast<size_t>(N) * sizeof(float) + 63) & ~size_t(63))));
         s_bias_cap = s_bias_f ? static_cast<size_t>(N) : 0;
         if (!s_bias_f) return false;
@@ -82,8 +83,8 @@ bool int8_resolve_bias_f(const GemmDescriptor &desc, int N, const void *bias,
 
 } // namespace
 
-__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni"))) bool
-int8_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512vnni")
+bool int8_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
         const void *src, const void *weight, void *dst, const void *bias,
         matmul_params &params) {
 
@@ -150,9 +151,9 @@ int8_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
     } else {
         // s8 → u8: add 128, adjust zp
         if (s_a_cap < static_cast<size_t>(K)) {
-            std::free(s_a_buf);
+            zendnnl_aligned_free(s_a_buf);
             s_a_buf = static_cast<uint8_t *>(
-                    std::aligned_alloc(64, ((K + 63) & ~size_t(63))));
+                    zendnnl_aligned_alloc(64, ((K + 63) & ~size_t(63))));
             s_a_cap = s_a_buf ? K : 0;
         }
         if (!s_a_buf) return false;
@@ -232,21 +233,21 @@ int8_gemv_direct(const GemmDescriptor &desc, const UarchParams &uarch,
         const size_t need_pack = static_cast<size_t>(K_padded) * N_padded;
         constexpr size_t bkc_guard = NR_PACK * INT8_VNNI_GRP;
         if (s_bkc_cap < need_pack + bkc_guard) {
-            std::free(s_bkc);
-            s_bkc = static_cast<int8_t *>(std::aligned_alloc(
+            zendnnl_aligned_free(s_bkc);
+            s_bkc = static_cast<int8_t *>(zendnnl_aligned_alloc(
                     64, ((need_pack + bkc_guard + 63) & ~size_t(63))));
             s_bkc_cap = s_bkc ? need_pack + bkc_guard : 0;
         }
         if (!s_bkc) return false;
 
         if (s_dq_cap < static_cast<size_t>(N_padded)) {
-            std::free(s_cs);
-            std::free(s_cscale);
-            std::free(s_ebias);
+            zendnnl_aligned_free(s_cs);
+            zendnnl_aligned_free(s_cscale);
+            zendnnl_aligned_free(s_ebias);
             size_t alloc_n = ((N_padded * sizeof(float) + 63) & ~size_t(63));
-            s_cs = static_cast<int32_t *>(std::aligned_alloc(64, alloc_n));
-            s_cscale = static_cast<float *>(std::aligned_alloc(64, alloc_n));
-            s_ebias = static_cast<float *>(std::aligned_alloc(64, alloc_n));
+            s_cs = static_cast<int32_t *>(zendnnl_aligned_alloc(64, alloc_n));
+            s_cscale = static_cast<float *>(zendnnl_aligned_alloc(64, alloc_n));
+            s_ebias = static_cast<float *>(zendnnl_aligned_alloc(64, alloc_n));
             s_dq_cap = (s_cs && s_cscale && s_ebias) ? N_padded : 0;
         }
         if (!s_cs || !s_cscale || !s_ebias) return false;

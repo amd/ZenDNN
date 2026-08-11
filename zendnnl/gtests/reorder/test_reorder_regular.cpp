@@ -52,7 +52,7 @@ TEST_P(TestReorder, F32_F32) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -70,7 +70,7 @@ TEST_P(TestReorder, F32_F32) {
 
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn TEST_P
@@ -98,7 +98,7 @@ TEST_P(TestReorder, BF16_F32) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -116,7 +116,7 @@ TEST_P(TestReorder, BF16_F32) {
 
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn TEST_P
@@ -144,7 +144,7 @@ TEST_P(TestReorder, BF16_BF16) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
@@ -162,7 +162,7 @@ TEST_P(TestReorder, BF16_BF16) {
 
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn TEST_P
@@ -184,7 +184,7 @@ TEST_P(TestReorder, F32) {
     auto [reorder_weights, reorder_status] = reorder_kernel_test(
             weights, inplace_reorder, &weights_buff, source_dtype);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
 
@@ -192,7 +192,7 @@ TEST_P(TestReorder, F32) {
     auto [unreorder_weights, unreorder_status] = reorder_kernel_test(
             reorder_weights, inplace_reorder, &weights_buffer, source_dtype);
     if (unreorder_status == status_t::unimplemented) {
-        if (weights_buffer) { free(weights_buffer); }
+        if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
         GTEST_SKIP();
     }
 
@@ -203,8 +203,8 @@ TEST_P(TestReorder, F32) {
             is_test_successful);
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
-    if (weights_buffer) { free(weights_buffer); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
+    if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
 }
 
 /** @fn TEST_P
@@ -226,7 +226,7 @@ TEST_P(TestReorder, BF16) {
     auto [reorder_weights, reorder_status] = reorder_kernel_test(
             weights, inplace_reorder, &weights_buff, source_dtype);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
 
@@ -234,7 +234,7 @@ TEST_P(TestReorder, BF16) {
     auto [unreorder_weights, unreorder_status] = reorder_kernel_test(
             reorder_weights, inplace_reorder, &weights_buffer, source_dtype);
     if (unreorder_status == status_t::unimplemented) {
-        if (weights_buffer) { free(weights_buffer); }
+        if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
         GTEST_SKIP();
     }
 
@@ -245,8 +245,8 @@ TEST_P(TestReorder, BF16) {
             is_test_successful);
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
-    if (weights_buffer) { free(weights_buffer); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
+    if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
 }
 
 /** @fn TEST_P
@@ -268,7 +268,7 @@ TEST_P(TestReorder, S8) {
     auto [reorder_weights, reorder_status] = reorder_kernel_test(
             weights, inplace_reorder, &weights_buff, source_dtype);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
 
@@ -276,7 +276,7 @@ TEST_P(TestReorder, S8) {
     auto [unreorder_weights, unreorder_status] = reorder_kernel_test(
             reorder_weights, inplace_reorder, &weights_buffer, source_dtype);
     if (unreorder_status == status_t::unimplemented) {
-        if (weights_buffer) { free(weights_buffer); }
+        if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
         GTEST_SKIP();
     }
 
@@ -287,8 +287,8 @@ TEST_P(TestReorder, S8) {
             is_test_successful);
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
-    if (weights_buffer) { free(weights_buffer); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
+    if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
 }
 
 /** @fn TEST_P
@@ -310,11 +310,11 @@ TEST_P(TestReorder, F16) {
     auto [reorder_weights, reorder_status] = reorder_kernel_test(
             weights, inplace_reorder, &weights_buff, source_dtype);
     if (reorder_status == status_t::isa_unsupported) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP() << "F16 not supported: requires AVX512-FP16 ISA";
     }
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
 
@@ -322,7 +322,7 @@ TEST_P(TestReorder, F16) {
     auto [unreorder_weights, unreorder_status] = reorder_kernel_test(
             reorder_weights, inplace_reorder, &weights_buffer, source_dtype);
     if (unreorder_status == status_t::unimplemented) {
-        if (weights_buffer) { free(weights_buffer); }
+        if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
         GTEST_SKIP();
     }
 
@@ -333,8 +333,8 @@ TEST_P(TestReorder, F16) {
             is_test_successful);
     EXPECT_TRUE(is_test_successful);
 
-    if (weights_buff) { free(weights_buff); }
-    if (weights_buffer) { free(weights_buffer); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
+    if (weights_buffer) { zendnnl_aligned_free(weights_buffer); }
 }
 
 /** @fn TEST_P
@@ -382,7 +382,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -398,7 +398,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
     }
 
     EXPECT_TRUE(is_test_successful);
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn TEST_P
@@ -446,7 +446,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -462,7 +462,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
     }
 
     EXPECT_TRUE(is_test_successful);
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn TEST_P
@@ -510,7 +510,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
     auto [reorder_weights, reorder_status]
             = reorder_kernel_test(weights, inplace_reorder, &weights_buff);
     if (reorder_status == status_t::unimplemented) {
-        if (weights_buff) { free(weights_buff); }
+        if (weights_buff) { zendnnl_aligned_free(weights_buff); }
         GTEST_SKIP();
     }
     auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
@@ -526,7 +526,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
     }
 
     EXPECT_TRUE(is_test_successful);
-    if (weights_buff) { free(weights_buff); }
+    if (weights_buff) { zendnnl_aligned_free(weights_buff); }
 }
 
 /** @fn INSTANTIATE_TEST_SUITE_P

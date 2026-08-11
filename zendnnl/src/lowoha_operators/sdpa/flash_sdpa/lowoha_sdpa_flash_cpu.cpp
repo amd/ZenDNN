@@ -6,6 +6,7 @@
 # *******************************************************************************/
 
 #include "lowoha_sdpa_flash_cpu.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/common/simd_ops.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
@@ -31,7 +32,7 @@
 // (__m512).  The note warns that the calling convention for these types
 // differs from GCC 4.6 — irrelevant for any modern toolchain.  The
 // template helpers below pass __m512 to/from SimdOps<avx512_tag> methods
-// that carry __attribute__((target("avx512f,..."))), which is correct.
+// that carry ZENDNNL_TARGET("avx512f,..."), which is correct.
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpsabi"

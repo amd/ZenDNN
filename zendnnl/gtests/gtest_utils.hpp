@@ -17,13 +17,33 @@
 #ifndef _GTEST_UTILS_HPP_
 #define _GTEST_UTILS_HPP_
 #include <algorithm>
+#include <cstdlib>
 #include <omp.h>
 #include <optional>
 #include <random>
 #include <string>
 #include <variant>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
+#include "memory/tensor.hpp"
+
+// Portable env helpers: setenv/unsetenv are POSIX and are not provided by the
+// MSVC CRT. Map them onto _putenv_s (honoring setenv's overwrite flag;
+// _putenv_s(name, "") removes the variable, matching unsetenv). Gated on
+// _MSC_VER (real cl and clang-cl share the MSVC CRT) rather than _WIN32:
+// MinGW and other non-MSVC Windows toolchains provide the real POSIX
+// setenv/unsetenv, so defining the shim there would clash with them. GCC/Clang
+// on Linux keep the POSIX functions too, so the test bodies stay unchanged.
+#if defined(_MSC_VER)
+static inline int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && std::getenv(name) != nullptr) { return 0; }
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char *name) {
+    return _putenv_s(name, "");
+}
+#endif
 #include "lowoha_operators/embedding_bag/lowoha_embag_ref_kernel.hpp"
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
@@ -36,7 +56,6 @@
 #include "lowoha_operators/sdpa/reference/lowoha_sdpa_ref_kernel.hpp"
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
 #include "lowoha_operators/softmax/reference_kernel.hpp"
-#include "memory/tensor.hpp"
 #include "operators/embag/embag_context.hpp"
 #include "operators/embag/embag_operator.hpp"
 #include "operators/matmul/matmul_context.hpp"

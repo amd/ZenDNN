@@ -23,6 +23,7 @@
 #include <immintrin.h>
 #include <limits>
 #include <omp.h>
+#include "common/zendnnl_compat.hpp"
 #include <type_traits>
 
 #include "embag_avx2_kernels.hpp"
@@ -107,8 +108,8 @@ inline void maybe_prefetch_weight(
 */
 
 // Helper function for BF16 to FP32 conversion
-__attribute__((target("avx2,avx512vl"))) inline __m256 bf16_to_fp32_avx2(
-        const uint16_t *bf16_data) {
+ZENDNNL_TARGET("avx2,avx512vl")
+inline __m256 bf16_to_fp32_avx2(const uint16_t *bf16_data) {
     // Load 8 BF16 values (16-bit each)
     __m128i bf16_vec
             = _mm_loadu_si128(reinterpret_cast<const __m128i *>(bf16_data));
@@ -121,8 +122,8 @@ __attribute__((target("avx2,avx512vl"))) inline __m256 bf16_to_fp32_avx2(
 }
 
 // Helper function for FP32 to BF16 conversion
-__attribute__((target("avx2,avx512vl"))) inline void fp32_to_bf16_avx2(
-        __m256 fp32_vec, uint16_t *bf16_data) {
+ZENDNNL_TARGET("avx2,avx512vl")
+inline void fp32_to_bf16_avx2(__m256 fp32_vec, uint16_t *bf16_data) {
     // Convert to int32, then extract upper 16 bits
     __m256i fp32_int = _mm256_castps_si256(fp32_vec);
     __m256i bf16_32 = _mm256_srli_epi32(fp32_int, 16);
@@ -134,7 +135,8 @@ __attribute__((target("avx2,avx512vl"))) inline void fp32_to_bf16_avx2(
 
 template <typename InType, typename IndexType, typename OffsetType,
         typename OutType>
-__attribute__((target("avx2,fma"))) void embag_avx2_kernel(
+ZENDNNL_TARGET("avx2,fma")
+void embag_avx2_kernel(
         const InType *input, // [num_embeddings, width] - embedding table
         const float *weights, // [indsz] or nullptr if is_weights == false
         const IndexType *indices, // [indsz] - indices into embedding table

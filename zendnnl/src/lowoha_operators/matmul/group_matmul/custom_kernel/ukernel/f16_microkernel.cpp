@@ -137,10 +137,8 @@ alignas(64) constexpr int32_t kUpLaneIdx[16]
 // Convert a `float16_t` (raw uint16 storage) to the `_Float16` scalar
 // the `_mm512_set1_ph` broadcast expects.  A bit-copy — no arithmetic
 // — so it is exact and the optimiser folds it into the broadcast load.
-__attribute__((always_inline,
-        target("avx512f,avx512fp16,avx512bw,avx512vl,"
-               "fma"))) static inline _Float16
-f16_raw_to_scalar(const float16_t &v) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline _Float16 f16_raw_to_scalar(const float16_t &v) {
     _Float16 hv;
     const uint16_t r = v.raw();
     std::memcpy(&hv, &r, sizeof(hv));
@@ -154,9 +152,8 @@ f16_raw_to_scalar(const float16_t &v) {
 // `f32_to_f16x16` and stores 256 bits.  Same structure as the bf16
 // `swiglu_oai_store_pair`, only the widen step (FP16→FP32) and the
 // final cvt (FP32→F16 instead of FP32→BF16) differ.
-__attribute__((
-        target("avx512f,avx512fp16,avx512bw,avx512vl,fma"))) static inline void
-swiglu_oai_store_pair_f16(__m512h acc, float16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void swiglu_oai_store_pair_f16(__m512h acc, float16_t *dst_row) {
     __m512 lo, hi;
     float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
@@ -170,9 +167,9 @@ swiglu_oai_store_pair_f16(__m512h acc, float16_t *dst_row) {
 
 // Apply silu_and_mul in registers — silu(gate) * up.  See the bf16
 // sibling's `silu_and_mul_store_pair` for the numerical contract.
-__attribute__((
-        target("avx512f,avx512fp16,avx512bw,avx512vl,fma"))) static inline void
-silu_and_mul_store_pair_f16(__m512h acc, float16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void silu_and_mul_store_pair_f16(
+        __m512h acc, float16_t *dst_row) {
     __m512 lo, hi;
     float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
@@ -187,9 +184,9 @@ silu_and_mul_store_pair_f16(__m512h acc, float16_t *dst_row) {
 // Apply gelu_and_mul in registers — gelu(gate) * up (gelu_tanh form,
 // see the bf16 sibling's `gelu_and_mul_store_pair` for the numerical
 // contract).
-__attribute__((
-        target("avx512f,avx512fp16,avx512bw,avx512vl,fma"))) static inline void
-gelu_and_mul_store_pair_f16(__m512h acc, float16_t *dst_row) {
+ZENDNNL_TARGET("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static inline void gelu_and_mul_store_pair_f16(
+        __m512h acc, float16_t *dst_row) {
     __m512 lo, hi;
     float16_t::cvt_f16_to_f32_vec(acc, lo, hi);
     const __m512i gate_idx = _mm512_load_si512(kGateLaneIdx);
@@ -210,12 +207,11 @@ gelu_and_mul_store_pair_f16(__m512h acc, float16_t *dst_row) {
 // cover the NR = NV*16 columns of one o-block.
 // ─────────────────────────────────────────────────────────────────────
 template <int MR, int NV, ActKind Act, typename DstT>
-__attribute__((target("avx512f,avx512fp16,avx512bw,avx512vl,fma"),
-        noinline)) static void
-ukernel_impl(const float16_t *__restrict__ A, int lda,
-        const float16_t *__restrict__ Bpacked, const void *__restrict__ bias,
-        BiasKind bias_kind, void *__restrict__ Cout_void, int ldc,
-        void *__restrict__ Cout_tight_void, int ldc_tight, int K) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512fp16,avx512bw,avx512vl,fma")
+static void ukernel_impl(const float16_t *__restrict A, int lda,
+        const float16_t *__restrict Bpacked, const void *__restrict bias,
+        BiasKind bias_kind, void *__restrict Cout_void, int ldc,
+        void *__restrict Cout_tight_void, int ldc_tight, int K) {
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
     static_assert(Act == ActKind::none || (NV % 2 == 0),
@@ -229,8 +225,8 @@ ukernel_impl(const float16_t *__restrict__ A, int lda,
     static_assert(Act == ActKind::none || std::is_same<DstT, float16_t>::value,
             "Gated-activation kinds are F16-dst only");
 
-    DstT *__restrict__ Cout = static_cast<DstT *>(Cout_void);
-    DstT *__restrict__ Cout_tight = static_cast<DstT *>(Cout_tight_void);
+    DstT *__restrict Cout = static_cast<DstT *>(Cout_void);
+    DstT *__restrict Cout_tight = static_cast<DstT *>(Cout_tight_void);
 
     // NV_h native FP16 accumulators per row (32 cols each).  No double-
     // buffering: FP16 packs 32 cols/zmm so the accumulator footprint is

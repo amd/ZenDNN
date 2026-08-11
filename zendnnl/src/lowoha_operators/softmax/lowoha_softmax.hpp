@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "common/zendnnl_api.hpp"
 #include "lowoha_operators/softmax/lowoha_softmax_utils.hpp"
 
 namespace zendnnl {
@@ -37,7 +38,7 @@ namespace softmax {
  *
  * @return status_t::success or status_t::failure
  */
-status_t softmax_direct(
+ZENDNNL_API status_t softmax_direct(
         const void *input, void *output, softmax_params &params);
 
 /**

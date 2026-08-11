@@ -17,6 +17,7 @@
 #ifndef MATMUL_NATIVE_FP32_BRGEMM_UKERNEL_HPP
 #define MATMUL_NATIVE_FP32_BRGEMM_UKERNEL_HPP
 
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
@@ -25,22 +26,22 @@ namespace matmul {
 namespace native {
 
 template <int MR, int NV>
-__attribute__((target("avx512f,fma"))) void brgemm_ukernel(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int K, int BK, float beta, const float *__restrict__ bias,
+ZENDNNL_TARGET("avx512f,fma")
+void brgemm_ukernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int K, int BK, float beta, const float *__restrict bias,
         fused_postop_t fused_op);
 
-using brgemm_fn_t = void (*)(const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int K, int BK, float beta, const float *__restrict__ bias,
+using brgemm_fn_t = void (*)(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int K, int BK, float beta, const float *__restrict bias,
         fused_postop_t fused_op);
 
-__attribute__((target("avx512f,avx512bw,fma"))) void brgemm_tail_kernel(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int K, int BK, int mr_act, int nr_act, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op);
+ZENDNNL_TARGET("avx512f,avx512bw,fma")
+void brgemm_tail_kernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int K, int BK, int mr_act, int nr_act, float beta,
+        const float *__restrict bias, fused_postop_t fused_op);
 
 } // namespace native
 } // namespace matmul

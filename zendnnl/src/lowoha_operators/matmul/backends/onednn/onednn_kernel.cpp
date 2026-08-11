@@ -241,40 +241,41 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
     if (batch_count == 1) {
         dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
         dnnl_params.src.strides = (transA == 'n')
-                ? std::vector<long int> {lda, 1}
-                : std::vector<long int> {1, lda};
+                ? std::vector<int64_t> {lda, 1}
+                : std::vector<int64_t> {1, lda};
         dnnl_params.weights.format_tag = (transB == 'n') ? "ab" : "ba";
         dnnl_params.weights.strides = (transB == 'n')
-                ? std::vector<long int> {ldb, 1}
-                : std::vector<long int> {1, ldb};
+                ? std::vector<int64_t> {ldb, 1}
+                : std::vector<int64_t> {1, ldb};
         dnnl_params.dst.format_tag = "ab";
-        dnnl_params.dst.strides = std::vector<long int> {ldc, 1};
+        dnnl_params.dst.strides = std::vector<int64_t> {ldc, 1};
         if (bias != nullptr) {
             dnnl_params.bias.format_tag = "ab";
-            dnnl_params.bias.strides = std::vector<long int> {0, 1};
+            dnnl_params.bias.strides = std::vector<int64_t> {0, 1};
         }
     } else {
-        // Cast size_t strides to long int to avoid narrowing conversion warnings
-        long int src_stride = static_cast<long int>(src_batch_stride);
-        long int wei_stride = static_cast<long int>(weight_batch_stride);
-        long int dst_stride = static_cast<long int>(dst_batch_stride);
+        // oneDNN dims (dnnl::memory::dims) are std::vector<int64_t>; use int64_t
+        // explicitly (`long` is 32-bit on MSVC, which would mismatch the dims type).
+        int64_t src_stride = static_cast<int64_t>(src_batch_stride);
+        int64_t wei_stride = static_cast<int64_t>(weight_batch_stride);
+        int64_t dst_stride = static_cast<int64_t>(dst_batch_stride);
 
         dnnl_params.src.format_tag = (transA == 'n') ? "abc" : "acb";
         dnnl_params.src.strides = (transA == 'n')
-                ? std::vector<long int> {src_stride, lda, 1}
-                : std::vector<long int> {src_stride, 1, lda};
+                ? std::vector<int64_t> {src_stride, lda, 1}
+                : std::vector<int64_t> {src_stride, 1, lda};
 
         dnnl_params.weights.format_tag = (transB == 'n') ? "abc" : "acb";
         dnnl_params.weights.strides = (transB == 'n')
-                ? std::vector<long int> {wei_stride, ldb, 1}
-                : std::vector<long int> {wei_stride, 1, ldb};
+                ? std::vector<int64_t> {wei_stride, ldb, 1}
+                : std::vector<int64_t> {wei_stride, 1, ldb};
 
         dnnl_params.dst.format_tag = "abc";
-        dnnl_params.dst.strides = std::vector<long int> {dst_stride, ldc, 1};
+        dnnl_params.dst.strides = std::vector<int64_t> {dst_stride, ldc, 1};
 
         if (bias != nullptr) {
             dnnl_params.bias.format_tag = "abc";
-            dnnl_params.bias.strides = std::vector<long int> {0, 0, 1};
+            dnnl_params.bias.strides = std::vector<int64_t> {0, 0, 1};
         }
     }
 

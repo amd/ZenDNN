@@ -110,6 +110,7 @@
 #include <cstdlib>
 #include <limits>
 #include <vector>
+#include "common/zendnnl_compat.hpp"
 
 #include "operators/matmul/matmul_config.hpp" // matmul_algo_t
 // `group_matmul_parallel_common.hpp` provides:
@@ -195,7 +196,7 @@ struct PerThreadScratch {
     void *buf = nullptr;
     size_t cap = 0;
     PerThreadScratch() = default;
-    ~PerThreadScratch() { std::free(buf); }
+    ~PerThreadScratch() { zendnnl_aligned_free(buf); }
     PerThreadScratch(const PerThreadScratch &) = delete;
     PerThreadScratch &operator=(const PerThreadScratch &) = delete;
     PerThreadScratch(PerThreadScratch &&) = delete;
@@ -207,11 +208,12 @@ struct PerThreadScratch {
 // + post-OMP-region check).
 inline bool grow_scratch(PerThreadScratch &s, size_t need) {
     if (need <= s.cap) return true;
-    std::free(s.buf);
+    zendnnl_aligned_free(s.buf);
     s.buf = nullptr;
     s.cap = 0;
     void *tmp = nullptr;
-    if (posix_memalign(&tmp, 64, need) != 0 || tmp == nullptr) return false;
+    if (zendnnl_posix_memalign(&tmp, 64, need) != 0 || tmp == nullptr)
+        return false;
     s.buf = tmp;
     s.cap = need;
     return true;
@@ -461,8 +463,8 @@ inline int get_grp_n_tile_strategy() {
     // numeric input (e.g. `"abc"`) falls back to the documented
     // default 2, NOT silently to mode 0 via legacy atoi-returns-0
     // behaviour.  See `parse_env_int_strict`.
-    constexpr int kDefault = 2;
-    constexpr int kMaxValue
+    static constexpr int kDefault = 2;
+    static constexpr int kMaxValue
             = 3; // 0=auto, 1=decode_d, 2=rounds, 3=decode_dynamic
     const int ovr = test_api::s_grp_n_tile_strategy_override.load(
             std::memory_order_relaxed);
@@ -514,7 +516,7 @@ inline int get_grp_n_tile_strategy() {
 // ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT — cached, default 4.
 //   DecodeDynamic when active_ops >= this * num_ccds (experts-per-CCD).
 inline int get_grp_decdyn_epc_mult() {
-    constexpr int kDefault = 4;
+    static constexpr int kDefault = 4;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT");
         int parsed = 0;
@@ -529,7 +531,7 @@ inline int get_grp_decdyn_epc_mult() {
 //   i.e. the per-expert weight is large enough that Rounds' L3-batching
 //   serialises.  0 disables this branch (epc rule only).
 inline int get_grp_decdyn_wei_l3_mult() {
-    constexpr int kDefault = 2;
+    static constexpr int kDefault = 2;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECDYN_WEI_L3_MULT");
         int parsed = 0;
@@ -571,7 +573,7 @@ inline int get_grp_matmul_n_order() {
     // input (e.g. `"abc"`) falls back to the documented default 3,
     // NOT silently to mode 0 via the legacy `std::atoi`-returns-0
     // behaviour.  See `parse_env_int_strict`.
-    constexpr int kDefault = 3;
+    static constexpr int kDefault = 3;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_ORDER");
         int parsed = 0;
@@ -637,7 +639,7 @@ inline int get_grp_matmul_n_order() {
 // (`stable_n_thr_per_expert[]` + `per_expert_remainder = true`); the
 // only difference is how the planner populates that array.
 inline int get_grp_matmul_n_tile_heavy_threshold() {
-    constexpr int kDefault = 0; // AUTO (prompt adaptive tiers)
+    static constexpr int kDefault = 0; // AUTO (prompt adaptive tiers)
     // Test override sentinel: INT_MIN = no override.  Cannot use `-1`
     // any more since `-1` is now a meaningful (DISABLED) value.
     // Production keeps the static-const env-cache for branch-

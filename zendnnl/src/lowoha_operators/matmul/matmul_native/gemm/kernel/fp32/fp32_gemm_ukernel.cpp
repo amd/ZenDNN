@@ -21,6 +21,7 @@
 //
 
 #include "lowoha_operators/matmul/matmul_native/gemm/kernel/fp32/fp32_gemm_ukernel.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 #include <algorithm>
@@ -34,10 +35,10 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-__attribute__((target("avx512f,fma"), noinline)) void avx512_ukernel_6x64_asm(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, float beta, const float *__restrict__ bias,
+ZENDNNL_TARGET_NOINLINE("avx512f,fma")
+void avx512_ukernel_6x64_asm(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, float beta, const float *__restrict bias,
         fused_postop_t fused_op) {
 
     const float *a0 = pa;
@@ -50,9 +51,67 @@ __attribute__((target("avx512f,fma"), noinline)) void avx512_ukernel_6x64_asm(
     const long bs = static_cast<long>(b_stride) * 4;
 
     // Stack buffer: 24 accumulators × 64 bytes = 1536 bytes (L1-resident)
-    __m512 c_acc[24] __attribute__((aligned(64)));
+    alignas(64) __m512 c_acc[24];
     int k2 = k >> 1;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+    // MSVC x64 has no GNU inline assembly. This is a portable AVX-512 intrinsic
+    // reimplementation that fills c_acc[24] identically to the asm kernel in the
+    // #else branch: 24 accumulators = 6 A-rows x 4 B-tiles (each 16 f32 lanes),
+    // 2x-unrolled over K. a0..a5 and bp are advanced exactly as the asm does
+    // (via its "+r" outputs), so the k&1 remainder below runs unchanged.
+    (void)bs;
+    for (int i = 0; i < 24; ++i) {
+        c_acc[i] = _mm512_setzero_ps();
+    }
+    for (int kk = 0; kk < k2; ++kk) {
+        for (int s = 0; s < 2; ++s) {
+            const float *br = bp + static_cast<long>(s) * b_stride;
+            const __m512 b0 = _mm512_loadu_ps(br);
+            const __m512 b1 = _mm512_loadu_ps(br + 16);
+            const __m512 b2 = _mm512_loadu_ps(br + 32);
+            const __m512 b3 = _mm512_loadu_ps(br + 48);
+            __m512 av;
+            av = _mm512_set1_ps(a0[s]);
+            c_acc[0] = _mm512_fmadd_ps(b0, av, c_acc[0]);
+            c_acc[1] = _mm512_fmadd_ps(b1, av, c_acc[1]);
+            c_acc[2] = _mm512_fmadd_ps(b2, av, c_acc[2]);
+            c_acc[3] = _mm512_fmadd_ps(b3, av, c_acc[3]);
+            av = _mm512_set1_ps(a1[s]);
+            c_acc[4] = _mm512_fmadd_ps(b0, av, c_acc[4]);
+            c_acc[5] = _mm512_fmadd_ps(b1, av, c_acc[5]);
+            c_acc[6] = _mm512_fmadd_ps(b2, av, c_acc[6]);
+            c_acc[7] = _mm512_fmadd_ps(b3, av, c_acc[7]);
+            av = _mm512_set1_ps(a2[s]);
+            c_acc[8] = _mm512_fmadd_ps(b0, av, c_acc[8]);
+            c_acc[9] = _mm512_fmadd_ps(b1, av, c_acc[9]);
+            c_acc[10] = _mm512_fmadd_ps(b2, av, c_acc[10]);
+            c_acc[11] = _mm512_fmadd_ps(b3, av, c_acc[11]);
+            av = _mm512_set1_ps(a3[s]);
+            c_acc[12] = _mm512_fmadd_ps(b0, av, c_acc[12]);
+            c_acc[13] = _mm512_fmadd_ps(b1, av, c_acc[13]);
+            c_acc[14] = _mm512_fmadd_ps(b2, av, c_acc[14]);
+            c_acc[15] = _mm512_fmadd_ps(b3, av, c_acc[15]);
+            av = _mm512_set1_ps(a4[s]);
+            c_acc[16] = _mm512_fmadd_ps(b0, av, c_acc[16]);
+            c_acc[17] = _mm512_fmadd_ps(b1, av, c_acc[17]);
+            c_acc[18] = _mm512_fmadd_ps(b2, av, c_acc[18]);
+            c_acc[19] = _mm512_fmadd_ps(b3, av, c_acc[19]);
+            av = _mm512_set1_ps(a5[s]);
+            c_acc[20] = _mm512_fmadd_ps(b0, av, c_acc[20]);
+            c_acc[21] = _mm512_fmadd_ps(b1, av, c_acc[21]);
+            c_acc[22] = _mm512_fmadd_ps(b2, av, c_acc[22]);
+            c_acc[23] = _mm512_fmadd_ps(b3, av, c_acc[23]);
+        }
+        a0 += 2;
+        a1 += 2;
+        a2 += 2;
+        a3 += 2;
+        a4 += 2;
+        a5 += 2;
+        bp += 2 * static_cast<long>(b_stride);
+    }
+#else
     __asm__ __volatile__(
             // Zero 24 accumulators
             "vpxord %%zmm0,  %%zmm0,  %%zmm0\n\t"
@@ -205,6 +264,7 @@ __attribute__((target("avx512f,fma"), noinline)) void avx512_ukernel_6x64_asm(
             "zmm15", "zmm16", "zmm17", "zmm18", "zmm19", "zmm20", "zmm21",
             "zmm22", "zmm23", "zmm24", "zmm25", "zmm26", "zmm27", "zmm28",
             "memory");
+#endif
 
     // Load 24 accumulators from stack buffer
     __m512 c00 = c_acc[0], c01 = c_acc[1], c02 = c_acc[2], c03 = c_acc[3];
@@ -375,10 +435,10 @@ __attribute__((target("avx512f,fma"), noinline)) void avx512_ukernel_6x64_asm(
 // K-loop unrolled 4x. All MR/NV loops unrolled at compile time.
 // ============================================================================
 template <int MR, int NV>
-__attribute__((target("avx512f,fma"), noinline)) void avx512_ukernel(
-        const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, float beta, const float *__restrict__ bias,
+ZENDNNL_TARGET_NOINLINE("avx512f,fma")
+void avx512_ukernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, float beta, const float *__restrict bias,
         fused_postop_t fused_op) {
 
     __m512 acc[MR][NV];
@@ -465,11 +525,11 @@ template void avx512_ukernel<6, 1>(const float *, int, const float *, int,
 // ============================================================================
 // AVX-512 masked tail kernel with fused bias
 // ============================================================================
-__attribute__((target("avx512f,avx512bw,fma"), noinline)) void
-avx512_tail_kernel(const float *__restrict__ pa, int a_stride,
-        const float *__restrict__ pb, int b_stride, float *__restrict__ C,
-        int ldc, int k, int mr_count, int nr_count, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op) {
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,fma")
+void avx512_tail_kernel(const float *__restrict pa, int a_stride,
+        const float *__restrict pb, int b_stride, float *__restrict C, int ldc,
+        int k, int mr_count, int nr_count, float beta,
+        const float *__restrict bias, fused_postop_t fused_op) {
 
     const int full_vecs = nr_count / 16;
     const int rem = nr_count & 15;
@@ -613,8 +673,8 @@ void scalar_microkernel(const float *pa, int a_stride, const float *pb,
 // Kernel dispatch
 // ============================================================================
 /// Select FP32 microkernel — asm kernel for NR=64 (primary hot path).
-__attribute__((target("avx512f,fma"))) ukernel_fn_t select_ukernel(
-        [[maybe_unused]] int MR, int NR) {
+ZENDNNL_TARGET("avx512f,fma")
+ukernel_fn_t select_ukernel([[maybe_unused]] int MR, int NR) {
     switch (NR) {
         case 64: return avx512_ukernel_6x64_asm; // Hand-scheduled asm, 24 acc
         case 32: return avx512_ukernel<6, 2>; // Template fallback (NV=2)

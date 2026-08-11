@@ -20,6 +20,18 @@ include(CreateIncludeFiles)
 set(zendnnl_src_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(zendnnl_inc_file "${CMAKE_BINARY_DIR}/zendnnl.hpp")
 
+# MSVC (cl 19.4x) hits an internal compiler error (C1001, back-end 'p2' pass)
+# when optimizing this AVX-512 bf16 GEMV kernel at /O2. An in-source
+# #pragma optimize does not help because the offending code is a template whose
+# instantiation is code-generated outside the pragma's scope. Compile just this
+# one translation unit without optimization on MSVC; every other toolchain and
+# TU is unaffected. Revisit if a future cl release fixes the ICE.
+if(MSVC)
+  set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.cpp"
+    PROPERTIES COMPILE_OPTIONS "/Od")
+endif()
+
 # build archive
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   add_library(zendnnl_archive STATIC)
@@ -45,8 +57,12 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
     INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 
-  target_link_options(zendnnl_archive
-    PUBLIC "-fopenmp")
+  # OpenMP::OpenMP_CXX already carries the right flag (/openmp on MSVC,
+  # -fopenmp on GCC/Clang); the explicit -fopenmp link option is GCC/Clang-only.
+  if(NOT MSVC)
+    target_link_options(zendnnl_archive
+      PUBLIC "-fopenmp")
+  endif()
 
   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl_archive
@@ -169,8 +185,12 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
     INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 
-  target_link_options(zendnnl
-    PUBLIC "-fopenmp")
+  # OpenMP::OpenMP_CXX already carries the right flag (/openmp on MSVC,
+  # -fopenmp on GCC/Clang); the explicit -fopenmp link option is GCC/Clang-only.
+  if(NOT MSVC)
+    target_link_options(zendnnl
+      PUBLIC "-fopenmp")
+  endif()
 
   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl
@@ -334,6 +354,15 @@ if(ZENDNNL_FUSED_ADD_RMS_F16)
     target_compile_definitions(zendnnl
       PUBLIC ZENDNNL_FUSED_ADD_RMS_F16)
   endif()
+endif()
+
+# Shared library "DLL mode": ZENDNNL_DLL selects the export/import decoration
+# in common/zendnnl_api.hpp, and ZENDNNL_DLL_EXPORTS marks THIS target as the
+# producer (so ZENDNNL_API => __declspec(dllexport) on Windows). Both are
+# PRIVATE: consumers that link the DLL define only ZENDNNL_DLL themselves.
+# No-op on GCC/Clang (maps to default ELF visibility).
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_compile_definitions(zendnnl PRIVATE ZENDNNL_DLL ZENDNNL_DLL_EXPORTS)
 endif()
 
 # create top level include file

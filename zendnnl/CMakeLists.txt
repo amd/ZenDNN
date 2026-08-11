@@ -69,11 +69,29 @@ include(CheckCXXSourceCompiles)
 include(ZenDnnlMacros)
 include(ZenDnnlDependenciesInfo)
 
-# global cxx flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
-if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mavx512f -mavx512vl -mavx512bf16")
+# global cxx flags (split per compiler). Keeping the GCC/Clang-only flags out
+# of the MSVC build also keeps them out of CMake's OpenMP probe compile test,
+# which otherwise fails when GCC-style flags are fed to cl.
+if(MSVC)
+  # Whole-translation-unit AVX-512 (Zen 4+ is the baseline; MSVC has no
+  # per-function ISA targeting), large object files for the heavily-templated
+  # TUs, and suppress C4141 ('inline' used more than once). The Windows
+  # source-portability defines: NOMINMAX (suppress the min/max macros) and
+  # _USE_MATH_DEFINES (expose M_PI and friends that MSVC otherwise withholds).
+  # /FI force-includes the portability shim into every TU so its MSVC fixups are
+  # active before any code — in particular the `#define collapse(x)` that
+  # neutralizes the OpenMP `collapse` clause MSVC's libomp crashes on. An
+  # absolute path is used so it also resolves in CMake's find_package(OpenMP) /
+  # check_cxx_source_compiles probe TUs, which do not carry the src include dir.
+  # The /FI path is double-quoted so it survives spaces in the source tree --
+  # MSVC otherwise treats /FI<path with spaces> as multiple arguments.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX512 /bigobj /wd4141 /DNOMINMAX /D_USE_MATH_DEFINES /FI\"${CMAKE_CURRENT_SOURCE_DIR}/src/common/zendnnl_compat.hpp\"")
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mavx512f -mavx512vl -mavx512bf16")
+  endif()
 endif()
 
 check_cxx_source_compiles("

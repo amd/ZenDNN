@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "matmul_partitioner.hpp"
+#include "common/zendnnl_compat.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -275,7 +276,7 @@ static const void *libxsmm_weight_prepack(const void *weight, int M, int K,
     }
 
     size_t buf_sz = libxsmm_weight_block_size(K, N, src_dtype);
-    void *blocked = std::aligned_alloc(64, buf_sz);
+    void *blocked = zendnnl_aligned_alloc(64, buf_sz);
     if (!blocked) { return nullptr; }
 
     libxsmm_weight_block(weight, blocked, K, N, ldb, k_block_size, n_block_size,
@@ -366,7 +367,7 @@ void execute_brgemm_std(const char trans_input, const char trans_weight,
     const int k_step = bp.k_blocks_per_reduce * bp.k_block_size;
 
     auto tile_body = [&](int k_off, int m_off, int n_off)
-            __attribute__((always_inline)) {
+                             ZENDNNL_LAMBDA_ALWAYS_INLINE {
         int is_m_rem = (m_off + bp.m_block_size > M) ? 1 : 0;
         int is_n_rem = (n_off + bp.n_block_size > N) ? 1 : 0;
         int m_len = is_m_rem ? bp.m_block_rem : bp.m_block_size;
@@ -484,8 +485,8 @@ void execute_brgemm_prepacked(const void *src, const void *blocked_weight,
     const size_t tile_bytes
             = static_cast<size_t>(n_block_size) * k_block_size * src_elem;
 
-    auto tile_body = [&](int kblk, int m_off, int nblk)
-            __attribute__((always_inline)) {
+    auto tile_body
+            = [&](int kblk, int m_off, int nblk) ZENDNNL_LAMBDA_ALWAYS_INLINE {
         int is_m_rem = (m_off + bp.m_block_size > M) ? 1 : 0;
         int m_len = is_m_rem ? bp.m_block_rem : bp.m_block_size;
 

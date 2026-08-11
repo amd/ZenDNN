@@ -17,8 +17,8 @@
 #include "platform_info.hpp"
 
 #include <cstdint>
-#ifdef __x86_64__
-#include <cpuid.h>
+#if defined(__x86_64__) || defined(_M_X64)
+#include "common/zendnnl_cpuid_compat.hpp"
 #endif
 
 namespace zendnnl {
@@ -60,12 +60,12 @@ status_t platform_info_t::populate() {
 }
 
 void platform_info_t::detect_f16_isa() {
-#ifdef __x86_64__
-    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
 
     // AVX512-FP16 (CPUID leaf 7, subleaf 0, EDX bit 23)
     // Full FP16 arithmetic (FMA, add, mul, div, etc.)
-    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    zendnnl_cpuid_count(7, 0, eax, ebx, ecx, edx);
     is_avx512_f16_native = (edx >> 23) & 1;
 #endif
 }

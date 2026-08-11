@@ -73,9 +73,9 @@ using zendnnl::common::reduce_add_ph_to_fp32;
 // vcvtph2ps per 32-lane block; the inner-loop arithmetic stays in __m512h.
 template <typename InType, typename OutType, typename GammaType,
         typename BetaType>
-static inline void layer_norm_row_fp16(const void *__restrict__ in_row,
-        void *__restrict__ out_row, const void *__restrict__ gamma,
-        const void *__restrict__ beta, uint64_t norm_size, float inv_n,
+static inline void layer_norm_row_fp16(const void *__restrict in_row,
+        void *__restrict out_row, const void *__restrict gamma,
+        const void *__restrict beta, uint64_t norm_size, float inv_n,
         float epsilon, bool use_scale, bool use_shift) {
     const InType *in_p = static_cast<const InType *>(in_row);
     OutType *out_p = static_cast<OutType *>(out_row);

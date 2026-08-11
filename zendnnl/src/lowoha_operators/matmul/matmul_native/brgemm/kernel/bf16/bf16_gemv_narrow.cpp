@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_narrow.hpp"
+#include "common/zendnnl_compat.hpp"
 
 #include <immintrin.h>
 
@@ -47,9 +48,9 @@ namespace {
 /// Unused lanes (N < 4) contain adjacent row/column data that will
 /// accumulate into unused acc lanes and get discarded at store time
 /// — intentional and harmless.
-__attribute__((always_inline,
-        target("avx512f,avx512bw,avx512vl,avx512bf16"))) static inline __m128i
-load_b_pair_fast(const uint16_t *__restrict__ B, int ldb, int kp) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl,avx512bf16")
+static inline __m128i load_b_pair_fast(
+        const uint16_t *__restrict B, int ldb, int kp) {
     const __m128i r0 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(
             B + static_cast<size_t>(2 * kp) * ldb));
     const __m128i r1 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(
@@ -68,10 +69,9 @@ load_b_pair_fast(const uint16_t *__restrict__ B, int ldb, int kp) {
 /// case the second row's BF16 is forced to zero (matching the BKC
 /// pack's zero-fill convention for the K-odd last element).
 template <int N>
-__attribute__((always_inline,
-        target("avx512f,avx512bw,avx512vl,avx512bf16"))) static inline __m128i
-load_b_pair_safe(
-        const uint16_t *__restrict__ B, int ldb, int kp, bool k1_is_live) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl,avx512bf16")
+static inline __m128i load_b_pair_safe(
+        const uint16_t *__restrict B, int ldb, int kp, bool k1_is_live) {
     alignas(8) uint16_t b_row0[4] = {0, 0, 0, 0};
     alignas(8) uint16_t b_row1[4] = {0, 0, 0, 0};
     std::memcpy(b_row0, B + static_cast<size_t>(2 * kp) * ldb,
@@ -90,9 +90,9 @@ load_b_pair_safe(
 /// Broadcast one K-pair from A (4 bytes = 2 BF16) to every lane of
 /// an xmm register.  Uses the `memcpy(uint32_t) + _mm_set1_epi32`
 /// idiom that GCC fuses into a single `vpbroadcastd xmm, [mem]`.
-__attribute__((always_inline,
-        target("avx512f,avx512bw,avx512vl,avx512bf16"))) static inline __m128
-load_a_pair_broadcast(const uint16_t *__restrict__ A, int kp) {
+ZENDNNL_INLINE_TARGET("avx512f,avx512bw,avx512vl,avx512bf16")
+static inline __m128 load_a_pair_broadcast(
+        const uint16_t *__restrict A, int kp) {
     uint32_t a_pair;
     std::memcpy(&a_pair, A + 2 * kp, sizeof(a_pair));
     return _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(a_pair)));
@@ -120,11 +120,10 @@ inline int kp_fast_max_for_K(int K) {
 /// 4-cycle VDPBF16PS latency at 1-cycle issue rate, matching the
 /// pattern in the group-matmul custom microkernel.
 template <int N>
-__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"),
-        noinline)) static void
-bf16_gemv_narrow_impl(const uint16_t *__restrict__ A, int K,
-        const uint16_t *__restrict__ B, int ldb, uint16_t *__restrict__ C_bf16,
-        float *__restrict__ C_fp32, const float *__restrict__ bias_f,
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512bw,avx512vl,avx512bf16,fma")
+static void bf16_gemv_narrow_impl(const uint16_t *__restrict A, int K,
+        const uint16_t *__restrict B, int ldb, uint16_t *__restrict C_bf16,
+        float *__restrict C_fp32, const float *__restrict bias_f,
         fused_postop_t fused_op, float alpha, float beta, bool dst_is_bf16) {
 
     static_assert(N >= 1 && N <= 4, "narrow kernel handles N ∈ [1, 4]");
@@ -149,15 +148,13 @@ bf16_gemv_narrow_impl(const uint16_t *__restrict__ A, int K,
     // Runs while all 4 K-pairs (kp, kp+1, kp+2, kp+3) have at least
     // 4 BF16 elements past their last-row start, so 8-byte unaligned
     // loads never cross the caller's B allocation end.
-    // NOTE on bf16-lane vector casts: the Intel intrinsics ABI defines
-    // `__m128bh` as a distinct vector value type that represents 8
-    // packed BF16 lanes (vs `__m128` = 4 FP32, `__m128i` = 128-bit
-    // integer).  Going between these types requires a bit-preserving
-    // re-interpretation.  C++ `reinterpret_cast` between SIMD vector
-    // types is implementation-defined and flagged by some compilers,
-    // so we use C-style casts (same pattern the BKC kernel uses —
-    // see `bf16_gemv_bkc_nr64_core`) which are a no-op at the
-    // generated-code level and are portable across GCC/Clang/MSVC.
+    // NOTE on bf16-lane vector casts: on GCC/Clang `__m128bh` is a distinct
+    // vector type (8 packed BF16 lanes) that accepts bit-preserving C-style casts
+    // from `__m128`/`__m128i`. MSVC instead defines `__m128bh` as an alias of
+    // `__m128i` and rejects a C-cast from `__m128` (4 FP32) to it, so the fp32-
+    // lane (A) operands are routed through `_mm_castps_si128` first — a no-op
+    // reinterpret on every toolchain. The already-integer (B) operands cast
+    // directly. All conversions are bit-preserving and cost nothing at runtime.
     int kp = 0;
     for (; kp + 3 <= kp_fast_max; kp += 4) {
         const __m128 a0 = load_a_pair_broadcast(A, kp);
@@ -168,10 +165,14 @@ bf16_gemv_narrow_impl(const uint16_t *__restrict__ A, int K,
         const __m128i b2 = load_b_pair_fast(B, ldb, kp + 2);
         const __m128 a3 = load_a_pair_broadcast(A, kp + 3);
         const __m128i b3 = load_b_pair_fast(B, ldb, kp + 3);
-        acc0 = _mm_dpbf16_ps(acc0, (__m128bh)a0, (__m128bh)b0);
-        acc1 = _mm_dpbf16_ps(acc1, (__m128bh)a1, (__m128bh)b1);
-        acc2 = _mm_dpbf16_ps(acc2, (__m128bh)a2, (__m128bh)b2);
-        acc3 = _mm_dpbf16_ps(acc3, (__m128bh)a3, (__m128bh)b3);
+        acc0 = _mm_dpbf16_ps(
+                acc0, (__m128bh)_mm_castps_si128(a0), (__m128bh)b0);
+        acc1 = _mm_dpbf16_ps(
+                acc1, (__m128bh)_mm_castps_si128(a1), (__m128bh)b1);
+        acc2 = _mm_dpbf16_ps(
+                acc2, (__m128bh)_mm_castps_si128(a2), (__m128bh)b2);
+        acc3 = _mm_dpbf16_ps(
+                acc3, (__m128bh)_mm_castps_si128(a3), (__m128bh)b3);
     }
     // ── Second-pass 2-wide unroll for any 2–3 leftover fast K-pairs ────
     for (; kp + 1 <= kp_fast_max; kp += 2) {
@@ -179,15 +180,17 @@ bf16_gemv_narrow_impl(const uint16_t *__restrict__ A, int K,
         const __m128i b0 = load_b_pair_fast(B, ldb, kp);
         const __m128 a1 = load_a_pair_broadcast(A, kp + 1);
         const __m128i b1 = load_b_pair_fast(B, ldb, kp + 1);
-        acc0 = _mm_dpbf16_ps(acc0, (__m128bh)a0, (__m128bh)b0);
-        acc1 = _mm_dpbf16_ps(acc1, (__m128bh)a1, (__m128bh)b1);
+        acc0 = _mm_dpbf16_ps(
+                acc0, (__m128bh)_mm_castps_si128(a0), (__m128bh)b0);
+        acc1 = _mm_dpbf16_ps(
+                acc1, (__m128bh)_mm_castps_si128(a1), (__m128bh)b1);
     }
 
     // ── Trailing K-pairs (0–3 remaining), safe staging to avoid OOB ────
     for (; kp < k_pairs_even; ++kp) {
         const __m128 a = load_a_pair_broadcast(A, kp);
         const __m128i b = load_b_pair_safe<N>(B, ldb, kp, /*k1_is_live=*/true);
-        acc0 = _mm_dpbf16_ps(acc0, (__m128bh)a, (__m128bh)b);
+        acc0 = _mm_dpbf16_ps(acc0, (__m128bh)_mm_castps_si128(a), (__m128bh)b);
     }
 
     // Combine the four accumulator chains.
@@ -204,7 +207,7 @@ bf16_gemv_narrow_impl(const uint16_t *__restrict__ A, int K,
                 = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(a_lo)));
         const __m128i b
                 = load_b_pair_safe<N>(B, ldb, kp_tail, /*k1_is_live=*/false);
-        acc = _mm_dpbf16_ps(acc, (__m128bh)a, (__m128bh)b);
+        acc = _mm_dpbf16_ps(acc, (__m128bh)_mm_castps_si128(a), (__m128bh)b);
     }
 
     // ── Epilogue: alpha, beta · C_old, bias, fused postop, store ───────

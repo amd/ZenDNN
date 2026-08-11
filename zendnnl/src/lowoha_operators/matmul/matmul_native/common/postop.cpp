@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "operators/common/post_op.hpp"
 
@@ -36,9 +37,10 @@ using zendnnl::ops::post_op_type_t;
 // Main vectorized post-op application
 // ============================================================================
 
-__attribute__((target("avx512f,avx512bw,fma"))) void apply_postops_tile(
-        float *C, int ldc, int m_count, int n_count, int n_offset, int m_offset,
-        const float *bias, const std::vector<matmul_post_op> &postops) {
+ZENDNNL_TARGET("avx512f,avx512bw,fma")
+void apply_postops_tile(float *C, int ldc, int m_count, int n_count,
+        int n_offset, int m_offset, const float *bias,
+        const std::vector<matmul_post_op> &postops) {
 
     // Bias addition (vectorized)
     if (bias != nullptr) {

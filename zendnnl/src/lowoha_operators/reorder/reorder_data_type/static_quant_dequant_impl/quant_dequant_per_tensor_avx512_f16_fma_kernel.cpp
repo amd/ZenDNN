@@ -73,6 +73,7 @@
 //==============================================================================
 
 #include "common/float16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
 
 #include <algorithm>
@@ -89,9 +90,8 @@ namespace reorder {
 //==============================================================================
 // Pass-2 building block: PH * (1/scale_f16), round to 32 s16 lanes.
 //==============================================================================
-__attribute__((
-        target("avx512f,avx512vl,avx512bw,avx512fp16"))) static inline __m512i
-ph_quantize_to_s16(__m512h v, __m512h vinv_scale) {
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+static inline __m512i ph_quantize_to_s16(__m512h v, __m512h vinv_scale) {
     __m512h q_ph = _mm512_mul_ph(v, vinv_scale);
     return _mm512_cvt_roundph_epi16(
             q_ph, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
@@ -101,8 +101,8 @@ ph_quantize_to_s16(__m512h v, __m512h vinv_scale) {
 // KERNEL: f16 -> int8 (per-tensor, static quantization, FP16-FMA)
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-quantize_f16_to_int8_avx512fp16(const uint16_t *input, int8_t *output,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void quantize_f16_to_int8_avx512fp16(const uint16_t *input, int8_t *output,
         size_t nelems, float scale, int zero_point) {
     // Zero-point arithmetic is done in int32 to match the reference / F32-FMA
     // kernels: the public contract (see docs/operator/lowoha_reorder_operator.md
@@ -160,8 +160,8 @@ quantize_f16_to_int8_avx512fp16(const uint16_t *input, int8_t *output,
 // KERNEL: f16 -> uint8 (per-tensor, static quantization, FP16-FMA)
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-quantize_f16_to_uint8_avx512fp16(const uint16_t *input, uint8_t *output,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void quantize_f16_to_uint8_avx512fp16(const uint16_t *input, uint8_t *output,
         size_t nelems, float scale, int zero_point) {
     // Zero-point arithmetic in int32; see quantize_f16_to_int8_avx512fp16 for
     // the rationale (preserves the s32-zp contract across all backends).
@@ -226,8 +226,8 @@ quantize_f16_to_uint8_avx512fp16(const uint16_t *input, uint8_t *output,
 // by scale_f16 -> store PH.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dequantize_int8_to_f16_avx512fp16(const int8_t *input, uint16_t *output,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dequantize_int8_to_f16_avx512fp16(const int8_t *input, uint16_t *output,
         size_t nelems, float scale, int zero_point) {
     const _Float16 scale_f16 = static_cast<_Float16>(scale);
     const __m512h vscale = _mm512_set1_ph(scale_f16);
@@ -296,8 +296,8 @@ dequantize_int8_to_f16_avx512fp16(const int8_t *input, uint16_t *output,
 // dequantize_int8_to_f16_avx512fp16 comment for the rationale.
 //==============================================================================
 
-__attribute__((target("avx512f,avx512vl,avx512bw,avx512fp16"))) void
-dequantize_uint8_to_f16_avx512fp16(const uint8_t *input, uint16_t *output,
+ZENDNNL_TARGET("avx512f,avx512vl,avx512bw,avx512fp16")
+void dequantize_uint8_to_f16_avx512fp16(const uint8_t *input, uint16_t *output,
         size_t nelems, float scale, int zero_point) {
     const _Float16 scale_f16 = static_cast<_Float16>(scale);
     const __m512h vscale = _mm512_set1_ph(scale_f16);
@@ -338,18 +338,20 @@ dequantize_uint8_to_f16_avx512fp16(const uint8_t *input, uint16_t *output,
     }
 }
 
-#else // !(GCC >= 12) — Strategy A not buildable on this toolchain
-
-// The FP16-FMA kernels cannot be compiled (no __m512h intrinsics on
-// toolchains older than GCC 12), but we still emit symbols for the
-// declared functions so the link succeeds. Instead of leaving them as
-// no-op stubs (which would silently corrupt output if the dispatcher
-// ever mis-routed to them), delegate to the always-available F32-FMA
-// siblings in quant_dequant_per_tensor_avx512_f32_fma_kernel.cpp. The
-// can_use_f16_fma_kernel() helper returns false on this toolchain
-// (gated on __GNUC__ >= 12 in lowoha_reorder_common.hpp), so the
-// dispatcher should never select these in practice -- the delegation
-// is defense in depth.
+// clang-format off
+#else  // !(GCC >= 12) — Strategy A not buildable on this toolchain
+       //
+       // The FP16-FMA kernels cannot be compiled (no __m512h intrinsics on
+       // toolchains older than GCC 12), but we still emit symbols for the
+       // declared functions so the link succeeds. Instead of leaving them as
+       // no-op stubs (which would silently corrupt output if the dispatcher
+       // ever mis-routed to them), delegate to the always-available F32-FMA
+       // siblings in quant_dequant_per_tensor_avx512_f32_fma_kernel.cpp. The
+       // can_use_f16_fma_kernel() helper returns false on this toolchain
+       // (gated on __GNUC__ >= 12 in lowoha_reorder_common.hpp), so the
+       // dispatcher should never select these in practice -- the delegation
+       // is defense in depth.
+// clang-format on
 
 void quantize_f16_to_int8_avx512fp16(const uint16_t *input, int8_t *output,
         size_t nelems, float scale, int zp) {

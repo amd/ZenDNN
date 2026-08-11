@@ -18,6 +18,7 @@
 #define _LOWOHA_EMBEDDING_BAG_HPP
 
 #include <vector>
+#include "common/zendnnl_api.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_embag_common.hpp"
 
@@ -61,7 +62,7 @@ namespace embag {
  *       table_ptr, indices_ptr, offsets_ptr, output_ptr, params);
  * @endcode
  */
-zendnnl::common::status_t embedding_bag_direct(const void *table,
+ZENDNNL_API zendnnl::common::status_t embedding_bag_direct(const void *table,
         const void *indices, const void *offsets, const float *weights,
         void *dst, embag_params_t params);
 
@@ -79,7 +80,7 @@ zendnnl::common::status_t embedding_bag_direct(const void *table,
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
-zendnnl::common::status_t embedding_direct(const void *table,
+ZENDNNL_API zendnnl::common::status_t embedding_direct(const void *table,
         const void *indices, const float *weights, void *dst,
         embag_params_t params);
 
@@ -115,7 +116,7 @@ zendnnl::common::status_t embedding_direct(const void *table,
  *       tables, indices, offsets, weights, outputs, params);
  * @endcode
  */
-zendnnl::common::status_t group_embedding_bag_direct(
+ZENDNNL_API zendnnl::common::status_t group_embedding_bag_direct(
         const std::vector<const void *> &tables,
         const std::vector<const void *> &indices,
         const std::vector<const void *> &offsets,

@@ -16,6 +16,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
 #include "common/bfloat16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/brgemm_planner.hpp"
@@ -41,9 +42,9 @@ using zendnnl::ops::matmul_config_t;
 // ── INT8 VNNI B packing (panel-based, same layout as KC but per N-panel) ──
 // Packs s8 weights into NR_PACK-wide panels with 4-byte VNNI groups.
 // Also computes col_sum[n] for zero-point compensation.
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static void
-pack_b_int8_vnni_panel(const int8_t *B, int ldb, int K, int N, bool transB,
-        int8_t *packed, int32_t *col_sum) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static void pack_b_int8_vnni_panel(const int8_t *B, int ldb, int K, int N,
+        bool transB, int8_t *packed, int32_t *col_sum) {
 
     const int K_padded = (K + 3) & ~3;
     const int k_quads = K_padded / 4;
@@ -87,8 +88,8 @@ pack_b_int8_vnni_panel(const int8_t *B, int ldb, int K, int N, bool transB,
 }
 
 // Alpha scaling for fp32 tile (applied after dequant when alpha != 1).
-__attribute__((target("avx512f"))) static void scale_tile_fp32(
-        float *C, int ldc, int mr, int nr, float alpha) {
+ZENDNNL_TARGET("avx512f")
+static void scale_tile_fp32(float *C, int ldc, int mr, int nr, float alpha) {
     __m512 av = _mm512_set1_ps(alpha);
     for (int m = 0; m < mr; ++m) {
         float *row = C + m * ldc;
@@ -102,9 +103,9 @@ __attribute__((target("avx512f"))) static void scale_tile_fp32(
 }
 
 // Beta accumulation: C_dst = alpha * C_fp32 + beta * C_old_fp32.
-__attribute__((target("avx512f"))) static void beta_accumulate(float *C_new,
-        int ldc_new, const float *C_old, int ldc_old, int mr, int nr,
-        float beta) {
+ZENDNNL_TARGET("avx512f")
+static void beta_accumulate(float *C_new, int ldc_new, const float *C_old,
+        int ldc_old, int mr, int nr, float beta) {
     __m512 bv = _mm512_set1_ps(beta);
     for (int m = 0; m < mr; ++m) {
         float *dst = C_new + m * ldc_new;
@@ -120,9 +121,10 @@ __attribute__((target("avx512f"))) static void beta_accumulate(float *C_new,
 }
 
 // Requantize fp32 → s8 or u8: out = clamp(round(val / dst_scale) + dst_zp)
-__attribute__((target("avx512f,avx512bw,avx512vl"))) static void
-requantize_tile(const float *C_fp32, int ldc_fp32, void *dst, int ldc_dst,
-        int mr, int nr, data_type_t dst_dt, float dst_scale, int32_t dst_zp) {
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static void requantize_tile(const float *C_fp32, int ldc_fp32, void *dst,
+        int ldc_dst, int mr, int nr, data_type_t dst_dt, float dst_scale,
+        int32_t dst_zp) {
     const __m512 inv_scale = _mm512_set1_ps(1.0f / dst_scale);
     const __m512i vzp = _mm512_set1_epi32(dst_zp);
 
@@ -169,9 +171,9 @@ requantize_tile(const float *C_fp32, int ldc_fp32, void *dst, int ldc_dst,
 }
 
 // Convert fp32 tile → bf16 output.
-__attribute__((target("avx512f,avx512bf16"))) static void convert_fp32_to_bf16(
-        const float *C_fp32, int ldc_fp32, uint16_t *C_bf16, int ldc_bf16,
-        int mr, int nr) {
+ZENDNNL_TARGET("avx512f,avx512bf16")
+static void convert_fp32_to_bf16(const float *C_fp32, int ldc_fp32,
+        uint16_t *C_bf16, int ldc_bf16, int mr, int nr) {
     for (int m = 0; m < mr; ++m) {
         const float *src_row = C_fp32 + m * ldc_fp32;
         uint16_t *dst_row = C_bf16 + m * ldc_bf16;
@@ -190,9 +192,8 @@ __attribute__((target("avx512f,avx512bf16"))) static void convert_fp32_to_bf16(
     }
 }
 
-__attribute__((
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma"))) void
-int8_brgemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+void int8_brgemm_execute(const GemmDescriptor &desc, const UarchParams &uarch,
         const void *src, const void *weight, void *dst, const void *bias,
         matmul_params &params) {
 

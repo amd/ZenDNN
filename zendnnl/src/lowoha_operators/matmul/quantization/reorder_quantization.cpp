@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -515,8 +516,8 @@ status_t group_reorder_quantization_wrapper(
         const size_t m_sz = static_cast<size_t>(std::max(0, M[i]));
         const size_t k_sz = static_cast<size_t>(K[i]);
         size_t src_bytes = 0;
-        if (__builtin_mul_overflow(m_sz, k_sz, &src_bytes)
-                || __builtin_add_overflow(src_total, src_bytes, &src_total)) {
+        if (zendnnl_mul_overflow(m_sz, k_sz, &src_bytes)
+                || zendnnl_add_overflow(src_total, src_bytes, &src_total)) {
             log_error("Group reorder quantization: source arena size overflow");
             return status_t::failure;
         }
@@ -525,11 +526,10 @@ status_t group_reorder_quantization_wrapper(
             // M * src_scale_groups elements — src_scale_groups == 1 on the
             // per-token path, so this is byte-identical there (no overhead).
             size_t scale_cnt = 0, scale_bytes = 0;
-            if (__builtin_mul_overflow(
+            if (zendnnl_mul_overflow(
                         m_sz, static_cast<size_t>(src_scale_groups), &scale_cnt)
-                    || __builtin_mul_overflow(
-                            scale_cnt, scale_elem, &scale_bytes)
-                    || __builtin_add_overflow(
+                    || zendnnl_mul_overflow(scale_cnt, scale_elem, &scale_bytes)
+                    || zendnnl_add_overflow(
                             scale_total, scale_bytes, &scale_total)) {
                 log_error(
                         "Group reorder quantization: scale arena size "

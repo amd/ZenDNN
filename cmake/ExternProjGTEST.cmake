@@ -31,6 +31,19 @@ if(ZENDNNL_BUILD_GTEST)
 
   list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
+  # On Windows, googletest must be built with the same compiler, build type, and
+  # C runtime as ZenDNN or linking the gtests binary fails with CRT /
+  # _ITERATOR_DEBUG_LEVEL mismatches (LNK2038) and unresolved debug-CRT symbols.
+  # Without CMAKE_BUILD_TYPE the sub-build produces a Debug gtest.lib (MDd) while
+  # the rest of the tree is Release (MD); googletest also defaults to the static
+  # CRT (/MT) on MSVC, so force the shared (DLL) CRT to match ZenDNN's -MD.
+  if(WIN32)
+    list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+    list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+    list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
+    list(APPEND GTEST_CMAKE_ARGS "-Dgtest_force_shared_crt=ON")
+  endif()
+
   message(DEBUG "${ZENDNNL_MSG_PREFIX}GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
 
   set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
@@ -42,8 +55,8 @@ if(ZENDNNL_BUILD_GTEST)
     GIT_TAG ${GTEST_GIT_TAG}
     GIT_PROGRESS ${GTEST_GIT_PROGRESS}
     CMAKE_ARGS ${GTEST_CMAKE_ARGS}
-    BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-    INSTALL_COMMAND cmake --build . --config release --target install
+    BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+    INSTALL_COMMAND cmake --build . --config Release --target install
     UPDATE_DISCONNECTED TRUE)
 
   list(APPEND GTEST_CLEAN_FILES "${CMAKE_BINARY_DIR}/gtest")

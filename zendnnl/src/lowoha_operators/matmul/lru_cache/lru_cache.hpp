@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include "common/zendnnl_compat.hpp"
 #include "operators/matmul/matmul_config.hpp"
 #include <unordered_map>
 namespace zendnnl {
@@ -168,7 +169,11 @@ void lru_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
         });
         if constexpr (std::is_pointer<VALUE_T>::value) {
             if (oldest->second.value_ != nullptr) {
-                std::free(oldest->second.value_);
+                // Cached pointer values are allocated with zendnnl_aligned_alloc, so
+                // they must be released with zendnnl_aligned_free (which is _aligned_free
+                // on Windows, std::free elsewhere). A plain std::free of _aligned_malloc
+                // memory corrupts the heap on Windows.
+                zendnnl_aligned_free(oldest->second.value_);
             }
         }
         lru_cache_map_->erase(oldest);
@@ -182,7 +187,8 @@ void lru_cache_t<KEY_T, VALUE_T>::evict() {
         // Assuming VALUE_T is a pointer type
         if constexpr (std::is_pointer<VALUE_T>::value) {
             if (entry.second.value_ != nullptr) {
-                std::free(entry.second.value_);
+                // See note in evict(size_t): wrapper-allocated -> wrapper free.
+                zendnnl_aligned_free(entry.second.value_);
             }
         }
     }
@@ -239,6 +245,14 @@ bool lru_cache_t<KEY_T, VALUE_T>::try_get(const lru_key_t &key, value_t &out) {
 } // namespace lowoha
 } // namespace zendnnl
 
+// Keep `interface` undef'd for the rest of the TU (do NOT push/pop-restore):
+// `interface` is a public zendnnl namespace that consumers reference (e.g.
+// `using namespace zendnnl::interface;`) after including this header, so the
+// Windows <windows.h> `interface` macro must stay undefined here -- restoring
+// it would re-shadow the namespace and break downstream consumers on Windows.
+#ifdef interface
+#undef interface
+#endif
 namespace interface {
 template <typename KEY_T, typename VALUE_T>
 using lru_cache_t = zendnnl::lowoha::matmul::lru_cache_t<KEY_T, VALUE_T>;

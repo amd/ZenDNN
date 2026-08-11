@@ -26,9 +26,16 @@ find_library(LIBXSMM_LIB
   PATH_SUFFIXES lib
 )
 
-# Static library
+# Static library. On Windows LIBXSMM's CMake build names the archive from the
+# target (xsmm.lib, possibly libxsmm.lib); on Linux the Make build emits
+# libxsmm.a. find_library adds the platform prefix/suffix to the base names.
+if(WIN32)
+  set(_zl_libxsmm_archive_names xsmm libxsmm)
+else()
+  set(_zl_libxsmm_archive_names libxsmm.a)
+endif()
 find_library(LIBXSMM_ARCHIVE_LIB
-  NAMES libxsmm.a
+  NAMES ${_zl_libxsmm_archive_names}
   PATHS ${LIBXSMM_LIB_ROOT}
   NO_DEFAULT_PATH
   PATH_SUFFIXES lib
@@ -44,7 +51,7 @@ find_path(LIBXSMM_INCLUDE_DIR
 
 # Validate findings
 include(FindPackageHandleStandardArgs)
-if(LIBXSMM_LIB-NOTFOUND)
+if(NOT LIBXSMM_LIB)
   find_package_handle_standard_args(LIBXSMM
     DEFAULT_MSG
     LIBXSMM_ARCHIVE_LIB
@@ -61,7 +68,7 @@ endif()
 
 # Define imported targets
 if(LIBXSMM_FOUND)
-  if(LIBXSMM_LIB-NOTFOUND)
+  if(NOT LIBXSMM_LIB)
     message(STATUS "libxsmm shared library not found.")
   else()
     add_library(libxsmm::libxsmm SHARED IMPORTED GLOBAL)

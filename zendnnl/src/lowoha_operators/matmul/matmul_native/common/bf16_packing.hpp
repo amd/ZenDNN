@@ -17,6 +17,7 @@
 #ifndef MATMUL_NATIVE_COMMON_BF16_PACKING_HPP
 #define MATMUL_NATIVE_COMMON_BF16_PACKING_HPP
 
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
 #include <algorithm>
@@ -54,10 +55,10 @@ inline void pack_a_bf16_block(const uint16_t *A_src, uint16_t *pack_buf, int ic,
 }
 
 // On-the-fly VNNI strip pack: pack NR_PACK columns for a K-block
-__attribute__((target("avx512f,avx512bw"))) inline void pack_b_vnni_strip(
-        const uint16_t *B, int ldb, bool transB, int col_start, int nr_act,
-        int K, [[maybe_unused]] int K_padded, int pc, int kb,
-        uint16_t *packed) {
+ZENDNNL_TARGET("avx512f,avx512bw")
+inline void pack_b_vnni_strip(const uint16_t *B, int ldb, bool transB,
+        int col_start, int nr_act, int K, [[maybe_unused]] int K_padded, int pc,
+        int kb, uint16_t *packed) {
 
     const int kb_padded = (kb + 1) & ~1;
     const int k_pairs = kb_padded / 2;
@@ -111,9 +112,9 @@ __attribute__((target("avx512f,avx512bw"))) inline void pack_b_vnni_strip(
 }
 
 // BRGEMM overload: packs full K (no pc/kb subset)
-__attribute__((target("avx512f,avx512bw"))) inline void pack_b_vnni_strip_full(
-        const uint16_t *B, int ldb, bool transB, int col_start, int nr_act,
-        int K, int K_padded, uint16_t *packed) {
+ZENDNNL_TARGET("avx512f,avx512bw")
+inline void pack_b_vnni_strip_full(const uint16_t *B, int ldb, bool transB,
+        int col_start, int nr_act, int K, int K_padded, uint16_t *packed) {
 
     const int k_pairs = K_padded / 2;
     const int out_stride = NR_PACK * VNNI_PAIR;

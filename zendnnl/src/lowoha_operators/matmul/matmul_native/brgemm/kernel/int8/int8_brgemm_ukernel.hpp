@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_INT8_BRGEMM_UKERNEL_HPP
 
 #include <cstdint>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
@@ -55,26 +56,24 @@ namespace native {
 ///   fused_op   - fused activation post-op
 ///   C_bf16     - bf16 output [MR × ldc_bf16] (nullptr if fp32 output)
 ///   ldc_bf16   - leading dimension of bf16 output
-using int8_brgemm_fn_t = void (*)(const uint8_t *__restrict__ A, int lda,
-        const int8_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C_fp32, int ldc, int K, int BK,
-        const int32_t *__restrict__ col_sum, int32_t src_zp, float src_scale,
-        const float *__restrict__ wei_scale, int wei_scale_count,
-        const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+using int8_brgemm_fn_t = void (*)(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict B_vnni, int b_stride, float *__restrict C_fp32,
+        int ldc, int K, int BK, const int32_t *__restrict col_sum,
+        int32_t src_zp, float src_scale, const float *__restrict wei_scale,
+        int wei_scale_count, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16);
 
-__attribute__((target("avx512f,avx512vnni,fma"))) int8_brgemm_fn_t
-select_int8_brgemm_kernel(int MR, int NR);
+ZENDNNL_TARGET("avx512f,avx512vnni,fma")
+int8_brgemm_fn_t select_int8_brgemm_kernel(int MR, int NR);
 
-__attribute__((
-        target("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma"))) void
-int8_brgemm_tail_kernel(const uint8_t *__restrict__ A, int lda,
-        const int8_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C_fp32, int ldc, int K, int BK, int mr_act,
-        int nr_act, const int32_t *__restrict__ col_sum, int32_t src_zp,
-        float src_scale, const float *__restrict__ wei_scale,
-        int wei_scale_count, const float *__restrict__ bias,
-        fused_postop_t fused_op, uint16_t *__restrict__ C_bf16, int ldc_bf16);
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,avx512vnni,fma")
+void int8_brgemm_tail_kernel(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict B_vnni, int b_stride, float *__restrict C_fp32,
+        int ldc, int K, int BK, int mr_act, int nr_act,
+        const int32_t *__restrict col_sum, int32_t src_zp, float src_scale,
+        const float *__restrict wei_scale, int wei_scale_count,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16);
 
 } // namespace native
 } // namespace matmul

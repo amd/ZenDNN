@@ -65,8 +65,8 @@ using zendnnl::common::f16x32_store_mask_typed;
 // For non-f16 operand types the typed load/store helpers emit one vcvtps2ph /
 // vcvtph2ps per 32-lane block; the FMA inner loop stays in __m512h regardless.
 template <typename InType, typename OutType, typename GammaType>
-static inline void rms_norm_row_fp16(const void *__restrict__ in_row,
-        void *__restrict__ out_row, const void *__restrict__ gamma,
+static inline void rms_norm_row_fp16(const void *__restrict in_row,
+        void *__restrict out_row, const void *__restrict gamma,
         uint64_t norm_size, float inv_n, float epsilon, bool use_scale) {
     const InType *in_p = static_cast<const InType *>(in_row);
     OutType *out_p = static_cast<OutType *>(out_row);
@@ -197,9 +197,9 @@ static inline void rms_norm_row_fp16(const void *__restrict__ in_row,
 // unacceptable precision loss versus the FP32-accumulating AVX-512 kernel.
 // =============================================================================
 
-static inline void fused_add_rms_row_fp16(const void *__restrict__ in_row,
-        void *__restrict__ out_row, void *__restrict__ res_row,
-        const void *__restrict__ gamma, uint64_t norm_size, float inv_n,
+static inline void fused_add_rms_row_fp16(const void *__restrict in_row,
+        void *__restrict out_row, void *__restrict res_row,
+        const void *__restrict gamma, uint64_t norm_size, float inv_n,
         float epsilon, bool use_scale) {
     const uint16_t *in_u16 = static_cast<const uint16_t *>(in_row);
     uint16_t *out_u16 = static_cast<uint16_t *>(out_row);

@@ -14,6 +14,7 @@
  * limitations under the License.
  ******************************************************************************/
 
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
 #include "lowoha_operators/reorder/reorder_data_type/static_quant_dequant_impl/static_kernels.hpp"
 
@@ -35,8 +36,8 @@ namespace reorder {
  * Uses VCVTPH2PS to widen 16 packed f16 values from a 256-bit register
  * into 16 float32 values in a 512-bit register.
  */
-__attribute__((target("avx512f"))) static inline __m512 f16_to_float_vec(
-        __m256i f16) {
+ZENDNNL_TARGET("avx512f")
+static inline __m512 f16_to_float_vec(__m256i f16) {
     return _mm512_cvtph_ps(f16);
 }
 
@@ -47,8 +48,8 @@ __attribute__((target("avx512f"))) static inline __m512 f16_to_float_vec(
  * float32 values from a 512-bit register into 16 packed f16 values in a
  * 256-bit register.
  */
-__attribute__((target("avx512f"))) static inline __m256i float_to_f16_vec(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f")
+static inline __m256i float_to_f16_vec(__m512 val) {
     return _mm512_cvtps_ph(val, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
 }
 
@@ -56,8 +57,8 @@ __attribute__((target("avx512f"))) static inline __m256i float_to_f16_vec(
  * @brief Convert 16 BF16 values to 16 float32 values using AVX512.
  *
  */
-__attribute__((target("avx512f,avx512bw"))) static inline __m512
-bf16_to_float_vec(__m256i bf16) {
+ZENDNNL_TARGET("avx512f,avx512bw")
+static inline __m512 bf16_to_float_vec(__m256i bf16) {
     __m512i extended = _mm512_cvtepu16_epi32(bf16);
     __m512i shifted = _mm512_slli_epi32(extended, 16);
     return _mm512_castsi512_ps(shifted);
@@ -66,8 +67,8 @@ bf16_to_float_vec(__m256i bf16) {
 /**
  * @brief Convert 16 float32 values to 16 BF16 values using round-to-nearest-even.
  */
-__attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
-        __m512 val) {
+ZENDNNL_TARGET("avx512f")
+static inline __m256i float_to_bf16_vec(__m512 val) {
     __m512i int_val = _mm512_castps_si512(val);
     __m512i lsb = _mm512_and_si512(
             _mm512_srli_epi32(int_val, 16), _mm512_set1_epi32(1));
@@ -98,9 +99,9 @@ __attribute__((target("avx512f"))) static inline __m256i float_to_bf16_vec(
  *                   + 1 YMM (f16_packed) = 5 vector registers total
  *   - No-scaling path: 1 ZMM (f32_vals) + 1 YMM (f16_packed) = 2 vector registers
  */
-__attribute__((target("avx512f"))) void convert_f32_to_f16_avx512(
-        const float *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void convert_f32_to_f16_avx512(const float *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     const bool apply_scaling = (scale != 1.0f || zero_point != 0);
 
     size_t i = 0;
@@ -151,9 +152,9 @@ __attribute__((target("avx512f"))) void convert_f32_to_f16_avx512(
  *                   + 1 YMM (f16_vals) = 5 vector registers total
  *   - No-scaling path: 1 ZMM (f32_vals) + 1 YMM (f16_vals) = 2 vector registers
  */
-__attribute__((target("avx512f"))) void convert_f16_to_f32_avx512(
-        const uint16_t *input, float *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void convert_f16_to_f32_avx512(const uint16_t *input, float *output,
+        size_t nelems, float scale, int zero_point) {
     const bool apply_scaling = (scale != 1.0f || zero_point != 0);
 
     size_t i = 0;
@@ -217,9 +218,9 @@ __attribute__((target("avx512f"))) void convert_f16_to_f32_avx512(
  *   - No-scaling path: 3 ZMM (f32_vals, extended, shifted)
  *                   + 2 YMM (bf16_vals, f16_packed) = 5 vector registers
  */
-__attribute__((target("avx512f,avx512bw"))) void convert_bf16_to_f16_avx512(
-        const uint16_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f,avx512bw")
+void convert_bf16_to_f16_avx512(const uint16_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     const bool apply_scaling = (scale != 1.0f || zero_point != 0);
 
     size_t i = 0;
@@ -278,9 +279,9 @@ __attribute__((target("avx512f,avx512bw"))) void convert_bf16_to_f16_avx512(
  *   - No-scaling path: ~7 ZMM (f32_vals + 6 from float_to_bf16_vec)
  *                   + 2 YMM (f16_vals, bf16_packed) = ~9 vector registers
  */
-__attribute__((target("avx512f"))) void convert_f16_to_bf16_avx512(
-        const uint16_t *input, uint16_t *output, size_t nelems, float scale,
-        int zero_point) {
+ZENDNNL_TARGET("avx512f")
+void convert_f16_to_bf16_avx512(const uint16_t *input, uint16_t *output,
+        size_t nelems, float scale, int zero_point) {
     const bool apply_scaling = (scale != 1.0f || zero_point != 0);
 
     size_t i = 0;

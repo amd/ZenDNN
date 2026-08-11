@@ -18,6 +18,7 @@
 #define MATMUL_NATIVE_BF16_GEMM_UKERNEL_HPP
 
 #include <cstdint>
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
@@ -27,24 +28,23 @@ namespace native {
 
 // Function pointer type for BF16 GEMM microkernel dispatch.
 // All microkernels share this signature regardless of MR/NR.
-using bf16_ukernel_fn_t = void (*)(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int k, float beta,
-        const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+using bf16_ukernel_fn_t = void (*)(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int k, float beta, const float *__restrict bias,
+        fused_postop_t fused_op, uint16_t *__restrict C_bf16, int ldc_bf16);
 
 // Select the best intrinsics microkernel for given MR and NR.
 // Supports MR={1,2,3,4,6,8,12} with NR={16,32,64} (register-limited).
-__attribute__((target("avx512f,avx512bf16,fma"))) bf16_ukernel_fn_t
-select_bf16_ukernel(int MR, int NR);
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_ukernel_fn_t select_bf16_ukernel(int MR, int NR);
 
 // Tail microkernel for edge tiles with dynamic MR/NR (masked operations).
-__attribute__((target("avx512f,avx512bf16,avx512bw,avx512vl,fma"))) void
-bf16_tail_kernel(const uint16_t *__restrict__ A, int lda,
-        const uint16_t *__restrict__ B_vnni, int b_stride,
-        float *__restrict__ C, int ldc, int k, int mr_act, int nr_act,
-        float beta, const float *__restrict__ bias, fused_postop_t fused_op,
-        uint16_t *__restrict__ C_bf16, int ldc_bf16);
+ZENDNNL_TARGET("avx512f,avx512bf16,avx512bw,avx512vl,fma")
+void bf16_tail_kernel(const uint16_t *__restrict A, int lda,
+        const uint16_t *__restrict B_vnni, int b_stride, float *__restrict C,
+        int ldc, int k, int mr_act, int nr_act, float beta,
+        const float *__restrict bias, fused_postop_t fused_op,
+        uint16_t *__restrict C_bf16, int ldc_bf16);
 
 } // namespace native
 } // namespace matmul
