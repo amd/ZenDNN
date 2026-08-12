@@ -302,9 +302,9 @@ static inline void layer_norm_row_avx512(const void *__restrict in_row,
 // =============================================================================
 
 static inline void fused_layer_norm_add_row_avx512(
-        const void *__restrict__ in_row, void *__restrict__ out_row,
-        const void *__restrict__ res_row, const void *__restrict__ gamma,
-        const void *__restrict__ beta, uint64_t norm_size, float inv_n,
+        const void *__restrict in_row, void *__restrict out_row,
+        const void *__restrict res_row, const void *__restrict gamma,
+        const void *__restrict beta, uint64_t norm_size, float inv_n,
         float epsilon, bool use_scale, bool use_shift, data_type_t src_dt,
         data_type_t dst_dt, data_type_t gamma_dt, data_type_t beta_dt) {
     const size_t src_sz = elem_size(src_dt);

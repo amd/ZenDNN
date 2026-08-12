@@ -264,7 +264,7 @@ status_t normalization_direct(const void *input, void *output,
     // - null residual makes the kernels treat it as plain LAYER_NORM and silently
     //   drop the residual-add step.
     // - residual == output is undefined behavior because the fused row kernels use
-    //   __restrict__ on both pointers.
+    //   __restrict on both pointers.
     if (params.norm_type == norm_type_t::FUSED_LAYER_NORM_ADD) {
         if (!residual) {
             log_error(
