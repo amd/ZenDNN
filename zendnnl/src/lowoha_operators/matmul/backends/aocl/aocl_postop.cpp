@@ -309,6 +309,14 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
             for (int64_t d : po.dims) {
                 sig = sig * 31u + static_cast<std::size_t>(d);
             }
+            // A {1, N} binary_mul is routed to SCALE (broadcast) only when
+            // M > 1, otherwise to MATRIX_MUL (see binary_mul_uses_scale_path).
+            // Fold the routing class in so M == 1 and M > 1 metadata stay
+            // distinct.
+            if (po.po_type == post_op_type_t::binary_mul && po.dims.size() == 2
+                    && po.dims[0] == 1) {
+                sig = sig * 31u + (M > 1 ? 1u : 0u);
+            }
         }
     }
     sig = sig * 31u + static_cast<std::size_t>(dtypes.src);
@@ -365,6 +373,31 @@ std::size_t get_aocl_postop_metadata_cache_size() {
     return get_postop_metadata_cache().get_size();
 }
 
+// A {1, N} binary_mul only needs the AOCL DLP SCALE post-op (a per-N multiply,
+// out[:, j] *= vec[j]) when it must broadcast a single row across MULTIPLE
+// output rows, i.e. when M > 1. When M == 1 the {1, N} operand is a dense
+// single-row matrix and is routed to MATRIX_MUL instead. This decision is
+// independent of the operand dtype.
+//
+// Why avoid SCALE for the M == 1 case: the DLP SCALE kernel
+// (POST_OPS_DOWNSCALE_*) loads its scale vector with _mm512_loadu_ps((float*)
+// scale_factor + j), i.e. it always reads f32 and ignores scale_factor_type,
+// so a bf16/f16 operand is byte-reinterpreted as f32 and produces huge/inf/nan
+// output. MATRIX_MUL dispatches on stor_type and widens bf16/f16 to f32
+// correctly. The fused WOQ linear*mul+add path produces exactly this case at
+// M == 1 (the dense {M, N} mul operand is {1, N}); see ZENAI-3714 / ZENAI-3717.
+//
+// NOTE: this predicate depends on M, which is otherwise excluded from the
+// routing decision. compute_postop_signature() folds the same M > 1 bit into
+// the signature for {1, N} binary_mul operands so that M == 1 and M > 1 calls
+// for the same layer get distinct cached metadata.
+static inline bool binary_mul_uses_scale_path(
+        const matmul_post_op &po, int64_t n, int64_t M) {
+    return po.po_type == post_op_type_t::binary_mul && po.dims.size() == 2
+            && po.dims[0] == 1 && static_cast<int64_t>(po.dims[1]) == n
+            && M > 1;
+}
+
 // Fill DLP post-op array entries (eltwise, binary_add, binary_mul) for one
 // matmul.
 //
@@ -390,7 +423,7 @@ static void setup_dlp_postops(dlp_metadata_t *md,
         dlp_postop_metadata_holder_t *h,
         const std::vector<matmul_post_op> &postops, int &op_index,
         int &eltwise_index, int &matrix_add_index, int &matrix_mul_index,
-        int &bias_index, int &scale_index, int n_cols) {
+        int &bias_index, int &scale_index, int n_cols, int M) {
     // Write one ELTWISE slot. stor_type describes the storage of alpha/beta;
     // when the op carries neither, leave the field at its zero-init default
     // (DLP_INVALID) — the AOCL DLP kernel only consults stor_type when at
@@ -462,11 +495,11 @@ static void setup_dlp_postops(dlp_metadata_t *md,
                 }
                 break;
             case post_op_type_t::binary_mul:
-                // Row-broadcast {1, N}: multiply each output column j by po.buff[j].
-                // DLP MATRIX_MUL expects a dense M×N operand; map broadcast to SCALE
-                // (per-channel multiply), same idea as matmul_aocl_dlp_utils 1D mul path.
-                if (po.dims.size() == 2 && po.dims[0] == 1
-                        && static_cast<int>(po.dims[1]) == n_cols) {
+                // A {1, N} operand broadcasts a per-column vector across output
+                // rows only when M > 1 -> DLP SCALE (per-channel multiply). When
+                // M == 1 it is a dense single-row operand -> MATRIX_MUL. This is
+                // dtype-independent; see binary_mul_uses_scale_path.
+                if (binary_mul_uses_scale_path(po, n_cols, M)) {
                     md->seq_vector[op_index++] = SCALE;
                     dlp_scale_t &sc = md->scale[scale_index++];
                     sc.sf->scale_factor = const_cast<void *>(po.buff);
@@ -729,8 +762,7 @@ static void patch_mutable_fields(dlp_metadata_t *md,
                 }
                 break;
             case post_op_type_t::binary_mul:
-                if (po.dims.size() == 2 && po.dims[0] == 1
-                        && static_cast<int>(po.dims[1]) == N) {
+                if (binary_mul_uses_scale_path(po, N, M)) {
                     md->scale[scale_index].sf->scale_factor
                             = const_cast<void *>(po.buff);
                     md->scale[scale_index].sf->scale_factor_len = N;
@@ -1113,11 +1145,11 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
     // For INT8, add scale count
     if (is_int8) { scale_count = int8_scale_count; }
-    // Row-broadcast binary_mul {1, N} uses DLP SCALE (per-N multiply), not MATRIX_MUL.
+    // Row-broadcast binary_mul {1, N} at M > 1 uses DLP SCALE (per-N multiply);
+    // the M == 1 {1, N} case stays on MATRIX_MUL (counted below).
     int binary_mul_bcast_scale_count = 0;
     for (const auto &po : lowoha_param.postop_) {
-        if (po.po_type == post_op_type_t::binary_mul && po.dims.size() == 2
-                && po.dims[0] == 1 && static_cast<int>(po.dims[1]) == N) {
+        if (binary_mul_uses_scale_path(po, N, M)) {
             binary_mul_bcast_scale_count++;
         }
     }
@@ -1151,8 +1183,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                 }
                 break;
             case post_op_type_t::binary_mul:
-                if (!(po.dims.size() == 2 && po.dims[0] == 1
-                            && static_cast<int>(po.dims[1]) == N)) {
+                // Everything not on the SCALE broadcast path (dense {M, N}, and
+                // the M == 1 {1, N} case) is a MATRIX_MUL operand.
+                if (!binary_mul_uses_scale_path(po, N, M)) {
                     matrix_mul_count++;
                 }
                 break;
@@ -1463,7 +1496,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     // Add post-ops
     setup_dlp_postops(dlp_metadata, new_holder, lowoha_param.postop_, op_index,
             eltwise_index, matrix_add_index, matrix_mul_index, bias_index,
-            scale_index, N);
+            scale_index, N, M);
 
     // For INT8: Add destination scale at the end (after eltwise post-ops)
     if (is_int8 && lowoha_param.quant_params.dst_scale.buff) {
