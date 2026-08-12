@@ -23,6 +23,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -42,7 +43,8 @@ namespace {
 namespace ck = zendnnl::lowoha::matmul::custom_kernel;
 using zendnnl::common::dtype_info;
 
-constexpr size_t kPrepackAlign = 64;
+constexpr size_t kPrepackAlign
+        = zendnnl::lowoha::matmul::kStaticQuantColsumAlign;
 
 inline size_t round_up_align(size_t bytes, size_t align) {
     return (bytes + align - 1) & ~(align - 1);
@@ -63,6 +65,46 @@ int ck_resolve_pack_nr(const prepack_params_t &params) {
     }
     return ck::plan_pack_nr(K, N);
 }
+
+inline bool wants_colsum(const prepack_params_t &params) {
+    return params.wei_dtype == data_type_t::s8 && params.sym_group_size <= 0
+            && params.src_dtype == data_type_t::u8;
+}
+
+inline size_t colsum_buffer_bytes(const prepack_params_t &params) {
+    if (!wants_colsum(params)) return 0;
+    return round_up_align(
+            static_cast<size_t>(params.N) * sizeof(int32_t), kPrepackAlign);
+}
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+void write_weight_colsum(
+        const void *weights, const prepack_params_t &params, void *dst) {
+    using namespace zendnnl::lowoha::matmul;
+    const int k = static_cast<int>(params.K);
+    const int n = static_cast<int>(params.N);
+    const int64_t ldb = params.ldb;
+    const char order = 'r';
+    const char trans = params.transposed ? 't' : 'n';
+    const size_t offset
+            = static_quant_colsum_offset(order, trans, params.K, params.N);
+    int32_t *colsum
+            = reinterpret_cast<int32_t *>(static_cast<char *>(dst) + offset);
+    const int8_t *wei = static_cast<const int8_t *>(weights);
+    const int64_t wei_s0 = params.transposed ? 1 : ldb;
+    const int64_t wei_s1 = params.transposed ? ldb : 1;
+
+#pragma omp parallel for
+    for (int col = 0; col < n; ++col) {
+        int32_t acc = 0;
+        for (int row = 0; row < k; ++row) {
+            const int64_t wei_idx = wei_s0 * row + wei_s1 * col;
+            acc += wei[wei_idx];
+        }
+        colsum[col] = acc;
+    }
+}
+#endif
 
 // Params-only validation (no weights pointer needed). Used by both the
 // size-query path and the data-movement paths. `caller` is the name of
@@ -86,6 +128,16 @@ status_t validate_prepack_params(
                 "), expected at least ", required_ldb, " for ",
                 (params.transposed ? "transposed" : "non-transposed"),
                 " weights");
+        return status_t::failure;
+    }
+    if (wants_colsum(params)
+            && (params.K > std::numeric_limits<int>::max()
+                    || params.N > std::numeric_limits<int>::max()
+                    || params.ldb > std::numeric_limits<int>::max())) {
+        apilog_error(caller,
+                ": static-quant colsum requires K, N, and ldb <= INT_MAX "
+                "(K=",
+                params.K, ", N=", params.N, ", ldb=", params.ldb, ")");
         return status_t::failure;
     }
 
@@ -127,6 +179,14 @@ status_t validate_prepack_params(
             return status_t::failure;
         }
         return status_t::success;
+    }
+
+    if (params.algo == matmul_algo_t::aocl_dlp_blocked
+            && params.src_dtype == data_type_t::u8
+            && params.sym_group_size > 0) {
+        apilog_error(caller,
+                ": src_dtype u8 with sym_group_size > 0 is unsupported");
+        return status_t::failure;
     }
 
     // Prepack only supports the AOCL DLP blocked layout. (libxsmm_blocked
@@ -217,7 +277,18 @@ size_t aocl_compute_size(const prepack_params_t &params) {
         if (params.src_dtype == data_type_t::u8) {
             const size_t req = aocl_get_reorder_buf_size_u8s8s32os32(
                     order, trans, 'B', k, n, nullptr);
-            return round_up_align(req, kPrepackAlign);
+            // AOCL returns zero when the reorder is unsupported or its
+            // parameters are invalid. Preserve that failure sentinel: adding
+            // the ZenDNN column-sum tail to zero would otherwise make the size
+            // query appear successful.
+            if (req == 0) {
+                apilog_error(
+                        "weight_prepack(aocl_dlp): AOCL u8s8 reorder size "
+                        "query failed");
+                return 0;
+            }
+            return round_up_align(req, kPrepackAlign)
+                    + colsum_buffer_bytes(params);
         }
 
         // src = s8 / bf16 / f32 / unspecified -> s8s8s32os32
@@ -301,6 +372,9 @@ status_t aocl_prepack(
             aocl_reorder_u8s8s32os32(order, trans, 'B',
                     static_cast<const int8_t *>(weights),
                     static_cast<int8_t *>(dst), k, n, ldb, nullptr);
+            if (wants_colsum(params)) {
+                write_weight_colsum(weights, params, dst);
+            }
             return status_t::success;
         }
 

@@ -72,8 +72,8 @@ struct dlp_postop_metadata_holder_t {
 
     DLP_POST_OP_TYPE seq_vector[kMaxSeqOps];
     dlp_post_op_eltwise eltwise[kMaxEltwise];
-    // Stable per-eltwise alpha/beta storage. Build path copies CLIP bounds
-    // here and wires e.algo.alpha/beta to these addresses; patch path
+    // Stable per-eltwise alpha/beta storage. Build path copies parameterized
+    // eltwise values here and wires e.algo.alpha/beta to these addresses; patch path
     // refreshes the values without touching the pointers, so e.algo.alpha
     // /beta stay valid across cache hits regardless of the caller's
     // matmul_params lifetime.
@@ -84,6 +84,8 @@ struct dlp_postop_metadata_holder_t {
     dlp_post_op_matrix_mul matrix_mul[kMaxMatrixMul];
     dlp_sf_t matrix_mul_sf[kMaxMatrixMul];
     dlp_post_op_bias bias[kMaxBias];
+    dlp_sf_t zp_comp_bias_sf;
+    int32_t zp_comp_neg_src_zp;
     dlp_scale_t scale[kMaxScale];
     dlp_sf_t scale_sf[kMaxScale];
     dlp_zp_t scale_zp[kMaxScale];
@@ -161,6 +163,10 @@ void init_metadata_holder(dlp_postop_metadata_holder_t *h) {
     h->a_quant_scl.stor_type = DLP_F32;
     h->b_quant_op.dequant_scale_factors = &h->b_dequant_scl;
     h->b_quant_op.zero_point = &h->b_quant_zp;
+    h->zp_comp_bias_sf.scale_factor = &h->zp_comp_neg_src_zp;
+    h->zp_comp_bias_sf.scale_factor_len = 1;
+    h->zp_comp_bias_sf.scale_factor_type = DLP_S32;
+    h->zp_comp_bias_sf.scale_factor_dim = DLP_PARAM_DIM_PER_TENSOR;
 }
 
 // Map zendnnl data_type_t to DLP_TYPE. File-scope so both the cold-path
@@ -287,7 +293,7 @@ get_postop_metadata_cache() {
 //     values that patch_mutable_fields does not refresh.
 //
 // Intentionally NOT in the signature:
-//   - po.alpha/po.beta (CLIP bounds): patched per-call via holder-owned
+//   - po.alpha/po.beta (parameterized eltwise values): patched per-call via holder-owned
 //     eltwise_alpha/eltwise_beta floats.
 //   - po.buff (binary operand pointer): patched per-call.
 //   - M: dynamic batch sizes must not invalidate per-layer cache hits.
@@ -456,15 +462,21 @@ static void setup_dlp_postops(dlp_metadata_t *md,
     for (const auto &po : postops) {
         switch (po.po_type) {
             case post_op_type_t::relu: put_eltwise(RELU); break;
-            case post_op_type_t::leaky_relu:
-                put_eltwise(PRELU, get_void_ptr(LEAKY_RELU_SLOPE_DEFAULT));
+            case post_op_type_t::leaky_relu: {
+                const std::size_t i = static_cast<std::size_t>(eltwise_index);
+                h->eltwise_alpha[i] = po.alpha;
+                put_eltwise(PRELU, &h->eltwise_alpha[i]);
                 break;
+            }
             case post_op_type_t::gelu_tanh: put_eltwise(GELU_TANH); break;
             case post_op_type_t::gelu_erf: put_eltwise(GELU_ERF); break;
             case post_op_type_t::sigmoid: put_eltwise(SIGMOID); break;
-            case post_op_type_t::swish:
-                put_eltwise(SWISH, get_void_ptr(ONE_F32));
+            case post_op_type_t::swish: {
+                const std::size_t i = static_cast<std::size_t>(eltwise_index);
+                h->eltwise_alpha[i] = po.alpha;
+                put_eltwise(SWISH, &h->eltwise_alpha[i]);
                 break;
+            }
             case post_op_type_t::tanh: put_eltwise(TANH); break;
             // clip(x; lo, hi): bounds from matmul_post_op::alpha (lower), ::beta
             // (upper). Copy the values into holder-owned floats and wire algo.
@@ -667,7 +679,8 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 static void patch_mutable_fields(dlp_metadata_t *md,
         dlp_postop_metadata_holder_t *h, const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int M, int N, int K,
-        int32_t *zp_comp_acc, int zp_comp_ndim, bool is_w4a8) {
+        int32_t *zp_comp_acc, int zp_comp_ndim, bool is_w4a8,
+        const int32_t *reorder_colsum = nullptr, int32_t neg_src_zp = 0) {
     // NOTE: keep these flag definitions in lockstep with the build path in
     // create_dlp_post_op(). The hit path mirrors the build path's per-call
     // mutable-field updates, so any divergence in classification (especially
@@ -698,7 +711,13 @@ static void patch_mutable_fields(dlp_metadata_t *md,
 
     // INT8 zero-point compensation must be patched first to mirror the
     // build-path order; it consumes bias[0] or matrix_add[0].
-    if (zp_comp_ndim == 1 && zp_comp_acc) {
+    const bool colsum_mode
+            = reorder_colsum && !zp_comp_acc && zp_comp_ndim == 0;
+    if (colsum_mode) {
+        md->bias[bias_index].bias = const_cast<int32_t *>(reorder_colsum);
+        h->zp_comp_neg_src_zp = neg_src_zp;
+        bias_index++;
+    } else if (zp_comp_ndim == 1 && zp_comp_acc) {
         md->bias[bias_index].bias = zp_comp_acc;
         bias_index++;
     } else if (zp_comp_ndim == 2 && zp_comp_acc) {
@@ -714,18 +733,15 @@ static void patch_mutable_fields(dlp_metadata_t *md,
 
     // Walk lowoha_param.postop_ in build-path order to refresh per-call
     // mutable fields:
-    //   - CLIP eltwise bounds: rewritten through the holder's eltwise_alpha
-    //     /beta floats. The eltwise[i].algo.alpha/beta pointers were wired
-    //     to these holder addresses at build time and are stable across
-    //     cache hits.
+    //   - parameterized eltwise values (Leaky ReLU, Swish, CLIP): rewritten
+    //     through the holder's eltwise_alpha/beta floats. The
+    //     eltwise[i].algo.alpha/beta pointers were wired to these holder
+    //     addresses at build time and are stable across cache hits.
     //   - binary_add / binary_mul operand pointers (dense M×N uses
     //     matrix_add/matrix_mul; row-broadcast {1, N} uses BIAS/SCALE,
     //     matching setup_dlp_postops).
-    // Other eltwise types (relu, gelu_*, sigmoid, swish, tanh, mish,
-    // leaky_relu) have no per-call mutable fields — their alpha/beta either
-    // is unused or points at process-lifetime constexpr globals. We still
-    // advance eltwise_index for them so it stays in lockstep with the build
-    // path.
+    // Other eltwise types have no per-call mutable fields. We still advance
+    // eltwise_index for them so it stays in lockstep with the build path.
     int scale_index = 0;
     if (is_int8 && lowoha_param.quant_params.src_scale.buff
             && !is_non_quant_src_int8 && !is_sym_quant
@@ -739,17 +755,20 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     std::size_t eltwise_index = 0;
     for (const auto &po : lowoha_param.postop_) {
         switch (po.po_type) {
+            case post_op_type_t::leaky_relu:
+            case post_op_type_t::swish:
+                h->eltwise_alpha[eltwise_index] = po.alpha;
+                ++eltwise_index;
+                break;
             case post_op_type_t::clip:
                 h->eltwise_alpha[eltwise_index] = po.alpha;
                 h->eltwise_beta[eltwise_index] = po.beta;
                 ++eltwise_index;
                 break;
             case post_op_type_t::relu:
-            case post_op_type_t::leaky_relu:
             case post_op_type_t::gelu_tanh:
             case post_op_type_t::gelu_erf:
             case post_op_type_t::sigmoid:
-            case post_op_type_t::swish:
             case post_op_type_t::tanh:
             case post_op_type_t::mish: ++eltwise_index; break;
             case post_op_type_t::binary_add:
@@ -984,7 +1003,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
         zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
-        bool is_w4a8) {
+        bool is_w4a8, const int32_t *reorder_colsum, int32_t neg_src_zp) {
     // Normalize zp_comp presence at the API boundary: a zp_comp slot is
     // present iff BOTH the dimensionality and the buffer are non-null.
     // Downstream sites disagree on what "present" means today — the
@@ -999,6 +1018,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     // patch_mutable_fields on the hit path would overwrite the cached
     // user-bias slot with zp_comp_acc, producing silently wrong output.
     if (!zp_comp_acc) { zp_comp_ndim = 0; }
+
+    const bool colsum_mode
+            = reorder_colsum && !zp_comp_acc && zp_comp_ndim == 0;
+    const int sig_zp_ndim = colsum_mode ? 3 : zp_comp_ndim;
 
     // Runtime kill switch: ZENDNNL_ENABLE_POSTOP_CACHE=0 forces every
     // call through the cold path by clearing the cache here, before the
@@ -1017,7 +1040,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
     // Build the cache key.
     const std::size_t sig = compute_postop_signature(
-            lowoha_param, dtypes, zp_comp_ndim, bias, is_w4a8, M, N);
+            lowoha_param, dtypes, sig_zp_ndim, bias, is_w4a8, M, N);
     const Key_matmul key(/*TransB=*/false, static_cast<unsigned int>(K),
             static_cast<unsigned int>(N),
             /*ldb=*/0, weight_ptr, static_cast<uint32_t>(kernel), sig);
@@ -1029,7 +1052,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         if (cached_holder->no_metadata) { return nullptr; }
         patch_mutable_fields(&cached_holder->metadata, cached_holder,
                 lowoha_param, bias, dtypes, M, N, K, zp_comp_acc, zp_comp_ndim,
-                is_w4a8);
+                is_w4a8, reorder_colsum, neg_src_zp);
         return &cached_holder->metadata;
     }
 
@@ -1101,7 +1124,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             = (bias ? 1 : 0) + lowoha_param.postop_.size() + int8_scale_count;
 
     // Add zero-point compensation to total ops
-    if (zp_comp_ndim > 0) { total_ops++; }
+    if (zp_comp_ndim > 0 || colsum_mode) { total_ops++; }
 
     // Plain matmul with no post-op chain: nothing to build, nothing to
     // cache. Re-dispatching on every call (the flag/count work above) is
@@ -1156,7 +1179,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     scale_count += binary_mul_bcast_scale_count;
 
     // Add zp_comp to appropriate count
-    if (zp_comp_ndim == 1) {
+    if (zp_comp_ndim == 1 || colsum_mode) {
         bias_count++; // 1D compensation is added as bias
     } else if (zp_comp_ndim == 2) {
         matrix_add_count++; // 2D compensation is added as matrix_add
@@ -1414,7 +1437,17 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     int scale_index = 0;
 
     // For INT8: Add zero-point compensation FIRST (before scales)
-    if (zp_comp_ndim == 1 && zp_comp_acc) {
+    if (colsum_mode) {
+        new_holder->zp_comp_neg_src_zp = neg_src_zp;
+        dlp_metadata->seq_vector[op_index++] = BIAS;
+        dlp_metadata->bias[bias_index].bias
+                = const_cast<int32_t *>(reorder_colsum);
+        dlp_metadata->bias[bias_index].stor_type = DLP_S32;
+        dlp_metadata->bias[bias_index].sf = &new_holder->zp_comp_bias_sf;
+        dlp_metadata->bias[bias_index].zp = nullptr;
+        dlp_metadata->bias[bias_index].bias_len = N;
+        bias_index++;
+    } else if (zp_comp_ndim == 1 && zp_comp_acc) {
         dlp_metadata->seq_vector[op_index++] = BIAS;
         dlp_metadata->bias[bias_index].bias = zp_comp_acc;
         dlp_metadata->bias[bias_index].stor_type = DLP_S32;

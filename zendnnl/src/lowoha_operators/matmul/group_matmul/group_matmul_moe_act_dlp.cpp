@@ -57,6 +57,9 @@ dlp_metadata_t *build_act_and_mul_metadata(post_op_type_t act_kind,
 
     matmul_post_op act_op;
     act_op.po_type = act_kind;
+    // This helper intentionally implements standard SiLU when act_kind is
+    // Swish; it bypasses matmul_direct(), so provide the alpha explicitly.
+    if (act_kind == post_op_type_t::swish) { act_op.alpha = 1.0f; }
     lparams.postop_.push_back(act_op);
 
     matmul_post_op mul_op;

@@ -61,12 +61,16 @@ inline void clear_zp_compensation_cache() {
  * @param src_dtype Source data type (u8 or s8)
  * @param is_weights_const Whether weights are constant across inferences
  * @param zp_comp_ndim [out] Dimensionality of compensation (0=none, 1=1D, 2=2D)
+ * @param reorder_colsum Optional precomputed per-column weight sums. Required
+ *        when the weights use AOCL's blocked layout and both zero-points are
+ *        nonzero, because blocked bytes cannot be reduced as a plain matrix.
  * @return Pointer to compensation buffer (owned by cache or caller based on config)
  */
 inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
         int M, int N, int K, const void *src, const void *wei, int32_t src_zp,
         int32_t wei_zp, bool transA, bool transB, int lda, int ldb,
-        data_type_t src_dtype, bool is_weights_const, int &zp_comp_ndim) {
+        data_type_t src_dtype, bool is_weights_const, int &zp_comp_ndim,
+        const int32_t *reorder_colsum = nullptr) {
 
     // No compensation needed if both zero-points are zero
     if (src_zp == 0 && wei_zp == 0) {
@@ -211,19 +215,23 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
             }
         }
 
-        // Compute column sums of weights
-        std::vector<int32_t> wei_col_sum(N, 0);
-        for (int k = 0; k < K; ++k) {
-            for (int n = 0; n < N; ++n) {
-                wei_col_sum[n] += wei_buff[wei_s0 * k + wei_s1 * n];
+        std::vector<int32_t> wei_col_sum;
+        const int32_t *wei_col_sum_ptr = reorder_colsum;
+        if (!wei_col_sum_ptr) {
+            wei_col_sum.assign(N, 0);
+            for (int k = 0; k < K; ++k) {
+                for (int n = 0; n < N; ++n) {
+                    wei_col_sum[n] += wei_buff[wei_s0 * k + wei_s1 * n];
+                }
             }
+            wei_col_sum_ptr = wei_col_sum.data();
         }
 
         // Compute 2D compensation with full formula
         int32_t base_comp = src_zp * wei_zp * K;
         for (int m = 0; m < M; ++m) {
             for (int n = 0; n < N; ++n) {
-                zp_comp_acc[m * N + n] = -src_zp * wei_col_sum[n]
+                zp_comp_acc[m * N + n] = -src_zp * wei_col_sum_ptr[n]
                         - wei_zp * src_row_sum[m] + base_comp;
             }
         }

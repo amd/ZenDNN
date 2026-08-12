@@ -370,10 +370,6 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
             switch (lowoha_params.postop_[po].po_type) {
                 case post_op_type_t::elu: {
                     log_info("Adding ELU post-op");
-                    lowoha_params.postop_[po].alpha
-                            = lowoha_params.postop_[po].alpha
-                            ? lowoha_params.postop_[po].alpha
-                            : 1.0f;
                     matmul_pops.append_eltwise(dnnl::algorithm::eltwise_elu,
                             lowoha_params.postop_[po].alpha,
                             lowoha_params.postop_[po].beta);
@@ -470,10 +466,6 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
                 }
                 case post_op_type_t::swish: {
                     log_info("Adding Swish post-op");
-                    lowoha_params.postop_[po].alpha
-                            = lowoha_params.postop_[po].alpha
-                            ? lowoha_params.postop_[po].alpha
-                            : 1.0f;
                     matmul_pops.append_eltwise(dnnl::algorithm::eltwise_swish,
                             lowoha_params.postop_[po].alpha,
                             lowoha_params.postop_[po].beta);

@@ -86,11 +86,9 @@ static inline bool can_use_libxsmm(char transA, char transB, int M, int N,
                 case post_op_type_t::tanh:
                 case post_op_type_t::sigmoid: continue;
                 case post_op_type_t::swish:
-                    // SiLU only: alpha == 1.0 (or 0.0, treated as default 1.0 by callers).
-                    // Anything else falls back to OneDNN/DLP.
-                    if (postop.alpha != 0.0f && postop.alpha != 1.0f) {
-                        return false;
-                    }
+                    // SiLU only. Execution-boundary normalization resolves an
+                    // omitted alpha to 1.0 before backend selection.
+                    if (postop.alpha != 1.0f) { return false; }
                     continue;
                 default: return false;
             }

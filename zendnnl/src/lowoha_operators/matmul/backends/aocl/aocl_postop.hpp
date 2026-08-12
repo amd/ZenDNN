@@ -30,7 +30,6 @@ namespace lowoha {
 namespace matmul {
 
 // Shared scalar constants used as pointer-targets for AOCL/DLP post-op fields
-inline constexpr float LEAKY_RELU_SLOPE_DEFAULT = 0.01f;
 inline constexpr float ONE_F32 = 1.0f;
 
 // Cast a (const) float address into the non-const void* slot expected by the
@@ -107,12 +106,17 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
  *         exists because every subsequent wiring step assumes a live
  *         holder; callers that need a non-throwing path should catch
  *         the exception at the matmul boundary.
+ *
+ * @param reorder_colsum Optional prepacked per-column weight sums used for
+ *        static-INT8 source zero-point compensation.
+ * @param neg_src_zp Scale applied to reorder_colsum.
  */
 dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
         zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
-        bool is_w4a8 = false);
+        bool is_w4a8 = false, const int32_t *reorder_colsum = nullptr,
+        int32_t neg_src_zp = 0);
 
 /**
  * @brief Per-call teardown for the metadata returned by create_dlp_post_op().

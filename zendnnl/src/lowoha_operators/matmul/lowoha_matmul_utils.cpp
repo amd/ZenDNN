@@ -343,6 +343,23 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         return status_t::failure;
     }
 
+    // Only u8-source static-quant prepacks carry the appended column sums.
+    // Reject asymmetric s8-source prepacks because blocked weights cannot be
+    // reduced as a plain matrix to recover the missing compensation.
+    if (is_int8 && params.mem_format_b == 'r'
+            && params.dtypes.src == data_type_t::s8
+            && params.quant_params.src_zp.buff) {
+        const int32_t src_zp = zendnnl::memory::read_and_cast<int32_t>(
+                params.quant_params.src_zp.buff, params.quant_params.src_zp.dt);
+        if (src_zp != 0) {
+            log_error(
+                    "Prepacked s8 weights with an s8 source and non-zero "
+                    "source zero-point are unsupported; use a u8 source, "
+                    "symmetric s8 source, or non-prepacked weights.");
+            return status_t::unimplemented;
+        }
+    }
+
     // Weight quant params: WOQ, INT8, or W4A8.
     if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff)
             && !is_woq && !is_int8 && !is_w4a8) {
@@ -427,11 +444,12 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     for (size_t i = 0; i < params.postop_.size(); ++i) {
         auto &po = params.postop_[i];
         if (po.po_type == post_op_type_t::clip) {
-            if (!std::isfinite(po.alpha) || !std::isfinite(po.beta)) {
+            const float lower = po.alpha_or_default();
+            if (!std::isfinite(lower) || !std::isfinite(po.beta)) {
                 log_error("Clip post-op[", i,
                         "]: alpha (lower) and beta (upper) "
                         "must be finite, got alpha=",
-                        po.alpha, ", beta=", po.beta);
+                        lower, ", beta=", po.beta);
                 return status_t::failure;
             }
         }

@@ -315,6 +315,10 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // Defaults N for binary post-ops when leading_dim is -1. Mutates exec_params
     // only. Must always execute regardless of ZENDNNL_DIAGNOSTICS_ENABLE.
     for (auto &po : exec_params.postop_) {
+        // Materialize operation-specific defaults on the per-call copy.
+        // In particular, an omitted Swish/ELU alpha becomes 1 while an
+        // explicitly supplied zero remains zero.
+        po.apply_alpha_default();
         if (po.po_type == post_op_type_t::binary_add
                 || po.po_type == post_op_type_t::binary_mul) {
             if (po.leading_dim == -1) { po.leading_dim = N; }

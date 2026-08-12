@@ -15,6 +15,7 @@ Unlike the standard Reorder operator which uses the operator factory pattern, Lo
 - Dynamic quantization (compute scale/zero-point from source data at runtime) — supports BF16, FP32, and FP16 sources
 - Per-tensor, per-channel (row and column), and per-group (row and column) quantization granularities
 - Strided (non-contiguous) source memory support
+- Weight prepack (`is_prepack = true`) — produce a backend-blocked weight buffer once at model load and reuse it across matmul calls; for static-INT8 with a `u8` source it also precomputes the per-column weight sums the matmul needs for zero-point compensation (see *Weight Prepack Mode*)
 - For per-tensor FP16 source/destination, the optimal AVX-512 path has two backends — F32-FMA (AVX-512F + F16C convert) and FP16-FMA (`__m512h`-native, AVX512-FP16 ISA) — auto-selected at dispatch time via `can_use_f16_fma_kernel()`. Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to pin reorder to the F32-FMA path. No runtime env var.
 
 
@@ -478,7 +479,11 @@ struct prepack_params_t {
                                 //   matmul_algo_t::moe_custom_kernel -> group_matmul CK VNNI
                                 //                                       (packs into caller dst)
   data_type_t   wei_dtype;      // Weight data type (f32 / bf16 / f16 / s8 / s4 / u4)
-  data_type_t   src_dtype;      // Source (matmul A) dtype (disambiguates s8 vs u8 src)
+  data_type_t   src_dtype;      // Source (matmul A) dtype. Disambiguates s8 vs u8
+                                //   src, and (with wei_dtype = s8) decides whether
+                                //   the column-sum buffer is appended -- see
+                                //   "Appended Column-Sum Buffer". MUST equal the
+                                //   matmul's dtypes.src.
   int64_t       K;              // Weight rows
   int64_t       N;              // Weight cols
   int64_t       ldb;            // Physical leading dimension of the input weights
@@ -504,8 +509,66 @@ struct prepack_params_t {
 | `f16`       | any                | `aocl_reorder_f16f16f16of16` (DLP only) |
 | `s4` / `u4` | any                | `aocl_reorder_bf16s4f32of32` (4-bit wei, bf16 act) |
 | `s8`        | `s8` / `bf16` / `f32` | `aocl_reorder_s8s8s32os32`        |
-| `s8`        | `u8`               | `aocl_reorder_u8s8s32os32`           |
+| `s8`        | `u8`               | `aocl_reorder_u8s8s32os32` **+ appended column-sum buffer** (see below) |
 | `s8` + `sym_group_size > 0` (with `src_dtype = bf16`) | — | `aocl_reorder_s8s8s32os32_sym_quant` (DLP only) |
+
+### Appended Column-Sum Buffer (static-INT8, `wei_dtype = s8` + `src_dtype = u8`)
+
+For the asymmetric static-INT8 path, the matmul has to subtract a source-zero-point
+correction term built from the per-column weight sums:
+
+```
+dst[m,n] = sum_k (src[m,k] - src_zp) * wei[k,n]
+         = sum_k src[m,k] * wei[k,n]  -  src_zp * colsum[n]
+
+where    colsum[n] = sum_k wei[k,n]   <- depends only on the weights
+```
+
+`colsum[n]` depends only on the weights, so recomputing it on every matmul call
+costs an avoidable O(K·N) reduction. More importantly, **once the weights are in
+AOCL DLP blocked layout the matmul can no longer compute it**: the blocked bytes
+are not addressable as a plain `[K, N]` matrix. The prepack therefore computes
+`colsum[n] = sum_k wei[k,n]` from the raw weights and **appends it to the
+prepacked buffer**, which is the only correct source for the term at matmul time.
+
+**When it is appended.** Implicitly, with no caller flag, whenever all three hold:
+
+| Condition | Why |
+|---|---|
+| `prepack.wei_dtype == s8` | static-INT8 weights |
+| `prepack.src_dtype == u8` | the only source dtype whose compensation the matmul recovers from the packed buffer |
+| `prepack.sym_group_size <= 0` | sym-quant carries its own metadata and uses a different reorder kernel |
+
+Every other prepack (sym-quant, WOQ, float, and `s8` weights with an `s8` / `bf16` /
+`f32` source) skips it and produces a buffer with no tail.
+
+**Layout.** The buffer is `N * sizeof(int32_t)` bytes, placed at the 64-byte-aligned
+offset immediately past the AOCL-packed weights, and its own length is rounded up to
+64 bytes:
+
+```
++------------------------------------------+  offset 0
+|  AOCL DLP blocked weights                |
+|  (size from aocl_get_reorder_buf_size_*) |
++------------------------------------------+  round_up(packed_size, 64)
+|  colsum[0 .. N-1]   (N * int32)          |
+|  padding up to the next 64B boundary     |
++------------------------------------------+  weight_prepack_size(rp)
+```
+
+The writer (prepack) and the reader (matmul) both compute that offset with the same
+shared helper, `static_quant_colsum_offset()`, so the size formula and the 64-byte
+alignment are defined in exactly one place.
+
+**The stored value is the raw sum, not `-src_zp * colsum[n]`.** `src_zp` is a
+runtime quantity that is unknown at pack time, so the prepacked buffer stays
+independent of it. The same prepacked weights are therefore valid across calls that use
+different source zero-points.
+
+> ℹ️ `weight_prepack_size` **already includes** the appended buffer. Callers who
+> follow the two-step workflow need no changes and no extra allocation. Do not
+> size the allocation from a raw `aocl_get_reorder_buf_size_*` call — that value
+> omits the tail and the prepack will write past the end of the buffer.
 
 ### Consuming the Prepacked Buffer at Matmul Time
 
@@ -515,6 +578,36 @@ struct prepack_params_t {
 - `matmul_params::mem_format_b = 'r'`
 
 `mem_format_b = 'r'` tells the matmul backend "the `weight` pointer is already in AOCL DLP blocked layout, skip the internal reorder". `matmul_direct` validates that `lowoha_algo == aocl_dlp_blocked` whenever `mem_format_b == 'r'`; any other algo is rejected up front (would otherwise silently produce wrong results).
+
+**Static-INT8: `dtypes.src` must match the `prepack.src_dtype` you packed with.**
+The matmul reads the appended column-sum buffer when *all* of the following hold:
+
+- the weights were supplied prepacked (`mem_format_b == 'r'` on entry),
+- `dtypes.src == u8`, and
+- the source zero-point is non-zero.
+
+Those are matmul-side facts. The library has no way to inspect a `void *` weight
+buffer and discover whether a tail was actually appended, so it trusts that
+`dtypes.src` matches the `prepack.src_dtype` used to build the buffer. Getting this
+wrong is a **memory-safety bug, not just a numerical one**:
+
+| Prepacked with | Matmul called with | Result |
+|---|---|---|
+| `src_dtype = u8` | `dtypes.src = u8` | ✅ Correct — tail present, tail read |
+| `src_dtype = s8` / `bf16` / `f32` | `dtypes.src = u8`, `src_zp != 0` | ❌ **Out-of-bounds read** past the end of the buffer — no tail was appended, but the matmul reads `N * int32` where one would have been |
+| `src_dtype = u8` | `dtypes.src = s8`, `src_zp != 0` | ⛔ Rejected with `status_t::unimplemented` (see below) |
+| any | `src_zp == 0` | ✅ Symmetric — no compensation, tail (if present) is ignored |
+
+The one case the library *can* detect is an `s8` source: `matmul_direct` rejects
+`mem_format_b == 'r'` + `dtypes.src == s8` + non-zero per-tensor `src_zp` with
+`status_t::unimplemented`, because no prepack configuration ever produces a tail for
+an `s8` source and the blocked bytes cannot be reduced to recover one. Use a `u8`
+source, a symmetric `s8` source (`src_zp == 0`), or non-prepacked weights
+(`mem_format_b = 'n'`).
+
+Transposed weights are supported: pass `transB = true` to `matmul_direct` when the
+buffer was packed with `prepack.transposed = true`. The column-sum is always taken
+over the logical `[K, N]` weight, so `colsum[n]` is the same value either way.
 
 **Custom-kernel (group_matmul) VNNI** — hand the prepacked buffer to `group_matmul_direct` (per expert) with:
 
@@ -572,13 +665,74 @@ matmul_direct(/*layout*/'r', /*transA*/false, /*transB*/false,
               bp, mp);
 ```
 
+#### Static-INT8 Asymmetric (u8 source) — with the appended column-sum
+
+Same two-step workflow; the only difference is `src_dtype = u8`, which makes the
+prepack append the column-sum buffer. Nothing extra to allocate, read, or free —
+`weight_prepack_size` covers it and the matmul finds it on its own.
+
+```cpp
+// --- Model load ---------------------------------------------------------
+reorder_params_t rp;
+rp.is_prepack             = true;
+rp.prepack.algo           = matmul_algo_t::aocl_dlp_blocked;
+rp.prepack.wei_dtype      = data_type_t::s8;
+rp.prepack.src_dtype      = data_type_t::u8;  // <-- appends colsum[N]
+rp.prepack.K              = K;
+rp.prepack.N              = N;
+rp.prepack.ldb            = N;
+rp.prepack.transposed     = false;
+rp.prepack.sym_group_size = 0;                // static quant, not sym-quant
+
+size_t prepack_bytes = weight_prepack_size(rp);   // includes the colsum tail
+std::vector<uint8_t> prepacked_buf(prepack_bytes);
+reorder_direct(original_weight, prepacked_buf.data(), rp);
+
+// --- Inference ----------------------------------------------------------
+int32_t src_zp = 17;                          // may vary call to call
+float   src_scale = 0.031f, wei_scale = 0.017f;
+
+matmul_params mp;
+mp.lowoha_algo  = matmul_algo_t::aocl_dlp_blocked;
+mp.mem_format_b = 'r';
+mp.dtypes.src   = data_type_t::u8;            // MUST match prepack.src_dtype
+mp.dtypes.wei   = data_type_t::s8;
+mp.dtypes.dst   = data_type_t::f32;
+
+mp.quant_params.src_scale.buff = &src_scale;
+mp.quant_params.src_scale.dt   = data_type_t::f32;
+mp.quant_params.src_scale.dims = {1, 1};
+mp.quant_params.wei_scale.buff = &wei_scale;
+mp.quant_params.wei_scale.dt   = data_type_t::f32;
+mp.quant_params.wei_scale.dims = {1, 1};
+mp.quant_params.src_zp.buff    = &src_zp;     // per-tensor
+mp.quant_params.src_zp.dt      = data_type_t::s32;
+mp.quant_params.src_zp.dims    = {1, 1};
+
+matmul_batch_params_t bp;
+matmul_direct('r', /*transA*/false, /*transB*/false, M, N, K, /*alpha*/1.0f,
+              activation, /*lda*/K, prepacked_buf.data(), /*ldb*/N,
+              /*bias*/nullptr, /*beta*/0.0f, dst, /*ldc*/N,
+              /*is_weights_const*/true, bp, mp);
+```
+
+`src_zp` may change between calls without re-prepacking: the buffer stores the raw
+column sums and the matmul applies the current `-src_zp` as a post-op scale factor.
+
 ### Caller Responsibilities
 
 The library trusts the caller to keep prepack-time and matmul-time parameters in sync. A mismatch produces **silently wrong results** — no error, no crash, just bad math. Make sure these match between the `reorder_direct` (prepack) call and the subsequent `matmul_direct` call:
 
-- `K`, `N`, `ldb`, `transposed`
+- `K`, `N`, `ldb`, `transposed` (`prepack.transposed = true` pairs with `transB = true`)
 - `wei_dtype`, `src_dtype`
 - `sym_group_size` (for the s8 sym-quant variant)
+
+> ⚠️ **`src_dtype` is the one field whose mismatch is worse than wrong math.** For
+> `wei_dtype = s8`, it decides whether the column-sum buffer is appended at pack
+> time, while the matmul decides whether to *read* one from `dtypes.src`. Packing
+> with a non-`u8` `src_dtype` and then running the matmul with `dtypes.src = u8`
+> and a non-zero source zero-point reads off the end of the buffer. See
+> *Consuming the Prepacked Buffer at Matmul Time* for the full matrix.
 
 If you mutate any of these on `rp.prepack` between the size query and the prepack call (or between the prepack call and the matmul call), the buffer's layout will not match what the matmul kernel expects.
 
@@ -1883,20 +2037,23 @@ The operator performs the following validations:
 20. **Leading dimension:** `prepack.ldb` must be ≥ `prepack.K` (transposed) or ≥ `prepack.N` (non-transposed)
 21. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` or `matmul_algo_t::moe_custom_kernel` (any other value is rejected at validation: `reorder_direct` returns `status_t::failure` and `weight_prepack_size` returns `0`)
 22. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_prepack_size(params)` bytes (both paths). The library does **not** verify this; an undersized buffer causes silent out-of-bounds writes.
+23. **Appended column-sum buffer (AOCL, static-INT8):** for `wei_dtype = s8` + `src_dtype = u8` + `sym_group_size <= 0`, `weight_prepack_size` returns the packed-weight size **plus** `round_up(N * sizeof(int32_t), 64)` for the appended column-sum. This is implicit — there is no flag to enable or disable it, and no separate validation. Sizing the allocation from a raw `aocl_get_reorder_buf_size_*` call instead of `weight_prepack_size` under-allocates by exactly that tail.
+
+> **Cross-check performed by matmul, not reorder:** `matmul_direct` rejects `mem_format_b = 'r'` + `dtypes.src = s8` + non-zero per-tensor `src_zp` with `status_t::unimplemented`, since no prepack configuration appends a column-sum for an `s8` source. The mirror-image error — packing with a non-`u8` `src_dtype` and running the matmul with `dtypes.src = u8` — is **not** detectable by either operator and reads past the end of the buffer. See *Consuming the Prepacked Buffer at Matmul Time*.
 
 ### Custom-Kernel Prepack Validation (when `is_prepack = true` and `prepack.algo == matmul_algo_t::moe_custom_kernel`)
 
-23. **Weight dtype:** `prepack.wei_dtype` must be `bf16` or `s8`
-24. **Pack width:** `prepack.pack_nr` resolves to `32` or `64` (explicit value must divide N; `0` auto-selects via `plan_pack_nr(K, N)`)
-25. **INT8 K alignment:** for `wei_dtype = s8`, `prepack.K % 4 == 0` (VNNI K-quad)
-26. **Interleave:** `interleave_split_halves = true` requires even N
-27. **Alignment (caller):** `dst` should be 64-byte aligned so the CK microkernel's aligned AVX-512 loads succeed at inference (`weight_prepack_size` already rounds the byte size up to 64)
+24. **Weight dtype:** `prepack.wei_dtype` must be `bf16` or `s8`
+25. **Pack width:** `prepack.pack_nr` resolves to `32` or `64` (explicit value must divide N; `0` auto-selects via `plan_pack_nr(K, N)`)
+26. **INT8 K alignment:** for `wei_dtype = s8`, `prepack.K % 4 == 0` (VNNI K-quad)
+27. **Interleave:** `interleave_split_halves = true` requires even N
+28. **Alignment (caller):** `dst` should be 64-byte aligned so the CK microkernel's aligned AVX-512 loads succeed at inference (`weight_prepack_size` already rounds the byte size up to 64)
 
 ### Group Reorder Validation (`group_reorder`)
 
-28. **Non-empty group:** `params` must not be empty
-29. **Vector sizes:** `src.size() == dst.size() == params.size()`
-30. **Per-op:** each op is validated by `reorder_direct` under its own mode; the first per-op failure aborts the group and returns that status
+29. **Non-empty group:** `params` must not be empty
+30. **Vector sizes:** `src.size() == dst.size() == params.size()`
+31. **Per-op:** each op is validated by `reorder_direct` under its own mode; the first per-op failure aborts the group and returns that status
 
 
 ## Implementation Support Matrix
@@ -1973,4 +2130,5 @@ After computing dynamic quantization parameters, the standard reorder path is us
 - **Destination Memory:** Always written contiguously (strided destination not currently supported)
 - **Granularity:** Per-tensor is fastest with optimal support; per-channel/per-group use reference implementation
  - **Float ↔ Float Conversion (FP32, BF16, F16):** Simple conversion (no scale/zp) is fastest. The optimal `native` path is the AVX-512 per-tensor path with contiguous source memory (or 2D -> [x, 1]/ 3D -> [x, y, 1] padded stride). Availability of this path follows the implementation's current ISA/runtime selection logic for `native`; this documentation does not guarantee a separate F16C-specific dispatcher check or fallback for FP32 ↔ F16 / BF16 ↔ F16 conversions. BF16 ↔ F16 conversion goes through FP32 in registers, so it has the same per-element cost as two 16-bit ↔ FP32 conversions fused together.
+- **Weight Prepack (static-INT8, `u8` source):** The appended column-sum buffer moves the `sum_k wei[k,n]` reduction from every matmul call to the one-time prepack, removing an O(K·N) pass per call plus the LRU lookup that used to cache its result. The prepack itself costs one extra O(K·N) reduction (OpenMP-parallel over N) and `round_up(N * 4, 64)` bytes of buffer. The win grows with call count and shrinks as M grows, so it matters most for decode-shaped (small-M) inference.
 - **Dynamic Quantization:** Adds a min/max scan pass over the source data before quantization. For per-tensor, this scans all elements sequentially. For per-channel and per-group, the scan is parallelized with OpenMP. The compute-only mode (`dst = nullptr`) can be used to separate the parameter computation from the quantization step.

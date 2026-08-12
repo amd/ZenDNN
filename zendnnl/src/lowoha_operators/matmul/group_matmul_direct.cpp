@@ -1167,6 +1167,13 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             params.begin()
                     + static_cast<std::vector<matmul_params>::difference_type>(
                             num_ops));
+    // Normalize post-op defaults on the per-call copies. Group matmul
+    // dispatches through matmul_execute() without entering matmul_direct().
+    for (auto &matmul_param : exec_params) {
+        for (auto &po : matmul_param.postop_) {
+            po.apply_alpha_default();
+        }
+    }
 
     // Single-expert parallel routing (see `single_expert_parallel` defined
     // near the top of this function).  `src.size() == 1` normally selects

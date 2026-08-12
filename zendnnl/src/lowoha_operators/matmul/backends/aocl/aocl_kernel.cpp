@@ -967,6 +967,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     bool is_weight_blocked = false;
     void *reordered_mem = nullptr;
     bool simulated_woq_free_buff = false;
+    // Capture caller-supplied prepacking before runtime reorder changes the
+    // format marker. U8-source prepacks append the weight-sum buffer; runtime
+    // reorders do not.
+    const bool weights_prepacked = (mem_format_b == 'r');
     matmul_config_t &matmul_config = matmul_config_t::instance();
     int32_t weight_cache_type
             = effective_weight_cache_type(lowoha_param.weight_cache_type);
@@ -1064,6 +1068,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     int zp_comp_ndim = 0;
     int32_t src_zp = 0;
     int32_t wei_zp = 0;
+    const int32_t *reorder_colsum = nullptr;
+    int32_t colsum_neg_src_zp = 0;
     bool is_int8 = dtypes.wei == data_type_t::s8;
     if (is_int8) {
         // Extract zero-point values
@@ -1082,16 +1088,34 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
 
         // Compute or retrieve cached zero-point compensation
         if (src_zp != 0 || wei_zp != 0) {
-            zp_comp_acc = cache_or_compute_zp_compensation(cache_key, M, N, K,
-                    A, B, src_zp, wei_zp, transA == 't', transB == 't', lda,
-                    ldb, dtypes.src, is_weights_const, zp_comp_ndim);
+            const int32_t *prepacked_colsum = nullptr;
+            if (weights_prepacked && src_zp != 0
+                    && dtypes.src == data_type_t::u8) {
+                const size_t colsum_off
+                        = static_quant_colsum_offset('r', transB, K, N);
+                prepacked_colsum = reinterpret_cast<const int32_t *>(
+                        static_cast<const int8_t *>(B) + colsum_off);
+            }
 
-            if (zp_comp_acc) {
-                bool is_cacheable = (wei_zp == 0 && is_weights_const
-                        && matmul_config.get_zp_comp_cache());
-                apilog_info("INT8 ZP compensation: src_zp=", src_zp,
-                        ", wei_zp=", wei_zp, ", ndim=", zp_comp_ndim,
-                        ", cacheable=", (is_cacheable ? "yes" : "no"));
+            if (prepacked_colsum && wei_zp == 0) {
+                reorder_colsum = prepacked_colsum;
+                colsum_neg_src_zp = -src_zp;
+                apilog_info(
+                        "INT8 ZP compensation: prepacked colsum path, src_zp=",
+                        src_zp, ", neg_src_zp=", colsum_neg_src_zp);
+            } else {
+                zp_comp_acc = cache_or_compute_zp_compensation(cache_key, M, N,
+                        K, A, B, src_zp, wei_zp, transA == 't', transB == 't',
+                        lda, ldb, dtypes.src, is_weights_const, zp_comp_ndim,
+                        prepacked_colsum);
+
+                if (zp_comp_acc) {
+                    bool is_cacheable = (wei_zp == 0 && is_weights_const
+                            && matmul_config.get_zp_comp_cache());
+                    apilog_info("INT8 ZP compensation: src_zp=", src_zp,
+                            ", wei_zp=", wei_zp, ", ndim=", zp_comp_ndim,
+                            ", cacheable=", (is_cacheable ? "yes" : "no"));
+                }
             }
         }
     }
@@ -1184,7 +1208,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     dlp_metadata_t *aocl_po
             = create_dlp_post_op(is_w4a8 ? w4a8_lowoha_param : lowoha_param,
                     bias, is_w4a8 ? dtypes_for_postop : dtypes, N, K, M,
-                    zp_comp_acc, zp_comp_ndim, kernel, B, is_w4a8);
+                    zp_comp_acc, zp_comp_ndim, kernel, B, is_w4a8,
+                    reorder_colsum, colsum_neg_src_zp);
 
     if (dtypes.src == data_type_t::f32 && dtypes.wei == data_type_t::f32
             && dtypes.dst == data_type_t::f32) {

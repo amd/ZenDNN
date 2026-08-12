@@ -47,6 +47,7 @@ if(ZENDNNL_BUILD_GTEST)
   if(ZENDNNL_DEPENDS_AOCLDLP)
     list(APPEND gtests_sources test_postop_cache.cpp)
     list(APPEND gtests_sources test_weight_cache_inplace.cpp)
+    list(APPEND gtests_sources test_static_quant_prepack.cpp)
   endif()
   # Group-matmul-specific gtest artifacts (5 test files + 2 helper TUs +
   # moe_test_utils.hpp + README) live in the `group_matmul/` subdirectory.

@@ -18,7 +18,9 @@
 #define _LOWOHA_COMMON_HPP
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
 #include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
 #include "memory/memory_utils.hpp"
@@ -51,7 +53,7 @@ struct matmul_post_op {
     void *buff; ///< Buffer for binary operations
     data_type_t dtype; ///< Data type of the buffer
     std::vector<int64_t> dims; ///< Dimensions of the buffer
-    float alpha; ///< Alpha parameter for operations
+    float alpha; ///< Alpha parameter; NaN means use the post-op default
     float beta; ///< Beta parameter for operations
     int leading_dim; ///< Leading dimension for the buffer
 
@@ -63,9 +65,36 @@ struct matmul_post_op {
         , buff(nullptr)
         , dtype(data_type_t::none)
         , dims()
-        , alpha(0.0f)
+        , alpha(std::numeric_limits<float>::quiet_NaN())
         , beta(0.0f)
         , leading_dim(-1) {}
+
+    /**
+     * @brief Whether the caller explicitly supplied alpha.
+     *
+     * NaN is reserved as the unset sentinel. This keeps an explicit zero
+     * distinguishable from an omitted value.
+     */
+    bool has_alpha() const noexcept { return !std::isnan(alpha); }
+
+    /**
+     * @brief Return caller alpha or the default for this post-op.
+     */
+    float alpha_or_default() const noexcept {
+        if (has_alpha()) { return alpha; }
+        switch (po_type) {
+            case zendnnl::ops::post_op_type_t::elu:
+            case zendnnl::ops::post_op_type_t::swish: return 1.0f;
+            default: return 0.0f;
+        }
+    }
+
+    /**
+     * @brief Materialize the post-op-specific alpha default in this object.
+     */
+    void apply_alpha_default() noexcept {
+        if (!has_alpha()) { alpha = alpha_or_default(); }
+    }
 };
 
 /**

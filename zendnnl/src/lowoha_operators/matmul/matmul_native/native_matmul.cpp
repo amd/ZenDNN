@@ -249,6 +249,17 @@ bool native_matmul_execute(matmul_algo_t kernel, char layout, bool transA,
     (void)layout;
     if (M <= 0 || N <= 0 || K <= 0) return true;
 
+    // Native fused Swish implements SiLU (alpha == 1) only. Parameterized
+    // Swish must fall back to DLP, which consumes the post-op alpha.
+    for (const auto &po : params.postop_) {
+        if (po.po_type == post_op_type_t::swish && po.alpha != 1.0f) {
+            log_info(
+                    "Native matmul: non-unit Swish alpha is not supported, "
+                    "falling back to aocl_dlp");
+            return false;
+        }
+    }
+
     const bool is_bf16 = (params.dtypes.src == data_type_t::bf16
             && params.dtypes.wei == data_type_t::bf16);
 

@@ -115,6 +115,47 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         int weight_cache_type);
 #endif
 
+// Alignment (bytes) of the appended static-quant per-column weight-sum buffer.
+// The prepack writer and the matmul reader MUST agree on this value; both
+// derive it from this single constant so they can never diverge. 64 bytes is
+// the AOCL AVX-512 packed-weight alignment.
+constexpr size_t kStaticQuantColsumAlign = 64;
+
+// Round @p bytes up to the next multiple of @p align (a power of two).
+inline size_t round_up_to_align(size_t bytes, size_t align) {
+    return (bytes + align - 1) & ~(align - 1);
+}
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+/**
+ * @brief Byte offset of the ZenDNN-appended per-column weight-sum buffer
+ *        inside a static-quant INT8 prepacked weight buffer.
+ *
+ * The prepack writer (lowoha_prepack.cpp) and the matmul reader (run_dlp)
+ * MUST agree on this offset, so it is derived from a single expression here.
+ * The offset equals the AOCL packed-weight size rounded up to
+ * @ref kStaticQuantColsumAlign bytes; the @c N * int32 column-sum buffer
+ * starts there.
+ *
+ * The weight-sum buffer is only ever produced/consumed for a u8 source (the
+ * asymmetric static-quant path), so the offset is always keyed to the
+ * u8s8s32os32 reorder size.
+ *
+ * @param order AOCL order ('r').
+ * @param trans AOCL transpose flag ('t' / 'n').
+ * @param k     Weight rows (K).
+ * @param n     Weight cols (N).
+ * @return @ref kStaticQuantColsumAlign -aligned byte offset of the column-sum
+ *         buffer.
+ */
+inline size_t static_quant_colsum_offset(
+        char order, char trans, md_t k, md_t n) {
+    const size_t req = aocl_get_reorder_buf_size_u8s8s32os32(
+            order, trans, 'B', k, n, nullptr);
+    return round_up_to_align(req, kStaticQuantColsumAlign);
+}
+#endif
+
 /**
  * @brief Widen packed signed-s4 weights to a K×N s8 buffer.
  *
