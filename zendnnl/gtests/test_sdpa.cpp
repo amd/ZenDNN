@@ -721,6 +721,65 @@ TEST(SdpaGqaTest, F32_GQA_MASK_MATCHES_EXPANDED_KV) {
     EXPECT_TRUE(is_test_successful);
 }
 
+TEST(SdpaGqaTest, BF16_GQA_LONG_MASKED_TILES_STAY_FINITE) {
+    tensor_factory_t tensor_factory;
+    constexpr uint64_t batch = 1;
+    constexpr uint64_t num_heads = 4;
+    constexpr uint64_t kv_num_heads = 1;
+    constexpr uint64_t seq_len = 1024;
+    constexpr uint64_t head_dim = 16;
+
+    auto query_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0,
+            kBhsdOrder);
+    auto key_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0,
+            kBhsdOrder);
+    auto value_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len, head_dim}, data_type_t::bf16, 1.0,
+            kBhsdOrder);
+    auto mask_tensor = tensor_factory.zero_tensor(
+            {batch, 1UL, seq_len, seq_len}, data_type_t::f32);
+    auto output_tensor = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len, head_dim}, data_type_t::bf16,
+            kBhsdOrder);
+
+    float *mask = static_cast<float *>(mask_tensor.get_raw_handle_unsafe());
+    const auto mask_stride = mask_tensor.get_stride();
+    const float neg_inf = -std::numeric_limits<float>::infinity();
+    // Fully mask query row 0 across every KV tile. Its attention output must
+    // remain zero after the safe normalization path.
+    for (uint64_t key = 0; key < seq_len; ++key) {
+        mask[key * mask_stride[3]] = neg_inf;
+    }
+    // Fully mask only the first 512-key tile of query row 1. A later valid tile
+    // must recover from the initial empty tile without propagating NaN.
+    for (uint64_t key = 0; key < 512; ++key) {
+        mask[mask_stride[2] + key * mask_stride[3]] = neg_inf;
+    }
+
+    const status_t status = sdpa_kernel_test(query_tensor, key_tensor,
+            value_tensor, mask_tensor, output_tensor,
+            1.0f / std::sqrt(static_cast<float>(head_dim)),
+            /*is_causal=*/false, /*has_mask=*/true, sdpa_kernel_t::flash);
+    ASSERT_EQ(status, status_t::success);
+
+    const auto output_stride = output_tensor.get_stride();
+    const auto *output = static_cast<const bfloat16_t *>(
+            output_tensor.get_raw_handle_unsafe());
+    for (uint64_t head = 0; head < num_heads; ++head) {
+        for (uint64_t dim = 0; dim < head_dim; ++dim) {
+            const uint64_t masked_offset
+                    = head * output_stride[1] + dim * output_stride[3];
+            const uint64_t delayed_valid_offset = head * output_stride[1]
+                    + output_stride[2] + dim * output_stride[3];
+            EXPECT_EQ(static_cast<float>(output[masked_offset]), 0.0f);
+            EXPECT_TRUE(std::isfinite(
+                    static_cast<float>(output[delayed_valid_offset])));
+        }
+    }
+}
+
 /** @fn TEST_P
  *  @param TestSdpa parameterized test class
  *  @param BF16_BF16 BF16 Q/K/V/output (encoder-style self-attention).

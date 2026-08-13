@@ -705,14 +705,21 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
                 }
                 tmp_max = qk_max_data[row] > tmp_max ? qk_max_data[row]
                                                      : tmp_max;
+                scalar_t *qk_row
+                        = conditional_data_ptr(qk_data, qk_reduced_data)
+                        + row * kvBlockSize;
+                // A fully masked tile has max=-inf. Skip exponentiation because
+                // subtracting that max from its -inf scores would produce NaN;
+                // zero probabilities make this tile contribute nothing.
+                if (tmp_max == -std::numeric_limits<accum_t>::infinity()) {
+                    std::fill_n(qk_row, kvBlockSize, scalar_t(0));
+                    continue;
+                }
                 tmp_sum = tmp_max;
                 if constexpr (is_reduced_type) {
                     exp_reduce_sum_fusion_to<SimdTag>(
                             qk_data + row * kvBlockSize,
-                            static_cast<int>(kvBlockSize),
-                            conditional_data_ptr(qk_data, qk_reduced_data)
-                                    + row * kvBlockSize,
-                            tmp_sum);
+                            static_cast<int>(kvBlockSize), qk_row, tmp_sum);
                 } else {
                     exp_reduce_sum_fusion<SimdTag>(qk_data + row * kvBlockSize,
                             static_cast<int>(kvBlockSize),
@@ -739,6 +746,13 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
         }
 
         for (int64_t row = 0; row < qBlockSize; ++row) {
+            // A row that remained fully masked across every KV tile retains
+            // max=-inf and sum=0. Use neutral normalization sentinels so the
+            // zero output accumulator stays zero instead of producing NaN.
+            if (qk_max_data[row] == -std::numeric_limits<accum_t>::infinity()) {
+                qk_max_data[row] = 0;
+            }
+            if (qk_sum_data[row] == 0) { qk_sum_data[row] = 1; }
             const accum_t sum_reciprocal = 1 / qk_sum_data[row];
             write_scaled_output_row<SimdTag, scalar_t>(out_data + i * oStrideB
                             + j * oStrideH + m * oStrideM + row * oStrideM,
