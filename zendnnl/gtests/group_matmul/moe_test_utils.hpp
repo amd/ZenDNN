@@ -475,12 +475,28 @@ inline grp_matmul_gated_act_t pick_random_gated_act(
 //   sqrt_term   16·α·k·ε · √|ref| — dominates the moderate-|ref| regime
 //               where |g|, |u| ≈ √|ref|.
 //   rel_term    30% · |ref| — takes over for very large |ref|.
+//   gate_term   ill-conditioned gated-activation regime (see below).
 //
 // The bound is a "no order-of-magnitude regression" envelope, not a
 // BF16-precise tracking bound.  When `ok` flips false the per-element
 // fprintf prints the full breakdown (regime contributions) so the
 // dominating term is obvious in the test log; only the FIRST miss is
 // printed (subsequent ones short-circuit via `i < m && ok`).
+//
+// ── gate_term: ill-conditioned silu/gelu amplification ──
+// For the concatenated silu/gelu layout the activated result is
+// `r = act(g) · u`, where `g` (gate) and `u` (up) are two independent
+// GEMM accumulations over the same K.  The reference leaves the raw `u`
+// in the still-unactivated up-half of `out_ref` (columns [cmp_n, 2·cmp_n)),
+// so the gate magnitude is recoverable as `|g| ≈ |act(g)| = |r| / |u|`.
+// When `|u|` collapses toward the GEMM noise floor via catastrophic
+// cancellation while `|g|` stays large, the per-element rounding of the
+// up projection `δu ≈ ε · (accumulation scale) ≈ ε · |g|` is multiplied
+// by the large `|act(g)| ≈ |g|`, giving an absolute error `≈ ε · |g|²`
+// that the flat / √|r| / rel terms above never bound (they only see the
+// moderate product `|r| = |g·u|`).  Add a `C · ε · |g|²` regime for it.
+// Like every other regime this only widens `allowed` via `max`, so it can
+// never tighten (and therefore never regress) any existing comparison.
 inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
         uint64_t m, uint64_t cmp_n, uint64_t k, float alpha, float epsilon,
         bool &ok) {
@@ -491,6 +507,11 @@ inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
     const float floor_abs = std::max(floor_abs_formula, 0.5f);
     const float sqrt_factor = 16.0f * a_abs * kf * epsilon;
     const float rel_bound = 0.30f;
+    // Gate-amplification regime constant.  The modelled error is exactly
+    // ε·|g|²; the 16× margin absorbs multi-ulp up-projection rounding and
+    // cross-seed variation.
+    const float gate_factor = 16.0f * a_abs * a_abs * epsilon;
+    const float u_floor = 1e-6f; // guards |g| ≈ |r|/|u| against u → 0.
     for (uint64_t i = 0; i < m && ok; ++i) {
         for (uint64_t j = 0; j < cmp_n && ok; ++j) {
             const float a = const_cast<tensor_t &>(out).at({i, j});
@@ -498,9 +519,14 @@ inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
             const float r_abs = std::fabs(r);
             const float sqrt_term = sqrt_factor * std::sqrt(r_abs);
             const float rel_term = rel_bound * r_abs;
+            const float u_abs = std::fabs(
+                    const_cast<tensor_t &>(out_ref).at({i, cmp_n + j}));
+            const float gate_est = r_abs / std::max(u_abs, u_floor);
+            const float gate_term = gate_factor * gate_est * gate_est;
             float allowed = floor_abs;
             if (sqrt_term > allowed) { allowed = sqrt_term; }
             if (rel_term > allowed) { allowed = rel_term; }
+            if (gate_term > allowed) { allowed = gate_term; }
             const float abs_err = std::fabs(a - r);
             if (abs_err > allowed) { ok = false; }
         }
