@@ -3851,9 +3851,18 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
             || (output_tensor.get_data_type() == data_type_t::f16) || is_quant;
     // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
     bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+    // Quantized GEMMs accumulate exactly in int32, so the pure-GEMM term is
+    // just `k` dequant roundings — but post-ops (binary_*, gelu_erf/tanh, ...)
+    // run afterwards in float and add their own rounding, which the plain
+    // `k * epsilon` bound omits.  For near-zero outputs (e.g. gelu_erf of a
+    // large-negative pre-activation, or binary_mul by ~0) that post-op noise
+    // (~a few * epsilon, independent of the tiny output) can exceed a `k`-only
+    // bound when `k` is small.  Fold in the same post-op accumulation margin
+    // `P` the f32 branch already uses; this only widens the bound, so it can
+    // never tighten (regress) an existing quantized comparison.
     const float abs_bound = is_dst_u8 ? 1.0f
-            : is_low_precision
-            ? (alpha * k * epsilon)
+            : is_quant ? (alpha * (k + P) * epsilon)
+            : is_low_precision ? (alpha * k * epsilon)
             : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
     // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
