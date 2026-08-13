@@ -519,6 +519,11 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // Op2 weight buffers sized to `total` (prepack-extras tail);
     // dst_down stays at `n` (Op2 only computes for firing experts).
     std::vector<AlignedBuffer> B_down(total), C_down(n);
+    // Op2 per-expert weight-scale buffers.  Declared out here, next to the
+    // other Op2 buffers, because `fused.down_scale[e].buff` aliases them and
+    // `fused` outlives the `if (fused_enabled)` block below — the library
+    // reads these on every warmup / timed call further down.
+    std::vector<AlignedBuffer> wei_down_scale_buf;
     grp_matmul_fused_moe_params fused;
     grp_matmul_fused_moe_params *fused_ptr = nullptr;
 
@@ -571,7 +576,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
                 ? static_cast<size_t>(wei_down_scale_G)
                         * static_cast<size_t>(cfg.N_down)
                 : 0;
-        std::vector<AlignedBuffer> wei_down_scale_buf(w4a8_fused ? n : 0);
+        wei_down_scale_buf.resize(w4a8_fused ? n : 0);
         if (w4a8_fused) {
             fused.down_scale.resize(n);
             for (int e = 0; e < n; ++e) {

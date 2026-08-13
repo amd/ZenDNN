@@ -324,6 +324,13 @@ struct CallContext {
     // and read only by `dispatch_tile()`.  Callers should not touch.
     int NV = 0; // = pack_nr / 16
     int max_mr = 0; // = max_mr_for_nv(NV)
+    /// AUTO deep-K K-blocking engage flag.  Set by `prepare_for_call()` only
+    /// for a single-expert (`num_ops == 1`) decode-class call, and ORed by
+    /// `dispatch_tile()` into the `ZENDNNL_GRP_MATMUL_KBLOCK` env gate so
+    /// that path engages K-blocking without the global env.  The remaining
+    /// correctness conditions (bf16 / act=none / bias-free / deep-K /
+    /// M > max_mr) are still enforced by the `dispatch_tile()` gate.
+    bool kblock_auto = false;
     // Representative L2-friendly N-chunk width (worst case, sized from
     // the call's m_max).  Kept as a single value for APILOG / debug
     // output; the actual per-expert values live in `subtile_cols_per_expert`

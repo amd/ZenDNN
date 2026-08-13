@@ -80,7 +80,7 @@
 #include <omp.h>
 
 #include "group_matmul_m_tile.hpp" // own decls + env knobs
-        // (re-includes planner header)
+// (re-includes planner header)
 #include "../group_matmul_parallel_common.hpp"
 #include "../n_tile/group_matmul_n_tile.hpp" // PerThreadScratch + grow_scratch
 #include "../prepack/prepack.hpp"
@@ -571,8 +571,19 @@ void flat_m_tile(const std::vector<char> &layout,
 
     matmul_algo_t algo = resolve_kernel();
 
-    const size_t src_elem = size_of(params[0].dtypes.src);
-    const size_t dst_elem = size_of(params[0].dtypes.dst);
+    // Element sizes must come from an expert that actually runs.  Grouped
+    // quantisation leaves an inactive slot at the caller's default dtype —
+    // `params[0].dtypes.src` stays bf16 while the active experts are s8 — and
+    // these sizes scale every slice's row offset, so reading slot 0 on a call
+    // with a leading inactive expert strides the source at twice the rate.
+    const int elem_ref = [&]() {
+        for (int e = 0; e < num_ops; ++e) {
+            if (M[e] > 0) return e;
+        }
+        return 0;
+    }();
+    const size_t src_elem = size_of(params[elem_ref].dtypes.src);
+    const size_t dst_elem = size_of(params[elem_ref].dtypes.dst);
 
     scoped_active_levels guard(1);
 
@@ -684,14 +695,13 @@ void flat_m_tile(const std::vector<char> &layout,
 
     // ── CCD topology (universal: handles any num_threads) ──
     // F7 — Zen 3 / 4 / 5 classic-CCD assumption: 8 cores per CCD with
-    // shared L3 per CCD.  c-class parts (Zen 4c "Bergamo", Zen 5c
-    // "Turin-Dense") deviate from this — Zen 5c uses 16-core CCDs
-    // with one L3 per CCD; the planner's striping math still
-    // schedules correctly there but treats each large CCD as two
+    // shared L3 per CCD.  Dense (c-class) parts deviate — they use
+    // 16-core CCDs with one L3 per CCD; the planner's striping math
+    // still schedules correctly there but treats each large CCD as two
     // 8-core groups (i.e. CCD locality is per 8-core stripe rather
     // than per L3 slice).  Make this a runtime detect when ZenDNN
-    // builds against a c-class part; until then the constant matches
-    // every shipped MI300 / Genoa / Turin head node.
+    // builds against a dense part; until then the constant matches the
+    // classic-CCD server parts this planner targets.
     const int cores_per_ccd = std::min(8, num_threads);
     const int num_ccds
             = std::max(1, (num_threads + cores_per_ccd - 1) / cores_per_ccd);
@@ -702,60 +712,23 @@ void flat_m_tile(const std::vector<char> &layout,
     // scope; the multi-tier branch below uses linear (not CCD-striped)
     // mapping over the heavy pool.
 
-    // ── ALGO 2 is M-tile-INFEASIBLE when active_ops > num_threads ──
+    // ── `active_ops > num_threads` is infeasible for SINGLE-TIER only ──
     //
-    // A pure M-tile plan splits an expert's M rows across a thread team; it
-    // cannot hand out fewer than one thread per active expert, so when more
-    // experts fire than there are threads there is NO valid M-tile slice plan
-    // (the single-tier planner would floor every active expert at 1 thread,
-    // overflow `num_threads`, and silently DROP the surplus experts in its
-    // Phase-3 tid mapping — a correctness bug).
+    // A pure single-tier M-tile plan splits an expert's M rows across a thread
+    // team; it cannot hand out fewer than one thread per active expert, so
+    // when more experts fire than there are threads there is NO valid
+    // single-tier slice plan (the planner would floor every active expert at
+    // 1 thread, overflow `num_threads`, and silently DROP the surplus experts
+    // in its Phase-3 tid mapping — a correctness bug).  That clamp therefore
+    // now lives immediately before the single-tier planner below, NOT here.
     //
-    // AUTO never reaches this branch: `auto_select_algo` routes the
-    // `active_ops > num_threads` regime to ALGO 5 (parallel_per_expert).  The
-    // only way here is an explicit `ZENDNNL_GRP_MATMUL_ALGO=2` force on such a
-    // shape.  Per the cleanup policy, ALGO 2 stays a PURE M-tile executor and
-    // does NOT fall back to the per-expert (ALGO-5) schedule it used to; for
-    // this infeasible regime we instead CLAMP to the sequential full-team path
-    // (ALGO 1 equivalent — each active expert's GEMM runs across the whole
-    // `num_threads` team, one expert at a time) and emit a one-time WARN so
-    // the operator knows forced ALGO 2 could not run as M-tile here.
-    if (active_ops > num_threads) {
-        static const bool s_warn = apilog_warning_enabled();
-        static std::atomic<bool> s_warned {false};
-        if (s_warn && !s_warned.exchange(true, std::memory_order_relaxed)) {
-            apilog_warning(
-                    "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) on a "
-                    "shape with "
-                    "active_ops > num_threads: pure M-tile is infeasible "
-                    "(cannot give "
-                    "< 1 thread per active expert).  CLAMP to sequential "
-                    "full-team "
-                    "(ALGO 1 equivalent).  AUTO (ZENDNNL_GRP_MATMUL_ALGO "
-                    "unset) routes "
-                    "this regime to ALGO 5 (per-expert) instead.");
-        }
-        set_mtile_mode("flat_m_tile_seq_clamp");
-        if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
-            test_api::s_last_m_tile_path.store(
-                    test_api::m_tile_path_tag::kManyExpertsSeqFallback,
-                    std::memory_order_relaxed);
-        }
-        for (int e = 0; e < num_ops; ++e) {
-            if (M[e] <= 0) continue;
-            static thread_local matmul_params local_params;
-            local_params = params[e];
-            execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e],
-                    K[e], alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e],
-                    beta[e], dst[e], ldc[e], is_weights_const[e], num_threads,
-                    local_params, algo);
-            if (fused_act != grp_matmul_gated_act_t::none) {
-                apply_gated_act_inplace(
-                        fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
-            }
-        }
-        return;
-    }
+    // The MULTI-TIER path has no such limit and is the right executor for this
+    // regime: heavy experts still get ≥ 1 thread each (enforced by the
+    // `candidate_heavy_pool >= n_heavy` gate), while the light tail is drained
+    // by an atomic counter whose loop is bounded by `n_light`, not by the pool
+    // size — so an arbitrary number of light experts is already handled.
+    // Clamping earlier sent these frames to sequential full-team, running
+    // every expert one at a time on the whole team.
 
     // ── Multi-tier hybrid (skewed many-expert / Qwen3-class prompt) ──
     //
@@ -839,20 +812,149 @@ void flat_m_tile(const std::vector<char> &layout,
                         >= static_cast<int64_t>(kHybridMinSkewX) * avg_M);
 
         if (active_ops >= min_actives && gate_skew) {
+            // Light/heavy cut.  The stock rule (a quarter of the mean)
+            // assumes every active expert can hold a thread, which stops
+            // being true once experts outnumber threads: it then marks more
+            // experts heavy than the heavy pool can cover, the
+            // `heavy_pool >= n_heavy` gate below declines, and the call falls
+            // back to sequential full-team.  So in that regime cut by RANK
+            // instead — keep only the largest `num_threads/3` experts heavy
+            // and let the tail drain through the light pool.  The cut never
+            // moves DOWN, so this only ever reclassifies heavy → light.
             const int light_cut = std::max(8, avg_M / 4);
+            // Rank cap, held as a SET of indices rather than a value cut.  A
+            // value cut cannot express "the largest `max_heavy` experts" when
+            // M ties across the boundary: with `M = {400 x 11, 1 x 53}` and 32
+            // threads the boundary value is 400, every 400-expert then tests
+            // `M <= light_cut` and lands light, no expert is heavy, and the
+            // hybrid declines the whole call.  Ranking by (M desc, index asc)
+            // is total, so the cap is exact and reproducible.  With no tie at
+            // the boundary this selects the same experts the value cut did.
+            std::vector<int> heavy_rank;
+            // Experts tied with the boundary M but ranked just outside the
+            // cap.  Demoting them is the worst of both worlds: a light runs
+            // single-threaded off the atomic queue, and roles are fixed, so
+            // an expert the size of the heavy tier becomes the long pole
+            // while its identical twins hold whole teams.  Kept aside so the
+            // cap can absorb the whole tie group when the heavy pool has
+            // room for it.
+            std::vector<int> heavy_ties;
+            if (active_ops > num_threads) {
+                heavy_rank.reserve(active_ops);
+                for (int i = 0; i < num_ops; ++i) {
+                    if (M[i] > 0) { heavy_rank.push_back(i); }
+                }
+                const int max_heavy = std::max(1, num_threads / 3);
+                if (static_cast<int>(heavy_rank.size()) > max_heavy) {
+                    std::nth_element(heavy_rank.begin(),
+                            heavy_rank.begin() + max_heavy, heavy_rank.end(),
+                            [&](int a, int b) {
+                        return M[a] != M[b] ? M[a] > M[b] : a < b;
+                    });
+                    const int boundary_M = M[heavy_rank[max_heavy - 1]];
+                    for (auto it = heavy_rank.begin() + max_heavy;
+                            it != heavy_rank.end(); ++it) {
+                        if (M[*it] == boundary_M) { heavy_ties.push_back(*it); }
+                    }
+                    heavy_rank.resize(max_heavy);
+                }
+                std::sort(heavy_rank.begin(), heavy_rank.end());
+                std::sort(heavy_ties.begin(), heavy_ties.end());
+            }
+
+            // Pool sizing for a given classification.  Shared by the trial
+            // below and the committed plan so the two can never disagree.
+            struct pool_plan {
+                int light_pool;
+                int heavy_pool;
+                bool ok;
+            };
+            const auto plan_pools = [&](int n_light, int n_heavy,
+                                            int64_t heavy_M_sum) -> pool_plan {
+                // Overflow-safe light-pool ceil-div.  Same defense-in-depth
+                // rationale as the skew gate above: with the F8 env knob
+                // `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD`
+                // accepting any positive int, the intermediate
+                // `n_light + kLightsPerThread - 1` can overflow signed `int`.
+                // The final ceil-div result is bounded by `n_light` (≤
+                // kNTilePlanMaxExperts = 256), so the int cast after the
+                // ≥ 1 clamp is safe regardless of the env value.
+                int light_pool = std::min(cores_per_ccd,
+                        static_cast<int>(std::max<int64_t>(1,
+                                (static_cast<int64_t>(n_light)
+                                        + kLightsPerThread - 1)
+                                        / kLightsPerThread)));
+                // Many-expert regime: size the two pools by WORK, not by
+                // expert count.  The `cores_per_ccd` cap was calibrated for a
+                // negligible tail; once experts outnumber threads the tail
+                // carries a real share of `sum_M_total` and a small pool
+                // draining it becomes the critical path.  Give the light pool
+                // its proportional share, bounded so the heavy pool still
+                // covers every heavy expert.
+                if (active_ops > num_threads) {
+                    const int64_t light_M_sum = sum_M_total - heavy_M_sum;
+                    int prop = static_cast<int>(
+                            static_cast<int64_t>(num_threads) * light_M_sum
+                            / std::max<int64_t>(1, sum_M_total));
+                    prop = std::max(1, std::min(prop, num_threads - n_heavy));
+                    light_pool = std::max(light_pool, prop);
+                }
+                const int heavy_pool = num_threads - light_pool;
+                const bool ok = n_light > 0 && n_light >= min_lights
+                        && n_heavy > 0 && heavy_M_sum > 0
+                        && light_pool < num_threads && heavy_pool >= n_heavy;
+                return pool_plan {light_pool, heavy_pool, ok};
+            };
+
+            const auto classify = [&](const std::vector<int> &heavy_set,
+                                          std::vector<int> &light_exp,
+                                          std::vector<int> &heavy_exp,
+                                          int64_t &heavy_M_sum) {
+                light_exp.clear();
+                heavy_exp.clear();
+                heavy_M_sum = 0;
+                light_exp.reserve(num_ops);
+                heavy_exp.reserve(num_ops);
+                for (int i = 0; i < num_ops; ++i) {
+                    if (M[i] <= 0) continue;
+                    const bool capped = heavy_set.empty()
+                            || std::binary_search(
+                                    heavy_set.begin(), heavy_set.end(), i);
+                    if (M[i] <= light_cut || !capped) {
+                        light_exp.push_back(i);
+                    } else {
+                        heavy_exp.push_back(i);
+                        heavy_M_sum += M[i];
+                    }
+                }
+            };
 
             std::vector<int> light_exp;
             std::vector<int> heavy_exp;
             int64_t heavy_M_sum = 0;
-            light_exp.reserve(num_ops);
-            heavy_exp.reserve(num_ops);
-            for (int i = 0; i < num_ops; ++i) {
-                if (M[i] <= 0) continue;
-                if (M[i] <= light_cut) {
-                    light_exp.push_back(i);
-                } else {
-                    heavy_exp.push_back(i);
-                    heavy_M_sum += M[i];
+            classify(heavy_rank, light_exp, heavy_exp, heavy_M_sum);
+
+            // Absorb the tie group when the wider heavy tier still passes
+            // every pool gate.  Trying it first and keeping it only on
+            // success means this can promote a demoted expert but can never
+            // turn an engaging call into a declining one.
+            if (!heavy_ties.empty()) {
+                std::vector<int> wide_set;
+                wide_set.reserve(heavy_rank.size() + heavy_ties.size());
+                std::merge(heavy_rank.begin(), heavy_rank.end(),
+                        heavy_ties.begin(), heavy_ties.end(),
+                        std::back_inserter(wide_set));
+                std::vector<int> wide_light;
+                std::vector<int> wide_heavy;
+                int64_t wide_heavy_M_sum = 0;
+                classify(wide_set, wide_light, wide_heavy, wide_heavy_M_sum);
+                if (plan_pools(static_cast<int>(wide_light.size()),
+                            static_cast<int>(wide_heavy.size()),
+                            wide_heavy_M_sum)
+                                .ok) {
+                    light_exp.swap(wide_light);
+                    heavy_exp.swap(wide_heavy);
+                    heavy_M_sum = wide_heavy_M_sum;
                 }
             }
             const int n_light = static_cast<int>(light_exp.size());
@@ -908,23 +1010,10 @@ void flat_m_tile(const std::vector<char> &layout,
             // the M-weighted distribution there handles every active
             // expert correctly, and multi-tier's load-balancing payoff is
             // negligible at the offending scale anyway.
-            // Overflow-safe light-pool ceil-div.  Same defense-in-depth
-            // rationale as the skew gate above: with the F8 env knob
-            // `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID_LIGHTS_PER_THREAD`
-            // accepting any positive int, the intermediate
-            // `n_light + kLightsPerThread - 1` can overflow signed `int`.
-            // The final ceil-div result is bounded by `n_light` (≤
-            // kNTilePlanMaxExperts = 256), so the int cast after the
-            // ≥ 1 clamp is safe regardless of the env value.
-            const int candidate_light_pool = std::min(cores_per_ccd,
-                    static_cast<int>(std::max<int64_t>(1,
-                            (static_cast<int64_t>(n_light) + kLightsPerThread
-                                    - 1)
-                                    / kLightsPerThread)));
-            const int candidate_heavy_pool = num_threads - candidate_light_pool;
-            if (n_light > 0 && n_light >= min_lights && n_heavy > 0
-                    && heavy_M_sum > 0 && candidate_light_pool < num_threads
-                    && candidate_heavy_pool >= n_heavy) {
+            const pool_plan committed
+                    = plan_pools(n_light, n_heavy, heavy_M_sum);
+            const int candidate_light_pool = committed.light_pool;
+            if (committed.ok) {
                 // Capture-gated branch tag — commit point for multi-tier
                 // hybrid.  Tagged here (not at the outer `if
                 // (get_grp_matmul_m_tile_hybrid() == 0)`) so the tag fires
@@ -1050,9 +1139,8 @@ void flat_m_tile(const std::vector<char> &layout,
                 // `Σ M_heavy ≥ 256 ≥ heavy_pool ≤ 128`, so the surplus
                 // loop fully consumes `heavy_pool` and the guard always
                 // passes.  The guard's purpose is correctness on ≥ 256t
-                // hosts (c-class parts such as Zen 4c "Bergamo" or Zen 5c
-                // "Turin-Dense") where a single heavy with `M = 256` cannot
-                // absorb a `heavy_pool > 256` budget.
+                // hosts (dense c-class parts) where a single heavy with
+                // `M = 256` cannot absorb a `heavy_pool > 256` budget.
                 int ht_assigned_final = 0;
                 for (int idx : heavy_exp)
                     ht_assigned_final += ht_assign[idx];
@@ -1161,6 +1249,44 @@ void flat_m_tile(const std::vector<char> &layout,
         }
     }
     // (multi-tier gating did not engage — fall through to single-tier)
+
+    // ── Single-tier cannot represent `active_ops > num_threads` ──
+    // Placed after the multi-tier hybrid so that gets first refusal on this
+    // regime.  Reaching here means multi-tier declined, so the only correct
+    // answer left is the sequential full-team path — the single-tier planner
+    // would silently drop the surplus experts.
+    if (active_ops > num_threads) {
+        static const bool s_warn = apilog_warning_enabled();
+        static std::atomic<bool> s_warned {false};
+        if (s_warn && !s_warned.exchange(true, std::memory_order_relaxed)) {
+            apilog_warning(
+                    "[GRP_MATMUL.ALGO WARN] env_algo=2 (flat_m_tile) on a "
+                    "shape with active_ops > num_threads that the multi-tier "
+                    "hybrid declined: single-tier M-tile is infeasible "
+                    "(cannot give < 1 thread per active expert).  CLAMP to "
+                    "sequential full-team (ALGO 1 equivalent).");
+        }
+        set_mtile_mode("flat_m_tile_seq_clamp");
+        if (test_api::s_capture_m_tile_path.load(std::memory_order_relaxed)) {
+            test_api::s_last_m_tile_path.store(
+                    test_api::m_tile_path_tag::kManyExpertsSeqFallback,
+                    std::memory_order_relaxed);
+        }
+        for (int e = 0; e < num_ops; ++e) {
+            if (M[e] <= 0) continue;
+            static thread_local matmul_params local_params;
+            local_params = params[e];
+            execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e],
+                    K[e], alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e],
+                    beta[e], dst[e], ldc[e], is_weights_const[e], num_threads,
+                    local_params, algo);
+            if (fused_act != grp_matmul_gated_act_t::none) {
+                apply_gated_act_inplace(
+                        fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
+            }
+        }
+        return;
+    }
 
     // ── Single-tier Phase-1b/2/3 plan (refactored helper) ──
     //

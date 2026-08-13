@@ -365,23 +365,22 @@ inline bool get_grp_n_tile_fused_act() {
 //         describing the resulting allocation, OR a fallback line
 //         if num_threads < num_ops forces a Rounds fall-through.
 //
-//     2 = rounds (DEFAULT, FORCE).  SKIP the auto-mirror gate AND
-//         the viability perf heuristic (same as 1) — when the caller
+//     2 = rounds (FORCE).  SKIP the auto-mirror gate AND the
+//         viability perf heuristic (same as 1) — when the caller
 //         (or ALGO 0 auto-pick) routed to ALGO 3 we mean to run
 //         N-tile, not silently bounce back to Sequential on a perf
-//         preference.  Skip the DecodeD attempt entirely; always run
-//         the Rounds path (FewExperts / ManyExperts).  This is the
-//         production default: deterministic ALGO 3 = "true N-tile with
-//         rounds" behaviour across all decode and prompt shapes that
-//         survive the structural gates, and the path exercised by the
-//         in-tree MoE gtests.
+//         preference.  Skip the DecodeDynamic gate entirely; always run
+//         the Rounds path (FewExperts / ManyExperts).  The former
+//         production default, kept as the one-knob escape back to
+//         deterministic ALGO 3 = "true N-tile with rounds" behaviour on
+//         every shape that survives the structural gates.
 //
-//     3 = decode_dynamic (FORCE).  SKIP the auto-mirror gate AND the
-//         viability heuristics (same as 1/2).  Per op, a gate decides
-//         between the barrier-free CCD-cohesive DecodeDynamic executor
-//         (`DecodeDynamic` -> `execute_decode_dynamic`) and Rounds, from
-//         the active expert count and per-expert weight (see the
-//         DecodeDynamic knob block below).  DecodeDynamic targets the
+//     3 = decode_dynamic (DEFAULT, FORCE).  SKIP the auto-mirror gate
+//         AND the viability heuristics (same as 1/2).  Per op, a gate
+//         decides between the barrier-free CCD-cohesive DecodeDynamic
+//         executor (`DecodeDynamic` -> `execute_decode_dynamic`) and
+//         Rounds, from the active expert count and per-expert weight
+//         (see the DecodeDynamic knob block below).  DecodeDynamic targets the
 //         decode-class regime `num_ops > num_ccds` (max_M <= decode
 //         threshold); it maps whole experts onto CCDs and processes them
 //         in per-CCD waves, so it also runs when `num_ops > num_threads`.
@@ -390,10 +389,16 @@ inline bool get_grp_n_tile_fused_act() {
 //         non-fused calls (non-custom wide-fused runs one team-wide
 //         barrier + apply_swiglu_oai post-pass inside the executor).
 //         Only a use_custom DQ-INT8 fused call falls back to Rounds
-//         (defense-in-depth).  AUTO (value 0) also engages DecodeDynamic
-//         under the SAME gate (decode-class many-active-expert shapes,
-//         active_ops >= 4*num_ccds); below the gate AUTO uses its normal
-//         Rounds / AOCL path.
+//         (defense-in-depth).  AUTO (value 0) engages DecodeDynamic under
+//         the SAME gate (active_ops >= 4*num_ccds).
+//
+//         PRODUCTION DEFAULT, and a STRICT SUPERSET of value 2: the gate is
+//         a narrow, decode-class, MULTI-expert test, and every shape that
+//         does not clear it falls through to the exact Rounds planner value
+//         2 would have run.  `force_ntile` stays true (it is
+//         `strategy != 0`), so changing the default does not reopen the
+//         auto-mirror or viability heuristics.  Set `=2` to restore the
+//         legacy Rounds-everywhere behaviour.
 //
 // What survives `n_tile_strategy = {1, 2, 3}` (genuinely STRUCTURAL —
 // memory safety / kernel correctness, not perf):
@@ -401,7 +406,7 @@ inline bool get_grp_n_tile_fused_act() {
 //   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
 //     = 256`).  Stack-array bound on the planner; demoting to
 //     Sequential is the only safe recourse.  Auto-select rule 0 also
-//     captures this upstream by routing to ALGO 5.
+//     captures this upstream by routing to ALGO 1.
 //
 //   * F3 narrow-N escape — only reachable when the strict-stable
 //     AOCL path runs (`CUSTOM_KERNEL=0 && AOCL_STABLE_NTILE=1`).
@@ -435,47 +440,68 @@ inline bool get_grp_n_tile_fused_act() {
 // See `plan_group_n_tile` in `group_matmul_n_tile.cpp` for the
 // authoritative precedence diagram and emission sites.
 //
-// Mid-process env changes have no effect (cached static const);
-// tests should use `s_grp_n_tile_strategy_override` via the RAII
-// helper `NTileStrategyOverride` in `gtests/group_matmul/
-// moe_test_utils.hpp` to flip it deterministically inside the same
-// process.  Existing tests that pin the planner to its heuristic
-// path use `NTileStrategyOverride(0)` and continue to work — only
-// the unset / invalid default changed.
+// Mid-process env changes have no effect (cached static const); tests
+// should use `s_grp_n_tile_strategy_override` via the RAII helper
+// `NTileStrategyOverride` in `gtests/group_matmul/moe_test_utils.hpp` to
+// flip it deterministically inside the same process.
 //
 // Validation paths differ slightly between the env and the override:
-//   * Env path  — invalid values (< 0 OR > 3) parse to 2 (rounds),
-//                 matching the "unset → safe default" convention used
-//                 by the other knobs in this header.  Note this
-//                 differs from the historical default of 0 (auto)
-//                 documented in older notes.
-//   * Override path — `-1` is the sentinel for "no override" and
-//                 falls through to the cached env path; any other
-//                 negative value also falls through (so a bogus
-//                 negative typo cannot accidentally pin a strategy).
-//                 Non-negative override values > 3 clamp to 2
-//                 (rounds), mirroring the env path on the upper end.
-inline int get_grp_n_tile_strategy() {
-    // Unset / invalid → 2 (rounds): production default; ALGO 3 always
-    // runs FewExperts / ManyExperts when the structural gates pass.
-    // See the doc-block above for the rationale and the precedence
-    // diagram in `plan_group_n_tile`.  Strict env parsing — non-
-    // numeric input (e.g. `"abc"`) falls back to the documented
-    // default 2, NOT silently to mode 0 via legacy atoi-returns-0
-    // behaviour.  See `parse_env_int_strict`.
-    static constexpr int kDefault = 2;
-    static constexpr int kMaxValue
-            = 3; // 0=auto, 1=decode_d, 2=rounds, 3=decode_dynamic
-    const int ovr = test_api::s_grp_n_tile_strategy_override.load(
-            std::memory_order_relaxed);
-    if (ovr >= 0) return (ovr <= kMaxValue) ? ovr : kDefault;
-    static const int v = []() {
+//   * Env path  — invalid values (< 0 OR > 3) parse to the default,
+//                 matching the "unset → safe default" convention used by
+//                 the other knobs in this header.
+//   * Override path — `-1` is the sentinel for "no override" and falls
+//                 through to the cached env path; any other negative value
+//                 also falls through, so a bogus negative typo cannot
+//                 accidentally pin a strategy.  Non-negative values > 3
+//                 clamp to 3, mirroring the env path.
+inline constexpr int kGrpNTileStrategyDefault = 3;
+inline constexpr int kGrpNTileStrategyMax
+        = 3; // 0=auto, 1=decode_d, 2=rounds, 3=decode_dynamic
+
+// Resolved ONCE from the env, because two questions are asked of the same
+// variable — "which strategy?" and "did the user pick it, or is this just
+// the default?" — and a second `getenv` + parse could drift from the first.
+// Strict parsing: non-numeric input falls back to the documented default,
+// NOT silently to mode 0 via legacy atoi-returns-0 behaviour, and leaves
+// `is_set` false so junk reads as "not selected".
+struct GrpNTileStrategyEnv {
+    int value = kGrpNTileStrategyDefault;
+    bool is_set = false;
+};
+inline const GrpNTileStrategyEnv &grp_n_tile_strategy_env() {
+    static const GrpNTileStrategyEnv s = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY");
         int parsed = 0;
-        if (!parse_env_int_strict(e, parsed)) return kDefault;
-        return (parsed >= 0 && parsed <= kMaxValue) ? parsed : kDefault;
+        if (!parse_env_int_strict(e, parsed)) return GrpNTileStrategyEnv {};
+        const bool in_range = (parsed >= 0 && parsed <= kGrpNTileStrategyMax);
+        return GrpNTileStrategyEnv {
+                in_range ? parsed : kGrpNTileStrategyDefault, true};
     }();
-    return v;
+    return s;
+}
+
+inline int get_grp_n_tile_strategy() {
+    // See the doc-block above for the measured rationale and the
+    // precedence diagram in `plan_group_n_tile`.
+    const int ovr = test_api::s_grp_n_tile_strategy_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0)
+        return (ovr <= kGrpNTileStrategyMax) ? ovr : kGrpNTileStrategyDefault;
+    return grp_n_tile_strategy_env().value;
+}
+
+// True when the caller EXPLICITLY selected a strategy — via the env or
+// the test override — as opposed to inheriting the default.  Mirrors
+// `grp_matmul_auto_decode_algo_is_set()`.  Needed because the planner
+// logs "DecodeDynamic NOT engaged" diagnostics that are useful when a
+// user asked for strategy 3 and wants to know why it did not fire, but
+// are pure per-call spam now that 3 is the default and the common case
+// is a shape that legitimately falls through to Rounds.
+inline bool grp_n_tile_strategy_is_set() {
+    if (test_api::s_grp_n_tile_strategy_override.load(std::memory_order_relaxed)
+            >= 0)
+        return true;
+    return grp_n_tile_strategy_env().is_set;
 }
 
 // ── DecodeDynamic generic decision-tree knobs ────────────────────────
@@ -714,6 +740,63 @@ inline int get_grp_matmul_custom_kernel_n_tile() {
         int parsed = 0;
         if (!parse_env_int_strict(e, parsed)) return 0;
         return (parsed > 0 && (parsed % 32) == 0) ? parsed : 0;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB = { >= 0 } — cached, default 2.
+//   Oversubscription factor for adaptive N-tile sizing
+//   (`adaptive_ab_min_tile`), which targets
+//   `min(OVERSUB * team_per_expert, num_threads)` N-tiles so the tile COUNT
+//   tracks the thread count instead of a fixed constant.  SCOPE:
+//   `num_ops == 1` only; real MoE keeps the legacy fixed tile.
+//
+//   EFFECTIVELY AN ON/OFF SWITCH TODAY: in that scope
+//   `team_per_expert == num_threads`, so the cap collapses every value >= 1
+//   onto the same target and `0` is the only distinct setting (it disables
+//   adaptive sizing).  The multiplier is kept rather than reduced to a bool
+//   because the multi-expert generalisation needs it: once `num_ops > 1` is
+//   in scope, `team_per_expert < num_threads` leaves real headroom under the
+//   cap.  Non-numeric input → default 2.
+inline int get_grp_n_tile_oversub() {
+    static const int v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_OVERSUB");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return 2; // default
+        return (parsed >= 0) ? parsed : 2;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_N_TILE_FLOOR = { positive multiple of 32 } — cached,
+//   default 32 (= pack_nr).  Lower bound the adaptive N-tile sizer will
+//   shrink a per-expert tile to.  A 32 floor lets narrow-N shapes (e.g.
+//   N=2048 on 64 cores) saturate every thread with one pack-wide slice
+//   each; deep-K down-proj tolerates the narrow tile well.  Raise it to
+//   trade parallelism for microkernel efficiency on shallow-K shapes.
+//   Non-multiples of 32 (or non-numeric) → default 32.
+inline int get_grp_n_tile_floor() {
+    static const int v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_FLOOR");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return 32;
+        return (parsed > 0 && (parsed % 32) == 0) ? parsed : 32;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_N_TILE_CCD_FILL = { 0, 1 } — cached, default 1 (ON).
+//   Kill switch for the multi-expert CCD-fill N-tile sizer
+//   (`ccd_fill_min_n_tile`), used only by the DecodeDynamic executor: it
+//   shrinks the tile for experts whose fixed tile yields fewer tiles than
+//   the CCD has lanes, leaving wider-N experts on `phase_cap`.  Set to 0 to
+//   restore the legacy fixed decode tile.  Non-numeric input → default 1.
+inline bool get_grp_n_tile_ccd_fill() {
+    static const bool v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_CCD_FILL");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
+        return parsed != 0;
     }();
     return v;
 }

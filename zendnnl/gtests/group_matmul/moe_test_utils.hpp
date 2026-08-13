@@ -830,6 +830,50 @@ struct AutoPromptAlgoOverride {
     AutoPromptAlgoOverride &operator=(AutoPromptAlgoOverride &&) = delete;
 };
 
+// Arms the K-blocked-tile capture and clears the previous verdict, so a test
+// can assert that the deep-K path actually ran rather than silently passing
+// on the straight-line one.
+struct KblockCaptureGuard {
+    KblockCaptureGuard() {
+        zendnnl::lowoha::matmul::test_api ::s_last_kblock_used.store(
+                false, std::memory_order_relaxed);
+        zendnnl::lowoha::matmul::test_api ::s_capture_kblock.store(
+                true, std::memory_order_relaxed);
+    }
+    ~KblockCaptureGuard() {
+        zendnnl::lowoha::matmul::test_api ::s_capture_kblock.store(
+                false, std::memory_order_relaxed);
+    }
+    static bool used() {
+        return zendnnl::lowoha::matmul::test_api ::s_last_kblock_used.load(
+                std::memory_order_relaxed);
+    }
+    KblockCaptureGuard(const KblockCaptureGuard &) = delete;
+    KblockCaptureGuard &operator=(const KblockCaptureGuard &) = delete;
+    KblockCaptureGuard(KblockCaptureGuard &&) = delete;
+    KblockCaptureGuard &operator=(KblockCaptureGuard &&) = delete;
+};
+
+// RAII guard for `ZENDNNL_GRP_MATMUL_KBLOCK`.  `0` = forced off, `1` =
+// forced on, `2` = automatic policy, `-1` = restore the env path.  Same
+// cache-bypass rationale as the other Override structs: the getter latches
+// its env read, so A/B-ing the K-blocked kernel needs the atomic.
+struct KblockOverride {
+    int prev;
+    explicit KblockOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::s_grp_matmul_kblock_override
+                       .exchange(value, std::memory_order_relaxed);
+    }
+    ~KblockOverride() {
+        zendnnl::lowoha::matmul::test_api ::s_grp_matmul_kblock_override.store(
+                prev, std::memory_order_relaxed);
+    }
+    KblockOverride(const KblockOverride &) = delete;
+    KblockOverride &operator=(const KblockOverride &) = delete;
+    KblockOverride(KblockOverride &&) = delete;
+    KblockOverride &operator=(KblockOverride &&) = delete;
+};
+
 struct AutoDecodeAlgoOverride {
     int prev;
     explicit AutoDecodeAlgoOverride(int value) {
@@ -846,6 +890,29 @@ struct AutoDecodeAlgoOverride {
     AutoDecodeAlgoOverride &operator=(const AutoDecodeAlgoOverride &) = delete;
     AutoDecodeAlgoOverride(AutoDecodeAlgoOverride &&) = delete;
     AutoDecodeAlgoOverride &operator=(AutoDecodeAlgoOverride &&) = delete;
+};
+
+// RAII guard for Rule 0.45's env gate
+// (`ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE`).  `1` = rule enabled (the
+// production default), `0` = disabled, `-1` = restore the env path.
+// Same cache-bypass rationale as the other Override structs.
+struct DenseDecodeNTileOverride {
+    int prev;
+    explicit DenseDecodeNTileOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_dense_decode_ntile_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~DenseDecodeNTileOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_dense_decode_ntile_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    DenseDecodeNTileOverride(const DenseDecodeNTileOverride &) = delete;
+    DenseDecodeNTileOverride &operator=(const DenseDecodeNTileOverride &)
+            = delete;
+    DenseDecodeNTileOverride(DenseDecodeNTileOverride &&) = delete;
+    DenseDecodeNTileOverride &operator=(DenseDecodeNTileOverride &&) = delete;
 };
 
 // RAII guard for the ALGO 3 N-tile heavy-threshold knob (the test-

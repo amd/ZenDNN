@@ -77,6 +77,36 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 inline constexpr int kDecodeMaxM = 32; // per-expert M ≤ this → "decode"
 inline constexpr int kMinNTile = 512; // prompt-path per-thread N
 
+// ── Single-op (num_ops == 1) specialisation scope ───────────────────────
+// SINGLE SOURCE OF TRUTH for the optimisations added for a lone expert.
+//
+// WHAT IS ACTUALLY TESTED: `num_ops == 1`, plus `max_M <= kDecodeMaxM` for
+// the decode refinement.  Nothing here inspects operand shapes, so "dense
+// FFN" / "W13/W2" in these doc-blocks names the workload the paths were
+// TUNED for, not a property the predicates verify: "dense" means "a
+// single-op group" (i.e. not MoE), and any other single-op grouped matmul
+// in the decode M band is in scope too.  That is deliberate — all three
+// consumers are shape-generic perf heuristics with their own guards (Rule
+// 0.45 also requires `n_tile_safe`; the kblock gate keys on per-expert M
+// and dtype) — so a non-FFN single-op caller gets a differently-tuned but
+// equally valid plan.  Add operand-shape inputs here if a consumer ever
+// needs FFN specifically.
+//
+// Two predicates, so each consumer takes exactly the scope it needs:
+//   `is_single_dense_expert` (phase-agnostic) guards adaptive N-tile sizing
+//       in `adaptive_ab_min_tile`, which serves BOTH phases and so must not
+//       be decode-gated.
+//   `is_dense_ffn_decode` (adds the decode gate) guards Rule 0.45 ALGO-3
+//       routing and the auto deep-K K-blocking in `prepare_for_call`; both
+//       must fire only in decode, since single-expert prompt has its own
+//       path (ALGO 1).
+inline bool is_single_dense_expert(int num_ops) {
+    return num_ops == 1;
+}
+inline bool is_dense_ffn_decode(int num_ops, int max_M) {
+    return is_single_dense_expert(num_ops) && max_M <= kDecodeMaxM;
+}
+
 // DQ-INT8 sibling of `kMinNTile`.  Today set equal to the bf16
 // value so the dtype-aware split is a structural no-op.  Kept as an
 // independent constant so the int8 family can be retuned without
@@ -316,9 +346,13 @@ inline int get_grp_matmul_algo() {
 // phase to a single ALGO.
 //
 // Structural gates that ALWAYS fire (independent of phase env):
-//   * R0 capacity (`num_ops > kNTilePlanMaxExperts=256`) → ALGO 5.
+//   * R0 capacity (`num_ops > kNTilePlanMaxExperts=256`) → ALGO 1.
 //     Phase env cannot override the N-tile planner's capacity
 //     ceiling.
+//
+// NOTE: auto-select never emits ALGO 4 or ALGO 5.  Setting either
+// here is clamped (with a [WARN]) to `n_tile_safe ? 3 : 1`; only the
+// global `ZENDNNL_GRP_MATMUL_ALGO` can force 4 or 5.
 //
 // Telemetry: the `[GRP_MATMUL.ALGO]` apilog line surfaces `phase=`
 // (prompt/decode) and `auto_prompt_env=` / `auto_decode_env=` (the
@@ -379,35 +413,64 @@ inline int get_grp_matmul_auto_decode_algo() {
 }
 
 // True when the operator has EXPLICITLY chosen a prompt phase algo —
-// either via the test override atomic (`>= 0`) or a parseable
+// either via the test override atomic or a parseable
 // `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` env value (including `0`, the
 // explicit "legacy cascade" request).  Lets the default-policy few-
 // experts ALGO 2 preference defer to an explicit pin while still firing
 // out-of-the-box.  Env presence is cached on first call (same pattern as
 // the value getter); test overrides read the live atomic.
+//
+// The accepted range MUST match the value getter's.  That getter clamps
+// anything outside 0..5 to the documented default, so treating an
+// out-of-range value as "set" would claim a pin that was never honoured:
+// `AUTO_PROMPT_ALGO=99` would resolve to 2 and then suppress the very
+// rules the inherited default is supposed to run.
 inline bool grp_matmul_auto_prompt_algo_is_set() {
-    if (test_api_auto_prompt_algo_override().load(std::memory_order_relaxed)
-            >= 0)
-        return true;
+    const int ovr = test_api_auto_prompt_algo_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr <= 5;
     static const bool s = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO");
         int parsed = 0;
-        return parse_env_int_strict(e, parsed);
+        return parse_env_int_strict(e, parsed) && parsed >= 0 && parsed <= 5;
     }();
     return s;
 }
 
-// Decode counterpart of `grp_matmul_auto_prompt_algo_is_set()`.
+// Decode counterpart of `grp_matmul_auto_prompt_algo_is_set()`, with the
+// same range agreement against `get_grp_matmul_auto_decode_algo()`.
 inline bool grp_matmul_auto_decode_algo_is_set() {
-    if (test_api_auto_decode_algo_override().load(std::memory_order_relaxed)
-            >= 0)
-        return true;
+    const int ovr = test_api_auto_decode_algo_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr <= 5;
     static const bool s = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO");
         int parsed = 0;
-        return parse_env_int_strict(e, parsed);
+        return parse_env_int_strict(e, parsed) && parsed >= 0 && parsed <= 5;
     }();
     return s;
+}
+
+// ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE = { 0, 1 } — cached, default 1 (ON).
+//   AUTO-only (`ALGO=0`) routing knob for Rule 0.45: a lone expert
+//   (`num_ops == 1`) in decode goes to ALGO 3 rather than being diverted by
+//   Rule 0.5 to `kWideN → ALGO 1`, so it reaches the N-tile planner.  Set
+//   `=0` to restore the legacy diversion for A/B measurement.  Scope:
+//   num_ops==1 + decode + n_tile_safe + phase env NOT explicitly pinned.
+//   Non-numeric input → default 1.  The `test_api` override atom below lets
+//   a gtest A/B the rule mid-process, which the cached env read cannot.
+inline std::atomic<int> &test_api_dense_decode_ntile_override();
+inline bool get_grp_matmul_dense_decode_ntile() {
+    const int ovr = test_api_dense_decode_ntile_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
+        return parsed != 0;
+    }();
+    return v;
 }
 
 // NOTE: `get_grp_n_tile_fused_act()` moved to
@@ -532,6 +595,21 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override {-1};
 inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 
+// Sentinel `-1` = no override (use the cached env path, default ON).
+// `0` / `1` force Rule 0.45's env gate
+// (`ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE`) off / on for the lifetime of
+// a test.  Needed because the getter caches its env read in a
+// function-local `static const`, so a gtest cannot A/B the rule by
+// setting the env var after the first call has already latched it.
+inline std::atomic<int> s_grp_matmul_dense_decode_ntile_override {-1};
+
+// Sentinel `-1` = no override (use the cached env path).  `0` / `1` force
+// `ZENDNNL_GRP_MATMUL_KBLOCK` off / on, and `2` restores the automatic
+// policy, so a gtest can A/B the K-blocked kernel against the straight-line
+// one inside a single process — the getter caches its env read, so the env
+// var alone cannot flip the path once latched.
+inline std::atomic<int> s_grp_matmul_kblock_override {-1};
+
 // Sentinel `-1` = no override (use cached env path).  Settable values
 // 0..5 mirror `get_grp_matmul_algo()` parse output (`0` = AUTO,
 // `1..5` = forced ALGO_N, `> 5` clamped to AUTO by the getter).  The
@@ -597,6 +675,14 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override {
 inline std::atomic<bool> s_capture_gemm_mode {false};
 inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode {nullptr};
 
+// Whether the deep-K K-blocked BF16 custom-kernel tile ran.  Gated by its
+// own capture flag because the decision sits per TILE, not per call: an
+// unconditional store would write a shared line from every worker on every
+// tile.  The gating load is of a flag that only a test ever flips, so it
+// stays in shared state and costs nothing in production.
+inline std::atomic<bool> s_capture_kblock {false};
+inline std::atomic<bool> s_last_kblock_used {false};
+
 // NOTE: The M-tile (ALGO 2) branch-tag capture hook —
 // `s_capture_m_tile_path`, `s_last_m_tile_path`, and the
 // `m_tile_path_tag::*` named constants — moved out to
@@ -618,6 +704,9 @@ inline std::atomic<int> &test_api_auto_decode_algo_override() {
 }
 inline std::atomic<int> &test_api_algo_override() {
     return test_api::s_grp_matmul_algo_override;
+}
+inline std::atomic<int> &test_api_dense_decode_ntile_override() {
+    return test_api::s_grp_matmul_dense_decode_ntile_override;
 }
 
 inline int get_grp_n_rounds_mode() {
@@ -1160,6 +1249,54 @@ inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
     return v;
 }
 
+// ZENDNNL_GRP_MATMUL_KBLOCK = { unset, "0", "1" } — cached, TRI-STATE.
+//   unset : automatic policy (`CallContext::kblock_auto` decides).
+//   0     : forced OFF — overrides `kblock_auto`, so this is the escape
+//           hatch when the K-blocked path is suspected.
+//   1     : forced ON wherever the shape gates allow it.
+//   Anything else parses as unset, so a typo cannot silently enable a
+//   different numerical path.
+//   Deep-K single-thread K-blocking for the BF16 custom kernel (act=none,
+//   bias-free).  When ON, the per-tile dispatcher splits the K reduction
+//   into L2-resident chunks so each o-block's B strip is streamed ONCE and
+//   reused across all M-blocks instead of being re-streamed
+//   `ceil(M / max_mr)` times.  Engages only when the strip exceeds the L2
+//   budget and M > max_mr; every other shape and the fused / biased paths
+//   are untouched.  `CallContext::kblock_auto` turns it on for single-expert
+//   decode without the env.
+enum class kblock_env_t { kAuto, kOff, kOn };
+
+inline kblock_env_t get_grp_matmul_kblock_env() {
+    const int ovr = test_api::s_grp_matmul_kblock_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) {
+        return ovr == 0 ? kblock_env_t::kOff
+                        : (ovr == 1 ? kblock_env_t::kOn : kblock_env_t::kAuto);
+    }
+    static const kblock_env_t v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_KBLOCK");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return kblock_env_t::kAuto;
+        if (parsed == 0) return kblock_env_t::kOff;
+        if (parsed == 1) return kblock_env_t::kOn;
+        return kblock_env_t::kAuto;
+    }();
+    return v;
+}
+
+// Resolves the tri-state against the per-call automatic decision.  An
+// explicit setting wins in both directions; unset defers to `kblock_auto`.
+// Split from the env read so the precedence is testable without the cache.
+constexpr bool resolve_grp_matmul_kblock(kblock_env_t env, bool kblock_auto) {
+    return env == kblock_env_t::kOff   ? false
+            : env == kblock_env_t::kOn ? true
+                                       : kblock_auto;
+}
+
+inline bool grp_matmul_kblock_enabled(bool kblock_auto) {
+    return resolve_grp_matmul_kblock(get_grp_matmul_kblock_env(), kblock_auto);
+}
+
 // NOTE: `get_grp_matmul_custom_kernel_n_tile()`
 // (ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE) moved to
 // `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
@@ -1346,10 +1483,22 @@ inline bool get_grp_matmul_enable_group_dq() {
 /// tile-safety checks, auto_select_algo on env=0.  Pure observer
 /// (no side-effects); used by the fused-MoE entry to choose tight
 /// vs wide arena before committing the buffer layout.
+// What the AUTO heuristic decided and why.  Filled by the selector itself so
+// the `[GRP_MATMUL.ALGO]` line reports the rule that actually matched instead
+// of re-deriving a parallel copy of the rule table that drifts out of step
+// with it.  `reason` stays null when AUTO did not run (a global ALGO pin), and
+// `unclamped` is what the matched rule answered before the m_tile_safe /
+// n_tile_safe correctness clamps, so the log can tell a deliberate pick from
+// a safety downgrade.
+struct auto_algo_trace {
+    const char *reason = nullptr;
+    int unclamped = 0;
+};
+
 int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
-        int num_threads);
+        int num_threads, auto_algo_trace *trace = nullptr);
 
 } // namespace matmul
 } // namespace lowoha

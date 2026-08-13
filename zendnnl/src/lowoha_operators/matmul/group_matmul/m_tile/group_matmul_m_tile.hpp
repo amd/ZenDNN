@@ -474,13 +474,14 @@ inline int get_grp_matmul_m_tile_slice_target() {
 // regime (per-expert, ALGO-5-equivalent) — are no longer chosen inside
 // flat_m_tile for AUTO.  This classifier lets `auto_select_algo` (ALGO 0)
 // detect those regimes at SELECTION time and route them to the dedicated
-// algos (ALGO 1 / ALGO 5) so AUTO reproduces the executor flat_m_tile used
+// algos (ALGO 1 / ALGO 3) so AUTO reproduces the executor flat_m_tile used
 // to pick internally.  The gates mirror flat_m_tile's old internal gates
 // EXACTLY (same kSliceTarget, same total_need / max_M math) so the routing
 // is parity-preserving, not coincidental:
-//   * kManyExperts — `active_ops > num_threads`.  A pure M-tile plan cannot
-//                    give < 1 thread per active expert, so this regime is
-//                    M-tile-INFEASIBLE; AUTO routes it to ALGO 5.
+//   * kManyExperts — `active_ops > num_threads`.  A single-tier M-tile plan
+//                    cannot give < 1 thread per active expert, so AUTO hands
+//                    the regime to ALGO 2's multi-tier hybrid, which peels
+//                    the heavy experts onto teams and drains the tail.
 //   * kWideN       — `max_M > 1 && total_need*2 <= num_threads`, where
 //                    `total_need = Σ_active min(M[i], ceil(M[i]/kSliceTarget))`.
 //                    M is too shallow to feed the slicer; AUTO routes to

@@ -58,6 +58,7 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -1047,6 +1048,134 @@ inline int min_n_tile_for_variant(bool is_int8) {
     return is_int8 ? kMinNTileInt8 : kMinNTile;
 }
 
+// ── Target tile COUNT → pack-aligned tile WIDTH ──────────────────────
+// Shared sizing tail for `adaptive_ab_min_tile` and `ccd_fill_min_n_tile`,
+// which differ only in how `target_tiles` is derived.  Two regimes,
+// selected by the K:N aspect ratio:
+//
+//   K >= N (reduction-bound): smallest pack-aligned tile with
+//         ceil(N/tile) <= target_tiles — maximum parallelism for the deep-K
+//         reduction, and a ragged tail is cheap next to the K work.
+//   K <  N (bandwidth-bound): largest EXACT pack-aligned divisor of N
+//         yielding <= target_tiles slices — an even column split, so no
+//         ragged tile becomes the critical path.
+//
+// Rounding UP to a `pack_nr` multiple in both regimes is what satisfies the
+// CK `N % pack_nr == 0` contract.
+inline int n_tile_from_target_count(const GroupNTileTopology &topo,
+        int phase_cap, int target_tiles, int floor) {
+    constexpr int kNTileAlign = 32; // pack_nr for the bf16/int8 CK path
+    if (target_tiles < 1) target_tiles = 1;
+
+    if (topo.max_K >= topo.max_N) {
+        int tile = (topo.max_N + target_tiles - 1) / target_tiles; // ceil
+        tile = ((tile + kNTileAlign - 1) / kNTileAlign)
+                * kNTileAlign; // round UP
+        if (tile < floor) tile = floor;
+        if (tile > phase_cap) tile = phase_cap;
+        return tile;
+    }
+
+    // Output-dominant: larger `t` = more tiles = more parallelism, so scan
+    // from the target down and take the first exact, in-range, pack-aligned
+    // divisor.
+    for (int t = target_tiles; t >= 1; --t) {
+        if (topo.max_N % t != 0) continue;
+        const int cand = topo.max_N / t;
+        if (cand % kNTileAlign == 0 && cand >= floor && cand <= phase_cap) {
+            return cand;
+        }
+    }
+    // No exact pack-aligned divisor in [floor, phase_cap] (e.g. N=37888 =
+    // 2^10*37).  Returning `phase_cap` would spill past one thread-wave —
+    // N=37888/512 = 74 tiles on 64 threads makes 10 cores run a second tile
+    // and doubles the critical path — so size for ONE wave instead.  This is
+    // the single branch that may exceed `phase_cap`, deliberately: a
+    // bandwidth-bound kernel only gains with width, and the ragged final
+    // slice is SMALLER than the rest, so it never becomes the critical path.
+    int tile = (topo.max_N + target_tiles - 1) / target_tiles; // ceil
+    tile = ((tile + kNTileAlign - 1) / kNTileAlign) * kNTileAlign; // round UP
+    if (tile < floor) tile = floor;
+    return tile;
+}
+
+// ── Adaptive N-tile floor (single-expert only) ───────────────────────
+// SCOPE: `num_ops == 1`.  Real MoE groups keep the legacy fixed
+// `phase_cap`, so multi-expert round scheduling and per-expert tiling
+// are untouched; multi-expert decode has its own `ccd_fill_min_n_tile`.
+//
+// `phase_cap` bounds tile WIDTH for microkernel efficiency, but
+// `max_N / phase_cap` can yield far fewer tiles than the thread team the
+// lone expert receives (N=4096 / 512 = 8 tiles on 64 cores leaves 56
+// threads idle).  So size the tile by target COUNT instead, tracking the
+// thread count across core counts and N.  Never below `floor`, and
+// bounded by `phase_cap` except in `n_tile_from_target_count`'s
+// one-wave fallback.
+inline int adaptive_ab_min_tile(const GroupNTileTopology &topo, int phase_cap) {
+    const int oversub = get_grp_n_tile_oversub();
+    if (oversub <= 0) return phase_cap; // adaptive sizing disabled
+    if (!is_single_dense_expert(topo.num_ops)) return phase_cap;
+    const int team_per_expert = topo.num_threads / std::max(1, topo.num_ops);
+    if (team_per_expert <= 1) return phase_cap; // one-thread-per-expert
+    // A single expert can never usefully run more concurrent N-tiles than
+    // there are hardware threads: surplus tiles just queue behind the first
+    // wave.  Hence the `num_threads` cap, which in this `num_ops == 1` scope
+    // (`team_per_expert == num_threads`) collapses every OVERSUB >= 1 onto
+    // the same target — see the knob's doc-block in the header for why the
+    // multiplier is kept for the multi-expert generalisation.  Widened to
+    // 64-bit first: OVERSUB accepts any non-negative int, so the product
+    // would overflow before the cap.
+    const int64_t target = static_cast<int64_t>(oversub) * team_per_expert;
+    const int target_tiles
+            = static_cast<int>(std::min<int64_t>(target, topo.num_threads));
+    return n_tile_from_target_count(
+            topo, phase_cap, target_tiles, get_grp_n_tile_floor());
+}
+
+// ── CCD-fill N-tile (multi-expert decode_dynamic only) ───────────────
+// SCOPE: the DecodeDynamic executor, which hands each active expert to a
+// single CCD whose `ccd_size` lanes cooperatively N-split it using
+// `min_n_tile`.  A wide fixed tile on a NARROW-N expert yields fewer tiles
+// than lanes, so the surplus lanes idle for the whole expert (N=1536 with a
+// 256 tile = 6 tiles < 8 lanes).  Only in that under-filled case shrink the
+// tile so the count lands on exactly `ccd_size`; an expert already yielding
+// >= ccd_size tiles keeps `phase_cap`, making this a no-op there.
+// `ZENDNNL_GRP_MATMUL_N_TILE_CCD_FILL=0` restores the legacy fixed tile.
+inline int ccd_fill_min_n_tile(const GroupNTileTopology &topo, int phase_cap) {
+    if (!get_grp_n_tile_ccd_fill()) return phase_cap;
+    // Defense in depth: the planner gate already keeps `num_ops == 1` out of
+    // DecodeDynamic, and a lone expert's tile is owned by
+    // `adaptive_ab_min_tile`, so refuse here rather than resize it.
+    if (is_single_dense_expert(topo.num_ops)) return phase_cap;
+    const int ccd_size = std::max(1, topo.ccd_size); // = min(8, num_threads)
+    // Round UP: a ragged final slice still occupies a lane, so `floor` would
+    // understate the count (N=2000 with a 256 tile is 8 tiles, not 7) and
+    // resize an expert that already fills every lane.
+    const int cap = std::max(1, phase_cap);
+    const int cur_tiles = std::max(1, (topo.max_N + cap - 1) / cap);
+    if (cur_tiles >= ccd_size) return phase_cap; // already fills the CCD
+    return n_tile_from_target_count(
+            topo, phase_cap, ccd_size, get_grp_n_tile_floor());
+}
+
+// ── NR-alignment floor for the adaptive sizers ───────────────────────
+// MANDATORY post-pass on anything the two sizers above return, before it
+// becomes `plan.min_n_tile`.  `participating_n_thr` caps an expert's team at
+// `N[e] / min_n_tile` while `aligned_n_split` can only cut `N[e] / nr_align`
+// aligned slices, so a `min_n_tile` BELOW `nr_align` lets `n_thr` exceed the
+// alignable slice count and `aligned_n_split` drops to its UNALIGNED even
+// split.  On a custom-kernel plan that breaks `dispatch_tile`'s
+// `col_start % pack_nr == 0` / `n_tile % pack_nr == 0` contract: a
+// mis-aligned `col_start` indexes the wrong o-block and a mis-aligned
+// `n_tile` drops tail columns.  Both are asserted, but we ship `-DNDEBUG`,
+// so a release build gets silent numerics rather than a trap.  The legacy
+// fixed tile cleared this implicitly (`phase_cap` >= 256); the adaptive
+// sizers quantise to 32, so the floor is re-imposed here — unconditionally,
+// since an aligned split is what the AOCL path wants too.
+inline int nr_aligned_min_n_tile(int min_n_tile, int nr_align) {
+    return std::max(min_n_tile, std::max(1, nr_align));
+}
+
 // ── Auto-select mirror ───────────────────────────────────────────────
 // Returns true when ALGO 0's auto-selector (`auto_select_algo` in
 // `group_matmul_dispatch.cpp`) would have picked ALGO 1
@@ -1204,12 +1333,15 @@ inline bool force_decode_d_plan(
 // runs correctly when `num_ops > num_threads`).
 //
 // DecodeDynamic is reached under BOTH the force knob
-// (`ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`) AND the auto path
+// (`ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`, the default) AND the auto path
 // (strategy 0): the same gate in `plan_group_n_tile`
 // (`decode_class && decdyn_pick && dyn_single_pool_safe`) drives the
 // engage-vs-fall-through decision for both, and `force_decode_dynamic_plan`
-// below commits the plan.  Under AUTO a non-engaging shape simply falls
-// through to the AOCL strict-stable / Rounds branches.
+// below commits the plan.  A non-engaging shape simply falls through to the
+// AOCL strict-stable / Rounds branches.  Note `decdyn_pick` is MULTI-expert
+// only: mapping whole experts onto CCDs is meaningless for `num_ops == 1`,
+// which would land on a single CCD and idle the rest of the team, so the
+// single dense expert stays on the Rounds path and its adaptive N-tile sizer.
 
 // Force path for `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`: commit to the
 // DecodeDynamic executor once the gate in `plan_group_n_tile` selects
@@ -1221,7 +1353,15 @@ inline bool force_decode_dynamic_plan(
         const GroupNTileTopology &topo, GroupNTilePlan &plan) {
     if (topo.max_N <= 0) return false;
     plan.strategy = GroupNTileStrategy::DecodeDynamic;
-    plan.min_n_tile = effective_decode_n_tile_for_variant(topo.is_int8);
+    // Size the decode tile so a NARROW-N expert fills every lane of the CCD
+    // it is assigned to instead of leaving the surplus idle; a wide-N expert
+    // that already fills its CCD keeps the legacy fixed tile untouched.
+    // `plan.nr_align` is assigned at the top of `plan_group_n_tile`, well
+    // before this commit point, so the alignment floor is available here.
+    plan.min_n_tile = nr_aligned_min_n_tile(
+            ccd_fill_min_n_tile(
+                    topo, effective_decode_n_tile_for_variant(topo.is_int8)),
+            plan.nr_align);
     return true;
 }
 
@@ -2327,9 +2467,19 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // makes the "single read per plan" intent explicit.
     const int decode_n_tile_snapshot
             = effective_decode_n_tile_for_variant(topo.is_int8);
-    const int ab_min_tile = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
+    // `phase_cap` is the legacy fixed tile (decode vs prompt).  The
+    // adaptive sizer treats it as an UPPER bound and shrinks it when the
+    // per-expert thread team needs more tiles than `max_N / phase_cap`
+    // provides (see `adaptive_ab_min_tile`).  With OVERSUB=0 the adaptive
+    // path is a no-op and `ab_min_tile == phase_cap` (legacy behaviour).
+    const int phase_cap = (topo.max_M <= kDecodeMaxM && decode_tile_ab_on)
             ? decode_n_tile_snapshot
             : min_n_tile_for_variant(topo.is_int8);
+    // `nr_aligned_min_n_tile` keeps the adaptive tile at or above the
+    // column alignment `aligned_n_split` will cut on — see its doc-block
+    // for why a narrower tile would breach the CK pack contract.
+    const int ab_min_tile = nr_aligned_min_n_tile(
+            adaptive_ab_min_tile(topo, phase_cap), nr_align);
 
     // ── Force-DecodeD path (knob value 1) ──────────────────────────────
     // When the user explicitly forces DecodeD, attempt it BEFORE any
@@ -2383,16 +2533,12 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // structural fall-through is the degenerate `max_N <= 0` case.
     //
     // AUTO adoption: the same gate (`decode_class && decdyn_pick &&
-    // dyn_single_pool_safe`) now also fires under n_tile_strategy==0, so
-    // AUTO routes decode-class many-active-expert shapes to DecodeDynamic
-    // automatically.  This is the empirically-validated win: at 64c a
-    // many-expert decode (active_ops >= 4*num_ccds = 32) runs 1.2-1.5x
-    // faster than the Rounds path it would otherwise take (qwen3-class);
-    // few-expert decode (mixtral / gpt-oss) never clears the gate and is
-    // left on its existing AUTO path unchanged.  When the gate does not
-    // hold, AUTO falls through to the AOCL strict-stable / Rounds branches
-    // exactly as before.  n_tile_strategy==2 (explicit Rounds) and ==1
-    // (forced DecodeD, handled above) intentionally skip this block.
+    // dyn_single_pool_safe`, where `decdyn_pick` is MULTI-expert only) also
+    // fires under n_tile_strategy==0, so AUTO routes decode-class
+    // many-active-expert shapes to DecodeDynamic automatically.  Few-expert
+    // decode never clears the gate and keeps its existing AUTO path;
+    // n_tile_strategy==2 (explicit Rounds) and ==1 (forced DecodeD, handled
+    // above) intentionally skip this block.
     if (n_tile_strategy == 3 || n_tile_strategy == 0) {
         // Single-pool safety gate.  execute_decode_dynamic now hosts every
         // activation shape (see its body): CK in-register (no barrier),
@@ -2461,7 +2607,18 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         const bool huge_weight = wei_l3_mult > 0
                 && (topo.wei_per_expert / kL3PerCcdBytes)
                         >= static_cast<size_t>(wei_l3_mult);
-        const bool decdyn_pick = enough_experts || huge_weight;
+        // MULTI-EXPERT ONLY.  `execute_decode_dynamic` assigns whole experts
+        // to individual CCDs, so a lone expert would run on ONE CCD and idle
+        // the rest of the team.  `huge_weight` alone is clearable by a single
+        // dense W13, so without this clause such a call would be pulled in on
+        // weight size and bypass `adaptive_ab_min_tile`, its proper sizer.
+        // ACTIVE count, not `topo.num_ops`: the latter is the padded slot
+        // count, so a 128-slot call with one firing expert would read as
+        // multi-expert, clear `huge_weight`, and enter DecodeDynamic with a
+        // single CCD working — precisely the case this clause excludes.
+        const bool multi_expert = active_ops > 1;
+        const bool decdyn_pick
+                = multi_expert && (enough_experts || huge_weight);
 
         if (dyn_single_pool_safe && decode_class && decdyn_pick
                 && force_decode_dynamic_plan(topo, plan)) {
@@ -2489,16 +2646,20 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         }
         // Fall through to the default planner (Rounds / AOCL strict-stable /
         // AUTO branches below).  Only log the non-engagement when the user
-        // EXPLICITLY forced n_tile_strategy==3 (they asked for DecodeDynamic
-        // and want to know why it didn't fire).  Under AUTO (==0) a
-        // non-engaging shape is the normal common case (every few-expert /
-        // prompt shape), so staying silent here avoids per-call log spam.
+        // EXPLICITLY selected the strategy (they asked for DecodeDynamic and
+        // want to know why it didn't fire).  When 3 is merely the inherited
+        // default — as it is now — a non-engaging shape is the normal common
+        // case (every single-expert / few-expert / prompt shape), so staying
+        // silent here avoids per-call log spam.
         static const bool s_log_dyn_fb = apilog_info_enabled();
-        if (s_log_dyn_fb && n_tile_strategy == 3) {
+        if (s_log_dyn_fb && n_tile_strategy == 3
+                && grp_n_tile_strategy_is_set()) {
             const char *reason = !dyn_single_pool_safe
                     ? "int8_ck_fused(aocl_fallback_needs_barrier)"
                     : !decode_class ? "prompt_class(max_M>decode)"
-                                    : "below_epc_and_weight_thresholds";
+                    : !multi_expert
+                    ? "single_dense_expert(owns_adaptive_n_tile_path)"
+                    : "below_epc_and_weight_thresholds";
             apilog_info(
                     "[GRP_MATMUL.PLAN.HINT] "
                     "n_tile_strategy=decode_dynamic NOT engaged — reason=",
@@ -2880,8 +3041,6 @@ inline void execute_decode_dynamic(
     const int num_ops = static_cast<int>(ctx.M.size());
     const int min_n_tile = plan.min_n_tile;
     const int num_threads = plan.num_threads;
-    const int ccd_size = std::min(8, num_threads);
-    const int num_ccds = std::max(1, (num_threads + ccd_size - 1) / ccd_size);
 
     // Wide non-custom fused is the ONLY case needing a matmul→activation
     // barrier: do_tile writes raw (gate, up) pairs and the swiglu
@@ -2911,16 +3070,26 @@ inline void execute_decode_dynamic(
 
 #pragma omp parallel num_threads(num_threads)
     {
+        // Topology comes from the team OpenMP actually gave us, not the team
+        // the plan asked for.  A request is not a guarantee (OMP_THREAD_LIMIT,
+        // an already-active outer level, or a runtime that trims the team),
+        // and expert positions are owned modulo the CCD count: sizing that
+        // count from the request would leave the positions belonging to CCDs
+        // that never materialised unwritten, returning whatever the
+        // destination held.  Every thread reads the same team size, so the
+        // derived topology is uniform across the region.
+        const int team = std::max(1, omp_get_num_threads());
+        const int ccd_size = std::min(8, team);
+        const int num_ccds = std::max(1, (team + ccd_size - 1) / ccd_size);
         const int tid = omp_get_thread_num();
         const int my_ccd = tid / ccd_size;
         const int lane = tid % ccd_size;
-        // Last CCD may be partial (num_threads not a multiple of ccd_size);
-        // pass the ACTUAL lane count as team_size so aligned_n_split covers
-        // every column (lanes 0..my_ccd_size-1 all present in this CCD).
-        const int my_ccd_size
-                = std::min(ccd_size, num_threads - my_ccd * ccd_size);
-        // `my_ccd = tid / ccd_size` with `tid < num_threads` and
-        // `num_ccds = ceil(num_threads / ccd_size)`, so `my_ccd` is always
+        // Last CCD may be partial (team not a multiple of ccd_size); pass the
+        // ACTUAL lane count as team_size so aligned_n_split covers every
+        // column (lanes 0..my_ccd_size-1 all present in this CCD).
+        const int my_ccd_size = std::min(ccd_size, team - my_ccd * ccd_size);
+        // `my_ccd = tid / ccd_size` with `tid < team` and
+        // `num_ccds = ceil(team / ccd_size)`, so `my_ccd` is always
         // in `[0, num_ccds)` — every thread owns a valid CCD, no guard
         // needed.  This CCD owns sorted positions {my_ccd, my_ccd+num_ccds,
         // ...}; its lanes cooperatively N-split each owned expert in turn.
@@ -3163,13 +3332,15 @@ inline void execute_rounds(const GroupNTilePlan &plan, GroupNTileContext &ctx) {
 // =====================================================================
 //
 // Returns the static literal that benchdnn / profilers print in the
-// "kernel/gemm mode" column for this flat_n_tile call.  Seventeen
+// "kernel/gemm mode" column for this flat_n_tile call.  Twenty-three
 // values across the (strategy × fused × tight × custom × act-kind)
 // cube:
 //
 //   strategy == Sequential                          → flat_n_tile_sequential
-//   strategy == DecodeDynamic, standard backend      → flat_n_tile_decdyn
-//   strategy == DecodeDynamic, custom kernel         → flat_n_tile_decdyn_custom
+//   strategy == DecodeDynamic, non-fused            → flat_n_tile_decdyn[_custom]
+//   strategy == DecodeDynamic, fused swiglu         → flat_n_tile_decdyn_fused_swiglu_oai[_custom]
+//   strategy == DecodeDynamic, fused silu_and_mul   → flat_n_tile_decdyn_fused_silu_and_mul[_custom]
+//   strategy == DecodeDynamic, fused gelu_and_mul   → flat_n_tile_decdyn_fused_gelu_and_mul[_custom]
 //   non-fused, standard backend                     → flat_n_tile
 //   non-fused, custom kernel                        → flat_n_tile_custom
 //   fused swiglu, wide,  standard backend           → flat_n_tile_fused_swiglu_oai
@@ -3217,11 +3388,26 @@ inline const char *gemm_mode_label(GroupNTileStrategy strategy,
     }
     if (strategy == GroupNTileStrategy::DecodeDynamic) {
         // Dedicated marker so the post-exec [GRP_MATMUL.CALL] line shows the
-        // CCD-cohesive DecodeDynamic executor ran (vs Rounds / DecodeD).
-        // Keeps the `flat_n_tile` prefix so `executed_algo_from_gemm_mode`
-        // still maps it to exec_algo=3.  `use_custom` distinguishes the CK
-        // path; the fused act-kind is carried by the [GRP_MATMUL.ALGO] /
-        // PLAN.HINT lines.
+        // DecodeDynamic executor ran (vs Rounds / DecodeD).  Keeps the
+        // `flat_n_tile` prefix so `executed_algo_from_gemm_mode` still maps it
+        // to exec_algo=3, and carries the same act fragment as the Rounds
+        // labels — that fragment is the only signal in benchdnn / production
+        // logs distinguishing a fused silu from gelu or swiglu.  No "tight"
+        // variant: this executor has no tight/wide epilogue split.
+        if (fused_epilogue) {
+            if (fused_act == grp_matmul_gated_act_t::silu_and_mul) {
+                return use_custom
+                        ? "flat_n_tile_decdyn_fused_silu_and_mul_custom"
+                        : "flat_n_tile_decdyn_fused_silu_and_mul";
+            }
+            if (fused_act == grp_matmul_gated_act_t::gelu_and_mul) {
+                return use_custom
+                        ? "flat_n_tile_decdyn_fused_gelu_and_mul_custom"
+                        : "flat_n_tile_decdyn_fused_gelu_and_mul";
+            }
+            return use_custom ? "flat_n_tile_decdyn_fused_swiglu_oai_custom"
+                              : "flat_n_tile_decdyn_fused_swiglu_oai";
+        }
         return use_custom ? "flat_n_tile_decdyn_custom" : "flat_n_tile_decdyn";
     }
     if (fused_epilogue) {
