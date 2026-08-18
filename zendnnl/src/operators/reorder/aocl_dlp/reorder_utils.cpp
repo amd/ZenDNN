@@ -94,8 +94,8 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
         return reorder_size;
     } else if (input_tensor.get_layout() & uint16_t(tensor_layout_t::blocked)) {
         // Unreordered size computation is been handled for 2D tensors
-        const int k = input_tensor.get_size(0);
-        const int n = input_tensor.get_size(1);
+        const auto k = input_tensor.get_size(0);
+        const auto n = input_tensor.get_size(1);
 
         if (input_tensor.get_data_type() == data_type_t::f32) {
             return k * n * sizeof(float);

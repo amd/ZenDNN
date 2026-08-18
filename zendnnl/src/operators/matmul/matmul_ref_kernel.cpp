@@ -90,7 +90,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
         // zp_comp is freed in main function
         size_t alignment = 64;
         size_t comp_size
-                = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
+                = (static_cast<size_t>(M) * N * sizeof(int32_t) + alignment - 1)
+                & ~(alignment - 1);
         zp_comp = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         zp_comp_size = M * N;
 
@@ -112,7 +113,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
         // zp_comp is freed in main function
         size_t alignment = 64;
         size_t comp_size
-                = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
+                = (static_cast<size_t>(M) * N * sizeof(int32_t) + alignment - 1)
+                & ~(alignment - 1);
         zp_comp = (int32_t *)zendnnl_aligned_alloc(64, comp_size);
         zp_comp_size = M * N;
         //Src comp
@@ -154,14 +156,20 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
         for (int bs = 0; bs < BS; ++bs) {
             for (int i = 0; i < M; ++i) {
                 for (int j = 0; j < N; ++j) {
-                    float val = accum_buff_f32[bs * accum_batch_stride + i * N
-                            + j];
+                    const size_t accum_idx
+                            = static_cast<size_t>(bs) * accum_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(N)
+                            + static_cast<size_t>(j);
+                    const size_t out_idx
+                            = static_cast<size_t>(bs) * output_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(ldc)
+                            + static_cast<size_t>(j);
+                    float val = accum_buff_f32[accum_idx];
                     val = (val < 0.0f)
                             ? 0.0f
                             : ((val > (float)UINT8_MAX) ? (float)UINT8_MAX
                                                         : val);
-                    out_u8[bs * output_batch_stride + i * ldc + j]
-                            = static_cast<uint8_t>(std::nearbyint(val));
+                    out_u8[out_idx] = static_cast<uint8_t>(std::nearbyint(val));
                 }
             }
         }
@@ -171,13 +179,19 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
         for (int bs = 0; bs < BS; ++bs) {
             for (int i = 0; i < M; ++i) {
                 for (int j = 0; j < N; ++j) {
-                    float val = accum_buff_f32[bs * accum_batch_stride + i * N
-                            + j];
+                    const size_t accum_idx
+                            = static_cast<size_t>(bs) * accum_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(N)
+                            + static_cast<size_t>(j);
+                    const size_t out_idx
+                            = static_cast<size_t>(bs) * output_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(ldc)
+                            + static_cast<size_t>(j);
+                    float val = accum_buff_f32[accum_idx];
                     val = (val < (float)INT8_MIN)
                             ? (float)INT8_MIN
                             : ((val > (float)INT8_MAX) ? (float)INT8_MAX : val);
-                    out_s8[bs * output_batch_stride + i * ldc + j]
-                            = static_cast<int8_t>(std::nearbyint(val));
+                    out_s8[out_idx] = static_cast<int8_t>(std::nearbyint(val));
                 }
             }
         }
@@ -187,13 +201,20 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
         for (int bs = 0; bs < BS; ++bs) {
             for (int i = 0; i < M; ++i) {
                 for (int j = 0; j < N; ++j) {
-                    float val = accum_buff_f32[bs * accum_batch_stride + i * N
-                            + j];
+                    const size_t accum_idx
+                            = static_cast<size_t>(bs) * accum_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(N)
+                            + static_cast<size_t>(j);
+                    const size_t out_idx
+                            = static_cast<size_t>(bs) * output_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(ldc)
+                            + static_cast<size_t>(j);
+                    float val = accum_buff_f32[accum_idx];
                     val = (val < (float)INT32_MIN)
                             ? (float)INT32_MIN
                             : ((val > (float)INT32_MAX) ? (float)INT32_MAX
                                                         : val);
-                    out_s32[bs * output_batch_stride + i * ldc + j]
+                    out_s32[out_idx]
                             = static_cast<int32_t>(std::nearbyint(val));
                 }
             }
@@ -204,9 +225,15 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
         for (int bs = 0; bs < BS; ++bs) {
             for (int i = 0; i < M; ++i) {
                 for (int j = 0; j < N; ++j) {
-                    out_bf16[bs * output_batch_stride + i * ldc + j]
-                            = bfloat16_t(accum_buff_f32[bs * accum_batch_stride
-                                    + i * N + j]);
+                    const size_t accum_idx
+                            = static_cast<size_t>(bs) * accum_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(N)
+                            + static_cast<size_t>(j);
+                    const size_t out_idx
+                            = static_cast<size_t>(bs) * output_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(ldc)
+                            + static_cast<size_t>(j);
+                    out_bf16[out_idx] = bfloat16_t(accum_buff_f32[accum_idx]);
                 }
             }
         }
@@ -216,9 +243,15 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
         for (int bs = 0; bs < BS; ++bs) {
             for (int i = 0; i < M; ++i) {
                 for (int j = 0; j < N; ++j) {
-                    out_f16[bs * output_batch_stride + i * ldc + j]
-                            = float16_t(accum_buff_f32[bs * accum_batch_stride
-                                    + i * N + j]);
+                    const size_t accum_idx
+                            = static_cast<size_t>(bs) * accum_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(N)
+                            + static_cast<size_t>(j);
+                    const size_t out_idx
+                            = static_cast<size_t>(bs) * output_batch_stride
+                            + static_cast<size_t>(i) * static_cast<size_t>(ldc)
+                            + static_cast<size_t>(j);
+                    out_f16[out_idx] = float16_t(accum_buff_f32[accum_idx]);
                 }
             }
         }
@@ -236,9 +269,17 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
             for (int bs = 0; bs < BS; ++bs) {
                 for (int i = 0; i < M; ++i) {
                     for (int j = 0; j < N; ++j) {
-                        out_f32[bs * output_batch_stride + i * ldc + j]
-                                = accum_buff_f32[bs * accum_batch_stride + i * N
-                                        + j];
+                        const size_t accum_idx
+                                = static_cast<size_t>(bs) * accum_batch_stride
+                                + static_cast<size_t>(i)
+                                        * static_cast<size_t>(N)
+                                + static_cast<size_t>(j);
+                        const size_t out_idx
+                                = static_cast<size_t>(bs) * output_batch_stride
+                                + static_cast<size_t>(i)
+                                        * static_cast<size_t>(ldc)
+                                + static_cast<size_t>(j);
+                        out_f32[out_idx] = accum_buff_f32[accum_idx];
                     }
                 }
             }
@@ -313,7 +354,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
             && (weight_dtype == data_type_t::s4
                     || weight_dtype == data_type_t::u4);
     // Interim buffer  size
-    size_t output_size = batch_size * M * N;
+    size_t output_size = static_cast<size_t>(batch_size)
+            * static_cast<size_t>(M) * static_cast<size_t>(N);
     // Interim accumulation buffer with float type
     tensor_t accum_tensor = tensor_t()
                                     .set_size({output_size})
@@ -363,7 +405,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
         }
         bool is_float_domain = quant_param.wei_zp.dt == data_type_t::bf16;
         // Allocate tensor for dequantized BF16 weights
-        size_t weight_nelem = batch_size * K * N;
+        size_t weight_nelem = static_cast<size_t>(batch_size)
+                * static_cast<size_t>(K) * static_cast<size_t>(N);
         tensor_t bf16_weight_tensor = tensor_t()
                                               .set_size({weight_nelem})
                                               .set_data_type(data_type_t::bf16)
