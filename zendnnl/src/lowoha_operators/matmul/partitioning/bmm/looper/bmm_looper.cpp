@@ -208,7 +208,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     size_t dst_batch_stride_elems
             = (batch_params.batch_stride_dst != static_cast<size_t>(-1))
             ? batch_params.batch_stride_dst
-            : M * ldc;
+            : static_cast<size_t>(M) * ldc;
 
     size_t src_batch_stride_bytes = src_batch_stride_elems * src_type_size;
     size_t weight_batch_stride_bytes

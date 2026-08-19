@@ -155,7 +155,8 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
 
         size_t alignment = 64;
         size_t comp_size
-                = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
+                = (static_cast<size_t>(M) * N * sizeof(int32_t) + alignment - 1)
+                & ~(alignment - 1);
         zp_comp_acc = static_cast<int32_t *>(
                 zendnnl_aligned_alloc(alignment, comp_size));
         if (!zp_comp_acc) return nullptr;
@@ -192,7 +193,8 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
 
         size_t alignment = 64;
         size_t comp_size
-                = (M * N * sizeof(int32_t) + alignment - 1) & ~(alignment - 1);
+                = (static_cast<size_t>(M) * N * sizeof(int32_t) + alignment - 1)
+                & ~(alignment - 1);
         zp_comp_acc = static_cast<int32_t *>(
                 zendnnl_aligned_alloc(alignment, comp_size));
         if (!zp_comp_acc) return nullptr;

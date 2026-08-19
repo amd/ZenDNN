@@ -263,7 +263,7 @@ protected:
         const int num_slots = num_tokens * topk;
         std::vector<float> moe_weights(num_slots, 1.0f / topk);
         const size_t dst_elem_sz = zendnnl::common::size_of(dst_dt);
-        std::vector<char> moe_output(num_tokens * D * dst_elem_sz, 0);
+        std::vector<char> moe_output((size_t)num_tokens * D * dst_elem_sz, 0);
         std::vector<const void *> row_ptrs(num_slots);
 
         group_matmul_moe_postop_params moe {};

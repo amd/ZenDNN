@@ -62,7 +62,7 @@ void apply_bmm_postop_offsets(
             }
 
             // Add row offset for partitioned execution
-            total_offset += m_start * N * element_size;
+            total_offset += static_cast<size_t>(m_start) * N * element_size;
 
             po.buff = static_cast<uint8_t *>(po.buff) + total_offset;
         }

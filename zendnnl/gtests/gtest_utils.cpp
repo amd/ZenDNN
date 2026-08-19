@@ -1283,7 +1283,7 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
         std::uniform_real_distribution<float> bias_dist(bias_min, bias_max);
 
         for (int i = 0; i < num_embeddings; ++i) {
-            const size_t row_base = i * row_size;
+            const size_t row_base = static_cast<size_t>(i) * row_size;
             float scale = scale_dist(gen);
             float bias = bias_dist(gen);
 
@@ -3861,8 +3861,9 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
     // `P` the f32 branch already uses; this only widens the bound, so it can
     // never tighten (regress) an existing quantized comparison.
     const float abs_bound = is_dst_u8 ? 1.0f
-            : is_quant ? (alpha * (k + P) * epsilon)
-            : is_low_precision ? (alpha * k * epsilon)
+            : is_quant                ? (alpha * (k + P) * epsilon)
+            : is_low_precision
+            ? (alpha * k * epsilon)
             : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
     // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
