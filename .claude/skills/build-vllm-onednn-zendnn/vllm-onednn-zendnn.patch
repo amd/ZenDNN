@@ -1,0 +1,58 @@
+# oneDNN + ZenDNN (zen64) direct integration for vLLM CPU.
+#
+# Net diff of the vLLM oneDNN+ZenDNN integration change (the cpu_extension.cmake
+# wiring). Apply it on top of an upstream vllm-project/vllm checkout.
+#
+# Generated against base: vllm-project/vllm commit
+#   c638f9216a08bfb5644d8a266ddd35421e04118d  ("[Rust Frontend] Split engine
+#   core DTOs into separate modules (#47265)") — the exact upstream commit the
+#   change was based on, so the patch applies cleanly there.
+#
+# ZENDNN_DIR accepts either form:
+#   - the ZenDNN repo dir, whose install tree is at build/install/zendnnl, or
+#   - the zendnnl install tree itself (ZENDBUILDPATH).
+# Neither one resolving to a real install tree is a hard configure error, so a
+# wrong path fails loudly instead of silently producing a ZenDNN-less build.
+#
+# Apply from the vLLM repo root, e.g.:
+#   git apply --check vllm-onednn-zendnn.patch   # version guard (dry run)
+#   git apply         vllm-onednn-zendnn.patch
+#
+diff --git a/cmake/cpu_extension.cmake b/cmake/cpu_extension.cmake
+--- a/cmake/cpu_extension.cmake
++++ b/cmake/cpu_extension.cmake
+@@ -335,6 +335,34 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND
+     set(ONEDNN_VERBOSE "ON")
+     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+ 
++    # Add ZenDNN configuration for the oneDNN + ZenDNN integration
++    if(FETCHCONTENT_SOURCE_DIR_ONEDNN)
++        # Use ZENDNN_DIR environment variable to derive all paths
++        set(ZENDNN_DIR "$ENV{ZENDNN_DIR}" CACHE PATH "ZenDNN base directory")
++
++        if(ZENDNN_DIR AND NOT ZENDNN_DIR STREQUAL "")
++            # ZENDNN_DIR accepts either form: the ZenDNN repo (install tree
++            # lives under build/install/zendnnl) or the install tree itself.
++            if(EXISTS "${ZENDNN_DIR}/build/install/zendnnl/include")
++                set(ZENDNNROOT "${ZENDNN_DIR}/build/install/zendnnl" CACHE PATH "ZenDNN root directory")
++            elseif(EXISTS "${ZENDNN_DIR}/include")
++                set(ZENDNNROOT "${ZENDNN_DIR}" CACHE PATH "ZenDNN root directory")
++            else()
++                message(FATAL_ERROR
++                    "ZENDNN_DIR='${ZENDNN_DIR}' is neither a ZenDNN repo containing "
++                    "build/install/zendnnl nor a zendnnl install tree. Build ZenDNN "
++                    "first, then set ZENDNN_DIR to the repo dir or the install tree.")
++            endif()
++
++            message(STATUS "Using ZenDNN from: ${ZENDNN_DIR}")
++            message(STATUS "  ZENDNNROOT: ${ZENDNNROOT}")
++
++            set(DNNL_X64_USE_ZEN ON CACHE BOOL "Enable ZenDNN integration")
++        else()
++            message(WARNING "ZENDNN_DIR not set. ZenDNN integration will be disabled.")
++        endif()
++    endif()
++
+     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
+     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
+     FetchContent_MakeAvailable(oneDNN)

@@ -1,0 +1,46 @@
+%% build-vllm-onednn-zendnn: vLLM (CPU) build with the oneDNN + ZenDNN (zen64)
+%% backend via direct integration (no zentorch).
+%% Linear spine, Stage 0 -> 6. Every gate is an explicit decision with a STOP
+%% terminal — no retry loops, per the skill's FAILURE POLICY. Stage 1 delegates
+%% to the build-zendnn skill (see its own build-zendnn-flow.mmd).
+flowchart TD
+    START(["START: user requests a ZenDNN vLLM CPU build"])
+    START --> S0
+
+    S0["Stage 0 - Confirm inputs<br/>REPO_ROOT, vLLM repo + ref, ZenDNN ref, oneDNN ref, build method<br/>Verify a pre-staged vllm/ tree, do NOT clone over it"]
+    S0 --> G0{"refs valid and as expected?"}
+    G0 -->|"No"| ST0["STOP: reconfirm repo / ref with the user"]
+    G0 -->|"Yes"| S0P["Stage 0b - Apply vllm-onednn-zendnn.patch<br/>skip if DNNL_X64_USE_ZEN already present,<br/>else git apply --check, then git apply"]
+
+    S0P --> G0P{"patch applies cleanly?"}
+    G0P -->|"No - upstream diverged"| ST0P["STOP: never force or auto --3way<br/>offer the pinned base c638f92, or regenerate the patch"]
+    G0P -->|"Yes"| S1
+
+    S1["Stage 1 - build-zendnn skill<br/>rm -rf build, cmake with the 4 alternate backends OFF, build target all<br/>export ZENDBUILDPATH"]
+    S1 --> G1{"install tree exists?"}
+    G1 -->|"No"| ST1["STOP: build did not install, re-read the build log"]
+    G1 -->|"Yes"| S2
+
+    S2["Stage 2 - oneDNN source prep, NO build<br/>upstream uxlfoundation/oneDNN, default main<br/>export ONEDNN_DIR"]
+    S2 --> G2{"ref carries the zen64 backend?<br/>merge-base --is-ancestor e4feb31"}
+    G2 -->|"No - e.g. tag v3.13"| ST2["STOP: reconfirm the oneDNN ref, use main"]
+    G2 -->|"Yes"| S3
+
+    S3["Stage 3 - Conda build env via create_env.sh<br/>gcc 12.3 to 13, rust off the home quota, CPU-only torch<br/>conda activate vllm-build-env-312"]
+    S3 --> G3{"env provisioned?"}
+    G3 -->|"No"| ST3["STOP: fix requirements / conda solve / rustup"]
+    G3 -->|"Yes"| S4
+
+    S4["Stage 4 - vLLM build via build_wheel.sh<br/>VLLM_TARGET_DEVICE=cpu, BOTH FETCHCONTENT_SOURCE_DIR_ONEDNN and ZENDNN_DIR,<br/>MAX_JOBS=32, then pip install dist/*.whl"]
+    S4 --> G4{"build ok?"}
+    G4 -->|"No - OOM or link error"| ST4["STOP: lower MAX_JOBS, rm -rf build/ .deps/, re-run"]
+    G4 -->|"Yes"| S5
+
+    S5["Stage 5 - Verification, BOTH tiers<br/>build-time: grep 'Using ZenDNN from' build.log<br/>runtime smoke: VLLM_CPU_KVCACHE_SPACE plus LD_PRELOAD libiomp5"]
+    S5 --> G5{"zen:matmul AND LOWOHA matmul_direct in out.log?"}
+    G5 -->|"No"| ST5["STOP: ZenDNN not active at runtime, rebuild from Stage 4"]
+    G5 -->|"Yes"| G6{"benchmark needed?"}
+
+    G6 -->|"No"| DONE
+    G6 -->|"Yes"| S6["Stage 6 - Benchmark, clean run<br/>NO profiler or verbose, DO set VLLM_CPU_KVCACHE_SPACE<br/>report requests/s and total tokens/s"]
+    S6 --> DONE(["END: verified ZenDNN-enabled vLLM wheel"])

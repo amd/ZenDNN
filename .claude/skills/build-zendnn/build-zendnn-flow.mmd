@@ -1,0 +1,31 @@
+%% build-zendnn: standalone zendnnl build flow.
+%% Four steps plus a smoke test. Also the reusable Stage 1 sub-flow of
+%% build-vllm-onednn-zendnn. Every gate has an explicit STOP terminal —
+%% there are no retry loops, per the skill's FAILURE POLICY.
+flowchart TD
+    START(["START: build the standalone zendnnl library"])
+    START --> I0
+
+    I0["Confirm inputs<br/>ZenDNN git ref, default main, a branch / tag / PR number<br/>ZenDNN dir, default this repo root"]
+    I0 --> S1["Step 1 - Check out the ref<br/>git fetch origin, then checkout ref<br/>or fetch origin pull/N/head:prN for a PR"]
+
+    S1 --> G1{"ref resolved?"}
+    G1 -->|"No - did not match any"| ST1["STOP: re-confirm the exact branch / tag / PR with the user<br/>never continue on a stale checkout"]
+    G1 -->|"Yes"| S2
+
+    S2["Step 2 - Configure, zendnn-only<br/>rm -rf build first, stale cache defeats the OFF flags<br/>4 alternate backends OFF: ONEDNN, LIBXSMM, PARLOOPER, FBGEMM<br/>keep AOCLDLP ON, it is the GEMM backend zendnnl links against<br/>no -DCMAKE_INSTALL_PREFIX, the build sets build/install"]
+    S2 --> G2{"cmake configure ok?"}
+    G2 -->|"No"| ST2["STOP: fix compiler / OpenMP / CMake 3.26+ / stale cache,<br/>then re-run from the rm -rf build line"]
+    G2 -->|"Yes"| S3
+
+    S3["Step 3 - Build: cmake --build . --target all<br/>the all target ALSO installs via ExternalProject,<br/>so no separate --target install step"]
+    S3 --> G3{"compile and link ok?"}
+    G3 -->|"No"| ST3["STOP: report the first error in the log,<br/>do not record an install path"]
+    G3 -->|"Yes"| S4
+
+    S4["Step 4 - Record the install path<br/>export ZENDBUILDPATH=ZenDNN/build/install/zendnnl"]
+    S4 --> G4{"test -d build/install/zendnnl?"}
+    G4 -->|"No"| ST4["STOP: the build did not install,<br/>re-check the Step 3 log and re-run Steps 2-3"]
+    G4 -->|"Yes"| S5["Smoke test - record provenance<br/>git rev-parse HEAD, matched downstream against<br/>the ZENDNNL Git Hash line in show_config"]
+
+    S5 --> DONE(["END: zendnnl install tree plus ZENDBUILDPATH<br/>ready for zentorch / vLLM"])
