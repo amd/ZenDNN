@@ -66,6 +66,11 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     # adding pthread to cxx flags is a manylinux docker requirement.
     list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
     list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-lpthread")
+    # The C examples need it too: aocl-utils does not link Threads on those
+    # targets, and thread_pinning_example_linux.c calls pthread_join as of
+    # 5.3.2, so without this the C example fails to link (DSO missing from
+    # command line) even though the CXX example above builds.
+    list(APPEND AU_CMAKE_ARGS "-DCMAKE_C_FLAGS=-lpthread")
   endif()
 
   # Windows produces .lib (with build-configuration-dependent names/paths), so

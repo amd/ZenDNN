@@ -593,6 +593,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch' }}
     env:
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '50' }}
       # Point to the runner's CMake and Ninja (adjust to the runner's installs).
       # The configure/build commands invoke these explicitly so they work
       # regardless of what is on PATH.
@@ -658,8 +659,9 @@ jobs:
         # takes a while. Artifacts are installed under build-msvc/install/.
         "$CMAKE" --build build-msvc |& tee -a "$GITHUB_WORKSPACE/msvc_build_output.log"
 
-        echo "Running gtests with filter: $GTEST_FILTER"
+        echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
         ./build-msvc/install/gtests/gtests.exe --gtest_filter="$GTEST_FILTER" \
+          --test "$TEST_ITERATIONS" \
           |& tee "$GITHUB_WORKSPACE/msvc_gtest_output.log"
 
         if grep -F -q "[  FAILED  ]" "$GITHUB_WORKSPACE/msvc_gtest_output.log"; then
