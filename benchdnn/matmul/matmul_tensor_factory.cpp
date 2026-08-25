@@ -148,7 +148,11 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                         "weights_" + std::to_string(i), std::move(wei_scale));
             } else {
                 // Compute the reorder size and create a buffer with reorderd size
-                void *reorder_weights = aligned_alloc(64, reorder_size);
+                void *reorder_weights = zendnnl_aligned_alloc(64, reorder_size);
+                if (reorder_weights == nullptr) {
+                    testlog_error("reorder_weights aligned alloc failed.");
+                    return NOT_OK;
+                }
 
                 // Create a Pair of storage params [reorder size and reorder weights] and
                 // use it in tensor creation

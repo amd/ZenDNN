@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include "common/data_types.hpp"
+#include "common/zendnnl_compat.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
@@ -40,11 +41,11 @@ struct AlignedBuffer {
     void alloc(size_t n) {
         free();
         bytes = (n + 63) & ~size_t(63);
-        ptr = std::aligned_alloc(64, bytes);
+        ptr = zendnnl_aligned_alloc(64, bytes);
     }
     void free() {
         if (ptr) {
-            std::free(ptr);
+            zendnnl_aligned_free(ptr);
             ptr = nullptr;
         }
     }

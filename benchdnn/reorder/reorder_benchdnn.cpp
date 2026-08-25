@@ -88,8 +88,12 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
                 return NOT_OK;
             }
         } else {
-            // Out-of-place reorder: allocate new buffer for output
-            void *reorder_weights = aligned_alloc(64, reorder_size);
+            // Out-of-place reorder: allocate new buffer for output.
+            void *reorder_weights = zendnnl_aligned_alloc(64, reorder_size);
+            if (reorder_weights == nullptr) {
+                testlog_error("reorder_weights aligned allocation failed.");
+                return NOT_OK;
+            }
 
             // Create a Pair of storage params [reorder size and reorder weights] and
             // use it in tensor creation
@@ -113,7 +117,7 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
                 return NOT_OK;
             }
             // Free reordered size buffer.
-            free(reorder_weights);
+            zendnnl_aligned_free(reorder_weights);
         }
 #if MEASURE_INDIVIDUAL_TIMINGS
     } else {
@@ -200,7 +204,11 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
             }
         } else {
             auto start_other = std::chrono::high_resolution_clock::now();
-            void *reorder_weights = aligned_alloc(64, reorder_size);
+            void *reorder_weights = zendnnl_aligned_alloc(64, reorder_size);
+            if (reorder_weights == nullptr) {
+                testlog_error("reorder_weights aligned allocation failed.");
+                return NOT_OK;
+            }
 
             // Create a Pair of storage params [reorder size and reorder weights] and
             // use it in tensor creation
@@ -239,7 +247,7 @@ int run_reorder(tensor_t input_tensor, const ReorderConfig &cfg,
             }
             start_other = std::chrono::high_resolution_clock::now();
             // Free reordered size buffer.
-            free(reorder_weights);
+            zendnnl_aligned_free(reorder_weights);
             end_other = std::chrono::high_resolution_clock::now();
             elapsed_time = (std::chrono::duration<double, std::milli>(
                     end_other - start_other)

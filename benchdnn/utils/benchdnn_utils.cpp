@@ -18,6 +18,14 @@
 
 #include <limits>
 #include <stdexcept>
+#include <vector>
+#include <system_error>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h> // _ReadWriteBarrier
+#endif
+#if defined(_WIN32)
+#include <windows.h> // GetLogicalProcessorInformation
+#endif
 
 namespace zendnnl {
 namespace benchdnn {
@@ -262,8 +270,13 @@ void flush_cache(size_t cache_size) {
             buffer[i] = (char)(i & 0xFF);
         }
 
-        // Prevent optimization
+        // Prevent optimization (compiler reordering / dead-store elimination).
+        // MSVC's cl does not accept GNU inline asm; use its _ReadWriteBarrier.
+#if defined(_MSC_VER) && !defined(__clang__)
+        _ReadWriteBarrier();
+#else
         asm volatile("" : : "r"(buffer), "r"(buffer_size) : "memory");
+#endif
 
         // Flush cache
         for (size_t i = 0; i < buffer_size; i += CACHE_LINE_SIZE) {
@@ -293,9 +306,33 @@ size_t read_cache_size(const std::string &path) {
 size_t get_cache_size() {
     size_t cache_size = 0;
 
+#if defined(_WIN32)
+    // Windows has no /sys cache tree. Approximate the Linux cpu0 L1+L2+L3 sum
+    // by adding the caches visible to the first logical processor, queried via
+    // GetLogicalProcessorInformation.
+    DWORD length = 0;
+    GetLogicalProcessorInformation(nullptr, &length);
+    if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && length > 0) {
+        std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> info(
+                length / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+        if (GetLogicalProcessorInformation(info.data(), &length)) {
+            for (const auto &entry : info) {
+                if (entry.Relationship == RelationCache
+                        && (entry.ProcessorMask & 0x1)) {
+                    cache_size += entry.Cache.Size;
+                }
+            }
+        }
+    }
+#else
     std::filesystem::path cache_path = "/sys/devices/system/cpu/cpu0/cache";
 
-    for (const auto &index : std::filesystem::directory_iterator(cache_path)) {
+    // Non-throwing iterator: on platforms/systems where the sysfs cache tree is
+    // absent, ec is set and the loop is simply skipped (cache_size stays 0)
+    // instead of throwing an unhandled filesystem_error.
+    std::error_code ec;
+    for (const auto &index :
+            std::filesystem::directory_iterator(cache_path, ec)) {
         if (index.path().filename().string().find("index") == 0) {
             std::string size_path = index.path().string() + "/size";
 
@@ -303,6 +340,7 @@ size_t get_cache_size() {
             cache_size += size_in_bytes;
         }
     }
+#endif
     return cache_size;
 }
 
