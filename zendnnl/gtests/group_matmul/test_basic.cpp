@@ -181,7 +181,7 @@ protected:
                 for (size_t i = 0; i < num_ops && ok; ++i)
                     compare_tensor_2D_matrix(out[i], out_ref[i], m, n, k,
                             rtol_pref, eps_pref, ok, enable_f32_relaxation,
-                            alpha);
+                            alpha, false, beta);
             }
             EXPECT_TRUE(ok);
             return;
@@ -312,7 +312,7 @@ protected:
         if (ok && !enable_moe) {
             for (size_t i = 0; i < num_ops && ok; ++i)
                 compare_tensor_2D_matrix(out_t[i], out_ref_t[i], m, n, k,
-                        rtol_pref, eps_pref, ok, false, alpha);
+                        rtol_pref, eps_pref, ok, false, alpha, false, beta);
         }
 
         if (ok && enable_moe) {

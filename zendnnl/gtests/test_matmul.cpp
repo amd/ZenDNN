@@ -123,7 +123,7 @@ TEST_P(TestMatmul, F32_F32) {
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -253,7 +253,7 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 output_dtype == data_type_t::bf16 ? rtol_bf16 : rtol_woq,
                 output_dtype == data_type_t::bf16 ? epsilon_bf16 : epsilon_woq,
-                is_test_successful, false, alpha, true);
+                is_test_successful, false, alpha, true, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -509,7 +509,7 @@ TEST_P(TestMatmul, WOQ_BF16_U4) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 output_dtype == data_type_t::bf16 ? rtol_bf16 : rtol_woq,
                 output_dtype == data_type_t::bf16 ? epsilon_bf16 : epsilon_woq,
-                is_test_successful, false, alpha, true);
+                is_test_successful, false, alpha, true, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -552,7 +552,7 @@ TEST_P(TestMatmul, BF16_F32) {
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -593,7 +593,8 @@ TEST_P(TestMatmul, BF16_BF16) {
 
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha);
+                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
+                false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -639,7 +640,8 @@ TEST_P(TestMatmul, F16_F16) {
 
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha);
+                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
+                false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -693,7 +695,7 @@ TEST_P(TestMatmul, F16_F32) {
                 ? epsilon_f32
                 : epsilon_bf16;
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol, epsilon, is_test_successful, false, alpha);
+                rtol, epsilon, is_test_successful, false, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -759,7 +761,7 @@ TEST_P(TestMatmul, F32_F32_Stride) {
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -826,7 +828,7 @@ TEST_P(TestMatmul, BF16_F32_Stride) {
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
                 rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -889,7 +891,8 @@ TEST_P(TestMatmul, BF16_BF16_Stride) {
 
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha);
+                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
+                false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);
@@ -959,7 +962,8 @@ TEST_P(TestMatmul, F16_F16_Stride) {
 
     if (is_test_successful) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
-                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha);
+                rtol_bf16, epsilon_bf16, is_test_successful, false, alpha,
+                false, beta);
     }
 
     EXPECT_TRUE(is_test_successful);

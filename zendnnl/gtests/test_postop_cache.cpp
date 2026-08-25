@@ -347,9 +347,9 @@ protected:
         const auto t = tols_for_dst(dst_dt);
         bool ok_1 = true, ok_2 = true;
         compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-                t.enable_f32_relaxation, alpha);
+                t.enable_f32_relaxation, alpha, false, beta);
         compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-                t.enable_f32_relaxation, alpha);
+                t.enable_f32_relaxation, alpha, false, beta);
         EXPECT_TRUE(ok_1);
         EXPECT_TRUE(ok_2);
     }
@@ -424,9 +424,9 @@ TEST_P(TestPostopCache, HitParity) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }
@@ -480,9 +480,9 @@ TEST_P(TestPostopCache, BiasRefreshOnHit) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }
@@ -553,9 +553,9 @@ TEST_P(TestPostopCache, BinaryMulBcastRefreshOnHit) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }
@@ -612,9 +612,9 @@ TEST_P(TestPostopCache, BiasDtypeKeysDistinct) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }
@@ -668,9 +668,9 @@ TEST_P(TestPostopCache, PostopOrderKeysDistinct) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }
@@ -750,9 +750,9 @@ TEST_P(TestPostopCache, LifecycleClear) {
     const auto t = tols_for_dst(dst_dt);
     bool ok_1 = true, ok_2 = true;
     compare_tensor_2D_matrix(out_1, ref_1, m, n, k, t.rtol, t.epsilon, ok_1,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     compare_tensor_2D_matrix(out_2, ref_2, m, n, k, t.rtol, t.epsilon, ok_2,
-            t.enable_f32_relaxation, alpha);
+            t.enable_f32_relaxation, alpha, false, beta);
     EXPECT_TRUE(ok_1);
     EXPECT_TRUE(ok_2);
 }

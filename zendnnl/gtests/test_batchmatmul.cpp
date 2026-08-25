@@ -345,7 +345,7 @@ TEST_P(TestBatchMatmul, F32_3D) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -400,7 +400,7 @@ TEST_P(TestBatchMatmul, F32_2D_WEI) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -455,7 +455,7 @@ TEST_P(TestBatchMatmul, F32_2D_INP) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -502,7 +502,7 @@ TEST_P(TestBatchMatmul, BF16_F32_3D) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -558,7 +558,7 @@ TEST_P(TestBatchMatmul, BF16_F32_2D_WEI) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -614,7 +614,7 @@ TEST_P(TestBatchMatmul, BF16_F32_2D_INP) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_f32, epsilon_f32, is_test_successful,
-                enable_f32_relaxation, alpha);
+                enable_f32_relaxation, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -658,7 +658,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_3D) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_bf16, epsilon_bf16, is_test_successful, false,
-                alpha);
+                alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -711,7 +711,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_2D_WEI) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_bf16, epsilon_bf16, is_test_successful, false,
-                alpha);
+                alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -764,7 +764,7 @@ TEST_P(TestBatchMatmul, BF16_BF16_2D_INP) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_bf16, epsilon_bf16, is_test_successful, false,
-                alpha);
+                alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -821,7 +821,7 @@ TEST_P(TestBatchMatmul, F16_3D) {
     if (is_test_successful) {
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                 m, n, k, rtol_bf16, epsilon_bf16, is_test_successful, false,
-                alpha);
+                alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }
@@ -885,7 +885,7 @@ TEST_P(TestBatchMatmul, F16_F32_3D) {
                 ? epsilon_f32
                 : epsilon_bf16;
         compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
-                m, n, k, rtol, epsilon, is_test_successful, false, alpha);
+                m, n, k, rtol, epsilon, is_test_successful, false, alpha, beta);
     }
     EXPECT_TRUE(is_test_successful);
 }

@@ -3831,40 +3831,60 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
     return;
 }
 
-void compare_tensor_2D_matrix(tensor_t &output_tensor,
-        tensor_t &output_tensor_ref, uint64_t m, uint64_t n, uint64_t k,
-        const float rtol, const float epsilon, bool &is_comparison_successful,
-        bool enable_f32_relaxation, float alpha, bool is_quant) {
+// Absolute tolerance envelope for matmul/batch-matmul output comparison.
+// D = alpha * A * B + beta * C: GEMM accumulation scales with |alpha| and k;
+// beta * C_in adds |beta| ULPs (× P on F32 to cover post-op chains).  Low-
+// precision/quant paths use |beta| unscaled (MoE bf16 envelope).
+static float matmul_comparison_abs_bound(uint64_t k, float epsilon, float alpha,
+        float beta, bool is_low_precision, bool is_quant, bool is_dst_u8) {
     constexpr int C = 20; // Margin for F32 tolerance
-    //ToDo: Add P value according to the postop currently, same value is used for all.
+    // ToDo: Add P value according to the postop currently, same value is used for all.
     constexpr int P = 15; // Post-op accumulation margin
     constexpr int scale_factor = 4; // scale factor
 
+    if (is_dst_u8) { return 1.0f; }
+
+    const float abs_alpha = std::fabs(alpha);
+    const float abs_beta = std::fabs(beta);
+    const float k_f = static_cast<float>(k);
+
+    float gemm_accum = 0.0f;
+    if (is_quant) {
+        gemm_accum = k_f + static_cast<float>(P);
+    } else if (is_low_precision) {
+        gemm_accum = k_f;
+    } else {
+        gemm_accum
+                = (static_cast<float>(C)
+                          + std::log2(k_f) / static_cast<float>(scale_factor))
+                        * k_f
+                + static_cast<float>(P);
+    }
+
+    const float gemm_term = abs_alpha * gemm_accum;
+    // F32/beta*C_in carries |beta| ULPs per output; chained post-ops (binary_*,
+    // gelu, …) add the same accumulation margin P already folded into the GEMM
+    // term.  Low-precision/quant paths keep |beta| unscaled (MoE envelope).
+    const float beta_scale
+            = (is_low_precision || is_quant) ? 1.0f : static_cast<float>(P);
+    const float beta_term = abs_beta * beta_scale;
+    return (gemm_term + beta_term) * epsilon;
+}
+
+void compare_tensor_2D_matrix(tensor_t &output_tensor,
+        tensor_t &output_tensor_ref, uint64_t m, uint64_t n, uint64_t k,
+        const float rtol, const float epsilon, bool &is_comparison_successful,
+        bool enable_f32_relaxation, float alpha, bool is_quant, float beta) {
 #if ENABLE_F32_RELAXATION
     enable_f32_relaxation = true;
 #endif
 
-    // Accumulation-based absolute bound, scaled by alpha
-    // abs_bound = alpha * (C*k+P)*epsilon
     const bool is_low_precision
             = (output_tensor.get_data_type() == data_type_t::bf16)
             || (output_tensor.get_data_type() == data_type_t::f16) || is_quant;
-    // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
-    bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
-    // Quantized GEMMs accumulate exactly in int32, so the pure-GEMM term is
-    // just `k` dequant roundings — but post-ops (binary_*, gelu_erf/tanh, ...)
-    // run afterwards in float and add their own rounding, which the plain
-    // `k * epsilon` bound omits.  For near-zero outputs (e.g. gelu_erf of a
-    // large-negative pre-activation, or binary_mul by ~0) that post-op noise
-    // (~a few * epsilon, independent of the tiny output) can exceed a `k`-only
-    // bound when `k` is small.  Fold in the same post-op accumulation margin
-    // `P` the f32 branch already uses; this only widens the bound, so it can
-    // never tighten (regress) an existing quantized comparison.
-    const float abs_bound = is_dst_u8 ? 1.0f
-            : is_quant                ? (alpha * (k + P) * epsilon)
-            : is_low_precision
-            ? (alpha * k * epsilon)
-            : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
+    const bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+    const float abs_bound = matmul_comparison_abs_bound(
+            k, epsilon, alpha, beta, is_low_precision, is_quant, is_dst_u8);
 
     // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
     constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
@@ -3929,30 +3949,18 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
 void compare_tensor_3D_matrix(tensor_t &output_tensor,
         tensor_t &output_tensor_ref, uint64_t batch_size, uint64_t m,
         uint64_t n, uint64_t k, const float rtol, const float epsilon,
-        bool &is_comparison_successful, bool enable_f32_relaxation,
-        float alpha) {
-    constexpr int C = 20; // Margin for F32 tolerance
-    //ToDo: Add P value according to the postop currently, same value is used for all.
-    constexpr int P = 15; // Post-op accumulation margin
-    constexpr int scale_factor = 4; // scale factor
-
+        bool &is_comparison_successful, bool enable_f32_relaxation, float alpha,
+        float beta) {
 #if ENABLE_F32_RELAXATION
     enable_f32_relaxation = true;
 #endif
 
-    // Accumulation-based absolute bound, scaled by alpha
-    //float abs_bound = alpha * ((20 + log2(k)/4) * k + 15) * epsilon;
-    //(alpha*C*K+P)*epsilon
     const bool is_low_precision
             = (output_tensor.get_data_type() == data_type_t::bf16)
             || (output_tensor.get_data_type() == data_type_t::f16);
-    // For u8 dst, set abs_bound to 1.0f to avoid strict comparison due to rounding errors.
-    bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
-
-    const float abs_bound = is_dst_u8 ? 1.0f
-            : is_low_precision
-            ? (alpha * k * epsilon)
-            : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
+    const bool is_dst_u8 = output_tensor.get_data_type() == data_type_t::u8;
+    const float abs_bound = matmul_comparison_abs_bound(k, epsilon, alpha, beta,
+            is_low_precision, /*is_quant=*/false, is_dst_u8);
 
     // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
     constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
