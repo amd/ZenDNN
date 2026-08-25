@@ -647,9 +647,9 @@ int group_matmul_f32_kernel_example() {
         std::vector<std::vector<float>> dst_buffers(NUM_OPS);
 
         for (int i = 0; i < NUM_OPS; ++i) {
-            src_buffers[i].resize(Ms[i] * Ks[i], 1.0f);
-            weight_buffers[i].resize(Ks[i] * Ns[i], 1.0f);
-            dst_buffers[i].resize(Ms[i] * Ns[i], 0.0f);
+            src_buffers[i].resize(static_cast<size_t>(Ms[i]) * Ks[i], 1.0f);
+            weight_buffers[i].resize(static_cast<size_t>(Ks[i]) * Ns[i], 1.0f);
+            dst_buffers[i].resize(static_cast<size_t>(Ms[i]) * Ns[i], 0.0f);
         }
 
         // Prepare vectors for group_matmul API
@@ -761,13 +761,13 @@ int sequential_gemm_f32_kernel_example() {
         // Allocate weight buffers for each layer
         std::vector<std::vector<float>> weight_buffers(NUM_OPS);
         for (int i = 0; i < NUM_OPS; ++i) {
-            weight_buffers[i].resize(Ks[i] * Ns[i], 0.5f);
+            weight_buffers[i].resize(static_cast<size_t>(Ks[i]) * Ns[i], 0.5f);
         }
 
         // Allocate output buffers for each layer
         std::vector<std::vector<float>> dst_buffers(NUM_OPS);
         for (int i = 0; i < NUM_OPS; ++i) {
-            dst_buffers[i].resize(Ms[i] * Ns[i], 0.0f);
+            dst_buffers[i].resize(static_cast<size_t>(Ms[i]) * Ns[i], 0.0f);
         }
 
         // Prepare API vectors

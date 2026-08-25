@@ -317,7 +317,8 @@ int run_lowoha_strided_conv2d_test() {
         std::vector<float> input(batch * in_h * in_w * in_c, 1.0f);
         std::vector<float> filter(filter_h * filter_w * in_c * out_c, 0.5f);
         std::vector<float> bias(out_c, 0.0f);
-        std::vector<float> output(batch * out_h * out_w * out_c, 0.0f);
+        std::vector<float> output(
+                static_cast<size_t>(batch) * out_h * out_w * out_c, 0.0f);
 
         // Configure conv_params
         conv_params params;

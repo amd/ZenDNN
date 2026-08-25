@@ -87,9 +87,9 @@ int group_matmul_fp32_example() {
         std::vector<std::vector<float>> src(NUM_OPS), wei(NUM_OPS),
                 dst(NUM_OPS);
         for (int i = 0; i < NUM_OPS; ++i) {
-            src[i].resize(Ms[i] * Ks[i]);
-            wei[i].resize(Ks[i] * Ns[i]);
-            dst[i].resize(Ms[i] * Ns[i], 0.f);
+            src[i].resize(static_cast<size_t>(Ms[i]) * Ks[i]);
+            wei[i].resize(static_cast<size_t>(Ks[i]) * Ns[i]);
+            dst[i].resize(static_cast<size_t>(Ms[i]) * Ns[i], 0.f);
             fill_f32(src[i], 1.f);
             fill_f32(wei[i], 1.f);
         }
