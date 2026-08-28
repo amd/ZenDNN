@@ -2607,6 +2607,225 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultDecodeRoutesToAlgo3) {
             << "AUTO_DECODE_ALGO default (=3) must route decode → ALGO 3";
 }
 
+// ── Rule 0.6a — decode AUTO_DECODE_ALGO=5 pin qualifier ──────────────
+// AUTO never emits ALGO 5 on its own; an operator opts in with the explicit
+// `AUTO_DECODE_ALGO=5` pin.  With the qualifier gate ON (default) that pin is
+// HONOURED only where the measured win holds — a decode frame whose every ACTIVE
+// expert is s8 AND whose active count saturates the team
+// (`active_ops >= num_threads`).  The gate is model-agnostic: it fences on dtype
+// and occupancy, NOT on a shape/hidden-size fingerprint, so the pin is a per-
+// deployment opt-in the operator sets only where ALGO 5 helps (the measured INT8
+// Qwen3/3.6 case) and every other INT8 saturated decode is honoured on the same
+// terms.  On any other decode frame (bf16, low occupancy, prompt, mixed dtype)
+// the pin is DECLINED and the call falls back to the decode default, exactly as
+// if the pin were unset.  `DECODE_ALGO5_GATE=0` honours the pin verbatim.  The
+// honoured probes use M=16 (decode) with active_ops(40) >= num_threads(32);
+// absent the pin they would take Rule 0.6 → ALGO 3, so ALGO 5 proves the pin was
+// honoured.
+
+// Representative gate_up (K=2048 hidden, N=1536 = 2*intermediate), s8, saturated
+// team, pin=5 → 5.  Uses a Qwen3-30B shape as the MOTIVATING example, but the
+// qualifier accepts it on dtype+occupancy, not the shape.
+TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredGateUp) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "AUTO_DECODE_ALGO=5 must be honoured for an INT8 gate_up decode "
+               "(all-s8 + saturated team)";
+}
+
+// Representative down proj (N=2048 hidden, K=768 intermediate), s8, saturated,
+// pin=5 → 5 — the other fused-MoE matmul shape.
+TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredDownProj) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/768, /*N=*/2048,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "AUTO_DECODE_ALGO=5 must be honoured for an INT8 down-proj "
+               "decode";
+}
+
+// SHAPE-AGNOSTIC: a NON-Qwen shape (Gemma4-ish hidden=2816) that is s8 and
+// saturates the team is HONOURED just the same — proving the qualifier does NOT
+// fence on a hidden-size fingerprint.  (Whether ALGO 5 actually helps this model
+// is the operator's call: they only set the pin where it does.)
+TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodePinHonouredShapeAgnostic) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2816, /*N=*/1408,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "AUTO_DECODE_ALGO=5 must be honoured for ANY INT8 saturated "
+               "decode "
+               "frame — the gate is shape-agnostic (dtype + occupancy only)";
+}
+
+// NO PIN: AUTO on its own must NOT emit ALGO 5 for an s8 decode frame — the
+// restored no-4-no-5 invariant.  It takes the decode default (Rule 0.6,
+// active_ops > num_threads → ALGO 3).
+TEST(TestGroupMatmulAutoPhaseEnv, Int8DecodeNoPinStaysOnDefault) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    // No AutoDecodeAlgoOverride — the pin is unset.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "AUTO with no pin must not emit ALGO 5 (s8 decode stays on the "
+               "ALGO 3 default)";
+}
+
+// bf16 + pin=5: the all-s8 term fails → pin DECLINED → falls back to the decode
+// default, NOT ALGO 5.
+TEST(TestGroupMatmulAutoPhaseEnv, Bf16DecodePinDeclined) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    // build_auto_probe leaves wei=bf16.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    EXPECT_NE(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "A =5 pin on a bf16 decode frame must be declined (s8-only)";
+}
+
+// Occupancy floor: an s8 frame whose active_ops (16) < num_threads (32) cannot
+// fill the team one-expert-per-thread → pin DECLINED, NOT ALGO 5.
+TEST(TestGroupMatmulAutoPhaseEnv, LowOccupancyDecodePinDeclined) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/16, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_NE(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "active_ops < num_threads must decline the =5 pin (occupancy)";
+}
+
+// The =5 pin is DECODE-ONLY: an s8 PROMPT frame (max_M > 32) is not governed by
+// AUTO_DECODE_ALGO and must never route to ALGO 5.
+TEST(TestGroupMatmulAutoPhaseEnv, Int8PromptPinDeclined) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_NE(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "An s8 PROMPT (max_M>32) must not route to ALGO 5 (decode-only "
+               "pin)";
+}
+
+// EVERY ACTIVE expert must be s8: a group with a bf16 active expert mixed in
+// must decline the pin (ALGO 5 has no uniform-dtype clamp, so a partial match
+// would hand a bf16 tile to the excluded route).
+TEST(TestGroupMatmulAutoPhaseEnv, MixedDtypeDecodePinDeclined) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    // One ACTIVE expert carries bf16 weights → all_active_wei_s8 fails.
+    s.params[1].dtypes.wei = data_type_t::bf16;
+    EXPECT_NE(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "A mixed s8/bf16 active group must decline the =5 pin";
+}
+
+// Gate OFF (`DECODE_ALGO5_GATE=0`): the pin is honoured VERBATIM even for a bf16
+// frame the qualifier would otherwise decline — the escape hatch that restores
+// pre-gate semantics.
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo5PinVerbatimWhenGateOff) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin5(5);
+    DecodeAlgo5GateOverride gate_off(0);
+    // bf16 frame — the qualifier would decline it, but the gate is bypassed.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2816, /*N=*/1408,
+            /*num_ops=*/40, /*num_threads=*/32);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            5)
+            << "Gate=0 must honour AUTO_DECODE_ALGO=5 verbatim for any decode "
+               "frame";
+}
+
+// An explicit NON-5 decode pin is honoured verbatim — the gate only qualifies
+// the =5 value, so `AUTO_DECODE_ALGO=3` still pins ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo3PinHonouredVerbatim) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin3(3);
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/40, /*num_threads=*/32);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "An explicit AUTO_DECODE_ALGO=3 pin is honoured (gate qualifies "
+               "only =5)";
+}
+
 // ── Rule 0.45 — single dense expert decode → ALGO 3 ──────────────────
 // A lone expert (`num_ops == 1`) in decode is routed to ALGO 3 so it
 // reaches the N-tile planner where the dense-FFN optimisations live

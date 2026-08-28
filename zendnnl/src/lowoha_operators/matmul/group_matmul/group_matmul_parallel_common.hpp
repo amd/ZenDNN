@@ -390,6 +390,12 @@ inline int get_grp_matmul_auto_prompt_algo() {
     return v;
 }
 
+// Decode-phase default, shared so the gate-declined `AUTO_DECODE_ALGO=5`
+// fallback in `auto_select_algo` resolves to the SAME algo an unset decode env
+// would (Rule 1 substitutes this for the pinned 5), without duplicating the
+// literal `3` at two sites that must agree.
+inline constexpr int kGrpMatmulAutoDecodeAlgoDefault = 3;
+
 // ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO = { 0, 1..5 } — cached, default 3.
 //   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
 //   the call classifies as DECODE (`max_M ≤ kDecodeMaxM`).  Value 0
@@ -399,7 +405,7 @@ inline int get_grp_matmul_auto_prompt_algo() {
 //   decode choice.
 inline std::atomic<int> &test_api_auto_decode_algo_override();
 inline int get_grp_matmul_auto_decode_algo() {
-    static constexpr int kDefault = 3;
+    static constexpr int kDefault = kGrpMatmulAutoDecodeAlgoDefault;
     const int ovr = test_api_auto_decode_algo_override().load(
             std::memory_order_relaxed);
     if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
@@ -466,6 +472,37 @@ inline bool get_grp_matmul_dense_decode_ntile() {
     if (ovr >= 0) return ovr != 0;
     static const bool v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
+        return parsed != 0;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE = { 0, 1 } — cached, default 1 (ON).
+//   QUALIFIER kill-switch for the decode `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=5`
+//   pin (see Rule 0.6a / Rule 1 in `group_matmul_dispatch.cpp`).  AUTO never
+//   emits ALGO 5 on its own; an operator opts in with the `AUTO_DECODE_ALGO=5`
+//   pin.  When this gate is ON (the default) that pin is HONOURED only where the
+//   measured win holds — a decode frame whose every ACTIVE expert carries s8
+//   weights AND whose active expert count saturates the team
+//   (`active_ops >= num_threads`).  The gate is model-agnostic: it fences on
+//   dtype and occupancy, NOT on a shape/hidden-size fingerprint, so the pin is a
+//   per-deployment opt-in the operator sets only where ALGO 5 helps (the
+//   measured INT8 Qwen3/3.6 case).  On any OTHER decode frame — bf16 weights or
+//   a team the active experts cannot saturate (where ALGO 5 REGRESSES) — the pin
+//   is DECLINED and the call falls back to the normal decode policy exactly as
+//   if the pin were unset.  Set `=0` to HONOUR the pin verbatim for every decode
+//   call (the pre-gate semantics, dtype/occupancy unchecked).  Non-numeric input
+//   → default 1.  The `test_api` override atom below lets a gtest A/B the gate
+//   mid-process, which the cached env read cannot.
+inline std::atomic<int> &test_api_decode_algo5_gate_override();
+inline bool get_grp_matmul_decode_algo5_gate() {
+    const int ovr = test_api_decode_algo5_gate_override().load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE");
         int parsed = 0;
         if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
         return parsed != 0;
@@ -583,13 +620,13 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 // `get_grp_matmul_auto_decode_algo()`:
 //   * any negative value (including the `-1` sentinel) → fall
 //     through to the cached env path (which itself applies the
-//     documented defaults — 1 for prompt, 3 for decode).
+//     documented defaults — 2 for prompt, 3 for decode).
 //   * 0          — explicit legacy 3-rule cascade selection.
 //                  Production deployments that want pre-default-flip
 //                  behaviour use this (or the env equivalent
 //                  `AUTO_*_ALGO=0`).
 //   * 1..5       — adopted as the override value.
-//   * > 5        — clamped to the documented default (1 for prompt,
+//   * > 5        — clamped to the documented default (2 for prompt,
 //                  3 for decode), matching the env-parse validation
 //                  behaviour.
 inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override {-1};
@@ -602,6 +639,14 @@ inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 // function-local `static const`, so a gtest cannot A/B the rule by
 // setting the env var after the first call has already latched it.
 inline std::atomic<int> s_grp_matmul_dense_decode_ntile_override {-1};
+
+// Sentinel `-1` = no override (use the cached env path, default ON).
+// `0` / `1` force the decode ALGO 5 pin qualifier
+// (`ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE`) off / on for the lifetime of a test,
+// so a gtest can A/B a qualified `AUTO_DECODE_ALGO=5` pin (s8 + occupancy)
+// against a verbatim-honoured one inside one process — same cached-env
+// rationale as the dense-decode atom above.
+inline std::atomic<int> s_grp_matmul_decode_algo5_gate_override {-1};
 
 // Sentinel `-1` = no override (use the cached env path).  `0` / `1` force
 // `ZENDNNL_GRP_MATMUL_KBLOCK` off / on, and `2` restores the automatic
@@ -707,6 +752,9 @@ inline std::atomic<int> &test_api_algo_override() {
 }
 inline std::atomic<int> &test_api_dense_decode_ntile_override() {
     return test_api::s_grp_matmul_dense_decode_ntile_override;
+}
+inline std::atomic<int> &test_api_decode_algo5_gate_override() {
+    return test_api::s_grp_matmul_decode_algo5_gate_override;
 }
 
 inline int get_grp_n_rounds_mode() {
@@ -1493,6 +1541,16 @@ inline bool get_grp_matmul_enable_group_dq() {
 struct auto_algo_trace {
     const char *reason = nullptr;
     int unclamped = 0;
+    // Set true when Rule 0.6a's qualifier HONOURED a decode `AUTO_DECODE_ALGO=5`
+    // pin for an s8 saturated-team frame.  The pin then resolves to ALGO 5
+    // through Rule 1 (`reason=auto_phase_env`), so this dedicated boolean is
+    // what keeps the `[GRP_MATMUL.ALGO]` line greppable for the qualified
+    // pin→ALGO-5 route the generic reason string does not name.
+    bool decode5_pin_honoured = false;
+    // Set true when a decode `AUTO_DECODE_ALGO=5` pin was DECLINED by the
+    // qualifier (not all-s8, or active_ops < num_threads) and the call fell back
+    // to the decode default exactly as if the pin were unset.
+    bool decode5_pin_declined = false;
 };
 
 int select_grp_matmul_algo(const std::vector<char> &layout,

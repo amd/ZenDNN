@@ -3762,8 +3762,8 @@ TEST_P(TestFusedMoEVerticalWOQ, Correctness) {
         verify_per_expert_2d(src_test, K_in, d2_ref, H, E, M, H, is_bf16,
                 woq_tol, lbl.str());
     } else {
-        verify_per_expert_2d(d2_fused, H, d2_ref, H, E, M, H, is_bf16,
-                woq_tol, lbl.str());
+        verify_per_expert_2d(
+                d2_fused, H, d2_ref, H, E, M, H, is_bf16, woq_tol, lbl.str());
     }
 }
 

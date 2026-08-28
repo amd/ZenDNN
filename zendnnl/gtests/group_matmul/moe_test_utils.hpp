@@ -915,6 +915,33 @@ struct DenseDecodeNTileOverride {
     DenseDecodeNTileOverride &operator=(DenseDecodeNTileOverride &&) = delete;
 };
 
+// RAII override for the decode ALGO 5 pin QUALIFIER
+// (`ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE`).  `1` = gate ON (the production
+// default: an `AUTO_DECODE_ALGO=5` pin is honoured only for an s8 +
+// saturated-team decode frame), `0` = gate OFF (the pin is honoured verbatim for
+// every decode call), `-1` = restore the env path.  Same cache-bypass rationale
+// as the other
+// Override structs: the getter latches its env read in a function-local
+// `static const`, so setting the env var mid-process cannot A/B the two modes.
+struct DecodeAlgo5GateOverride {
+    int prev;
+    explicit DecodeAlgo5GateOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_decode_algo5_gate_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~DecodeAlgo5GateOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_decode_algo5_gate_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    DecodeAlgo5GateOverride(const DecodeAlgo5GateOverride &) = delete;
+    DecodeAlgo5GateOverride &operator=(const DecodeAlgo5GateOverride &)
+            = delete;
+    DecodeAlgo5GateOverride(DecodeAlgo5GateOverride &&) = delete;
+    DecodeAlgo5GateOverride &operator=(DecodeAlgo5GateOverride &&) = delete;
+};
+
 // RAII guard for the ALGO 3 N-tile heavy-threshold knob (the test-
 // only path over `ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD`).  Same
 // cache-bypass rationale as the other Override structs.
