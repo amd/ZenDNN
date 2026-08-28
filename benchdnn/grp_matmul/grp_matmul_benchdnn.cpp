@@ -566,18 +566,40 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
             fused.ldc_down.resize(n, cfg.N_down);
         }
 
-        // W4A8 Op2 per-group weight scale: G2 = K_down / group_size.
-        const bool w4a8_fused = (cfg.wei_dt == data_type_t::s4
-                && cfg.dynamic_quant && cfg.group_size > 0);
-        const int64_t wei_down_scale_G = w4a8_fused
-                ? static_cast<int64_t>(K_down / cfg.group_size)
-                : 0;
-        const size_t wei_down_scale_nelems = w4a8_fused
+        // Op2 (down_proj) per-expert weight scale for the dynamic-INT8 fused
+        // path.  The library requires a populated `down_scale` whenever
+        // `dynamic_quant=1` and the down weight is s8/s4; with it empty the
+        // s8/s4 Op2 has no wei_scale, so the down_proj is not executed and no
+        // output is written (the caller's dst_down is left untouched).  Op2
+        // inherits dynamic_quant / compute / per-token src_scale from Op1;
+        // only this per-expert *weight* scale must be carried here.
+        //   * da8w8 (wei=s8): per-channel, G = 1               -> dims {1, N_down}
+        //   * W4A8  (wei=s4): per-group,  G = K_down/group_size (group_size>0)
+        const bool dq_fused = cfg.dynamic_quant
+                && (cfg.wei_dt == data_type_t::s8
+                        || cfg.wei_dt == data_type_t::s4);
+        // Op2 reduces over K_down (= N/2 for gated act, N otherwise), which
+        // differs from Op1's K.  parse_config only validates
+        // `cfg.K % group_size == 0`, so a per-group (s4/W4A8) config can be
+        // valid for Op1 yet leave K_down indivisible — truncating G and
+        // building a wrong-shaped down_scale.  Guard Op2's own reduction dim.
+        if (dq_fused && cfg.group_size > 0 && (K_down % cfg.group_size) != 0) {
+            std::cerr << "ERROR: K_down=" << K_down
+                      << " not divisible by group_size=" << cfg.group_size
+                      << " for fused Op2 down_scale. Skipping config.\n";
+            return false;
+        }
+        const int64_t wei_down_scale_G = !dq_fused
+                ? 0
+                : (cfg.group_size > 0 ? static_cast<int64_t>(
+                                                K_down / cfg.group_size)
+                                      : 1);
+        const size_t wei_down_scale_nelems = dq_fused
                 ? static_cast<size_t>(wei_down_scale_G)
                         * static_cast<size_t>(cfg.N_down)
                 : 0;
-        wei_down_scale_buf.resize(w4a8_fused ? n : 0);
-        if (w4a8_fused) {
+        wei_down_scale_buf.resize(dq_fused ? n : 0);
+        if (dq_fused) {
             fused.down_scale.resize(n);
             for (int e = 0; e < n; ++e) {
                 wei_down_scale_buf[e].alloc(
@@ -593,7 +615,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
             fill_buffer(B_down[i].ptr, static_cast<size_t>(K_down) * cfg.N_down,
                     cfg.wei_dt, 200 + i * 11);
             fused.down_weight[i] = B_down[i].ptr;
-            if (w4a8_fused) {
+            if (dq_fused) {
                 grp_matmul_fused_moe_params::down_weight_quant_t ds;
                 ds.buff = wei_down_scale_buf[i].ptr;
                 ds.dt = data_type_t::f32;
