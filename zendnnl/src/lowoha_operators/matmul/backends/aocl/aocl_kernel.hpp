@@ -198,20 +198,25 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         const std::vector<matmul_params> &params, int num_ops,
         std::vector<void *> &w4a8_s8_out, bool &any_w4a8);
 
-/// W4A8 weight reorder + cache: converts s4→s8 then packs through the
-/// AOCL sym-quant s8s8s32os32 path into the dedicated W4A8 LRU cache.
-/// Called by run_dlp at GEMM time; also callable from prepack to eagerly
-/// warm the cache for all experts before inference begins.
+inline bool w4a8_uses_native_s4(zendnnl::ops::matmul_algo_t algo) {
+    return algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
+}
+
+/// Resolve W4A8 matmul algo for run_dlp (dense + group).
+/// aocl_dlp_blocked uses native s4; every other input uses aocl_dlp.
+inline zendnnl::ops::matmul_algo_t w4a8_algo_for(
+        zendnnl::ops::matmul_algo_t algo) {
+    return w4a8_uses_native_s4(algo)
+            ? zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            : zendnnl::ops::matmul_algo_t::aocl_dlp;
+}
+
+/// W4A8 reorder + cache; path must match runtime (separate native/simulated LRUs).
 void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const bool is_weights_const, const char order, const char trans,
         data_type_t wei_dt, data_type_t src_dt, int weight_cache_type,
-        int sym_quant_group_size);
-
-/// Broadcast per-token/per-tensor src_scale to per-group {M, G} shape
-/// so AOCL sym-quant derives the correct group_size = K/G.
-status_t broadcast_w4a8_src_scale(
-        matmul_params &params, int M, std::vector<uint8_t> &expanded_src_scale);
+        int sym_quant_group_size, zendnnl::ops::matmul_algo_t algo);
 
 /**
  * @brief Execute single matrix multiplication using AOCL DLP backend

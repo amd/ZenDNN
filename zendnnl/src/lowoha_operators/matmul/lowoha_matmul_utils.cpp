@@ -165,21 +165,21 @@ status_t validate_w4a8_inputs(
         return status_t::failure;
     }
     if (src_scale.dims.size() != 2) {
-        log_error("W4A8 requires source scale dims {1,1}, {M,1}, or {M,G}");
+        log_error("W4A8 requires source scale dims {M,1} or {M,G}");
         return status_t::failure;
     }
 
+    // Reject per-tensor {1,1} src scale except M==1; sym-quant needs per-row scales.
     const int64_t src_rows = src_scale.dims[0];
     const int64_t src_cols = src_scale.dims[1];
-    const bool is_per_tensor_src = (src_rows == 1 && src_cols == 1);
     const bool is_per_token_src
             = (src_rows == static_cast<int64_t>(M) && src_cols == 1);
     const bool is_per_group_src
             = (src_rows == static_cast<int64_t>(M) && src_cols == G);
-    if (!is_per_tensor_src && !is_per_token_src && !is_per_group_src) {
+    if (!is_per_token_src && !is_per_group_src) {
         log_error(
-                "W4A8 requires source scale dims {1,1}, {M,1}, or {M,G} "
-                "(rows=",
+                "W4A8 requires per-token {M,1} or per-group {M,G} source "
+                "scale dims; per-tensor scales are not supported (rows=",
                 src_rows, ", cols=", src_cols, ", M=", M, ", G=", G, ")");
         return status_t::failure;
     }
@@ -305,14 +305,21 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
             const bool wei_scale_supplied_externally
                     = (params.packing.pack_format_b != 1);
             if (wei_scale_supplied_externally && is_per_token) {
+                // Pairing (matches group-matmul):
+                //   per-token src + per-channel wei {N}  -> accepted
+                //   per-token src + per-group wei {G,N}  -> accepted
+                //     (src scale is N-independent; B-side group size is
+                //     taken from wei {G,N} by sym_quant_group_size)
                 const bool has_per_channel_wei
                         = wei_scale_nelems == static_cast<int64_t>(N);
-                if (!has_per_channel_wei) {
+                const bool has_per_group_wei
+                        = has_per_group_wei_scale(params.quant_params, N);
+                if (!has_per_channel_wei && !has_per_group_wei) {
                     log_error(
                             "Per-token source scale requires per-channel "
-                            "weight scale "
-                            "(expected ",
-                            N, " elements, got ", wei_scale_nelems, ")");
+                            "{N} or per-group {G,N} weight scale "
+                            "(got ",
+                            wei_scale_nelems, " elements, N=", N, ")");
                     return status_t::failure;
                 }
             }
@@ -876,7 +883,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         kernel = matmul_algo_t::aocl_dlp_blocked;
         log_info("WOQ detected, switching to DLP kernel");
     }
-    // W4A8: AOCL DLP only; honor aocl_dlp / aocl_dlp_blocked if already set.
+    // W4A8: AOCL DLP only.
     if (is_w4a8 && kernel != matmul_algo_t::aocl_dlp
             && kernel != matmul_algo_t::aocl_dlp_blocked) {
         kernel = matmul_algo_t::aocl_dlp_blocked;

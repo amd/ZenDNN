@@ -52,6 +52,14 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
     return count;
 }
 
+// Collapsed per-token src at M==1; per-group wei scale disambiguates sym-quant.
+inline bool src_scale_is_collapsed_per_token(
+        const matmul_quantization_params_t &quant_params, int M, int N) {
+    return quant_params.src_scale.buff != nullptr
+            && get_num_elements(quant_params.src_scale.dims) == 1 && M == 1
+            && has_per_group_wei_scale(quant_params, N);
+}
+
 /**
  * @brief Creates DLP metadata for post-operations
  *
@@ -79,14 +87,8 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
  *                   wrapper -- a null B would have already crashed
  *                   upstream before reaching this function, so no
  *                   defensive null-check is added here.
- * @param is_w4a8 True when the caller is the W4A8 (dynamic-quant s8 src +
- *                s4 weight, widened to s8) path, which always dispatches
- *                the s8s8 *_sym_quant GEMM regardless of scale shape. That
- *                GEMM mandates a_quant_op/b_quant_op group metadata, so the
- *                sym-quant wiring must fire even when the (broadcast) source
- *                scale collapses to a single element (M==1 + single group),
- *                a case the generic src_scale_nelems>1 gate would drop.
- *                False for every non-W4A8 caller (unchanged behavior).
+ * @param w4a8_algo W4A8 AOCL algo (`none` / `aocl_dlp` / `aocl_dlp_blocked`);
+ *                   included in the cache key.
  * @return Pointer to the dlp_metadata_t inside the per-layer holder
  *         (lifetime managed by the per-thread post-op metadata LRU),
  *         OR nullptr for layers that legitimately have no post-op
@@ -115,8 +117,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
         zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
-        bool is_w4a8 = false, const int32_t *reorder_colsum = nullptr,
-        int32_t neg_src_zp = 0);
+        const int32_t *reorder_colsum = nullptr, int32_t neg_src_zp = 0,
+        zendnnl::ops::matmul_algo_t w4a8_algo
+        = zendnnl::ops::matmul_algo_t::none);
 
 /**
  * @brief Per-call teardown for the metadata returned by create_dlp_post_op().

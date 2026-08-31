@@ -301,7 +301,7 @@ get_postop_metadata_cache() {
 //     and group_size are refreshed by patch_mutable_fields).
 std::size_t compute_postop_signature(const matmul_params &lowoha_param,
         const matmul_data_types &dtypes, int zp_comp_ndim, const void *bias,
-        bool is_w4a8, int M, int N) {
+        zendnnl::ops::matmul_algo_t w4a8_algo, int M, int N) {
     std::size_t sig = 0;
     for (const auto &po : lowoha_param.postop_) {
         sig = sig * 31u + static_cast<std::size_t>(po.po_type);
@@ -358,11 +358,9 @@ std::size_t compute_postop_signature(const matmul_params &lowoha_param,
             + scale_layout(
                     get_num_elements(lowoha_param.quant_params.wei_scale.dims),
                     N);
-    // W4A8 forces the sym-quant wiring even at a collapsed (1-element)
-    // source scale; a genuine s8s8 layer with the same collapsed scale on
-    // the same key wires the non-sym path, so the two must not share a
-    // holder.
-    sig = sig * 31u + (is_w4a8 ? 1u : 0u);
+    // Include W4A8 algo in post-op cache key (S4 vs S8 wiring differs).
+    sig = sig * 31u
+            + static_cast<std::size_t>(static_cast<uint32_t>(w4a8_algo));
     return sig;
 }
 
@@ -679,14 +677,19 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 static void patch_mutable_fields(dlp_metadata_t *md,
         dlp_postop_metadata_holder_t *h, const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int M, int N, int K,
-        int32_t *zp_comp_acc, int zp_comp_ndim, bool is_w4a8,
+        int32_t *zp_comp_acc, int zp_comp_ndim,
+        zendnnl::ops::matmul_algo_t w4a8_algo,
         const int32_t *reorder_colsum = nullptr, int32_t neg_src_zp = 0) {
     // NOTE: keep these flag definitions in lockstep with the build path in
     // create_dlp_post_op(). The hit path mirrors the build path's per-call
     // mutable-field updates, so any divergence in classification (especially
     // is_bf16_f32_per_token_sym vs is_non_quant_src_int8) would silently
     // corrupt scale_factor on cache hits.
-    bool is_int8 = dtypes.wei == data_type_t::s8;
+    const bool is_w4a8 = w4a8_algo != zendnnl::ops::matmul_algo_t::none;
+    const bool is_w4a8_native_sym
+            = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            && dtypes.wei == data_type_t::s4;
+    bool is_int8 = dtypes.wei == data_type_t::s8 || is_w4a8_native_sym;
     size_t src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
     const bool is_bf16_f32_per_token_sym = is_int8
@@ -701,7 +704,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
             && is_int8 && !is_bf16_f32_per_token_sym;
     bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1 || is_w4a8)
+            && (src_scale_nelems > 1 || is_w4a8
+                    || src_scale_is_collapsed_per_token(
+                            lowoha_param.quant_params, M, N))
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
 
@@ -847,7 +852,8 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         }
     }
 
-    // Symmetric INT8 quant: group_size depends on M, which is intentionally
+    // Symmetric INT8 quant: B-side group_size comes from wei {G,N};
+    // A-side scale length is M-dependent (per-token).  M is intentionally
     // excluded from the cache key. Recompute on every hit. a_quant_op /
     // b_quant_op dequant_scale_factors point at per-call user buffers and
     // (for per-token a-scale) carry an M-dependent length; the cold-path-
@@ -856,10 +862,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     // the signature, so on hit we know is_sym_quant matches the cold-path mode
     // (a_quant_op is non-null iff the cold path wired it).
     if (is_sym_quant && md->a_quant_op) {
-        int64_t src_group_size = (src_scale_nelems == static_cast<size_t>(M))
-                ? K
-                : K / (static_cast<int64_t>(src_scale_nelems) / M);
-        md->a_quant_op->group_size = static_cast<int>(src_group_size);
+        const int64_t group_size
+                = sym_quant_group_size(lowoha_param.quant_params, M, N, K);
+        md->a_quant_op->group_size = static_cast<int>(group_size);
 
         if (md->a_quant_op->dequant_scale_factors) {
             md->a_quant_op->dequant_scale_factors->data = const_cast<void *>(
@@ -872,7 +877,7 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         if (md->b_quant_op && md->b_quant_op->dequant_scale_factors) {
             size_t wei_scale_nelems = get_num_elements(
                     lowoha_param.quant_params.wei_scale.dims);
-            md->b_quant_op->group_size = static_cast<int>(src_group_size);
+            md->b_quant_op->group_size = static_cast<int>(group_size);
             md->b_quant_op->dequant_scale_factors->data = const_cast<void *>(
                     lowoha_param.quant_params.wei_scale.buff);
             md->b_quant_op->dequant_scale_factors->len = wei_scale_nelems;
@@ -1003,7 +1008,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
         zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
-        bool is_w4a8, const int32_t *reorder_colsum, int32_t neg_src_zp) {
+        const int32_t *reorder_colsum, int32_t neg_src_zp,
+        zendnnl::ops::matmul_algo_t w4a8_algo) {
+    const bool has_w4a8_algo = w4a8_algo != zendnnl::ops::matmul_algo_t::none;
     // Normalize zp_comp presence at the API boundary: a zp_comp slot is
     // present iff BOTH the dimensionality and the buffer are non-null.
     // Downstream sites disagree on what "present" means today — the
@@ -1040,7 +1047,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
     // Build the cache key.
     const std::size_t sig = compute_postop_signature(
-            lowoha_param, dtypes, sig_zp_ndim, bias, is_w4a8, M, N);
+            lowoha_param, dtypes, sig_zp_ndim, bias, w4a8_algo, M, N);
     const Key_matmul key(/*TransB=*/false, static_cast<unsigned int>(K),
             static_cast<unsigned int>(N),
             /*ldb=*/0, weight_ptr, static_cast<uint32_t>(kernel), sig);
@@ -1052,7 +1059,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         if (cached_holder->no_metadata) { return nullptr; }
         patch_mutable_fields(&cached_holder->metadata, cached_holder,
                 lowoha_param, bias, dtypes, M, N, K, zp_comp_acc, zp_comp_ndim,
-                is_w4a8, reorder_colsum, neg_src_zp);
+                w4a8_algo, reorder_colsum, neg_src_zp);
         return &cached_holder->metadata;
     }
 
@@ -1069,8 +1076,11 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             && dtypes.src == data_type_t::bf16
             && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
 
-    // Check if this is INT8 quantization case
-    bool is_int8 = dtypes.wei == data_type_t::s8;
+    // Check if this is INT8 quantization case (incl. W4A8 native s4 weights).
+    const bool is_w4a8_native_sym
+            = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            && dtypes.wei == data_type_t::s4;
+    bool is_int8 = dtypes.wei == data_type_t::s8 || is_w4a8_native_sym;
 
     size_t src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
@@ -1088,17 +1098,12 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                                          || dtypes.src == data_type_t::f32)
             && is_int8 && !is_bf16_f32_per_token_sym;
 
-    // s8s8 *_sym_quant GEMMs consume a_quant_op / b_quant_op; bf16s8/f32s8
-    // paths use a_quant_op and regular SCALE post-ops instead.
-    // W4A8 (is_w4a8) always dispatches the s8s8 *_sym_quant GEMM, which
-    // mandates a_quant_op/b_quant_op group metadata even when the broadcast
-    // source scale collapses to a single element (M==1 with a single weight
-    // group). Force the sym-quant wiring in that case; the generic
-    // src_scale_nelems>1 gate would otherwise route it through the SCALE
-    // post-op path and leave the GEMM without its required quant metadata.
+    // W4A8 and collapsed per-token src need sym-quant wiring (see run_dlp).
     const bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && (src_scale_nelems > 1 || is_w4a8)
+            && (src_scale_nelems > 1 || has_w4a8_algo
+                    || src_scale_is_collapsed_per_token(
+                            lowoha_param.quant_params, M, N))
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16);
 
@@ -1354,9 +1359,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         dlp_metadata->a_quant_op->dequant_scale_factors->outer_dim = a_dim;
     }
     if (is_sym_quant) {
-        int64_t src_group_size = (src_scale_nelems == static_cast<size_t>(M))
-                ? K
-                : K / (static_cast<int64_t>(src_scale_nelems) / M);
+        // K-axis B-side group size comes from wei scale {G,N}, independent
+        // of src granularity (per-token src still uses this wei group size).
+        const int64_t group_size
+                = sym_quant_group_size(lowoha_param.quant_params, M, N, K);
 
         // s8 x s8 symmetric quant (new AOCL DLP API): the A-side dequant scale
         // goes into a_quant_op.dequant_scale_factors, the weight (B) dequant
@@ -1372,7 +1378,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         dlp_metadata->a_quant_op->quant_op_kind = DLP_QUANT_OP_QUANTIZE;
         dlp_metadata->a_quant_op->src_type = DLP_S8;
         dlp_metadata->a_quant_op->dst_type = DLP_S8;
-        dlp_metadata->a_quant_op->group_size = static_cast<int>(src_group_size);
+        dlp_metadata->a_quant_op->group_size = static_cast<int>(group_size);
         dlp_metadata->a_quant_op->quant_scale_factors = nullptr;
         dlp_metadata->a_quant_op->zero_point = nullptr;
         dlp_metadata->a_quant_op->dequant_scale_factors
@@ -1392,9 +1398,12 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 
         dlp_metadata->b_quant_op = &new_holder->b_quant_op;
         dlp_metadata->b_quant_op->quant_op_kind = DLP_QUANT_OP_QUANTIZE;
-        dlp_metadata->b_quant_op->src_type = DLP_S8;
-        dlp_metadata->b_quant_op->dst_type = DLP_S8;
-        dlp_metadata->b_quant_op->group_size = static_cast<int>(src_group_size);
+        const bool b_uses_native_s4
+                = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
+        const DLP_TYPE b_sym_dtype = b_uses_native_s4 ? DLP_S4 : DLP_S8;
+        dlp_metadata->b_quant_op->src_type = b_sym_dtype;
+        dlp_metadata->b_quant_op->dst_type = b_sym_dtype;
+        dlp_metadata->b_quant_op->group_size = static_cast<int>(group_size);
         dlp_metadata->b_quant_op->quant_scale_factors = nullptr;
         dlp_metadata->b_quant_op->zero_point = nullptr;
         dlp_metadata->b_quant_op->dequant_scale_factors

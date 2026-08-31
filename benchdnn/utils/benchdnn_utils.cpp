@@ -592,8 +592,12 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
             return NOT_OK;
         }
         options.group_size = std::stoul(value);
-        // Source and weight group sizes are always kept in sync.
-        options.src_group_size = options.group_size;
+        // Mirror onto src only when src scales are per-group; per-token src
+        // keeps src_group_size=0 (matmul_utils::sync_src_weight_group_sizes).
+        if (options.src_scale_granularity == "per-group"
+                || options.src_scale_granularity == "group") {
+            options.src_group_size = options.group_size;
+        }
     } else if (arg.find("--scale_dt=") == 0
             || arg.find("--weight_scale_dt=") == 0) {
         const std::string value = arg.substr(arg.find('=') + 1);
@@ -856,8 +860,11 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
             return NOT_OK;
         }
         options.src_group_size = std::stoul(arg.substr(17));
-        // Source and weight group sizes are always kept in sync.
-        options.group_size = options.src_group_size;
+        // Mirror onto weight only when src scales are per-group.
+        if (options.src_scale_granularity == "per-group"
+                || options.src_scale_granularity == "group") {
+            options.group_size = options.src_group_size;
+        }
     } else if (arg.find("--src_scale_dt=") == 0) {
         if (arg.substr(15).empty()) {
             commonlog_error(

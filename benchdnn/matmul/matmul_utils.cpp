@@ -108,12 +108,37 @@ static void couple_src_scale_to_weight(MatmulConfig &cfg) {
     }
 }
 
+// Keep src/weight group sizes in sync only for per-group src scales.
+// Per-token/per-tensor src must keep src_group_size=0 even when weights use
+// per-group scales (W4A8).
+static void sync_src_weight_group_sizes(MatmulConfig &cfg) {
+    const bool src_per_group = (cfg.src_scale_granularity == "per-group"
+            || cfg.src_scale_granularity == "group");
+    if (src_per_group) {
+        if (cfg.src_group_size != cfg.group_size) {
+            if (cfg.src_group_size == 0) {
+                cfg.src_group_size = cfg.group_size;
+            } else if (cfg.group_size == 0) {
+                cfg.group_size = cfg.src_group_size;
+            } else {
+                commonlog_warning("src_group_size=", cfg.src_group_size,
+                        " differs from weight group_size=", cfg.group_size,
+                        ". Forcing both to ", cfg.group_size, ".");
+                cfg.src_group_size = cfg.group_size;
+            }
+        }
+    } else {
+        cfg.src_group_size = 0;
+    }
+}
+
 // Validates/normalizes a parsed row against its weight dtype. The row parser is
 // positional and defaults missing tail fields, so a quantized row missing quant
 // metadata would otherwise parse "successfully" then crash at kernel dispatch.
-// Returns false to skip the row; may adjust cfg (forces bf16 src/dst, couples
-// src granularity/dtype to the weight scale). bf16->bf16:bf16:bf16,
-// s8->bf16:s8:bf16, s4->bf16:s4:bf16.
+// Returns false to skip the row; may adjust cfg (forces bf16 src/dst, src
+// scale dtype to the weight scale dtype, and a default src granularity when
+// the row leaves it unset). bf16->bf16:bf16:bf16, s8->bf16:s8:bf16,
+// s4->bf16:s4:bf16.
 static bool validate_dtype_fields(MatmulConfig &cfg, const std::string &line) {
     if (cfg.dt.size() < 3) {
         commonlog_error(
@@ -229,8 +254,9 @@ static bool validate_dtype_fields(MatmulConfig &cfg, const std::string &line) {
             return false;
         }
     } else if (is_int8) {
-        // INT8 dynamic quant (s8 weights). The integer GEMM needs the activation pre/post-quant
-        // metadata, which is only produced when src_dynamic_quant is on.
+        // INT8 dynamic quant (s8 weights). The integer GEMM needs the
+        // activation pre/post-quant metadata, which is only produced when
+        // src_dynamic_quant is on.
         if (!cfg.src_dynamic_quant) {
             commonlog_error("Row '", line, "' uses int8 weights (", dt_str,
                     ") but src_dynamic_quant is not enabled. int8 requires "
@@ -249,31 +275,41 @@ static bool validate_dtype_fields(MatmulConfig &cfg, const std::string &line) {
                     cfg.scale_granularity, "'.");
             return false;
         }
-        // The INT8 dynamic kernel (s8 weights) couples activation and weight scale granularity: per-group
-        // weights require per-group activation scales; per-channel weights require
-        // per-token activation scales (dlp: "Per-token source scale requires
-        // per-channel weight scale"). Weight granularity is authoritative.
-        const std::string expected_src = (cfg.scale_granularity == "group")
-                ? "per-group"
-                : "per-token";
-        if (cfg.src_scale_granularity != expected_src) {
-            commonlog_warning("Row '", line, "' weight granularity '",
-                    cfg.scale_granularity, "' implies src_scale_granularity '",
-                    expected_src, "' but got '", cfg.src_scale_granularity,
-                    "'. Forcing src to '", expected_src, "'.");
-            cfg.src_scale_granularity = expected_src;
-        }
-        if (cfg.scale_granularity == "group") {
+        // INT8 dynamic (s8 weights). Src and weight granularity are
+        // independent, matching validate_matmul_direct_inputs:
+        //   per-channel wei -> src must be per-token
+        //   per-group wei   -> src may be per-group (legacy default) OR
+        //                      explicit per-token (src_group_size=0)
+        if (cfg.scale_granularity == "channel") {
+            if (cfg.src_scale_granularity != "per-token") {
+                commonlog_warning("Row '", line, "' weight granularity '",
+                        cfg.scale_granularity,
+                        "' requires src_scale_granularity 'per-token' but "
+                        "got '",
+                        cfg.src_scale_granularity,
+                        "'. Forcing src to 'per-token'.");
+                cfg.src_scale_granularity = "per-token";
+            }
+            cfg.group_size = 0;
+            cfg.src_group_size = 0;
+        } else if (cfg.src_scale_granularity == "per-token") {
+            // Explicit mixed pairing: per-token src + per-group wei.
+            cfg.src_group_size = 0;
+        } else {
+            if (cfg.src_scale_granularity != "per-group") {
+                commonlog_warning("Row '", line, "' weight granularity '",
+                        cfg.scale_granularity,
+                        "' defaults src to 'per-group' (got '",
+                        cfg.src_scale_granularity, "').");
+                cfg.src_scale_granularity = "per-group";
+            }
             if (cfg.src_group_size == 0) {
                 cfg.src_group_size = cfg.group_size;
             }
-        } else {
-            cfg.group_size = 0;
-            cfg.src_group_size = 0;
         }
-        // The GEMM kernel requires the src (A) and weight (B) scale dtypes to match
-        // (dlp_gemm_post_ops.c: "A and B scale factor type mismatch"). Force the
-        // src scale dtype to the weight scale dtype.
+        // The GEMM kernel requires the src (A) and weight (B) scale dtypes
+        // to match (dlp_gemm_post_ops.c: "A and B scale factor type
+        // mismatch"). Force the src scale dtype to the weight scale dtype.
         if (cfg.src_scale_dt != cfg.scale_dt) {
             commonlog_warning("Row '", line, "' src scale dtype (",
                     datatypeToStr(cfg.src_scale_dt),
@@ -726,20 +762,7 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
                 cfg.src_scale_dt = strToDatatype(fields[id]);
             }
 
-            // Source and weight group sizes are always kept in sync. If only one
-            // was specified in the input row, mirror it onto the other.
-            if (cfg.src_group_size != cfg.group_size) {
-                if (cfg.src_group_size == 0) {
-                    cfg.src_group_size = cfg.group_size;
-                } else if (cfg.group_size == 0) {
-                    cfg.group_size = cfg.src_group_size;
-                } else {
-                    commonlog_warning("src_group_size=", cfg.src_group_size,
-                            " differs from weight group_size=", cfg.group_size,
-                            ". Forcing both to ", cfg.group_size, ".");
-                    cfg.src_group_size = cfg.group_size;
-                }
-            }
+            sync_src_weight_group_sizes(cfg);
 
             if (!validate_dtype_fields(cfg, line)) { continue; }
             normalize_w4a8_quant_config(cfg);
@@ -1000,6 +1023,7 @@ void inputModelFileParser(std::ifstream &infile,
             cfg.src_group_size = options.src_group_size;
             cfg.src_scale_dt = options.src_scale_dt;
 
+            sync_src_weight_group_sizes(cfg);
             normalize_w4a8_quant_config(cfg);
             configs.push_back(cfg);
         } catch (const std::exception &e) {
@@ -1088,6 +1112,7 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
         cfg.src_group_size = options.src_group_size;
         cfg.src_scale_dt = options.src_scale_dt;
 
+        sync_src_weight_group_sizes(cfg);
         normalize_w4a8_quant_config(cfg);
         configs.push_back(cfg);
     } catch (const std::exception &e) { commonlog_error(e.what()); }
@@ -1171,8 +1196,11 @@ static const SweepAxis kSweepAxes[] = {
         {"fp32", data_type_t::f32, data_type_t::f32, QuantScheme::kNone,
                 QuantGran::kPerChannel, 0, QuantGran::kPerChannel, 0,
                 data_type_t::f32},
-        // 2-3: int8 dynamic (s8 weights). The kernel couples activation and weight scale
-        // granularity, so per-token activations require per-channel weights.
+        // 2-3: int8 dynamic (s8 weights). Src and weight granularity are
+        // independent: these two tokens keep the historical paired layouts
+        // (both per-group, or per-token src + per-channel wei). Mixed
+        // per-token src + per-group wei is accepted by validate_dtype_fields
+        // on --input_file rows.
         {"int8_per_group", data_type_t::s8, data_type_t::bf16,
                 QuantScheme::kDynamic, QuantGran::kPerGroup, 32,
                 QuantGran::kPerGroup, 32, data_type_t::bf16},

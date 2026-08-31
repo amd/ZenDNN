@@ -176,8 +176,7 @@ inline void offset_quant_by_col(matmul_quantization_params_t::matmul_quant_t &q,
 // pull the substitute `src_ptr` / `lda` / dtype / scale-and-zp out
 // of the slot and overwrite its thread-local `tile_params` so the
 // wrapper inside `execute_expert_slice` sees `dtypes.src == s8` and
-// short-circuits (its `eligible` check requires src dtype to still
-// be bf16 / f32 — the hoist has already rewritten it).
+// `dynamic_quant == false` and short-circuits (no second reorder).
 struct HoistedSrcQuant {
     const void *src_ptr = nullptr;
     int lda = 0;
@@ -203,17 +202,6 @@ struct HoistedSrcQuant {
     std::vector<float> wei_scale_f32_owned;
     const void *src_scale_view = nullptr;
     const void *wei_scale_view = nullptr;
-};
-
-// Pre-OMP hoisted W4A8 state: broadcast src_scale expanded to {M, G}
-// shape, computed once per expert BEFORE the OMP region.  do_tile and
-// execute_sequential read the expanded scale from here instead of
-// calling broadcast_w4a8_src_scale per tile (avoids nested OMP and
-// redundant work).
-struct HoistedW4A8 {
-    bool valid = false;
-    std::vector<uint8_t> expanded_src_scale;
-    matmul_quantization_params_t::matmul_quant_t src_scale_meta;
 };
 
 // apply_w4a8_substitution is a member of GroupNTileContext (see below).
@@ -374,44 +362,23 @@ struct GroupNTileContext {
     // OMP region only reads it.
     const std::vector<HoistedSrcQuant> *hoisted_src_quant = nullptr;
 
-    // W4A8 per-expert s8 weight pointers.  Non-null when at least one
-    // active expert is W4A8 (wei=s4, dynamic_quant, compute=s8).  Each
-    // slot points into the W4A8 LRU cache (the cvt_s4_to_s8 result);
-    // `do_tile()` uses it as the weight source instead of the original
-    // s4 pointer when the expert is W4A8.  Pointer (not owned) because
-    // the LRU owns the buffers and the backing vector lives on
-    // `flat_n_tile`'s stack.
+    // Plain-s8 W4A8 weights from dispatch (LRU-owned; not owned here).
     const std::vector<void *> *w4a8_s8_weights = nullptr;
 
-    // Per-expert hoisted W4A8 broadcast state.  Non-null when W4A8 experts
-    // exist.  Populated in the pre-OMP phase; do_tile/execute_sequential
-    // read the expanded src_scale from here (no per-tile broadcast call).
-    const std::vector<HoistedW4A8> *w4a8_hoisted = nullptr;
-
-    // W4A8 weight substitution: replaces the weight pointer with the
-    // cached plain-s8 buffer (column-offset for N-tile), rewrites params
-    // to (wei=s8, dynamic_quant=false), and points src_scale at the
-    // hoisted broadcast buffer.  Returns true on success, false if the
-    // expert is not W4A8 (no substitution needed).
+    // Substitute the column-sliced plain-s8 buffer.  Caller then sets
+    // wei=s8 and runs aocl_dlp_blocked so run_dlp hits the per-tile
+    // sym-quant LRU that ALGO 3 W4A8 prepack warms.
     inline bool apply_w4a8_substitution(int e, const void *&w_out, int &ldb_out,
-            matmul_params &params_out, int N_e, int col_offset = 0) const {
+            int N_e, int col_offset = 0) const {
         if (w4a8_s8_weights == nullptr
                 || static_cast<size_t>(e) >= w4a8_s8_weights->size()
                 || (*w4a8_s8_weights)[e] == nullptr) {
-            return false;
-        }
-        if (w4a8_hoisted == nullptr
-                || static_cast<size_t>(e) >= w4a8_hoisted->size()
-                || !(*w4a8_hoisted)[e].valid) {
             return false;
         }
         const void *s8_base = (*w4a8_s8_weights)[e];
         w_out = static_cast<const char *>(s8_base)
                 + static_cast<size_t>(col_offset) * sizeof(int8_t);
         ldb_out = N_e;
-        params_out.dtypes.wei = data_type_t::s8;
-        params_out.dynamic_quant = false;
-        params_out.quant_params.src_scale = (*w4a8_hoisted)[e].src_scale_meta;
         return true;
     }
 
@@ -651,10 +618,8 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     // When `flat_n_tile` ran the pre-OMP hoist loop for this expert,
     // swap the bf16/f32 caller src for the shared S8 reorder result
     // and rewrite this thread's `tile_params` so the wrapper inside
-    // `execute_expert_slice` sees `dtypes.src == s8` and short-circuits
-    // (otherwise every N-tile thread would re-run the wrapper on the
-    // full (M, K) source — racing on the caller-shared scale buffer
-    // and duplicating the reorder work `num_threads` times per call).
+    // `execute_expert_slice` short-circuits (`dtypes.src == s8`,
+    // `dynamic_quant == false`).
     // `src_for_tile` / `lda_for_tile` default to the caller's vectors
     // when no hoist happened (legacy bf16 / static-quant / WOQ paths).
     const void *src_for_tile = src[e];
@@ -668,17 +633,24 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         tile_params.dtypes.src = h.src_dtype;
         tile_params.quant_params.src_scale = h.src_scale;
         tile_params.quant_params.src_zp = h.src_zp;
+        tile_params.dynamic_quant = false;
     }
 
     // ── W4A8 weight substitution ──────────────────────────────────────
     const void *w_for_tile = w;
     int ldb_for_tile = ldb[e];
     bool transB_for_tile = transB[e];
-    if (apply_w4a8_substitution(
-                e, w_for_tile, ldb_for_tile, tile_params, N[e], col_start)) {
+    const bool w4a8_plain_s8 = apply_w4a8_substitution(
+            e, w_for_tile, ldb_for_tile, N[e], col_start);
+    if (w4a8_plain_s8) {
         // Plain s8 cache is always [K, N] row-major (non-transposed).
         transB_for_tile = false;
+        tile_params.dtypes.wei = data_type_t::s8;
     }
+    // Per-tile W4A8 prepack stores blocked s8 packs.  aocl_dlp skips
+    // reorderAndCacheWeightsSymQuant, so those packs would never hit.
+    const matmul_algo_t tile_algo
+            = w4a8_plain_s8 ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
 
     // ── Column-slice the weight quantization metadata ──────────────────
     // N-tile slices columns of B, so the weight scale must be re-anchored
@@ -789,7 +761,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         execute_expert_slice(layout[e], transA[e], transB_for_tile, M[e],
                 n_tile, K[e], alpha[e], src_for_tile, lda_for_tile, w_for_tile,
                 ldb_for_tile, b, beta[e], scratch.buf, n_tile,
-                is_weights_const[e], 1, tile_params, plan.algo);
+                is_weights_const[e], 1, tile_params, tile_algo);
 
         // OOP activation: compact 2I → I into caller's tight dst at the
         // matching column range.
@@ -822,7 +794,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     execute_expert_slice(layout[e], transA[e], transB_for_tile, M[e], n_tile,
             K[e], alpha[e], src_for_tile, lda_for_tile, w_for_tile,
             ldb_for_tile, b, beta[e], d, ldc[e], is_weights_const[e], 1,
-            tile_params, plan.algo);
+            tile_params, tile_algo);
 }
 
 // ---------------------------------------------------------------------
@@ -2866,17 +2838,23 @@ inline void execute_sequential(
             local_params.dtypes.src = h.src_dtype;
             local_params.quant_params.src_scale = h.src_scale;
             local_params.quant_params.src_zp = h.src_zp;
+            local_params.dynamic_quant = false;
         }
 
         // W4A8 weight substitution (Sequential path).
         const void *wei_for_call = ctx.weight[e];
         int ldb_for_call = ctx.ldb[e];
         bool transB_for_call = ctx.transB[e];
-        if (ctx.apply_w4a8_substitution(
-                    e, wei_for_call, ldb_for_call, local_params, ctx.N[e], 0)) {
+        const bool w4a8_plain_s8 = ctx.apply_w4a8_substitution(
+                e, wei_for_call, ldb_for_call, ctx.N[e], 0);
+        if (w4a8_plain_s8) {
             // Plain s8 cache is always [K, N] row-major (non-transposed).
             transB_for_call = false;
+            local_params.dtypes.wei = data_type_t::s8;
         }
+        // Same as do_tile: ALGO 3 W4A8 is simulated s8 + blocked DLP.
+        const matmul_algo_t exec_algo
+                = w4a8_plain_s8 ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
 
         const bool tight_caller = plan.fused_epilogue && ctx.ldc[e] < ctx.N[e];
         if (tight_caller) {
@@ -2894,7 +2872,7 @@ inline void execute_sequential(
                     ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e], src_for_call,
                     lda_for_call, wei_for_call, ldb_for_call, ctx.bias[e],
                     ctx.beta[e], scratch.buf, ctx.N[e], ctx.is_weights_const[e],
-                    plan.num_threads, local_params, plan.algo);
+                    plan.num_threads, local_params, exec_algo);
             if (ctx.fused_act == grp_matmul_gated_act_t::swiglu_oai_mul) {
                 const int pairs = ctx.N[e] / 2;
                 apply_swiglu_oai_tile_rows_oop(scratch.buf,
@@ -2931,7 +2909,7 @@ inline void execute_sequential(
                 ctx.M[e], ctx.N[e], ctx.K[e], ctx.alpha[e], src_for_call,
                 lda_for_call, wei_for_call, ldb_for_call, ctx.bias[e],
                 ctx.beta[e], ctx.dst[e], ctx.ldc[e], ctx.is_weights_const[e],
-                plan.num_threads, local_params, plan.algo);
+                plan.num_threads, local_params, exec_algo);
         if (plan.fused_epilogue) {
             apply_gated_act_inplace(ctx.fused_act, ctx.dst[e], 0, ctx.M[e],
                     ctx.N[e], ctx.ldc[e], ctx.act_dtype);
@@ -4177,80 +4155,13 @@ void flat_n_tile(const std::vector<char> &layout,
         }
     }
 
-    // ── W4A8 s8 weights: provided by dispatch-level plain-s8 materialization ──
-    // The dispatch entry (group_matmul_run_parallel_dispatch) populates the
-    // plain-s8 LRU (w4a8_populate_plain_s8_cache) for all W4A8 experts and
-    // passes the side table here.  do_tile uses these s8 pointers as the
-    // weight source (column-sliceable, 1 byte/elem) and rewrites tile_params
-    // so run_dlp flows through the sym-quant path.  Caller weight[] and
-    // params are untouched.
-
-    // ── W4A8 pre-OMP: broadcast src_scale to {M, G} for each W4A8 expert ──
-    // Done once per expert, serial, outside the OMP region.  Avoids nested
-    // OMP (broadcast_w4a8_src_scale has #pragma omp parallel for) and
-    // eliminates redundant per-tile broadcast calls.
-    std::vector<HoistedW4A8> w4a8_broadcast(num_ops);
-    bool any_w4a8_broadcast = false;
-    if (w4a8_s8_weights_in != nullptr) {
-        for (int e = 0; e < num_ops; ++e) {
-            if (static_cast<size_t>(e) >= w4a8_s8_weights_in->size()) break;
-            if ((*w4a8_s8_weights_in)[e] == nullptr) continue;
-            if (M[e] <= 0) continue;
-            // Build a temp params copy for broadcast (does not mutate caller params).
-            matmul_params bp = params[e];
-            bp.dtypes.wei = data_type_t::s8;
-            bp.dynamic_quant = false;
-            // If the grouped DQ pre-pass already quantized this expert's source
-            // (fused MoE Op2 path), params[e].src_scale.buff is nullptr — the
-            // computed scale lives in the hoisted state.  Pull it from there.
-            if (bp.quant_params.src_scale.buff == nullptr && any_hoist
-                    && static_cast<size_t>(e) < hoisted.size()
-                    && hoisted[e].valid) {
-                bp.quant_params.src_scale = hoisted[e].src_scale;
-            }
-            apilog_verbose("[W4A8.pre_OMP.diag] expert=", e, " M=", M[e],
-                    " src_scale.buff=",
-                    static_cast<const void *>(bp.quant_params.src_scale.buff),
-                    " src_scale.dims=[",
-                    (bp.quant_params.src_scale.dims.size() > 0
-                                    ? bp.quant_params.src_scale.dims[0]
-                                    : -1),
-                    ",",
-                    (bp.quant_params.src_scale.dims.size() > 1
-                                    ? bp.quant_params.src_scale.dims[1]
-                                    : -1),
-                    "]",
-                    " dtypes.src_orig=", static_cast<int>(params[e].dtypes.src),
-                    " dynamic_quant_orig=",
-                    (params[e].dynamic_quant ? "yes" : "no"), " hoisted_valid=",
-                    (any_hoist && static_cast<size_t>(e) < hoisted.size()
-                                            && hoisted[e].valid
-                                    ? "yes"
-                                    : "no"));
-            if (broadcast_w4a8_src_scale(
-                        bp, M[e], w4a8_broadcast[e].expanded_src_scale)
-                    == status_t::success) {
-                w4a8_broadcast[e].src_scale_meta = bp.quant_params.src_scale;
-                w4a8_broadcast[e].valid = true;
-                any_w4a8_broadcast = true;
-            } else {
-                apilog_error(
-                        "[W4A8.pre_OMP] broadcast_w4a8_src_scale failed for "
-                        "expert ",
-                        e, " — aborting flat_n_tile call");
-                if (alloc_fail.load(std::memory_order_relaxed) == 0)
-                    alloc_fail.store(1, std::memory_order_relaxed);
-                return;
-            }
-        }
-    }
+    // W4A8 plain-s8 side table from dispatch (see w4a8_populate_plain_s8_cache).
 
     GroupNTileContext ctx {layout, transA, transB, M, N, K, alpha, src, lda,
             weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
             fused_act, act_dtype, wei_elem, dst_elem, bias_elem, use_custom,
             use_custom ? &kctx : nullptr, &alloc_fail,
-            any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
-            any_w4a8_broadcast ? &w4a8_broadcast : nullptr};
+            any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in};
 
     // `is_int8` drives the planner's int8-variant per-thread N floor
     // (`kDecodeNTileInt8` / `kMinNTileInt8` via the `*_for_variant`

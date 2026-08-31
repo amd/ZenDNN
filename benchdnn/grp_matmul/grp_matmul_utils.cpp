@@ -142,11 +142,17 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
                 return false;
             }
         }
-        // 16th column (optional): group_size for W4A8 per-group quant.
+        // 16th column (optional): weight group_size for W4A8 / DQ-INT8.
         // 0 or absent = per-channel (DQ-INT8 default).
-        // >0 = per-group; G = K / group_size.
+        // >0 = per-group weights; G = K / group_size.
         std::string gs_str = next();
         if (!gs_str.empty()) { cfg.group_size = std::stoi(gs_str); }
+        // 17th column (optional): src_group_size.
+        // Absent / empty → -1 (legacy: mirror weight granularity).
+        // 0 → per-token src {M,1} (valid with per-group weights).
+        // >0 → per-group src with that K width.
+        std::string src_gs_str = next();
+        if (!src_gs_str.empty()) { cfg.src_group_size = std::stoi(src_gs_str); }
         cfg.M_per_op = parse_M(m_str, cfg.num_ops);
     } catch (...) { return false; }
     // Internal-alloc requires fused down_proj: the library only owns
@@ -225,6 +231,24 @@ bool parse_config(const std::string &line, GrpMatmulConfig &cfg) {
             std::cerr
                     << "parse_config: W4A8 group_size=" << cfg.group_size
                     << " must be a multiple of 4 (AOCL sym-quant alignment)\n";
+            return false;
+        }
+        // Optional src_group_size: 0 = per-token {M,1}; >0 must divide K.
+        if (cfg.src_group_size > 0 && cfg.K % cfg.src_group_size != 0) {
+            std::cerr << "parse_config: src_group_size=" << cfg.src_group_size
+                      << " must divide K=" << cfg.K << "\n";
+            return false;
+        }
+        if (cfg.src_group_size > 0 && cfg.src_group_size != cfg.group_size) {
+            std::cerr << "parse_config: per-group src_group_size="
+                      << cfg.src_group_size
+                      << " must match weight group_size=" << cfg.group_size
+                      << "\n";
+            return false;
+        }
+        if (cfg.src_group_size < -1) {
+            std::cerr << "parse_config: src_group_size=" << cfg.src_group_size
+                      << " is invalid (use -1/absent, 0, or >0)\n";
             return false;
         }
         // Generic per-group validation for non-s4 weights (e.g. DQ-INT8

@@ -586,8 +586,7 @@ static bool check_n_tile_extra(const std::vector<int> &M,
             // u4 remains rejected (no symmetric W4A8 support).
             if (params[i].dtypes.wei == data_type_t::u4) { return false; }
             if (is_w4a8_config(params[i])) {
-                // N-tile-specific extra gates beyond is_w4a8_config:
-                // plain row-major weight required for column slicing.
+                // ALGO 3 needs raw packed s4 (mem_format_b='n'); native prepack is full-N only.
                 if (params[i].mem_format_b != 'n') { return false; }
                 const bool w4a8_src_ok
                         = is_per_token_dyn_src(qp.src_scale, M[i])
@@ -1113,14 +1112,7 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
     // prepack-extras tail).
     const int num_ops_eff = static_cast<int>(M.size());
     const bool m_tile_safe = check_m_tile_safe(layout, M, params, num_ops_eff);
-    // ALGO 3 (N-tile) — unlike ALGO 2 (M-tile) — CAN consume a caller-
-    // prepacked custom-kernel VNNI weight (mem_format_b=='r' with
-    // lowoha_algo==moe_custom_kernel) directly, so its m-tile-safety
-    // precondition is computed with `allow_prepacked_b=true`.  The ALGO 2
-    // `m_tile_safe` above keeps the strict default (the M-tile executor has
-    // no prepacked-B consumption path).  Without this, a CK-VNNI 'r' weight
-    // failed `check_m_tile_safe`, forced `n_tile_safe=false`, fell back to
-    // ALGO 1, and then tripped the CK-only-or-fail guard below.
+    // ALGO 3 allows CK-VNNI prepacked B; W4A8 native prepack stays on full-N ALGOs.
     const bool n_tile_safe = check_m_tile_safe(layout, M, params, num_ops_eff,
                                      /*allow_prepacked_b=*/true)
             && check_n_tile_extra(M, params, num_ops_eff);
@@ -1609,14 +1601,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             return false;
         }
     }
-    // ── W4A8 plain materialization (s4→s8 + plain-s8 LRU) ────────────
-    // Only ALGO 3 (and AUTO which might pick ALGO 3) needs the side table
-    // of s8 pointers for per-tile column slicing.  ALGO 1/2/4/5 discover
-    // plain cache internally inside w4a8ReorderAndCacheWeightsAocl (cache
-    // HIT when prepack already filled the plain cache).  Skipping the
-    // per-expert loop for pinned non-ALGO-3 avoids num_ops × (mutex + hash)
-    // overhead on every call.  No mutation of weight[] or params; side table
-    // only.
+    // ALGO 3/AUTO: always simulated W4A8 (s4→s8). Inner 1 or 4 both
+    // run blocked s8s8_sym_quant after this widen; there is no native s4.
     const int dispatch_num_ops = static_cast<int>(M.size());
     static thread_local std::vector<void *> w4a8_s8_ptrs;
     bool any_w4a8 = false;

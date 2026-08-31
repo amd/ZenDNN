@@ -1442,6 +1442,18 @@ inline matmul_algo_t resolve_kernel() {
     return algo;
 }
 
+/// W4A8 matmul policy for full-N ALGOs (1/2/4/5): follow inner kernel
+/// (aocl_dlp = simulated s8, aocl_dlp_blocked = native s4).
+/// ALGO 3 has no native s4 path; runtime N-tile/Sequential force
+/// aocl_dlp_blocked after s8 substitution.
+inline matmul_algo_t w4a8_runtime_algo(
+        int scheduling_algo, matmul_algo_t inner_kernel) {
+    if (scheduling_algo == 3) { return matmul_algo_t::aocl_dlp; }
+    return inner_kernel == matmul_algo_t::aocl_dlp_blocked
+            ? matmul_algo_t::aocl_dlp_blocked
+            : matmul_algo_t::aocl_dlp;
+}
+
 /// Thin wrapper around matmul_execute that packages per-expert slice
 /// arguments into the batch/params objects the kernel expects.
 inline void execute_expert_slice(char layout, bool transA, bool transB, int M,

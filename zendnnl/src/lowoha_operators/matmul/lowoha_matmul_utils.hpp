@@ -225,25 +225,38 @@ inline bool is_dynamic_quant_config(const matmul_params &params) {
             || params.dtypes.compute == data_type_t::u8;
 }
 
+inline bool has_quant_scale_metadata(
+        const matmul_quantization_params_t::matmul_quant_t &scale) {
+    return scale.buff != nullptr && !scale.dims.empty()
+            && scale.dt != data_type_t::none;
+}
+
 /**
  * @brief W4A8: dynamic_quant s4 weights, bf16 output, s8 compute, symmetric.
- *        Entry (bf16 src) also requires src/wei scales; runtime (s8 src) does not.
+ *        Entry bf16 src requires scale descriptors; runtime s8 src requires
+ *        populated source and weight scale metadata.
  */
 inline bool is_w4a8_config(const matmul_params &params) {
-    if (!params.dynamic_quant) { return false; }
     if (params.dtypes.wei != data_type_t::s4) { return false; }
     if (params.dtypes.dst != data_type_t::bf16) { return false; }
     if (params.dtypes.compute != data_type_t::s8) { return false; }
     if (params.quant_params.wei_zp.buff || params.quant_params.src_zp.buff) {
         return false;
     }
+    // Runtime/pre-quantized path: source is already quantized to s8.
+    if (params.dtypes.src == data_type_t::s8) {
+        return has_quant_scale_metadata(params.quant_params.src_scale)
+                && has_quant_scale_metadata(params.quant_params.wei_scale);
+    }
+    // Entry path: bf16 source with dynamic quant enabled.
+    if (!params.dynamic_quant) { return false; }
     if (params.dtypes.src == data_type_t::bf16) {
         return !params.quant_params.src_scale.dims.empty()
                 && params.quant_params.src_scale.dt != data_type_t::none
                 && !params.quant_params.wei_scale.dims.empty()
                 && params.quant_params.wei_scale.dt != data_type_t::none;
     }
-    return params.dtypes.src == data_type_t::s8;
+    return false;
 }
 
 /** @brief Product of quant-param dims; 0 when dims is empty. */

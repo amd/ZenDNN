@@ -292,19 +292,12 @@ TEST_P(TestMatmul, W4A8_BF16) {
     std::vector<uint64_t> src_scale_size;
     std::vector<uint64_t> wei_scale_size = {num_groups, n};
     std::string src_granularity_label;
-    switch (local_rng() % 3) {
-        case 0:
-            src_scale_size = {1, 1};
-            src_granularity_label = "per-tensor";
-            break;
-        case 1:
-            src_scale_size = {m, 1};
-            src_granularity_label = "per-token";
-            break;
-        default:
-            src_scale_size = {m, num_groups};
-            src_granularity_label = "per-group";
-            break;
+    if (local_rng() % 2 == 0) {
+        src_scale_size = {m, 1};
+        src_granularity_label = "per-token";
+    } else {
+        src_scale_size = {m, num_groups};
+        src_granularity_label = "per-group";
     }
     std::string granularity_label
             = "A=" + src_granularity_label + " + W=per-group";
@@ -1753,37 +1746,39 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
     neutralize_mish_quant_int8(po_types);
     data_type_t test_dt = data_type_t::bf16;
 
-    std::mt19937 local_rng(m ^ k ^ n ^ 0xBF18);
-    bool use_per_group = (local_rng() % 2 == 0);
+    std::mt19937 local_rng(static_cast<uint32_t>(m ^ (k << 3) ^ (n << 7)
+            ^ (static_cast<uint64_t>(transA) << 1)
+            ^ (static_cast<uint64_t>(transB) << 2)
+            ^ (static_cast<uint64_t>(algo) << 4) ^ (po_types.size() << 8)
+            ^ 0xBF18));
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+        if (sym_k % gs == 0) { valid_gs.push_back(gs); }
+    }
+    // 0: per-token src + per-channel wei
+    // 1: per-group src + per-group wei
+    // 2: per-token src + per-group wei (newly supported mixed pairing)
+    int pairing = static_cast<int>(local_rng() % 3);
+    if (valid_gs.empty()) { pairing = 0; }
     uint64_t group_size = 0;
     uint64_t num_groups = 0;
-
-    if (use_per_group) {
-        std::vector<uint64_t> valid_gs;
-        for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
-            if (sym_k % gs == 0) { valid_gs.push_back(gs); }
-        }
-        if (valid_gs.empty()) {
-            use_per_group = false;
-        } else {
-            group_size = valid_gs[local_rng() % valid_gs.size()];
-            num_groups = sym_k / group_size;
-        }
+    if (pairing != 0) {
+        group_size = valid_gs[local_rng() % valid_gs.size()];
+        num_groups = sym_k / group_size;
     }
+    const bool wei_per_group = pairing != 0;
+    const bool src_per_group = pairing == 1;
 
     data_type_t scale_dt
             = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
 
-    std::vector<int64_t> wei_scale_dims;
-    std::vector<uint64_t> src_scale_shape;
-    if (use_per_group) {
-        wei_scale_dims
-                = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
-        src_scale_shape = {m, num_groups};
-    } else {
-        wei_scale_dims = {1, static_cast<int64_t>(n)};
-        src_scale_shape = {m, 1};
-    }
+    std::vector<int64_t> wei_scale_dims = wei_per_group
+            ? std::vector<int64_t> {static_cast<int64_t>(num_groups),
+                      static_cast<int64_t>(n)}
+            : std::vector<int64_t> {1, static_cast<int64_t>(n)};
+    std::vector<uint64_t> src_scale_shape = src_per_group
+            ? std::vector<uint64_t> {m, num_groups}
+            : std::vector<uint64_t> {m, 1};
 
     auto weight_tensor_ref
             = tensor_factory.uniform_dist_tensor({sym_k, n}, test_dt, 2.0);
@@ -1813,10 +1808,14 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
     auto output_tensor_ref
             = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
 
-    log_info("INT8_DYNAMIC_GEMM_BF16: ",
-            use_per_group ? "per-group" : "per-token",
-            use_per_group ? " group_size=" + std::to_string(group_size) : "",
+    const char *pairing_str = pairing == 0
+            ? "per-token-src/per-channel-wei"
+            : (pairing == 1 ? "per-group-src/per-group-wei"
+                            : "per-token-src/per-group-wei");
+    log_info("INT8_DYNAMIC_GEMM_BF16: ", pairing_str,
+            wei_per_group ? " group_size=" + std::to_string(group_size) : "",
             " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+    SCOPED_TRACE(pairing_str);
 
     status_t status = matmul_kernel_test(input_tensor, weight_tensor_s8,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
@@ -1850,37 +1849,39 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
     neutralize_mish_quant_int8(po_types);
     data_type_t test_dt = data_type_t::f32;
 
-    std::mt19937 local_rng(m ^ k ^ n ^ 0xF322);
-    bool use_per_group = (local_rng() % 2 == 0);
+    std::mt19937 local_rng(static_cast<uint32_t>(m ^ (k << 3) ^ (n << 7)
+            ^ (static_cast<uint64_t>(transA) << 1)
+            ^ (static_cast<uint64_t>(transB) << 2)
+            ^ (static_cast<uint64_t>(algo) << 4) ^ (po_types.size() << 8)
+            ^ 0xF322));
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+        if (sym_k % gs == 0) { valid_gs.push_back(gs); }
+    }
+    // 0: per-token src + per-channel wei
+    // 1: per-group src + per-group wei
+    // 2: per-token src + per-group wei (newly supported mixed pairing)
+    int pairing = static_cast<int>(local_rng() % 3);
+    if (valid_gs.empty()) { pairing = 0; }
     uint64_t group_size = 0;
     uint64_t num_groups = 0;
-
-    if (use_per_group) {
-        std::vector<uint64_t> valid_gs;
-        for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
-            if (sym_k % gs == 0) { valid_gs.push_back(gs); }
-        }
-        if (valid_gs.empty()) {
-            use_per_group = false;
-        } else {
-            group_size = valid_gs[local_rng() % valid_gs.size()];
-            num_groups = sym_k / group_size;
-        }
+    if (pairing != 0) {
+        group_size = valid_gs[local_rng() % valid_gs.size()];
+        num_groups = sym_k / group_size;
     }
+    const bool wei_per_group = pairing != 0;
+    const bool src_per_group = pairing == 1;
 
     data_type_t scale_dt
             = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
 
-    std::vector<int64_t> wei_scale_dims;
-    std::vector<uint64_t> src_scale_shape;
-    if (use_per_group) {
-        wei_scale_dims
-                = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
-        src_scale_shape = {m, num_groups};
-    } else {
-        wei_scale_dims = {1, static_cast<int64_t>(n)};
-        src_scale_shape = {m, 1};
-    }
+    std::vector<int64_t> wei_scale_dims = wei_per_group
+            ? std::vector<int64_t> {static_cast<int64_t>(num_groups),
+                      static_cast<int64_t>(n)}
+            : std::vector<int64_t> {1, static_cast<int64_t>(n)};
+    std::vector<uint64_t> src_scale_shape = src_per_group
+            ? std::vector<uint64_t> {m, num_groups}
+            : std::vector<uint64_t> {m, 1};
 
     auto weight_tensor_ref
             = tensor_factory.uniform_dist_tensor({sym_k, n}, test_dt, 2.0);
@@ -1910,10 +1911,14 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
     auto output_tensor_ref
             = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
 
-    log_info("INT8_DYNAMIC_GEMM_F32: ",
-            use_per_group ? "per-group" : "per-token",
-            use_per_group ? " group_size=" + std::to_string(group_size) : "",
+    const char *pairing_str = pairing == 0
+            ? "per-token-src/per-channel-wei"
+            : (pairing == 1 ? "per-group-src/per-group-wei"
+                            : "per-token-src/per-group-wei");
+    log_info("INT8_DYNAMIC_GEMM_F32: ", pairing_str,
+            wei_per_group ? " group_size=" + std::to_string(group_size) : "",
             " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+    SCOPED_TRACE(pairing_str);
 
     status_t status = matmul_kernel_test(input_tensor, weight_tensor_s8,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,

@@ -154,84 +154,6 @@ void cvt_s4_to_s8(const int8_t *weights, int8_t *wei_s8, int k, int n, int ldb,
     }
 }
 
-// W4A8 AOCL sym-quant derives its source group size from the source-scale
-// buffer shape. Normalize compact per-tensor/per-token shapes before reorder.
-status_t broadcast_w4a8_src_scale(matmul_params &params, int M,
-        std::vector<uint8_t> &expanded_src_scale) {
-    const auto &src_dims = params.quant_params.src_scale.dims;
-    if (src_dims.size() != 2) {
-        log_error(
-                "[AOCL.run_dlp W4A8] source scale dims must be "
-                "{1,1}, {M,1}, or {M,G}");
-        return status_t::failure;
-    }
-
-    if (params.quant_params.wei_scale.dims.size() != 2) {
-        log_error(
-                "[AOCL.run_dlp W4A8] source scale broadcast requires "
-                "per-group weight scale dims {G,N}");
-        return status_t::failure;
-    }
-
-    const int64_t src_rows = src_dims[0];
-    const int64_t src_cols = src_dims[1];
-    const int64_t G_dim = params.quant_params.wei_scale.dims[0];
-
-    const void *scale_buff = params.quant_params.src_scale.buff;
-    if (!scale_buff) {
-        log_error("[AOCL.run_dlp W4A8] source scale buffer is null");
-        return status_t::failure;
-    }
-
-    if (src_cols != 1) {
-        if (src_rows != M || src_cols != G_dim) {
-            log_error(
-                    "[AOCL.run_dlp W4A8] per-group source scale dims must be "
-                    "{M,G} (rows=",
-                    src_rows, ", cols=", src_cols, ", M=", M, ", G=", G_dim,
-                    ")");
-            return status_t::failure;
-        }
-        return status_t::success;
-    }
-
-    const bool is_per_tensor = src_rows == 1;
-    if (!is_per_tensor && src_rows != M) {
-        log_error(
-                "[AOCL.run_dlp W4A8] source scale rows must be 1 or M "
-                "(rows=",
-                src_rows, ", M=", M, ")");
-        return status_t::failure;
-    }
-
-    const int64_t target_rows = M;
-    const int64_t target_cols = G_dim;
-
-    const size_t elem_size = size_of(params.quant_params.src_scale.dt);
-    expanded_src_scale.resize(
-            static_cast<size_t>(target_rows * target_cols) * elem_size);
-    const uint8_t *src_scale_src = static_cast<const uint8_t *>(scale_buff);
-    uint8_t *expanded = expanded_src_scale.data();
-
-#pragma omp parallel for collapse(2)
-    for (int64_t m = 0; m < target_rows; ++m) {
-        for (int64_t g = 0; g < target_cols; ++g) {
-            const int64_t src_m = is_per_tensor ? 0 : m;
-            std::memcpy(expanded
-                            + static_cast<size_t>(m * target_cols + g)
-                                    * elem_size,
-                    src_scale_src + static_cast<size_t>(src_m) * elem_size,
-                    elem_size);
-        }
-    }
-
-    params.quant_params.src_scale.buff = expanded;
-    params.quant_params.src_scale.dims = {target_rows, target_cols};
-    apilog_info("[AOCL.run_dlp W4A8] broadcast source scales to shape [",
-            target_rows, ",", target_cols, "]");
-    return status_t::success;
-}
-
 namespace {
 template <typename T>
 lru_cache_t<Key_matmul, void *> &get_aocl_weight_cache() {
@@ -259,12 +181,22 @@ std::mutex &get_aocl_woq_weight_cache_mutex() {
     static std::mutex m;
     return m;
 }
-// Separate W4A8 weight cache (s4 widened to blocked s8 layout).
+// Simulated W4A8 blocked cache (s4 widened to s8).
 lru_cache_t<Key_matmul, void *> &get_w4a8_reorder_blocked_cache() {
     static lru_cache_t<Key_matmul, void *> c;
     return c;
 }
 std::mutex &get_w4a8_reorder_blocked_cache_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+// Native W4A8 blocked cache (packed s4).
+lru_cache_t<Key_matmul, void *> &get_w4a8_native_reorder_cache() {
+    static lru_cache_t<Key_matmul, void *> c;
+    return c;
+}
+std::mutex &get_w4a8_native_reorder_cache_mutex() {
     static std::mutex m;
     return m;
 }
@@ -400,6 +332,10 @@ void clear_aocl_w4a8_weight_cache_under_lock() {
     std::lock_guard<std::mutex> lock(get_w4a8_reorder_blocked_cache_mutex());
     get_w4a8_reorder_blocked_cache().clear();
 }
+void clear_aocl_w4a8_native_weight_cache_under_lock() {
+    std::lock_guard<std::mutex> lock(get_w4a8_native_reorder_cache_mutex());
+    get_w4a8_native_reorder_cache().clear();
+}
 void clear_w4a8_plain_s8_cache_under_lock() {
     std::lock_guard<std::mutex> lock(get_w4a8_plain_cache_mutex());
     get_w4a8_plain_cache().clear();
@@ -421,6 +357,7 @@ void clear_aocl_matmul_weight_caches() {
     clear_aocl_symquant_weight_cache_under_lock();
     clear_aocl_woq_weight_cache_under_lock();
     clear_aocl_w4a8_weight_cache_under_lock();
+    clear_aocl_w4a8_native_weight_cache_under_lock();
     clear_w4a8_plain_s8_cache_under_lock();
     clear_ggml_weight_unpack_cache();
     clear_zp_compensation_cache();
@@ -835,24 +772,100 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
     }
 }
 
-// W4A8: s4 -> s8 widen, AOCL sym_quant int8 reorder, optional cache.
+// b_quant_op.group_size for sym-quant reorder; 0 means one group over K.
+static void init_w4a8_symq_meta(dlp_metadata_t &meta,
+        dlp_quant_op_t &b_quant_op, int k, int sym_quant_group_size) {
+    b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+    b_quant_op.group_size = sym_quant_group_size > 0 ? sym_quant_group_size : k;
+    meta.b_quant_op = &b_quant_op;
+}
+
+// Native W4A8: packed s4 -> aocl_reorder_s8s4s32os32 (separate LRU).
+static void w4a8ReorderNativeS4(Key_matmul key, const int8_t *weights,
+        void *&reorder_weights, const int k, const int n, const int ldb,
+        const bool is_weights_const, const char order, const char trans,
+        int weight_cache_type, int sym_quant_group_size) {
+    std::lock_guard<std::mutex> lock(get_w4a8_native_reorder_cache_mutex());
+    lru_cache_t<Key_matmul, void *> &cache = get_w4a8_native_reorder_cache();
+
+    void *cached = nullptr;
+    if (weight_cache_type == 1 && is_weights_const
+            && cache.try_get(key, cached)) {
+        apilog_verbose(
+                "[W4A8.REORDER.S4 HIT] native s8s4 reorder cache hit — "
+                "reusing cached pack");
+        reorder_weights = cached;
+        return;
+    }
+
+    apilog_verbose(
+            "[W4A8.REORDER.S4 MISS] native s8s4 reorder "
+            "(weight_cache_type=",
+            weight_cache_type, " K=", k, " N=", n, ")");
+
+    dlp_metadata_t symq_meta = {};
+    dlp_quant_op_t symq_b_quant_op = {};
+    init_w4a8_symq_meta(symq_meta, symq_b_quant_op, k, sym_quant_group_size);
+
+    // Size query returns 0 on unsupported ISA or invalid group size.
+    const size_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s4s32os32(
+            order, trans, 'B', k, n, &symq_meta);
+    if (b_reorder_buf_siz_req == 0) {
+        apilog_error(
+                "[W4A8.REORDER.S4] aocl_get_reorder_buf_size_s8s4s32os32 "
+                "returned 0 (unsupported ISA or group size); group_size=",
+                symq_b_quant_op.group_size, " K=", k);
+        reorder_weights = nullptr;
+        return;
+    }
+
+    const size_t alignment = 64;
+    const size_t reorder_size
+            = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
+    int8_t *buf = static_cast<int8_t *>(
+            zendnnl_aligned_alloc(alignment, reorder_size));
+    if (!buf) {
+        apilog_error("[W4A8.REORDER.S4] failed to allocate reorder weights");
+        reorder_weights = nullptr;
+        return;
+    }
+
+    // Packed s4 reorder is in-place; transB n/t both OK.
+    apilog_verbose("Calling aocl_reorder_s8s4s32os32");
+    aocl_reorder_s8s4s32os32(
+            order, trans, 'B', weights, buf, k, n, ldb, &symq_meta);
+
+    reorder_weights = buf;
+    if (is_weights_const && weight_cache_type == 1) { cache.add(key, buf); }
+}
+
+// W4A8 aocl_dlp: s4->s8 + sym-quant reorder; blocked DLP delegates native s4.
 void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const bool is_weights_const, const char order, const char trans,
         data_type_t wei_dt, data_type_t src_dt, int weight_cache_type,
-        int sym_quant_group_size) {
+        int sym_quant_group_size, matmul_algo_t algo) {
     lru_cache_t<Key_matmul, void *> &matmul_weight_cache_w4a8
             = get_w4a8_reorder_blocked_cache();
     std::mutex &w4a8_cache_mutex = get_w4a8_reorder_blocked_cache_mutex();
 
     bool is_transposed = (trans == 't');
 
-    // Only signed s4 weights are supported -- unsigned u4 needs explicit
-    // zero-point semantics and a different conversion routine.
+    if (w4a8_uses_native_s4(algo)) {
+        if (wei_dt != data_type_t::s4) {
+            apilog_error(
+                    "[AOCL.reorder W4A8] aocl_dlp_blocked requires s4 weights");
+            reorder_weights = nullptr;
+            return;
+        }
+        w4a8ReorderNativeS4(key, weights, reorder_weights, k, n, ldb,
+                is_weights_const, order, trans, weight_cache_type,
+                sym_quant_group_size);
+        return;
+    }
+
     if (wei_dt != data_type_t::s4) {
-        apilog_error(
-                "[AOCL.reorder W4A8] supports only s4 weights; "
-                "wei_dt is not s4");
+        apilog_error("[AOCL.reorder W4A8] simulated path requires s4 weights");
         reorder_weights = nullptr;
         return;
     }
@@ -864,7 +877,7 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         return;
     }
 
-    // Check the plain-s8 cache BEFORE acquiring the blocked-reorder lock.
+    // Check plain-s8 cache before blocked lock.
     int8_t *cvt_weights = nullptr;
     bool own_cvt_buf = false;
     {
@@ -912,11 +925,9 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
             own_cvt_buf = true;
         }
 
-        // After cvt_s4_to_s8 (or plain cache HIT), weights are in K×N row-major layout
-        // (non-transposed), so ldb_cvt = n regardless of the original packed
-        // buffer's layout.
-        int ldb_cvt = n;
-        char trans_cvt = 'n';
+        // Full convert -> K×n row-major (ldb=n).
+        const int ldb_cvt = n;
+        const char trans_cvt = 'n';
 
         size_t b_reorder_buf_siz_req = 0;
         size_t reorder_size = 0;
@@ -925,10 +936,8 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         // DLP_SYMM_STAT_QUANT struct was removed.
         dlp_metadata_t symq_meta = {};
         dlp_quant_op_t symq_b_quant_op = {};
-        symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
-        symq_b_quant_op.group_size
-                = sym_quant_group_size > 0 ? sym_quant_group_size : k;
-        symq_meta.b_quant_op = &symq_b_quant_op;
+        init_w4a8_symq_meta(
+                symq_meta, symq_b_quant_op, k, sym_quant_group_size);
         b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32_sym_quant(
                 order, trans_cvt, 'B', k, n, &symq_meta);
         reorder_size
@@ -1004,11 +1013,17 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     size_t run_src_scale_nelems
             = get_num_elements(lowoha_param.quant_params.src_scale.dims);
 
-    // s8×s8 sym_quant uses a distinct blocked weight layout. bf16/f32 per-token
-    // still runs bf16s8/f32s8 GEMMs with standard s8 blocked weights + a_pre/a_post.
+    const bool src_scale_collapsed_per_token
+            = src_scale_is_collapsed_per_token(lowoha_param.quant_params, M, N);
+
+    // s8×s8 sym_quant uses a distinct blocked weight layout.  Fired by a
+    // non-scalar src scale (per-token {M}/{M,1} or per-group {M,G}); B-side
+    // group_size comes from wei {G,N} via sym_quant_group_size, so
+    // per-token src + per-group wei is valid.  bf16/f32 src still runs
+    // bf16s8/f32s8 GEMMs with standard s8 blocked weights + a_pre/a_post.
     const bool is_s8_sym_quant_scales = dtypes.wei == data_type_t::s8
             && !lowoha_param.quant_params.src_zp.buff
-            && run_src_scale_nelems > 1
+            && (run_src_scale_nelems > 1 || src_scale_collapsed_per_token)
             && (dtypes.dst == data_type_t::f32
                     || dtypes.dst == data_type_t::bf16)
             && dtypes.src == data_type_t::s8;
@@ -1020,25 +1035,23 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                               == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked)
             && is_w4a8_config(lowoha_param);
 
-    // W4A8 post-op wiring needs broadcast src scales and wei typed as s8.
-    matmul_params w4a8_lowoha_param = lowoha_param;
-    std::vector<uint8_t> w4a8_expanded_src_scale;
-    matmul_data_types dtypes_for_postop = dtypes;
+    // W4A8 aocl_dlp reports s8 B; blocked DLP keeps packed s4.
+    // Caller-prepacked native s8s4 (mem_format_b='r') must use blocked DLP.
+    matmul_algo_t w4a8_algo = matmul_algo_t::none;
     if (is_w4a8) {
-        if (broadcast_w4a8_src_scale(
-                    w4a8_lowoha_param, M, w4a8_expanded_src_scale)
-                != status_t::success) {
-            return;
-        }
+        w4a8_algo = (mem_format_b == 'r') ? matmul_algo_t::aocl_dlp_blocked
+                                          : w4a8_algo_for(kernel);
+    }
+    matmul_data_types dtypes_for_postop = dtypes;
+    if (is_w4a8 && w4a8_algo == matmul_algo_t::aocl_dlp) {
         dtypes_for_postop.wei = data_type_t::s8;
     }
 
+    // Sym-quant blocked cache keys include group_size.
     size_t cache_extra_hash = 0;
     if (is_s8_sym_quant_scales) {
-        int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
-                ? K
-                : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
-        cache_extra_hash = std::hash<int64_t> {}(src_grp);
+        cache_extra_hash = std::hash<int64_t> {}(
+                sym_quant_group_size(lowoha_param.quant_params, M, N, K));
     }
     Key_matmul cache_key(transB == 't', K, N, ldb, B,
             static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
@@ -1148,17 +1161,17 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     aocl_reorder_bf16s4f32of32, weight_cache_type);
         } else if (lowoha_param.dtypes.wei == data_type_t::s8) {
             if (is_s8_sym_quant_scales) {
-                int64_t src_grp
-                        = (run_src_scale_nelems == static_cast<size_t>(M))
-                        ? K
-                        : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
+                // B-side K-group size from wei {G,N}, independent of src
+                // granularity (per-token src still uses this wei group size).
+                const int64_t wei_grp = sym_quant_group_size(
+                        lowoha_param.quant_params, M, N, K);
                 // Carry the B-side quantization group size through dlp_metadata_t's
                 // b_quant_op (new AOCL DLP reorder API); the standalone
                 // DLP_SYMM_STAT_QUANT struct was removed.
                 dlp_metadata_t symq_meta = {};
                 dlp_quant_op_t symq_b_quant_op = {};
                 symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
-                symq_b_quant_op.group_size = static_cast<int>(src_grp);
+                symq_b_quant_op.group_size = static_cast<int>(wei_grp);
                 symq_meta.b_quant_op = &symq_b_quant_op;
                 blocked_flag = reorderAndCacheWeightsSymQuant<int8_t>(cache_key,
                         B, reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
@@ -1204,12 +1217,9 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                 = !is_weights_const || woq_weight_cache_type != 1;
     }
 
-    //TODO: remove the check for is_w4a8
-    dlp_metadata_t *aocl_po
-            = create_dlp_post_op(is_w4a8 ? w4a8_lowoha_param : lowoha_param,
-                    bias, is_w4a8 ? dtypes_for_postop : dtypes, N, K, M,
-                    zp_comp_acc, zp_comp_ndim, kernel, B, is_w4a8,
-                    reorder_colsum, colsum_neg_src_zp);
+    dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias,
+            dtypes_for_postop, N, K, M, zp_comp_acc, zp_comp_ndim, kernel, B,
+            reorder_colsum, colsum_neg_src_zp, w4a8_algo);
 
     if (dtypes.src == data_type_t::f32 && dtypes.wei == data_type_t::f32
             && dtypes.dst == data_type_t::f32) {
@@ -1264,27 +1274,38 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     }
     // W4A8: reorder s4->s8, sym_quant GEMM (bf16 output only).
     else if (is_w4a8) {
-        const size_t w4a8_src_scale_nelems = get_num_elements(
-                w4a8_lowoha_param.quant_params.src_scale.dims);
-        const int64_t src_grp
-                = (w4a8_src_scale_nelems == static_cast<size_t>(M))
-                ? K
-                : K / (static_cast<int64_t>(w4a8_src_scale_nelems) / M);
+        // Group size comes from wei scale {G,N}; src may be per-token.
+        const int64_t wei_grp
+                = sym_quant_group_size(lowoha_param.quant_params, M, N, K);
         const Key_matmul w4a8_cache_key(transB == 't', K, N, ldb, B,
                 static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
-                std::hash<int64_t> {}(src_grp));
+                std::hash<int64_t> {}(wei_grp));
 
         void *w4a8_reordered_mem = nullptr;
         const int32_t w4a8_weight_cache_type
                 = (weight_cache_type == 2) ? 1 : weight_cache_type;
-        const int w4a8_sym_group_size
-                = (w4a8_src_scale_nelems == static_cast<size_t>(M))
-                ? K
-                : K / (static_cast<int>(w4a8_src_scale_nelems) / M);
-        w4a8ReorderAndCacheWeightsAocl(w4a8_cache_key,
-                static_cast<const int8_t *>(B), w4a8_reordered_mem, K, N, ldb,
-                is_weights_const, 'r', transB, dtypes.wei, dtypes.src,
-                w4a8_weight_cache_type, w4a8_sym_group_size);
+        const int w4a8_sym_group_size = static_cast<int>(wei_grp);
+        const bool w4a8_prepacked_native
+                = mem_format_b == 'r' && w4a8_uses_native_s4(w4a8_algo);
+        if (mem_format_b == 'r' && !w4a8_prepacked_native) {
+            log_error(
+                    "[AOCL.run_dlp W4A8] prepacked W4A8 weights "
+                    "(mem_format_b='r') "
+                    "require aocl_dlp_blocked inner kernel; the "
+                    "aocl_dlp path cannot consume native-prepacked blocked "
+                    "s4");
+            cleanup_dlp_post_op(aocl_po);
+            return;
+        }
+        if (w4a8_prepacked_native) {
+            // Reuse caller's native prepacked s8s4 buffer.
+            w4a8_reordered_mem = const_cast<void *>(B);
+        } else {
+            w4a8ReorderAndCacheWeightsAocl(w4a8_cache_key,
+                    static_cast<const int8_t *>(B), w4a8_reordered_mem, K, N,
+                    ldb, is_weights_const, 'r', transB, dtypes.wei, dtypes.src,
+                    w4a8_weight_cache_type, w4a8_sym_group_size, w4a8_algo);
+        }
         if (w4a8_reordered_mem == nullptr) {
             apilog_error("[AOCL.run_dlp W4A8] weight reorder failed");
             cleanup_dlp_post_op(aocl_po);
@@ -1293,7 +1314,19 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
 
         if (dtypes.dst != data_type_t::bf16) {
             log_error("Unsupported output data type for W4A8; expected bf16");
+        } else if (w4a8_uses_native_s4(w4a8_algo)) {
+            apilog_verbose("[W4A8.GEMM] native aocl_gemm_s8s4s32obf16");
+            aocl_gemm_s8s4s32obf16(layout, transA, transB, M, N, K, alpha,
+                    static_cast<const int8_t *>(A), lda, mem_format_a,
+                    static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
+                    beta, static_cast<int16_t *>(C), ldc, aocl_po);
         } else {
+            apilog_verbose(
+                    "[W4A8.GEMM] simulated aocl_gemm_s8s8s32obf16_sym_quant");
+            apilog_info(
+                    "[AOCL.run_dlp.SYM_GEMM] calling "
+                    "aocl_gemm_s8s8s32obf16_sym_quant (simulated W4A8) M=",
+                    M, " K=", K, " N=", N);
             aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M, N, K,
                     alpha, static_cast<const int8_t *>(A), lda, mem_format_a,
                     static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
@@ -1301,7 +1334,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         }
 
         cleanup_dlp_post_op(aocl_po);
-        if (!is_weights_const || w4a8_weight_cache_type != 1) {
+        if (!w4a8_prepacked_native
+                && (!is_weights_const || w4a8_weight_cache_type != 1)) {
             zendnnl_aligned_free(w4a8_reordered_mem);
         }
         return;
@@ -1464,12 +1498,20 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         if (is_s8_sym_quant_scales) {
             switch (dtypes.dst) {
                 case data_type_t::f32:
+                    apilog_info(
+                            "[AOCL.run_dlp.SYM_GEMM] calling "
+                            "aocl_gemm_s8s8s32of32_sym_quant M=",
+                            M, " K=", K, " N=", N);
                     aocl_gemm_s8s8s32of32_sym_quant(layout, transA, transB, M,
                             N, K, alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
                             static_cast<float *>(C), ldc, aocl_po);
                     break;
                 case data_type_t::bf16:
+                    apilog_info(
+                            "[AOCL.run_dlp.SYM_GEMM] calling "
+                            "aocl_gemm_s8s8s32obf16_sym_quant M=",
+                            M, " K=", K, " N=", N);
                     aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M,
                             N, K, alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,

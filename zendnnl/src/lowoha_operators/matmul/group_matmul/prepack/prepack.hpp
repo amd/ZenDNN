@@ -274,12 +274,7 @@ struct PrepackParams {
     // them via `n_groups`).
     int group_size = 0;
 
-    // W4A8 per-group sym-quant group_size (= K / G where G is the number
-    // of K-groups in wei_scale.dims[0]).  Used by the W4A8 prepack warmer
-    // to build a cache key matching what the runtime computes from the
-    // broadcast src_scale shape.  Zero means "not a W4A8 call" or
-    // "caller didn't supply the value" — the warmer defaults to K (full-K
-    // per-tensor grouping) in that case.
+    // W4A8 sym-quant group_size (=K/G); 0 means not W4A8 or use full-K default.
     int w4a8_group_size = 0;
 
     // Per-call OMP team size — taken straight from the dispatcher's
@@ -513,27 +508,29 @@ inline PrepackParams build_prepack_params(
                         && (params[rep].dtypes.compute == data_type_t::s8
                                 || params[rep].dtypes.compute
                                         == data_type_t::u8));
+        const bool is_w4a8 = params[rep].dtypes.wei == data_type_t::s4
+                && params[rep].dtypes.compute == data_type_t::s8;
         // DQ-INT8 (either form): carry the runtime compute dtype so the
         // fingerprint marks it int8 (not bf16) and `ck_eligible_int8` /
         // `int8_aocl_warm_candidate` recognise it.  Plain bf16 (or a
         // non-DQ s8 combo we don't warm) forces `none` so a stale trailing
         // `compute_dtype` can't skew the fingerprint and split the bf16
         // cache.
-        p.compute_dtype
-                = is_dq_int8 ? params[rep].dtypes.compute : data_type_t::none;
+        p.compute_dtype = (is_dq_int8 || is_w4a8) ? params[rep].dtypes.compute
+                                                  : data_type_t::none;
     } else {
         p.dynamic_quant = dynamic_quant;
         p.compute_dtype = compute_dtype;
     }
 
-    // W4A8 group_size: derive K/G from the first expert's wei_scale dims.
-    if (!params.empty() && !K.empty() && params[0].dtypes.wei == data_type_t::s4
-            && params[0].dynamic_quant) {
-        const auto &ws_dims = params[0].quant_params.wei_scale.dims;
+    // W4A8 group_size from wei scale dims; ignore dynamic_quant (group DQ clears it).
+    if (!params.empty() && rep < K.size()
+            && params[rep].dtypes.wei == data_type_t::s4) {
+        const auto &ws_dims = params[rep].quant_params.wei_scale.dims;
         const int64_t g = (ws_dims.size() == 2) ? ws_dims[0] : 0;
-        if (g > 1 && K[0] > 0 && (static_cast<int64_t>(K[0]) % g) == 0) {
+        if (g > 1 && K[rep] > 0 && (static_cast<int64_t>(K[rep]) % g) == 0) {
             p.w4a8_group_size
-                    = static_cast<int>(static_cast<int64_t>(K[0]) / g);
+                    = static_cast<int>(static_cast<int64_t>(K[rep]) / g);
         }
     }
 

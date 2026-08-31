@@ -85,16 +85,20 @@ struct reorder_params_t;
  *     - @c sym_group_size > 0 selects the s8 sym-quant variant
  *       (s8s8s32os32_sym_quant). The value populates
  *       @c dlp_quant_op_t::group_size on the metadata's @c b_quant_op;
- *       the caller should compute it
- *       the same way matmul does (group_size = K when scale_nelems == M,
- *       else K / (scale_nelems / M)).
+ *       the caller should compute it from the B-side weight scale
+ *       granularity (for wei_scale {G, N}, group_size = K / G).
  */
 struct prepack_params_t {
     matmul_algo_t algo; ///< Target prepack layout:
     ///< @c matmul_algo_t::aocl_dlp_blocked   — AOCL DLP blocked weight; OR
     ///< @c matmul_algo_t::moe_custom_kernel  — group_matmul custom-kernel VNNI
     data_type_t wei_dtype; ///< Weight data type
-    data_type_t src_dtype; ///< Source (matmul A) data type
+    ///< @brief Effective A dtype consumed by the target packed-weight
+    ///< layout, after any dynamic quantization -- NOT necessarily the
+    ///< dtype of the caller's matmul A tensor.
+    ///<
+    ///< W4A8 native prepack: pass src_dtype=s8 (runtime quantizes bf16->s8 first).
+    data_type_t src_dtype;
     int64_t K; ///< Weight rows
     int64_t N; ///< Weight cols
     int64_t ldb; ///< Physical leading dimension
@@ -168,6 +172,7 @@ struct prepack_params_t {
 //       wei_dtype = s4/u4 -> aocl_reorder_bf16s4f32of32
 //                            (4-bit weights, bf16 activations; the
 //                             GEMM dequantizes on the fly)
+//       wei_dtype = s4 + src_dtype = s8 -> aocl_reorder_s8s4s32os32 (native W4A8)
 //       wei_dtype = s8 + src_dtype = s8/bf16/f32
 //                         -> aocl_reorder_s8s8s32os32
 //       wei_dtype = s8 + src_dtype = u8

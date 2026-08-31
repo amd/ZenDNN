@@ -252,6 +252,29 @@ size_t aocl_compute_size(const prepack_params_t &params) {
     }
 
     if (params.wei_dtype == data_type_t::s4
+            && params.src_dtype == data_type_t::s8) {
+        // Native W4A8: packed s4, group size in b_quant_op.
+        dlp_metadata_t symq_meta = {};
+        dlp_quant_op_t symq_b_quant_op = {};
+        symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+        symq_b_quant_op.group_size = params.sym_group_size > 0
+                ? params.sym_group_size
+                : static_cast<int>(params.K);
+        symq_meta.b_quant_op = &symq_b_quant_op;
+        const size_t req = aocl_get_reorder_buf_size_s8s4s32os32(
+                order, trans, 'B', k, n, &symq_meta);
+        if (req == 0) {
+            apilog_error(
+                    "weight_prepack(aocl_dlp): "
+                    "aocl_get_reorder_buf_size_s8s4s32os32 returned 0 "
+                    "(unsupported ISA or group size); group_size=",
+                    symq_b_quant_op.group_size, ", K=", params.K);
+            return 0;
+        }
+        return round_up_align(req, kPrepackAlign);
+    }
+
+    if (params.wei_dtype == data_type_t::s4
             || params.wei_dtype == data_type_t::u4) {
         const size_t req = aocl_get_reorder_buf_size_bf16s4f32of32(
                 order, trans, 'B', k, n, nullptr);
@@ -340,6 +363,22 @@ status_t aocl_prepack(
         aocl_reorder_f16f16f16of16(order, trans, 'B',
                 static_cast<const uint16_t *>(weights),
                 static_cast<uint16_t *>(dst), k, n, ldb, nullptr);
+        return status_t::success;
+    }
+
+    if (params.wei_dtype == data_type_t::s4
+            && params.src_dtype == data_type_t::s8) {
+        // Native W4A8 reorder consumes packed s4 in place.
+        dlp_metadata_t symq_meta = {};
+        dlp_quant_op_t symq_b_quant_op = {};
+        symq_b_quant_op.quant_op_kind = DLP_QUANT_OP_QUANTIZE;
+        symq_b_quant_op.group_size = params.sym_group_size > 0
+                ? params.sym_group_size
+                : static_cast<int>(params.K);
+        symq_meta.b_quant_op = &symq_b_quant_op;
+        aocl_reorder_s8s4s32os32(order, trans, 'B',
+                static_cast<const int8_t *>(weights),
+                static_cast<int8_t *>(dst), k, n, ldb, &symq_meta);
         return status_t::success;
     }
 

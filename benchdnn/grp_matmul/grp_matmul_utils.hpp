@@ -128,15 +128,21 @@ struct GrpMatmulConfig {
     /// "s8" / "u8" for human-friendly input files.
     data_type_t compute_dt = data_type_t::s8;
 
-    int group_size = 0; ///< Per-group K-grouping for DQ-INT8 / W4A8.
+    int group_size = 0; ///< Per-group K-grouping for DQ-INT8 / W4A8 weights.
     ///< 0 = per-token / per-channel (default):
     ///<     src_scale {M,1}, wei_scale {1,N}.
-    ///< >0 = per-group: G = K / group_size groups;
-    ///<     wei_scale {G,N}, src_scale {M,G}
-    ///<     (buff null — hoist fills at runtime).
+    ///< >0 = per-group weights: G = K / group_size;
+    ///<     wei_scale {G,N}.
     ///< Requires compute_dt=s8 (symmetric-only)
     ///< and K % group_size == 0.
     ///< W4A8 (wei=s4) always requires group_size > 0.
+
+    /// Optional 17th column: source scale group size.
+    /// -1 = unset (legacy): when weight group_size>0, src uses {M,G};
+    ///      when weight group_size==0, src uses {M,1}.
+    ///  0 = per-token src scales {M,1} (allowed with per-group weights).
+    /// >0 = per-group src with that K-group width (must divide K).
+    int src_group_size = -1;
 
     int max_M() const {
         return *std::max_element(M_per_op.begin(), M_per_op.end());

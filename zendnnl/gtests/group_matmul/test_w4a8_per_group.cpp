@@ -15,27 +15,9 @@
 # *******************************************************************************/
 
 /// @file test_w4a8_per_group.cpp
-/// @brief Grouped (MoE) W4A8 per-group matmul — the group-matmul analogue
-///        of the single-matmul W4A8 tests, structured like
-///        `test_ggml_per_group.cpp` for comprehensive MoE routing coverage.
-///
-/// Each expert owns:
-///   * a bf16 source `[M, K]` with a per-token `{M, 1}` dynamic src_scale
-///     (the runtime quantizes bf16 → s8 on the fly), and
-///   * a per-group s4 weight `[K, N]` with per-group `{G, N}` wei_scale
-///     (G = K / group_size).
-///
-/// The suite drives `group_matmul_direct` with many experts (15) and a sparse
-/// active set (e.g. only 6 routed), modelling one MoE decode iteration.
-/// Inactive experts carry `M == 0` (no routed tokens): the GEMM skips them.
-/// Routed experts are validated against a per-expert reference matmul.
-///
-/// W4A8 on ALGO 3 (N-tile) is supported: flat_n_tile expands s4→s8 into the
-/// W4A8 LRU cache (no caller-param mutation), rewrites tile_params to
-/// wei=s8 + dynamic_quant=false, then flows through the existing sym-quant
-/// per-tile path (reorderAndCacheWeightsSymQuant → aocl_gemm_s8s8s32obf16).
-/// Prepack warms both the plain-s8 cache and the sym-quant per-tile blocked
-/// cache so runtime calls get cache HITs on both levels.
+/// @brief Grouped MoE W4A8 per-group matmul tests (sparse expert routing).
+/// ALGO 3 W4A8 is always simulated (s4→s8) + aocl_dlp_blocked s8s8_sym_quant.
+/// Full-N ALGOs 1/2/4/5 follow w4a8_runtime_algo (blocked = native s4).
 
 #include <gtest/gtest.h>
 
@@ -61,18 +43,18 @@ namespace {
 /// reference matmul.
 void run_w4a8_per_group_scenario(const std::string &label,
         const std::vector<int> &rows, uint64_t K, uint64_t N,
-        uint64_t group_size, float src_range = 2.0f) {
+        uint64_t group_size, float src_range = 2.0f,
+        matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked) {
     ASSERT_EQ(K % group_size, 0u)
             << label << ": K must be a multiple of group_size";
     const uint64_t G = K / group_size;
-    ASSERT_GE(G, 2u) << label << ": need >= 2 groups for per-group scaling";
+    ASSERT_GE(G, 1u) << label << ": need >= 1 group for per-group scaling";
 
     const int E = static_cast<int>(rows.size());
     ASSERT_GT(E, 0) << label;
 
     reset_grp_matmul_caches();
 
-    const matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked;
     const data_type_t out_dt = data_type_t::bf16;
     const data_type_t scale_dt = data_type_t::bf16;
 
@@ -179,6 +161,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
     status_t st;
     {
         moe_test_utils::AlgoEnvGuard g(1);
+        reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a1, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
@@ -186,6 +169,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
 
     {
         moe_test_utils::AlgoEnvGuard g(0);
+        reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a0, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
@@ -193,6 +177,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
 
     {
         moe_test_utils::AlgoEnvGuard g(2);
+        reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a2, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
@@ -200,6 +185,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
 
     {
         moe_test_utils::AlgoEnvGuard g(3);
+        reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a3, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
@@ -207,6 +193,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
 
     {
         moe_test_utils::AlgoEnvGuard g(4);
+        reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a4, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
@@ -343,6 +330,22 @@ TEST(GroupMatmulW4A8PerGroup, GroupSize64BF16) {
     run_w4a8_per_group_scenario("gs64 bf16", rows, 256, 128, 64);
 }
 
+// group_size=K => single weight group; M=1 decode boundary.
+TEST(GroupMatmulW4A8PerGroup, GroupSizeEqualsKDecodeM1BF16) {
+    std::vector<int> rows(8, 1);
+    run_w4a8_per_group_scenario("gs_eq_k decode M1 bf16", rows, /*K=*/128,
+            /*N=*/64, /*group_size=*/128);
+}
+
+TEST(GroupMatmulW4A8PerGroup, AoclDlpSixActiveInterleavedBF16) {
+    std::vector<int> rows(15, 0);
+    for (int e : {1, 3, 5, 8, 11, 14})
+        rows[e] = 32;
+    run_w4a8_per_group_scenario("aocl_dlp 15/6 interleaved bf16", rows,
+            /*K=*/128, /*N=*/64, /*group_size=*/32, /*src_range=*/2.0f,
+            matmul_algo_t::aocl_dlp);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Cross-algo accuracy coverage
 // ═══════════════════════════════════════════════════════════════════════
@@ -377,31 +380,6 @@ TEST(GroupMatmulW4A8PerGroup, CrossAlgoQwen3ManyOpsBF16) {
 // ═══════════════════════════════════════════════════════════════════════
 // ALGO 3 (N-tile) direct validation
 // ═══════════════════════════════════════════════════════════════════════
-
-// W4A8 on ALGO 3 now runs natively (s4→s8 via W4A8 LRU + per-tile
-// sym-quant reorder).  Pin ALGO 3 and verify prepack runs + output matches.
-TEST(GroupMatmulW4A8PerGroup, Algo3DirectBF16) {
-    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
-    moe_test_utils::AlgoEnvGuard algo3(3);
-    moe_test_utils::LastInvocationCaptureGuard prepack_capture;
-    prepack::clear_fingerprint_cache_for_test();
-    prepack::test_api::clear_last_invocation_stats();
-
-    std::vector<int> rows(15, 0);
-    for (int e : {1, 3, 5, 8, 11, 14})
-        rows[e] = 32;
-    run_w4a8_per_group_scenario("15/6 algo3 direct bf16", rows, /*K=*/128,
-            /*N=*/64, /*group_size=*/32);
-
-    auto stats = prepack::test_api::get_last_invocation_stats();
-    ASSERT_TRUE(stats.valid)
-            << "prepack must run for the W4A8 per-group call on ALGO 3";
-    EXPECT_EQ(stats.scheduling_algo, 3)
-            << "W4A8 per-group + ALGO 3 must route to flat_n_tile (N-tile), "
-               "not fall back to ALGO 1 sequential_experts";
-    EXPECT_GT(stats.aocl.total_attempted, 0)
-            << "ALGO 3 W4A8 prepack must warm at least one AOCL entry";
-}
 
 // Cross-algo comparison: ALGO 1 and ALGO 3 must produce identical
 // output for the same W4A8 input (ALGO 3 now runs natively, not fallback).

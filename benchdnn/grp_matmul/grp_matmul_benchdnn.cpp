@@ -19,7 +19,7 @@
 /// Input file format (CSV, one line per config):
 ///   num_ops, M, K, N, iters, src_dt:wei_dt:dst_dt, is_weights_const, warmup
 ///       [, moe_topk[, gated_act[, N_down[, use_internal_alloc[,
-///          total_experts[, dynamic_quant[, compute_dt[, group_size]]]]]]]]
+///          total_experts[, dynamic_quant[, compute_dt[, group_size[, src_group_size]]]]]]]]]
 ///
 /// M can be a single int (all experts same) or colon-separated per-expert:
 ///   8, 4, 4096, 14336, 200, bf16:bf16:bf16, true, 50                    <- plain GEMM
@@ -73,17 +73,17 @@
 ///     "s8" → kS8_S8_BF16_SYM (symmetric; no src zero-point)
 ///     "u8" → kU8_S8_BF16_ASYM (asymmetric; hoist allocates src_zp)
 ///   Ignored when dynamic_quant=0.
-/// group_size (optional, default 0; only when dynamic_quant=1): quant
-///   group width in K-elements for PER-GROUP symmetric int8.
+/// group_size (optional, default 0; only when dynamic_quant=1): weight
+///   group width in K-elements for PER-GROUP symmetric int8 / W4A8.
 ///     0 → per-token / per-channel (src_scale {M,1}, wei_scale {1,N}).
-///     >0 → per-group: G = K/group_size groups; the driver fills a G×N
-///          f32 wei_scale ({G, N}) and requests a {M, G} src_scale
-///          (buff null — the N-tile hoist quantizes the bf16 src
-///          per-group at call time).  Runs the AOCL DLP sym-quant GEMM
-///          via the N-tile `do_tile` {G, n_tile} per-column repack.
+///     >0 → per-group weights: G = K/group_size; wei_scale {G,N}.
 ///   Requires compute_dt=s8 (symmetric-only) and K % group_size == 0;
 ///   the parser refuses anything else.  W4A8 (wei=s4) always requires
 ///   group_size > 0 and additionally requires group_size % 4 == 0.
+/// src_group_size (optional 17th column; default unset/-1):
+///     absent/-1 → legacy: mirror weight granularity for src_scale.
+///     0 → per-token src_scale {M,1} (allowed with per-group weights).
+///     >0 → per-group src_scale {M, K/src_group_size}.
 ///
 /// Env vars (all read by the library, not parsed by this driver):
 ///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
@@ -373,7 +373,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // ldb / transB / wconst), not from a per-expert wei_scale.  So
     // allocating/filling tail scales would just be dead memory + fill
     // time — restrict both to the active prefix.
-    // Per-group: G = K / group_size groups when group_size > 0;
+    // Per-group weights: G = K / group_size when group_size > 0;
     // per-channel (G = 1) otherwise.  Applies to both DQ-INT8 (s8)
     // and W4A8 (s4) weight types.
     const int64_t wei_scale_G = (cfg.group_size > 0)
@@ -381,6 +381,15 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
             : 1;
     const size_t wei_scale_nelems
             = static_cast<size_t>(wei_scale_G) * static_cast<size_t>(cfg.N);
+
+    // Source scale groups are independent of weight groups:
+    //   src_group_size == 0      → per-token {M,1}
+    //   src_group_size  > 0      → per-group {M, K/src_group_size}
+    //   src_group_size == -1     → legacy: mirror weight G
+    const int64_t src_scale_G = (cfg.src_group_size == 0) ? 1
+            : (cfg.src_group_size > 0)
+            ? static_cast<int64_t>(cfg.K / cfg.src_group_size)
+            : wei_scale_G;
 
     std::vector<AlignedBuffer> wei_scale_buf(n);
     if (cfg.dynamic_quant) {
@@ -394,7 +403,7 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
             params[i].dtypes.compute = cfg.compute_dt;
             params[i].quant_params.src_scale.buff = nullptr;
             params[i].quant_params.src_scale.dims
-                    = {cfg.M_per_op[i], wei_scale_G};
+                    = {cfg.M_per_op[i], src_scale_G};
             params[i].quant_params.src_scale.dt = data_type_t::f32;
             params[i].quant_params.wei_scale.buff = wei_scale_buf[i].ptr;
             params[i].quant_params.wei_scale.dims

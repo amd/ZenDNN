@@ -118,10 +118,9 @@ All configuration parameters can be provided directly via command-line options.
 - `--dynamic_quant=true|false`
 - `--src_scale_granularity=per-tensor|per-token|per-group`
 - `--src_group_size=<int>` (only used with `per-group`; falls back to per-token if K is not divisible).
-  The source and weight group sizes are always kept in sync: setting `--src_group_size` also sets
-  `--weight_group_size` (and vice versa), so you only need to specify one. If both are given on the
-  CLI, the last one wins; if both appear in an input-file row and differ, a warning is printed and
-  both are forced to the weight value.
+  Source and weight group sizes are kept in sync only for per-group source scales:
+  per-token source scales keep `src_group_size=0`. If both group sizes are given
+  for per-group source scales, they must match.
 - `--src_scale_dt=f32|bf16`
 
 ```sh

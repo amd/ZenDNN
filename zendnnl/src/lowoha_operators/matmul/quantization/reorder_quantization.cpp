@@ -46,15 +46,19 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
         matmul_batch_params_t &batch_params, const bool transA, const int M,
         const int K, const int num_threads, reorder_quant_buffers_t &buffers) {
 
-    const bool is_w4a8 = is_w4a8_config(params);
+    const bool is_dynamic = params.dynamic_quant;
+    const data_type_t quant_dtype = params.dtypes.compute;
+    const data_type_t orig_src_dtype = params.dtypes.src;
+
+    const bool is_w4a8 = is_w4a8_config(params) && is_dynamic
+            && orig_src_dtype == data_type_t::bf16;
+    // is_dynamic_quant_config likewise admits only a bf16/f32 source, so no
+    // already-quantized source can reach the reorder below.
     const bool eligible = is_w4a8 || is_dynamic_quant_config(params);
 
     //TODO: Masking static quantization for now, Remove later.
     if (!eligible) { return status_t::success; }
 
-    const bool is_dynamic = params.dynamic_quant;
-    const data_type_t quant_dtype = params.dtypes.compute;
-    const data_type_t orig_src_dtype = params.dtypes.src;
     const bool needs_zp = (quant_dtype == data_type_t::u8);
 
     status_t val_status = op_instrumentation::validate([&]() {
@@ -443,7 +447,13 @@ status_t group_reorder_quantization_wrapper(
         // granularity that is neither per_token nor M<=1 per_tensor) would
         // needlessly force the WHOLE group onto the slow per-expert fallback.
         if (M[i] == 0) { continue; }
-        if (!params[i].dynamic_quant || params[i].dtypes.wei != data_type_t::s8
+        // s8 (W8A8) or s4 (W4A8).  The grouped kernel only ever touches the
+        // SOURCE, so the weight dtype is irrelevant to it beyond identifying
+        // a supported quant scheme; `is_w4a8_config` covers the rest of the
+        // W4A8 contract (bf16 dst, s8 compute, no zero points).
+        const bool wei_dtype_ok = params[i].dtypes.wei == data_type_t::s8
+                || is_w4a8_config(params[i]);
+        if (!params[i].dynamic_quant || !wei_dtype_ok
                 || params[i].dtypes.src != src_dtype
                 || params[i].dtypes.compute != compute_dtype
                 || params[i].quant_params.src_scale.dt != scale_dtype

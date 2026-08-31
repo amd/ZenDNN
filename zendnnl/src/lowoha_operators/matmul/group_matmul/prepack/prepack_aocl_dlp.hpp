@@ -44,6 +44,7 @@
 
 #include "common/data_types.hpp"
 #include "common/error_status.hpp"
+#include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -232,28 +233,16 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
         AoclDlpPackProbeStats &stats, int group_size = 0);
 
-/// W4A8 full-weight warm-pack: converts s4→s8 then reorders via
-/// aocl_reorder_s8s8s32os32_sym_quant into the AOCL W4A8 weight cache.
-/// Eliminates the first-call reorder spike for all ALGOs.
-/// @param group_size  K-group size for the sym-quant reorder (typically K/G
-///                    where G = wei_scale.dims[0]).  Pass 0 for full-K.
+/// W4A8 full-weight warm for ALGOs 1/2/4/5. @param algo must match runtime.
 status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
-        data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats);
+        data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats,
+        zendnnl::ops::matmul_algo_t algo);
 
-/// W4A8 per-N-tile warm-pack for ALGO 3.  Two-level caching:
-///   Plain cache: cvt_s4_to_s8 full weight → cached in the plain-s8 LRU
-///     (get_w4a8_plain_cache, keyed on original s4 ptr).  This buffer
-///     stays alive in the LRU.
-///   Blocked cache: per-tile reorderAndCacheWeightsSymQuant on column
-///     slices of the plain-s8 buffer → cached in sym-quant LRU.
-/// At runtime flat_n_tile looks up the plain cache (HIT), then each
-/// do_tile thread looks up the blocked cache (HIT).  Both levels are
-/// populated eagerly here.
-/// @param group_size  K-group size for sym-quant (K/G).  Must be > 0.
+/// W4A8 per-N-tile warm for ALGO 3 (plain-s8 + blocked per-tile caches).
 status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
