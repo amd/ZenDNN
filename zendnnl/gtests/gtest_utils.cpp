@@ -4816,13 +4816,21 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
     if (!success.load()) { is_comparison_successful = false; }
 }
 
-status_t softmax_kernel_test(
-        const void *input, void *output, softmax_params &params) {
+status_t softmax_kernel_test(const void *input, void *output,
+        softmax_params &params, softmax_algo_t algo) {
     try {
-        params.algorithm = softmax_algo_t::onednn;
+        // Select the LOWOHA algorithm and run through the production dispatch.
+        // softmax_algo_t::none uses the default backend (OneDNN when built with
+        // it, reference otherwise); softmax_algo_t::reference forces the scalar
+        // reference kernel.
+        params.algorithm = algo;
         status_t status = softmax_direct(input, output, params);
         if (status != status_t::success) {
-            log_error("softmax_direct (onednn) execution failed");
+            // isa_unsupported is a platform-capability signal (e.g. f16 on a
+            // host without AVX512-FP16)
+            if (status != status_t::isa_unsupported) {
+                log_error("softmax_direct execution failed");
+            }
         }
         return status;
     } catch (const exception_t &ex) {
@@ -4830,24 +4838,6 @@ status_t softmax_kernel_test(
         return status_t::failure;
     } catch (const std::exception &e) {
         log_error("softmax_kernel_test std::exception: ", e.what());
-        return status_t::failure;
-    }
-}
-
-status_t softmax_forced_ref_kernel_test(
-        const void *input, void *output, softmax_params &params) {
-    try {
-        params.algorithm = softmax_algo_t::reference;
-        status_t status = softmax_reference_wrapper(input, output, params);
-        if (status != status_t::success) {
-            log_error("softmax_reference_wrapper execution failed");
-        }
-        return status;
-    } catch (const exception_t &ex) {
-        log_error("softmax_forced_ref_kernel_test exception: ", ex.what());
-        return status_t::failure;
-    } catch (const std::exception &e) {
-        log_error("softmax_forced_ref_kernel_test std::exception: ", e.what());
         return status_t::failure;
     }
 }

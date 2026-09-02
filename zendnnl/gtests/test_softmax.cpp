@@ -105,9 +105,10 @@ TEST_P(TestSoftmax, F32_F32) {
     log_info("F32_F32 OneDNN kernel status: ",
             (status == status_t::success) ? "success" : "failure");
 
-    status_t ref_status = softmax_forced_ref_kernel_test(
-            input_tensor.get_raw_handle_unsafe(),
-            output_tensor_ref.get_raw_handle_unsafe(), ref_sp);
+    status_t ref_status
+            = softmax_kernel_test(input_tensor.get_raw_handle_unsafe(),
+                    output_tensor_ref.get_raw_handle_unsafe(), ref_sp,
+                    softmax_algo_t::reference);
     log_info("F32_F32 reference kernel status: ",
             (ref_status == status_t::success) ? "success" : "failure");
 
@@ -149,9 +150,10 @@ TEST_P(TestSoftmax, BF16_BF16) {
     log_info("BF16_BF16 OneDNN kernel status: ",
             (status == status_t::success) ? "success" : "failure");
 
-    status_t ref_status = softmax_forced_ref_kernel_test(
-            input_tensor.get_raw_handle_unsafe(),
-            output_tensor_ref.get_raw_handle_unsafe(), ref_sp);
+    status_t ref_status
+            = softmax_kernel_test(input_tensor.get_raw_handle_unsafe(),
+                    output_tensor_ref.get_raw_handle_unsafe(), ref_sp,
+                    softmax_algo_t::reference);
     log_info("BF16_BF16 reference kernel status: ",
             (ref_status == status_t::success) ? "success" : "failure");
 
@@ -196,9 +198,10 @@ TEST_P(TestSoftmax, F16_F16) {
     log_info("F16_F16 OneDNN kernel status: ",
             (status == status_t::success) ? "success" : "failure");
 
-    status_t ref_status = softmax_forced_ref_kernel_test(
-            input_tensor.get_raw_handle_unsafe(),
-            output_tensor_ref.get_raw_handle_unsafe(), ref_sp);
+    status_t ref_status
+            = softmax_kernel_test(input_tensor.get_raw_handle_unsafe(),
+                    output_tensor_ref.get_raw_handle_unsafe(), ref_sp,
+                    softmax_algo_t::reference);
     log_info("F16_F16 reference kernel status: ",
             (ref_status == status_t::success) ? "success" : "failure");
 

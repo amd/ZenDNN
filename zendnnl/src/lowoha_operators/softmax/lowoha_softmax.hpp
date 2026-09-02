@@ -36,21 +36,14 @@ namespace softmax {
  * @param output           Output tensor (same shape as input)
  * @param params           Softmax parameters (dims, softmax params, data types)
  *
- * @return status_t::success or status_t::failure
+ * @return status_t::success on success,
+ *         status_t::isa_unsupported if an f16 buffer is used with the OneDNN
+ *         backend on a host without AVX512-FP16 (the reference path —
+ *         algorithm == softmax_algo_t::reference — converts f16 in software
+ *         and is exempt),
+ *         or status_t::failure otherwise.
  */
 ZENDNNL_API status_t softmax_direct(
-        const void *input, void *output, softmax_params &params);
-
-/**
- * @brief Kernel dispatcher - selects appropriate backend
- *
- * @param input                   Input tensor data
- * @param output                  Output tensor data
- * @param softmax_params          Softmax parameters (dims, softmax params, data types)
- *
- * @return status_t::success on success, or the backend failure status.
- */
-status_t softmax_kernel_wrapper(
         const void *input, void *output, softmax_params &params);
 
 } // namespace softmax

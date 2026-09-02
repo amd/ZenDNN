@@ -114,6 +114,8 @@ static void softmax_reference_impl(const void *input, void *output,
 
 status_t softmax_reference_wrapper(
         const void *input, void *output, softmax_params &params) {
+    log_info("Using reference kernel for Softmax");
+
     // Calculate flattened parameters from shape
     if (params.ndims <= 0 || params.ndims > SOFTMAX_MAX_NDIMS) {
         log_error("Softmax Reference: Invalid ndims: ", params.ndims,

@@ -94,7 +94,7 @@ struct softmax_params {
   data_type_t src_dt;                   // Source/input data type
   data_type_t dst_dt;                   // Destination/output data type
   softmax_algo_t algorithm;             // Selected algorithm
-  uint64_t num_threads;                 // Number of threads (0 = auto)
+  int32_t num_threads;                  // Number of threads (0 = auto)
   
   // Original tensor shape (for OneDNN backend)
   uint64_t shape[SOFTMAX_MAX_NDIMS];    // Original tensor dimensions
@@ -110,13 +110,15 @@ struct softmax_params {
 |------------|-------------|-------|
 | FP32 | FP32 | Standard floating-point precision |
 | BF16 | BF16 | Mixed-precision for inference |
-| F16 | F16 | Half-precision for inference; requires AVX-512-FP16 ISA |
+| F16 | F16 | Half-precision for inference; OneDNN backend requires AVX-512-FP16 ISA (the reference kernel is exempt) |
 
 `src_dt` must equal `dst_dt` (mixed-precision I/O is not supported). For all
 dtypes the softmax math (max-subtract, exp, sum, log, divide) is computed in
 FP32 internally for numerical stability; BF16/F16 are narrowed only at the
-output store. F16 requires the host CPU to expose **AVX-512-FP16** — otherwise
-`softmax_direct` returns `status_t::isa_unsupported`.
+output store. F16 requires the host CPU to expose **AVX-512-FP16** for the
+OneDNN backend — otherwise `softmax_direct` returns `status_t::isa_unsupported`.
+The scalar reference kernel (`algorithm == softmax_algo_t::reference`) converts
+F16 in software and runs on any host, so it is exempt from this requirement.
 
 ### Helper Function: `setup_softmax_shape`
 
@@ -239,15 +241,22 @@ enum class softmax_algo_t {
 
 ### Algorithm Selection Priority
 
+`softmax_direct()` resolves `params.algorithm` before dispatch:
+
 1. **Auto-selection** (`algorithm = softmax_algo_t::none`):
-   - If OneDNN is available: Uses OneDNN backend
-   - Otherwise: Falls back to reference implementation
+   - If OneDNN is available: resolves to the OneDNN backend
+   - Otherwise: resolves to the reference implementation
+
+   The resolved value is written back to `params.algorithm`.
 
 2. **Explicit selection**:
    ```cpp
    params.algorithm = softmax_algo_t::onednn;     // Use OneDNN
-   params.algorithm = softmax_algo_t::reference;  // Use reference
+   params.algorithm = softmax_algo_t::reference;  // Force the scalar reference
    ```
+   Forcing `softmax_algo_t::reference` runs the scalar reference kernel directly
+   (portability / debugging / bit-exact validation); it converts F16 in software
+   and therefore runs on any host regardless of AVX-512-FP16 support.
 
 ## Performance Considerations
 
@@ -322,12 +331,12 @@ The `softmax_direct` function returns `status_t`:
 
 - `status_t::success`: Operation completed successfully
 - `status_t::failure`: Operation failed (check logs for details)
-- `status_t::isa_unsupported`: An F16 buffer was requested but the host CPU lacks AVX-512-FP16
+- `status_t::isa_unsupported`: An F16 buffer was requested for the OneDNN backend but the host CPU lacks AVX-512-FP16 (the reference kernel — `algorithm == softmax_algo_t::reference` — is exempt, since it converts F16 in software)
 
 Common failure causes:
 - Null input/output pointers
 - Invalid dimensions (batch=0 or axis_dim=0)
 - Unsupported data type (must be `f32`, `bf16`, or `f16`)
 - Mismatched `src_dt` / `dst_dt` (mixed-precision I/O is not supported)
-- F16 requested on a host without AVX-512-FP16 support
+- F16 requested on a host without AVX-512-FP16 support (OneDNN backend only)
 - Invalid axis index

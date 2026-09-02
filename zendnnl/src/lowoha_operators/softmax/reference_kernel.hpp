@@ -24,7 +24,12 @@ namespace lowoha {
 namespace softmax {
 
 /**
- * @brief Reference implementation for Softmax
+ * @brief Reference (scalar) Softmax kernel — ground-truth path.
+ *
+ * First-class reference entry selected when params.algorithm ==
+ * softmax_algo_t::reference (and used as the fall-back when OneDNN is not
+ * available). Computes in FP32 and narrows at the store boundary, so f16
+ * storage is handled in software and needs no AVX512-FP16 ISA.
  *
  * @param input                     Input tensor
  * @param output                    Output tensor

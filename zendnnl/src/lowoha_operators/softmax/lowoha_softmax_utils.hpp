@@ -57,6 +57,23 @@ status_t validate_softmax_inputs(
 status_t setup_softmax_shape(
         softmax_params &params, const uint64_t *shape, int ndims, int axis);
 
+/**
+ * @brief Convert softmax_algo_t enum to string representation.
+ */
+const char *algo_to_string(softmax_algo_t algo);
+
+/**
+ * @brief Resolve the softmax algorithm.
+ *
+ * Maps softmax_algo_t::none to the default backend (onednn when the library
+ * is built with OneDNN, reference otherwise) and writes the resolved value
+ * back to params.algorithm. When OneDNN is not compiled in, an explicit
+ * onednn request falls back to reference with a log message.
+ * softmax_algo_t::reference is returned unchanged. Unknown values are left
+ * untouched and returned as-is so the caller fails the dispatch.
+ */
+softmax_algo_t algo_select(softmax_params &params);
+
 } // namespace softmax
 } // namespace lowoha
 } // namespace zendnnl

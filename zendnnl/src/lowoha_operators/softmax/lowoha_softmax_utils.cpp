@@ -115,6 +115,40 @@ status_t setup_softmax_shape(
     return status_t::success;
 }
 
+const char *algo_to_string(softmax_algo_t algo) {
+    switch (algo) {
+        case softmax_algo_t::none: return "none";
+        case softmax_algo_t::dynamic_dispatch: return "dynamic_dispatch";
+        case softmax_algo_t::onednn: return "onednn";
+        case softmax_algo_t::reference: return "reference";
+        default: return "unknown";
+    }
+}
+
+softmax_algo_t algo_select(softmax_params &params) {
+    softmax_algo_t algo = params.algorithm;
+
+#if ZENDNNL_DEPENDS_ONEDNN
+    if (algo == softmax_algo_t::none) { algo = softmax_algo_t::onednn; }
+#else
+    if (algo == softmax_algo_t::none) {
+        algo = softmax_algo_t::reference;
+    } else if (algo == softmax_algo_t::onednn) {
+        log_info(
+                "Softmax: OneDNN backend requested but not compiled in; "
+                "falling back to reference kernel");
+        algo = softmax_algo_t::reference;
+    }
+#endif
+
+    if (algo != softmax_algo_t::onednn && algo != softmax_algo_t::reference) {
+        return params.algorithm;
+    }
+
+    params.algorithm = algo;
+    return algo;
+}
+
 } // namespace softmax
 } // namespace lowoha
 } // namespace zendnnl

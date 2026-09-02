@@ -22,29 +22,6 @@ namespace zendnnl {
 namespace lowoha {
 namespace softmax {
 
-status_t softmax_kernel_wrapper(
-        const void *input, void *output, softmax_params &params) {
-    // Select algorithm if not specified
-    if (params.algorithm == softmax_algo_t::none) {
-#if ZENDNNL_DEPENDS_ONEDNN
-        params.algorithm = softmax_algo_t::onednn;
-#else
-        params.algorithm = softmax_algo_t::reference;
-#endif
-    }
-
-#if ZENDNNL_DEPENDS_ONEDNN
-    if (params.algorithm == softmax_algo_t::onednn) {
-        log_info("Using OneDNN kernel for Softmax");
-        return softmax_onednn_wrapper(input, output, params);
-    }
-#endif
-
-    // Fallback to reference implementation (always reached if OneDNN not selected)
-    log_info("Using reference kernel for Softmax");
-    return softmax_reference_wrapper(input, output, params);
-}
-
 status_t softmax_direct(
         const void *input, void *output, softmax_params &params) {
     // Create profiler instance for timing
@@ -52,11 +29,23 @@ status_t softmax_direct(
     bool is_profile = is_profile_enabled();
     if (is_profile) { profiler.tbp_start(); }
 
-    // F16 requires AVX512-FP16; reject up-front on unsupported hosts to
-    // avoid undefined behavior in kernels that touch F16 storage.
+    // Resolve the algorithm up front so the ISA gate below can be limited to
+    // the OneDNN backend.
+    const softmax_algo_t algo = algo_select(params);
+
+    // F16 requires AVX512-FP16; reject up-front on unsupported hosts to avoid
+    // undefined behavior in kernels that touch F16 storage. This gate is
+    // specific to the OneDNN backend, which touches F16 storage directly. The
+    // reference kernel computes in FP32 and converts f16 storage in software,
+    // so it never needs AVX512-FP16 and is not gated here. No separate
+    // ZENDNNL_DEPENDS_ONEDNN guard is needed: algo_select() has already
+    // resolved algo against the build configuration, so algo == onednn can
+    // only occur when OneDNN support is actually compiled in. Unsupported
+    // algorithms fall through to the switch below and return failure.
     const bool is_f16 = (params.src_dt == data_type_t::f16
             || params.dst_dt == data_type_t::f16);
-    if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
+    if (is_f16 && algo == softmax_algo_t::onednn
+            && !zendnnl_platform_info().get_avx512_f16_status()) {
         log_error(
                 "F16 data type is not supported on this platform "
                 "(requires AVX512-FP16).");
@@ -68,26 +57,45 @@ status_t softmax_direct(
         return status_t::failure;
     }
 
-    // Log API call
-    [[maybe_unused]] std::ostringstream ss;
+    // Execute softmax; propagate the backend outcome so callers are not
+    // told the op succeeded when the kernel actually failed. none was
+    // normalized by algo_select, so it never reaches the switch below.
+    // The onednn case needs no ZENDNNL_DEPENDS_ONEDNN guard either: algo_select()
+    // already restricts algo == onednn to builds where OneDNN is compiled in.
+    status_t status = status_t::failure;
+    switch (algo) {
+        case softmax_algo_t::onednn:
+            log_info("Using OneDNN kernel for Softmax");
+            status = softmax_onednn_wrapper(input, output, params);
+            break;
+        case softmax_algo_t::reference:
+            status = softmax_reference_wrapper(input, output, params);
+            break;
+        default:
+            log_error("softmax_direct: unsupported algorithm ",
+                    static_cast<int32_t>(algo), " (", algo_to_string(algo),
+                    ")");
+            return status_t::failure;
+    }
+
+    if (is_profile) { profiler.tbp_stop(); }
+
+    if (status != status_t::success) { return status; }
+
     if (apilog_info_enabled() || is_profile) {
+        [[maybe_unused]] std::ostringstream ss;
         ss << "LOWOHA softmax_direct: batch=" << params.batch
            << ", axis_dim=" << params.axis_dim << ", axis=" << params.axis
            << ", log_softmax=" << (params.log_softmax ? "true" : "false")
            << ", softmin=" << (params.softmin ? "true" : "false")
            << ", src_dt=" << static_cast<int>(params.src_dt)
-           << ", dst_dt=" << static_cast<int>(params.dst_dt);
-    }
-    apilog_info(ss.str());
-
-    // Execute softmax; propagate the backend outcome so callers are not
-    // told the op succeeded when the kernel actually failed.
-    status_t status = softmax_kernel_wrapper(input, output, params);
-
-    if (is_profile) {
-        profiler.tbp_stop();
-        profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
-                profiler.get_res_str());
+           << ", dst_dt=" << static_cast<int>(params.dst_dt)
+           << ", algo=" << algo_to_string(algo);
+        apilog_info(ss.str());
+        if (is_profile) {
+            profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                    profiler.get_res_str());
+        }
     }
 
     return status;

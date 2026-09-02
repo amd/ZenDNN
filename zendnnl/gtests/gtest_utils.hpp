@@ -53,7 +53,6 @@ static inline int unsetenv(const char *name) {
 #include "lowoha_operators/sdpa/lowoha_sdpa.hpp"
 #include "lowoha_operators/sdpa/lowoha_sdpa_common.hpp"
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
-#include "lowoha_operators/softmax/reference_kernel.hpp"
 #include "operators/embag/embag_context.hpp"
 #include "operators/embag/embag_operator.hpp"
 #include "operators/matmul/matmul_context.hpp"
@@ -1026,25 +1025,19 @@ void compare_tensor_4D_sdpa(tensor_t &output_tensor,
         uint64_t seq_len_q, uint64_t seq_len_kv, uint64_t head_dim,
         const float rtol, const float epsilon, bool &is_comparison_successful);
 /** @fn softmax_kernel_test
- *  @brief Test function for softmax kernel (OneDNN path)
+ *  @brief Test function for softmax kernel
  *
- *  Calls softmax_direct() with algorithm forced to OneDNN.
+ *  Calls softmax_direct() through the production dispatch.
  *
- *  @return status_t Success or failure status
- */
-status_t softmax_kernel_test(
-        const void *input, void *output, softmax_params &params);
-
-/** @fn softmax_forced_ref_kernel_test
- *  @brief Test function for softmax reference kernel (forced)
- *
- *  Calls softmax_reference_wrapper() directly, bypassing the
- *  kernel dispatcher to always use the reference implementation.
+ *  @param algo Selects the LOWOHA algorithm (defaults to `softmax_algo_t::none`
+ *         for the default backend — OneDNN when built with it, reference
+ *         otherwise — or `softmax_algo_t::reference` to force the scalar
+ *         reference kernel).
  *
  *  @return status_t Success or failure status
  */
-status_t softmax_forced_ref_kernel_test(
-        const void *input, void *output, softmax_params &params);
+status_t softmax_kernel_test(const void *input, void *output,
+        softmax_params &params, softmax_algo_t algo = softmax_algo_t::none);
 
 /** @fn compare_softmax_tensors
  *  @brief Compare two tensors element-by-element for any dimensionality
