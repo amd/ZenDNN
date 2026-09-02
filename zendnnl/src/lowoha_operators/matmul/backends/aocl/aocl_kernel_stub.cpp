@@ -14,22 +14,33 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-// Error-out stubs for the AOCL-DLP backend, compiled only when ZenDNNL is
-// built without AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=0). They satisfy the link
-// dependencies of the always-compiled LOWOHA matmul dispatch (run_dlp,
-// matmul_batch_gemm_wrapper, weight-cache helpers and reorder caching) while
-// making it explicit at runtime that the AOCL-DLP path is unavailable.
+// Stubs for the AOCL-DLP backend, compiled only when ZenDNNL is built without
+// AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=0). They satisfy the link dependencies of
+// the always-compiled LOWOHA matmul dispatch while making the missing backend
+// explicit at runtime.
 //
-// The selecting layers (e.g. lowoha::matmul::matmul_direct) already reject
-// AOCL-DLP kernels up front and return status_t::unimplemented. The compute
-// entry points below (run_dlp / matmul_batch_gemm_wrapper) are the final
-// backstop for any residual fall-through path (e.g. a deeper native/onednn
-// decline that mutates the kernel to aocl_dlp). They are void, so returning
-// normally would leave the caller's output buffer uninitialized (a silent
-// wrong result); instead they throw so an unsupported call fails loudly.
+// The two groups below fail differently, on purpose:
+//
+//   * Compute entry points (run_dlp, matmul_batch_gemm_wrapper) throw. Every
+//     call site either sits behind #if ZENDNNL_DEPENDS_AOCLDLP or redirects
+//     AOCL-DLP kernels to the reference kernel (kernel_select() and the
+//     !ZENDNNL_DEPENDS_AOCLDLP branches of matmul_kernel_wrapper, bmm_execute
+//     and execute_partitioned_matmul), so both should be unreachable. They
+//     return void, so a silent return would leave the caller's output buffer
+//     uninitialized -- a wrong result rather than an error. Throwing makes any
+//     residual fall-through fail loudly instead.
+//
+//   * Cache, prepack and quantization helpers return benign "nothing cached /
+//     not available" values. Some of their callers are compiled
+//     unconditionally -- the W4A8 plain-s8 side table in
+//     group_matmul_dispatch.cpp, broadcast_w4a8_src_scale() in the N-tile
+//     group path, and the gtest weight-cache reset -- and must be able to
+//     carry on down the reference path, so aborting is wrong.
 
 #include "common/zendnnl_exceptions.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+
+#include <atomic>
 
 namespace zendnnl {
 namespace lowoha {
@@ -81,6 +92,45 @@ bool reorderAndCacheWeights(Key_matmul, const void *, void *&, const int,
 template bool reorderAndCacheWeights<int16_t>(Key_matmul, const void *, void *&,
         const int, const int, const int, const char, const char, char,
         get_reorder_buff_size_func_ptr, reorder_func_ptr<int16_t>, int);
+
+void w4a8_cvt_and_cache_plain_s8(
+        Key_matmul, const int8_t *, void *&s8_plain, int, int, int, bool) {
+    s8_plain = nullptr;
+}
+
+void w4a8_populate_plain_s8_cache(const std::vector<const void *> &,
+        const std::vector<int> &, const std::vector<int> &,
+        const std::vector<int> &, const std::vector<bool> &,
+        const std::vector<matmul_params> &, int num_ops,
+        std::vector<void *> &w4a8_s8_out, bool &any_w4a8) {
+    // No AOCL plain-s8 LRU in this build; leave the side table empty so
+    // downstream W4A8 AOCL paths are skipped (reference W4A8 still works).
+    static std::atomic<bool> s_w4a8_plain_stub_announced {false};
+    if (!s_w4a8_plain_stub_announced.exchange(
+                true, std::memory_order_relaxed)) {
+        apilog_verbose(
+                "[W4A8.PLAIN] w4a8_populate_plain_s8_cache skipped: ZenDNNL "
+                "was built without AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=0); "
+                "W4A8 AOCL plain-s8 prep and ALGO-3 N-tile sym-quant path "
+                "are unavailable (reference W4A8 unaffected).");
+    }
+    w4a8_s8_out.assign(num_ops, nullptr);
+    any_w4a8 = false;
+}
+
+void w4a8ReorderAndCacheWeightsAocl(Key_matmul, const int8_t *,
+        void *&reorder_weights, const int, const int, const int, const bool,
+        const char, const char, data_type_t, data_type_t, int, int) {
+    reorder_weights = nullptr;
+}
+
+status_t broadcast_w4a8_src_scale(
+        matmul_params &, int, std::vector<uint8_t> &) {
+    apilog_error(
+            "W4A8 source-scale broadcast requested but ZenDNNL was built "
+            "without AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0).");
+    return status_t::failure;
+}
 
 } // namespace matmul
 } // namespace lowoha

@@ -16,10 +16,12 @@
 
 #include "lowoha_operators/matmul/partitioning/bmm/looper/bmm_looper.hpp"
 #include <algorithm>
+#include <atomic>
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_utils.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/partitioning/bmm/kernel/bmm_kernel.hpp"
@@ -116,12 +118,18 @@ static void execute_partitioned(const void *src, const void *weight, void *dst,
 
     BmmPlan plan = plan_bmm(config);
 
-    if (config.kernel == matmul_algo_t::libxsmm
+    if ((config.kernel == matmul_algo_t::libxsmm
+                || config.kernel == matmul_algo_t::libxsmm_blocked)
             && !(can_use_libxsmm(trans_input, trans_weight, plan.M_block,
                     config.N, config.K, alpha, beta, params))) {
-        apilog_info("Using AOCL DLP kernel as fallback for libxsmm, algo: ",
-                static_cast<int>(config.kernel));
+#if ZENDNNL_DEPENDS_AOCLDLP
         config.kernel = matmul_algo_t::aocl_dlp;
+#else
+        config.kernel = matmul_algo_t::reference;
+#endif
+        apilog_info("Using ", kernel_to_string(config.kernel),
+                " kernel as fallback for libxsmm, algo: ",
+                static_cast<int>(config.kernel));
     }
 
     BmmKernelContext ctx;
@@ -141,13 +149,6 @@ static void execute_partitioned(const void *src, const void *weight, void *dst,
     ctx.kernel = config.kernel;
     ctx.bias = bias;
     ctx.is_weights_const = is_weights_const;
-
-#if !ZENDNNL_DEPENDS_AOCLDLP
-    // Track a per-tile fall-through to the unavailable AOCL fallback (e.g. a
-    // runtime libxsmm decline) so we can surface it after the parallel region.
-    std::atomic<bool> aocl_unavailable {false};
-    ctx.aocl_unavailable = &aocl_unavailable;
-#endif
 
     auto process_tile
             = [&](int batch_idx, int m_start, int m_len, const uint8_t *src_ptr,
@@ -170,15 +171,7 @@ static void execute_partitioned(const void *src, const void *weight, void *dst,
                 process_tile);
     }
 
-#if !ZENDNNL_DEPENDS_AOCLDLP
-    // A tile hit the unavailable AOCL fallback. Mark config.kernel so
-    // bmm_execute's write-back surfaces it to matmul_direct()'s post-dispatch
-    // guard (-> status_t::unimplemented) instead of reporting success with an
-    // uncomputed/partial dst.
-    if (aocl_unavailable.load(std::memory_order_relaxed)) {
-        config.kernel = matmul_algo_t::aocl_dlp;
-    }
-#endif
+    return;
 }
 
 // ─── BMM entry point ────────────────────────────────────────────────────────
@@ -220,13 +213,11 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
         apilog_info("Executing BMM LOWOHA kernel with batch SGEMM, algo: ",
                 static_cast<int>(kernel));
 #if !ZENDNNL_DEPENDS_AOCLDLP
-        // Batched SGEMM is backed by AOCL-DLP, which is not built in. Log and
-        // return without computing instead of letting matmul_batch_gemm_wrapper
-        // throw (this can run inside OpenMP parallel regions -> std::terminate).
-        apilog_error(
-                "AOCL-DLP batched SGEMM required but ZenDNNL was built "
-                "without AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0); BMM "
-                "output not computed.");
+        // Batched SGEMM is AOCL-backed; compute via the reference kernel instead.
+        kernel = matmul_algo_t::reference;
+        reference_matmul_execute(layout, transA, transB, M, N, K, alpha, src,
+                lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
+                batch_params, params);
         return;
 #else
         matmul_batch_gemm_wrapper(layout, trans_input, trans_weight, M, N, K,
@@ -271,20 +262,22 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                 params, layout, trans_input, trans_weight, transA, alpha, beta,
                 lda, ldb, ldc, src_type_size, out_type_size, is_weights_const);
 
-        // execute_partitioned() may fall back from libxsmm to aocl_dlp via its
+        // execute_partitioned() may fall back from libxsmm to reference via its
         // up-front can_use_libxsmm() check (mutating the local config.kernel).
-        // Propagate that back to the caller's kernel reference so matmul_direct()
-        // observes the AOCL-DLP fallback: in an AOCL-DLP-disabled build its
-        // post-dispatch guard then returns status_t::unimplemented instead of
-        // reporting success with an uncomputed dst.
+        // Write back so matmul_direct() api-log reflects the effective kernel.
         kernel = config.kernel;
     }
     // ── Path 4: Single-thread fallback ──
     else {
-        if (kernel == matmul_algo_t::libxsmm
+        if ((kernel == matmul_algo_t::libxsmm
+                    || kernel == matmul_algo_t::libxsmm_blocked)
                 && !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
                         beta, params))) {
+#if ZENDNNL_DEPENDS_AOCLDLP
             kernel = matmul_algo_t::aocl_dlp;
+#else
+            kernel = matmul_algo_t::reference;
+#endif
         }
 
         apilog_info(
@@ -310,11 +303,6 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
         ctx.bias = bias;
         ctx.is_weights_const = is_weights_const;
 
-#if !ZENDNNL_DEPENDS_AOCLDLP
-        std::atomic<bool> aocl_unavailable {false};
-        ctx.aocl_unavailable = &aocl_unavailable;
-#endif
-
         for (int b = 0; b < batch_count; ++b) {
             const uint8_t *src_ptr = static_cast<const uint8_t *>(src)
                     + get_batch_index(b, batch_params.Batch_A)
@@ -328,16 +316,8 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
             bmm_tile_execute(b, 0, M, src_ptr, weight_ptr, dst_ptr, ctx, params,
                     batch_params);
         }
-
-#if !ZENDNNL_DEPENDS_AOCLDLP
-        // Surface an unavailable-AOCL fall-through to matmul_direct() (kernel is
-        // the caller's by-reference algo -> post-dispatch guard reports
-        // status_t::unimplemented).
-        if (aocl_unavailable.load(std::memory_order_relaxed)) {
-            kernel = matmul_algo_t::aocl_dlp;
-        }
-#endif
     }
+    return;
 }
 
 } // namespace bmm

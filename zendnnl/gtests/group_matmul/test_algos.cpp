@@ -3513,6 +3513,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoDowngradesWc2WhenIneligible) {
 // unlimited LRU capacity) ENABLES mixed-in-place: WC stays 2 and the flag
 // is set (instead of downgrading).
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -3554,6 +3555,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
 // (AOCL full-weight) must not perturb the CK decode output, which is
 // served from the out-of-place pack warmed from the raw weights.
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceMatchesWc1) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
@@ -3827,6 +3829,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo5RespectsWc2) {
 // WC=1 out-of-place reference.
 TEST(TestGroupMatmulWeightCacheDowngrade,
         AutoMixedInplaceCustomKernelOnMatchesWc1) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);

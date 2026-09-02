@@ -576,6 +576,27 @@ inline Tol tol_moe(bool is_bf16) {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// AOCL-DLP compile-time availability — use in gtests that exercise
+// AOCL prepack / cross-warm / mixed in-place weight-cache paths.
+// ───────────────────────────────────────────────────────────────────
+#if ZENDNNL_DEPENDS_AOCLDLP
+constexpr bool k_grp_matmul_aocl_dlp_compiled = true;
+#else
+constexpr bool k_grp_matmul_aocl_dlp_compiled = false;
+#endif
+
+// Call at the start of each TEST body that exercises AOCL-DLP prepack /
+// cross-warm / mixed in-place weight-cache paths (GTEST_SKIP only returns
+// from the function it is written in, so do not invoke from nested helpers).
+#define SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP() \
+    do { \
+        if (!::moe_test_utils::k_grp_matmul_aocl_dlp_compiled) { \
+            GTEST_SKIP() << "Group-matmul AOCL-DLP paths require AOCL-DLP " \
+                            "(ZENDNNL_DEPENDS_AOCLDLP=ON)."; \
+        } \
+    } while (0)
+
+// ───────────────────────────────────────────────────────────────────
 // [1.f] ALGO env var RAII guard
 // ───────────────────────────────────────────────────────────────────
 

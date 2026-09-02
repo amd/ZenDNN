@@ -28,7 +28,11 @@
 
 #include "ggml_weight_unpack.hpp"
 #include "lowoha_matmul_utils.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#else
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
+#endif
 
 namespace zendnnl {
 namespace lowoha {
@@ -553,6 +557,13 @@ status_t unpack_ggml_weights_and_cache(const void *&weight, int N, int K,
     apilog_info("GGML unpack: N=", N, ", K=", K, ", ggml_type=", ggml_type,
             ", weight_address=", static_cast<const void *>(weight),
             ", skip_reorder=", (skip_reorder ? 1 : 0));
+
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    // No AOCL sym-quant reorder: hand back raw s8 + per-group scales for the
+    // reference kernel (mem_format 'n').
+    return unpack_ggml_raw_s8_and_cache(
+            weight, N, K, ldb, trans, params, ggml_type);
+#endif
 
     // N-tile per-group DLP path: keep the weight raw so `do_tile` reorders it
     // per N-tile, instead of pre-reordering the full weight for AOCL here.

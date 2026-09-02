@@ -754,6 +754,11 @@ private:
                         postop_item.buff = nullptr;
                         postop_item.dtype = output.get_data_type();
                     }
+                    // Match gtest_utils / gemv AI tests: swish and elu need alpha=1.0
+                    if (post_op_type == post_op_type_t::swish
+                            || post_op_type == post_op_type_t::elu) {
+                        postop_item.alpha = 1.0f;
+                    }
                     matmul_params_obj.postop_.push_back(postop_item);
                 }
 

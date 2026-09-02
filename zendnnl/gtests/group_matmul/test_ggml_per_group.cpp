@@ -362,6 +362,7 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     prepack::test_api::clear_last_invocation_stats();
 
     std::vector<int> rows(E, 16); // all experts active -> clean per-tile count
+    moe_test_utils::GemmModeCaptureGuard gemm_mode_capture;
     run_ggml_per_group_scenario("15 all-active N-tile split", rows, K, N,
             /*bf16=*/true);
 
@@ -369,17 +370,40 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     ASSERT_TRUE(stats.valid)
             << "prepack_for_algo_3 must run for the GGML per-group call";
     EXPECT_EQ(stats.scheduling_algo, 3);
-    // total_attempted > num_experts means the sym-quant cache was warmed per
-    // N-tile (num_experts * stable), i.e. flat_n_tile actually split N — not the
-    // Sequential fallback's one-full-weight-reorder-per-expert (== num_experts).
-    EXPECT_GT(stats.aocl.total_attempted, E)
-            << "planner took the Sequential fallback (no real N-tile split): "
-               "stable="
-            << stable << " N=" << N << " num_threads=" << num_threads;
-    // AUTO-only cross-warm must AOT-warm the OTHER layout class (full-weight,
-    // used by ALGO 1/2/4/5) alongside the per-tile ALGO-3 primary above.
-    EXPECT_NE(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
-            << "cross-warm did not fire under AUTO (env_algo=0)";
+    if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
+        // total_attempted > num_experts means the sym-quant cache was warmed per
+        // N-tile (num_experts * stable), i.e. flat_n_tile actually split N — not the
+        // Sequential fallback's one-full-weight-reorder-per-expert (== num_experts).
+        EXPECT_GT(stats.aocl.total_attempted, E)
+                << "planner took the Sequential fallback (no real N-tile "
+                   "split): "
+                   "stable="
+                << stable << " N=" << N << " num_threads=" << num_threads;
+        // AUTO-only cross-warm must AOT-warm the OTHER layout class (full-weight,
+        // used by ALGO 1/2/4/5) alongside the per-tile ALGO-3 primary above.
+        EXPECT_NE(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
+                << "cross-warm did not fire under AUTO (env_algo=0)";
+    } else {
+        // Without AOCL-DLP, `resolve_kernel()` returns reference so the AOCL
+        // prepack warmers are not invoked (see test_prepack.cpp).  The planner
+        // and executor still run ALGO 3 — verify a real N-tile split via the
+        // published gemm_mode rather than AOCL probe counters.
+        const char *mode = zendnnl::lowoha::matmul::test_api::
+                                   s_last_group_matmul_direct_gemm_mode.load(
+                                           std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr)
+                << "group_matmul_direct must publish gemm_mode for ALGO 3";
+        EXPECT_STRNE(mode, "flat_n_tile_sequential")
+                << "planner took the Sequential fallback (no real N-tile "
+                   "split): "
+                   "stable="
+                << stable << " N=" << N << " num_threads=" << num_threads
+                << " gemm_mode=" << mode;
+        // cross_warm is gated on the AOCL-DLP inner kernel; wiring is covered
+        // in TestPrepackCrossWarmRegimes under ZENDNNL_DEPENDS_AOCLDLP=ON builds.
+        EXPECT_EQ(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
+                << "without AOCL-DLP, cross-warm is a no-op by design";
+    }
 }
 
 // ── Full-pool warm: cold (unrouted) experts are unpacked + cached too ──────

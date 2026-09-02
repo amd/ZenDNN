@@ -124,6 +124,9 @@ protected:
 
 private:
     bool is_bmm = false;
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    status_t fallback_aocl_dlp_to_reference();
+#endif
 };
 
 } //namespace ops

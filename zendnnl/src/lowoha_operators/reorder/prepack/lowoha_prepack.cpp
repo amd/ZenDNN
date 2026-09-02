@@ -23,6 +23,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
 
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -102,6 +103,58 @@ void write_weight_colsum(
             acc += wei[wei_idx];
         }
         colsum[col] = acc;
+    }
+}
+#endif
+#if !ZENDNNL_DEPENDS_AOCLDLP
+inline size_t dense_weight_bytes(const prepack_params_t &params) {
+    return static_cast<size_t>(params.K) * static_cast<size_t>(params.N)
+            * zendnnl::common::size_of(params.wei_dtype);
+}
+
+// Identity prepack when AOCL-DLP is unavailable: pack the logical KxN
+// weight matrix into a dense row-major buffer, honoring source ldb.
+void reference_prepack_weights(
+        const void *weights, const prepack_params_t &params, void *dst) {
+    const auto *src = static_cast<const uint8_t *>(weights);
+    auto *out = static_cast<uint8_t *>(dst);
+    const size_t elem_size = zendnnl::common::size_of(params.wei_dtype);
+    const int64_t K = params.K;
+    const int64_t N = params.N;
+    const int64_t ldb = params.ldb;
+
+    // Fast path only when the source is already dense row-major (order="ab").
+    // transposed=true with ldb==K is dense column-major and still needs
+    // element-wise reorder into row-major KxN.
+    if (!params.transposed && ldb == N) {
+        std::memcpy(out, src, dense_weight_bytes(params));
+        return;
+    }
+
+    if (!params.transposed) {
+        for (int64_t k = 0; k < K; ++k) {
+            const size_t row_src = static_cast<size_t>(k)
+                    * static_cast<size_t>(ldb) * elem_size;
+            const size_t row_dst = static_cast<size_t>(k)
+                    * static_cast<size_t>(N) * elem_size;
+            std::memcpy(out + row_dst, src + row_src,
+                    static_cast<size_t>(N) * elem_size);
+        }
+        return;
+    }
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t k = 0; k < K; ++k) {
+            const size_t src_off
+                    = (static_cast<size_t>(n) * static_cast<size_t>(ldb)
+                              + static_cast<size_t>(k))
+                    * elem_size;
+            const size_t dst_off
+                    = (static_cast<size_t>(k) * static_cast<size_t>(N)
+                              + static_cast<size_t>(n))
+                    * elem_size;
+            std::memcpy(out + dst_off, src + src_off, elem_size);
+        }
     }
 }
 #endif
@@ -489,6 +542,13 @@ size_t backend_size_by_algo(const prepack_params_t &params) {
     if (params.algo == matmul_algo_t::moe_custom_kernel) {
         return ck_compute_size(params);
     }
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    apilog_warning(
+            "backend_size_by_algo: ZenDNNL was built without AOCL-DLP "
+            "support (ZENDNNL_DEPENDS_AOCLDLP=0); sizing reference (dense "
+            "row-major) prepack fallback instead of aocl_dlp_blocked layout.");
+    return round_up_align(dense_weight_bytes(params), kPrepackAlign);
+#endif
     if (params.algo == matmul_algo_t::aocl_dlp_blocked) {
         return aocl_compute_size(params);
     }
@@ -503,6 +563,14 @@ status_t backend_prepack_by_algo(
     if (params.algo == matmul_algo_t::moe_custom_kernel) {
         return ck_prepack(weights, params, dst);
     }
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    apilog_warning(
+            "backend_prepack_by_algo: ZenDNNL was built without AOCL-DLP "
+            "support (ZENDNNL_DEPENDS_AOCLDLP=0); using reference (dense "
+            "row-major) prepack fallback instead of aocl_dlp_blocked layout.");
+    reference_prepack_weights(weights, params, dst);
+    return status_t::success;
+#endif
     if (params.algo == matmul_algo_t::aocl_dlp_blocked) {
         return aocl_prepack(weights, params, dst);
     }

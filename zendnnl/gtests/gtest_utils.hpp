@@ -44,7 +44,6 @@ static inline int unsetenv(const char *name) {
     return _putenv_s(name, "");
 }
 #endif
-#include "lowoha_operators/embedding_bag/lowoha_embag_ref_kernel.hpp"
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
@@ -53,7 +52,6 @@ static inline int unsetenv(const char *name) {
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/sdpa/lowoha_sdpa.hpp"
 #include "lowoha_operators/sdpa/lowoha_sdpa_common.hpp"
-#include "lowoha_operators/sdpa/reference/lowoha_sdpa_ref_kernel.hpp"
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
 #include "lowoha_operators/softmax/reference_kernel.hpp"
 #include "operators/embag/embag_context.hpp"
@@ -726,11 +724,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 // refactor so this header stays operator-agnostic.
 
 /** @fn matmul_forced_ref_kernel_test
- *  @brief Compute Matmul Op using Reference kernel.
+ *  @brief Compute matmul via the LOWOHA reference kernel.
  *
- *  This function computes fused matmul that uses the Matmul Operator fused
- *  with randomly selected postop (supported by library) with Reference kernel
- *  that only supports F32 datatype.
+ *  Runs matmul_direct with matmul_algo_t::reference for golden-output
+ *  comparison against a DUT kernel. Supports F32, BF16, F16, INT8, and WOQ
+ *  dtypes, fused post-ops, and batched/broadcast shapes. F16 accumulation
+ *  precision is selected from the DUT algo so AOCL F16 GEMM validation matches
+ *  hardware-level rounding.
  *
  *  @return matmul status
  * */

@@ -775,6 +775,25 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             ? matmul_algo_t::aocl_dlp_blocked
             : static_cast<matmul_algo_t>(algo);
 
+    // AOCL-prepacked weights (mem_format_b == 'r') — from GGML unpack or
+    // reorder_direct prepack — are only consumable by aocl_dlp_blocked when
+    // AOCL-DLP is linked in.  Honor this before the explicit reference
+    // fast-path below; otherwise a ZENDNNL_MATMUL_ALGO=reference (or
+    // params.lowoha_algo=reference) run would hit the mem_format_b guard in
+    // matmul_direct and fail.
+    //
+    // When AOCL-DLP is unavailable, keep selecting aocl_dlp_blocked here to
+    // avoid matmul_direct's mem_format_b=='r' guard. In this configuration the
+    // prepack API falls back to a dense row-major buffer, and the compute path
+    // will later fall back to the reference kernel.
+    // CK-VNNI prepack (lowoha_algo == moe_custom_kernel) is still rejected there.
+    if (params.mem_format_b == 'r') {
+        params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+        return matmul_algo_t::aocl_dlp_blocked;
+    }
+
+    const bool force_reference = (kernel == matmul_algo_t::reference);
+
     // In-place weight caching is controlled only by
     // ZENDNNL_MATMUL_WEIGHT_CACHE / matmul_config::weight_cache. Mode 2
     // reuses the user's weight buffer as the reorder destination, so it
@@ -809,6 +828,11 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
             && (params.dtypes.wei == data_type_t::f16)
             && (params.dtypes.dst == data_type_t::f16
                     || params.dtypes.dst == data_type_t::f32);
+
+    if (force_reference) {
+        params.lowoha_algo = matmul_algo_t::reference;
+        return matmul_algo_t::reference;
+    }
 
     // TODO: Fallback to reference/supported kernel
     if (kernel == matmul_algo_t::auto_tuner
@@ -880,8 +904,13 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     // Force aocl_dlp or aocl_dlp_blocked for WOQ (Weight-Only Quantization) cases
     if (is_woq && kernel != matmul_algo_t::aocl_dlp
             && kernel != matmul_algo_t::aocl_dlp_blocked) {
+#if ZENDNNL_DEPENDS_AOCLDLP
         kernel = matmul_algo_t::aocl_dlp_blocked;
-        log_info("WOQ detected, switching to DLP kernel");
+#else
+        kernel = matmul_algo_t::reference;
+#endif
+        log_info("WOQ detected, switching to ", kernel_to_string(kernel),
+                " kernel");
     }
     // W4A8: AOCL DLP only.
     if (is_w4a8 && kernel != matmul_algo_t::aocl_dlp
@@ -983,9 +1012,20 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                     && (kernel == matmul_algo_t::libxsmm
                             || kernel == matmul_algo_t::libxsmm_blocked))
             || (kernel >= matmul_algo_t::algo_count)) {
+#if ZENDNNL_DEPENDS_AOCLDLP
         kernel = matmul_algo_t::aocl_dlp;
+#else
+        kernel = matmul_algo_t::reference;
+#endif
     }
-
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    if (kernel == matmul_algo_t::aocl_dlp
+            || kernel == matmul_algo_t::aocl_dlp_blocked
+            || kernel == matmul_algo_t::batched_sgemm) {
+        kernel = matmul_algo_t::reference;
+        log_info("AOCL-DLP unavailable, falling back to reference kernel");
+    }
+#endif
     params.lowoha_algo = kernel;
 
     // aocl_dlp / aocl_dlp_blocked use native F16 accumulation for F16 GEMM.

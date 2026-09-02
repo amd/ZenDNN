@@ -22,6 +22,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "partitioning/bmm/looper/bmm_looper.hpp"
@@ -95,21 +96,12 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
     }
 
 #if !ZENDNNL_DEPENDS_AOCLDLP
-    // No AOCL-DLP backend in this build. This tail is the universal AOCL
-    // fallback: it is reachable not only when an AOCL kernel is selected, but
-    // also when another backend falls through without computing (e.g. a libxsmm
-    // runtime decline, or onednn selected with oneDNN compiled out). It can also
-    // run inside OpenMP parallel regions (group-matmul / BMM), where letting
-    // run_dlp throw would call std::terminate. Log and return without computing
-    // instead of crashing.
-    log_error("Kernel ", kernel_to_string(kernel),
-            " requires the AOCL-DLP "
-            "fallback, but ZenDNNL was built without AOCL-DLP support "
-            "(ZENDNNL_DEPENDS_AOCLDLP=0); matmul output not computed.");
-    // kernel is a reference: mark the unavailable AOCL-DLP fallback so
-    // matmul_direct()'s post-dispatch guard reports status_t::unimplemented
-    // even when the fell-through kernel name was libxsmm/onednn/etc.
-    kernel = matmul_algo_t::aocl_dlp;
+    log_info("Using reference kernel (AOCL-DLP fallback unavailable, was ",
+            kernel_to_string(kernel), ")");
+    kernel = matmul_algo_t::reference;
+    reference_matmul_execute(layout, transA == 't', transB == 't', M, N, K,
+            alpha, A, lda, B, ldb, bias, beta, C, ldc, is_weights_const,
+            batch_params, lowoha_param);
     return;
 #else
     log_info("Using AOCL DLP kernel");
@@ -171,12 +163,6 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
         execute_partitioned_matmul(layout, trans_input, trans_weight, src,
                 weight, dst, bias, part_config, params, batch_params,
                 is_weights_const, alpha, beta);
-        // execute_partitioned_matmul() may fall back to aocl_dlp (it sets
-        // config.kernel and calls matmul_kernel_wrapper). Propagate the effective
-        // kernel back to the caller's reference so matmul_direct()'s post-dispatch
-        // guard observes an AOCL-DLP fallback: in an AOCL-DLP-disabled build it
-        // then returns status_t::unimplemented instead of reporting success with
-        // an uncomputed dst.
         kernel = part_config.kernel;
         return;
     }
@@ -386,18 +372,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     matmul_algo_t kernel = kernel_select(exec_params, exec_batch_params.Batch_A,
             exec_batch_params.Batch_B, batch_count, M, N, K, num_threads, bias,
             is_weights_const, transB);
-#if !ZENDNNL_DEPENDS_AOCLDLP
-    // AOCL-DLP backed kernels are unavailable in this build. Reject up front
-    // with a clear status instead of falling through to the error-out stub.
-    if (kernel == matmul_algo_t::aocl_dlp
-            || kernel == matmul_algo_t::aocl_dlp_blocked
-            || kernel == matmul_algo_t::batched_sgemm) {
-        log_error("Selected kernel ", kernel_to_string(kernel),
-                " requires AOCL-DLP, but ZenDNNL was built without AOCL-DLP "
-                "support (ZENDNNL_DEPENDS_AOCLDLP=0).");
-        return status_t::unimplemented;
-    }
-#endif
     matmul_algo_t api_log_kernel = kernel;
     static unsigned int auto_version = get_auto_tuner_ver();
 
@@ -405,12 +379,22 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     // Unreorder if onednn/ libxsmm is used
     // Implement the necessary logic for memory reordering here
     // if (params.mem_format_b) {}
+    if (kernel == matmul_algo_t::reference && exec_params.mem_format_b == 'r') {
+        log_error(
+                "Reference kernel does not support AOCL-reordered weights "
+                "(mem_format_b='r')");
+        return status_t::unimplemented;
+    }
 
-    // Dispatch to BMM or Matmul based on batch_count
+    // Dispatch to reference, BMM, or single matmul based on kernel / batch_count
     thread_guard tg(num_threads, omp_mt);
     const int exec_lda = exec_params.dynamic_quant ? reordered_lda : lda;
 
-    if (batch_count > 1) {
+    if (kernel == matmul_algo_t::reference) {
+        reference_matmul_execute(layout, transA, transB, M, N, K, alpha,
+                exec_src, exec_lda, exec_weight, ldb, bias, beta, dst, ldc,
+                is_weights_const, exec_batch_params, exec_params);
+    } else if (batch_count > 1) {
         // Batch Matrix Multiplication (BMM)
         bmm::bmm_execute(layout, transA, transB, M, N, K, alpha, exec_src,
                 exec_lda, exec_weight, ldb, bias, beta, dst, ldc,
@@ -424,22 +408,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 is_weights_const, src_type_size, out_type_size, num_threads,
                 kernel, exec_params, exec_batch_params, auto_version);
     }
-
-#if !ZENDNNL_DEPENDS_AOCLDLP
-    // A native/onednn decline inside matmul_execute can fall back to AOCL-DLP
-    // (kernel is taken by reference and mutated, e.g. for an unsupported dtype
-    // or transA). In an AOCL-DLP-disabled build that fallback cannot compute,
-    // so report the failure to the caller instead of returning success with an
-    // uncomputed output buffer.
-    if (kernel == matmul_algo_t::aocl_dlp
-            || kernel == matmul_algo_t::aocl_dlp_blocked
-            || kernel == matmul_algo_t::batched_sgemm) {
-        log_error("Matmul fell back to AOCL-DLP (", kernel_to_string(kernel),
-                "), unavailable in this build (ZENDNNL_DEPENDS_AOCLDLP=0); "
-                "output not computed.");
-        return status_t::unimplemented;
-    }
-#endif
 
     if (is_profile) { profiler.tbp_stop(); }
 

@@ -468,7 +468,13 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileTotalAttemptedCount) {
                     /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
                     /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
             status_t::success);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.total_attempted, 16);
+#else
+    EXPECT_EQ(st.total_attempted, 4);
+    EXPECT_EQ(st.skipped_invalid, 4);
+    EXPECT_EQ(st.packed_ok, 0);
+#endif
     EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
 }
 
@@ -504,9 +510,14 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantNTileSkipsNonConstExperts) {
                     /*total_count=*/4, /*wei_dtype=*/data_type_t::s8,
                     /*num_threads=*/64, /*stable=*/4, /*nr_align=*/1, st),
             status_t::success);
-    // Experts 1 + 3 (non-const) are skipped at the expert level (1 skip
-    // each); experts 0 + 2 contribute 4 tiles each.
+// Experts 1 + 3 (non-const) are skipped at the expert level (1 skip
+// each); experts 0 + 2 contribute 4 tiles each.
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.skipped_invalid, 2);
+#else
+    EXPECT_EQ(st.skipped_invalid, 4);
+    EXPECT_EQ(st.packed_ok, 0);
+#endif
 }
 
 TEST_F(TestPrepackPerAlgoFunctions, AoclDlpSymQuantFullWeightPacks) {
@@ -549,18 +560,19 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileTotalAttemptedCount) {
                       /*nr_align=*/1, st),
             status_t::success);
 
-    // 4 experts × 4 tiles = 16 attempts, each producing a per-tile
-    // cache key.  packed_ok + skipped_invalid must equal total_attempted.
+// 4 experts × 4 tiles = 16 attempts, each producing a per-tile
+// cache key.  packed_ok + skipped_invalid must equal total_attempted.
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.total_attempted, 16);
     EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
-    // Production-cache gate must be ON for the BF16 reorder primitive
-    // to accept the request; if `ZENDNNL_MATMUL_WEIGHT_CACHE != 1` the
-    // warmer short-circuits with all counters at zero.  In that mode
-    // the assertion below is informational rather than load-bearing.
-    if (st.total_attempted > 0) {
-        EXPECT_GT(st.packed_ok, 0)
-                << "weight-cache type 1 (default) should accept BF16 reorders";
-    }
+    EXPECT_GT(st.packed_ok, 0)
+            << "weight-cache type 1 (default) should accept BF16 reorders";
+#else
+    EXPECT_EQ(st.total_attempted, 4);
+    EXPECT_EQ(st.skipped_invalid, 4);
+    EXPECT_EQ(st.packed_ok, 0);
+    EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
+#endif
 }
 
 TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTilePerExpertNarrowNClamp) {
@@ -583,7 +595,13 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTilePerExpertNarrowNClamp) {
                       /*stable=*/4,
                       /*nr_align=*/16, st),
             status_t::success);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.total_attempted, 12); // 3 × min(4, 64/16) = 3 × 4
+#else
+    EXPECT_EQ(st.total_attempted, 3);
+    EXPECT_EQ(st.skipped_invalid, 3);
+    EXPECT_EQ(st.packed_ok, 0);
+#endif
     EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
 }
 
@@ -645,13 +663,19 @@ TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileSkipsNonConstExperts) {
                       /*nr_align=*/1, st),
             status_t::success);
 
-    // Two valid const experts × 4 tiles = 8 attempts.  The two
-    // non-const experts are counted as `skipped_invalid` (one count
-    // each, NOT four — the warmer skips at expert granularity for the
-    // is_weights_const gate, mirroring `run_dlp`'s coarser gate).
+// Two valid const experts × 4 tiles = 8 attempts.  The two
+// non-const experts are counted as `skipped_invalid` (one count
+// each, NOT four — the warmer skips at expert granularity for the
+// is_weights_const gate, mirroring `run_dlp`'s coarser gate).
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.total_attempted, 8 + 2);
     EXPECT_EQ(st.skipped_invalid, 2);
     EXPECT_EQ(st.packed_ok + (st.skipped_invalid - 2), 8);
+#else
+    EXPECT_EQ(st.total_attempted, 4);
+    EXPECT_EQ(st.skipped_invalid, 4);
+    EXPECT_EQ(st.packed_ok, 0);
+#endif
 }
 
 TEST_F(TestPrepackPerAlgoFunctions, CustomKernelWarmerSkipsNonConstExperts) {
@@ -1516,6 +1540,7 @@ TEST_F(TestPrepackAoclDlpFullWeight, SkipsNonConstExperts) {
     // Two non-const (1, 3) → skipped_invalid = 2.
     // total_attempted counts every iteration regardless of skip path.
     EXPECT_EQ(st.total_attempted, 4);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.packed_ok, 2)
             << "full-weight warmer must skip variable-weight experts to "
                "stay in parity with `run_dlp(...)`'s `is_weights_const` "
@@ -1523,6 +1548,10 @@ TEST_F(TestPrepackAoclDlpFullWeight, SkipsNonConstExperts) {
                "introduces wasted cache entries the dispatcher never "
                "consults, bloating LRU + duplicating reorder cost.";
     EXPECT_EQ(st.skipped_invalid, 2);
+#else
+    EXPECT_EQ(st.packed_ok, 0);
+    EXPECT_EQ(st.skipped_invalid, 4);
+#endif
 }
 
 TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
@@ -1546,8 +1575,13 @@ TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
             status_t::success);
 
     EXPECT_EQ(st.total_attempted, 4);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(st.packed_ok, 4);
     EXPECT_EQ(st.skipped_invalid, 0);
+#else
+    EXPECT_EQ(st.packed_ok, 0);
+    EXPECT_EQ(st.skipped_invalid, 4);
+#endif
 }
 
 // ===============================================================================
@@ -2404,6 +2438,7 @@ protected:
 };
 
 TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
 
@@ -2627,10 +2662,15 @@ TEST_F(TestPrepackCrossWarmRegimes,
             << "grouped-s8 ALGO3 must warm the int8 CK pack (D1 regression "
                "guard: warm_custom family must follow wei=s8, not "
                "dynamic_quant)";
-    // CK-on int8 ALGO3 cross-warms the upcoming ALGO1 prompt sym-quant LRU.
+// CK-on int8 ALGO3 cross-warms the upcoming ALGO1 prompt sym-quant LRU.
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(
                     prepack::CrossWarmRegime::aocl_full_weight_sym_quant));
+#else
+    EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none));
+#endif
 }
 
 TEST_F(TestPrepackCrossWarmRegimes, GroupedS8Algo1CrossWarmsSymQuantPerTile) {
@@ -2665,9 +2705,14 @@ TEST_F(TestPrepackCrossWarmRegimes, GroupedS8Algo1CrossWarmsSymQuantPerTile) {
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 1);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(
                     prepack::CrossWarmRegime::aocl_per_tile_sym_quant));
+#else
+    EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none));
+#endif
     // No CK pack warmed (int8 sub-knob off).
     EXPECT_EQ(stats.ck.cache_misses, 0);
 }
@@ -2696,11 +2741,16 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOnAlgo3SkipsRegime2Warm) {
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 3);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "Fix B: under CK=1 + BF16, the per-tile AOCL DLP warm must "
                "be skipped.  Expected `total_attempted == 4` (cross-warm "
                "regime 1 only).  If `> 4`, the per-tile warm has reappeared "
                "and Fix B has regressed.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0)
+            << "without AOCL-DLP, AOCL warmers are stubbed out";
+#endif
 
     // Sanity: custom-kernel warm did happen (primary regime 3).
     EXPECT_EQ(stats.ck.cache_misses, 4)
@@ -2736,11 +2786,16 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOffAlgo3WarmsRegime2) {
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 3);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4 + 4 * 4)
             << "CK=0: regime 2 (per-tile, N*stable_n_thr = 16) + cross-warm "
                "regime 1 (full-weight, N = 4) = 20.  If different, either "
                "Fix B over-applied (mistakenly fired under CK=0) or the "
                "cross-warm logic has changed.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0)
+            << "without AOCL-DLP, AOCL warmers are stubbed out";
+#endif
 
     // Custom-kernel cache should NOT be touched under CK=0.
     EXPECT_EQ(stats.ck.cache_misses, 0);
@@ -2770,12 +2825,17 @@ TEST_F(TestPrepackCrossWarmRegimes, FixD_CkOnAlgo1CrossWarmsRegime3OnlyAocl) {
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 1);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "CK=1 + ALGO 1: cross-warm picks regime 3, not regime 2 — "
                "aocl.total_attempted should be N (primary regime 1 only).";
     EXPECT_EQ(stats.ck.cache_misses, 4)
             << "CK=1 + ALGO 1: cross-warm should populate regime 3 "
                "(custom-kernel pack) with N entries.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0);
+    EXPECT_EQ(stats.ck.cache_misses, 0);
+#endif
 }
 
 TEST_F(TestPrepackCrossWarmRegimes, FixD_CkOffAlgo1CrossWarmsRegime2) {
@@ -2800,10 +2860,14 @@ TEST_F(TestPrepackCrossWarmRegimes, FixD_CkOffAlgo1CrossWarmsRegime2) {
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 1);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4 + 4 * 4)
             << "CK=0 + ALGO 1: cross-warm should populate regime 2 — "
                "expected N (primary regime 1) + N*stable_n_thr (cross-warm "
                "regime 2) = 4 + 16 = 20.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0);
+#endif
     EXPECT_EQ(stats.ck.cache_misses, 0);
 }
 
@@ -2831,10 +2895,14 @@ TEST_F(TestPrepackCrossWarmRegimes,
     auto stats = prepack::test_api::get_last_invocation_stats();
     EXPECT_TRUE(stats.valid);
     EXPECT_EQ(stats.scheduling_algo, 1);
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "ALGO 1 primary regime-1 warm should run unconditionally on "
                "AOCL DLP path; cross-warm regime 2 should safely skip when "
                "thread context is missing.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0);
+#endif
 }
 
 // ── Cross-warm is AUTO-only ─────────────────────────────────────────
@@ -2873,9 +2941,13 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo1DisablesCrossWarm) {
     EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
             static_cast<int>(prepack::CrossWarmRegime::none))
             << "Pinned ALGO 1: cross-warm is AUTO-only and must short-circuit.";
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "Pinned ALGO 1: only the primary regime-1 full-weight warm "
                "(N=4) runs; no cross-warm regime-2 contribution.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0);
+#endif
     EXPECT_EQ(stats.ck.cache_misses, 0)
             << "Pinned ALGO 1: cross-warm regime 3 (custom-kernel pack) must "
                "NOT fire — that cache belongs to the ALGO 3 decode path the "
@@ -2962,10 +3034,14 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo245DisableCrossWarm) {
                 << "Pinned ALGO " << c.algo
                 << ": cross-warm is AUTO-only and "
                    "must short-circuit (shared prepack_aocl_only_algo path).";
+#if ZENDNNL_DEPENDS_AOCLDLP
         EXPECT_EQ(stats.aocl.total_attempted, 4)
                 << "Pinned ALGO " << c.algo
                 << ": only the primary regime-1 "
                    "full-weight warm (N=4) runs; no cross-warm contribution.";
+#else
+        EXPECT_EQ(stats.aocl.total_attempted, 0);
+#endif
         EXPECT_EQ(stats.ck.cache_misses, 0)
                 << "Pinned ALGO " << c.algo
                 << ": cross-warm regime 3 "
@@ -3006,8 +3082,12 @@ TEST_F(TestPrepackCrossWarmRegimes,
             static_cast<int>(prepack::CrossWarmRegime::none))
             << "Fallback clamp: the gate keys off the ENV pin (3), not the "
                "clamped runtime algo (1); cross-warm must short-circuit.";
+#if ZENDNNL_DEPENDS_AOCLDLP
     EXPECT_EQ(stats.aocl.total_attempted, 4)
             << "Only the primary regime-1 full-weight warm (N=4) runs.";
+#else
+    EXPECT_EQ(stats.aocl.total_attempted, 0);
+#endif
     EXPECT_EQ(stats.ck.cache_misses, 0) << "No CK cross-warm under the pin.";
 }
 

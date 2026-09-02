@@ -24,11 +24,12 @@ include(ZenDnnlDependenciesDefaults OPTIONAL)
 
 # sanity check on dependencies
 # AOCL-DLP is now an optional dependency. When disabled, AOCL-DLP backed
-# kernels are not built and selecting one at runtime returns an error
-# (reference-kernel fallback is planned as a follow-up).
+# kernels are not built; at runtime, AOCL-DLP kernel selection falls back
+# to the reference kernel.
 if(NOT ZENDNNL_DEPENDS_AOCLDLP)
   message(STATUS "${ZENDNNL_MSG_PREFIX}AOCL-DLP dependency disabled; "
-                 "AOCL-DLP kernels will be unavailable at runtime.")
+                 "AOCL-DLP kernel selection will fall back to the reference "
+                 "kernel at runtime.")
 endif()
 
 if(NOT ZENDNNL_DEPENDS_AOCLUTILS)

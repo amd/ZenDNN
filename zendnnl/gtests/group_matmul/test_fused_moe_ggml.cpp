@@ -519,6 +519,7 @@ TEST(FusedMoEGgml, VerticalFusionDenseSwigluBF16) {
 // stable < 2 hosts can't demonstrate a split, so skip.  The fused result is
 // validated against the ALGO-1 two-pass reference inside the scenario.
 TEST(FusedMoEGgml, NtileDenseSiluBF16) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     const int stable = zendnnl::lowoha::matmul::aocl_stable_n_thr(
             zendnnl::lowoha::thread_guard::max_threads(), /*N=*/0);
     if (stable < 2) {
@@ -540,6 +541,7 @@ TEST(FusedMoEGgml, NtileDenseSiluBF16) {
 // prepack + cross-warm wiring on the fused GGML path; the N-tile executor
 // itself is covered by `NtileDenseSiluBF16` above.
 TEST(FusedMoEGgml, AutoCrossWarmDenseSiluBF16) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     const int stable = zendnnl::lowoha::matmul::aocl_stable_n_thr(
             zendnnl::lowoha::thread_guard::max_threads(), /*N=*/0);
     if (stable < 2) {

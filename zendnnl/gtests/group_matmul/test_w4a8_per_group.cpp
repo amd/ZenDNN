@@ -484,13 +484,25 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 per-group call";
-    // The prepack warmer should attempt all 15 experts (total_attempted >= 15),
-    // not just the 6 routed ones.
-    EXPECT_GE(stats.aocl.total_attempted, 15)
-            << "prepack must warm all 15 experts' W4A8 weight cache (not just "
-               "the "
-               "6 routed ones) to eliminate first-fire reorder spikes on "
-               "rotating-experts MoE patterns";
+    if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
+        // The prepack warmer should attempt all 15 experts (total_attempted >= 15),
+        // not just the 6 routed ones.
+        EXPECT_GE(stats.aocl.total_attempted, 15)
+                << "prepack must warm all 15 experts' W4A8 weight cache (not "
+                   "just "
+                   "the "
+                   "6 routed ones) to eliminate first-fire reorder spikes on "
+                   "rotating-experts MoE patterns";
+        EXPECT_GT(stats.aocl.total_attempted - stats.aocl.skipped_invalid, 0)
+                << "with AOCL-DLP, at least one expert W4A8 cache entry must "
+                   "be warmed";
+    } else {
+        // Without AOCL-DLP the inner kernel resolves to reference, so prepack
+        // skips AOCL W4A8 warm (no cache to populate).  Correctness is
+        // validated above by run_w4a8_per_group_scenario.
+        EXPECT_EQ(stats.aocl.total_attempted, 0)
+                << "without AOCL-DLP no AOCL W4A8 cache warm is attempted";
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

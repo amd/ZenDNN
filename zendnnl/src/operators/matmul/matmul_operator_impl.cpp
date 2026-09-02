@@ -673,26 +673,29 @@ status_t matmul_impl_t::validate_forced_kernel() {
     return status_t::success;
 }
 
+#if !ZENDNNL_DEPENDS_AOCLDLP
+status_t matmul_impl_t::fallback_aocl_dlp_to_reference() {
+    auto weight_tensor = context.get_param("weights");
+    if (weight_tensor
+            && (weight_tensor->get_layout() & uint16_t(tensor_layout_t::blocked)
+                    || weight_tensor->get_layout()
+                            & uint16_t(tensor_layout_t::blocked_aocl))) {
+        apilog_error("<", get_name(),
+                "> AOCL-DLP unavailable and weights are prepacked/blocked; "
+                "reference kernel cannot consume this layout.");
+        return status_t::unimplemented;
+    }
+    apilog_info("AOCL-DLP unavailable, falling back to reference kernel");
+    forced_kernel = "reference";
+    return status_t::success;
+}
+#endif
+
 status_t matmul_impl_t::preprocess() {
     if (forced_kernel.empty() || forced_kernel == "aocl_dlp"
             || forced_kernel == "aocl_dlp_blocked") {
 #if !ZENDNNL_DEPENDS_AOCLDLP
-        // Mirror op_execute_info()'s empty-kernel default: blocked-layout weights
-        // imply aocl_dlp_blocked, otherwise aocl_dlp.
-        std::string selected_kernel = forced_kernel;
-        if (selected_kernel.empty()) {
-            auto weights = context.get_param("weights");
-            selected_kernel
-                    = (weights
-                              && (weights->get_layout()
-                                      & uint16_t(tensor_layout_t::blocked)))
-                    ? "aocl_dlp_blocked"
-                    : "aocl_dlp";
-        }
-        apilog_error("<", get_name(), "> AOCL-DLP kernel '", selected_kernel,
-                "' selected but ZenDNNL was built without AOCL-DLP support "
-                "(ZENDNNL_DEPENDS_AOCLDLP=0).");
-        return status_t::unimplemented;
+        return fallback_aocl_dlp_to_reference();
 #else
         auto weight_tensor = context.get_param("weights");
         LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
@@ -798,22 +801,9 @@ status_t matmul_impl_t::kernel_factory() {
     if (forced_kernel.empty() || forced_kernel == "aocl_dlp_blocked"
             || forced_kernel == "aocl_dlp") {
 #if !ZENDNNL_DEPENDS_AOCLDLP
-        // Mirror op_execute_info()'s empty-kernel default: blocked-layout weights
-        // imply aocl_dlp_blocked, otherwise aocl_dlp.
-        std::string selected_kernel = forced_kernel;
-        if (selected_kernel.empty()) {
-            auto weights = context.get_param("weights");
-            selected_kernel
-                    = (weights
-                              && (weights->get_layout()
-                                      & uint16_t(tensor_layout_t::blocked)))
-                    ? "aocl_dlp_blocked"
-                    : "aocl_dlp";
-        }
-        apilog_error("<", obj_name, "> AOCL-DLP kernel '", selected_kernel,
-                "' selected but ZenDNNL was built without AOCL-DLP support "
-                "(ZENDNNL_DEPENDS_AOCLDLP=0).");
-        return status_t::unimplemented;
+        status_t fallback_status = fallback_aocl_dlp_to_reference();
+        if (fallback_status != status_t::success) { return fallback_status; }
+        kernel = std::shared_ptr<matmul_ref_kernel_t>(get_matmul_ref_kernel());
 #else
         auto weight_tensor = context.get_param("weights").value();
         auto weight_dtype = context.get_param("weights")->get_data_type();

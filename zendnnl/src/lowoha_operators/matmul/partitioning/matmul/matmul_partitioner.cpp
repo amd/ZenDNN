@@ -26,6 +26,7 @@
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_utils.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
@@ -120,6 +121,14 @@ static bool is_strided_gemm_layout(const matmul_partition_config_t &config) {
             || config.ldc != config.N;
 }
 
+static matmul_algo_t libxsmm_partition_fallback() {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    return matmul_algo_t::aocl_dlp;
+#else
+    return matmul_algo_t::reference;
+#endif
+}
+
 static matmul_algo_t select_partition_kernel(const char trans_input,
         const char trans_weight, float alpha, float beta,
         const matmul_partition_config_t &config, const matmul_params &params,
@@ -131,10 +140,12 @@ static matmul_algo_t select_partition_kernel(const char trans_input,
     }
 
     if (is_strided_gemm_layout(config)) {
+        const matmul_algo_t fallback = libxsmm_partition_fallback();
         apilog_info(
                 "LibXSMM partitioned kernel does not support strided layouts, "
-                "falling back to DLP");
-        return matmul_algo_t::aocl_dlp;
+                "falling back to ",
+                kernel_to_string(fallback));
+        return fallback;
     }
 
     // LibXSMM matmul path (libxsmm / libxsmm_blocked) is currently supported
@@ -144,18 +155,22 @@ static matmul_algo_t select_partition_kernel(const char trans_input,
     if (config.dtypes.src != data_type_t::bf16
             || config.dtypes.wei != data_type_t::bf16
             || config.dtypes.dst != data_type_t::bf16) {
+        const matmul_algo_t fallback = libxsmm_partition_fallback();
         apilog_info(
                 "LibXSMM kernel is only supported for BF16_BF16 combination, "
-                "falling back to DLP");
-        return matmul_algo_t::aocl_dlp;
+                "falling back to ",
+                kernel_to_string(fallback));
+        return fallback;
     }
 
     if (!can_use_libxsmm(trans_input, trans_weight, config.M, config.N,
                 config.K, alpha, beta, params, false)) {
+        const matmul_algo_t fallback = libxsmm_partition_fallback();
         apilog_info(
                 "LibXSMM kernel cannot be used for current configuration, "
-                "falling back to DLP");
-        return matmul_algo_t::aocl_dlp;
+                "falling back to ",
+                kernel_to_string(fallback));
+        return fallback;
     }
     if (kernel == matmul_algo_t::libxsmm_blocked && !is_weights_const) {
         apilog_info(
@@ -605,6 +620,24 @@ void execute_partitioned_matmul(const char layout, const char trans_input,
                 config.K, alpha, src, config.lda, weight, config.ldb, beta, dst,
                 config.ldc, params, batch_params, bias, config.kernel,
                 is_weights_const);
+        return;
+    }
+#endif
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    if (config.kernel == matmul_algo_t::reference
+            || config.kernel == matmul_algo_t::aocl_dlp
+            || config.kernel == matmul_algo_t::aocl_dlp_blocked
+            || config.kernel == matmul_algo_t::batched_sgemm) {
+        config.kernel = matmul_algo_t::reference;
+        apilog_info(
+                "Given combination is not supported for matmul parallel "
+                "primitive, executing matmul LOWOHA kernel with reference "
+                "fallback, algo: ",
+                static_cast<int>(config.kernel));
+        reference_matmul_execute(layout, trans_input == 't',
+                trans_weight == 't', config.M, config.N, config.K, alpha, src,
+                config.lda, weight, config.ldb, bias, beta, dst, config.ldc,
+                is_weights_const, batch_params, params);
         return;
     }
 #endif

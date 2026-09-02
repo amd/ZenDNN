@@ -18,6 +18,7 @@
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {
@@ -40,7 +41,8 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
     matmul_algo_t tile_kernel = ctx.kernel;
 
 #if ZENDNNL_DEPENDS_LIBXSMM
-    if (tile_kernel == matmul_algo_t::libxsmm) {
+    if (tile_kernel == matmul_algo_t::libxsmm
+            || tile_kernel == matmul_algo_t::libxsmm_blocked) {
         log_info("Using libxsmm kernel");
         if (run_libxsmm_std(ctx.trans_input, ctx.trans_weight, m_len, ctx.N,
                     ctx.K, ctx.beta, ctx.lda, ctx.ldb, ctx.ldc, A, weight_ptr,
@@ -60,19 +62,14 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
     }
 #endif
 #if !ZENDNNL_DEPENDS_AOCLDLP
-    // No AOCL-DLP backend in this build. BMM tiles execute inside OpenMP
-    // parallel regions, so letting run_dlp throw would call std::terminate.
-    // Log and return without computing instead of crashing.
-    log_error(
-            "AOCL-DLP kernel required but ZenDNNL was built without AOCL-DLP "
-            "support (ZENDNNL_DEPENDS_AOCLDLP=0); BMM tile output not "
-            "computed.");
-    // Signal the looper that a tile could not compute (e.g. a runtime libxsmm
-    // decline fell through to the unavailable AOCL fallback) so it can surface
-    // the failure to matmul_direct() instead of returning success uncomputed.
-    if (ctx.aocl_unavailable != nullptr) {
-        ctx.aocl_unavailable->store(true, std::memory_order_relaxed);
-    }
+    log_info("Using reference kernel");
+    // src_ptr/weight_ptr/dst_ptr are already batch-scoped; A/C are further
+    // M-tiled. reference_matmul_execute must not re-walk all batches.
+    matmul_batch_params_t tile_batch_params;
+    reference_matmul_execute(ctx.layout, ctx.transA, ctx.trans_weight == 't',
+            m_len, ctx.N, ctx.K, ctx.alpha, A, ctx.lda, weight_ptr, ctx.ldb,
+            ctx.bias, ctx.beta, C, ctx.ldc, ctx.is_weights_const,
+            tile_batch_params, tile_params);
     return;
 #else
     log_info("Using AOCL DLP kernel");
@@ -81,6 +78,7 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
             tile_params.mem_format_a, tile_params.mem_format_b, A, weight_ptr,
             C, tile_params.dtypes, tile_params, ctx.bias, tile_kernel,
             ctx.is_weights_const);
+    return;
 #endif
 }
 

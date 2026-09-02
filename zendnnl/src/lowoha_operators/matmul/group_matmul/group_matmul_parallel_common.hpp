@@ -1430,14 +1430,29 @@ inline size_t get_grp_l3_total_bytes(int num_ccds) {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Resolves the effective matmul algo ID from the runtime config,
-/// falling back to AOCL DLP blocked when the config is unset/invalid.
+/// falling back to AOCL DLP blocked (or reference when AOCL is absent)
+/// when the config is unset/invalid.
 inline matmul_algo_t resolve_kernel() {
     static const matmul_algo_t algo = []() {
         int32_t a = matmul_config_t::instance().get_algo();
+        matmul_algo_t kernel;
         if (a <= 0 || a >= static_cast<int32_t>(matmul_algo_t::algo_count)) {
-            return matmul_algo_t::aocl_dlp_blocked;
+#if ZENDNNL_DEPENDS_AOCLDLP
+            kernel = matmul_algo_t::aocl_dlp_blocked;
+#else
+            kernel = matmul_algo_t::reference;
+#endif
+        } else {
+            kernel = static_cast<matmul_algo_t>(a);
         }
-        return static_cast<matmul_algo_t>(a);
+#if !ZENDNNL_DEPENDS_AOCLDLP
+        if (kernel == matmul_algo_t::aocl_dlp
+                || kernel == matmul_algo_t::aocl_dlp_blocked
+                || kernel == matmul_algo_t::batched_sgemm) {
+            kernel = matmul_algo_t::reference;
+        }
+#endif
+        return kernel;
     }();
     return algo;
 }

@@ -128,6 +128,7 @@ void sequential_experts(const std::vector<char> &layout,
                     fused_act, dst[i], 0, M[i], N[i], ldc[i], act_dtype);
         }
     }
+    return;
 }
 
 // ── ALGO=4: multilevel — CCD-aware adaptive scheduling ──────────────────
@@ -268,6 +269,7 @@ void parallel_multilevel(const std::vector<char> &layout,
             }
         }
     }
+    return;
 }
 
 // ── ALGO=5: per_expert ─────────────────────────────────────────────────
@@ -329,6 +331,7 @@ void parallel_per_expert(const std::vector<char> &layout,
                     fused_act, dst[i], 0, M[i], N[i], ldc[i], act_dtype);
         }
     }
+    return;
 }
 
 // M-tile (ALGO 2) safety predicate hoisted to
@@ -586,8 +589,16 @@ static bool check_n_tile_extra(const std::vector<int> &M,
             // u4 remains rejected (no symmetric W4A8 support).
             if (params[i].dtypes.wei == data_type_t::u4) { return false; }
             if (is_w4a8_config(params[i])) {
-                // ALGO 3 needs raw packed s4 (mem_format_b='n'); native prepack is full-N only.
+#if !ZENDNNL_DEPENDS_AOCLDLP
+                // W4A8 N-tile needs AOCL-DLP (s4→s8 plain cache, per-tile
+                // sym-quant reorder, broadcast_w4a8_src_scale).  Without AOCL
+                // the ALGO-1 path falls through to the reference W4A8 kernel.
+                return false;
+#else
+                // N-tile-specific extra gates beyond is_w4a8_config:
+                // plain row-major weight required for column slicing.
                 if (params[i].mem_format_b != 'n') { return false; }
+#endif
                 const bool w4a8_src_ok
                         = is_per_token_dyn_src(qp.src_scale, M[i])
                         || is_per_group_src(qp.src_scale, M[i]);
@@ -1245,6 +1256,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             //        * PREPACK on   — cross-warm runs upfront (before compute);
             //        * CROSS_WARM on — both phases' layouts are warmed on the
             //          first call;
+            //        * AOCL-DLP compiled in — mixed mode's in-place prompt
+            //          reorder and cross-warm both route through the AOCL DLP
+            //          inner kernel (`aocl_dlp_blocked`); without it the warmers
+            //          stub out and cross-warm is a no-op, so mixed-in-place is
+            //          disabled at dispatch rather than enabled-then-failed in
+            //          prepack;
             //        * CUSTOM_KERNEL on — decode runs through the CK pack, which
             //          cross-warm fully pre-warms (regime 3) from raw W.  With CK
             //          OFF, decode falls to the AOCL per-tile path whose tight
@@ -1276,8 +1293,13 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             // Both writes are IDEMPOTENT (every AUTO call re-derives the same
             // deterministic verdict from process-constant env, so concurrent
             // cold-start calls converge); only the log lines are one-shot.
-            const bool mixed_eligible = get_grp_matmul_prepack()
-                    && get_grp_matmul_cross_warm()
+#if ZENDNNL_DEPENDS_AOCLDLP
+            const bool aocl_dlp_compiled = true;
+#else
+            const bool aocl_dlp_compiled = false;
+#endif
+            const bool mixed_eligible = aocl_dlp_compiled
+                    && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
                     && get_grp_matmul_custom_kernel()
                     && get_grp_matmul_fused_moe_tight() != 0
                     && matmul_config_t::instance().get_lru_cache_capacity()
@@ -1317,6 +1339,18 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 static std::atomic<bool> s_wc2_downgrade_warned {false};
                 if (!s_wc2_downgrade_warned.exchange(
                             true, std::memory_order_relaxed)) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+                    apilog_warning(
+                            "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
+                            "(in-place) "
+                            "requires AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=OFF): "
+                            "mixed-in-place "
+                            "is unavailable.  Downgrading process-wide to "
+                            "out-of-place "
+                            "(weight_cache_type=1) for the rest of the run; "
+                            "kernel selection "
+                            "unchanged.");
+#else
                     apilog_warning(
                             "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
                             "(in-place) is "
@@ -1327,6 +1361,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                             "process-wide to out-of-place "
                             "(weight_cache_type=1) for the "
                             "rest of the run; kernel selection unchanged.");
+#endif
                 }
             }
         } else {
