@@ -74,22 +74,18 @@ status_t validate_w4a8_inputs(
     // GGML packed weights (pack_format_b == 1) are exempt from the native W4A8
     // contract: a GGML Q4_0 weight arrives as s4 with a pre-quantized s8 source
     // and carries its scales inside the packed blob, so the checks below (which
-    // require bf16 src + an explicit {G,N} wei_scale) do not apply.  Such a
-    // weight is validated by validate_ggml_packed_inputs and unpacked/widened to
-    // s8 before the sym-quant reorder.
+    // require an explicit {G,N} wei_scale) do not apply.  Such a weight is
+    // validated by validate_ggml_packed_inputs and unpacked/widened to s8
+    // before the sym-quant reorder.
     if (params.packing.pack_format_b == 1) { return status_t::success; }
-    if (params.dtypes.wei == data_type_t::s4
-            && params.dtypes.src == data_type_t::s8) {
-        log_error(
-                "W4A8 requires bf16 source with dynamic_quant=true "
-                "(pre-quantized s8 source is not supported)");
-        return status_t::failure;
-    }
 
     if (params.dtypes.wei == data_type_t::s4 && params.dynamic_quant
             && (params.dtypes.src == data_type_t::f32
                     || params.dtypes.dst == data_type_t::f32)) {
-        log_error("W4A8 supports bf16 source and bf16 output only");
+        log_error(
+                "W4A8 does not support f32 source or destination; use bf16 "
+                "src with dynamic_quant=true or pre-quantized s8 src with "
+                "dynamic_quant=false");
         return status_t::failure;
     }
 
@@ -97,24 +93,37 @@ status_t validate_w4a8_inputs(
             && params.dtypes.src == data_type_t::u8
             && (params.quant_params.src_scale.buff || params.dynamic_quant)) {
         log_error(
-                "S4 weights do not support u8 source; W4A8 requires bf16 "
-                "source with dynamic_quant=true");
+                "S4 weights do not support u8 source; W4A8 accepts bf16 src "
+                "with dynamic_quant=true or pre-quantized s8 src with "
+                "dynamic_quant=false");
         return status_t::failure;
     }
 
-    const bool w4a8_entry = params.dynamic_quant
+    const bool w4a8_dynamic_entry = params.dynamic_quant
             && params.dtypes.wei == data_type_t::s4
             && params.dtypes.src == data_type_t::bf16;
 
-    if (w4a8_entry && params.dtypes.compute != data_type_t::s8) {
-        log_error("W4A8 dynamic quantization requires s8 compute");
+    const bool w4a8_static_entry = !params.dynamic_quant
+            && params.dtypes.wei == data_type_t::s4
+            && params.dtypes.src == data_type_t::s8;
+
+    if (params.dtypes.wei == data_type_t::s4
+            && params.dtypes.src == data_type_t::s8 && params.dynamic_quant) {
+        log_error(
+                "W4A8 with pre-quantized s8 source requires "
+                "dynamic_quant=false");
         return status_t::failure;
     }
 
-    if (!w4a8_entry) { return status_t::success; }
+    if (!w4a8_dynamic_entry && !w4a8_static_entry) { return status_t::success; }
+
+    if (params.dtypes.compute != data_type_t::s8) {
+        log_error("W4A8 requires s8 compute dtype");
+        return status_t::failure;
+    }
 
     if (params.dtypes.dst != data_type_t::bf16) {
-        log_error("W4A8 dynamic quantization requires bf16 output");
+        log_error("W4A8 requires bf16 output");
         return status_t::failure;
     }
 
@@ -160,6 +169,10 @@ status_t validate_w4a8_inputs(
     }
 
     const auto &src_scale = params.quant_params.src_scale;
+    if (w4a8_static_entry && !src_scale.buff) {
+        log_error("W4A8 static path requires quant_params.src_scale.buff");
+        return status_t::failure;
+    }
     if (src_scale.dt != data_type_t::f32 && src_scale.dt != data_type_t::bf16) {
         log_error("W4A8 source scale supports only f32 or bf16 data type");
         return status_t::failure;
@@ -245,7 +258,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
             && !is_int8 && !is_w4a8) {
         log_error(
                 "Source/destination quantization params are only supported for "
-                "INT8 (u8/s8 src + s8 weights) or W4A8 (bf16 src + s4 wei)");
+                "INT8 (u8/s8 src + s8 weights) or W4A8 (s8/bf16 src + s4 wei)");
         return status_t::failure;
     }
 
@@ -372,7 +385,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
             && !is_woq && !is_int8 && !is_w4a8) {
         log_error(
                 "Weight quantization params are only supported for WOQ (BF16 "
-                "src + S4 weights), INT8, or W4A8 (bf16 src + s4 wei)");
+                "src + S4 weights), INT8, or W4A8 (s8/bf16 src + s4 wei)");
         return status_t::failure;
     }
     if (params.dtypes.wei == data_type_t::u4) {

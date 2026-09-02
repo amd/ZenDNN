@@ -232,9 +232,9 @@ inline bool has_quant_scale_metadata(
 }
 
 /**
- * @brief W4A8: dynamic_quant s4 weights, bf16 output, s8 compute, symmetric.
- *        Entry bf16 src requires scale descriptors; runtime s8 src requires
- *        populated source and weight scale metadata.
+ * @brief W4A8: s4 weights, bf16 output, s8 compute, symmetric.
+ *        Dynamic entry: bf16 src + dynamic_quant. Static entry: pre-quantized
+ *        s8 src with populated src/wei scale buffers (dynamic_quant=false).
  */
 inline bool is_w4a8_config(const matmul_params &params) {
     if (params.dtypes.wei != data_type_t::s4) { return false; }

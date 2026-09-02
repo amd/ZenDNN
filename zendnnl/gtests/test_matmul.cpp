@@ -363,6 +363,155 @@ TEST_P(TestMatmul, W4A8_BF16) {
     EXPECT_TRUE(ok);
 }
 
+/** @brief W4A8 static: pre-quantized s8 src + s4 wei vs WOQ bf16 reference.
+ *
+ *  quant_params_compute writes per-group src scales in physical {G,M} order
+ *  when the bf16 source is transposed. matmul_direct consumes logical {M,G},
+ *  matching the dynamic W4A8 untranspose in reorder_quantization_wrapper.
+ */
+static void untranspose_logical_mg_src_scale(
+        tensor_t &scale, int64_t M_dim, int64_t G_dim) {
+    if (M_dim <= 1 || G_dim <= 1) { return; }
+    const size_t nelems
+            = static_cast<size_t>(M_dim) * static_cast<size_t>(G_dim);
+    const size_t elem_size = zendnnl::common::size_of(scale.get_data_type());
+    uint8_t *buf = static_cast<uint8_t *>(scale.get_raw_handle_unsafe());
+    if (!buf) { return; }
+    std::vector<uint8_t> tmp(nelems * elem_size);
+    std::memcpy(tmp.data(), buf, nelems * elem_size);
+    for (int64_t row = 0; row < M_dim; ++row) {
+        for (int64_t col = 0; col < G_dim; ++col) {
+            std::memcpy(
+                    buf + static_cast<size_t>(row * G_dim + col) * elem_size,
+                    tmp.data()
+                            + static_cast<size_t>(col * M_dim + row)
+                                    * elem_size,
+                    elem_size);
+        }
+    }
+}
+
+TEST_P(TestMatmul, W4A8_STATIC_S8) {
+    if (!use_LOWOHA) {
+        GTEST_SKIP() << "W4A8 lives in run_dlp(), reachable only via "
+                        "the LOWOHA path.";
+    }
+    if (algo == matmul_algo_t::onednn
+            || algo == matmul_algo_t::onednn_blocked) {
+        GTEST_SKIP();
+    }
+
+    uint64_t sym_k = (k / 4) * 4;
+    if (sym_k == 0) { sym_k = 4; }
+
+    std::mt19937 local_rng(m ^ k ^ n ^ 0x5A71);
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+        if (sym_k % gs == 0) { valid_gs.push_back(gs); }
+    }
+    if (valid_gs.empty()) {
+        GTEST_SKIP() << "No valid W4A8 group_size for K=" << sym_k;
+    }
+    uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+    uint64_t num_groups = sym_k / group_size;
+
+    std::vector<uint64_t> src_scale_size;
+    std::vector<uint64_t> wei_scale_size = {num_groups, n};
+    // transA + per-group {M,G} is the layout that must stay logical for GEMM.
+    if (transA || local_rng() % 2 != 0) {
+        src_scale_size = {m, num_groups};
+    } else {
+        src_scale_size = {m, 1};
+    }
+
+    neutralize_mish_quant_int8(po_types);
+
+    data_type_t ref_dt = data_type_t::bf16;
+    data_type_t scale_dt
+            = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+
+    auto wei_scale
+            = tensor_factory.uniform_dist_tensor(wei_scale_size, scale_dt, 2.0);
+    auto weight_tensor = tensor_factory.uniform_dist_tensor(
+            {sym_k, n}, data_type_t::s4, 7.0, transB, wei_scale);
+
+    auto src_scale = tensor_factory.zero_tensor(src_scale_size, scale_dt);
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {m, sym_k}, ref_dt, 2.0, transA, src_scale, tensor_t());
+
+    tensor_t input_tensor;
+    std::vector<int64_t> src_sd(src_scale_size.begin(), src_scale_size.end());
+    tensor_t src_zp;
+    if (quant_params_compute(tensor_factory, src_ref, ref_dt, data_type_t::s8,
+                src_sd, scale_dt, src_scale, src_zp, &input_tensor)
+            != status_t::success) {
+        FAIL() << "static W4A8 source quantization failed";
+    }
+    if (transA && src_scale_size.size() == 2 && src_scale_size[1] > 1) {
+        untranspose_logical_mg_src_scale(src_scale,
+                static_cast<int64_t>(src_scale_size[0]),
+                static_cast<int64_t>(src_scale_size[1]));
+    }
+
+    auto bias_tensor = tensor_factory.uniform_dist_tensor({1, n},
+            rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+    auto binary_tensor_shape_2d = {m, n};
+    auto binary_tensor_shape_broadcast = {uint64_t {1}, n};
+    auto binary_tensor_shape = (rand() % 2 == 0) ? binary_tensor_shape_broadcast
+                                                 : binary_tensor_shape_2d;
+    auto binary_tensors = make_binary_postop_tensors(
+            tensor_factory, po_types, binary_tensor_shape);
+
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+
+    status_t status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
+            algo, 1.0f, 0.0f);
+
+    status_t ref_status = matmul_forced_ref_kernel_test(src_ref, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0f, 0.0f);
+
+    EXPECT_EQ(status, status_t::success)
+            << "W4A8 static: kernel path (s8 src + s4 wei) failed";
+    EXPECT_EQ(ref_status, status_t::success)
+            << "W4A8 static: WOQ bf16 reference path failed";
+
+    bool ok = (status == status_t::success && ref_status == status_t::success);
+    if (ok) {
+        compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                rtol_bf16, 128 * epsilon_bf16, ok,
+                /*enable_f32_relaxation=*/false, /*alpha=*/1.0f,
+                /*is_quant=*/true);
+    }
+    EXPECT_TRUE(ok);
+
+    matmul_params dq_reject;
+    dq_reject.dtypes.src = data_type_t::s8;
+    dq_reject.dtypes.wei = data_type_t::s4;
+    dq_reject.dtypes.dst = data_type_t::bf16;
+    dq_reject.dtypes.compute = data_type_t::s8;
+    dq_reject.dynamic_quant = true;
+    dq_reject.quant_params.src_scale.buff = src_scale.get_raw_handle_unsafe();
+    dq_reject.quant_params.src_scale.dt = scale_dt;
+    dq_reject.quant_params.src_scale.dims = src_sd;
+    dq_reject.quant_params.wei_scale.buff = wei_scale.get_raw_handle_unsafe();
+    dq_reject.quant_params.wei_scale.dt = scale_dt;
+    dq_reject.quant_params.wei_scale.dims.assign(
+            wei_scale_size.begin(), wei_scale_size.end());
+    EXPECT_EQ(
+            validate_matmul_direct_inputs(input_tensor.get_raw_handle_unsafe(),
+                    weight_tensor.get_raw_handle_unsafe(),
+                    output_tensor.get_raw_handle_unsafe(), static_cast<int>(m),
+                    static_cast<int>(n), static_cast<int>(sym_k), 1, 1,
+                    dq_reject,
+                    /*is_weights_const=*/true),
+            status_t::failure);
+}
+
 /** @fn TEST_P
  *  @param TestMatmul parameterized test class to initialize Matmul parameters
  *  @param WOQ_BF16_U4 user-defined name of test according to test

@@ -2929,10 +2929,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                     return status_t::failure;
                 }
 
-                // W4A8: dynamic bf16 src + s4 wei; wire scales like INT8 (not WOQ).
-                bool is_w4a8 = wei_data_type == data_type_t::s4
+                // W4A8 dynamic: bf16 src + s4 wei. Static: pre-quantized s8 src.
+                const bool is_w4a8_dynamic = wei_data_type == data_type_t::s4
                         && src_data_type == data_type_t::bf16
                         && input_tensor.is_quantized();
+                const bool is_w4a8_static = wei_data_type == data_type_t::s4
+                        && src_data_type == data_type_t::s8
+                        && input_tensor.is_quantized()
+                        && weight_tensor.is_quantized();
+                const bool is_w4a8 = is_w4a8_dynamic || is_w4a8_static;
 
                 // bf16 + src_scale is W4A8 dynamic quant, not WOQ.
                 bool is_woq = !is_w4a8
@@ -3143,10 +3148,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                     params.dynamic_quant = true;
                     params.dtypes.compute = data_type_t::s8;
                 }
-                if (is_w4a8 && src_data_type == data_type_t::bf16
-                        && input_tensor.is_quantized()) {
-                    params.dynamic_quant = true;
+                if (is_w4a8) {
                     params.dtypes.compute = data_type_t::s8;
+                    if (is_w4a8_dynamic) { params.dynamic_quant = true; }
                 }
 
                 // Create batch_params structure

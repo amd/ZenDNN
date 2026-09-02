@@ -71,7 +71,7 @@ Test tensors are initialized with uniformly distributed random values. The distr
 | **F16** | `[-2.0, 2.0]` | Half-precision (IEEE 754) tests |
 | **S8** (INT8 weights) | `[-25.0, 25.0]` | Signed 8-bit integer quantized weights |
 | **U8** (INT8 source) | `[0, 25.0]` | Unsigned 8-bit integer quantized input |
-| **S4** (WOQ weights) | `[-8, 7]` | 4-bit signed integer for weight-only quantization |
+| **S4** (WOQ / W4A8 weights) | `[-8, 7]` | 4-bit signed integer for WOQ and W4A8 weights |
 
 ### **Other Tensors**
 
@@ -172,7 +172,7 @@ The `zendnnl/gtests/` directory contains all test-related files and subdirectori
 ```plaintext
 gtests/
 ├── gtest_main.cpp           # Entry point for all tests.
-├── test_matmul.cpp          # Single-op matmul testsuite (F32, BF16, INT8, WOQ, stride).
+├── test_matmul.cpp          # Single-op matmul testsuite (F32, BF16, INT8, WOQ, W4A8, stride).
 ├── test_batchmatmul.cpp     # Batch matmul testsuite with different test cases.
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
@@ -686,9 +686,11 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
 ```
 
 ### Matmul Tests
- - Matmul TestSuite has nine testcases (F32_F32, BF16_F32, BF16_BF16, F16_F16, F16_F32, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride, F16_F16_Stride)
+ - Matmul TestSuite includes F32/BF16/F16 (including stride), WOQ (`WOQ_BF16_S4`, `WOQ_BF16_U4`), INT8, and W4A8 (`W4A8_BF16` dynamic, `W4A8_STATIC_S8` pre-quantized s8).
 
 > **Note:** F16 tests (F16_F16, F16_F32, F16_F16_Stride) require **AVX512-FP16** support. On unsupported platforms, these tests are automatically skipped via `GTEST_SKIP()` with an informative message.
+
+> **Note:** W4A8 tests run on the LOWOHA + AOCL DLP path only. OneDNN backends are skipped. Dynamic `W4A8_BF16` uses bf16 src + `dynamic_quant=true`. Static `W4A8_STATIC_S8` uses pre-quantized s8 src + s4 wei (`dynamic_quant=false`), untransposes per-group `{M,G}` src scales when `transA` is set, and checks that s8 + `dynamic_quant=true` is rejected.
 
 1. Run all BF16 Input, F32 Output matmul tests:
 ``` bash
@@ -717,6 +719,14 @@ Passing `--lowoha false` no longer enables the regular reorder + matmul path; it
 7. Run F16_F16_Stride matmul tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F16_F16_Stride/*
+```
+8. Run W4A8 dynamic (bf16 src + s4 wei) tests with AOCL DLP:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.W4A8_BF16/* --backend aocl_dlp --lowoha true
+```
+9. Run W4A8 static (pre-quantized s8 src + s4 wei) tests with AOCL DLP:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.W4A8_STATIC_S8/* --backend aocl_dlp --lowoha true
 ```
 
 ### Embedding Bag Tests
