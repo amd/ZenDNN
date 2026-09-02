@@ -4462,7 +4462,7 @@ static void *safe_raw_ptr(tensor_t &t) {
 status_t normalization_kernel_test(tensor_t &input_tensor,
         tensor_t &output_tensor, tensor_t &gamma_tensor, tensor_t &beta_tensor,
         tensor_t &running_mean_tensor, tensor_t &running_var_tensor,
-        tensor_t &residual_tensor, norm_params &params) {
+        tensor_t &residual_tensor, norm_params &params, norm_algo_t algo) {
     try {
         void *input_ptr = safe_raw_ptr(input_tensor);
         void *output_ptr = safe_raw_ptr(output_tensor);
@@ -4471,6 +4471,14 @@ status_t normalization_kernel_test(tensor_t &input_tensor,
         void *mean_ptr = safe_raw_ptr(running_mean_tensor);
         void *var_ptr = safe_raw_ptr(running_var_tensor);
         void *residual_ptr = safe_raw_ptr(residual_tensor);
+
+        // Select the LOWOHA algorithm and run through the production dispatch.
+        // norm_algo_t::none uses the default AVX-512 / FP16 dispatch;
+        // norm_algo_t::reference routes to normalization_reference_wrapper (scalar
+        // reference). For the reference path, accum_type (recorded by the
+        // preceding native run on the same params) is left untouched so the
+        // reference bit-matches.
+        params.algorithm = algo;
 
         status_t status = normalization_direct(input_ptr, output_ptr, gamma_ptr,
                 beta_ptr, mean_ptr, var_ptr, residual_ptr, params);
@@ -4486,39 +4494,6 @@ status_t normalization_kernel_test(tensor_t &input_tensor,
         return status_t::failure;
     } catch (const std::exception &e) {
         log_error("normalization_kernel_test std::exception: ", e.what());
-        return status_t::failure;
-    }
-}
-
-status_t normalization_forced_ref_kernel_test(tensor_t &input_tensor,
-        tensor_t &output_tensor, tensor_t &gamma_tensor, tensor_t &beta_tensor,
-        tensor_t &running_mean_tensor, tensor_t &running_var_tensor,
-        tensor_t &residual_tensor, norm_params &params) {
-    try {
-        void *input_ptr = safe_raw_ptr(input_tensor);
-        void *output_ptr = safe_raw_ptr(output_tensor);
-        void *gamma_ptr = safe_raw_ptr(gamma_tensor);
-        void *beta_ptr = safe_raw_ptr(beta_tensor);
-        void *mean_ptr = safe_raw_ptr(running_mean_tensor);
-        void *var_ptr = safe_raw_ptr(running_var_tensor);
-        void *residual_ptr = safe_raw_ptr(residual_tensor);
-
-        status_t status = normalization_reference_wrapper(input_ptr, output_ptr,
-                gamma_ptr, beta_ptr, mean_ptr, var_ptr, residual_ptr, params);
-
-        if (status != status_t::success) {
-            if (status != status_t::isa_unsupported) {
-                log_error("normalization_reference_wrapper execution failed");
-            }
-        }
-        return status;
-    } catch (const exception_t &ex) {
-        log_error(
-                "normalization_forced_ref_kernel_test exception: ", ex.what());
-        return status_t::failure;
-    } catch (const std::exception &e) {
-        log_error("normalization_forced_ref_kernel_test std::exception: ",
-                e.what());
         return status_t::failure;
     }
 }

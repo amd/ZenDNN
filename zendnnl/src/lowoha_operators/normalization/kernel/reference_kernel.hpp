@@ -24,11 +24,14 @@ namespace lowoha {
 namespace normalization {
 
 /**
- * @brief Reference implementation wrapper for normalization
+ * @brief Reference (scalar) normalization kernel — ground-truth path.
  *
+ * First-class reference entry selected when params.algorithm ==
+ * norm_algo_t::reference (and used by the auto-dispatch fall-through).
  * Dispatches to the appropriate implementation based on params.src_dt / params.dst_dt,
  * and handles LayerNorm / RMSNorm / BatchNorm / FusedAddRMSNorm / FusedLayerNormAdd
  * via params.norm_type.
+ * Resolves num_threads internally.
  *
  * @param input             Input tensor (read-only). Same element type as params.src_dt.
  * @param output            Output tensor. Same shape as input, element type params.dst_dt.

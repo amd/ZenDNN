@@ -46,7 +46,6 @@ static inline int unsetenv(const char *name) {
 #endif
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
-#include "lowoha_operators/normalization/kernel/reference_kernel.hpp"
 #include "lowoha_operators/normalization/lowoha_normalization.hpp"
 #include "lowoha_operators/normalization/lowoha_normalization_utils.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
@@ -878,11 +877,18 @@ status_t quant_params_compute(tensor_factory_t &factory,
         const std::vector<int64_t> &scale_dims, data_type_t scale_dt,
         tensor_t &scale_out, tensor_t &zp_out, tensor_t *dst_out = nullptr);
 /** @fn normalization_kernel_test
- *  @brief Test function for normalization kernel (native path)
+ *  @brief Test function for normalization kernel
  *
  *  Calls normalization_direct() which dispatches to the best available
  *  kernel: AVX-512-FP16 / AVX-512 for LayerNorm, RMSNorm,
  *  FusedAddRMSNorm, and FusedLayerNormAdd, reference for BatchNorm.
+ *
+ * @param algo Selects the LOWOHA algorithm (defaults to `norm_algo_t::none`
+ *        for the default AVX-512-FP16 / AVX-512 / reference dispatch,
+ *        `norm_algo_t::reference` to force the scalar reference kernel).
+ *        Both paths run through normalization_direct(); for the reference
+ *        path params.accum_type (recorded by a preceding native run) is
+ *        preserved so the reference bit-matches.
  *
  *  @return status_t::success, status_t::isa_unsupported when an f16 buffer
  *  is used on a host without AVX-512-FP16 (unless the library was built
@@ -891,21 +897,8 @@ status_t quant_params_compute(tensor_factory_t &factory,
 status_t normalization_kernel_test(tensor_t &input_tensor,
         tensor_t &output_tensor, tensor_t &gamma_tensor, tensor_t &beta_tensor,
         tensor_t &running_mean_tensor, tensor_t &running_var_tensor,
-        tensor_t &residual_tensor, norm_params &params);
-
-/** @fn normalization_forced_ref_kernel_test
- *  @brief Test function for normalization reference kernel (forced)
- *
- *  Calls normalization_reference_wrapper() directly, bypassing the AVX-512
- *  dispatch to always use the scalar reference. Caller must set batch and
- *  norm_size in params before calling.
- *
- *  @return status_t::success or status_t::failure.
- */
-status_t normalization_forced_ref_kernel_test(tensor_t &input_tensor,
-        tensor_t &output_tensor, tensor_t &gamma_tensor, tensor_t &beta_tensor,
-        tensor_t &running_mean_tensor, tensor_t &running_var_tensor,
-        tensor_t &residual_tensor, norm_params &params);
+        tensor_t &residual_tensor, norm_params &params,
+        norm_algo_t algo = norm_algo_t::none);
 
 /** @fn compare_norm_tensors
  *  @brief Compare two tensors element-by-element for any dimensionality

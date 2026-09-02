@@ -191,9 +191,10 @@ TEST_P(TestNormalization, F32_F32) {
             gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
             residual_tensor, np);
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -230,9 +231,10 @@ TEST_P(TestNormalization, BF16_BF16) {
             gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
             residual_tensor, np);
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -269,9 +271,10 @@ TEST_P(TestNormalization, BF16_F32) {
             gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
             residual_tensor, np);
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -308,9 +311,10 @@ TEST_P(TestNormalization, F32_BF16) {
             gamma_tensor, beta_tensor, running_mean_tensor, running_var_tensor,
             residual_tensor, np);
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -351,9 +355,10 @@ TEST_P(TestNormalization, F16_F16) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -394,9 +399,10 @@ TEST_P(TestNormalization, F16_F32) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -437,9 +443,10 @@ TEST_P(TestNormalization, F32_F16) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
 
-    status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+    status_t ref_status = normalization_kernel_test(input_tensor,
             output_tensor_ref, gamma_tensor, beta_tensor, running_mean_tensor,
-            running_var_tensor, residual_tensor_ref, np);
+            running_var_tensor, residual_tensor_ref, np,
+            norm_algo_t::reference);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -583,10 +590,10 @@ TEST(NormalizationFusedTailF16, MaskedTail) {
 
         // Same np (with the accum_type the native dispatch just recorded) so the
         // reference bit-matches the native FP16 accumulation.
-        status_t ref_status = normalization_forced_ref_kernel_test(input_tensor,
+        status_t ref_status = normalization_kernel_test(input_tensor,
                 output_tensor_ref, gamma_tensor, beta_tensor,
                 running_mean_tensor, running_var_tensor, residual_tensor_ref,
-                np);
+                np, norm_algo_t::reference);
 
         bool ok = (status == status_t::success
                 && ref_status == status_t::success);

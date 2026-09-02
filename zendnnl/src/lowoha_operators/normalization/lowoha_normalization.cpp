@@ -181,7 +181,6 @@ status_t normalization_kernel_wrapper(const void *input, void *output,
         return status;
     }
 
-    log_info("Using reference kernel for ", norm_type_to_str(params.norm_type));
     status_t status = normalization_reference_wrapper(input, output, gamma,
             beta, running_mean, running_var, residual, params);
 
@@ -201,9 +200,21 @@ status_t normalization_direct(const void *input, void *output,
     bool is_profile = is_profile_enabled();
     if (is_profile) { profiler.tbp_start(); }
 
+    // Resolved up front so the ISA gate below can be skipped for reference.
+    const norm_algo_t algo = algo_select(params);
+
+    // Paths that always run on the scalar reference kernel (software f16
+    // conversion, no SIMD): the explicit reference algo, and BatchNorm, which
+    // has no native AVX-512 kernel and so falls through to reference even under
+    // dynamic_dispatch. The F16 ISA requirement below never applies to them.
+    [[maybe_unused]] const bool always_reference
+            = (algo == norm_algo_t::reference
+                    || params.norm_type == norm_type_t::BATCH_NORM);
+
     // F16 ISA check — requires AVX512-FP16 (CPUID leaf 7, sub 0, EDX bit 23).
     // Performed unconditionally (independent of ZENDNNL_DIAGNOSTICS_ENABLE)
     // since dispatching a kernel without the required ISA causes SIGILL.
+    // Skipped for the reference-only paths above.
     //
     // Only checks dtype fields whose buffer the kernel will actually read or
     // write: src and dst are always touched; gamma is read iff use_scale is
@@ -224,7 +235,8 @@ status_t normalization_direct(const void *input, void *output,
     // host has. Only require AVX-512-FP16 when the F16-FMA fast path could
     // actually be selected.
 #if !defined(ZENDNNL_NATIVE_F32_ACCUM)
-    if (is_f16 && !zendnnl_platform_info().get_avx512_f16_status()) {
+    if (is_f16 && !always_reference
+            && !zendnnl_platform_info().get_avx512_f16_status()) {
         log_error(
                 "F16 data type is not supported on this platform "
                 "(requires AVX512-FP16 ISA).");
@@ -291,9 +303,27 @@ status_t normalization_direct(const void *input, void *output,
     });
     if (status != status_t::success) { return status; }
 
-    // Execute normalization
-    status_t kernel_status = normalization_kernel_wrapper(input, output, gamma,
-            beta, running_mean, running_var, residual, params);
+    // none was normalized to dynamic_dispatch by algo_select, so it never
+    // reaches the switch below.
+    status_t kernel_status = status_t::failure;
+    switch (algo) {
+        case norm_algo_t::dynamic_dispatch:
+            kernel_status = normalization_kernel_wrapper(input, output, gamma,
+                    beta, running_mean, running_var, residual, params);
+            break;
+        case norm_algo_t::reference:
+            // accum_type is intentionally not reset: a norm_params reused from
+            // a prior dynamic_dispatch call lets the reference bit-match the
+            // native FMA precision (relied on by the gtests).
+            kernel_status = normalization_reference_wrapper(input, output,
+                    gamma, beta, running_mean, running_var, residual, params);
+            break;
+        default:
+            log_error("normalization_direct: unsupported algorithm ",
+                    static_cast<int32_t>(algo), " (", algo_to_string(algo),
+                    ")");
+            return status_t::failure;
+    }
 
     if (is_profile) { profiler.tbp_stop(); }
 
@@ -310,7 +340,8 @@ status_t normalization_direct(const void *input, void *output,
            << ", src_dt=" << dtype_info(params.src_dt)
            << ", dst_dt=" << dtype_info(params.dst_dt)
            << ", gamma_dt=" << dtype_info(params.gamma_dt)
-           << ", beta_dt=" << dtype_info(params.beta_dt);
+           << ", beta_dt=" << dtype_info(params.beta_dt)
+           << ", algo=" << algo_to_string(algo);
 
         apilog_info(ss.str());
         if (is_profile) {

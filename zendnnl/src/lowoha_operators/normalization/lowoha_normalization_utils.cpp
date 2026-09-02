@@ -177,6 +177,29 @@ std::string norm_type_to_str(norm_type_t type) {
     }
 }
 
+const char *algo_to_string(norm_algo_t algo) {
+    switch (algo) {
+        case norm_algo_t::none: return "none";
+        case norm_algo_t::dynamic_dispatch: return "dynamic_dispatch";
+        case norm_algo_t::reference: return "reference";
+        default: return "unknown";
+    }
+}
+
+norm_algo_t algo_select(norm_params &params) {
+    norm_algo_t algo = params.algorithm == norm_algo_t::none
+            ? norm_algo_t::dynamic_dispatch
+            : params.algorithm;
+
+    if (algo != norm_algo_t::dynamic_dispatch
+            && algo != norm_algo_t::reference) {
+        return params.algorithm;
+    }
+
+    params.algorithm = algo;
+    return algo;
+}
+
 } // namespace normalization
 } // namespace lowoha
 } // namespace zendnnl

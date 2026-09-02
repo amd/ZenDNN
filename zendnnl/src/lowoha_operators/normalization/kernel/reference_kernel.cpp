@@ -602,6 +602,8 @@ status_t normalization_reference_wrapper(const void *input, void *output,
         const void *gamma, const void *beta, const void *running_mean,
         const void *running_var, void *residual, norm_params &params) {
 
+    log_info("Using reference kernel for ", norm_type_to_str(params.norm_type));
+
     const int32_t num_threads = resolve_num_threads(
             params.num_threads, thread_guard::max_threads());
 

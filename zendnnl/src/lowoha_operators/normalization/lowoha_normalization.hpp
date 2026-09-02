@@ -105,9 +105,10 @@ namespace normalization {
  *
  * @return status_t::success on success,
  *         status_t::isa_unsupported if an f16 buffer is used on a host
- *         without AVX512-FP16 (unless the library was built with
- *         -DZENDNNL_NATIVE_F32_ACCUM=ON, in which case f16 storage is
- *         handled via F16C convert in the FP32 kernel),
+ *         without AVX512-FP16 (except for the reference-only paths —
+ *         algorithm == norm_algo_t::reference or BatchNorm — which convert f16
+ *         in software, or when built with -DZENDNNL_NATIVE_F32_ACCUM=ON, where
+ *         f16 storage is converted via F16C in the FP32 kernel),
  *         or status_t::failure otherwise.
  */
 ZENDNNL_API status_t normalization_direct(const void *input, void *output,

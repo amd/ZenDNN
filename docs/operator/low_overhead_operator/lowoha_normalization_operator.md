@@ -218,6 +218,12 @@ enum class norm_algo_t : int {
 };
 ```
 
+`normalization_direct()` resolves `params.algorithm` before dispatch:
+
+- `none` is treated as `dynamic_dispatch`.
+- `dynamic_dispatch` runs the auto-selecting path (best available AVX-512-FP16 / AVX-512 kernel, falling back to the scalar reference; BatchNorm always uses the reference).
+- `reference` forces the scalar reference kernel directly, bypassing the AVX-512 dispatch.
+
 
 ## Buffer Requirements
 
@@ -563,7 +569,7 @@ int batch_norm_inference_example() {
 
 ## Performance Considerations
 
-- **Algorithm Selection:** Leave `params.algorithm = norm_algo_t::none` for auto-selection (routes to the best available AVX-512 / AVX-512-FP16 kernel; falls back to reference on non-AVX-512 hosts for non-F16 paths).
+- **Algorithm Selection:** Leave `params.algorithm = norm_algo_t::none` for auto-selection (routes to the best available AVX-512 / AVX-512-FP16 kernel; falls back to reference on non-AVX-512 hosts for non-F16 paths). Set `params.algorithm = norm_algo_t::reference` to force the scalar reference kernel (portability / debugging / bit-exact validation).
 - **Data-Type Selection:**
 
   | Dtype Combo        | Best For                                   | Notes                                                    |
@@ -626,7 +632,7 @@ The operator performs the following validations:
 2. `FUSED_ADD_RMS_NORM` with a null `residual` buffer (rejected).
 3. `FUSED_LAYER_NORM_ADD` with a null `residual` buffer (rejected).
 4. `FUSED_LAYER_NORM_ADD` with `residual` aliasing the `output` buffer (rejected).
-5. F16 buffer requested on a host without AVX-512-FP16 (returns `status_t::isa_unsupported`, unless built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`).
+5. F16 buffer requested on a host without AVX-512-FP16 (returns `status_t::isa_unsupported`, unless the request runs on the scalar reference kernel — `params.algorithm == norm_algo_t::reference`, or `BATCH_NORM`, which has no native kernel — since it converts F16 in software and runs on any host; also skipped when the library was built with `-DZENDNNL_NATIVE_F32_ACCUM=ON`).
 
 **Additional checks when `ZENDNNL_DIAGNOSTICS_ENABLE=1` (default):**
 

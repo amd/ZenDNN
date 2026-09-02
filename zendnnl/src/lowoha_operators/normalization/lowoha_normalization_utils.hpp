@@ -72,6 +72,19 @@ status_t validate_normalization_inputs(const void *input, const void *output,
  */
 std::string norm_type_to_str(norm_type_t type);
 
+/**
+ * @brief Convert norm_algo_t enum to string representation.
+ */
+const char *algo_to_string(norm_algo_t algo);
+
+/**
+ * @brief Resolve the normalization algorithm (none -> dynamic_dispatch).
+ *
+ * Writes the resolved value back to params.algorithm. Unknown values are
+ * left unchanged and returned as-is so the caller fails the dispatch.
+ */
+norm_algo_t algo_select(norm_params &params);
+
 } // namespace normalization
 } // namespace lowoha
 } // namespace zendnnl
