@@ -176,6 +176,8 @@ int main() {
         run_lowoha_reorder_f32_to_bf16_batched_test();
 
         // Dynamic quantization tests
+        run_lowoha_dynamic_per_token_quant_bf16_s8_native_example();
+
         // ---- BF16 -> S8 Symmetric Tests ----
         run_lowoha_reorder_dynamic_quant_per_tensor_test(); // BF16->S8 per-tensor
         run_lowoha_reorder_dynamic_quant_per_channel_row_test(); // BF16->S8 per-token

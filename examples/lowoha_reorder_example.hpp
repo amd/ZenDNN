@@ -440,6 +440,11 @@ int run_lowoha_reorder_f32_to_bf16_batched_test();
 //   Dequantize: A' = (Q - zp) * scale
 //==============================================================================
 
+/** @fn run_lowoha_dynamic_per_token_quant_bf16_s8_native_example
+ *  @brief Calls the public native BF16-to-S8 per-token kernel directly.
+ */
+int run_lowoha_dynamic_per_token_quant_bf16_s8_native_example();
+
 // ---- BF16 -> S8 Symmetric Tests ----
 
 /** @fn run_lowoha_reorder_dynamic_quant_per_tensor_test

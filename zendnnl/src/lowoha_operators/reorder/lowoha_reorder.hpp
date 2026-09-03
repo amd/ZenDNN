@@ -18,6 +18,7 @@
 #define _LOWOHA_REORDER_HPP
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "common/zendnnl_api.hpp"
@@ -103,6 +104,40 @@ using zendnnl::memory::status_t;
  */
 ZENDNNL_API status_t reorder_direct(
         const void *src, void *dst, reorder_params_t &params);
+
+/**
+ * @brief Direct fused per-token BF16-to-S8 dynamic quantization kernel.
+ *
+ * Quantizes a contiguous row-major @c [M,N] BF16 matrix. For each row, the
+ * kernel computes one F32 scale from the largest finite absolute input value:
+ *
+ * @code
+ * scales[m] = max(abs(src[m, :])) / 127
+ * dst[m, n] = nearbyint(src[m, n] / scales[m])
+ * @endcode
+ *
+ * The scale is lower-bounded by @c 1e-10f. Under the default masked
+ * floating-point exception environment, non-finite inputs do not contribute
+ * to the scale and are quantized to zero.
+ *
+ * This low-level entry point bypasses @ref reorder_direct validation and ISA
+ * dispatch. The caller must ensure that AVX-512F, AVX-512BW, and AVX-512VL are
+ * available. Use @c zendnnl::common::zendnnl_platform_info() to query support,
+ * or use @ref reorder_direct when a portable fallback is required.
+ *
+ * @param src    Input buffer containing at least @c M*N raw BF16 bit patterns.
+ * @param dst    Output buffer with capacity for at least @c M*N S8 values.
+ * @param scales Output buffer with capacity for at least @c M F32 scales.
+ * @param M      Number of rows (tokens); must be positive.
+ * @param N      Number of contiguous elements per row; must be positive.
+ *
+ * @note The kernel uses the active OpenMP thread configuration.
+ * @note Quantization follows the active floating-point rounding mode; the
+ *       usual @c FE_TONEAREST mode gives round-to-nearest-even behavior.
+ * @note Input and output buffers must not overlap.
+ */
+ZENDNNL_API void dynamic_per_token_quant_bf16_s8_native(
+        const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N);
 
 /**
  * @brief Grouped per-token dynamic quantization for MoE/group GEMM sources.

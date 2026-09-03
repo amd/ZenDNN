@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 
 namespace zendnnl {
 namespace examples {
@@ -5178,6 +5179,138 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
 //   Quantize:   Q = round(A / scale) + zp
 //   Dequantize: A' = (Q - zp) * scale
 //==============================================================================
+
+//------------------------------------------------------------------------------
+// Direct native BF16 -> S8 per-token dynamic quantization kernel
+//------------------------------------------------------------------------------
+int run_lowoha_dynamic_per_token_quant_bf16_s8_native_example() {
+    try {
+        log_info("========================================");
+        log_info("Direct Dynamic Quant Kernel: BF16 -> S8 Per-Token");
+        log_info("========================================");
+
+        // The direct native entry point intentionally bypasses ISA dispatch.
+        // Applications must perform this check before calling it.
+        const auto &platform_info = common::zendnnl_platform_info();
+        if (!platform_info.get_avx512f_status()
+                || !platform_info.get_avx512_bw_vl_status()) {
+            log_info("SKIPPED: native kernel requires AVX-512F/BW/VL");
+            return OK;
+        }
+
+        // N=81 exercises the 64-element loop, 16-element loop, and scalar tail.
+        constexpr int64_t M = 4; // Number of tokens (rows)
+        constexpr int64_t N = 81; // Elements per token
+        constexpr size_t nelems = static_cast<size_t>(M * N);
+
+        std::vector<float> input_f32(nelems);
+        const float inf = std::numeric_limits<float>::infinity();
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (int64_t n = 0; n < N; ++n) {
+            input_f32[n] = static_cast<float>(static_cast<int>(n % 17) - 8)
+                    * 0.5f; // Mixed finite values
+            input_f32[N + n] = 0.0f; // All-zero token
+            input_f32[2 * N + n]
+                    = static_cast<float>(static_cast<int>(n % 17) - 8) * 1.25f;
+            input_f32[3 * N + n] = n % 3 == 0 ? nan : (n % 3 == 1 ? inf : -inf);
+        }
+
+        // Put non-finite values in each vectorized block and in the scalar tail.
+        input_f32[2 * N] = nan;
+        input_f32[2 * N + 16] = inf;
+        input_f32[2 * N + 64] = -inf;
+        input_f32[2 * N + 80] = nan;
+
+        // BF16 values are passed to the kernel as raw 16-bit bit patterns.
+        std::vector<uint16_t> input_bf16(nelems);
+        for (size_t i = 0; i < nelems; ++i)
+            input_bf16[i] = float_to_bf16(input_f32[i]);
+
+        constexpr int8_t output_sentinel = -42;
+        std::vector<int8_t> output_s8(nelems, output_sentinel);
+        std::vector<float> scales(M, -1.0f);
+
+        // One call computes one scale per token and quantizes the full matrix.
+        dynamic_per_token_quant_bf16_s8_native(
+                input_bf16.data(), output_s8.data(), scales.data(), M, N);
+
+        bool all_correct = true;
+        std::vector<float> expected_scales(M);
+        for (int64_t m = 0; m < M; ++m) {
+            float absmax = 0.0f;
+            for (int64_t n = 0; n < N; ++n) {
+                const size_t idx = static_cast<size_t>(m * N + n);
+                const float value = bf16_to_float(input_bf16[idx]);
+                if (std::isfinite(value))
+                    absmax = std::max(absmax, std::abs(value));
+            }
+            const float expected_scale = std::max(absmax / 127.0f, 1e-10f);
+            expected_scales[m] = expected_scale;
+            const float scale_tolerance
+                    = std::max(1e-12f, expected_scale * 1e-6f);
+            if (std::abs(scales[m] - expected_scale) > scale_tolerance) {
+                log_error("Unexpected scale for token ", m, ": expected ",
+                        expected_scale, ", got ", scales[m]);
+                all_correct = false;
+            }
+
+            std::cout << "Token " << m << ": scale=" << scales[m]
+                      << ", first 8 s8=[";
+            for (int64_t n = 0; n < N; ++n) {
+                const size_t idx = static_cast<size_t>(m * N + n);
+                const float value = bf16_to_float(input_bf16[idx]);
+                const int32_t expected = std::isfinite(value)
+                        ? static_cast<int32_t>(
+                                  std::nearbyint(value / expected_scale))
+                        : 0;
+                if (static_cast<int32_t>(output_s8[idx]) != expected) {
+                    log_error("Unexpected output at [", m, ",", n,
+                            "]: expected ", expected, ", got ",
+                            static_cast<int32_t>(output_s8[idx]));
+                    all_correct = false;
+                }
+
+                if (std::isfinite(value)) {
+                    const float dequant = static_cast<float>(output_s8[idx])
+                            * expected_scale;
+                    const float error = std::abs(dequant - value);
+                    if (error > expected_scale / 2.0f + 1e-6f) {
+                        log_error("Excess dequantization error at [", m, ",", n,
+                                "]: ", error);
+                        all_correct = false;
+                    }
+                }
+
+                if (n < 8) {
+                    std::cout << static_cast<int>(output_s8[idx])
+                              << (n == 7 ? "]\n" : ", ");
+                }
+            }
+        }
+
+        // M=1 takes the kernel's serial fast path. It must match token 0 above.
+        std::vector<int8_t> single_output(N, output_sentinel);
+        float single_scale = -1.0f;
+        dynamic_per_token_quant_bf16_s8_native(
+                input_bf16.data(), single_output.data(), &single_scale, 1, N);
+        if (std::abs(single_scale - expected_scales[0]) > 1e-7f
+                || !std::equal(single_output.begin(), single_output.end(),
+                        output_s8.begin())) {
+            log_error("M=1 serial-path validation failed");
+            all_correct = false;
+        }
+
+        if (!all_correct) {
+            log_error("Direct per-token dynamic quantization example FAILED!");
+            return NOT_OK;
+        }
+        log_info("Direct per-token dynamic quantization example PASSED!");
+    } catch (const exception_t &ex) {
+        std::cout << ex.what() << std::endl;
+        return NOT_OK;
+    }
+    return OK;
+}
 
 //------------------------------------------------------------------------------
 // BF16 -> S8 Symmetric Dynamic Quantization (Per-Tensor)

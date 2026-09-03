@@ -14,6 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 #include "zendnnl_global_block.hpp"
+#include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
 namespace common {
@@ -39,6 +40,10 @@ zendnnl_global_block_t *zendnnl_global_block_t::get() {
             init_flag, []() { instance = new zendnnl_global_block_t(); });
 
     return instance;
+}
+
+platform_info_t &zendnnl_platform_info() {
+    return zendnnl_global_block_t::get()->get_platform_info();
 }
 
 config_manager_t &zendnnl_global_block_t::get_config_manager() {

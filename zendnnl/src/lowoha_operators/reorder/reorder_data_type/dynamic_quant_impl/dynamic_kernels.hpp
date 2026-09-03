@@ -20,15 +20,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
-#include "lowoha_operators/reorder/lowoha_reorder_common.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace reorder {
 
-// Fused per-token AVX512 native kernels (F32-FMA backend, Strategy B)
-void dynamic_per_token_quant_bf16_s8_native(
-        const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N);
+// Fused per-token AVX512 native kernels (F32-FMA backend, Strategy B).
+// The BF16 -> S8 entry point is declared in the public lowoha_reorder.hpp.
 void dynamic_per_token_quant_f32_s8_native(
         const float *src, int8_t *dst, float *scales, int64_t M, int64_t N);
 void dynamic_per_token_quant_f16_s8_native(

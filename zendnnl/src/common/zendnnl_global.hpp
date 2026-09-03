@@ -18,6 +18,7 @@
 
 #include "common/bfloat16.hpp"
 #include "common/data_types.hpp"
+#include "common/zendnnl_api.hpp"
 #include "common/zendnnl_global_block.hpp"
 
 /** @def LOG_DEBUG_INFO(...)
@@ -99,9 +100,7 @@ static inline zendnnl_global_block_t &zendnnl_global_block() {
  * @brief Get a reference to zendnnl platform information block
  * @return A reference to zendnnl platform information block.
  */
-static inline platform_info_t &zendnnl_platform_info() {
-    return (zendnnl_global_block_t::get())->get_platform_info();
-}
+ZENDNNL_API platform_info_t &zendnnl_platform_info();
 
 /** @fn zendnnl_config_manager()
  * @brief Get a reference to zendnnl platform information block
