@@ -31,11 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp pinned to match main's tag (commit 30798bce, AOCL-202607W05), which
-# provides the unified AOCL DLP quant metadata API (a_quant_op/b_quant_op in
-# dlp_metadata_t) that matmul requires after main #589. Overridable on the
-# command line via -DAOCLDLP_GIT_TAG=<ref>.
-set(AOCLDLP_GIT_TAG "30798bce6b5ac25fd2e920c360110f549e0c9bee"
+# aocl-dlp tag AOCL-202608W04
+set(AOCLDLP_GIT_TAG "c577191304a3db0029f2f12fcacbc8ad296a645d"
   CACHE STRING "AOCL-DLP git tag or ref")
 option(AOCLDLP_GIT_PROGRESS ON)
 
