@@ -560,8 +560,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
 
     dnnl_params.algo = kernel;
 
-    matmul_onednn_kernel_t::execute_matmul(
-            dnnl_params, matmul_args, matmul_attr, eng);
+    onednn_matmul_execute(dnnl_params, matmul_args, matmul_attr, eng);
 }
 
 #endif

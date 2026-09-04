@@ -19,7 +19,8 @@
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #if ZENDNNL_DEPENDS_ONEDNN
-#include "operators/matmul/onednn/matmul_onednn_kernel.hpp"
+#include "lowoha_operators/matmul/backends/onednn/onednn_execute.hpp"
+#include "lowoha_operators/matmul/backends/onednn/onednn_utils.hpp"
 using namespace dnnl;
 #endif
 
