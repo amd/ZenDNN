@@ -444,6 +444,59 @@ bool dispatch_group_dynamic_per_token(const std::vector<const void *> &src,
     return true;
 }
 
+bool dispatch_group_dynamic_per_channel(const std::vector<const void *> &src,
+        const std::vector<int> &M, const std::vector<int> &K,
+        const std::vector<int> &lda, const std::vector<void *> &dst,
+        const std::vector<int> &dst_lda, const std::vector<void *> &scale,
+        const group_dynamic_quant_params_t &params) {
+    if (params.src_dtype != data_type_t::bf16
+            || params.dst_dtype != data_type_t::s8) {
+        return false;
+    }
+    if (params.scale_dtype != data_type_t::f32
+            && params.scale_dtype != data_type_t::bf16) {
+        return false;
+    }
+
+    const size_t num_ops = M.size();
+    const bool scale_is_bf16 = params.scale_dtype == data_type_t::bf16;
+    int64_t total_scales = 0;
+    for (size_t i = 0; i < num_ops; ++i) {
+        if (M[i] > 0) total_scales += K[i];
+    }
+
+    std::vector<float *> scale_f32(num_ops, nullptr);
+    std::vector<float> scale_tmp;
+    if (scale_is_bf16) {
+        scale_tmp.resize(static_cast<size_t>(total_scales));
+        size_t offset = 0;
+        for (size_t i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0) continue;
+            scale_f32[i] = scale_tmp.data() + offset;
+            offset += static_cast<size_t>(K[i]);
+        }
+    } else {
+        for (size_t i = 0; i < num_ops; ++i) {
+            scale_f32[i] = static_cast<float *>(scale[i]);
+        }
+    }
+
+    dynamic_per_channel_group_quant_bf16_s8_native(
+            src, M, K, lda, dst, dst_lda, scale_f32, params.num_threads);
+
+    if (scale_is_bf16) {
+        for (size_t i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0) continue;
+            auto *out = static_cast<uint16_t *>(scale[i]);
+            for (int64_t k = 0; k < K[i]; ++k) {
+                out[k] = float_to_bf16(scale_f32[i][k]);
+            }
+        }
+    }
+
+    return true;
+}
+
 bool dispatch_group_dynamic_per_group(const std::vector<const void *> &src,
         const std::vector<int> &M, const std::vector<int> &K,
         const std::vector<int> &lda, const std::vector<void *> &dst,

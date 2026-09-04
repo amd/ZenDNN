@@ -140,18 +140,19 @@ ZENDNNL_API void dynamic_per_token_quant_bf16_s8_native(
         const uint16_t *src, int8_t *dst, float *scales, int64_t M, int64_t N);
 
 /**
- * @brief Grouped per-token dynamic quantization for MoE/group GEMM sources.
+ * @brief Grouped dynamic quantization for independent source matrices.
  *
- * Treats the rows from all active source matrices as one logical collection
- * for scheduling. Each source matrix may live at a different base address, but
+ * Treats work from all active source matrices as one logical collection for
+ * scheduling. Each source matrix may live at a different base address, but
  * each row must be contiguous. Strides follow the same convention as
  * reorder_direct: empty means contiguous, otherwise 2D strides are
- * `{row_stride, col_stride}` in elements. For this per-token path
- * `col_stride` must be 1 and `row_stride >= K[i]`. Scale buffers are
- * per-expert and indexed by local row: `scale[i][m]`.
+ * `{row_stride, col_stride}` in elements. `col_stride` must be 1 and
+ * `row_stride >= K[i]`.
  *
- * Current implementation supports symmetric per-token bf16/f32 -> s8 dynamic
- * quantization. Callers own all destination and scale buffers.
+ * Scale layout is selected by group_dynamic_quant_params_t::granularity:
+ * per-token uses `scale[i][m]`, per-channel uses `scale[i][k]`, and
+ * per-group uses `scale[i][m * num_groups + g]`. Callers own all destination
+ * and scale buffers.
  */
 status_t group_dynamic_quant(const std::vector<const void *> &src,
         const std::vector<int> &M, const std::vector<int> &K,

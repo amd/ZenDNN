@@ -125,6 +125,25 @@ void dynamic_per_token_group_quant_f16_s8_native(
         const std::vector<void *> &dst, const std::vector<int> &dst_lda,
         const std::vector<float *> &scales, int num_threads);
 
+// Single-tensor per-channel-column BF16 -> S8 symmetric dynamic quantization
+// over the half-open column range [column_begin, column_end) of one [rows, K]
+// matrix; scales[k] receives the scale for column k. Picks 64-column and
+// 16-column AVX-512 blocks and falls back to scalar for a sub-16 remainder.
+// Serial by design: callers own the OpenMP schedule, so the grouped entry
+// point below can flatten column blocks from every matrix into one team.
+void dynamic_per_channel_quant_bf16_s8_native(const uint16_t *src,
+        int64_t src_lda, int8_t *dst, int64_t dst_lda, float *scales,
+        int64_t rows, int64_t column_begin, int64_t column_end);
+
+// Grouped per-channel-column BF16 -> S8 symmetric dynamic quantization.
+// Sources are independent [M_i, K_i] matrices and each scale buffer contains
+// K_i values. Work is scheduled over column blocks across all matrices.
+void dynamic_per_channel_group_quant_bf16_s8_native(
+        const std::vector<const void *> &src, const std::vector<int> &M,
+        const std::vector<int> &K, const std::vector<int> &lda,
+        const std::vector<void *> &dst, const std::vector<int> &dst_lda,
+        const std::vector<float *> &scales, int num_threads);
+
 // Grouped per-group (per-K-block) BF16/F32 -> S8 symmetric dynamic
 // quantization.  Sources are independent [M_i, K_i] matrices; each expert's
 // scale buffer is {M_i, G} (linear index m*G + g).  G is uniform across
@@ -149,6 +168,11 @@ bool dispatch_unfused_per_token(const void *src, void *dst,
 bool dispatch_fused_per_group(const void *src, void *dst,
         const reorder_params_t &params, int64_t M, int64_t K);
 bool dispatch_group_dynamic_per_token(const std::vector<const void *> &src,
+        const std::vector<int> &M, const std::vector<int> &K,
+        const std::vector<int> &lda, const std::vector<void *> &dst,
+        const std::vector<int> &dst_lda, const std::vector<void *> &scale,
+        const group_dynamic_quant_params_t &params);
+bool dispatch_group_dynamic_per_channel(const std::vector<const void *> &src,
         const std::vector<int> &M, const std::vector<int> &K,
         const std::vector<int> &lda, const std::vector<void *> &dst,
         const std::vector<int> &dst_lda, const std::vector<void *> &scale,

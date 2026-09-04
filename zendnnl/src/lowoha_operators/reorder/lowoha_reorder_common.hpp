@@ -301,24 +301,37 @@ struct reorder_params_t {
 };
 
 /**
- * @brief Parameters for grouped per-token dynamic quantization.
+ * @brief Granularity for grouped dynamic quantization.
+ *
+ * automatic preserves the original API behavior: num_groups <= 1 selects
+ * per-token and num_groups > 1 selects per-group.
+ */
+enum class group_dynamic_quant_granularity_t : int32_t {
+    automatic = 0,
+    per_token,
+    per_channel,
+    per_group
+};
+
+/**
+ * @brief Parameters for grouped dynamic quantization.
  *
  * The grouped API processes independently-contiguous source matrices as one
- * logical row collection. This is intended for grouped MoE GEMMs where each
- * expert owns a separate [M_i, K_i] source buffer, but all rows should share a
- * single OpenMP schedule.
+ * logical work collection. Each operation owns a separate [M_i, K_i] source
+ * buffer.
  *
  * Current implementation scope:
- *   - per-token (num_groups <= 1) or per-group symmetric dynamic quant
+ *   - per-token, per-channel-column, or per-group symmetric dynamic quant
  *   - bf16/f32 source to s8 destination
  *   - scale dtype f32 or bf16
  *
- * num_groups selects the granularity:
- *   - <= 1 : per-token, one scale per row, scale buffer {M_i, 1}
- *   - >  1 : per-group along K, G = num_groups groups per row,
- *            group_size = K_i / G (must divide K_i), scale buffer {M_i, G}
- *            laid out row-major (linear index m*G + g).  G is uniform
- *            across experts.
+ * granularity selects the scale layout:
+ *   - per_token:   one scale per row, scale buffer {M_i, 1}
+ *   - per_channel: one scale per column, scale buffer {1, K_i}; currently
+ *                  supported for bf16 source
+ *   - per_group:   G = num_groups groups along K per row, scale buffer
+ *                  {M_i, G}; K_i must be divisible by G
+ *   - automatic:   num_groups <= 1 selects per_token, otherwise per_group
  */
 struct group_dynamic_quant_params_t {
     data_type_t src_dtype;
@@ -326,13 +339,15 @@ struct group_dynamic_quant_params_t {
     data_type_t scale_dtype;
     int32_t num_threads;
     int32_t num_groups;
+    group_dynamic_quant_granularity_t granularity;
 
     group_dynamic_quant_params_t()
         : src_dtype(data_type_t::none)
         , dst_dtype(data_type_t::none)
         , scale_dtype(data_type_t::f32)
         , num_threads(0)
-        , num_groups(0) {}
+        , num_groups(0)
+        , granularity(group_dynamic_quant_granularity_t::automatic) {}
 };
 
 /**

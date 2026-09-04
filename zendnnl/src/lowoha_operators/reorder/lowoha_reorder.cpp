@@ -304,10 +304,37 @@ status_t group_dynamic_quant(const std::vector<const void *> &src,
         log_error("group_dynamic_quant: scale dtype must be f32 or bf16");
         return status_t::failure;
     }
-    // num_groups <= 1 => per-token (one scale per row); > 1 => per-group
-    // along K with G = num_groups groups per row (scale buffer {M_i, G}).
+
     const int64_t group_count = params.num_groups;
-    const bool per_group = (group_count > 1);
+    group_dynamic_quant_granularity_t granularity = params.granularity;
+    switch (granularity) {
+        case group_dynamic_quant_granularity_t::automatic:
+            granularity = group_count > 1
+                    ? group_dynamic_quant_granularity_t::per_group
+                    : group_dynamic_quant_granularity_t::per_token;
+            break;
+        case group_dynamic_quant_granularity_t::per_token:
+        case group_dynamic_quant_granularity_t::per_channel:
+        case group_dynamic_quant_granularity_t::per_group: break;
+        default:
+            log_error("group_dynamic_quant: invalid granularity");
+            return status_t::failure;
+    }
+    const bool per_channel
+            = granularity == group_dynamic_quant_granularity_t::per_channel;
+    const bool per_group
+            = granularity == group_dynamic_quant_granularity_t::per_group;
+    if (per_channel && params.src_dtype != data_type_t::bf16) {
+        log_error(
+                "group_dynamic_quant: per-channel currently requires bf16 "
+                "source");
+        return status_t::failure;
+    }
+    if (per_group && group_count <= 1) {
+        log_error("group_dynamic_quant: per-group requires num_groups > 1");
+        return status_t::failure;
+    }
+
     src_row_stride.resize(num_ops);
     dst_row_stride.resize(num_ops);
     for (size_t i = 0; i < num_ops; ++i) {
@@ -367,18 +394,37 @@ status_t group_dynamic_quant(const std::vector<const void *> &src,
         total_rows += std::max(0, m);
     if (total_rows == 0) return status_t::success;
 
+    const auto &platform = zendnnl::common::zendnnl_platform_info();
+    if (!platform.get_avx512f_status() || !platform.get_avx512_bw_vl_status()) {
+        log_error(
+                "group_dynamic_quant requires AVX-512F, AVX-512BW, and "
+                "AVX-512VL");
+        return status_t::isa_unsupported;
+    }
+
     if (apilog_info_enabled()) {
+        const char *granularity_name = per_channel ? "per_channel"
+                : per_group                        ? "per_group"
+                                                   : "per_token";
         apilog_info("LOWOHA group_dynamic_quant: num_ops=", M.size(),
                 ", total_rows=", total_rows,
                 ", src_dtype=", reorder_data_type_to_string(params.src_dtype),
                 ", dst_dtype=", reorder_data_type_to_string(params.dst_dtype),
                 ", scale_dtype=",
                 reorder_data_type_to_string(params.scale_dtype),
-                ", granularity=", (per_group ? "per_group" : "per_token"),
+                ", granularity=", granularity_name,
                 ", num_groups=", group_count);
     }
 
-    if (per_group) {
+    if (per_channel) {
+        if (!dispatch_group_dynamic_per_channel(src, M, K, src_row_stride, dst,
+                    dst_row_stride, scale, params)) {
+            log_error(
+                    "group_dynamic_quant: no native grouped per-channel "
+                    "kernel matched");
+            return status_t::failure;
+        }
+    } else if (per_group) {
         if (!dispatch_group_dynamic_per_group(src, M, K, src_row_stride, dst,
                     dst_row_stride, scale, params)) {
             log_error(
