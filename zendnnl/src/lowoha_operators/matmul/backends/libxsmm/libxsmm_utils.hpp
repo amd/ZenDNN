@@ -56,6 +56,14 @@ static inline bool can_use_libxsmm(char transA, char transB, int M, int N,
     if (transA == 't') { return false; }
 
 #if defined(_WIN32)
+    // Windows-only: transposed weights (transB='t', i.e. an N-major weight
+    // layout such as oneDNN's acb tag) fault with an access violation inside
+    // the JIT'd kernel once the BMM looper drives it per batch. Same class of
+    // x64 codegen bug as the bf16 path below. Linux runs this shape correctly
+    // through LIBXSMM (measurably distinct throughput from the DLP and
+    // batched-sgemm backends), so the guard is compiled out there.
+    if (transB == 't') { return false; }
+
     // Windows-only: the LIBXSMM bf16 GEMM path is unusable on this MSVC build --
     // it crashes whichever route the dispatcher takes:
     //   * JIT'd bf16 kernels stack-overflow (an x64 ABI/codegen bug in LIBXSMM's
