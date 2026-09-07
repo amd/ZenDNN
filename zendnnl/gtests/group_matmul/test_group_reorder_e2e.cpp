@@ -216,10 +216,10 @@ TEST(GroupReorderModelE2E, WarmUpThenInferenceFetchesReorderedWeights) {
     for (int e = 0; e < E && ref_st == status_t::success; ++e) {
         std::vector<post_op_type_t> ref_po;
         std::vector<tensor_t> bin;
-        ref_st = matmul_forced_ref_kernel_test(inp[e], wt[e], bias[e],
-                out_ref[e], ref_po, bin,
-                /*is_woq=*/false, kAlgo,
-                /*alpha=*/1.0f, /*beta=*/0.0f);
+        ref_st = matmul_kernel_test(inp[e], wt[e], bias[e], out_ref[e], ref_po,
+                bin,
+                /*use_LOWOHA=*/true, kAlgo,
+                /*alpha=*/1.0f, /*beta=*/0.0f, /*use_reference=*/true);
     }
     ASSERT_EQ(ref_st, status_t::success) << "reference GEMM failed";
 
@@ -355,10 +355,10 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
     for (int e = 0; e < E && ref_st == status_t::success; ++e) {
         std::vector<post_op_type_t> ref_po;
         std::vector<tensor_t> bin;
-        ref_st = matmul_forced_ref_kernel_test(inp[e], wt[e], bias[e],
-                out_ref[e], ref_po, bin,
-                /*is_woq=*/false, kAlgo,
-                /*alpha=*/1.0f, /*beta=*/0.0f);
+        ref_st = matmul_kernel_test(inp[e], wt[e], bias[e], out_ref[e], ref_po,
+                bin,
+                /*use_LOWOHA=*/true, kAlgo,
+                /*alpha=*/1.0f, /*beta=*/0.0f, /*use_reference=*/true);
     }
     ASSERT_EQ(ref_st, status_t::success) << "reference GEMM (f16) failed";
 

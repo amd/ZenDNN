@@ -2779,7 +2779,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         tensor_t &bias_tensor, tensor_t &output_tensor,
         const std::vector<post_op_type_t> &po_types,
         const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
-        matmul_algo_t algo, float alpha, float beta, int pack_format_b) {
+        matmul_algo_t algo, float alpha, float beta, bool use_reference,
+        int pack_format_b) {
     try {
 
         if (use_LOWOHA) {
@@ -2929,6 +2930,19 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                     return status_t::failure;
                 }
 
+                if (use_reference) {
+                    const bool is_aocl_f16_accum
+                            = (algo == matmul_algo_t::aocl_dlp
+                                    || algo == matmul_algo_t::aocl_dlp_blocked
+                                    || algo == matmul_algo_t::batched_sgemm);
+                    const bool is_f16_gemm = (src_data_type == data_type_t::f16
+                            && wei_data_type == data_type_t::f16);
+                    matmul_config_t::instance().set_accum_type(
+                            (is_aocl_f16_accum && is_f16_gemm)
+                                    ? data_type_t::f16
+                                    : data_type_t::f32);
+                }
+
                 // W4A8 dynamic: bf16 src + s4 wei. Static: pre-quantized s8 src.
                 const bool is_w4a8_dynamic = wei_data_type == data_type_t::s4
                         && src_data_type == data_type_t::bf16
@@ -2974,10 +2988,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
                 // Create lowoha_post_op structure
                 matmul_params params;
-                params.lowoha_algo = algo;
+                params.lowoha_algo
+                        = use_reference ? matmul_algo_t::reference : algo;
                 params.dtypes = matmul_dtypes;
                 params.num_threads = 0; // Use default (omp_get_max_threads)
-                params.packing.pack_format_b = pack_format_b;
+                if (!use_reference) {
+                    params.packing.pack_format_b = pack_format_b;
+                }
 
                 // For WOQ: Extract quantization parameters from weight tensor
                 if (is_woq) {
@@ -3379,426 +3396,6 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 // `group_matmul_kernel_test(...)` was lifted into
 // `group_matmul/group_matmul_test_helpers.cpp` during the gtests folder
 // refactor.
-
-status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
-        tensor_t &weight_tensor, tensor_t &bias_tensor, tensor_t &output_tensor,
-        const std::vector<post_op_type_t> &po_types,
-        const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
-        matmul_algo_t algo, float alpha, float beta) {
-    try {
-        // Validate input tensors
-        if (!input_tensor.check() || !weight_tensor.check()
-                || !output_tensor.check()) {
-            log_error("LOWOHA: Invalid tensor state detected");
-            return status_t::failure;
-        }
-        auto input_dim = input_tensor.get_dim();
-        auto weight_dim = weight_tensor.get_dim();
-        auto output_dim = output_tensor.get_dim();
-        if (input_dim < 2 || input_dim > 3 || weight_dim < 2 || weight_dim > 3
-                || output_dim < 2 || output_dim > 3
-                || !((input_dim == weight_dim && output_dim == input_dim)
-                        || (input_dim == 2 && weight_dim == 3
-                                && output_dim == 3)
-                        || (input_dim == 3 && weight_dim == 2
-                                && output_dim == 3))) {
-            log_error(
-                    "LOWOHA: Invalid tensor dimensions - Input dim:", input_dim,
-                    " Weight dim:", weight_dim, " Output dim:", output_dim);
-            return status_t::failure;
-        }
-        if (input_tensor.get_size(input_dim - 2)
-                        != output_tensor.get_size(output_dim - 2)
-                || input_tensor.get_size(input_dim - 1)
-                        != weight_tensor.get_size(weight_dim - 2)
-                || weight_tensor.get_size(weight_dim - 1)
-                        != output_tensor.get_size(output_dim - 1)) {
-            log_error("LOWOHA: Mismatched tensor dimensions - Input sizes: [",
-                    input_tensor.get_size(input_dim - 2), ", ",
-                    input_tensor.get_size(input_dim - 1), "], Weight sizes: [",
-                    weight_tensor.get_size(weight_dim - 2), ", ",
-                    weight_tensor.get_size(weight_dim - 1),
-                    "], Output sizes: [",
-                    output_tensor.get_size(output_dim - 2), ", ",
-                    output_tensor.get_size(output_dim - 1), "]");
-            return status_t::failure;
-        }
-        bool transA = (input_dim == 2) ? (input_tensor.get_order() == "ba")
-                                       : (input_tensor.get_order() == "acb");
-        bool transB = (weight_dim == 2) ? (weight_tensor.get_order() == "ba")
-                                        : (weight_tensor.get_order() == "acb");
-
-        const int lda = transA ? input_tensor.get_stride(input_dim - 1)
-                               : input_tensor.get_stride(input_dim - 2);
-        const int ldb = transB ? weight_tensor.get_stride(weight_dim - 1)
-                               : weight_tensor.get_stride(weight_dim - 2);
-        const int ldc = output_tensor.get_stride(output_dim - 2);
-
-        // Extract tensor dimensions
-        const int batchA
-                = (input_dim == 3) ? input_tensor.get_size(input_dim - 3) : 1;
-        const int batchB = (weight_dim == 3)
-                ? weight_tensor.get_size(weight_dim - 3)
-                : 1;
-        const int batchC = (output_dim == 3)
-                ? output_tensor.get_size(output_dim - 3)
-                : 1;
-
-        const int M = output_tensor.get_size(output_dim - 2);
-        const int K = input_tensor.get_size(input_dim - 1);
-        const int N = output_tensor.get_size(output_dim - 1);
-        // Validate dimensions
-        if (M == 0 || K == 0 || N == 0) {
-            log_error("LOWOHA: Invalid tensor dimensions - M:", M, " K:", K,
-                    " N:", N);
-            return status_t::failure;
-        }
-        if (std::max(batchA, batchB) != batchC) {
-            log_error("Invalid output batch size");
-            return status_t::failure;
-        }
-
-        // Get tensor data pointers
-        void *A_data = input_tensor.get_raw_handle_unsafe();
-        void *B_data = weight_tensor.get_raw_handle_unsafe();
-        void *C_data = output_tensor.get_raw_handle_unsafe();
-
-        //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
-        const bool is_libxsmm_kernel = (algo == matmul_algo_t::libxsmm
-                || algo == matmul_algo_t::libxsmm_blocked);
-        // skip_bias triggers in two cases:
-        //   1. libxsmm/libxsmm_blocked + bf16 dst (pre-existing accuracy
-        //      workaround).
-        //   2. Caller deliberately passed a default-constructed tensor_t()
-        //      as the "no bias" sentinel (status != success). Used by paths
-        //      that cannot exercise bias for the current (src, dst) pair —
-        //      e.g. TestPostopCache.LifecycleClear under F16_F16, which sets
-        //      drop_postops_and_bias=true via aocl_dlp_supports_postops_for_src().
-        // Both branches reduce to bias_data=nullptr + the f32 bias-dtype
-        // sentinel set below.
-        const bool skip_bias
-                = (is_libxsmm_kernel
-                          && output_tensor.get_data_type() == data_type_t::bf16)
-                || !bias_tensor.check();
-        void *bias_data
-                = skip_bias ? nullptr : bias_tensor.get_raw_handle_unsafe();
-
-        // Validate data pointers
-        if (!A_data || !B_data || !C_data) {
-            log_error("LOWOHA: Null data pointer detected");
-            return status_t::failure;
-        }
-
-        // Get data types
-        data_type_t src_data_type = input_tensor.get_data_type();
-        data_type_t wei_data_type = weight_tensor.get_data_type();
-        data_type_t out_data_type = output_tensor.get_data_type();
-        data_type_t bias_data_type
-                = skip_bias ? data_type_t::f32 : bias_tensor.get_data_type();
-        matmul_data_types matmul_dtypes;
-        matmul_dtypes.src = src_data_type;
-        matmul_dtypes.wei = wei_data_type;
-        matmul_dtypes.dst = out_data_type;
-        matmul_dtypes.bias = bias_data_type;
-        matmul_dtypes.compute = data_type_t::none;
-
-        // Validate data types
-        if (src_data_type != data_type_t::f32
-                && src_data_type != data_type_t::bf16
-                && src_data_type != data_type_t::u8
-                && src_data_type != data_type_t::s8
-                && src_data_type != data_type_t::f16) {
-            log_error("LOWOHA: Unsupported source data type");
-            return status_t::failure;
-        }
-        if (out_data_type != data_type_t::f32
-                && out_data_type != data_type_t::bf16
-                && out_data_type != data_type_t::u8
-                && out_data_type != data_type_t::s8
-                && out_data_type != data_type_t::s32
-                && out_data_type != data_type_t::f16) {
-            log_error("LOWOHA: Unsupported output data type");
-            return status_t::failure;
-        }
-
-        // Match reference accumulation precision to the DUT kernel under test.
-        const bool is_aocl_f16_accum = (algo == matmul_algo_t::aocl_dlp
-                || algo == matmul_algo_t::aocl_dlp_blocked
-                || algo == matmul_algo_t::batched_sgemm);
-        const bool is_f16_gemm = (src_data_type == data_type_t::f16
-                && wei_data_type == data_type_t::f16);
-        matmul_config_t::instance().set_accum_type(
-                (is_aocl_f16_accum && is_f16_gemm) ? data_type_t::f16
-                                                   : data_type_t::f32);
-
-        // W4A8: dynamic bf16 src + s4 wei; wire scales like INT8 (not WOQ).
-        bool is_w4a8 = wei_data_type == data_type_t::s4
-                && src_data_type == data_type_t::bf16
-                && input_tensor.is_quantized();
-
-        // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
-        bool is_woq = !is_w4a8
-                && (src_data_type == data_type_t::bf16
-                        && (wei_data_type == data_type_t::s4
-                                || wei_data_type == data_type_t::u4));
-
-        // Check if weight is INT8 (s8)
-        bool is_wei_s8 = wei_data_type == data_type_t::s8;
-
-        log_info("LOWOHA: Calling matmul_direct (reference) with batchA:",
-                batchA, " batchB:", batchB, " M:", M, " N:", N, " K:", K,
-                " alpha:", alpha, " beta:", beta, " is_woq:", is_woq,
-                " is_wei_s8:", is_wei_s8, " is_w4a8:", is_w4a8);
-
-        // Extract batch strides from tensors if they have batch dimension (3D)
-        // Batch strides are in elements, not bytes
-        size_t batch_stride_src = static_cast<size_t>(-1);
-        size_t batch_stride_wei = static_cast<size_t>(-1);
-        size_t batch_stride_dst = static_cast<size_t>(-1);
-
-        if (input_dim == 3) {
-            // For 3D input tensor, get stride of batch dimension (dimension 0) in elements
-            batch_stride_src = input_tensor.get_stride(0);
-        }
-        if (weight_dim == 3) {
-            // For 3D weight tensor, get stride of batch dimension (dimension 0) in elements
-            batch_stride_wei = weight_tensor.get_stride(0);
-        }
-        if (output_dim == 3) {
-            // For 3D output tensor, get stride of batch dimension (dimension 0) in elements
-            batch_stride_dst = output_tensor.get_stride(0);
-        }
-
-        // Create lowoha_post_op structure
-        matmul_params params;
-        params.lowoha_algo = matmul_algo_t::reference;
-        params.dtypes = matmul_dtypes;
-        params.num_threads = 0; // Use default (omp_get_max_threads)
-        // params.packing.pack_format_b = pack_format_b;
-
-        // For WOQ: Extract quantization parameters from weight tensor
-        if (is_woq) {
-            // Extract weight scale
-            const void *scale_buff
-                    = weight_tensor.get_quant_scale_raw_handle_const();
-            params.quant_params.wei_scale.buff = scale_buff;
-            params.quant_params.wei_scale.dt
-                    = weight_tensor.get_quant_scale_data_type();
-            auto scale_size = weight_tensor.get_quant_scale_size();
-            params.quant_params.wei_scale.dims.assign(
-                    scale_size.begin(), scale_size.end());
-            log_info("LOWOHA WOQ: Weight scale extracted, dims: [",
-                    params.quant_params.wei_scale.dims.size() > 0
-                            ? params.quant_params.wei_scale.dims[0]
-                            : 0,
-                    params.quant_params.wei_scale.dims.size() > 1
-                            ? params.quant_params.wei_scale.dims[1]
-                            : 0,
-                    "]");
-
-            // Extract weight zero point (if asymmetric quantization)
-            if (weight_tensor.get_quant_subtype()
-                    == quant_subtype_t::asymmetric) {
-                const void *zp_buff
-                        = weight_tensor.get_quant_zero_raw_handle_const();
-                if (zp_buff) {
-                    params.quant_params.wei_zp.buff = zp_buff;
-                    params.quant_params.wei_zp.dt
-                            = weight_tensor.get_quant_zero_data_type();
-                    auto zp_size = weight_tensor.get_quant_zero_size();
-                    params.quant_params.wei_zp.dims.assign(
-                            zp_size.begin(), zp_size.end());
-                    log_info("LOWOHA WOQ: Weight zero point extracted");
-                }
-            }
-        }
-
-        // For INT8 quant params (includes W4A8 s4 wei path).
-        if (is_wei_s8 || is_w4a8) {
-            // Extract source scale
-            if (input_tensor.is_quantized()) {
-                const void *src_scale_buff
-                        = input_tensor.get_quant_scale_raw_handle_const();
-                if (src_scale_buff) {
-                    params.quant_params.src_scale.buff = src_scale_buff;
-                    params.quant_params.src_scale.dt
-                            = input_tensor.get_quant_scale_data_type();
-                    auto src_scale_size = input_tensor.get_quant_scale_size();
-                    params.quant_params.src_scale.dims.assign(
-                            src_scale_size.begin(), src_scale_size.end());
-                    log_info("LOWOHA INT8: Source scale extracted");
-                }
-                // Extract source zero point (for asymmetric quantization)
-                if (input_tensor.get_quant_subtype()
-                        == quant_subtype_t::asymmetric) {
-                    const void *src_zp_buff
-                            = input_tensor.get_quant_zero_raw_handle_const();
-                    if (src_zp_buff) {
-                        params.quant_params.src_zp.buff = src_zp_buff;
-                        params.quant_params.src_zp.dt
-                                = input_tensor.get_quant_zero_data_type();
-                        auto src_zp_size = input_tensor.get_quant_zero_size();
-                        params.quant_params.src_zp.dims.assign(
-                                src_zp_size.begin(), src_zp_size.end());
-                        log_info("LOWOHA INT8: Source zero-point extracted");
-                    }
-                }
-            }
-
-            // Extract weight scale
-            if (weight_tensor.is_quantized()) {
-                const void *wei_scale_buff
-                        = weight_tensor.get_quant_scale_raw_handle_const();
-                if (wei_scale_buff) {
-                    params.quant_params.wei_scale.buff = wei_scale_buff;
-                    params.quant_params.wei_scale.dt
-                            = weight_tensor.get_quant_scale_data_type();
-                    auto wei_scale_size = weight_tensor.get_quant_scale_size();
-                    params.quant_params.wei_scale.dims.assign(
-                            wei_scale_size.begin(), wei_scale_size.end());
-                    log_info("LOWOHA INT8: Weight scale extracted");
-                }
-                // Extract weight zero point (for asymmetric quantization)
-                if (weight_tensor.get_quant_subtype()
-                        == quant_subtype_t::asymmetric) {
-                    const void *wei_zp_buff
-                            = weight_tensor.get_quant_zero_raw_handle_const();
-                    if (wei_zp_buff) {
-                        params.quant_params.wei_zp.buff = wei_zp_buff;
-                        params.quant_params.wei_zp.dt
-                                = weight_tensor.get_quant_zero_data_type();
-                        auto wei_zp_size = weight_tensor.get_quant_zero_size();
-                        params.quant_params.wei_zp.dims.assign(
-                                wei_zp_size.begin(), wei_zp_size.end());
-                        log_info("LOWOHA INT8: Weight zero-point extracted");
-                    }
-                }
-            }
-
-            // Extract destination scale and zero-point
-            if (output_tensor.is_quantized()) {
-                const void *dst_scale_buff
-                        = output_tensor.get_quant_scale_raw_handle_const();
-                if (dst_scale_buff) {
-                    params.quant_params.dst_scale.buff = dst_scale_buff;
-                    params.quant_params.dst_scale.dt
-                            = output_tensor.get_quant_scale_data_type();
-                    auto dst_scale_size = output_tensor.get_quant_scale_size();
-                    params.quant_params.dst_scale.dims.assign(
-                            dst_scale_size.begin(), dst_scale_size.end());
-                    log_info("LOWOHA INT8: Destination scale extracted");
-                }
-                // Extract destination zero point (for asymmetric quantization)
-                if (output_tensor.get_quant_subtype()
-                        == quant_subtype_t::asymmetric) {
-                    const void *dst_zp_buff
-                            = output_tensor.get_quant_zero_raw_handle_const();
-                    if (dst_zp_buff) {
-                        params.quant_params.dst_zp.buff = dst_zp_buff;
-                        params.quant_params.dst_zp.dt
-                                = output_tensor.get_quant_zero_data_type();
-                        auto dst_zp_size = output_tensor.get_quant_zero_size();
-                        params.quant_params.dst_zp.dims.assign(
-                                dst_zp_size.begin(), dst_zp_size.end());
-                        log_info(
-                                "LOWOHA INT8: Destination zero-point "
-                                "extracted");
-                    }
-                }
-            }
-        }
-
-        if (is_wei_s8
-                && (src_data_type == data_type_t::bf16
-                        || src_data_type == data_type_t::f32)
-                && input_tensor.is_quantized()) {
-            params.dynamic_quant = true;
-            params.dtypes.compute = data_type_t::s8;
-        }
-        if (is_w4a8 && src_data_type == data_type_t::bf16
-                && input_tensor.is_quantized()) {
-            params.dynamic_quant = true;
-            params.dtypes.compute = data_type_t::s8;
-        }
-
-        // Create batch_params structure
-        matmul_batch_params_t batch_params;
-        batch_params.Batch_A = batchA;
-        batch_params.Batch_B = batchB;
-        batch_params.batch_stride_src = batch_stride_src;
-        batch_params.batch_stride_wei = batch_stride_wei;
-        batch_params.batch_stride_dst = batch_stride_dst;
-
-        size_t expected_binary_tensors = 0;
-        for (const auto &p : po_types) {
-            if (is_binary_postop(p)) { ++expected_binary_tensors; }
-        }
-        if (expected_binary_tensors != binary_tensors.size()) {
-            log_error("LOWOHA: binary post-ops in po_types (",
-                    expected_binary_tensors,
-                    ") do not match binary_tensors size (",
-                    binary_tensors.size(), ")");
-            return status_t::failure;
-        }
-
-        // Add post-ops based on po_types
-        int binary_index = 0;
-        for (const auto &po : po_types) {
-            if (po == post_op_type_t::none) { continue; }
-            matmul_post_op postop_item;
-            postop_item.po_type = po;
-            // For binary operations, set the buffer to binary_tensor
-            if (po == post_op_type_t::binary_add
-                    || po == post_op_type_t::binary_mul) {
-                postop_item.buff
-                        = binary_tensors[binary_index].get_raw_handle_unsafe();
-                postop_item.dtype
-                        = binary_tensors[binary_index].get_data_type();
-                auto binary_tensor_dims
-                        = binary_tensors[binary_index].get_size();
-                postop_item.dims.assign(
-                        binary_tensor_dims.begin(), binary_tensor_dims.end());
-                binary_index++;
-            } else {
-                postop_item.buff = nullptr; // For element-wise operations
-                postop_item.dtype = out_data_type;
-            }
-
-            // Fused post-op scalars from gtest_main.cpp (match reference post_op_t).
-            if (po == post_op_type_t::swish) {
-                postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
-                postop_item.beta = 0.0f;
-            } else if (po == post_op_type_t::elu) {
-                postop_item.alpha = MATMUL_POSTOP_ELTWISE_ALPHA;
-                postop_item.beta = 0.0f;
-            } else if (po == post_op_type_t::clip) {
-                float lo = MATMUL_POSTOP_CLIP_LOWER;
-                float hi = MATMUL_POSTOP_CLIP_UPPER;
-                if (lo > hi) { std::swap(lo, hi); }
-                if (hi - lo < 1e-6f) { hi = lo + 1e-3f; }
-                postop_item.alpha = lo;
-                postop_item.beta = hi;
-            }
-            params.postop_.push_back(postop_item);
-        }
-        bool is_weights_const
-                = is_woq || is_wei_s8 || is_w4a8 || (rand() % 2 == 0);
-        status_t status = matmul_direct('r', // layout: row-major
-                transA, transB, static_cast<int>(M), static_cast<int>(N),
-                static_cast<int>(K), alpha, A_data, lda, B_data, ldb, bias_data,
-                beta, C_data, ldc, is_weights_const, batch_params, params);
-        if (status != status_t::success) {
-            if (status != status_t::isa_unsupported) {
-                log_error("LOWOHA matmul_direct (reference) execution failed.");
-            }
-            return status;
-        }
-    } catch (const exception_t &ex) {
-        log_verbose(ex.what());
-        return status_t::failure;
-    }
-    return status_t::success;
-}
 
 // `reorder_kernel_test(...)` was moved to `reorder/reorder_test_helpers.cpp`.
 

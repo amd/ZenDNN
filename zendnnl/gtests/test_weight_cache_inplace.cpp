@@ -25,7 +25,8 @@
 //
 // This test drives the full u8*s8 quantized matmul through the same harness as
 // test_matmul.cpp (matmul_kernel_test, which does a warmup + real call on the
-// SAME weight buffer, then matmul_forced_ref_kernel_test as the reference),
+// SAME weight buffer, then matmul_kernel_test(..., use_reference=true) for the
+// golden baseline),
 // pinned to WEIGHT_CACHE=2 so the in-place reorder path is exercised. It covers
 // the common case: u8 activations (nonzero src_zp) + symmetric s8 weights
 // (wei_zp == 0). The matmul is run several times on the same in-place-reordered
@@ -97,9 +98,9 @@ TEST_F(TestWeightCacheInplace, Cached1D_InPlaceWeightMutation) {
     // Reference FIRST, on the pristine weight buffer: the WEIGHT_CACHE=2 run below
     // reorders those weights IN PLACE, so computing the reference afterwards would
     // read the mutated (blocked) bytes and produce a wrong baseline.
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
     ASSERT_EQ(ref_status, status_t::success) << "reference kernel failed";
     clear_matmul_test_caches();
 

@@ -116,7 +116,7 @@ operator-agnostic (the same policy `group_matmul/` follows).
 **Stays in `gtest_utils.{hpp,cpp}` (shared / CLI infra):**
 - `ReorderInput` — it's a member of the shared `CLIParams`.
 - `read_reorder_inputs` — file-input parser alongside the other `read_*_inputs` helpers (shares `parse_bool_field`).
-- Genuinely shared helpers the reorder tests reuse: `tensor_factory_t`, `matmul_kernel_test`, `matmul_forced_ref_kernel_test`, `compare_tensor_2D`, `get_aligned_size`.
+- Genuinely shared helpers the reorder tests reuse: `tensor_factory_t`, `matmul_kernel_test`, `compare_tensor_2D`, `get_aligned_size`.
 
 Full CLI / input-file / granularity / tolerance documentation lives in the parent `gtests/Readme.md` (see the **LOWOHA Reorder Tests** and **Reorder Input File Format** sections).
 

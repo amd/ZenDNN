@@ -374,9 +374,9 @@ TEST_P(TestReorder, F32_F32_Stride) {
     log_info("transA:", transA, " transB:", transB, " strided_inp:{",
             stride_in[0], ",", stride_in[1], "} strided_wt:{", stride_wt[0],
             ",", stride_wt[1], "}");
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor, weights,
-            bias_tensor, output_tensor_ref, po_types, binary_tensors,
-            use_LOWOHA, algo);
+    status_t ref_status = matmul_kernel_test(input_tensor, weights, bias_tensor,
+            output_tensor_ref, po_types, binary_tensors, /*use_LOWOHA=*/true,
+            algo, 1.0, 0.0, true);
 
     void *weights_buff = nullptr;
     auto [reorder_weights, reorder_status]
@@ -438,9 +438,9 @@ TEST_P(TestReorder, BF16_F32_Stride) {
     log_info("transA:", transA, " transB:", transB, " strided_inp:{",
             stride_in[0], ",", stride_in[1], "} strided_wt:{", stride_wt[0],
             ",", stride_wt[1], "}");
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor, weights,
-            bias_tensor, output_tensor_ref, po_types, binary_tensors,
-            use_LOWOHA, algo);
+    status_t ref_status = matmul_kernel_test(input_tensor, weights, bias_tensor,
+            output_tensor_ref, po_types, binary_tensors, /*use_LOWOHA=*/true,
+            algo, 1.0, 0.0, true);
 
     void *weights_buff = nullptr;
     auto [reorder_weights, reorder_status]
@@ -502,9 +502,9 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
     log_info("transA:", transA, " transB:", transB, " strided_inp:{",
             stride_in[0], ",", stride_in[1], "} strided_wt:{", stride_wt[0],
             ",", stride_wt[1], "}");
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor, weights,
-            bias_tensor, output_tensor_ref, po_types, binary_tensors,
-            use_LOWOHA, algo);
+    status_t ref_status = matmul_kernel_test(input_tensor, weights, bias_tensor,
+            output_tensor_ref, po_types, binary_tensors, /*use_LOWOHA=*/true,
+            algo, 1.0, 0.0, true);
 
     void *weights_buff = nullptr;
     auto [reorder_weights, reorder_status]

@@ -56,7 +56,7 @@
 // [2] TestGroupMatmul: F32_F32, BF16_F32, BF16_BF16 with optional MoE post-op
 //
 // Uses the framework's tensor_t / tensor_factory_t infrastructure and the
-// reference matmul_forced_ref_kernel_test for correctness.  The three TEST_Ps
+// reference matmul_kernel_test for correctness.  The three TEST_Ps
 // share a common body via the templated run_basic_test helper.
 // ???????????????????????????????????????????????????????????????????????????????
 
@@ -163,9 +163,8 @@ protected:
                     ++i) {
                 std::vector<post_op_type_t> ref_po;
                 std::vector<tensor_t> bin;
-                ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i],
-                        bias[i], out_ref[i], ref_po, bin, false, algo, alpha,
-                        beta);
+                ref_status = matmul_kernel_test(inp[i], wt[i], bias[i],
+                        out_ref[i], ref_po, bin, true, algo, alpha, beta, true);
             }
 
             bool ok = (status == status_t::success
@@ -244,7 +243,7 @@ protected:
             params[i].num_threads = num_threads;
         }
 
-        // libxsmm doesn't accept bias for bf16 dst.matmul_forced_ref_kernel_test
+        // libxsmm doesn't accept bias for bf16 dst. matmul_kernel_test
         // applies the same condition, so we must drop bias here too to keep
         // kernel-under-test and reference in sync.
         {
@@ -302,9 +301,9 @@ protected:
         for (size_t i = 0; i < num_ops && ref_st == status_t::success; ++i) {
             std::vector<post_op_type_t> ref_po;
             std::vector<tensor_t> dummy;
-            ref_st = matmul_forced_ref_kernel_test(in_t[i], wei_t[i], bias_t[i],
-                    out_ref_t[i], ref_po, dummy, false, algo, alphas[i],
-                    betas[i]);
+            ref_st = matmul_kernel_test(in_t[i], wei_t[i], bias_t[i],
+                    out_ref_t[i], ref_po, dummy, true, algo, alphas[i],
+                    betas[i], true);
         }
 
         bool ok = (st == status_t::success && ref_st == status_t::success);

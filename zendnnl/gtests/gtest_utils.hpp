@@ -703,10 +703,13 @@ void trim(std::string &str);
 std::vector<std::string> split(const std::string &s, char delimiter);
 
 /** @fn matmul_kernel_test
- *  @brief Compute Matmul Operation using AOCL kernel.
+ *  @brief Run fused matmul via LOWOHA direct API or the matmul operator.
  *
- *  This function computes fused matmul that uses the Matmul Operator fused
- *  with randomly selected postop (supported by library) with AOCL kernel.
+ *  This function computes fused matmul with optional post-ops, either through
+ *  matmul_direct (LOWOHA) or the matmul operator API.
+ *
+ *  @param use_reference When true, dispatch matmul_algo_t::reference via LOWOHA
+ *                       (golden reference; ignores pack_format_b).
  *
  *  @return matmul status
  * */
@@ -715,28 +718,11 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
         const std::vector<post_op_type_t> &po_types,
         const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
         matmul_algo_t algo, float alpha = 1.0f, float beta = 0.0f,
-        int pack_format_b = 0);
+        bool use_reference = false, int pack_format_b = 0);
 
 // `group_matmul_kernel_test` was lifted into
 // `group_matmul/group_matmul_test_helpers.hpp` during the gtests folder
 // refactor so this header stays operator-agnostic.
-
-/** @fn matmul_forced_ref_kernel_test
- *  @brief Compute matmul via the LOWOHA reference kernel.
- *
- *  Runs matmul_direct with matmul_algo_t::reference for golden-output
- *  comparison against a DUT kernel. Supports F32, BF16, F16, INT8, and WOQ
- *  dtypes, fused post-ops, and batched/broadcast shapes. F16 accumulation
- *  precision is selected from the DUT algo so AOCL F16 GEMM validation matches
- *  hardware-level rounding.
- *
- *  @return matmul status
- * */
-status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
-        tensor_t &weights, tensor_t &bias, tensor_t &output_tensor,
-        const std::vector<post_op_type_t> &po_types,
-        const std::vector<tensor_t> &binary_tensors, bool use_LOWOHA,
-        matmul_algo_t algo, float alpha = 1.0f, float beta = 0.0f);
 
 // `reorder_kernel_test` was lifted into `reorder/reorder_test_helpers.hpp`.
 

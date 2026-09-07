@@ -187,8 +187,8 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_S4) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, alpha, beta);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, alpha, beta, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -316,8 +316,8 @@ TEST_P(TestGroupMatmulQuant, WOQ_BF16_U4) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, alpha, beta);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, alpha, beta, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -435,8 +435,8 @@ TEST_P(TestGroupMatmulQuant, INT8) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -543,8 +543,8 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_BF16) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -650,8 +650,8 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_GROUP_F32) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -746,8 +746,8 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_BF16) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -842,8 +842,8 @@ TEST_P(TestGroupMatmulQuant, INT8_SYM_QUANT_PER_TOKEN_F32) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -973,8 +973,8 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_BF16) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp_quant[i], wt_s8[i],
-                bias[i], out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp_quant[i], wt_s8[i], bias[i],
+                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -1104,8 +1104,8 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp_quant[i], wt_s8[i],
-                bias[i], out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp_quant[i], wt_s8[i], bias[i],
+                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0, true);
     }
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
@@ -1236,8 +1236,8 @@ TEST(TestGroupMatmulWeightCacheInt8, SymQuantWc2StaysOutOfPlace) {
     status_t ref_status = status_t::success;
     for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
         std::vector<tensor_t> bin;
-        ref_status = matmul_forced_ref_kernel_test(inp[i], wt[i], bias[i],
-                out_ref[i], ref_po, bin, true, algo, 1.0, 0.0);
+        ref_status = matmul_kernel_test(inp[i], wt[i], bias[i], out_ref[i],
+                ref_po, bin, true, algo, 1.0, 0.0, true);
     }
     ASSERT_EQ(ref_status, status_t::success);
     bool ok = true;

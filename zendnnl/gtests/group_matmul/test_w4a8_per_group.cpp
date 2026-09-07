@@ -99,9 +99,9 @@ void run_w4a8_per_group_scenario(const std::string &label,
     for (int e = 0; e < E; ++e) {
         if (rows[e] == 0) { continue; }
         std::vector<tensor_t> bin;
-        status_t rst = matmul_forced_ref_kernel_test(inp[e], wt[e], bias[e],
-                out_ref[e], ref_po, bin,
-                /*use_LOWOHA=*/true, algo, 1.0f, 0.0f);
+        status_t rst = matmul_kernel_test(inp[e], wt[e], bias[e], out_ref[e],
+                ref_po, bin,
+                /*use_LOWOHA=*/true, algo, 1.0f, 0.0f, true);
         ASSERT_EQ(rst, status_t::success)
                 << label << ": reference failed (expert " << e << ")";
         bool expert_ok = true;
@@ -205,8 +205,8 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
         for (int e = 0; e < E; ++e) {
             if (rows[e] == 0) { continue; }
             std::vector<tensor_t> bin;
-            st = matmul_forced_ref_kernel_test(inp[e], wt[e], bias[e],
-                    out_ref[e], ref_po, bin, true, algo, 1.0f, 0.0f);
+            st = matmul_kernel_test(inp[e], wt[e], bias[e], out_ref[e], ref_po,
+                    bin, true, algo, 1.0f, 0.0f, true);
             ASSERT_EQ(st, status_t::success) << label << ": ref failed e=" << e;
         }
     }

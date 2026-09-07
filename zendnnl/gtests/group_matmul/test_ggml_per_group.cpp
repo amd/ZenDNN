@@ -186,9 +186,9 @@ void run_ggml_per_group_scenario(const std::string &label,
     for (int e = 0; e < E; ++e) {
         if (rows[e] == 0) continue; // inactive -> nothing computed
         std::vector<tensor_t> bin;
-        status_t rst = matmul_forced_ref_kernel_test(inp[e], wref[e], bias[e],
-                out_ref[e], ref_po, bin,
-                /*use_LOWOHA=*/true, algo, 1.0f, 0.0f);
+        status_t rst = matmul_kernel_test(inp[e], wref[e], bias[e], out_ref[e],
+                ref_po, bin,
+                /*use_LOWOHA=*/true, algo, 1.0f, 0.0f, true);
         ASSERT_EQ(rst, status_t::success)
                 << label << ": reference failed (expert " << e << ")";
         bool expert_ok = true;

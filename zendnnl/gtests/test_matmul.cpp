@@ -111,9 +111,9 @@ TEST_P(TestMatmul, F32_F32) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
@@ -242,9 +242,9 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -342,9 +342,9 @@ TEST_P(TestMatmul, W4A8_BF16) {
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0f, 0.0f);
 
-    status_t ref_status = matmul_forced_ref_kernel_test(src_ref, weight_tensor,
+    status_t ref_status = matmul_kernel_test(src_ref, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
-            use_LOWOHA, algo, 1.0f, 0.0f);
+            use_LOWOHA, algo, 1.0f, 0.0f, true);
 
     EXPECT_EQ(status, status_t::success)
             << "W4A8: kernel path returned failure "
@@ -471,9 +471,9 @@ TEST_P(TestMatmul, W4A8_STATIC_S8) {
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0f, 0.0f);
 
-    status_t ref_status = matmul_forced_ref_kernel_test(src_ref, weight_tensor,
+    status_t ref_status = matmul_kernel_test(src_ref, weight_tensor,
             bias_tensor, output_tensor_ref, po_types, binary_tensors,
-            use_LOWOHA, algo, 1.0f, 0.0f);
+            use_LOWOHA, algo, 1.0f, 0.0f, true);
 
     EXPECT_EQ(status, status_t::success)
             << "W4A8 static: kernel path (s8 src + s4 wei) failed";
@@ -640,9 +640,9 @@ TEST_P(TestMatmul, WOQ_BF16_U4) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -682,9 +682,9 @@ TEST_P(TestMatmul, BF16_F32) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
@@ -726,9 +726,9 @@ TEST_P(TestMatmul, BF16_BF16) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -774,9 +774,9 @@ TEST_P(TestMatmul, F16_F16) {
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
 
@@ -821,9 +821,9 @@ TEST_P(TestMatmul, F16_F32) {
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
 
@@ -891,9 +891,9 @@ TEST_P(TestMatmul, F32_F32_Stride) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
     bool enable_f32_relaxation = (algo == matmul_algo_t::libxsmm
@@ -957,9 +957,9 @@ TEST_P(TestMatmul, BF16_F32_Stride) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
 
@@ -1024,9 +1024,9 @@ TEST_P(TestMatmul, BF16_BF16_Stride) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, alpha, beta);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -1095,9 +1095,9 @@ TEST_P(TestMatmul, F16_F16_Stride) {
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, alpha, beta);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, alpha, beta, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -1175,9 +1175,9 @@ TEST_P(TestMatmul, INT8) {
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
 
     bool is_test_successful
             = (status == status_t::success && ref_status == status_t::success);
@@ -1251,9 +1251,9 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_BF16) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
@@ -1324,9 +1324,9 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
@@ -1436,10 +1436,10 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED) {
 
     status_t status = matmul_kernel_test(input_tensor, packed_weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
-            algo, 1.0, 0.0, 1);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+            algo, 1.0, 0.0, false, 1);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
@@ -1569,10 +1569,10 @@ TEST_P(TestMatmul, INT8_PER_GROUP_GGML_PACKED_Q4_0) {
 
     status_t status = matmul_kernel_test(input_tensor, packed_weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
-            algo, 1.0, 0.0, 1);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+            algo, 1.0, 0.0, false, 1);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
 
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
@@ -1814,9 +1814,9 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
@@ -1875,9 +1875,9 @@ TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
-            weight_tensor, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
@@ -1969,9 +1969,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor_s8,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor_ref,
+    status_t ref_status = matmul_kernel_test(input_tensor_ref,
             weight_tensor_ref, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+            binary_tensors, use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         uint32_t binary_mul_count = 0;
@@ -2072,9 +2072,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
     status_t status = matmul_kernel_test(input_tensor, weight_tensor_s8,
             bias_tensor, output_tensor, po_types, binary_tensors, use_LOWOHA,
             algo, 1.0, 0.0);
-    status_t ref_status = matmul_forced_ref_kernel_test(input_tensor_ref,
+    status_t ref_status = matmul_kernel_test(input_tensor_ref,
             weight_tensor_ref, bias_tensor, output_tensor_ref, po_types,
-            binary_tensors, use_LOWOHA, algo, 1.0, 0.0);
+            binary_tensors, use_LOWOHA, algo, 1.0, 0.0, true);
     bool ok = (status == status_t::success && ref_status == status_t::success);
     if (ok) {
         uint32_t binary_mul_count = 0;
@@ -2130,9 +2130,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 //   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
 //                             bias_tensor, output_tensor, po_type, binary_tensor,
 //                             use_LOWOHA, algo, 1.0, 0.0);
-//   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+//   status_t ref_status     = matmul_kernel_test(input_tensor,
 //                             weight_tensor, bias_tensor, output_tensor_ref, po_type,
-//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0, true);
 
 //   bool is_test_successful =
 //     (status == status_t::success && ref_status == status_t::success);
@@ -2182,9 +2182,9 @@ TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
 //   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
 //                             bias_tensor, output_tensor, po_type, binary_tensor,
 //                             use_LOWOHA, algo, 1.0, 0.0);
-//   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+//   status_t ref_status     = matmul_kernel_test(input_tensor,
 //                             weight_tensor, bias_tensor, output_tensor_ref, po_type,
-//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0, true);
 
 //   bool is_test_successful =
 //     (status == status_t::success && ref_status == status_t::success);

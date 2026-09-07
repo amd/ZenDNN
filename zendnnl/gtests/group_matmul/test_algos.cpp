@@ -6544,7 +6544,7 @@ TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
 //      The end-to-end value-parity test for binary postops on M-tile
 //      is intentionally NOT added here — the existing `TestGroupMatmul`
 //      sweep in `test_basic.cpp` covers binary postops × ALGO 2 across
-//      a broad shape grid via the `matmul_forced_ref_kernel_test`
+//      a broad shape grid via the `matmul_kernel_test`
 //      reference, and the gate-level test below proves the M-tile
 //      safety predicate's reject/accept contract directly.
 // ============================================================================

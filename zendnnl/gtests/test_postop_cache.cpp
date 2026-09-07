@@ -329,9 +329,8 @@ protected:
             GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
         }
         ASSERT_EQ(s1, status_t::success);
-        ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                          bias_tensor, ref_1, po, binary_1, true, algo, alpha,
-                          beta),
+        ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                          ref_1, po, binary_1, true, algo, alpha, beta, true),
                 status_t::success);
 
         auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
@@ -339,9 +338,8 @@ protected:
         ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
                           out_2, po, binary_2, true, algo, alpha, beta),
                 status_t::success);
-        ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                          bias_tensor, ref_2, po, binary_2, true, algo, alpha,
-                          beta),
+        ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                          ref_2, po, binary_2, true, algo, alpha, beta, true),
                 status_t::success);
 
         const auto t = tols_for_dst(dst_dt);
@@ -405,9 +403,8 @@ TEST_P(TestPostopCache, HitParity) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_1, po, binary_tensors, true, algo, alpha,
-                      beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_1, po, binary_tensors, true, algo, alpha, beta, true),
             status_t::success);
 
     // Call 2 (hit path; same weight key, same inputs).
@@ -416,9 +413,8 @@ TEST_P(TestPostopCache, HitParity) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
                       out_2, po, binary_tensors, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_2, po, binary_tensors, true, algo, alpha,
-                      beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_2, po, binary_tensors, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -463,8 +459,8 @@ TEST_P(TestPostopCache, BiasRefreshOnHit) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor, bias_1,
-                      ref_1, po, no_binaries, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_1, ref_1, po,
+                      no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     // Hit path: same weight key, DIFFERENT bias buffer.
@@ -473,8 +469,8 @@ TEST_P(TestPostopCache, BiasRefreshOnHit) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_2, out_2, po,
                       no_binaries, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor, bias_2,
-                      ref_2, po, no_binaries, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_2, ref_2, po,
+                      no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -535,9 +531,8 @@ TEST_P(TestPostopCache, BinaryMulBcastRefreshOnHit) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                    bias_tensor, ref_1, po, binary_1, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_1, po, binary_1, true, algo, alpha, beta, true),
             status_t::success);
 
     auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
@@ -545,9 +540,8 @@ TEST_P(TestPostopCache, BinaryMulBcastRefreshOnHit) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
                       out_2, po, binary_2, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                    bias_tensor, ref_2, po, binary_2, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_2, po, binary_2, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -592,9 +586,8 @@ TEST_P(TestPostopCache, BiasDtypeKeysDistinct) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                    bias_bf16, ref_1, po, no_binaries, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_bf16, ref_1,
+                      po, no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     // Same weight_ptr/K/N/algo; bias dtype differs => separate cache
@@ -604,9 +597,8 @@ TEST_P(TestPostopCache, BiasDtypeKeysDistinct) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_f32, out_2,
                       po, no_binaries, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_tensor, weight_tensor, bias_f32,
-                    ref_2, po, no_binaries, true, algo, alpha, beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_f32, ref_2,
+                      po, no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -650,9 +642,9 @@ TEST_P(TestPostopCache, PostopOrderKeysDistinct) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_1, chain_1, no_binaries, true, algo,
-                      alpha, beta),
+    ASSERT_EQ(
+            matmul_kernel_test(input_tensor, weight_tensor, bias_tensor, ref_1,
+                    chain_1, no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
@@ -660,9 +652,9 @@ TEST_P(TestPostopCache, PostopOrderKeysDistinct) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
                       out_2, chain_2, no_binaries, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_2, chain_2, no_binaries, true, algo,
-                      alpha, beta),
+    ASSERT_EQ(
+            matmul_kernel_test(input_tensor, weight_tensor, bias_tensor, ref_2,
+                    chain_2, no_binaries, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -728,9 +720,8 @@ TEST_P(TestPostopCache, LifecycleClear) {
         GTEST_SKIP() << dtype_token(src_dt) << " not supported on this ISA";
     }
     ASSERT_EQ(s1, status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_1, po, binary_tensors, true, algo, alpha,
-                      beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_1, po, binary_tensors, true, algo, alpha, beta, true),
             status_t::success);
 
     // Drop every holder owned by this thread.
@@ -742,9 +733,8 @@ TEST_P(TestPostopCache, LifecycleClear) {
     ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
                       out_2, po, binary_tensors, true, algo, alpha, beta),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_tensor, weight_tensor,
-                      bias_tensor, ref_2, po, binary_tensors, true, algo, alpha,
-                      beta),
+    ASSERT_EQ(matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                      ref_2, po, binary_tensors, true, algo, alpha, beta, true),
             status_t::success);
 
     const auto t = tols_for_dst(dst_dt);
@@ -832,8 +822,8 @@ TEST_P(TestPostopCache, SymQuantPerTokenScaleRefreshOnHit) {
                       std::vector<post_op_type_t> {}, no_binaries, true, algo,
                       1.0, 0.0),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_1, weight_tensor, bias_tensor,
-                      ref_1, {}, no_binaries, true, algo, 1.0, 0.0),
+    ASSERT_EQ(matmul_kernel_test(input_1, weight_tensor, bias_tensor, ref_1, {},
+                      no_binaries, true, algo, 1.0, 0.0, true),
             status_t::success);
 
     auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, dst_dt, 2.0);
@@ -841,8 +831,8 @@ TEST_P(TestPostopCache, SymQuantPerTokenScaleRefreshOnHit) {
     ASSERT_EQ(matmul_kernel_test(input_2, weight_tensor, bias_tensor, out_2, {},
                       no_binaries, true, algo, 1.0, 0.0),
             status_t::success);
-    ASSERT_EQ(matmul_forced_ref_kernel_test(input_2, weight_tensor, bias_tensor,
-                      ref_2, {}, no_binaries, true, algo, 1.0, 0.0),
+    ASSERT_EQ(matmul_kernel_test(input_2, weight_tensor, bias_tensor, ref_2, {},
+                      no_binaries, true, algo, 1.0, 0.0, true),
             status_t::success);
 
     // INT8 quant noise dominates the dst rounding budget for any dst dtype,
@@ -923,9 +913,8 @@ TEST_P(TestPostopCache, DynQuantScaleRefreshOnHit) {
     ASSERT_EQ(matmul_kernel_test(input_1, weight_tensor_s8, bias_tensor, out_1,
                       {}, no_binaries, true, algo, 1.0, 0.0),
             status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_1_ref, weight_tensor_ref,
-                    bias_tensor, ref_1, {}, no_binaries, true, algo, 1.0, 0.0),
+    ASSERT_EQ(matmul_kernel_test(input_1_ref, weight_tensor_ref, bias_tensor,
+                      ref_1, {}, no_binaries, true, algo, 1.0, 0.0, true),
             status_t::success);
 
     auto out_2 = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
@@ -933,9 +922,8 @@ TEST_P(TestPostopCache, DynQuantScaleRefreshOnHit) {
     ASSERT_EQ(matmul_kernel_test(input_2, weight_tensor_s8, bias_tensor, out_2,
                       {}, no_binaries, true, algo, 1.0, 0.0),
             status_t::success);
-    ASSERT_EQ(
-            matmul_forced_ref_kernel_test(input_2_ref, weight_tensor_ref,
-                    bias_tensor, ref_2, {}, no_binaries, true, algo, 1.0, 0.0),
+    ASSERT_EQ(matmul_kernel_test(input_2_ref, weight_tensor_ref, bias_tensor,
+                      ref_2, {}, no_binaries, true, algo, 1.0, 0.0, true),
             status_t::success);
 
     // Dyn-quant introduces quantization error between the kernel (s8 weight,
