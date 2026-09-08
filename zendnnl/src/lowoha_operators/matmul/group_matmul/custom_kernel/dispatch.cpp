@@ -1786,12 +1786,14 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 // Gated-act epilogues are BF16-dst-only (gated by
                 // select_ukernel for swiglu_oai_mul, silu_and_mul, and
                 // gelu_and_mul — see `is_gated_act` above), so the half-width
-                // tight arena's element stride is fixed at `sizeof(bfloat16_t)`
-                // here regardless of `dst_elem_bytes`.
-                std::byte *Tight_row_base = Tight_bytes
-                        + (static_cast<size_t>(m_off) * tight_ldc
-                                  + (sub_col_base / 2))
-                                * sizeof(bfloat16_t);
+                // tight arena is a plain bfloat16_t matrix (`tight_ldc` in
+                // elements) regardless of `dst_elem_bytes`.  Index it as
+                // bfloat16_t* so the element→byte scaling is implicit —
+                // avoids a sizeof multiply against a byte pointer.
+                bfloat16_t *Tight_row_base
+                        = static_cast<bfloat16_t *>(tight_dst)
+                        + static_cast<size_t>(m_off) * tight_ldc
+                        + (sub_col_base / 2);
 
                 for (int b = 0; b < n_blocks; ++b) {
                     const bfloat16_t *Bpacked_blk = Bpacked_blk_base
@@ -1802,13 +1804,12 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                                               * bias_elem_bytes)
                             : nullptr;
                     // 16 cols per (g, u) pair × NV/2 pairs per kernel call.
-                    std::byte *Tight_row = Tight_row_base
-                            + static_cast<size_t>(b) * (ctx.pack_nr / 2)
-                                    * sizeof(bfloat16_t);
+                    bfloat16_t *Tight_row = Tight_row_base
+                            + static_cast<size_t>(b) * (ctx.pack_nr / 2);
 
                     kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
-                            /*Cout=*/nullptr, /*ldc=*/0, Tight_row, tight_ldc,
-                            K);
+                            /*Cout=*/nullptr, /*ldc=*/0,
+                            static_cast<void *>(Tight_row), tight_ldc, K);
                 }
                 m_off += mr_now;
             }
