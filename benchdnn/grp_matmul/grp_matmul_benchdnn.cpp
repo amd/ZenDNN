@@ -168,15 +168,18 @@ static bool run_config(const GrpMatmulConfig &cfg, std::ostream &csv,
     // Internal-alloc requires N_down > 0 (parser already guards this).
     const bool internal_alloc = (cfg.use_internal_alloc != 0);
 
-    // Internal-alloc requires matched src/dst precision because Op2
-    // writes dst-typed elements into the caller's src buffer.  The
-    // library enforces this with an always-on guard; reject upfront
-    // here so the benchdnn driver fails fast with a clear message
-    // instead of relying on the generic library status_t::failure.
+    // Op2 writes dst-typed elements into the caller's src buffer.  The
+    // library's gate (G3) is dtype EQUALITY (`dtypes.src == dtypes.dst`),
+    // and this driver needs the same property for its own reason: it reads
+    // the Op2 result back out of the src buffer as dst-typed elements,
+    // which only lines up when the two dtypes are identical.  Reject upfront
+    // so the driver fails fast with a clear message rather than producing a
+    // misdecoded comparison.
     if (internal_alloc && cfg.src_dt != cfg.dst_dt) {
         std::cerr << "ERROR: use_internal_alloc=1 requires matching src/dst "
-                     "dtypes; mixed-precision callers must use legacy mode "
-                     "(use_internal_alloc=0). Got src="
+                     "dtypes (the library's gate (G3) requires "
+                     "dtypes.src == dtypes.dst); mixed-precision callers must "
+                     "use legacy mode (use_internal_alloc=0). Got src="
                   << datatypeToStr(cfg.src_dt)
                   << ", dst=" << datatypeToStr(cfg.dst_dt) << "\n";
         return false;

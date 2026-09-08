@@ -87,6 +87,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -274,6 +275,195 @@ inline bool pick_fused_moe_want_tight(bool op1_internal,
     return resolved_algo == 3;
 }
 
+// True when `fused.dst_down[]` aliases `src[]` in a way only the two-pass
+// ordering can serve.  Two-pass drains src into the Op1 arena before Pass 2
+// writes anything.  Vertical fusion instead hands each thread one M-slice
+// and runs Op1-read -> act -> Op2-write inside it with no intervening
+// barrier (`flat_m_tile_pipeline_bf16`), and rows are owned by different
+// threads.  So the ONLY safe overlap is exact in-place reuse, where row r
+// writes precisely onto row r's own bytes: same base AND same row stride.
+// Any other overlap lets one thread's Op2 write land on a row another
+// thread has not read yet, in either direction (a lower slice's write can
+// outrun its own reader, and a higher slice's write can fall back onto a
+// lower row still owned by another thread).  Every src is tested against
+// every dst so an Op2 output covering a DIFFERENT expert's source is caught.
+// A transposed Op1 has M as its fast dimension, so every slice touches
+// almost the whole src buffer (`m_tile` offsets src by `row_start*elem`,
+// not `row_start*lda*elem`): the per-row frontier model does not apply, so
+// such an op spans K rows and never earns the in-place exemption.
+inline bool fused_moe_src_op2dst_hazard(const std::vector<int> &M,
+        const std::vector<int> &K, const std::vector<int> &lda,
+        const std::vector<bool> &transA, const std::vector<const void *> &src,
+        const std::vector<void *> &op2_dst, const std::vector<int> &op2_ldc,
+        const std::vector<int> &N_down,
+        const std::vector<matmul_params> &params, size_t num_ops) {
+    const auto active = [&](size_t i) {
+        return M[i] > 0 && src[i] != nullptr && op2_dst[i] != nullptr;
+    };
+    // Spans below feed an address-range comparison, so arithmetic that wraps
+    // must never be able to shrink a range into a false "disjoint" verdict.
+    // Any overflow trips this flag and the whole query answers "hazard",
+    // which costs such a (already pathological) shape only its vertical
+    // fusion.
+    bool unsafe_arith = false;
+    const auto mul = [&](size_t a, size_t b) {
+        size_t r = 0;
+        if (zendnnl_mul_overflow(a, b, &r)) unsafe_arith = true;
+        return r;
+    };
+    const auto add = [&](size_t a, size_t b) {
+        size_t r = 0;
+        if (zendnnl_add_overflow(a, b, &r)) unsafe_arith = true;
+        return r;
+    };
+    // Bytes each op reads from src[i] / writes to op2_dst[i], modelled as
+    // the STRIDED accessed interval: (rows - 1) full strides plus the
+    // columns actually touched on the last row.  Counting `rows * ld`
+    // instead would fold the final row's trailing padding into the range.
+    //
+    // This interval is an ENCLOSING hull, not the accessed set: it also
+    // covers each row's interior padding.  So it answers "definitely
+    // disjoint" exactly, but its "overlapping" verdict is only a
+    // candidate — two operands can share a hull while touching disjoint
+    // column ranges of the same rows.  The canonical case is a padded
+    // layout that writes the unused half of each row (non-transposed
+    // K=64, lda=128, `dst_down = src + 64`): at M=1 the hulls separate,
+    // but from M=2 on they interleave and the hull test alone would deny
+    // vertical fusion to a provably safe caller.  `strided_sets_overlap`
+    // below settles those candidates exactly.
+    //
+    // A transposed src is a [K, lda] buffer with M indexing COLUMNS, so
+    // its footprint is (K-1) full rows plus M elements — not K*lda, which
+    // understates it whenever lda < M and would hide an alias past the
+    // K*lda mark.
+    const auto strided_span
+            = [&](size_t rows, size_t ld, size_t last_cols, size_t elem) {
+        if (rows == 0 || last_cols == 0) return static_cast<size_t>(0);
+        return mul(add(mul(rows - 1, ld), last_cols), elem);
+    };
+    const auto src_span = [&](size_t i) {
+        // Op1 reads K columns per row (M columns per row when transposed,
+        // where the roles of the two extents swap).
+        const size_t ld = static_cast<size_t>(lda[i]);
+        const size_t rows = static_cast<size_t>(transA[i] ? K[i] : M[i]);
+        const size_t last_cols
+                = static_cast<size_t>(transA[i] ? M[i] : std::max(K[i], 0));
+        return strided_span(rows, ld, last_cols, size_of(params[i].dtypes.src));
+    };
+    const auto dst_span = [&](size_t i) {
+        // Op2 writes N_down columns per row at stride op2_ldc.  `N_down` is
+        // sized to the ACTIVE range by the caller, so clamp defensively
+        // rather than indexing past it.
+        const size_t cols = (i < N_down.size())
+                ? static_cast<size_t>(std::max(N_down[i], 0))
+                : static_cast<size_t>(op2_ldc[i]);
+        return strided_span(static_cast<size_t>(M[i]),
+                static_cast<size_t>(op2_ldc[i]), cols,
+                size_of(params[i].dtypes.dst));
+    };
+
+    // Exact intersection of two strided row sets, for the case that
+    // actually occurs in a padded MoE layout: both operands non-transposed
+    // and walking the SAME row stride.  Anything else keeps the
+    // conservative hull verdict.
+    //
+    // Model each set as rows of touched bytes at a fixed stride S:
+    //   src: r in [0, Rs)   ->  [ r*S,       r*S + Cs )
+    //   dst: q in [0, Rd)   ->  [ D + q*S,   D + q*S + Cd )
+    // with D the signed base delta.  A src row and a dst row intersect iff
+    // their offsets differ by less than the respective widths, and the
+    // difference only ever depends on k = q - r:
+    //   intersect(k)  <=>  -Cd < D + k*S < Cs
+    // and k is realisable iff some row pair exists, i.e. -Rs < k < Rd.
+    // So the sets overlap iff an integer k satisfies both — a couple of
+    // divisions, no loop over rows.
+    const auto floor_div = [](ptrdiff_t a, ptrdiff_t b) { // b > 0
+        ptrdiff_t q = a / b;
+        if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+        return q;
+    };
+    const auto strided_sets_overlap
+            = [&](ptrdiff_t D, ptrdiff_t S, ptrdiff_t Rs, ptrdiff_t Cs,
+                      ptrdiff_t Rd, ptrdiff_t Cd) {
+        if (S <= 0 || Cs <= 0 || Cd <= 0 || Rs <= 0 || Rd <= 0) return true;
+        // Smallest k with D + k*S > -Cd, largest k with D + k*S < Cs.
+        const ptrdiff_t k_min = floor_div(-Cd - D, S) + 1;
+        const ptrdiff_t k_max = -floor_div(-(Cs - D), S) - 1;
+        // Realisable row offsets.
+        const ptrdiff_t k_lo = std::max(k_min, -(Rs - 1));
+        const ptrdiff_t k_hi = std::min(k_max, Rd - 1);
+        return k_lo <= k_hi;
+    };
+
+    uintptr_t src_lo = UINTPTR_MAX, src_hi = 0;
+    uintptr_t dst_lo = UINTPTR_MAX, dst_hi = 0;
+    for (size_t i = 0; i < num_ops; ++i) {
+        if (!active(i)) continue;
+        const uintptr_t s = reinterpret_cast<uintptr_t>(src[i]);
+        const uintptr_t d = reinterpret_cast<uintptr_t>(op2_dst[i]);
+        const uintptr_t s_end = s + src_span(i);
+        const uintptr_t d_end = d + dst_span(i);
+        if (s_end < s || d_end < d) unsafe_arith = true; // address wrap
+        src_lo = std::min(src_lo, s);
+        src_hi = std::max(src_hi, s_end);
+        dst_lo = std::min(dst_lo, d);
+        dst_hi = std::max(dst_hi, d_end);
+    }
+    if (unsafe_arith) return true;
+    // O(num_ops) pre-filter: disjoint unions prove no pair can overlap.  It
+    // is only a pre-filter — separate src and dst allocations may interleave
+    // on the heap, so overlapping unions do NOT imply an aliased pair.  Pay
+    // for the exact pairwise scan only in that (rare) case, so the common
+    // non-aliasing caller is not charged O(num_ops^2) and, more importantly,
+    // is not denied vertical fusion by a false positive.
+    if (!(dst_lo < src_hi && src_lo < dst_hi)) return false;
+    for (size_t i = 0; i < num_ops; ++i) {
+        if (!active(i)) continue;
+        const uintptr_t s = reinterpret_cast<uintptr_t>(src[i]);
+        const uintptr_t s_end = s + src_span(i);
+        for (size_t j = 0; j < num_ops; ++j) {
+            if (!active(j)) continue;
+            const uintptr_t d = reinterpret_cast<uintptr_t>(op2_dst[j]);
+            const uintptr_t d_end = d + dst_span(j);
+            if (d >= s_end || s >= d_end) continue; // hulls disjoint
+            // Overlapping: safe only as this op's own exact in-place reuse.
+            if (i == j && !transA[i] && d == s
+                    && static_cast<size_t>(op2_ldc[i])
+                                    * size_of(params[i].dtypes.dst)
+                            == static_cast<size_t>(lda[i])
+                                    * size_of(params[i].dtypes.src))
+                continue;
+            // Hulls overlap, but they may still touch disjoint columns of
+            // the same rows.  Settle it exactly when both operands are
+            // non-transposed and share a row stride; otherwise keep the
+            // conservative verdict.  Erring toward "hazard" only costs
+            // vertical fusion, while a wrong "safe" is a data race.
+            const size_t s_elem = size_of(params[i].dtypes.src);
+            const size_t d_elem = size_of(params[j].dtypes.dst);
+            const ptrdiff_t s_stride = static_cast<ptrdiff_t>(lda[i]) * s_elem;
+            const ptrdiff_t d_stride
+                    = static_cast<ptrdiff_t>(op2_ldc[j]) * d_elem;
+            if (!transA[i] && s_stride == d_stride) {
+                const ptrdiff_t delta
+                        = static_cast<ptrdiff_t>(d) - static_cast<ptrdiff_t>(s);
+                const ptrdiff_t s_cols
+                        = static_cast<ptrdiff_t>(std::max(K[i], 0)) * s_elem;
+                const ptrdiff_t d_cols
+                        = static_cast<ptrdiff_t>(j < N_down.size()
+                                          ? std::max(N_down[j], 0)
+                                          : op2_ldc[j])
+                        * d_elem;
+                if (!strided_sets_overlap(delta, s_stride,
+                            static_cast<ptrdiff_t>(M[i]), s_cols,
+                            static_cast<ptrdiff_t>(M[j]), d_cols))
+                    continue;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Input validation.
 // ═══════════════════════════════════════════════════════════════════════
@@ -296,9 +486,10 @@ inline bool pick_fused_moe_want_tight(bool op1_internal,
 //       dst/dst_down in legacy caller-allocated mode).
 //
 //   (3) internal-alloc dtype safety — cross-expert dst dtype
-//       uniformity and per-expert matched-precision (src == dst) when
-//       either side is internal-alloc.  Both feed sizing math for the
-//       Op1 arena slab.
+//       uniformity when either side is internal-alloc (it feeds the Op1
+//       arena slab sizing), plus per-expert `src == dst` dtype equality
+//       (gate (G3)) for `op2_internal` only, where Op2's write footprint
+//       lands in the caller's src[].
 //
 //   (4) cross-expert N_down uniformity (only when moe_postop is
 //       engaged) — the weighted-reduce stage uses `fused.N_down[0]`
@@ -394,6 +585,59 @@ inline status_t validate_fused_moe_inputs(
         if (fused.ldb_down[i] < (transB[i] ? K_down : fused.N_down[i]))
             return status_t::failure;
 
+        // ── Op2 weight-scale metadata, checked BEFORE Op1 runs ─────────
+        //
+        // `setup_op2_dispatch_scratch` gives Op2 Op1's weight dtype
+        // verbatim (`p.dtypes.wei = params[i].dtypes.wei`), so a quantized
+        // Op1 weight means Op2 also runs a quantized GEMM and needs its
+        // own weight scale.  The vector-size checks above bound only the
+        // LENGTH of `down_scale`, and only when it is non-empty, which
+        // leaves two holes: an ABSENT `down_scale` on a quantized down
+        // weight, and a PRESENT one whose entry for this expert is null or
+        // shaped for a different K/N.  In both cases `params_down` reaches
+        // dispatch with `dynamic_quant=true` and no usable weight scale;
+        // nothing corrupts memory and the dispatch chain still returns
+        // success, so W2 can come back unwritten or unscaled with no error
+        // for the caller to see.  Fail closed here instead.
+        //
+        // Active experts only: an `M[i] == 0` slot runs no Op2 GEMM, so
+        // demanding scale metadata for it would reject callers that leave
+        // the inactive tail of a padded expert pool default-constructed.
+        if (M[i] > 0) {
+            const data_type_t wei_dt = params[i].dtypes.wei;
+            const bool op2_wei_quantized = (wei_dt == data_type_t::s8
+                    || wei_dt == data_type_t::u8 || wei_dt == data_type_t::s4
+                    || wei_dt == data_type_t::u4);
+            if (op2_wei_quantized) {
+                if (fused.down_scale.empty()) return status_t::failure;
+                const auto &ws = fused.down_scale[i];
+                if (ws.buff == nullptr) return status_t::failure;
+                if (ws.dt != data_type_t::f32 && ws.dt != data_type_t::bf16)
+                    return status_t::failure;
+                // Granularities the Op2 path actually consumes, measured
+                // against THIS pass's K_down / N_down rather than Op1's
+                // K_in / N — the two differ in general, which is the whole
+                // reason Op2 derives its own group count from these dims.
+                //   per-channel: {N_down} or {1, N_down}
+                //   per-group:   {G2, N_down} or {1, G2, N_down},
+                //                with K_down divisible by G2
+                const auto &d = ws.dims;
+                const int64_t n_down = static_cast<int64_t>(fused.N_down[i]);
+                const int64_t k_down = static_cast<int64_t>(K_down);
+                bool dims_ok = false;
+                if (d.size() == 1) {
+                    dims_ok = (d[0] == n_down);
+                } else if (d.size() == 2) {
+                    dims_ok = (d[1] == n_down) && d[0] >= 1
+                            && (k_down % d[0] == 0);
+                } else if (d.size() == 3) {
+                    dims_ok = (d[0] == 1) && (d[2] == n_down) && d[1] >= 1
+                            && (k_down % d[1] == 0);
+                }
+                if (!dims_ok) return status_t::failure;
+            }
+        }
+
         if (!op1_internal) {
             if (ldc[i] < N[i]) return status_t::failure;
         }
@@ -408,7 +652,7 @@ inline status_t validate_fused_moe_inputs(
             // allocation MUST cover `M[i] · lda[i] · src_elem` bytes —
             // i.e. the WIDEST row stride is what bounds the allocation.
             //
-            // Two correctness gates ZenDNN can enforce:
+            // Three correctness gates ZenDNN can enforce:
             //
             //   (G1) `lda[i] >= max(K[i], N_down[i])`.  The row stride must
             //        be wide enough for the larger of the two passes that
@@ -426,22 +670,34 @@ inline status_t validate_fused_moe_inputs(
             //        Pass-2 will overrun the caller's allocation if the
             //        caller sized src[] for Op1 only.
             //
-            // (G1) is the legacy check (preserved verbatim below).  (G2)
-            // is new: it elevates the validator from "wide-enough stride"
-            // to "consistent stride AND wide enough", which catches the
-            // typical-MoE silent-corruption path where
-            // K_in == hidden_dim but N_down can be smaller (rare) or
-            // larger (with bias projections / future variants).  When this
-            // gate trips, the validator emits a single `log_error` so the
-            // caller sees a clear failure instead of a downstream
-            // `std::bad_array_new_length` or a corrupted activation.
+            //   (G3) `dtypes.src == dtypes.dst`.  One integer `lda[i]`
+            //        addresses both passes in different element sizes — Op1
+            //        reads row m at `m·lda·src_elem`, Op2 writes it at
+            //        `m·lda·dst_elem` — so a NARROWER src (e.g. s8 src +
+            //        bf16 dst) both overruns the caller's allocation and,
+            //        because `src[]` holds per-expert bases into ONE grouped
+            //        buffer, lets expert e's output land in expert e+1's
+            //        SOURCE rows — corruption that needs no concurrency,
+            //        since that region is another expert's input.
+            //        Over-allocating does not help: the spacing, not the
+            //        total size, is what overlaps.  A WIDER src is
+            //        spacing-safe, but it leaves a mixed src/dst fused-MoE
+            //        configuration that dispatch does not compute, so it is
+            //        rejected too and the predicate is plain equality rather
+            //        than element-size parity.  A pre-quantized s8 source
+            //        therefore needs a caller-allocated `fused.dst_down[]`;
+            //        `op1_internal` stays available since the Op1 arena is
+            //        sized from dst alone.
             //
-            // OUT OF SCOPE for the validator: detecting cases where the
-            // caller passed a correctly-wide `lda` but UNDER-ALLOCATED
-            // `src[i]` (e.g. `lda[i] = N_down`, `src[i]` sized to
-            // `M*K*elem`).  No defensive check can spot that without an
-            // allocation introspection API — it remains a caller-contract
-            // requirement.
+            // (G1) is the legacy check (preserved verbatim below).  (G2)
+            // elevates the validator from "wide-enough stride" to
+            // "consistent stride AND wide enough".  (G3) replaces the
+            // blanket per-expert `src == dst` check that used to run for
+            // `op1_internal` too.
+            //
+            // A correctly-wide `lda` over an UNDER-ALLOCATED `src[i]` stays
+            // out of scope — undetectable without allocation introspection,
+            // so it remains a caller-contract requirement.
             if (lda[i] < fused.N_down[i]) {
                 log_error(
                         "group_matmul_fused_moe: op2_internal requires "
@@ -456,17 +712,85 @@ inline status_t validate_fused_moe_inputs(
                         "fused.dst_down[] (caller-allocated Op2 dst).");
                 return status_t::failure;
             }
+
+            if (params[i].dtypes.src != params[i].dtypes.dst) {
+                log_error(
+                        "group_matmul_fused_moe: op2_internal requires "
+                        "dtypes.src == dtypes.dst on params[",
+                        i,
+                        "] (got src=", static_cast<int>(params[i].dtypes.src),
+                        " (", size_of(params[i].dtypes.src),
+                        "B), dst=", static_cast<int>(params[i].dtypes.dst),
+                        " (", size_of(params[i].dtypes.dst), "B)).  src[", i,
+                        "] is reused as Op2's destination: a NARROWER source "
+                        "element makes Op2 overrun both the caller's "
+                        "allocation and the next expert's rows, and a WIDER "
+                        "one is a mixed src/dst fused-MoE configuration that "
+                        "the dispatch does not compute.  Pass an explicit "
+                        "fused.dst_down[] (caller-allocated Op2 dst) "
+                        "instead.");
+                return status_t::failure;
+            }
         }
 
-        // Cross-expert dst-dtype uniformity / matched-precision are
-        // always-on when either side is internal-alloc (Op1 arena slab
-        // sizing and Op2 in-place write footprint both depend on
-        // params[0].dtypes.dst).
+        // Cross-expert dst-dtype uniformity is always-on when either side
+        // is internal-alloc: the Op1 arena slab and the Op2 in-place write
+        // footprint are both sized from `params[0].dtypes.dst`.  Per-expert
+        // src==dst is NOT implied — that is an op2_internal-only
+        // requirement, now (G3) above.
         if ((op1_internal || op2_internal) && M[i] > 0) {
             if (params[i].dtypes.dst != params[0].dtypes.dst)
                 return status_t::failure;
-            if (params[i].dtypes.src != params[i].dtypes.dst)
+        }
+
+        // (G4) Supported-Op1-tuple gate for internal Op1 allocation.
+        //
+        // (G3) above constrains `src == dst` only under `op2_internal`,
+        // where one integer `lda` has to address both passes.  An internal
+        // Op1 arena has no such spacing constraint, so relaxing (G3) off
+        // `op1_internal` was correct for SPACING — but it also stopped
+        // rejecting tuples the dispatch cannot compute at all.  An f32 src
+        // with a bf16 dst is the case in point: spacing-safe, passes every
+        // other check, and AOCL implements only the f32/f32 -> f32 branch,
+        // so the call returns `success` having written NEITHER pass.  A
+        // silent success over an untouched buffer is a worse outcome than a
+        // diagnostic, so admit only what dispatch actually computes:
+        //
+        //   * `src == dst` — the classic bf16/bf16 and f32/f32 regimes.
+        //     WOQ (s4/u4 weight) and library-side dynamic-quant INT8 both
+        //     live here too: their source stays float and equals dst; only
+        //     `dtypes.wei` / `dtypes.compute` differ.
+        //   * pre-quantized s8 — s8 src + s8 wei with a float dst, the
+        //     configuration this change adds.  Op1 consumes the caller's s8
+        //     rows plus `src_scale.buff` directly, so src != dst is
+        //     intended rather than an unsupported mix.
+        //
+        // Scoped to `op1_internal` because that is the mode whose gate was
+        // relaxed; a fully caller-allocated call keeps its prior behaviour.
+        if (op1_internal && M[i] > 0
+                && params[i].dtypes.src != params[i].dtypes.dst) {
+            const bool prequant_s8_op1 = params[i].dtypes.src == data_type_t::s8
+                    && params[i].dtypes.wei == data_type_t::s8
+                    && (params[i].dtypes.dst == data_type_t::bf16
+                            || params[i].dtypes.dst == data_type_t::f32)
+                    && params[i].quant_params.src_scale.buff != nullptr;
+            if (!prequant_s8_op1) {
+                log_error(
+                        "group_matmul_fused_moe: op1_internal requires "
+                        "dtypes.src == dtypes.dst on params[",
+                        i,
+                        "] unless the call is the pre-quantized s8 form "
+                        "(src=s8, wei=s8, dst=bf16/f32, non-null "
+                        "quant_params.src_scale.buff).  Got src=",
+                        static_cast<int>(params[i].dtypes.src),
+                        ", wei=", static_cast<int>(params[i].dtypes.wei),
+                        ", dst=", static_cast<int>(params[i].dtypes.dst),
+                        ".  A mixed src/dst tuple is not a dispatch the "
+                        "library computes: it would return success having "
+                        "written neither pass.  Match src to dst, or supply "
+                        "the pre-quantized s8 source with its scale.");
                 return status_t::failure;
+            }
         }
 
         if (M[i] > 0) {
@@ -616,17 +940,11 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
                 if (M[i] <= 0 || base == nullptr) {
                     scratch.op1_dst_internal[i] = nullptr;
                 } else {
-                    // Overflow-safe per-expert slab accumulation.  Sister to
-                    // the validator's pre-flight overflow gate — that gate
-                    // computed the WIDE total; here we incrementally build
-                    // per-expert offsets and must independently confirm that
-                    // `cursor + (M*row_cols*elem)` stays representable.  In
-                    // tight mode `row_cols = N/2`, so the per-expert footprint
-                    // is half the validator's wide computation — strictly
-                    // smaller, but we still re-check because the multiplier
-                    // chain is different.  A trip aborts with `failure` BEFORE
-                    // any thread proceeds past `setup_op1_arena_and_layout`,
-                    // so the executors never see a wrap-around pointer.
+                    // Overflow-safe per-expert slab accumulation.  The
+                    // validator gated the WIDE total; this multiplier chain is
+                    // different (tight halves `row_cols`), so re-check that
+                    // `cursor + M*row_cols*elem` stays representable.  A trip
+                    // fails before any executor sees a wrapped pointer.
                     scratch.op1_dst_internal[i] = base + cursor;
                     const size_t m_sz = static_cast<size_t>(M[i]);
                     const size_t row_sz = static_cast<size_t>(row_cols);
@@ -691,8 +1009,11 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
 // call — a stale buffer pointer from a freed caller-side scale tensor
 // would crash the next call.
 //
-// Op2 inherits Op1's `dynamic_quant` flag and `dtypes.compute` so the
-// down_proj runs through the same dispatch path as the gate+up GEMM.
+// Op2 inherits Op1's `dtypes.compute` so the down_proj runs through the
+// same dispatch path as the gate+up GEMM, but `dynamic_quant` is DERIVED
+// from Op2's own dtypes, not inherited: Op2's source is always the float
+// Op1 output, so a pre-quantized (s8) Op1 src must not disable Op2's
+// quantization.
 // Per-group src_scale (`dims = {M, ngroups>1}`) cannot inherit Op1's
 // group count because Op1.K != Op2.K; instead Op2's group count is
 // derived from the paired down-projection weight scale ({G2, N_down}),
@@ -756,12 +1077,19 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
         p.dtypes.dst = params[i].dtypes.dst;
         p.dtypes.bias = fused.bias_dt_down;
         p.num_threads = params[i].num_threads;
-        // Inherit the quant scheme knobs from Op1's params: dynamic_quant
-        // flag and dtypes.compute carry over unchanged so both the grouped
-        // source-quantization gate AND the per-expert fallback see the same
-        // values on Op2 as on Op1.
-        p.dynamic_quant = params[i].dynamic_quant;
+        // `dtypes.compute` carries over, but `dynamic_quant` is DERIVED:
+        // Op2's source is always the float Op1 output, so it needs a source
+        // quant pass exactly when its own compute dtype is int8.  Inheriting
+        // would leave Op2's s8 GEMM unscaled under a pre-quantized Op1 src.
         p.dtypes.compute = params[i].dtypes.compute;
+        const bool op2_int8_compute = (p.dtypes.compute == data_type_t::s8
+                || p.dtypes.compute == data_type_t::u8);
+        // bf16/f32 only, matching `is_dynamic_quant_config`: the reorder
+        // admits no other source dtype, so listing f16 here would set a flag
+        // the reorder ignores and hand Op2's s8 GEMM an unquantized source.
+        const bool op2_src_is_float = (p.dtypes.src == data_type_t::bf16
+                || p.dtypes.src == data_type_t::f32);
+        p.dynamic_quant = op2_int8_compute && op2_src_is_float;
         // GGML-packed down weights are unpacked + AOCL sym-quant-reordered by
         // the caller (group_matmul_direct) into the same layout as Op1's
         // weight, and `down_scale[i]` carries the resulting {K_down/32, N_down}
@@ -1280,7 +1608,21 @@ status_t group_matmul_fused_moe_execute(
     // check, so the gate agrees with the per-GEMM dispatch the legacy
     // two-pass below will pick.  `resolved_algo` was computed once at
     // Step 3 (reused here — same safety-clamped value).
-    const bool vf_algo_allowed = (resolved_algo == 2);
+    // VF is additionally declined on a src[]/Op2-dst alias only two-pass
+    // can serve; exact in-place reuse is unaffected.  Gated on the resolved
+    // algo AND on vertical fusion being enabled at all (the knob defaults
+    // to DISABLED), since the hazard verdict has no other consumer — so no
+    // caller pays for the scan on the default path.
+    const bool vf_knob_on = (get_grp_matmul_m_tile_vertical_fusion() != -1);
+    const bool src_op2dst_hazard = (resolved_algo == 2) && vf_knob_on
+            && fused_moe_src_op2dst_hazard(M, K, lda, transA, src, op2_dst,
+                    op2_ldc, fused.N_down, params, num_ops);
+    if (src_op2dst_hazard && s_apilog) {
+        apilog_info(
+                "[GRP_MATMUL.EXEC] op=fused_moe vertical_fusion=declined "
+                "reason=src_op2dst_alias");
+    }
+    const bool vf_algo_allowed = (resolved_algo == 2) && !src_op2dst_hazard;
 
     const char *pass1_mode = nullptr;
     const char *pass2_mode = nullptr;

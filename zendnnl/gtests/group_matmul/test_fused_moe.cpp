@@ -2391,9 +2391,9 @@ TEST_P(TestFusedMoEQuantWOQ, BothPasses) {
     fused.dst_down = d2_test_p;
     fused.ldc_down = std::vector<int>(num_ops, H);
     // Carry the down_weight scale through the new `down_scale` field.
-    // Op2 inherits the rest of the quant scheme (dynamic_quant=false,
-    // dtypes.wei=s4) automatically from `params[i]` via the fused-MoE
-    // dispatcher's setup loop.
+    // Op2 inherits the rest of the quant scheme (dtypes.wei=s4) from
+    // `params[i]` via the fused-MoE dispatcher's setup loop; WOQ leaves
+    // Op2's derived `dynamic_quant` false since compute stays float.
 
     fused.down_scale.resize(num_ops);
     for (int i = 0; i < num_ops; ++i) {
@@ -2567,9 +2567,9 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
         // intermediate has no `tensor_t` wrapper, so we set up the
         // per-token src_scale.dims directly on the params (the kernel
         // allocates the runtime scale buffer internally when buff is
-        // null — same path the fused dispatcher takes for Op2 by
-        // inheriting `params[i].dynamic_quant` + `dtypes.compute=s8`
-        // and copying `fused.down_scale[i]` into the Op2 weight slot).
+        // null — same path the fused dispatcher takes for Op2, which
+        // inherits `dtypes.compute=s8`, derives `dynamic_quant`, and
+        // copies `fused.down_scale[i]` into the Op2 weight slot).
         std::vector<matmul_params> p_ref_op2(num_ops);
         for (int i = 0; i < num_ops; ++i) {
             p_ref_op2[i] = make_uniform_params(1, data_type_t::bf16)[0];
@@ -2600,7 +2600,7 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
     }
 
     // ── Test: single fused call.  Dynamic INT8 on Op1 carried via
-    //   `params[i]`; Op2 inherits the same scheme — only the down_weight
+    //   `params[i]`; Op2 runs the same scheme — only the down_weight
     //   scale needs a dedicated carrier (`fused.down_scale`). ────────────
     grp_matmul_gated_act_params act {};
     act.act = act_type;
@@ -2610,10 +2610,9 @@ TEST_P(TestFusedMoEQuantDynINT8, BothPasses) {
     fused.ldc_down = std::vector<int>(num_ops, H);
 
     // Only Op2's weight scale is plumbed through the fused struct.
-    // Everything else (dynamic_quant flag, dtypes.compute=s8, per-token
-    // src_scale.dims) is inherited from `params[i]` by the dispatcher's
-    // setup loop in group_matmul_fused_moe.cpp — same scheme on both
-    // passes by construction.
+    // `dtypes.compute=s8` and per-token `src_scale.dims` come from
+    // `params[i]` via the dispatcher's setup loop in
+    // group_matmul_fused_moe.cpp; Op2's `dynamic_quant` is derived there.
     fused.down_scale.resize(num_ops);
     fused.down_zp.resize(num_ops);
     for (int i = 0; i < num_ops; ++i) {
@@ -2963,6 +2962,1652 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDqVsRuntimeHoistParity) {
     ASSERT_GT(sum, 1e-3) << "grouped-DQ path produced all-zero output";
     verify_per_expert_2d(d2_groupdq, H, d2_hoist, H, num_ops, M, H, is_bf16,
             tol_fused(is_bf16), "GroupDqVsRuntimeHoistParity");
+}
+
+// Route parity for the `ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED` knob.
+//
+// The knob defaults to ON, which makes a `use_custom` DQ-INT8 FUSED call
+// eligible for DecodeDynamic where it could previously only reach Rounds.
+// The two executors partition the same work differently — Rounds barriers
+// between rounds of N-tiles, DecodeDynamic maps whole experts onto CCDs —
+// so this pins the caller-visible contract that the route is a scheduling
+// choice and not a numerical one.  Both strategies are FORCED here (2 and
+// 3) rather than left to AUTO: at four experts the AUTO adoption gate
+// (`active_ops >= EPC_MULT * num_ccds`) does not fire on a typical
+// multi-CCD host, so an AUTO-only test would silently compare Rounds
+// against itself and prove nothing.  The snapshot assertions below fail
+// loudly if either run does not land on its intended executor.
+TEST(TestFusedMoEQuantDynINT8AllAlgos, DecodeDynamicVsRoundsRouteParity) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the DQ-INT8 "
+                        "custom-kernel path.";
+    }
+
+    // max_M = 32 = kDecodeMaxM keeps the call decode-class, which is a
+    // precondition for the DecodeDynamic branch.
+    constexpr int dim = 32, H = 32, M = 32, num_ops = 4;
+    constexpr int N_gate_up = 2 * dim, K_in = H, K_down = dim;
+    constexpr bool is_bf16 = true;
+    const auto act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+    AlgoEnvGuard algo_guard(3); // ALGO 3 — the only algo with these routes
+
+    tensor_factory_t factory {};
+    std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        src_scale_t[i] = factory.zero_tensor({M, 1}, data_type_t::f32);
+        src_t[i] = factory.uniform_dist_tensor({M, K_in}, data_type_t::bf16,
+                2.0, false, src_scale_t[i], tensor_t {});
+    }
+    std::vector<tensor_t> w1_s8_t(num_ops), w1_scale_t(num_ops),
+            w1_zp_t(num_ops);
+    std::vector<tensor_t> w2_s8_t(num_ops), down_scale_t(num_ops),
+            down_zp_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        auto w1_ref = factory.uniform_dist_tensor(
+                {K_in, N_gate_up}, data_type_t::bf16, 2.0);
+        ASSERT_EQ(quant_params_compute(factory, w1_ref, data_type_t::bf16,
+                          data_type_t::s8, {1, N_gate_up}, data_type_t::f32,
+                          w1_scale_t[i], w1_zp_t[i], &w1_s8_t[i]),
+                status_t::success);
+        auto w2_ref = factory.uniform_dist_tensor(
+                {K_down, H}, data_type_t::bf16, 2.0);
+        ASSERT_EQ(quant_params_compute(factory, w2_ref, data_type_t::bf16,
+                          data_type_t::s8, {1, H}, data_type_t::f32,
+                          down_scale_t[i], down_zp_t[i], &w2_s8_t[i]),
+                status_t::success);
+    }
+    std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        srcs[i] = src_t[i].get_raw_handle_unsafe();
+        wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+        wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+    }
+
+    TypedBuffers d2_rounds, d2_decdyn, d1_unused;
+    d2_rounds.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    d2_decdyn.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    d1_unused.alloc(num_ops, static_cast<size_t>(M) * N_gate_up, is_bf16);
+    auto d1_unused_p = d1_unused.ptrs(is_bf16);
+    std::vector<const void *> no_bias(num_ops, nullptr);
+
+    auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+    gv_op1.is_wc.assign(num_ops, true);
+
+    auto run_fused = [&](const std::vector<void *> &dst_down_p) {
+        grp_matmul_gated_act_params act {};
+        act.act = act_type;
+        auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+        fused.dst_down = dst_down_p;
+        fused.ldc_down = std::vector<int>(num_ops, H);
+        fused.down_scale.resize(num_ops);
+        fused.down_zp.resize(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            copy_attached_scale(w2_s8_t[i], fused.down_scale[i]);
+            copy_attached_zp(w2_s8_t[i], fused.down_zp[i]);
+        }
+        std::vector<matmul_params> p(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            auto q = make_uniform_params(1, data_type_t::bf16)[0];
+            q.dtypes.src = data_type_t::bf16;
+            q.dtypes.wei = data_type_t::s8;
+            q.dtypes.dst = data_type_t::bf16;
+            q.dtypes.compute = data_type_t::s8;
+            q.dynamic_quant = true;
+            copy_attached_scale(src_t[i], q.quant_params.src_scale);
+            copy_attached_scale(w1_s8_t[i], q.quant_params.wei_scale);
+            copy_attached_zp(w1_s8_t[i], q.quant_params.wei_zp);
+            p[i] = q;
+        }
+        return group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs, gv_op1.lda,
+                wei1_p, gv_op1.ldb, no_bias, gv_op1.beta, d1_unused_p,
+                gv_op1.ldc, gv_op1.is_wc, p, nullptr, &act, &fused);
+    };
+
+    // Route A: forced Rounds (the pre-knob destination for this call).
+    {
+        NTileStrategyOverride rounds(2);
+        PhaseBCaptureGuard capture;
+        reset_grp_matmul_caches();
+        ASSERT_EQ(run_fused(d2_rounds.ptrs(is_bf16)), status_t::success)
+                << "fused DQ-INT8 under forced Rounds";
+        const auto &snap = test_api::s_last_phase_b_snapshot;
+        ASSERT_TRUE(snap.valid) << "flat_n_tile was not reached under "
+                                   "strategy=2; the call left ALGO 3.";
+        EXPECT_NE(static_cast<int>(snap.strategy),
+                static_cast<int>(GroupNTileStrategy::DecodeDynamic))
+                << "strategy=2 must pin the call OFF DecodeDynamic.";
+    }
+    // Route B: forced DecodeDynamic (what the default knob now admits).
+    {
+        NTileStrategyOverride decdyn(3);
+        PhaseBCaptureGuard capture;
+        reset_grp_matmul_caches();
+        ASSERT_EQ(run_fused(d2_decdyn.ptrs(is_bf16)), status_t::success)
+                << "fused DQ-INT8 under forced DecodeDynamic";
+        const auto &snap = test_api::s_last_phase_b_snapshot;
+        ASSERT_TRUE(snap.valid) << "flat_n_tile was not reached under "
+                                   "strategy=3; the call left ALGO 3.";
+        // Strategy 3 is a REQUEST, not a bypass: the route still has to
+        // clear the per-op EPC rule (`active_ops >= EPC_MULT * num_ccds`,
+        // default 4x).  On a host with many CCDs four experts cannot clear
+        // it — a 64-CCD machine would need 256 active experts — and
+        // `EPC_MULT` is a cached env read, so a test cannot lower it
+        // mid-process.  Skip rather than assert, so this stays a genuine
+        // parity check where the route is reachable instead of silently
+        // comparing Rounds against itself.
+        if (static_cast<int>(snap.strategy)
+                != static_cast<int>(GroupNTileStrategy::DecodeDynamic)) {
+            GTEST_SKIP() << "DecodeDynamic not reachable here (strategy="
+                         << static_cast<int>(snap.strategy)
+                         << "); needs active_ops >= EPC_MULT * num_ccds.  "
+                            "Re-run with ZENDNNL_GRP_MATMUL_DECDYN_EPC_MULT=1 "
+                            "on a low-CCD host, or raise the expert count.";
+        }
+    }
+
+    double sum = 0.0;
+    for (int e = 0; e < num_ops; ++e)
+        for (size_t k = 0; k < d2_rounds.bf16[e].size(); ++k)
+            sum += std::abs(static_cast<float>(d2_rounds.bf16[e][k]));
+    ASSERT_GT(sum, 1e-3) << "Rounds route produced all-zero output";
+
+    // Every output element is one thread's complete K reduction on both
+    // routes, so the two must agree exactly — a tolerance here would hide
+    // precisely the plumbing mistakes this test exists to catch.
+    verify_per_expert_2d(d2_decdyn, H, d2_rounds, H, num_ops, M, H, is_bf16,
+            Tol {0.0f, 0.0f}, "DecodeDynamicVsRoundsRouteParity");
+}
+
+// ===============================================================================
+// [16c] TestFusedMoEPreQuantSrc — caller-side "quantize once, then group":
+// the caller hands Op1 a pre-quantized grouped s8 buffer plus per-token
+// scales, and the library's grouped-DQ pre-pass early-exits.
+//
+// Two things make this shape distinct from the `dynamic_quant=true` suites:
+//
+//   * Op2 must still narrow its OWN bf16 intermediate, so `dynamic_quant`
+//     is DERIVED for Op2, not inherited from Op1 (where it is false).
+//     Inheriting Op1's `false` would feed Op2's s8 GEMM an unscaled source.
+//   * An s8 `src[]` cannot be reused as the Op2 destination (gate G3: a
+//     1-byte element cannot absorb a 2-byte write), so these callers must
+//     pass an explicit `fused.dst_down[]`.  `dst[]` may still be empty, so
+//     every test here drives op1_internal + caller-allocated W2.
+// ===============================================================================
+
+namespace {
+
+using namespace zendnnl::lowoha::matmul;
+using namespace moe_test_utils;
+using zendnnl::common::data_type_t;
+
+// Pre-quantize a bf16 [M,K] source to s8 with per-token ({M,1}) f32
+// scales, mirroring what the framework does once per token before the
+// expert broadcast.  The scale is attached to the returned tensor so
+// `copy_attached_scale` can lift it into `quant_params.src_scale`.
+inline ::testing::AssertionResult prequant_src_s8(tensor_factory_t &factory,
+        const tensor_t &src_bf16, int M, tensor_t &src_scale_out,
+        tensor_t &src_zp_out, tensor_t &src_s8_out) {
+    src_scale_out = factory.zero_tensor(
+            {static_cast<uint64_t>(M), uint64_t {1}}, data_type_t::f32);
+    const std::vector<int64_t> scale_dims {static_cast<int64_t>(M), 1};
+    if (quant_params_compute(factory, src_bf16, data_type_t::bf16,
+                data_type_t::s8, scale_dims, data_type_t::f32, src_scale_out,
+                src_zp_out, &src_s8_out)
+            != status_t::success) {
+        return ::testing::AssertionFailure()
+                << "per-token src pre-quantization failed";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Shared harness: builds ONE set of bf16 source rows plus INT8 W13/W2
+// weights, then runs the fused MoE path with Op1's source presented
+// either as those bf16 rows (library quantizes them) or as the caller's
+// pre-quantized s8 rows plus per-token scales.  Both modes therefore see
+// the SAME source values, which is what makes the A/B in
+// `PreQuantMatchesLibrarySideDq` a statement about the source plumbing
+// and nothing else.
+// `MRows` is the per-expert row count.  It is a template parameter rather
+// than a fixed 32 because the collapsed-scale decode case (`M == 1`, where
+// a per-token source scale holds exactly ONE element and so is
+// indistinguishable from per-tensor by element count alone) exercises a
+// different classifier branch in the AOCL backend than the M > 1 shapes.
+template <int MRows>
+struct MoEInt8PreQuantHarnessT {
+    static constexpr int dim = 32;
+    static constexpr int H = 32;
+    static constexpr int M = MRows;
+    static constexpr int num_ops = 4;
+    static constexpr int N_gate_up = 2 * dim;
+    static constexpr int K_in = H;
+    static constexpr int K_down = dim;
+    static constexpr bool is_bf16 = true;
+
+    tensor_factory_t factory {};
+    std::vector<tensor_t> src_bf16_t, src_dq_scale_t;
+    std::vector<tensor_t> src_s8_t, src_s8_scale_t, src_s8_zp_t;
+    std::vector<tensor_t> w1_s8_t, w1_scale_t, w1_zp_t;
+    std::vector<tensor_t> w2_s8_t, down_scale_t, down_zp_t;
+    std::vector<const void *> wei1_p, wei2_p, no_bias;
+    grp_matmul_gated_act_t act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+
+    // When non-empty, every expert's Op1 `wei_scale.buff` is redirected at
+    // this caller-owned address instead of the weight's own attached scale
+    // tensor.  Models a caller that keeps ONE scale workspace per expert
+    // and refills it for whichever weight it is about to use; the values
+    // still have to be correct for that weight, only the ADDRESS is shared.
+    // Used by `SharedScaleWorkspaceTracksWeightIdentity`.
+    std::vector<const void *> w1_scale_override;
+
+    // Optional last-moment mutation of the Op2 params, applied inside
+    // `run_fused` just before dispatch.  Lets a negative test present
+    // malformed `down_scale` metadata without duplicating the call setup.
+    std::function<void(grp_matmul_fused_moe_params &)> op2_mutator;
+
+    // Range of the Op1 weight distribution.  `uniform_dist_tensor` reseeds
+    // a fresh mt19937 per call, so two harness instances with the same
+    // shapes draw bit-identical weights; varying this is what makes a
+    // second instance a genuinely DIFFERENT weight (and hence a different
+    // derived scale) rather than a copy of the first.
+    double w1_range = 2.0;
+
+    // Split out of a constructor so the ASSERT_* macros are usable.
+    void build() {
+        src_bf16_t.resize(num_ops);
+        src_dq_scale_t.resize(num_ops);
+        src_s8_t.resize(num_ops);
+        src_s8_scale_t.resize(num_ops);
+        src_s8_zp_t.resize(num_ops);
+        w1_s8_t.resize(num_ops);
+        w1_scale_t.resize(num_ops);
+        w1_zp_t.resize(num_ops);
+        w2_s8_t.resize(num_ops);
+        down_scale_t.resize(num_ops);
+        down_zp_t.resize(num_ops);
+        wei1_p.resize(num_ops);
+        wei2_p.resize(num_ops);
+        no_bias.assign(num_ops, nullptr);
+
+        for (int i = 0; i < num_ops; ++i) {
+            // The library-side-DQ presentation needs an attached (zero)
+            // scale tensor for the runtime reorder to fill in.
+            src_dq_scale_t[i] = factory.zero_tensor(
+                    {static_cast<uint64_t>(M), uint64_t {1}}, data_type_t::f32);
+            src_bf16_t[i]
+                    = factory.uniform_dist_tensor({M, K_in}, data_type_t::bf16,
+                            2.0, false, src_dq_scale_t[i], tensor_t {});
+            // ...and the pre-quantized presentation is derived from the
+            // very same rows.
+            ASSERT_TRUE(prequant_src_s8(factory, src_bf16_t[i], M,
+                    src_s8_scale_t[i], src_s8_zp_t[i], src_s8_t[i]))
+                    << "expert=" << i;
+
+            auto w1_ref = factory.uniform_dist_tensor(
+                    {K_in, N_gate_up}, data_type_t::bf16, w1_range);
+            ASSERT_EQ(quant_params_compute(factory, w1_ref, data_type_t::bf16,
+                              data_type_t::s8, {1, N_gate_up}, data_type_t::f32,
+                              w1_scale_t[i], w1_zp_t[i], &w1_s8_t[i]),
+                    status_t::success);
+            auto w2_ref = factory.uniform_dist_tensor(
+                    {K_down, H}, data_type_t::bf16, 2.0);
+            ASSERT_EQ(quant_params_compute(factory, w2_ref, data_type_t::bf16,
+                              data_type_t::s8, {1, H}, data_type_t::f32,
+                              down_scale_t[i], down_zp_t[i], &w2_s8_t[i]),
+                    status_t::success);
+
+            wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+            wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+        }
+    }
+
+    std::vector<const void *> src_ptrs(bool prequant) const {
+        std::vector<const void *> s(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            s[i] = prequant ? src_s8_t[i].get_raw_handle_unsafe()
+                            : src_bf16_t[i].get_raw_handle_unsafe();
+        }
+        return s;
+    }
+
+    // Op1 params.  Pre-quantized: s8 src, `dynamic_quant=false`, and
+    // `src_scale.buff` carries the caller's per-token scales.  Library-side
+    // DQ: bf16 src with `dynamic_quant=true`.
+    std::vector<matmul_params> op1_params(bool prequant) const {
+        std::vector<matmul_params> p(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            p[i] = make_uniform_params(1, data_type_t::bf16)[0];
+            p[i].dtypes.src = prequant ? data_type_t::s8 : data_type_t::bf16;
+            p[i].dtypes.wei = data_type_t::s8;
+            p[i].dtypes.dst = data_type_t::bf16;
+            p[i].dtypes.compute = data_type_t::s8;
+            p[i].dynamic_quant = !prequant;
+            copy_attached_scale(prequant ? src_s8_t[i] : src_bf16_t[i],
+                    p[i].quant_params.src_scale);
+            copy_attached_scale(w1_s8_t[i], p[i].quant_params.wei_scale);
+            if (!w1_scale_override.empty()) {
+                p[i].quant_params.wei_scale.buff = w1_scale_override[i];
+            }
+            copy_attached_zp(w1_s8_t[i], p[i].quant_params.wei_zp);
+        }
+        return p;
+    }
+
+    grp_matmul_fused_moe_params op2_params(
+            const std::vector<void *> &dst_down) const {
+        auto f = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+        f.dst_down = dst_down;
+        f.ldc_down = std::vector<int>(num_ops, H);
+        f.down_scale.resize(num_ops);
+        f.down_zp.resize(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            copy_attached_scale(w2_s8_t[i], f.down_scale[i]);
+            copy_attached_zp(w2_s8_t[i], f.down_zp[i]);
+        }
+        return f;
+    }
+
+    // One fused call: library-managed W13 (all-null dst[] + zero ldc[])
+    // plus the caller-allocated W2 that an s8 source mandates.
+    status_t run_fused(bool prequant, TypedBuffers &out) const {
+        auto gv = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+        gv.is_wc.assign(num_ops, true);
+        auto srcs = src_ptrs(prequant);
+        auto p = op1_params(prequant);
+        auto out_p = out.ptrs(is_bf16);
+        auto fused = op2_params(out_p);
+        if (op2_mutator) op2_mutator(fused);
+        grp_matmul_gated_act_params act {};
+        act.act = act_type;
+        std::vector<void *> dst_null(num_ops, nullptr);
+        std::vector<int> ldc_null(num_ops, 0);
+        return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1_p, gv.ldb, no_bias,
+                gv.beta, dst_null, ldc_null, gv.is_wc, p, nullptr, &act,
+                &fused);
+    }
+
+    // Unfused 2-call equivalent: Op1 -> reference activation -> Op2.  Op2's
+    // source is the bf16 Op1 output, so it carries `dynamic_quant=true`
+    // regardless of how Op1's source was presented — the same derivation
+    // the fused path has to make internally.
+    void run_two_call_reference(
+            bool prequant, TypedBuffers &d1, TypedBuffers &out) const {
+        auto gv_op1 = GemmVecs::uniform(num_ops, M, N_gate_up, K_in);
+        gv_op1.is_wc.assign(num_ops, true);
+        auto gv_op2 = GemmVecs::uniform(num_ops, M, H, K_down);
+        gv_op2.lda.assign(num_ops, N_gate_up);
+        gv_op2.is_wc.assign(num_ops, true);
+
+        auto srcs = src_ptrs(prequant);
+        auto p1 = op1_params(prequant);
+        auto d1_p = d1.ptrs(is_bf16);
+        ASSERT_EQ(
+                group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                        gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs,
+                        gv_op1.lda, wei1_p, gv_op1.ldb, no_bias, gv_op1.beta,
+                        d1_p, gv_op1.ldc, gv_op1.is_wc, p1),
+                status_t::success)
+                << "reference Op1";
+
+        for (int e = 0; e < num_ops; ++e)
+            apply_ref_gated_act(d1.bf16[e], M, N_gate_up, N_gate_up, act_type);
+
+        std::vector<matmul_params> p2(num_ops);
+        for (int i = 0; i < num_ops; ++i) {
+            p2[i] = make_uniform_params(1, data_type_t::bf16)[0];
+            p2[i].dtypes.src = data_type_t::bf16;
+            p2[i].dtypes.wei = data_type_t::s8;
+            p2[i].dtypes.dst = data_type_t::bf16;
+            p2[i].dtypes.compute = data_type_t::s8;
+            p2[i].dynamic_quant = true;
+            p2[i].quant_params.src_scale.dt = data_type_t::f32;
+            p2[i].quant_params.src_scale.dims = {M, 1};
+            copy_attached_scale(w2_s8_t[i], p2[i].quant_params.wei_scale);
+            copy_attached_zp(w2_s8_t[i], p2[i].quant_params.wei_zp);
+        }
+        std::vector<const void *> srcs2(num_ops);
+        for (int e = 0; e < num_ops; ++e)
+            srcs2[e] = d1_p[e];
+        auto out_p = out.ptrs(is_bf16);
+        ASSERT_EQ(
+                group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+                        gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2,
+                        gv_op2.lda, wei2_p, gv_op2.ldb, no_bias, gv_op2.beta,
+                        out_p, gv_op2.ldc, gv_op2.is_wc, p2),
+                status_t::success)
+                << "reference Op2";
+    }
+};
+
+// The prompt-class shape every pre-existing test in this section uses.
+using MoEInt8PreQuantHarness = MoEInt8PreQuantHarnessT<32>;
+
+// Guard against a silently-degenerate comparison: a rejected quant
+// configuration makes both sides fall back and produce matching zeros.
+inline void assert_not_all_zero(const TypedBuffers &b, int num_ops,
+        const std::vector<int> &Ms, const char *what) {
+    double sum = 0.0;
+    for (int e = 0; e < num_ops; ++e) {
+        if (Ms[e] == 0) continue;
+        for (size_t k = 0; k < b.bf16[e].size(); ++k)
+            sum += std::abs(static_cast<float>(b.bf16[e][k]));
+    }
+    ASSERT_GT(sum, 1e-3) << what << " produced all-zero output";
+}
+
+} // namespace
+
+// THE feature test.  Pre-quantizing the source caller-side must not change
+// the result versus letting the library quantize the same rows — only the
+// source PRESENTATION differs.  Comparing the two library paths against
+// each other (rather than a hand-rolled model) holds them to bit-exact
+// agreement on every ALGO, including tight ALGO 3, whose fused-activation
+// rounding no unfused reference reproduces.  It is also what pins the Op2
+// `dynamic_quant` derivation: Op1 arrives with `dynamic_quant=false` here,
+// and inheriting that would leave Op2's s8 GEMM without a source scale.
+TEST(TestFusedMoEPreQuantSrc, PreQuantMatchesLibrarySideDq) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+    using HW = MoEInt8PreQuantHarness;
+
+    MoEInt8PreQuantHarness h;
+    ASSERT_NO_FATAL_FAILURE(h.build());
+    const std::vector<int> all_active(HW::num_ops, HW::M);
+
+    for (int algo : {0, 1, 2, 3, 4, 5, 6}) {
+        TypedBuffers out_dq, out_pq;
+        out_dq.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+        out_pq.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(
+                    h.run_fused(/*prequant=*/false, out_dq), status_t::success)
+                    << "algo=" << algo << " library-side DQ";
+        }
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(h.run_fused(/*prequant=*/true, out_pq), status_t::success)
+                    << "algo=" << algo << " pre-quantized s8 src";
+        }
+
+        ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
+                out_pq, HW::num_ops, all_active, "pre-quantized fused path"));
+        // Both presentations yield the same s8 rows and scales, so keep the
+        // bound exact — loosening it hides the scale/plumbing mistakes this
+        // test exists to catch.
+        verify_per_expert_2d(out_pq, HW::H, out_dq, HW::H, HW::num_ops, HW::M,
+                HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+                "PreQuantVsLibrarySideDq algo=" + std::to_string(algo));
+    }
+}
+
+// [16c-M1] The collapsed-scale decode case, on the non-ALGO-3 routes.
+//
+// At `M == 1` a per-token source scale holds exactly ONE element, so element
+// count alone cannot distinguish it from a per-tensor scale.  Backends that
+// need the distinction have to break the tie some other way — the AOCL
+// classifier `src_scale_is_collapsed_per_token` consults the WEIGHT scale,
+// and recognises the collapsed source only for a per-group `{G>1, N}` weight
+// scale, not for a per-channel `{1, N}` one.
+//
+// That asymmetry is the reason this test exists.  It was raised in review as
+// a defect — the concern being that a pre-quantized s8 source with the
+// ORDINARY per-channel decode configuration would miss the s8 sym-quant
+// route and reach a GEMM that applies neither scale, silently returning an
+// unscaled result.  This test does NOT reproduce that: the values below
+// match the oracle exactly with the classifier unchanged, including under
+// `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`, which forces the AOCL route rather
+// than the custom kernel.  So the per-channel collapsed case is served
+// correctly today by whichever route it takes.
+//
+// The test is therefore coverage for the ambiguity itself rather than a
+// regression test for a known bug: it pins the `M == 1` behaviour so that a
+// future change to the classifier, or to which route this shape reaches,
+// cannot silently start dropping a scale.  An unscaled result is non-zero
+// and status is still `success`, so only a value comparison would catch it.
+//
+// Two comparisons run here, and only the second one can see a classifier
+// error.  The distinction matters, so it is spelled out:
+//
+//   (1) pre-quantized src vs library-side DQ.  This pins the two
+//       PRESENTATIONS against each other, and nothing more.  It is NOT an
+//       independent oracle: both configurations set `dtypes.compute = s8`,
+//       and the grouped DQ pre-pass is on by default, which rewrites the
+//       bf16 arm's `dtypes.src` to s8 and clears `dynamic_quant` before the
+//       kernel runs (see `get_grp_matmul_enable_group_dq`).  So both arms
+//       reach the same s8 backend holding the same one-element source scale
+//       and the same per-channel weight scale, and a shared scale or
+//       classifier error cancels exactly — staying nonzero and agreeing.
+//
+//   (2) M == 1 vs row 0 of the SAME shape run at M == 2.  This is the
+//       discriminating one.  At M == 2 the per-token scale holds two
+//       elements, so no element count can read it as per-tensor and the
+//       tie-break never runs; at M == 1 it collapses to one and the
+//       ambiguity is live.  `uniform_dist_tensor` reseeds a fresh mt19937
+//       per call and fills in order, so the M=2 harness's row 0 holds the
+//       byte-identical source of the M=1 harness, drawn against identical
+//       weights — and `prequant_src_s8` derives each row's scale from that
+//       row alone.  Row 0 of the M=2 result is therefore the same
+//       computation with the ambiguity removed, and must match exactly.
+//       A misclassification at M == 1 breaks that equality; it cannot
+//       cancel, because only one side is ambiguous.
+//
+// Every other pre-quant test in this section pins `M = 32`, where the scale
+// has M elements and the tie-break never runs, so none of them can see this.
+//
+// ALGO 3 is excluded for the reason given on `BothPassesVsTwoCallReference`:
+// its tight Op1 layout rounds f32 -> bf16 once inside the epilogue, which
+// legitimately diverges from the two-pass presentation at exact tolerance.
+TEST(TestFusedMoEPreQuantSrc, CollapsedPerTokenScaleAtM1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+    using HW = MoEInt8PreQuantHarnessT<1>;
+    using HW2 = MoEInt8PreQuantHarnessT<2>;
+    static_assert(HW::M == 1, "this test is specifically the M==1 shape");
+    static_assert(HW2::M == 2, "the unambiguous reference must have M > 1");
+    static_assert(HW::K_in == HW2::K_in && HW::H == HW2::H
+                    && HW::N_gate_up == HW2::N_gate_up
+                    && HW::num_ops == HW2::num_ops,
+            "the two harnesses must differ ONLY in row count, or row 0 is "
+            "not the same computation");
+
+    HW h;
+    ASSERT_NO_FATAL_FAILURE(h.build());
+    HW2 h2;
+    ASSERT_NO_FATAL_FAILURE(h2.build());
+    const std::vector<int> all_active(HW::num_ops, HW::M);
+
+    // Premise of comparison (2): row 0 of the M=2 source must be the exact
+    // bytes of the M=1 source, and the two must share weights.  If the
+    // factory ever stops reseeding per call this silently breaks, and the
+    // comparison would be against a different computation.
+    for (int e = 0; e < HW::num_ops; ++e) {
+        const auto *s1 = static_cast<const int8_t *>(
+                h.src_s8_t[e].get_raw_handle_unsafe());
+        const auto *s2 = static_cast<const int8_t *>(
+                h2.src_s8_t[e].get_raw_handle_unsafe());
+        ASSERT_EQ(std::memcmp(s1, s2, static_cast<size_t>(HW::K_in)), 0)
+                << "expert=" << e << ": M=2 row 0 is not the M=1 source";
+        const auto *w1 = static_cast<const int8_t *>(
+                h.w1_s8_t[e].get_raw_handle_unsafe());
+        const auto *w2 = static_cast<const int8_t *>(
+                h2.w1_s8_t[e].get_raw_handle_unsafe());
+        ASSERT_EQ(std::memcmp(w1, w2,
+                          static_cast<size_t>(HW::K_in) * HW::N_gate_up),
+                0)
+                << "expert=" << e << ": the two harnesses drew different W13";
+    }
+
+    for (int algo : {0, 1, 2, 4, 5, 6}) {
+        TypedBuffers out_dq, out_pq;
+        out_dq.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+        out_pq.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(
+                    h.run_fused(/*prequant=*/false, out_dq), status_t::success)
+                    << "algo=" << algo << " library-side DQ (oracle)";
+        }
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(h.run_fused(/*prequant=*/true, out_pq), status_t::success)
+                    << "algo=" << algo << " pre-quantized s8 src";
+        }
+
+        // An unscaled result is NOT zero, so the zero guard alone would pass
+        // the bug through; it only rules out the degenerate both-sides-zero
+        // comparison.
+        ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
+                out_pq, HW::num_ops, all_active, "pre-quantized M=1"));
+        ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
+                out_dq, HW::num_ops, all_active, "library-side-DQ M=1"));
+        // Same s8 rows and same scales on both presentations, so hold the
+        // bound exact — a dropped scale shifts values by orders of
+        // magnitude, but loosening here would also hide plumbing slips.
+        verify_per_expert_2d(out_pq, HW::H, out_dq, HW::H, HW::num_ops, HW::M,
+                HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+                "CollapsedPerTokenScaleAtM1 presentations algo="
+                        + std::to_string(algo));
+
+        // Comparison (2) — the discriminating one.  Run the identical
+        // configuration at M=2, where the per-token scale is unambiguous,
+        // and hold M=1 against its row 0.
+        TypedBuffers out_m2;
+        out_m2.alloc(HW2::num_ops, static_cast<size_t>(HW2::M) * HW2::H,
+                HW2::is_bf16);
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(
+                    h2.run_fused(/*prequant=*/true, out_m2), status_t::success)
+                    << "algo=" << algo << " pre-quantized s8 src at M=2";
+        }
+        // Compare row 0 only: rows 1.. are a different token and carry
+        // their own scale.  `verify_per_expert_2d` walks M rows at the
+        // given leading dimensions, so passing M=1 over the M=2 buffer
+        // reads exactly row 0 of each expert.
+        verify_per_expert_2d(out_pq, HW::H, out_m2, HW2::H, HW::num_ops,
+                /*rows=*/1, HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+                "CollapsedPerTokenScaleAtM1 M=1 vs M=2 row0 algo="
+                        + std::to_string(algo));
+    }
+}
+
+// A quantized Op2 weight with unusable `down_scale` metadata must be
+// REJECTED before Op1 runs, not silently mis-executed.
+//
+// Op2 inherits Op1's weight dtype, so an s8 Op1 weight means Op2 also runs
+// a quantized GEMM and needs its own weight scale.  Only the LENGTH of
+// `down_scale` was checked, and only when the vector was non-empty, so
+// three presentations reached dispatch with `dynamic_quant=true` and no
+// usable scale: absent entirely, present-but-null for an active expert,
+// and present with dims belonging to a different K/N.  None of them
+// corrupts memory and the dispatch chain still returns success, so W2
+// comes back unwritten or unscaled with nothing for the caller to check —
+// which is exactly why these have to fail closed.
+//
+// Each negative is paired with the positive control immediately before it
+// (the same call with correct metadata succeeds), so a test that started
+// failing for an unrelated reason cannot masquerade as a pass here.
+TEST(TestFusedMoEPreQuantSrc, RejectsUnusableOp2DownScaleMetadata) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+    using HW = MoEInt8PreQuantHarness;
+    const size_t out_elems = static_cast<size_t>(HW::M) * HW::H;
+
+    // Positive control: untouched metadata on the very same shape.
+    {
+        HW h;
+        ASSERT_NO_FATAL_FAILURE(h.build());
+        TypedBuffers out;
+        out.alloc(HW::num_ops, out_elems, HW::is_bf16);
+        reset_grp_matmul_caches();
+        ASSERT_EQ(h.run_fused(/*prequant=*/true, out), status_t::success)
+                << "positive control: correct down_scale must still succeed";
+    }
+
+    struct Negative {
+        const char *what;
+        std::function<void(grp_matmul_fused_moe_params &)> corrupt;
+    };
+    const std::vector<Negative> negatives = {
+            {"down_scale absent while the down weight is s8",
+                    [](grp_matmul_fused_moe_params &f) {
+        f.down_scale.clear();
+    }},
+            {"down_scale entry null for an active expert",
+                    [](grp_matmul_fused_moe_params &f) {
+        f.down_scale[0].buff = nullptr;
+    }},
+            {"down_scale dims describe a different N_down",
+                    [](grp_matmul_fused_moe_params &f) {
+        f.down_scale[0].dims = {1, HW::H + 8};
+    }},
+            {"down_scale group count does not divide K_down",
+                    [](grp_matmul_fused_moe_params &f) {
+        // K_down = dim = 32; 7 does not divide it.
+        f.down_scale[0].dims = {7, HW::H};
+    }},
+            {"down_scale dtype is not a supported scale type",
+                    [](grp_matmul_fused_moe_params &f) {
+        f.down_scale[0].dt = data_type_t::s32;
+    }},
+    };
+
+    for (const auto &neg : negatives) {
+        HW h;
+        ASSERT_NO_FATAL_FAILURE(h.build());
+        h.op2_mutator = neg.corrupt;
+        TypedBuffers out;
+        out.alloc(HW::num_ops, out_elems, HW::is_bf16);
+        reset_grp_matmul_caches();
+        EXPECT_EQ(h.run_fused(/*prequant=*/true, out), status_t::failure)
+                << "should have been rejected: " << neg.what;
+    }
+}
+
+// The memoized f32 wei_scale view has to follow the WEIGHT, not just the
+// scale buffer's address.
+//
+// That buffer is caller-managed, so ONE workspace address can serve several
+// distinct constant weights in turn: the caller refills it with the next
+// weight's scales and calls again.  The INT8 pack cache keys on the weight
+// pointer, so it correctly switches to the second weight's packed columns.
+// A scale memo keyed on the scale address alone would hit on that second
+// call and pair the new packed columns with the FIRST weight's converted
+// and permuted scales — a silent wrong answer, with status still success.
+//
+// Only `silu_and_mul` / `gelu_and_mul` reach the memo at all: `flat_n_tile`
+// clears `ck_scales_raw` exactly when the split-halves interleave
+// permutation is required, and the non-interleaved f32 case returns a
+// zero-copy alias of the caller's buffer that is deliberately never cached.
+// So this pins `silu_and_mul`; with the harness default `swiglu_oai_mul` the
+// memo is bypassed and the test would prove nothing.
+//
+// The sequence is deliberately run WITHOUT a cache clear between the calls:
+//   call 1 — weights A + workspace holding A's scales, which fills the memo
+//   call 2 — weights B + the SAME workspace, refilled with B's scales
+// The oracle is that same call 2 with B's own per-weight scale tensors,
+// which share no address with A and so cannot alias.  A cache-off arm
+// repeats the sequence under `WeightCacheGuard(0)`, where the memo is
+// bypassed entirely, so cache-on and cache-off have to agree.
+TEST(TestFusedMoEPreQuantSrc, SharedScaleWorkspaceTracksWeightIdentity) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+    using HW = MoEInt8PreQuantHarness;
+
+    HW A, B;
+    A.act_type = grp_matmul_gated_act_t::silu_and_mul;
+    B.act_type = grp_matmul_gated_act_t::silu_and_mul;
+    // Same shapes (the call configuration has to be identical) but a
+    // different weight distribution, so B is a genuinely different weight
+    // with genuinely different derived scales.
+    B.w1_range = 1.25;
+    ASSERT_NO_FATAL_FAILURE(A.build());
+    ASSERT_NO_FATAL_FAILURE(B.build());
+    const std::vector<int> all_active(HW::num_ops, HW::M);
+    const size_t out_elems = static_cast<size_t>(HW::M) * HW::H;
+
+    // Two DISTINCT weights is the premise of the whole test; if the
+    // harnesses ever handed back the same weight pointer the aliasing case
+    // could not arise and the comparison below would be vacuous.
+    for (int e = 0; e < HW::num_ops; ++e)
+        ASSERT_NE(A.wei1_p[e], B.wei1_p[e]) << "expert=" << e;
+
+    // One scale workspace per expert, reused across both calls.
+    tensor_factory_t f {};
+    std::vector<tensor_t> ws(HW::num_ops);
+    std::vector<const void *> ws_p(HW::num_ops);
+    for (int e = 0; e < HW::num_ops; ++e) {
+        ws[e] = f.zero_tensor(
+                {uint64_t {1}, static_cast<uint64_t>(HW::N_gate_up)},
+                data_type_t::f32);
+        ws_p[e] = ws[e].get_raw_handle_unsafe();
+    }
+    auto refill_ws_from = [&](HW &h) {
+        for (int e = 0; e < HW::num_ops; ++e) {
+            const auto *s = static_cast<const float *>(
+                    h.w1_scale_t[e].get_raw_handle_unsafe());
+            auto *d = static_cast<float *>(ws[e].get_raw_handle_unsafe());
+            std::copy(s, s + HW::N_gate_up, d);
+        }
+    };
+    auto max_abs_diff = [&](const TypedBuffers &x, const TypedBuffers &y) {
+        float worst = 0.0f;
+        for (int e = 0; e < HW::num_ops; ++e) {
+            for (size_t k = 0; k < x.bf16[e].size(); ++k) {
+                worst = std::max(worst,
+                        std::abs(static_cast<float>(x.bf16[e][k])
+                                - static_cast<float>(y.bf16[e][k])));
+            }
+        }
+        return worst;
+    };
+
+    // The memo lives on the flat_n_tile route.
+    AlgoEnvGuard algo_guard(3);
+
+    // Oracle: weights B with B's own scale tensors, nothing shared.
+    TypedBuffers out_ref;
+    out_ref.alloc(HW::num_ops, out_elems, HW::is_bf16);
+    {
+        reset_grp_matmul_caches();
+        B.w1_scale_override.clear();
+        ASSERT_EQ(B.run_fused(/*prequant=*/true, out_ref), status_t::success)
+                << "oracle: weights B with own scale tensors";
+    }
+    ASSERT_NO_FATAL_FAILURE(
+            assert_not_all_zero(out_ref, HW::num_ops, all_active, "oracle B"));
+
+    // Cache ON: A then B through the one refilled workspace, no clear
+    // between them, which is what lets a stale entry survive into call 2.
+    TypedBuffers out_a, out_b;
+    out_a.alloc(HW::num_ops, out_elems, HW::is_bf16);
+    out_b.alloc(HW::num_ops, out_elems, HW::is_bf16);
+    {
+        reset_grp_matmul_caches();
+        A.w1_scale_override = ws_p;
+        refill_ws_from(A);
+        ASSERT_EQ(A.run_fused(/*prequant=*/true, out_a), status_t::success)
+                << "cache-on call 1 (weights A)";
+        B.w1_scale_override = ws_p;
+        refill_ws_from(B);
+        ASSERT_EQ(B.run_fused(/*prequant=*/true, out_b), status_t::success)
+                << "cache-on call 2 (weights B, same scale address)";
+    }
+
+    // Only discriminating if the two weights really do produce different
+    // output; otherwise serving A's stale scales would be invisible.
+    EXPECT_GT(max_abs_diff(out_a, out_ref), 1e-3f)
+            << "weights A and B produced the same output, so a stale-scale "
+               "hit on call 2 would not be detectable";
+
+    verify_per_expert_2d(out_b, HW::H, out_ref, HW::H, HW::num_ops, HW::M,
+            HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+            "SharedScaleWorkspace cache-on call 2 vs own-scale oracle");
+
+    // Cache OFF: the memo is bypassed, so this arm is the control — it must
+    // land on the same values as both the oracle and the cache-on arm.
+    {
+        WeightCacheGuard wc_off(0);
+        TypedBuffers off_a, off_b;
+        off_a.alloc(HW::num_ops, out_elems, HW::is_bf16);
+        off_b.alloc(HW::num_ops, out_elems, HW::is_bf16);
+        reset_grp_matmul_caches();
+        A.w1_scale_override = ws_p;
+        refill_ws_from(A);
+        ASSERT_EQ(A.run_fused(/*prequant=*/true, off_a), status_t::success)
+                << "cache-off call 1 (weights A)";
+        B.w1_scale_override = ws_p;
+        refill_ws_from(B);
+        ASSERT_EQ(B.run_fused(/*prequant=*/true, off_b), status_t::success)
+                << "cache-off call 2 (weights B, same scale address)";
+        verify_per_expert_2d(off_b, HW::H, out_ref, HW::H, HW::num_ops, HW::M,
+                HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+                "SharedScaleWorkspace cache-off call 2 vs own-scale oracle");
+    }
+}
+
+// Absolute correctness of the pre-quantized path against an independent
+// unfused 2-call reference: bit-exact on every ALGO listed.
+//
+// ALGO 3 is excluded: it engages the TIGHT Op1 layout, which fuses the
+// gated activation into Op1's epilogue and rounds f32 -> bf16 ONCE, while
+// the reference stores bf16 and then activates those rounded values.  Op2
+// re-quantizes per token, so one differing element shifts a row's scale and
+// with it the whole row.  Not a defect: the same divergence appears on the
+// library-side-DQ path, and ALGO 3 is covered bit-exactly by
+// `PreQuantMatchesLibrarySideDq`.
+TEST(TestFusedMoEPreQuantSrc, BothPassesVsTwoCallReference) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+    using HW = MoEInt8PreQuantHarness;
+
+    MoEInt8PreQuantHarness h;
+    ASSERT_NO_FATAL_FAILURE(h.build());
+    const std::vector<int> all_active(HW::num_ops, HW::M);
+
+    for (int algo : {0, 1, 2, 4, 5, 6}) {
+        TypedBuffers d1_ref, out_ref, out_fused;
+        d1_ref.alloc(HW::num_ops, static_cast<size_t>(HW::M) * HW::N_gate_up,
+                HW::is_bf16);
+        out_ref.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+        out_fused.alloc(
+                HW::num_ops, static_cast<size_t>(HW::M) * HW::H, HW::is_bf16);
+
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_NO_FATAL_FAILURE(h.run_two_call_reference(
+                    /*prequant=*/true, d1_ref, out_ref))
+                    << "algo=" << algo;
+        }
+        {
+            reset_grp_matmul_caches();
+            AlgoEnvGuard algo_guard(algo);
+            ASSERT_EQ(h.run_fused(/*prequant=*/true, out_fused),
+                    status_t::success)
+                    << "algo=" << algo << " fused";
+        }
+
+        ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(out_fused, HW::num_ops,
+                all_active, "pre-quantized fused path"));
+        verify_per_expert_2d(out_fused, HW::H, out_ref, HW::H, HW::num_ops,
+                HW::M, HW::H, HW::is_bf16, Tol {0.0f, 0.0f},
+                "PreQuantSrcVsTwoCallRef algo=" + std::to_string(algo));
+    }
+}
+
+// A pre-quantized s8 src with an EMPTY `fused.dst_down` requests the
+// implicit `op2_internal` src-reuse, which gate (G3) must reject: Op2's
+// bf16 rows are twice as wide as the s8 rows they would overwrite, so
+// each expert's output would run into the next expert's unread source.
+// Must fail cleanly at validation rather than corrupting the buffer.
+TEST(TestFusedMoEPreQuantSrc, SrcReuseRejected) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    using HW = MoEInt8PreQuantHarness;
+
+    reset_grp_matmul_caches();
+
+    MoEInt8PreQuantHarness h;
+    ASSERT_NO_FATAL_FAILURE(h.build());
+
+    TypedBuffers d1;
+    d1.alloc(HW::num_ops, static_cast<size_t>(HW::M) * HW::N_gate_up,
+            HW::is_bf16);
+    auto d1_p = d1.ptrs(HW::is_bf16);
+
+    auto gv = GemmVecs::uniform(HW::num_ops, HW::M, HW::N_gate_up, HW::K_in);
+    gv.is_wc.assign(HW::num_ops, true);
+    auto srcs = h.src_ptrs(/*prequant=*/true);
+    auto p = h.op1_params(/*prequant=*/true);
+
+    grp_matmul_gated_act_params act {};
+    act.act = h.act_type;
+    // `dst_down` / `ldc_down` deliberately left empty -> op2_internal.
+    auto fused = make_fused_moe_op2(HW::num_ops, HW::H, h.wei2_p, h.no_bias);
+    fused.down_scale.resize(HW::num_ops);
+    fused.down_zp.resize(HW::num_ops);
+    for (int i = 0; i < HW::num_ops; ++i) {
+        copy_attached_scale(h.w2_s8_t[i], fused.down_scale[i]);
+        copy_attached_zp(h.w2_s8_t[i], fused.down_zp[i]);
+    }
+
+    EXPECT_EQ(
+            group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                    gv.Ks, gv.alpha, srcs, gv.lda, h.wei1_p, gv.ldb, h.no_bias,
+                    gv.beta, d1_p, gv.ldc, gv.is_wc, p, nullptr, &act, &fused),
+            status_t::failure)
+            << "s8 src + op2_internal (empty dst_down) must be rejected by "
+               "gate (G3): a 1-byte src element cannot absorb the 2-byte "
+               "bf16 Op2 write.";
+}
+
+// Both sides of gate (G3) on a dtype OTHER than bf16.
+//
+// G3 requires `dtypes.src == dtypes.dst` for `op2_internal` src reuse.
+// A narrower src is a spacing hazard (covered by `SrcReuseRejected`
+// above, s8 src + bf16 dst).  A WIDER src — f32 src + bf16 dst — is
+// spacing-safe, since Op2 writes `M*lda*2` bytes into an allocation
+// covering `M*lda*4`, but it is a mixed src/dst fused-MoE configuration
+// that the dispatch does not compute: run in mode (1), with an explicit
+// `dst_down` and nothing aliased, it returns success having written
+// neither pass.  G3 therefore rejects on dtype equality rather than
+// element-size parity, so that the caller gets a diagnostic instead of
+// an untouched buffer.
+//
+// The positive control is the same shape at f32 src + f32 dst, checked
+// against the SAME call in mode (1) (explicit `fused.dst_down`):
+// identical dtypes, shape and kernel, differing only in where Op2
+// lands, which isolates the reuse path itself.  Op2 writes at row stride
+// `lda` (`group_matmul_fused_moe.cpp`: `op2_ldc = op2_internal ? lda
+// : fused.ldc_down`), so the in-place result is read back at that stride.
+TEST(TestFusedMoEOp2InternalDtype, RejectsMixedDtypeAcceptsF32) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+
+    reset_grp_matmul_caches();
+
+    const int E = 2;
+    const int dim = 32;
+    const int N_gate_up = 2 * dim;
+    const int H = 32;
+    const int K_in = H;
+    const int M = 32;
+    const int K_down = dim;
+    const int lda = K_in; // G1: lda >= max(K_in, N_down) = 32.
+
+    TypedBuffers src_ref, src_test, w1, w2, d1_ref, d1_test, d2_ref;
+    src_ref.alloc(E, (size_t)M * lda, data_type_t::f32);
+    src_test.alloc(E, (size_t)M * lda, data_type_t::f32);
+    w1.alloc(E, (size_t)K_in * N_gate_up, data_type_t::f32);
+    w2.alloc(E, (size_t)K_down * H, data_type_t::f32);
+    d1_ref.alloc(E, (size_t)M * N_gate_up, data_type_t::f32);
+    d1_test.alloc(E, (size_t)M * N_gate_up, data_type_t::f32);
+    d2_ref.alloc(E, (size_t)M * H, data_type_t::f32);
+    // Same seeds into both source copies: mode (2) consumes src_test in
+    // place, so the two runs must start from identical bytes.
+    fill_moe_tensors(E, data_type_t::f32, &src_ref, &w1, &w2);
+    fill_moe_tensors(E, data_type_t::f32, &src_test, nullptr, nullptr);
+
+    auto gv = GemmVecs::uniform(E, M, N_gate_up, K_in);
+    auto wei1_p = w1.cptrs(data_type_t::f32);
+    auto wei2_p = w2.cptrs(data_type_t::f32);
+    std::vector<const void *> no_bias(E, nullptr);
+    const auto f32 = data_type_t::f32;
+
+    grp_matmul_gated_act_params act {};
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    // Negative: wider src (f32) against a bf16 dst, dst_down empty.
+    {
+        auto pm = make_uniform_params(E, f32);
+        for (auto &pp : pm)
+            pp.dtypes.dst = data_type_t::bf16;
+        auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
+        EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                          gv.Ns, gv.Ks, gv.alpha, src_test.cptrs(f32), gv.lda,
+                          wei1_p, gv.ldb, no_bias, gv.beta,
+                          d1_test.ptrs(data_type_t::bf16), gv.ldc, gv.is_wc, pm,
+                          nullptr, &act, &fused),
+                status_t::failure)
+                << "f32 src + bf16 dst + op2_internal must be rejected by "
+                   "gate (G3): the pair is spacing-safe but the dispatch "
+                   "does not compute a mixed src/dst fused MoE, so admitting "
+                   "it would return success with an untouched buffer.";
+    }
+
+    // Positive control, mode (1): explicit Op2 destination, all f32.
+    auto params = make_uniform_params(E, f32);
+    {
+        auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
+        fused.dst_down = d2_ref.ptrs(f32);
+        fused.ldc_down = std::vector<int>(E, H);
+        auto pr = params;
+        ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                          gv.Ns, gv.Ks, gv.alpha, src_ref.cptrs(f32), gv.lda,
+                          wei1_p, gv.ldb, no_bias, gv.beta, d1_ref.ptrs(f32),
+                          gv.ldc, gv.is_wc, pr, nullptr, &act, &fused),
+                status_t::success)
+                << "mode (1) f32 reference run (explicit dst_down) failed";
+    }
+
+    // Positive control, mode (2): empty dst_down -> Op2 reuses src_test.
+    {
+        auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
+        auto pt = params;
+        ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                          gv.Ns, gv.Ks, gv.alpha, src_test.cptrs(f32), gv.lda,
+                          wei1_p, gv.ldb, no_bias, gv.beta, d1_test.ptrs(f32),
+                          gv.ldc, gv.is_wc, pt, nullptr, &act, &fused),
+                status_t::success)
+                << "gate (G3) must admit f32 src + f32 dst for op2_internal";
+    }
+
+    // A reference that computed nothing cannot validate anything.
+    for (int e = 0; e < E; ++e) {
+        size_t nz = 0;
+        for (const auto &v : d2_ref.f32[e])
+            nz += (v != 0.0f);
+        ASSERT_GT(nz, 0u) << "f32 mode (1) reference wrote nothing for e=" << e;
+    }
+
+    // Same kernel, same dtypes, only the destination differs, so the two
+    // runs must agree bit-for-bit.
+    for (int e = 0; e < E; ++e) {
+        for (int r = 0; r < M; ++r) {
+            for (int c = 0; c < H; ++c) {
+                ASSERT_EQ(src_test.f32[e][(size_t)r * lda + c],
+                        d2_ref.f32[e][(size_t)r * H + c])
+                        << "in-place Op2 result differs from the explicit-dst "
+                           "reference at e="
+                        << e << " r=" << r << " c=" << c;
+            }
+        }
+    }
+}
+
+// Gate (G4): the supported-Op1-tuple check for an INTERNAL Op1 arena.
+//
+// (G3) only constrains `op2_internal`, where one integer `lda` addresses
+// both passes, so it deliberately does not apply here: with a library-sized
+// Op1 arena and an explicit `dst_down`, nothing aliases and the spacing
+// argument is moot.  That is precisely what makes this shape a trap.  An f32
+// source with a bf16 destination clears every other check, but AOCL
+// implements only the f32/f32 -> f32 branch, so without (G4) the call
+// returns `success` having written neither pass — a caller reading an
+// untouched destination with no diagnostic.
+//
+// The positive control is the whole `TestFusedMoEPreQuantSrc` suite above:
+// those calls are also `op1_internal` with `src != dst` (s8 source, bf16
+// destination), and they must keep passing.  That is what shows (G4)
+// rejects the unsupported mix rather than every inequality.
+TEST(TestFusedMoEOp1InternalDtype, RejectsMixedTupleAcceptsPreQuantS8) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+
+    reset_grp_matmul_caches();
+
+    const int E = 2;
+    const int dim = 32;
+    const int N_gate_up = 2 * dim;
+    const int H = 32;
+    const int K_in = H;
+    const int M = 32;
+    const int lda = K_in;
+
+    TypedBuffers src_f32, w1, w2, d2_bf16;
+    src_f32.alloc(E, (size_t)M * lda, data_type_t::f32);
+    w1.alloc(E, (size_t)K_in * N_gate_up, data_type_t::f32);
+    w2.alloc(E, (size_t)dim * H, data_type_t::f32);
+    d2_bf16.alloc(E, (size_t)M * H, data_type_t::bf16);
+    fill_moe_tensors(E, data_type_t::f32, &src_f32, &w1, &w2);
+
+    auto gv = GemmVecs::uniform(E, M, N_gate_up, K_in);
+    auto wei1_p = w1.cptrs(data_type_t::f32);
+    auto wei2_p = w2.cptrs(data_type_t::f32);
+    std::vector<const void *> no_bias(E, nullptr);
+    const auto f32 = data_type_t::f32;
+
+    grp_matmul_gated_act_params act {};
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    // nullptr dst + ldc 0 is the dispatcher's internal-Op1-arena signal.
+    const std::vector<void *> d1_internal(E, nullptr);
+    const std::vector<int> ldc1_internal(E, 0);
+
+    auto pm = make_uniform_params(E, f32);
+    for (auto &pp : pm)
+        pp.dtypes.dst = data_type_t::bf16;
+
+    auto fused = make_fused_moe_op2(E, H, wei2_p, no_bias);
+    fused.dst_down = d2_bf16.ptrs(data_type_t::bf16);
+    fused.ldc_down = std::vector<int>(E, H);
+
+    EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                      gv.Ks, gv.alpha, src_f32.cptrs(f32), gv.lda, wei1_p,
+                      gv.ldb, no_bias, gv.beta, d1_internal, ldc1_internal,
+                      gv.is_wc, pm, nullptr, &act, &fused),
+            status_t::failure)
+            << "f32 src + bf16 dst over an internal Op1 arena must be "
+               "rejected by gate (G4).  The tuple is spacing-safe and "
+               "unaliased, so (G3) does not catch it, but the dispatch does "
+               "not compute it — accepting it reports success over a "
+               "destination neither pass wrote.";
+}
+
+// Regression for the ALGO-2 vertical-fusion alias decline.  A caller may
+// point `fused.dst_down[]` back at `src[]` while asking for a NARROWER Op2
+// row stride (`ldc_down < lda`).  Gate G3 does not apply — `dst_down` is
+// populated, so this is mode (1) — and the write frontier trails the read
+// frontier, which is why the decline used to exempt it.  It must not:
+// vertical fusion gives each thread one M-slice with no barrier between its
+// Op1 read and its Op2 write, so a HIGHER slice's write lands on a LOWER
+// row's bytes that another thread may not have read yet.  Only exact
+// in-place (same base AND same row stride) is safe, so this shape has to
+// fall back to two-pass and match a non-aliased run.
+TEST(TestFusedMoEPreQuantSrc, VerticalFusionDeclinedOnNarrowAliasedOp2Dst) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+
+    // Shape must clear the vertical-fusion eligibility gate, else the run
+    // lands on the two-pass planner for reasons unrelated to aliasing and
+    // the decline assertion below proves nothing: E=4 needs M >= 128 to
+    // reach total_need >= 32 (see make_vertical_fusion_params).  K_in == H
+    // == 64 here, so one constant serves as both Op1's K and Op2's N.
+    constexpr int num_ops = 4, M = 128, H = 64, N_gate_up = 2 * H;
+    constexpr int K_down = N_gate_up / 2;
+    constexpr int lda_pad = 2 * H; // wider than K_in -> write_row < read_row
+    constexpr bool is_bf16 = true;
+
+    reset_grp_matmul_caches();
+    AlgoEnvGuard algo_guard(2);
+    // Vertical fusion is DISABLED by default (knob -1), so it must be forced
+    // on or the hazard check is never even consulted.
+    MoEVerticalFusionOverride vf_guard(1);
+
+    tensor_factory_t factory {};
+    std::vector<tensor_t> w1_t(num_ops), w2_t(num_ops);
+    std::vector<tensor_t> src_alias_t(num_ops), src_ref_t(num_ops);
+    std::vector<const void *> wei1_p(num_ops), wei2_p(num_ops);
+    std::vector<const void *> src_alias_p(num_ops), src_ref_p(num_ops);
+    std::vector<void *> dst_down_alias(num_ops);
+    const std::vector<const void *> no_bias(num_ops, nullptr);
+    const size_t src_elems = static_cast<size_t>(M) * lda_pad;
+
+    for (int i = 0; i < num_ops; ++i) {
+        w1_t[i] = factory.uniform_dist_tensor(
+                {H, N_gate_up}, data_type_t::bf16, 2.0);
+        w2_t[i] = factory.uniform_dist_tensor(
+                {K_down, H}, data_type_t::bf16, 2.0);
+        // The two source copies must hold identical rows so the aliased run
+        // and the clean run differ ONLY in where Op2 writes.
+        src_ref_t[i] = factory.uniform_dist_tensor(
+                {M, lda_pad}, data_type_t::bf16, 2.0);
+        src_alias_t[i] = factory.zero_tensor(
+                {static_cast<uint64_t>(M), static_cast<uint64_t>(lda_pad)},
+                data_type_t::bf16);
+        std::memcpy(src_alias_t[i].get_raw_handle_unsafe(),
+                src_ref_t[i].get_raw_handle_unsafe(),
+                src_elems * sizeof(bfloat16_t));
+        wei1_p[i] = w1_t[i].get_raw_handle_unsafe();
+        wei2_p[i] = w2_t[i].get_raw_handle_unsafe();
+        src_ref_p[i] = src_ref_t[i].get_raw_handle_unsafe();
+        src_alias_p[i] = src_alias_t[i].get_raw_handle_unsafe();
+        dst_down_alias[i] = src_alias_t[i].get_raw_handle_unsafe();
+    }
+
+    auto gv = GemmVecs::uniform(num_ops, M, N_gate_up, H);
+    gv.lda.assign(num_ops, lda_pad);
+    auto p = make_uniform_params(num_ops, data_type_t::bf16);
+    // Pin the team size so engagement does not depend on host core count
+    // (a host with fewer threads than experts trips the round-based bail
+    // and never reaches the pipeline).
+    for (auto &pp : p)
+        pp.num_threads = 32;
+    grp_matmul_gated_act_params act {};
+    act.act = grp_matmul_gated_act_t::swiglu_oai_mul;
+    // op1_internal: library-managed W13 arena.
+    const std::vector<void *> dst_null(num_ops, nullptr);
+    const std::vector<int> ldc_null(num_ops, 0);
+
+    // Captures which m_tile branch actually ran, so the decline is asserted
+    // rather than merely hoped for: the output comparison alone passes even
+    // with the hazard check deleted, because the two-pass and (racy) fused
+    // routes agree whenever the race does not happen to land.
+    auto call = [&](const std::vector<const void *> &srcs,
+                        const std::vector<void *> &dst_down, int &tag) {
+        auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+        fused.dst_down = dst_down;
+        fused.ldc_down = std::vector<int>(num_ops, H);
+        MTilePathCaptureGuard cap;
+        const auto st = group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1_p, gv.ldb,
+                no_bias, gv.beta, dst_null, ldc_null, gv.is_wc, p, nullptr,
+                &act, &fused);
+        tag = test_api::s_last_m_tile_path.load(std::memory_order_relaxed);
+        return st;
+    };
+
+    TypedBuffers out_clean;
+    out_clean.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    int tag_clean = 0, tag_alias = 0;
+    ASSERT_EQ(call(src_ref_p, out_clean.ptrs(is_bf16), tag_clean),
+            status_t::success)
+            << "non-aliased reference run";
+    ASSERT_EQ(call(src_alias_p, dst_down_alias, tag_alias), status_t::success)
+            << "aliased narrow-stride run";
+
+    // Positive control: without the alias this shape MUST take vertical
+    // fusion, otherwise the negative assertion below is vacuous.
+    EXPECT_EQ(tag_clean, test_api::m_tile_path_tag::kVerticalFusionBF16)
+            << "non-aliased run did not engage vertical fusion (tag="
+            << tag_clean << "); the decline assertion below proves nothing.";
+    EXPECT_NE(tag_alias, test_api::m_tile_path_tag::kVerticalFusionBF16)
+            << "aliased narrow-stride run engaged vertical fusion (tag="
+            << tag_alias
+            << "); a higher M-slice's Op2 write can land on a "
+               "lower row another thread has not read yet.";
+
+    // Op2 wrote densely at stride ldc_down into the head of each src buffer.
+    TypedBuffers out_alias;
+    out_alias.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    for (int i = 0; i < num_ops; ++i) {
+        std::memcpy(out_alias.bf16[i].data(),
+                src_alias_t[i].get_raw_handle_unsafe(),
+                static_cast<size_t>(M) * H * sizeof(bfloat16_t));
+    }
+
+    // Bit-exact: declining vertical fusion routes BOTH runs through the same
+    // two-pass executor, so any drift here means the aliased run raced.
+    verify_per_expert_2d(out_alias, H, out_clean, H, gv.Ms, H, is_bf16,
+            Tol {0.0f, 0.0f}, "VerticalFusionDeclinedOnNarrowAliasedOp2Dst");
+}
+
+// The counterpart to the decline above: an alias the probe must ACCEPT.
+//
+// A padded source (lda = 2*K_in) whose Op2 output is placed in the unused
+// half of each row — `dst_down = src + K_in` at `ldc_down == lda` — never
+// has a write land on a byte any Op1 read touches: row r is read over
+// columns [0, K_in) and written over columns [K_in, 2*K_in).  The row sets
+// interleave in ADDRESS order but are disjoint as sets, which is exactly
+// the case an enclosing-interval model cannot express: at M = 1 the two
+// hulls happen to separate and the layout is accepted, and from M = 2 on
+// they interleave and it was refused.  Vertical fusion is the whole point
+// of the shape, so refusing it is a silent perf cliff keyed on row count.
+//
+// The mirror-image check matters as much as the accept: shifting the write
+// base back inside the read columns must still be refused, so this pins
+// both directions against one shape.
+TEST(TestFusedMoEPreQuantSrc,
+        VerticalFusionAcceptsDisjointColumnAliasedOp2Dst) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+
+    // Same VF-eligible shape as the decline test above (E=4 needs M >= 128).
+    constexpr int num_ops = 4, M = 128, H = 64, N_gate_up = 2 * H;
+    constexpr int K_down = N_gate_up / 2;
+    constexpr int lda_pad = 2 * H; // read cols [0,64), write cols [64,128)
+    constexpr bool is_bf16 = true;
+
+    reset_grp_matmul_caches();
+    AlgoEnvGuard algo_guard(2);
+    MoEVerticalFusionOverride vf_guard(1);
+
+    tensor_factory_t factory {};
+    std::vector<tensor_t> w1_t(num_ops), w2_t(num_ops);
+    std::vector<tensor_t> src_alias_t(num_ops), src_ref_t(num_ops);
+    std::vector<const void *> wei1_p(num_ops), wei2_p(num_ops);
+    std::vector<const void *> src_alias_p(num_ops), src_ref_p(num_ops);
+    std::vector<void *> dst_down_disjoint(num_ops), dst_down_overlap(num_ops);
+    const std::vector<const void *> no_bias(num_ops, nullptr);
+    const size_t src_elems = static_cast<size_t>(M) * lda_pad;
+
+    for (int i = 0; i < num_ops; ++i) {
+        w1_t[i] = factory.uniform_dist_tensor(
+                {H, N_gate_up}, data_type_t::bf16, 2.0);
+        w2_t[i] = factory.uniform_dist_tensor(
+                {K_down, H}, data_type_t::bf16, 2.0);
+        src_ref_t[i] = factory.uniform_dist_tensor(
+                {M, lda_pad}, data_type_t::bf16, 2.0);
+        src_alias_t[i] = factory.zero_tensor(
+                {static_cast<uint64_t>(M), static_cast<uint64_t>(lda_pad)},
+                data_type_t::bf16);
+        std::memcpy(src_alias_t[i].get_raw_handle_unsafe(),
+                src_ref_t[i].get_raw_handle_unsafe(),
+                src_elems * sizeof(bfloat16_t));
+        wei1_p[i] = w1_t[i].get_raw_handle_unsafe();
+        wei2_p[i] = w2_t[i].get_raw_handle_unsafe();
+        src_ref_p[i] = src_ref_t[i].get_raw_handle_unsafe();
+        src_alias_p[i] = src_alias_t[i].get_raw_handle_unsafe();
+        auto *base = static_cast<bfloat16_t *>(
+                src_alias_t[i].get_raw_handle_unsafe());
+        dst_down_disjoint[i] = base + H; // unused half — provably safe
+        dst_down_overlap[i] = base + (H / 2); // straddles the read columns
+    }
+
+    auto gv = GemmVecs::uniform(num_ops, M, N_gate_up, H);
+    gv.lda.assign(num_ops, lda_pad);
+    auto p = make_uniform_params(num_ops, data_type_t::bf16);
+    for (auto &pp : p)
+        pp.num_threads = 32;
+    grp_matmul_gated_act_params act {};
+    act.act = grp_matmul_gated_act_t::swiglu_oai_mul;
+    const std::vector<void *> dst_null(num_ops, nullptr);
+    const std::vector<int> ldc_null(num_ops, 0);
+
+    auto call = [&](const std::vector<const void *> &srcs,
+                        const std::vector<void *> &dst_down, int ldc_down_v,
+                        int &tag) {
+        auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+        fused.dst_down = dst_down;
+        fused.ldc_down = std::vector<int>(num_ops, ldc_down_v);
+        MTilePathCaptureGuard cap;
+        const auto st = group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1_p, gv.ldb,
+                no_bias, gv.beta, dst_null, ldc_null, gv.is_wc, p, nullptr,
+                &act, &fused);
+        tag = test_api::s_last_m_tile_path.load(std::memory_order_relaxed);
+        return st;
+    };
+
+    // Reference: no alias at all, dense Op2 destination.
+    TypedBuffers out_clean;
+    out_clean.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    int tag_clean = 0, tag_disjoint = 0, tag_overlap = 0;
+    ASSERT_EQ(call(src_ref_p, out_clean.ptrs(is_bf16), H, tag_clean),
+            status_t::success)
+            << "non-aliased reference run";
+    EXPECT_EQ(tag_clean, test_api::m_tile_path_tag::kVerticalFusionBF16)
+            << "non-aliased run did not engage vertical fusion (tag="
+            << tag_clean << "); the accept assertion below proves nothing.";
+
+    // THE assertion: the disjoint-column alias must still reach vertical
+    // fusion.  `ldc_down == lda` keeps the two row strides equal, which is
+    // what lets the probe settle the hulls exactly.
+    ASSERT_EQ(call(src_alias_p, dst_down_disjoint, lda_pad, tag_disjoint),
+            status_t::success)
+            << "disjoint-column aliased run";
+    EXPECT_EQ(tag_disjoint, test_api::m_tile_path_tag::kVerticalFusionBF16)
+            << "disjoint-column alias was denied vertical fusion (tag="
+            << tag_disjoint << "); Op1 reads columns [0, " << H
+            << ") and Op2 writes columns [" << H << ", " << lda_pad
+            << ") of the same rows, so no write can "
+               "land on a byte any read touches.";
+
+    // Values must match the unaliased reference exactly.
+    TypedBuffers out_disjoint;
+    out_disjoint.alloc(num_ops, static_cast<size_t>(M) * H, is_bf16);
+    for (int i = 0; i < num_ops; ++i) {
+        const auto *base = static_cast<const bfloat16_t *>(
+                src_alias_t[i].get_raw_handle_unsafe());
+        for (int r = 0; r < M; ++r) {
+            std::memcpy(
+                    out_disjoint.bf16[i].data() + static_cast<size_t>(r) * H,
+                    base + static_cast<size_t>(r) * lda_pad + H,
+                    static_cast<size_t>(H) * sizeof(bfloat16_t));
+        }
+    }
+    verify_per_expert_2d(out_disjoint, H, out_clean, H, gv.Ms, H, is_bf16,
+            Tol {0.0f, 0.0f},
+            "VerticalFusionAcceptsDisjointColumnAliasedOp2Dst");
+
+    // Mirror image: move the write base into the read columns and the same
+    // probe must refuse.  Without this, an over-permissive probe would pass
+    // the accept assertion above and go unnoticed.
+    for (int i = 0; i < num_ops; ++i) {
+        std::memcpy(src_alias_t[i].get_raw_handle_unsafe(),
+                src_ref_t[i].get_raw_handle_unsafe(),
+                src_elems * sizeof(bfloat16_t));
+    }
+    ASSERT_EQ(call(src_alias_p, dst_down_overlap, lda_pad, tag_overlap),
+            status_t::success)
+            << "overlapping-column aliased run";
+    EXPECT_NE(tag_overlap, test_api::m_tile_path_tag::kVerticalFusionBF16)
+            << "a write base inside the read columns engaged vertical fusion "
+               "(tag="
+            << tag_overlap << "); that is a genuine read/write race.";
+}
+
+// The feature under the shapes a real decode frame produces: inactive
+// experts (M[e] == 0, no rows routed), a padded source stride
+// (lda > K_in, the grouped buffer aligned wider than the hidden dim),
+// and an asymmetric MoE (N_down != K_in) so the Op2 output row is a
+// different width from the Op1 source row.
+TEST(TestFusedMoEPreQuantSrc, InactiveExpertsPaddedLdaAsymmetricNDown) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+    if (!custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "Requires AVX-512 VNNI (VPDPBUSD) for the INT8 "
+                        "custom-kernel path.";
+    }
+
+    constexpr int dim = 32;
+    constexpr int K_in = 64; // hidden dim
+    constexpr int H = 48; // N_down != K_in -> asymmetric MoE
+    constexpr int lda_pad = 80; // padded grouped-src row stride (> K_in)
+    constexpr int num_ops = 4;
+    constexpr int N_gate_up = 2 * dim;
+    constexpr int K_down = dim;
+    constexpr bool is_bf16 = true;
+    const auto act_type = grp_matmul_gated_act_t::swiglu_oai_mul;
+    // Experts 1 and 3 receive no rows this frame.
+    const std::vector<int> Ms = {32, 0, 16, 0};
+    const int M_max = 32;
+
+    reset_grp_matmul_caches();
+
+    tensor_factory_t factory {};
+    // Allocate every expert at M_max rows and lda_pad stride, then hand
+    // the kernel only Ms[e] of them — this is the grouped-buffer shape,
+    // and it leaves padding columns the kernel must not read.  The
+    // per-token scale is computed over the full padded row, which is a
+    // legitimate caller choice and is applied identically on both sides.
+    std::vector<tensor_t> src_s8_t(num_ops), src_scale_t(num_ops),
+            src_zp_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        auto src_bf16 = factory.uniform_dist_tensor(
+                {M_max, lda_pad}, data_type_t::bf16, 2.0);
+        ASSERT_TRUE(prequant_src_s8(factory, src_bf16, M_max, src_scale_t[i],
+                src_zp_t[i], src_s8_t[i]))
+                << "expert=" << i;
+    }
+
+    std::vector<tensor_t> w1_s8_t(num_ops), w1_scale_t(num_ops),
+            w1_zp_t(num_ops);
+    std::vector<tensor_t> w2_s8_t(num_ops), down_scale_t(num_ops),
+            down_zp_t(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        auto w1_ref = factory.uniform_dist_tensor(
+                {K_in, N_gate_up}, data_type_t::bf16, 2.0);
+        ASSERT_EQ(quant_params_compute(factory, w1_ref, data_type_t::bf16,
+                          data_type_t::s8, {1, N_gate_up}, data_type_t::f32,
+                          w1_scale_t[i], w1_zp_t[i], &w1_s8_t[i]),
+                status_t::success);
+        auto w2_ref = factory.uniform_dist_tensor(
+                {K_down, H}, data_type_t::bf16, 2.0);
+        ASSERT_EQ(quant_params_compute(factory, w2_ref, data_type_t::bf16,
+                          data_type_t::s8, {1, H}, data_type_t::f32,
+                          down_scale_t[i], down_zp_t[i], &w2_s8_t[i]),
+                status_t::success);
+    }
+
+    std::vector<const void *> srcs(num_ops), wei1_p(num_ops), wei2_p(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        srcs[i] = src_s8_t[i].get_raw_handle_unsafe();
+        wei1_p[i] = w1_s8_t[i].get_raw_handle_unsafe();
+        wei2_p[i] = w2_s8_t[i].get_raw_handle_unsafe();
+    }
+    std::vector<const void *> no_bias(num_ops, nullptr);
+
+    TypedBuffers d1_ref, d2_ref, d2_test;
+    d1_ref.alloc(num_ops, static_cast<size_t>(M_max) * N_gate_up, is_bf16);
+    d2_ref.alloc(num_ops, static_cast<size_t>(M_max) * H, is_bf16);
+    d2_test.alloc(num_ops, static_cast<size_t>(M_max) * H, is_bf16);
+    auto d1_ref_p = d1_ref.ptrs(is_bf16);
+    auto d2_ref_p = d2_ref.ptrs(is_bf16);
+    auto d2_test_p = d2_test.ptrs(is_bf16);
+    std::vector<void *> dst_null(num_ops, nullptr);
+    std::vector<int> ldc_null(num_ops, 0);
+
+    auto gv_op1 = GemmVecs::uniform(num_ops, M_max, N_gate_up, K_in);
+    gv_op1.Ms = Ms;
+    gv_op1.lda.assign(num_ops, lda_pad);
+    gv_op1.is_wc.assign(num_ops, true);
+    auto gv_op2 = GemmVecs::uniform(num_ops, M_max, H, K_down);
+    gv_op2.Ms = Ms;
+    gv_op2.lda.assign(num_ops, N_gate_up);
+    gv_op2.is_wc.assign(num_ops, true);
+
+    std::vector<matmul_params> p_op1(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        p_op1[i] = make_uniform_params(1, data_type_t::bf16)[0];
+        p_op1[i].dtypes.src = data_type_t::s8;
+        p_op1[i].dtypes.wei = data_type_t::s8;
+        p_op1[i].dtypes.dst = data_type_t::bf16;
+        p_op1[i].dtypes.compute = data_type_t::s8;
+        p_op1[i].dynamic_quant = false;
+        copy_attached_scale(src_s8_t[i], p_op1[i].quant_params.src_scale);
+        // Per-token granularity is stated against the expert's ACTIVE row
+        // count, not the M_max the buffer was allocated at: the scale array
+        // is indexed by row so the leading entries do cover Ms[i] rows, but
+        // declaring M_max makes the granularity inconsistent with the GEMM's
+        // M and the reorder rejects it.
+        if (Ms[i] > 0) { p_op1[i].quant_params.src_scale.dims = {Ms[i], 1}; }
+        copy_attached_scale(w1_s8_t[i], p_op1[i].quant_params.wei_scale);
+        copy_attached_zp(w1_s8_t[i], p_op1[i].quant_params.wei_zp);
+    }
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                      gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs,
+                      gv_op1.lda, wei1_p, gv_op1.ldb, no_bias, gv_op1.beta,
+                      d1_ref_p, gv_op1.ldc, gv_op1.is_wc, p_op1),
+            status_t::success)
+            << "ref Op1";
+
+    for (int e = 0; e < num_ops; ++e) {
+        if (Ms[e] == 0) continue;
+        apply_ref_gated_act(
+                d1_ref.bf16[e], Ms[e], N_gate_up, N_gate_up, act_type);
+    }
+
+    std::vector<matmul_params> p_op2(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        p_op2[i] = make_uniform_params(1, data_type_t::bf16)[0];
+        p_op2[i].dtypes.src = data_type_t::bf16;
+        p_op2[i].dtypes.wei = data_type_t::s8;
+        p_op2[i].dtypes.dst = data_type_t::bf16;
+        p_op2[i].dtypes.compute = data_type_t::s8;
+        p_op2[i].dynamic_quant = true;
+        p_op2[i].quant_params.src_scale.dt = data_type_t::f32;
+        p_op2[i].quant_params.src_scale.dims = {Ms[i] > 0 ? Ms[i] : M_max, 1};
+        copy_attached_scale(w2_s8_t[i], p_op2[i].quant_params.wei_scale);
+        copy_attached_zp(w2_s8_t[i], p_op2[i].quant_params.wei_zp);
+    }
+    std::vector<const void *> srcs2(num_ops);
+    for (int e = 0; e < num_ops; ++e)
+        srcs2[e] = d1_ref_p[e];
+    ASSERT_EQ(group_matmul_direct(gv_op2.layout, gv_op2.transA, gv_op2.transB,
+                      gv_op2.Ms, gv_op2.Ns, gv_op2.Ks, gv_op2.alpha, srcs2,
+                      gv_op2.lda, wei2_p, gv_op2.ldb, no_bias, gv_op2.beta,
+                      d2_ref_p, gv_op2.ldc, gv_op2.is_wc, p_op2),
+            status_t::success)
+            << "ref Op2";
+
+    grp_matmul_gated_act_params act {};
+    act.act = act_type;
+    auto fused = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+    fused.dst_down = d2_test_p;
+    fused.ldc_down = std::vector<int>(num_ops, H);
+    fused.down_scale.resize(num_ops);
+    fused.down_zp.resize(num_ops);
+    for (int i = 0; i < num_ops; ++i) {
+        copy_attached_scale(w2_s8_t[i], fused.down_scale[i]);
+        copy_attached_zp(w2_s8_t[i], fused.down_zp[i]);
+    }
+
+    // The verification below is row-count driven and skips Ms[e]==0
+    // experts outright, so poison their output buffers first: an inactive
+    // expert must be left byte-for-byte untouched, and without this the
+    // suite would not notice a kernel that walked into one.
+    constexpr uint16_t kPoisonBits = 0x7A7A; // large finite bf16, not NaN
+    const bfloat16_t poison = bfloat16_t::from_bits(kPoisonBits);
+    const float poison_f = static_cast<float>(poison);
+    for (int e = 0; e < num_ops; ++e) {
+        if (Ms[e] != 0) continue;
+        std::fill(d2_test.bf16[e].begin(), d2_test.bf16[e].end(), poison);
+    }
+
+    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA, gv_op1.transB,
+                      gv_op1.Ms, gv_op1.Ns, gv_op1.Ks, gv_op1.alpha, srcs,
+                      gv_op1.lda, wei1_p, gv_op1.ldb, no_bias, gv_op1.beta,
+                      dst_null, ldc_null, gv_op1.is_wc, p_op1, nullptr, &act,
+                      &fused),
+            status_t::success)
+            << "fused (pre-quantized s8 src, mixed M / padded lda)";
+
+    for (int e = 0; e < num_ops; ++e) {
+        if (Ms[e] != 0) continue;
+        const auto &buf = d2_test.bf16[e];
+        size_t touched = 0;
+        for (size_t k = 0; k < buf.size(); ++k)
+            if (static_cast<float>(buf[k]) != poison_f) ++touched;
+        EXPECT_EQ(touched, 0u) << "expert " << e << " is inactive (Ms=0) but "
+                               << touched << " of " << buf.size()
+                               << " elements of its Op2 output were written";
+    }
+
+    ASSERT_NO_FATAL_FAILURE(assert_not_all_zero(
+            d2_test, num_ops, Ms, "pre-quantized fused path"));
+    verify_per_expert_2d(d2_test, H, d2_ref, H, Ms, H, is_bf16,
+            tol_fused(is_bf16), "PreQuantSrc_InactiveExperts_PaddedLda");
 }
 
 // One INSTANTIATE_TEST_SUITE_P per fixture subclass, each binding

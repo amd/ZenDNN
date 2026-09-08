@@ -81,6 +81,17 @@ inline constexpr int kVNNIInt8Quad = 4;
 /// Supported pack widths.  Match the `bf16_brgemm_ukernel.cpp` set
 /// minus NR=16 (gated activation needs at least 32 cols for one
 /// (gate, up) pair to fit in a single (acc_lo, acc_hi) zmm pair).
+///
+/// NR=48 (NV=3) is deliberately absent, and not merely untuned.  The
+/// gated epilogue consumes accumulators in (lo, hi) pairs — `n_pairs =
+/// NV / 2`, indexing `acc[m][2*p]` and `acc[m][2*p+1]` — so an odd NV
+/// would silently drop its last accumulator, i.e. output columns 32-47
+/// of every o-block, on the fused MoE path.  The tight-arena stride
+/// (`pack_nr / 2`) assumes the same pairing.  Divisibility argues the
+/// same way: of the five int8 MoE decode gate_up widths (2048, 2816,
+/// 2880, 4096, 2048) only gpt_oss's 2880 is a multiple of 48, while
+/// all five are multiples of both 32 and 64.  So NR=48 would need an
+/// odd-NV epilogue for one model's benefit.
 inline constexpr int kNRMin = 32;
 inline constexpr int kNRMax = 64;
 

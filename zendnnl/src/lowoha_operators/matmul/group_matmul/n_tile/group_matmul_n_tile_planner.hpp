@@ -267,9 +267,10 @@ enum class GroupNTileStrategy {
     //      custom-kernel path (swiglu fused in-register, no matmul→
     //      activation barrier) and standard-backend fused / non-fused
     //      calls; a non-custom wide-fused call runs one team-wide barrier
-    //      + apply_swiglu_oai post-pass inside the executor.  Only a
-    //      use_custom DQ-INT8 fused call falls back to Rounds
-    //      (defense-in-depth).
+    //      + apply_swiglu_oai post-pass inside the executor.  A
+    //      use_custom DQ-INT8 fused call is also served by default; set
+    //      ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED=0 to fall it back to
+    //      Rounds.
     DecodeDynamic,
 
     // (A)  Few experts (num_ops ≤ num_ccds, non-decode):

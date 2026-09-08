@@ -145,8 +145,8 @@ Lives in `zendnnl/src/lowoha_operators/matmul/group_matmul/group_matmul_direct.h
 | `grp_matmul_gated_act_params`         | gated activation kind (`silu_and_mul`, `gelu_and_mul`, `swiglu_oai_mul`, `none`) |
 | `grp_matmul_fused_moe_params`         | Op2 down-projection weights + bias + N_down/ldb_down/dst_down/ldc_down + **Op2 weight quant** (`down_scale`, `down_zp`) |
 | `group_matmul_moe_postop_params`      | weighted-reduce post-op (e.g. `topk`-routed sum after Op2) |
-| `quant_params` (in `matmul_params`)   | per-tensor scale/zp for WOQ / INT8 paths on Op1; **the same scheme** (dynamic_quant flag, dtypes.compute, src_scale.dims) is inherited by Op2's internal params_down |
-| `down_scale` / `down_zp` (in `grp_matmul_fused_moe_params`) | per-expert **weight** scale + zero-point for `down_weight[i]` (the only Op2-specific quant artefact — every other knob is inherited from `params[i]`).  Empty ⇒ Op2 weight un-quantized (default). |
+| `quant_params` (in `matmul_params`)   | per-tensor scale/zp for WOQ / INT8 paths on Op1; **the same scheme** (dtypes.compute, src_scale.dims) is inherited by Op2's internal params_down, except `dynamic_quant`, which Op2 derives from its own float source.  `src_scale.dims` is copied verbatim only for the K-independent granularities (per-tensor, per-token); a per-group Op1 source scale is **not** reused, because Op1's group count is tied to `K_in` — Op2 derives its own `{M, G2}` from `down_scale` instead |
+| `down_scale` / `down_zp` (in `grp_matmul_fused_moe_params`) | per-expert **weight** scale + zero-point for `down_weight[i]` (the only Op2-specific quant artefact — every other knob except `dynamic_quant` is inherited from `params[i]`).  Empty ⇒ Op2 weight un-quantized (default). |
 
 ### 3.3 Prepack module
 
@@ -303,9 +303,10 @@ have been pushed up to the parameter source.
 | Variant | Op1 quant | Op2 quant carrier | Test (in `[16]`) |
 |---|---|---|---|
 | WOQ S4 on both passes | `params[i].quant_params.wei_scale` | `fused.down_scale[i]` | `TestFusedMoEQuantWOQ.BothPasses` |
-| Dynamic INT8 on both passes (runtime BF16→S8 reorder) | `params[i].dynamic_quant=true` + `params[i].quant_params.src_scale` (drives both passes) | `fused.down_scale[i]` (down_weight only — every other knob inherited) | `TestFusedMoEQuantDynINT8.BothPasses` |
+| Dynamic INT8 on both passes (runtime BF16→S8 reorder) | `params[i].dynamic_quant=true` + `params[i].quant_params.src_scale` | `fused.down_scale[i]` (down_weight only — every other knob inherited) | `TestFusedMoEQuantDynINT8.BothPasses` |
+| Pre-quantized INT8 Op1 source (Op2 still DQs) | `params[i].dynamic_quant=false` + `dtypes.src=s8` + caller `src_scale` | `fused.down_scale[i]`; Op2 derives `dynamic_quant=true` | `TestFusedMoEPreQuantSrc.*` |
 
-Both fused-MoE quant tests carry a non-zero sanity guard (sum of
+All three fused-MoE quant suites carry a non-zero sanity guard (sum of
 absolute values of the reference + test outputs MUST exceed
 `1e-3`) at the bottom of the body — this catches the failure mode
 where AOCL DLP rejects an unsupported quant combo and leaves the

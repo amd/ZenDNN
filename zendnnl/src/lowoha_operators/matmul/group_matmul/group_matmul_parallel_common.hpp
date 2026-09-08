@@ -255,7 +255,7 @@ inline int op2_k_for_act(int n_op1, grp_matmul_gated_act_t act) {
 /// Rationale: the legacy `std::atoi(e)` pattern silently returns `0`
 /// for non-numeric inputs (e.g. `"abc"` → 0).  For env knobs whose
 /// documented default is NOT `0` (e.g. N_ORDER default 3, N_ROUNDS
-/// default 1, N_TILE_STRATEGY default 2) `atoi` would coincidentally
+/// default 1, N_TILE_STRATEGY default 3) `atoi` would coincidentally
 /// pick mode 0 — a valid value but NOT the documented default the
 /// user intended when they typo'd the env value.  Strict validation
 /// makes "invalid env value → fall back to documented default" the
@@ -552,8 +552,12 @@ inline bool a3_can_fuse_act(
 //     0 = auto: planner picks single-round / multi-round / balanced
 //               via cost-model on wall time.
 //     1 = force single-round (all experts in one round, n_thr =
-//         num_threads / num_ops).  Falls back to balanced when
-//         num_threads < num_ops.  CURRENT DEFAULT: production
+//         num_threads / num_ops).  When single-round is infeasible
+//         (num_threads < num_ops) the fallback is the SAME
+//         {multi, balanced} cost-model comparison AUTO would run —
+//         not an unconditional balanced pick — so mode 1 degrades to
+//         a two-way cost model rather than to one fixed strategy.
+//         CURRENT DEFAULT: production
 //         sweeps showed single-round dominates on the target MoE
 //         envelope at high thread counts; the auto cost-model
 //         occasionally picked balanced/multi-round at boundaries

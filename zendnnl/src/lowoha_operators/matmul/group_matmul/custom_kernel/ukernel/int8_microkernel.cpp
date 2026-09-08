@@ -242,31 +242,72 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // compensation row starts immediately after.
     const int weight_bytes_in_oblock = K_quad * kq_stride_bytes;
 
-    // ── Accumulator register budget + double-buffering ─────────────
-    // Base single-buffer footprint per row is `NV` s32 zmms.  Small-MR
-    // specialisations are FMA-latency bound: the number of independent
-    // accumulator chains (MR × NV) is below what is needed to saturate
-    // the VPDPBUSD pipeline (5-cycle latency on Zen4 / 4-cycle on Zen5,
-    // 2/cycle throughput).  Mirroring the bf16 sibling, double-buffering
-    // splits the s32 accumulators into two parallel sets fed from
-    // even / odd K-quads; the sets are summed (s32 add) at the end of
-    // the K-loop, BEFORE the compensation correction.  This doubles the
-    // chain count and brings MR=2, MR=3 from latency-bound to issue-
-    // bound.  For MR ≥ 4 single buffering already saturates issue, so
-    // kBuffers stays at 1 (avoids spilling the MR=8 × NV=2 spec's
-    // 16 acc zmms).
+    // ── B staging and accumulator register budget ──────────────────
+    // The K-quad loop comes in two forms, picked at compile time by MR:
     //
-    // Register count after double-buffering (MR ≤ 3, NV=2):
-    //   MR=1: 2×2 acc + 2 b + 1 a = 7 zmms
-    //   MR=2: 4×2 acc + 2 b + 1 a = 11 zmms
-    //   MR=3: 6×2 acc + 2 b + 1 a = 15 zmms
-    // All under the ~70% of 32-zmm rule of thumb.
+    //   kPipelineB: stages the next K-quad's B into registers one
+    //     iteration ahead, so VPDPBUSD reads B from a register.  Costs
+    //     one `vmovdqa64` per VPDPBUSD, which only pays back once a
+    //     second A row consumes the same staged register.
+    //   plain: leaves B as a VPDPBUSD *memory* operand, no staging, and
+    //     `kBuffers` consecutive K-quads per iteration for the chains.
+    //     Fewer instructions per FMA, no B reuse across rows.
+    //
+    // Total zmm footprint of the K-loop, against the 32 available:
+    //
+    //   kBuffers*MR*NV  +  (kPipelineB ? 2*NV : 0)  +  MR  +  1
+    //   accumulators       bv_cur and bv_next are     one     s8→u8
+    //                      both live: stage 3         bcast   bias
+    //                      refills bv_cur while       per     vector
+    //                      stage 4 still reads        row     (kS8_Sym)
+    //                      bv_next
+    //
+    // The `MR` broadcast term is not optional: the m-loop below is fully
+    // unrolled, so all MR `av` broadcasts are live at once.  Both it and
+    // the `2*NV` staging term were missing from an earlier version of
+    // this block, which is why it under-predicted the NV=4 footprint by
+    // enough to call spilling specialisations safe.
+    //
+    // kBuffers splits the accumulators into sets fed from consecutive
+    // K-quads, summed (s32 add) after the K-loop and before the
+    // compensation correction.  It exists to raise the independent
+    // chain count `kBuffers*MR*NV` to the VPDPBUSD latency × throughput
+    // product (4 cycles × 2/cycle = 8 chains on Zen5) — below that the
+    // loop is latency bound.  `kBudget` is the largest kBuffers that
+    // still fits `kBuffers*MR*NV + MR + 1` under 30 zmm; `kChainCap`
+    // stops it growing past the 8 chains that saturate the issue port.
+    //
+    // Which form to use is decided by whether the plain form can reach
+    // those 8 chains within budget, i.e. by `MR*NV <= 8`.  Staging B
+    // costs one `vmovdqa64` per VPDPBUSD, and above that boundary GCC
+    // also stops coalescing the bv_cur/bv_next swap and emits a further
+    // copy per accumulator.  Measured hot loops (S8Sym/swiglu, per
+    // K-loop iteration — insn/FMA, then register-to-register zmm moves,
+    // then hot-loop spill stores):
+    //
+    //   NV=2: MR=1..4 plain → 1.71-2.00 i/f,  0 mov,  0 spill, 10-28 zmm
+    //         MR=5,6  piped → 2.79-3.00 i/f, 19 mov,  0 spill, 27-30 zmm
+    //         MR=7,8  piped → 2.50-2.78 i/f, 16 mov, 1-6 spill,   32 zmm
+    //   NV=4: MR=1,2  plain → 2.50-2.75 i/f,  8 mov,  0 spill, 14-26 zmm
+    //         MR=3..6 piped → 2.48-2.66 i/f,  5 mov, 1-26 spill,  32 zmm
+    //
+    // The spilling high-MR specialisations are left as they are on
+    // purpose: MR is the weight-reuse factor, so halving it to fit the
+    // register file would double weight traffic, and weight traffic —
+    // not instruction count — is what this kernel is limited by (an M=1
+    // decode loop needs ~128 B/cycle of B to stay issue-bound and gets
+    // ~5 B/cycle).  Spill traffic is L1-resident; weight traffic is not.
     //
     // Bias is folded into the FP32 epilogue, NOT the s32 accumulator
-    // (the s32 path has no clean way to add a float bias), so both
-    // buffers simply start at zero — no bias-seed asymmetry like the
+    // (the s32 path has no clean way to add a float bias), so every
+    // buffer simply starts at zero — no bias-seed asymmetry like the
     // bf16 sibling has to manage.
-    constexpr int kBuffers = (MR <= 3) ? 2 : 1;
+    constexpr bool kPipelineB = (MR * NV > 8);
+    constexpr int kChainCap = 8 / NV;
+    constexpr int kBudget = (29 - MR) / (MR * NV);
+    constexpr int kBuffers = kPipelineB
+            ? 1
+            : (kBudget < kChainCap ? (kBudget < 1 ? 1 : kBudget) : kChainCap);
     __m512i acc[kBuffers][MR][NV];
 #pragma GCC unroll 2
     for (int b = 0; b < kBuffers; ++b) {
@@ -311,7 +352,69 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // for its K-pair broadcast.  XOR with the s8→u8 bias when the
     // compute is symmetric.
     int kq = 0;
-    if (kq + 1 < K_quad) {
+    if constexpr (!kPipelineB) {
+        // Plain form: B is a VPDPBUSD memory operand, so there is no
+        // staging load to amortise.  `kBuffers` consecutive K-quads are
+        // consumed per iteration, each into its own accumulator set, so
+        // the unrolled body issues `kBuffers * MR * NV` INDEPENDENT
+        // VPDPBUSDs rather than one dependent chain per (m, v).  Folding
+        // the unroll onto a single buffer instead would amortise the loop
+        // overhead just as well but serialise the whole body behind one
+        // 4-cycle accumulator chain.  The `b` loop has a compile-time
+        // bound, so every `acc[b]` index is a constant after unrolling —
+        // a runtime `kq % kBuffers` index makes GCC spill `acc` to stack.
+        const int k_main = K_quad - (K_quad % kBuffers);
+        for (; kq < k_main; kq += kBuffers) {
+#pragma GCC unroll 4
+            for (int b = 0; b < kBuffers; ++b) {
+                const int8_t *bp = Bpacked
+                        + static_cast<size_t>(kq + b) * kq_stride_bytes;
+#pragma GCC unroll 8
+                for (int m = 0; m < MR; ++m) {
+                    uint32_t a_quad;
+                    std::memcpy(&a_quad,
+                            A + static_cast<size_t>(m) * lda
+                                    + (kq + b) * kVNNIInt8Quad,
+                            sizeof(a_quad));
+                    __m512i av
+                            = _mm512_set1_epi32(static_cast<int32_t>(a_quad));
+                    if constexpr (Compute == IntCompute::kS8_Sym) {
+                        av = _mm512_xor_si512(av, s8_to_u8_bias_vec);
+                    }
+#pragma GCC unroll 4
+                    for (int v = 0; v < NV; ++v) {
+                        acc[b][m][v] = _mm512_dpbusd_epi32(acc[b][m][v], av,
+                                _mm512_load_si512(
+                                        reinterpret_cast<const __m512i *>(
+                                                bp + v * v_stride_bytes)));
+                    }
+                }
+            }
+        }
+        // Residual K-quads (0 .. kBuffers-1) fold into buffer 0, which the
+        // end-of-K combine below reduces along with the rest.
+        for (; kq < K_quad; ++kq) {
+            const int8_t *bp
+                    = Bpacked + static_cast<size_t>(kq) * kq_stride_bytes;
+#pragma GCC unroll 8
+            for (int m = 0; m < MR; ++m) {
+                uint32_t a_quad;
+                std::memcpy(&a_quad,
+                        A + static_cast<size_t>(m) * lda + kq * kVNNIInt8Quad,
+                        sizeof(a_quad));
+                __m512i av = _mm512_set1_epi32(static_cast<int32_t>(a_quad));
+                if constexpr (Compute == IntCompute::kS8_Sym) {
+                    av = _mm512_xor_si512(av, s8_to_u8_bias_vec);
+                }
+#pragma GCC unroll 4
+                for (int v = 0; v < NV; ++v) {
+                    acc[buf0][m][v] = _mm512_dpbusd_epi32(acc[buf0][m][v], av,
+                            _mm512_load_si512(reinterpret_cast<const __m512i *>(
+                                    bp + v * v_stride_bytes)));
+                }
+            }
+        }
+    } else if (kq + 1 < K_quad) {
         __m512i bv_cur[NV];
         {
             const int8_t *bp
@@ -418,12 +521,15 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // BEFORE the compensation correction + dequant, so the downstream
     // epilogue reads a single complete s32 reduction per (m, v) tile.
     if constexpr (kBuffers > 1) {
-#pragma GCC unroll 8
-        for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
-            for (int v = 0; v < NV; ++v) {
-                acc[buf0][m][v]
-                        = _mm512_add_epi32(acc[buf0][m][v], acc[buf1][m][v]);
+        for (int b = 1; b < kBuffers; ++b) {
+#pragma GCC unroll 8
+            for (int m = 0; m < MR; ++m) {
+#pragma GCC unroll 4
+                for (int v = 0; v < NV; ++v) {
+                    acc[buf0][m][v]
+                            = _mm512_add_epi32(acc[buf0][m][v], acc[b][m][v]);
+                }
             }
         }
     }

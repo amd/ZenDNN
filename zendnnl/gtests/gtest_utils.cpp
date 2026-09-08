@@ -28,6 +28,7 @@
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+#include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
@@ -128,6 +129,11 @@ void reset_grp_matmul_caches() {
     // mis-route off the stale metadata).  Clear it here so every test that
     // resets group-matmul caches starts from a clean GGML cache too.
     zendnnl::lowoha::matmul::clear_ggml_weight_unpack_cache();
+    // The memoized f32 weight-scale views (N-tile int8 CK path) are the
+    // sixth pointer-keyed process-wide cache here, and carry the identical
+    // hazard: a fresh scale buffer landing on a freed one's address would
+    // hit a stale entry and dequantize with a prior test's scales.
+    zendnnl::lowoha::matmul::clear_grp_wei_scale_f32_cache();
     clear_matmul_test_caches();
 }
 

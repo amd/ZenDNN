@@ -1728,7 +1728,11 @@ static void dynamic_per_token_group_quant_s8_impl(
     }
     if (total_rows <= 0) return;
 
-    const int nt = std::min<int64_t>(omp_team_size(num_threads), total_rows);
+    // Keep the caller's width: narrowing to total_rows is cheaper here
+    // but stops libiomp reusing the hot team, and that cost lands on the
+    // next full-width region.  Surplus lanes get an empty [begin, end)
+    // from the split below and exit.
+    const int nt = omp_team_size(num_threads);
 #pragma omp parallel num_threads(nt)
     {
         const int tid = omp_get_thread_num();

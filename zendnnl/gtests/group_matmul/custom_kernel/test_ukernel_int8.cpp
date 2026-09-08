@@ -270,6 +270,11 @@ struct Int8UkernelCase {
     ck::ActKind act;
     ck::BiasKind bias;
     std::string label;
+    // Source row stride, when the caller's rows are padded wider than K
+    // (`0` = dense, lda == K).  A grouped MoE source is allocated at a
+    // padded stride and handed to the kernel with only its first K
+    // columns live, so `lda > K` is a production shape, not a corner.
+    int lda_pad = 0;
 };
 
 class CkInt8UkernelTest : public ::testing::TestWithParam<Int8UkernelCase> {};
@@ -285,6 +290,8 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     ASSERT_EQ(K % 4, 0) << "K must be a multiple of kVNNIInt8Quad=4";
     ASSERT_LE(MR, ck::max_mr_for_nv(NV))
             << "MR exceeds max_mr_for_nv(NV) — case is malformed";
+    const int lda = (c.lda_pad > 0) ? c.lda_pad : K;
+    ASSERT_GE(lda, K) << "lda must cover K — case is malformed";
 
     // Random inputs — bounded so the s32 accumulator stays well
     // away from saturation regardless of K.
@@ -317,8 +324,11 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     } pg {packed_raw};
 
     // Src — sym keeps s8 storage (the kernel XORs to u8 internally);
-    // asym uses u8 storage directly.
-    std::vector<uint8_t> src(static_cast<size_t>(MR) * K);
+    // asym uses u8 storage directly.  Allocated at the (possibly padded)
+    // row stride; the columns past K are live memory the kernel must not
+    // read, so a stride slip shows up as a value mismatch rather than as
+    // a read of uninitialised bytes.
+    std::vector<uint8_t> src(static_cast<size_t>(MR) * lda);
     const bool sym = (c.compute == ck::IntCompute::kS8_Sym);
     for (auto &b : src) {
         b = sym ? static_cast<uint8_t>(static_cast<int8_t>(sd_s8(rng)))
@@ -373,7 +383,7 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     // ukernel writes through `Cout` at `ldc=out_cols`; for gated
     // activations it writes through `Cout_tight` at `ldc_tight=out_cols`.
     if (c.act == ck::ActKind::none) {
-        fn(/*A=*/src.data(), /*lda=*/K,
+        fn(/*A=*/src.data(), /*lda=*/lda,
                 /*Bpacked=*/packed_raw,
                 /*src_scale=*/src_scale.data(),
                 /*src_zp=*/src_zp_ptr,
@@ -384,7 +394,7 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
                 /*Cout_tight=*/nullptr, /*ldc_tight=*/0,
                 /*K=*/K);
     } else {
-        fn(src.data(), K, packed_raw, src_scale.data(), src_zp_ptr,
+        fn(src.data(), lda, packed_raw, src_scale.data(), src_zp_ptr,
                 wei_scale.data(), ck::ScaleKind::kF32, bias_ptr, c.bias,
                 /*Cout=*/nullptr, /*ldc=*/0,
                 /*Cout_tight=*/dst.data(), /*ldc_tight=*/out_cols,
@@ -397,7 +407,7 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     // bias / activation drift.
     std::vector<bfloat16_t> ref_mm(
             static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
-    scalar_ref_dq_int8<uint8_t>(MR, K, NR, src.data(), K, wei.data(), NR,
+    scalar_ref_dq_int8<uint8_t>(MR, K, NR, src.data(), lda, wei.data(), NR,
             src_scale.data(), src_zp_ptr, wei_scale.data(), bias_ptr, c.bias,
             ck::ActKind::none, ref_mm.data(), NR);
     std::vector<bfloat16_t> ref(
@@ -514,6 +524,47 @@ TEST(CkInt8UkernelBf16Scale, MatchesScalarReference) {
 
 INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,
         ::testing::Values(
+                // PADDED SOURCE STRIDE (lda > K).  Every other case here
+                // passes lda == K, so nothing exercised the row-stride
+                // arithmetic of either K-loop form.  A grouped MoE source
+                // is allocated at a padded stride (this mirrors
+                // TestFusedMoEPreQuantSrc.InactiveExpertsPaddedLdaAsymmetricNDown:
+                // K=64, lda=80), so cover both forms across the
+                // MR*NV <= 8 boundary that selects between them, with the
+                // gated epilogue as well as act=none.
+                Int8UkernelCase {1, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {2, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr2_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {3, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr3_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr4_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {5, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr5_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {8, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr8_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {4, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        "sym_mr4_nv2_K64_lda80_swiglu", 80},
+                Int8UkernelCase {8, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        "sym_mr8_nv2_K64_lda80_swiglu", 80},
+                Int8UkernelCase {4, 4, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr4_nv4_K64_lda80_none", 80},
+                Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv2_K68_lda84_ktail1", 84},
+                Int8UkernelCase {4, 2, 64, ck::IntCompute::kU8_Asym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "asym_mr4_nv2_K64_lda80_none", 80},
                 // act=none, both compute flavours, both NVs, span of MRs.
                 Int8UkernelCase {1, 2, 64, ck::IntCompute::kS8_Sym,
                         ck::ActKind::none, ck::BiasKind::none,
@@ -620,7 +671,70 @@ INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,
                         "asym_mr4_nv4_K64_silu"},
                 Int8UkernelCase {4, 4, 64, ck::IntCompute::kU8_Asym,
                         ck::ActKind::gelu_and_mul, ck::BiasKind::none,
-                        "asym_mr4_nv4_K64_gelu"}),
+                        "asym_mr4_nv4_K64_gelu"},
+                // K-quad residual coverage.  The plain (memory-operand)
+                // K-loop consumes `kBuffers` K-quads per iteration and
+                // folds the trailing `K_quad % kBuffers` quads into
+                // buffer 0 through a separate loop, so an exact multiple
+                // of kBuffers never reaches that code.  Every K above is
+                // 64 / 128 / 1024, i.e. K_quad ∈ {16, 32, 256}, which
+                // divides every kBuffers in play — the residual loop and
+                // the multi-buffer combine that follows it were both
+                // untested.  These pick K so that K_quad = K/4 leaves a
+                // non-zero remainder for the kBuffers each (MR, NV) gets:
+                // 4 at NV=2 MR=1..3, 3 at NV=2 MR=4, 2 at NV=4 MR=1,2.
+                Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv2_K68_ktail1"},
+                Int8UkernelCase {1, 2, 72, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv2_K72_ktail2"},
+                Int8UkernelCase {1, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv2_K76_ktail3"},
+                Int8UkernelCase {2, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr2_nv2_K68_ktail1"},
+                Int8UkernelCase {3, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr3_nv2_K76_ktail3"},
+                Int8UkernelCase {4, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr4_nv2_K76_ktail1"},
+                Int8UkernelCase {4, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr4_nv2_K68_ktail2"},
+                Int8UkernelCase {1, 4, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr1_nv4_K68_ktail1"},
+                Int8UkernelCase {2, 4, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr2_nv4_K76_ktail1"},
+                // Same residual paths on the asym flavour, which skips
+                // the s8→u8 broadcast XOR and corrects by src_zp instead.
+                Int8UkernelCase {1, 2, 68, ck::IntCompute::kU8_Asym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "asym_mr1_nv2_K68_ktail1"},
+                Int8UkernelCase {2, 4, 68, ck::IntCompute::kU8_Asym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "asym_mr2_nv4_K68_ktail1"},
+                // Residual K-quads under a gated epilogue, which reads
+                // the combined buffer 0 through the pair-pack store.
+                Int8UkernelCase {1, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        "sym_mr1_nv2_K68_swiglu_ktail1"},
+                Int8UkernelCase {3, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        "sym_mr3_nv2_K76_silu_ktail3"},
+                // The other side of the plain/pipelined boundary
+                // (MR*NV > 8) at the same non-dividing K_quad, so the
+                // staged-B form's own K tail stays covered too.
+                Int8UkernelCase {5, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr5_nv2_K68_ktail"},
+                Int8UkernelCase {3, 4, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr3_nv4_K68_ktail"}),
         [](const ::testing::TestParamInfo<Int8UkernelCase> &info) {
             return info.param.label;
         });

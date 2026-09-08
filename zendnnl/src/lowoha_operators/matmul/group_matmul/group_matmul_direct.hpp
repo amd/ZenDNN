@@ -404,11 +404,28 @@ struct grp_matmul_fused_moe_params {
 
     // ─── Op2 (down_proj) weight quantization (optional) ──────────────────
     //
-    // The fused-MoE dispatcher inherits every quant *scheme* knob from
-    // the caller's `params[i]` for Op2 (so Op1 and Op2 always use the
-    // same scheme — same `dtypes.wei`, same `dynamic_quant` flag, same
-    // `dtypes.compute`, same per-token `src_scale.dims`).  The ONLY
-    // thing that has to be carried separately is the down_weight scale
+    // The fused-MoE dispatcher inherits the quant *scheme* knobs from
+    // the caller's `params[i]` for Op2 — same `dtypes.wei`, same
+    // `dtypes.compute`, same per-token `src_scale.dims`.
+    //
+    // `dynamic_quant` is the ONE exception: it is DERIVED for Op2, not
+    // inherited.  Op2's source is always the float Op1 output, never the
+    // caller's `src[]`, so it needs a source quant pass when its own
+    // compute dtype is s8/u8 — but only for a `bf16` or `f32` Op1 output,
+    // matching what the dynamic-quant reorder actually accepts.  An `f16`
+    // intermediate is EXCLUDED: setting the flag there would hand Op2's s8
+    // GEMM an unquantized source, so fused MoE leaves such a call on its
+    // un-quantized dispatch instead.  A PRE-QUANTIZED s8 Op1 source
+    // arrives with `dynamic_quant == false` yet Op2 must still narrow its
+    // bf16 intermediate; there is no API to supply an Op2 source scale
+    // because that buffer is library-internal.
+    //
+    // NOT EXPRESSIBLE: a mixed-precision MoE (e.g. INT8 W13 with a BF16
+    // W2) — Op2 inherits `dtypes.wei` and `dtypes.compute` from Op1, so
+    // both projections share one quant regime.  That would need separate
+    // `down_wei_dt` / `down_compute_dt` fields here.
+    //
+    // Also carried separately is the down_weight scale
     // (and optional zero-point) tensor itself, because `down_weight[i]`
     // is a different tensor from Op1's `weight[i]` and therefore has
     // its own per-channel / per-group / per-tensor scale buffer.
@@ -428,23 +445,36 @@ struct grp_matmul_fused_moe_params {
     //   false                     | s8                     | populated  | (limited — see note below)
     //   true                      | s8                     | populated  | Dynamic INT8 on Op2 (runtime BF16→S8 reorder)
     //
+    // One more admissible row, keyed on `dtypes.src` not `dynamic_quant`:
+    //
+    //   dynamic_quant=false AND dtypes.src=s8 AND dtypes.wei=s8
+    //     → PRE-QUANTIZED Op1 source ("quantize once, then group" on the
+    //       caller side).  Op1 consumes the s8 rows plus
+    //       `quant_params.src_scale.buff` directly, the grouped DQ
+    //       pre-pass early-exits, and Op2 derives `dynamic_quant=true`.
+    //       Requires a caller-allocated `dst_down[]` — see the mode (2)
+    //       CONSTRAINT below.
+    //
     // The Op2-side runtime reorder for dynamic INT8 inherits its
     // `src_scale.dims` (and `dt`) from `params[i].quant_params.src_scale`
     // and lets the kernel allocate the runtime scratch internally —
     // the caller never sees nor manages an Op2-side `src_scale.buff`.
     //
-    // **Per-token source granularity ONLY**: dynamic source quant in
-    // the fused MoE path supports `src_scale.dims = {M, 1}` (and the
-    // trivial per-tensor `{1, 1}` / `{1}` forms).  Per-group
-    // (`{M, ngroups}` with `ngroups > 1`) is rejected up front by
-    // the dispatcher because Op1 reduces over `K[i]` (= K_in) and
-    // Op2 reduces over `op2_k_for_act(N[i], act)` (= K_down), and
-    // K_in != K_down in general — so Op1's ngroups cannot transfer
-    // to Op2 verbatim (the documented invariant at
-    // `docs/operator/low_overhead_operator/lowoha_matmul_operator.md:227` requires
-    // source-side and weight-side ngroups to match along K *per
-    // pass*).  Use per-token granularity instead — it is K-
-    // independent and works on both passes.
+    // Source granularity: per-tensor (`{1}` / `{1, 1}`) and per-token
+    // (`{M, 1}`) dims are K-independent and are copied to Op2 verbatim.
+    // Per-group (`{M, ngroups}` with `ngroups > 1`) is ACCEPTED but not
+    // copied: Op1 reduces over `K[i]` (= K_in) while Op2 reduces over
+    // `op2_k_for_act(N[i], act)` (= K_down), and K_in != K_down in
+    // general, so Op1's ngroups cannot transfer verbatim (the invariant
+    // at `docs/operator/low_overhead_operator/lowoha_matmul_operator.md:227`
+    // requires source- and weight-side ngroups to match along K *per
+    // pass*).  Op2 instead DERIVES its group count from the paired
+    // `down_scale[i]`: dims `{G2, N_down}` (or `{1, G2, N_down}`) give
+    // an Op2 source scale of `{M, G2}`, with `G2 = 1` when `down_scale`
+    // is absent or not per-group.  A per-group source forces the
+    // two-pass route, since vertical fusion requants per token only.
+    // Per-group source ZERO-points are the case that is rejected — the
+    // down-proj re-quant path is symmetric s8 only.
     //
     // Note on pure WOQ-S8: AOCL DLP's WOQ fast path is gated to s4/u4
     // only (see `aocl_postop.cpp::is_woq`); a bf16-src + s8-wei combo
@@ -495,6 +525,19 @@ struct grp_matmul_fused_moe_params {
     //       Caller's `dst` parameter is ignored in this mode (typically
     //       passed as a vector of nullptrs or an empty vector).
     //
+    //       CONSTRAINT for mode (2): per expert, `dtypes.src` ==
+    //       `dtypes.dst`.  Op2 writes into src[] at row stride lda
+    //       measured in DST elements.  A NARROWER src element (e.g. a
+    //       pre-quantized s8 input with bf16 output) would overrun the
+    //       allocation and, since src[] holds per-expert offsets into one
+    //       grouped buffer, the next expert's rows; over-allocating src[]
+    //       does not lift this, because the hazard is the pointer spacing
+    //       and not the total size.  A WIDER src element is spacing-safe
+    //       but is a mixed src/dst fused-MoE configuration that the
+    //       dispatch does not compute, so equality rather than element-size
+    //       parity is the gate.  Use mode (1), which composes freely with
+    //       an internally-allocated Op1 dst.
+    //
     //       Memory-lifetime note for mode (2):
     //         - The library does NOT call `free()` on the scratch at
     //           end-of-call.  Instead, Op1 scratch is allocated from a
@@ -531,23 +574,22 @@ struct grp_matmul_fused_moe_params {
     //           lda[i] in mode 2) fits within the original src row
     //           stride.  Naturally holds for MoE layers with
     //           hidden_dim = K_input = N_down.
-    //         - **MATCHED PRECISION REQUIRED**: params[i].dtypes.src
-    //           MUST equal params[i].dtypes.dst.  Op2 writes dst-typed
-    //           elements at row stride lda[i] (in dst-element units)
-    //           into the caller's src[i] buffer.  When dst element
-    //           size > src element size (e.g. bf16 src + f32 dst) the
-    //           per-row write footprint (lda[i] * sizeof(dst_elem))
-    //           exceeds the per-row allocation footprint
-    //           (lda[i] * sizeof(src_elem)) and corrupts memory.
-    //           This is enforced as an always-on guard inside
-    //           group_matmul_fused_moe_execute() — mixed-precision
-    //           callers must use mode (1) (caller-allocated dst_down)
-    //           where the destination buffer is sized for dst dtype
-    //           independently of src.
+    //         - **DTYPE EQUALITY REQUIRED** (gate G3):
+    //           params[i].dtypes.src == params[i].dtypes.dst.
+    //           Op2 writes dst-typed elements at row stride lda[i] (in
+    //           dst-element units) into the caller's src[i] buffer, so a
+    //           wider dst (e.g. bf16 src + f32 dst) makes the per-row
+    //           write footprint exceed the per-row allocation and
+    //           corrupts memory.  A wider SRC is spacing-safe but is
+    //           rejected as well, because a mixed src/dst fused-MoE
+    //           configuration is not a dispatch the library computes —
+    //           hence equality, not element-size parity.  Enforced as an
+    //           always-on guard in group_matmul_fused_moe_execute(); any
+    //           mixed-dtype caller must use mode (1), where dst_down is
+    //           sized for dst dtype independently of src.
     //         - src[i] buffer size must be at least
     //               M[i] * lda[i] * sizeof(dtypes.dst) bytes
-    //           (== M[i] * lda[i] * sizeof(dtypes.src) under matched
-    //           precision).  This is the Op2 row-pitched write footprint.
+    //           — the Op2 row-pitched write footprint.
     //
     // Mode (2) is targeted at frameworks that do their own token-grouping
     // scatter on src (so src is already a writable scratch), and their

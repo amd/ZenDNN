@@ -658,25 +658,28 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                             " (Op2 reuses src as output)");
                     return status_t::failure;
                 }
-                // Op2 writes dst-typed elements into the caller's src[i].
-                // When dst_elem > src_elem (e.g. bf16 src + f32 dst), every
-                // Op2 row overruns the original src row stride and corrupts
-                // memory.  Require matched precision; mixed-precision callers
-                // must use legacy mode (caller-allocated dst_down).  This is
-                // also enforced as an always-on guard inside
-                // group_matmul_fused_moe_execute() — the diagnostic message
-                // here is the richer one for caller debugging.
+                // Op2 writes dst-typed elements into the caller's src[i] at
+                // the same integer lda[i].  A narrower src element both
+                // overruns the allocation and, since src[] holds per-expert
+                // bases into one grouped buffer, runs into the next expert's
+                // SOURCE rows.  A wider one is spacing-safe but leaves a
+                // mixed src/dst fused-MoE config the dispatch does not
+                // compute, so the predicate is dtype equality.  Mirrors gate
+                // (G3) in group_matmul_fused_moe.cpp, which guards callers
+                // that reach the executor without passing through here.
                 if (M[i] > 0 && params[i].dtypes.src != params[i].dtypes.dst) {
                     log_error(
                             "group_matmul_direct: fused_moe internal-alloc "
-                            "requires "
-                            "matching src/dst dtypes when Op2 reuses src as "
-                            "output; "
-                            "params[",
+                            "requires dtypes.src == dtypes.dst "
+                            "when Op2 reuses src as output; params[",
                             i, "].dtypes.src=",
-                            static_cast<int>(params[i].dtypes.src), ", params[",
-                            i, "].dtypes.dst=",
-                            static_cast<int>(params[i].dtypes.dst));
+                            static_cast<int>(params[i].dtypes.src), " (",
+                            size_of(params[i].dtypes.src), "B), params[", i,
+                            "].dtypes.dst=",
+                            static_cast<int>(params[i].dtypes.dst), " (",
+                            size_of(params[i].dtypes.dst),
+                            "B).  Pass an explicit fused_moe->dst_down[] "
+                            "(caller-allocated Op2 dst) instead.");
                     return status_t::failure;
                 }
             }

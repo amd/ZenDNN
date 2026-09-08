@@ -62,7 +62,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #include <omp.h>
 
@@ -276,6 +278,150 @@ static const float *materialise_f32_wei_scale(const void *buff, data_type_t dt,
                           static_cast<const bfloat16_t *>(buff)[canon]);
     }
     return owned.data();
+}
+
+// Cache key for the f32 weight-scale view: the WEIGHT the scales belong
+// to, the caller's scale buffer, plus everything else that can change
+// the output bytes.
+//
+// `wei` is load-bearing, not redundant with `buff`.  The scale buffer is
+// caller-managed, so one workspace address can serve several distinct
+// constant weights in turn: the caller refills it with the next weight's
+// scales and calls again.  The INT8 pack cache keys on the weight, so it
+// correctly hands the kernel the SECOND weight's packed columns, and a
+// scale key of `buff` alone would pair them with the FIRST weight's
+// converted/permuted scales.  Keying on the weight too keeps the two
+// caches in agreement on which weight is being served.
+struct wei_scale_key_t {
+    const void *wei;
+    const void *buff;
+    int N;
+    bool interleave;
+    data_type_t dt;
+
+    bool operator==(const wei_scale_key_t &o) const {
+        return wei == o.wei && buff == o.buff && N == o.N
+                && interleave == o.interleave && dt == o.dt;
+    }
+};
+
+struct wei_scale_key_hash_t {
+    size_t operator()(const wei_scale_key_t &k) const {
+        size_t h = reinterpret_cast<uintptr_t>(k.wei);
+        h = h * 1000003u
+                + static_cast<size_t>(reinterpret_cast<uintptr_t>(k.buff));
+        h = h * 1000003u + static_cast<size_t>(k.N);
+        h = h * 1000003u + static_cast<size_t>(k.interleave);
+        h = h * 1000003u + static_cast<size_t>(k.dt);
+        return h;
+    }
+};
+
+// A memoized view plus the exact scale bytes it was built from.  A hit
+// has to prove the caller's buffer still holds those bytes before the
+// converted view can be reused — see `materialise_f32_wei_scale_cached`.
+struct wei_scale_entry_t {
+    std::vector<float> converted;
+    std::vector<unsigned char> src_bytes;
+};
+
+// Memoized `materialise_f32_wei_scale`.
+//
+// Uncached, that conversion runs on EVERY call, in the serial pre-OMP
+// hoist, once per active expert: a scalar gather over N plus a
+// `resize()` that mallocs and zero-fills N floats the loop then
+// overwrites.  `hoisted` is rebuilt per call, so the vector is always
+// empty and the allocation always happens.  For a decode MoE layer
+// that is ~40 experts x N elements of identical repeat work, because
+// the per-channel weight scale is a property of the weights and cannot
+// change between calls while `is_weights_const` holds.
+//
+// Keyed on (weight, scale buffer, shape, interleave, dtype) AND
+// validated against the scale bytes themselves.  The key alone is not a
+// safe identity: the scale buffer is caller-managed, so the same address
+// can be refilled for a different weight, and a heap address of either
+// kind can be recycled after a free.  So a hit additionally `memcmp`s
+// the caller's buffer against the bytes the entry was built from, which
+// is exact rather than probabilistic and cheap next to what it guards —
+// a linear compare of N scale elements, no allocation and no permuted
+// scatter, against the malloc + gather + permute it skips.  On a content
+// mismatch this falls back to the uncached path rather than refreshing
+// the entry in place, because another inference stream may still be
+// holding the `data()` pointer from an earlier hit (see below).
+//
+// Entries are never evicted or mutated, matching the INT8 pack cache's
+// effectively-unbounded capacity; the live set is bounded by
+// (experts x layers).  `std::unordered_map` is node-based, so a
+// `data()` pointer handed to the OMP region below stays valid across
+// later inserts.  The build runs under the lock, which is uncontended
+// in the single-threaded hoist and only ever serializes concurrent
+// inference streams on a first touch.
+//
+// Deliberately NOT vectorized: memoization drops this from once per
+// call to once per expert, so the scalar fill is now off the hot path
+// and reusing `materialise_f32_wei_scale` verbatim keeps the cached
+// bytes bit-identical to the uncached path.
+std::unordered_map<wei_scale_key_t, wei_scale_entry_t, wei_scale_key_hash_t>
+        g_wei_scale_f32_cache;
+std::mutex g_wei_scale_f32_cache_mutex;
+
+static const float *materialise_f32_wei_scale_cached(const void *wei,
+        const void *buff, data_type_t dt, int N, bool interleave,
+        bool weights_const, std::vector<float> &owned) {
+    // `ZENDNNL_MATMUL_WEIGHT_CACHE=0` is the process-wide contract for "do
+    // NOT cache weight-derived buffers keyed on a raw pointer", which
+    // exists because frameworks like the PyTorch CPU allocator recycle
+    // weight addresses between calls.  This scale view is weight-derived
+    // and pointer-keyed, so it must honour the knob exactly as the CK pack
+    // arena does (custom_kernel/dispatch.cpp).  `weights_const` does not
+    // cover it: it says the bytes behind a LIVE pointer are stable, not
+    // that the address will not be recycled for different weights.
+    const bool cache_off
+            = (zendnnl::ops::matmul_config_t::instance().get_weight_cache()
+                    == 0);
+    if (cache_off || !weights_const || buff == nullptr || N <= 0) {
+        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+    }
+
+    auto &cache = g_wei_scale_f32_cache;
+    auto &cache_mutex = g_wei_scale_f32_cache_mutex;
+
+    // Only the dtypes `materialise_f32_wei_scale` actually reads are
+    // fingerprintable; anything else returns nullptr below anyway.
+    if (dt != data_type_t::f32 && dt != data_type_t::bf16) {
+        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+    }
+    const size_t bytes = static_cast<size_t>(N) * size_of(dt);
+
+    const wei_scale_key_t key {wei, buff, N, interleave, dt};
+    std::lock_guard<std::mutex> guard(cache_mutex);
+
+    const auto it = cache.find(key);
+    if (it != cache.end()) {
+        const wei_scale_entry_t &entry = it->second;
+        if (entry.src_bytes.size() == bytes
+                && std::memcmp(entry.src_bytes.data(), buff, bytes) == 0) {
+            return entry.converted.data();
+        }
+        // Same weight and same scale address, but the bytes behind that
+        // address changed — a refilled workspace, or a recycled
+        // allocation.  Serve this call from the uncached path and leave
+        // the entry untouched: overwriting it would invalidate a
+        // `data()` pointer a concurrent stream may still be reading.
+        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+    }
+
+    wei_scale_entry_t entry;
+    const float *view = materialise_f32_wei_scale(
+            buff, dt, N, interleave, entry.converted);
+    // Either an unsupported dtype (nullptr, caller routes back to AOCL) or
+    // a zero-copy view of the caller's own f32 buffer (`view` aliases
+    // `buff`, not `entry.converted`).  Neither is ours to own, and caching
+    // the latter would hand out a pointer whose lifetime we do not control.
+    if (view == nullptr || view != entry.converted.data()) { return view; }
+    entry.src_bytes.resize(bytes);
+    std::memcpy(entry.src_bytes.data(), buff, bytes);
+    return cache.emplace(key, std::move(entry)).first->second.converted.data();
 }
 
 // Bundle every reference / dtype-size the executors and per-thread
@@ -581,6 +727,36 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
                 wei_scale_ptr = h.wei_scale_view;
             } else {
                 int8_hoist_ok = false;
+                // A fused call must never reach the AOCL fall-through: it
+                // emits raw (gate, up) columns that no executor activates.
+                // flat_n_tile's pre-OMP guard makes this unreachable by
+                // flipping the call to non-custom first.  The assert
+                // catches a broken guard in debug builds, the one-shot log
+                // in release (-DNDEBUG).
+                assert(!plan.fused_epilogue
+                        && "fused int8 tile fell back to AOCL; pre-OMP guard "
+                           "should have flipped this call to non-custom");
+                static const bool s_tripwire_log = apilog_error_enabled();
+                static std::atomic<bool> s_tripwire_armed {true};
+                if (plan.fused_epilogue && s_tripwire_log
+                        && s_tripwire_armed.exchange(
+                                false, std::memory_order_relaxed)) {
+                    // This tile's output is already wrong, and the knob
+                    // below cannot rescue the current process either:
+                    // `get_grp_decdyn_ck_int8_fused()` caches it in a
+                    // function-local `static const` that the planner has
+                    // necessarily already read, so setting it now changes
+                    // nothing for later calls.  It only helps on the NEXT
+                    // run, hence "re-run with", not "set".
+                    apilog_error("[do_tile] fused int8 tile e=", e,
+                            " took the AOCL fallback; its (gate, up) columns"
+                            " will NOT be activated.  This output is invalid."
+                            "  The route knob is read once per process, so"
+                            " re-run with"
+                            " ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED=0 set"
+                            " before start to keep off this route; changing"
+                            " it in-process has no effect.");
+                }
             }
         }
         if (int8_hoist_ok) {
@@ -590,11 +766,11 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
                     src_zp_ptr, wei_scale_ptr);
             return;
         }
-        // Fall through to AOCL path.  The flat_n_tile pre-OMP hoist
-        // loop emits a single `[CK INT8 BAD HOIST]` apilog warn for
-        // observability when this branch fires, so per-tile logging
-        // here is unnecessary (and would be way too noisy from inside
-        // the OMP region).
+        // Fall through to AOCL path — supported only for a NON-fused call.
+        // The flat_n_tile pre-OMP hoist loop emits a single
+        // `[CK INT8 BAD HOIST]` apilog warn for observability, so per-tile
+        // logging here is unnecessary (and far too noisy inside the OMP
+        // region).
     }
 
     // Weight: slice columns of op(B).  Shared by both the wide path
@@ -1425,8 +1601,8 @@ inline RoundCandidates build_round_candidates(
 //                         thr_per_expert > ccd_size spans CCDs and
 //                         misses the DLP kernel's blocking factor).
 //   Ties resolve to multi (keeps thr = ccd_size, the DLP sweet spot).
-//   Forced single falls back to balanced when single is infeasible
-//   (num_threads < num_ops).
+//   Forced single falls back to the same {multi, balanced} cost-model
+//   comparison when single is infeasible (num_threads < num_ops).
 //
 // SCOPE: this cost model is consulted only on the legacy / custom-
 // kernel path of `plan_group_n_tile`.  The default non-custom AOCL
@@ -1437,21 +1613,24 @@ inline RoundCandidates build_round_candidates(
 // (`RoundPick` enum lives in group_matmul_n_tile.hpp.)
 inline RoundPick pick_round_strategy(
         const GroupNTileTopology &topo, const RoundCandidates &c) {
+    // Above 64 threads a Balanced round's `thr_per_expert` can exceed
+    // `ccd_size`, spanning CCDs and missing the DLP kernel's blocking
+    // factor.  Hoisted so the forced-Single fallback shares the rule.
+    const bool consider_balanced = (topo.num_threads <= 64);
+
     const int rounds_mode = get_grp_n_rounds_mode();
     if (rounds_mode == 1) {
         if (c.single_eligible) return RoundPick::Single;
-        // Force-Single is infeasible (num_threads < num_ops): fall back
-        // to Balanced.  Emit a one-shot warning so a caller running with
-        // `ZENDNNL_GRP_MATMUL_N_ROUNDS=1` knows the env override didn't
-        // take effect for this call.  The gate uses an
-        // `std::atomic<bool>` + `compare_exchange_strong` so concurrent
-        // planner invocations (e.g. multiple application threads each
-        // calling group_matmul) emit the warning exactly once across the
-        // process — a plain `static bool` would race here in release
-        // builds, with both readers seeing `false` and emitting the
-        // warning twice (or, with sufficiently bad interleaving, not at
-        // all).  Subsequent calls follow the documented fallback
-        // silently.
+        // Force-Single is infeasible (num_threads < num_ops): defer to the
+        // cost-model tail below rather than hardcoding Balanced, which
+        // splits rounds by EXPERT and so runs only ceil(num_ops/2) threads
+        // just above num_threads, while Multi keeps round 0 full.
+        //
+        // One-shot warning that single-round did not take effect.  Note
+        // N_ROUNDS defaults to 1, so this arm is the DEFAULT on this path,
+        // not an opt-in override — the warning can fire for a caller that
+        // never set the knob.  Atomic CAS, not a plain `static bool`, since
+        // concurrent planner invocations would race.
         static const bool s_log_fallback = apilog_warning_enabled();
         static std::atomic<bool> s_warned {false};
         bool expected = false;
@@ -1459,19 +1638,21 @@ inline RoundPick pick_round_strategy(
                 && s_warned.compare_exchange_strong(
                         expected, true, std::memory_order_relaxed)) {
             apilog_warning(
-                    "[GRP_MATMUL.PLAN WARN] N_ROUNDS=1 forced single-round"
-                    " infeasible (num_threads=",
+                    "[GRP_MATMUL.PLAN WARN] N_ROUNDS=1 (the default)"
+                    " single-round infeasible (num_threads=",
                     topo.num_threads, " < num_ops=", topo.num_ops,
-                    "); using RoundPick::Balanced instead.  This warning fires"
-                    " once per process; subsequent calls follow the same"
+                    "); falling back to the cost model's Multi/Balanced"
+                    " choice instead.  This warning fires once per"
+                    " process; subsequent calls follow the same"
                     " documented fallback silently.");
         }
-        return RoundPick::Balanced;
+        if (consider_balanced && c.wall_balanced < c.wall_multi) {
+            return RoundPick::Balanced;
+        }
+        return RoundPick::Multi;
     }
     if (rounds_mode == 2) return RoundPick::Multi;
     if (rounds_mode == 3) return RoundPick::Balanced;
-
-    const bool consider_balanced = (topo.num_threads <= 64);
 
     // ── L3-spill penalty on Single (auto cost model) ─────────────────
     // The plain `wall_single = 1 / n_thr_single` metric assumes the
@@ -2512,29 +2693,29 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // n_tile_strategy==2 (explicit Rounds) and ==1 (forced DecodeD, handled
     // above) intentionally skip this block.
     if (n_tile_strategy == 3 || n_tile_strategy == 0) {
-        // Single-pool safety gate.  execute_decode_dynamic now hosts every
-        // activation shape (see its body): CK in-register (no barrier),
-        // non-custom TIGHT (do_tile scratch+OOP, no barrier), non-custom
-        // WIDE (one team-wide barrier + apply_swiglu_oai post-pass), and
-        // non-fused.  So the only case still routed to Rounds is a
-        // use_custom DQ-INT8 FUSED call: do_tile could fall back to the
-        // AOCL per-tile path at runtime (int8 src-hoist failure), and that
-        // matmul-only tile would need the post-pass — but the post-pass is
-        // gated on !use_custom, so it would not run.  flat_n_tile's pre-OMP
-        // guard already flips such a call to non-custom before planning
-        // (then it is eligible here as a non-custom fused call), so this is
-        // cheap defense-in-depth: keep the executor off the use_custom-int8
-        // fused path entirely.  bf16 CK and non-fused int8 stay eligible.
+        // Single-pool safety gate.  A use_custom DQ-INT8 FUSED call used to
+        // be excluded here in case its tile took the AOCL per-tile fallback,
+        // which emits raw (gate, up) columns the !use_custom-gated post-pass
+        // would not fix up.  flat_n_tile's pre-OMP guard makes that
+        // unreachable — it evaluates the same predicate off the same frozen
+        // inputs and flips the whole call to non-custom first, so this flag
+        // is only true for a call the guard cleared (`do_tile` asserts it).
+        // The knob restores the old exclusion.
         //
-        // NOTE: `ck_int8_at_plan_time` is passed `use_custom && is_int8`
-        // (it ALREADY implies use_custom), so this excludes ONLY the
-        // use_custom-int8-fused case.  NON-custom int8 fused (use_custom
-        // false — e.g. after flat_n_tile's pre-OMP hoist-failure flip)
-        // has `ck_int8_at_plan_time == false` and therefore STAYS eligible,
-        // running through the non-custom WIDE post-pass like any other
-        // non-custom fused call.
-        const bool dyn_single_pool_safe
-                = !ck_int8_at_plan_time || !plan.fused_epilogue;
+        // BEHAVIOUR CHANGE for existing callers: because the knob defaults
+        // to 1, a use_custom DQ-INT8 fused call that previously could only
+        // reach Rounds is now eligible for DecodeDynamic.  It is eligibility
+        // only — the call must still clear `decode_class` (max_M <=
+        // kDecodeMaxM) and the per-op EPC / weight-vs-L3 route test below,
+        // so the set that actually moves is decode-regime fused INT8 with
+        // enough active experts per CCD.  Set the knob to 0 to pin such a
+        // call back on Rounds.  The two routes are required to agree
+        // bit-for-bit; `DecodeDynamicVsRoundsRouteParity` in
+        // `test_fused_moe.cpp` forces each strategy over one config and
+        // compares, so a divergence shows up as a test failure rather than
+        // as a silent numerical change for whoever owned the old route.
+        const bool dyn_single_pool_safe = !ck_int8_at_plan_time
+                || !plan.fused_epilogue || get_grp_decdyn_ck_int8_fused();
 
         // DecodeDynamic is a DECODE-class executor (its CCD-cohesive, whole-
         // expert-per-CCD mapping is tuned for the small-max_M regime).  A
@@ -2627,7 +2808,7 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         if (s_log_dyn_fb && n_tile_strategy == 3
                 && grp_n_tile_strategy_is_set()) {
             const char *reason = !dyn_single_pool_safe
-                    ? "int8_ck_fused(aocl_fallback_needs_barrier)"
+                    ? "int8_ck_fused(DECDYN_CK_INT8_FUSED=0)"
                     : !decode_class ? "prompt_class(max_M>decode)"
                     : !multi_expert
                     ? "single_dense_expert(owns_adaptive_n_tile_path)"
@@ -3001,7 +3182,8 @@ inline void execute_decode_d(
 //     register and writes activated cols directly; no barrier.  (A
 //     fused DQ-INT8 call can never reach here with a per-tile AOCL
 //     fallback: flat_n_tile's pre-OMP guard flips such a call to
-//     non-custom before planning.)
+//     non-custom before planning, and `do_tile` asserts it.  This is
+//     what makes ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED safe ON.)
 //   * non-custom TIGHT fused      — do_tile's per-thread scratch + OOP
 //                                    swiglu activates in place; no barrier.
 //   * non-custom WIDE fused       — do_tile is matmul-only, so a SINGLE
@@ -3421,6 +3603,17 @@ inline const char *gemm_mode_label(GroupNTileStrategy strategy,
 }
 
 } // namespace
+
+// Drop every memoized f32 weight-scale view.  Mirrors the CK pack caches'
+// `clear_*` hooks: this cache is pointer-keyed and process-wide, so heap
+// address reuse across tests (or a weight rotation in a long-running
+// server) would otherwise return a scale array built from a freed buffer.
+// Call only in a quiescent window — a concurrent `flat_n_tile` may hold a
+// `data()` pointer into an entry this erases.
+void clear_grp_wei_scale_f32_cache() {
+    std::lock_guard<std::mutex> guard(g_wei_scale_f32_cache_mutex);
+    g_wei_scale_f32_cache.clear();
+}
 
 // =====================================================================
 // Section D — Public entry
@@ -3986,10 +4179,11 @@ void flat_n_tile(const std::vector<char> &layout,
                 hoisted[e].src_scale_view = materialise_f32_scale(
                         hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
                         M[e], hoisted[e].src_scale_f32_owned);
-                hoisted[e].wei_scale_view = materialise_f32_wei_scale(
-                        params[e].quant_params.wei_scale.buff,
+                hoisted[e].wei_scale_view = materialise_f32_wei_scale_cached(
+                        weight[e], params[e].quant_params.wei_scale.buff,
                         params[e].quant_params.wei_scale.dt, N[e],
-                        ck_scales_interleave, hoisted[e].wei_scale_f32_owned);
+                        ck_scales_interleave, is_weights_const[e],
+                        hoisted[e].wei_scale_f32_owned);
             }
             continue;
         }
@@ -4064,11 +4258,12 @@ void flat_n_tile(const std::vector<char> &layout,
                     hoisted[e].src_scale_view = materialise_f32_scale(
                             hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
                             M[e], hoisted[e].src_scale_f32_owned);
-                    hoisted[e].wei_scale_view = materialise_f32_wei_scale(
-                            params[e].quant_params.wei_scale.buff,
-                            params[e].quant_params.wei_scale.dt, N[e],
-                            ck_scales_interleave,
-                            hoisted[e].wei_scale_f32_owned);
+                    hoisted[e].wei_scale_view
+                            = materialise_f32_wei_scale_cached(weight[e],
+                                    params[e].quant_params.wei_scale.buff,
+                                    params[e].quant_params.wei_scale.dt, N[e],
+                                    ck_scales_interleave, is_weights_const[e],
+                                    hoisted[e].wei_scale_f32_owned);
                 }
             }
         }
@@ -4088,18 +4283,28 @@ void flat_n_tile(const std::vector<char> &layout,
             int n_bad_hoist = 0;
             for (int e = 0; e < num_ops; ++e) {
                 if (M[e] <= 0) continue;
-                if (!params[e].dynamic_quant) continue;
+                // Both routes into `hoisted[e]` are in scope: the runtime
+                // dynamic-quant reorder, and the pre-quantized s8 source
+                // that only points `hoisted[e]` at the caller's buffers.
+                // Filtering on dynamic_quant alone would make a failed
+                // pre-quant hoist silent.
+                const bool expected_hoist = params[e].dynamic_quant
+                        || (params[e].dtypes.src == data_type_t::s8
+                                && params[e].quant_params.src_scale.buff
+                                        != nullptr);
+                if (!expected_hoist) continue;
                 if (!hoisted[e].valid) ++n_bad_hoist;
             }
             if (n_bad_hoist > 0) {
                 apilog_info("[GRP_MATMUL.CK INT8 BAD HOIST] flat_n_tile: ",
                         n_bad_hoist, "/", num_ops,
-                        " active expert(s) failed dynamic-quant src hoist; "
+                        " active expert(s) failed int8 src hoist; "
                         "those experts fall back to AOCL DLP sym_quant for "
                         "this call.  CK kept engaged for the remaining "
                         "experts. "
-                        "Common cause: caller set dynamic_quant=true but "
-                        "dtypes.wei != s8.");
+                        "Common causes: caller set dynamic_quant=true but "
+                        "dtypes.wei != s8; or a pre-quantized s8 src whose "
+                        "int8 CK variant did not resolve.");
             }
         }
     }
@@ -4123,6 +4328,20 @@ void flat_n_tile(const std::vector<char> &layout,
     // (hoist edge cases); correctness over the CK fast path on this call.
     // Non-fused int8 is intentionally untouched — its AOCL fallback is
     // correct matmul-only output with nothing to activate.
+    //
+    // ORDERING INVARIANT — do not move this guard below the planner call.
+    // `ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED` (default 1) lets a fused
+    // CK-INT8 call onto the DecodeDynamic executor, which runs no
+    // activation post-pass.  That is only safe because this guard has
+    // already proven, over EVERY active expert and with the SAME
+    // predicate DecodeDynamic's `do_tile` will use, that no tile can take
+    // the AOCL fallback — so the un-activated raw (gate, up) tile the
+    // executor could not fix up is unreachable by the time
+    // `plan_group_n_tile` reads `ck_int8_at_plan_time` below.  The
+    // predicate depends only on `hoisted[]` and `kctx.compute_int`, both
+    // final at this point and read-only afterwards.  Reordering this
+    // below the planner, or narrowing it to a subset of experts, silently
+    // removes DecodeDynamic's correctness precondition.
     if (use_custom && fused_epilogue
             && custom_kernel::is_int8_variant(kctx.variant)) {
         bool any_tile_falls_back = false;

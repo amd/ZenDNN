@@ -1128,7 +1128,8 @@ static void dynamic_per_group_group_quant_s8_impl(
     }
     if (total_rows <= 0) return;
 
-    const int nt = std::min<int64_t>(pg_omp_team_size(num_threads), total_rows);
+    // Keep the caller's width -- see the per-token grouped region.
+    const int nt = pg_omp_team_size(num_threads);
 #pragma omp parallel num_threads(nt)
     {
         const int tid = omp_get_thread_num();

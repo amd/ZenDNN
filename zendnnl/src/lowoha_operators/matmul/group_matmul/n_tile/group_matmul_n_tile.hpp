@@ -333,7 +333,8 @@ inline bool get_grp_n_tile_fused_act() {
     return v;
 }
 
-// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2, 3 } — cached, default 2 (rounds).
+// ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY = { 0, 1, 2, 3 } — cached, default 3
+// (decode_dynamic; see `kGrpNTileStrategyDefault`).
 //
 // Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
 // controls whether the planner's auto-mirror perf gate fires.
@@ -388,8 +389,9 @@ inline bool get_grp_n_tile_fused_act() {
 //         no matmul->activation barrier) plus standard-backend fused /
 //         non-fused calls (non-custom wide-fused runs one team-wide
 //         barrier + apply_swiglu_oai post-pass inside the executor).
-//         Only a use_custom DQ-INT8 fused call falls back to Rounds
-//         (defense-in-depth).  AUTO (value 0) engages DecodeDynamic under
+//         A use_custom DQ-INT8 fused call is served too by default; set
+//         ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED=0 to fall it back to
+//         Rounds.  AUTO (value 0) engages DecodeDynamic under
 //         the SAME gate (active_ops >= 4*num_ccds).
 //
 //         PRODUCTION DEFAULT, and a STRICT SUPERSET of value 2: the gate is
@@ -508,11 +510,12 @@ inline bool grp_n_tile_strategy_is_set() {
 //
 // These take effect whenever DecodeDynamic is eligible for selection,
 // i.e. under BOTH:
-//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3` (forced DecodeDynamic), and
+//   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3` (forced DecodeDynamic, the
+//     production default), and
 //   * `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=0` (smart AUTO), where the
 //     planner may route decode-class shapes to DecodeDynamic.
-// Under the production default (2 = rounds) — and under `=1` (DecodeD) —
-// the flow is untouched and these getters are never consulted.
+// Under `=2` (Rounds) and `=1` (DecodeD) the flow is untouched and these
+// getters are never consulted.
 //
 // The route DecodeDynamic-vs-Rounds is decided PER OP from two signals
 // available in `topo` — the active expert count, the machine CCD count,
@@ -563,6 +566,21 @@ inline int get_grp_decdyn_wei_l3_mult() {
         int parsed = 0;
         if (!parse_env_int_strict(e, parsed) || parsed < 0) return kDefault;
         return parsed;
+    }();
+    return v;
+}
+
+// ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED — cached, default 1 (ON).
+//   Whether a `use_custom` DQ-INT8 FUSED call may engage DecodeDynamic,
+//   moving int8 fused-MoE Op1 (gate+up) off the barriered Rounds executor.
+//   Set 0 to restore the old unconditional exclusion if a shape regresses;
+//   `dyn_single_pool_safe` in plan_group_n_tile says why it is redundant.
+inline bool get_grp_decdyn_ck_int8_fused() {
+    static const bool v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECDYN_CK_INT8_FUSED");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
+        return parsed != 0;
     }();
     return v;
 }
@@ -1073,6 +1091,23 @@ void flat_n_tile(const std::vector<char> &layout,
         data_type_t act_dtype = data_type_t::none,
         const char **gemm_mode_out = nullptr,
         const std::vector<void *> *w4a8_s8_weights = nullptr);
+
+/// @brief Drop every memoized f32 weight-scale view.
+///
+/// The memo is pointer-keyed and process-wide, so it carries the same
+/// heap-address-reuse hazard as the CK pack arenas: a freed scale buffer
+/// whose address is recycled would otherwise hit a stale entry.  Tests
+/// call this via `reset_grp_matmul_caches()`; a server rotating weights
+/// can call it in a quiescent window.  Not safe to call concurrently with
+/// an in-flight `flat_n_tile`.
+///
+/// Named without a `_for_test` suffix deliberately, matching
+/// `clear_custom_kernel_pack_cache()`: the hazard it clears is a
+/// production one (framework allocators recycle weight addresses across
+/// model reload / adapter rotation), and a framework integration has no
+/// other way to invalidate the memo while
+/// `ZENDNNL_MATMUL_WEIGHT_CACHE` is at its default of 1.
+void clear_grp_wei_scale_f32_cache();
 
 } // namespace matmul
 } // namespace lowoha

@@ -1078,7 +1078,7 @@ static int auto_select_algo(const std::vector<int> &M,
     //   `tiles_per_expert ≥ min_ntiles`.  The new rule deliberately
     //   skips that check: the N-tile planner's `ntile_viable` runs
     //   anyway as part of `plan_group_n_tile`.  Since the
-    //   `N_TILE_STRATEGY=2` (rounds, default) fix to the planner,
+    //   `N_TILE_STRATEGY=2` (rounds) fix to the planner,
     //   `!viable` no longer demotes to Sequential under force_ntile —
     //   it stays on rounds with a `[GRP_MATMUL.PLAN.HINT]` line.
     //   Under `n_tile_strategy=0` (auto) the planner still uses

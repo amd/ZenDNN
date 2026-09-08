@@ -67,27 +67,36 @@
 ///       only; gated kinds are BF16-dst only (see `select_int8_ukernel`).
 ///
 /// Inner-loop pattern follows the bf16 sibling:
-///   * K-quad unroll-by-2 to expose ILP between two B-load batches.
+///   * K-quad unroll to expose ILP between independent B-load batches.
 ///   * `VPDPBUSD` (AVX-512 VNNI) for one FMA per 4 K-elements.
 ///   * For `kS8_Sym`: src bytes are XOR-ed with `0x80808080` at
 ///     broadcast time so VPDPBUSD's signed × unsigned operand
 ///     ordering holds — the compensation row is precomputed at pack
 ///     time to undo the resulting `+128 × sum_wei` bias.
 ///
-/// Register-pressure caps (Zen4/5: 32 zmm):
-///   * NV=2 (NR=32): max MR=8 — 16 s32 acc + 2 b + 1 a ≈ 19 zmms.
-///   * NV=4 (NR=64): max MR=6 — 24 s32 acc + 4 b + 1 a ≈ 29 zmms.
-/// Double-buffering on MR ≤ 3 (kBuffers = 2) IS enabled, mirroring the
-/// bf16 sibling: VPDPBUSD has 5-cycle latency on Zen4 / 4-cycle on
-/// Zen5 with 2/cycle throughput, so small-MR specialisations whose
-/// independent accumulator chain count (MR × NV) is below the
-/// latency × throughput product are FMA-latency bound.  Splitting the
-/// s32 accumulators into two sets fed from even / odd K-quads (summed
-/// with `_mm512_add_epi32` before the compensation correction)
-/// doubles the chain count and brings MR=2, MR=3 from latency-bound to
-/// issue-bound.  MR ≥ 4 keeps kBuffers = 1 (single buffering already
-/// saturates issue; avoids spilling the MR=8 × NV=2 spec's 16 acc
-/// zmms).
+/// Register-pressure budget (Zen4/5: 32 zmm).  The K-loop footprint is
+///
+///   kBuffers*MR*NV + (kPipelineB ? 2*NV : 0) + MR + 1
+///
+/// i.e. accumulators, the two live B staging sets when B is pipelined,
+/// one broadcast per row (the m-loop is fully unrolled, so all MR are
+/// live at once), and the s8→u8 bias vector on `kS8_Sym`.  Both the
+/// `MR` and the `2*NV` terms are load-bearing: an earlier version of
+/// this note omitted them, and so declared NV=4 safe up to MR=6 when
+/// the real footprint spills from MR=3 up.
+///
+/// VPDPBUSD has 5-cycle latency on Zen4 / 4-cycle on Zen5 at 2/cycle
+/// throughput, so a specialisation needs 8 independent accumulator
+/// chains to be issue- rather than latency-bound.  `kBuffers` supplies
+/// them by splitting the s32 accumulators into sets fed from
+/// consecutive K-quads (summed with `_mm512_add_epi32` before the
+/// compensation correction), sized to the largest value that still
+/// fits the budget and capped at the 8 chains that saturate issue.
+/// Whether B is staged into registers or left as a VPDPBUSD memory
+/// operand follows from whether the plain form can reach 8 chains
+/// within budget, i.e. `MR*NV <= 8`; see the register-budget block in
+/// the .cpp for the per-specialisation measurements behind that
+/// boundary.
 ///
 /// Destination dtype is a template axis (`DstDt`, shared with the bf16
 /// sibling): BF16 store for the standard path, FP32 store (direct
