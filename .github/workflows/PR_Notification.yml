@@ -146,8 +146,12 @@ jobs:
       - name: Wait for ALL workflows to complete
         id: wait_for_completion
         uses: actions/github-script@v9
+        env:
+          ZIAIE_PAT: ${{ secrets.ZIAIE_PAT }}
         with:
-          github-token: ${{ secrets.ZIAIE_PAT }}
+          # Local workflow/check listing uses GITHUB_TOKEN. ZIAIE_PAT 403s on
+          # Actions APIs and previously made this step report zero workflows.
+          github-token: ${{ github.token }}
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
@@ -172,7 +176,6 @@ jobs:
             }
             
             const checkAllWorkflows = async () => {
-              try {
                 // Define ALL important workflows including ZenTorch status check
                 const importantWorkflows = [
                   'commit message enforcement',
@@ -189,45 +192,49 @@ jobs:
 
                 console.log(`📊 Checking workflows for commit: ${ref.substring(0, 7)}`);
 
-                // Get workflow runs
-                const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
-                  owner,
-                  repo,
-                  head_sha: ref,
-                  per_page: 100
-                });
-                
-                const workflows = (workflowResp.data.workflow_runs || [])
-                  .filter(run => {
-                    const name = run.name.toLowerCase();
-                    const isImportant = importantWorkflows.some(important => 
-                      name.includes(important.toLowerCase())
-                    );
-                    const isSelf = run.id === context.runId;
-                    
-                    return !isSelf && isImportant;
+                let workflows = [];
+                try {
+                  const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
+                    owner,
+                    repo,
+                    head_sha: ref,
+                    per_page: 100
                   });
+                  workflows = (workflowResp.data.workflow_runs || [])
+                    .filter(run => {
+                      const name = run.name.toLowerCase();
+                      const isImportant = importantWorkflows.some(important => 
+                        name.includes(important.toLowerCase())
+                      );
+                      const isSelf = run.id === context.runId;
+                      return !isSelf && isImportant;
+                    });
+                } catch (error) {
+                  console.log(`⚠️ listWorkflowRuns failed: ${error.message}`);
+                }
 
-                // Get check runs
-                const checkResp = await github.rest.checks.listForRef({
-                  owner,
-                  repo,
-                  ref,
-                  per_page: 100
-                });
-                
-                const checks = (checkResp.data.check_runs || [])
-                  .filter(check => {
-                    const name = check.name.toLowerCase();
-                    const isImportant = importantWorkflows.some(important => 
-                      name.includes(important.toLowerCase())
-                    );
-                    const isNotification = name.includes('notify') || 
-                                         name.includes('notification') ||
-                                         name.includes('pr status');  // Exclude this notification workflow
-                    
-                    return !isNotification && isImportant;
+                let checks = [];
+                try {
+                  const checkResp = await github.rest.checks.listForRef({
+                    owner,
+                    repo,
+                    ref,
+                    per_page: 100
                   });
+                  checks = (checkResp.data.check_runs || [])
+                    .filter(check => {
+                      const name = check.name.toLowerCase();
+                      const isImportant = importantWorkflows.some(important => 
+                        name.includes(important.toLowerCase())
+                      );
+                      const isNotification = name.includes('notify') || 
+                                           name.includes('notification') ||
+                                           name.includes('pr status');
+                      return !isNotification && isImportant;
+                    });
+                } catch (error) {
+                  console.log(`⚠️ listForRef checks failed: ${error.message}`);
+                }
 
                 // Combine all workflow information
                 const allRuns = [];
@@ -297,7 +304,12 @@ jobs:
                 if (zentorchResult.found && zentorchResult.external_run_id) {
                   console.log(`📡 Adding external ZenTorch workflow to monitoring...`);
                   try {
-                    const externalResp = await github.rest.actions.getWorkflowRun({
+                    let extClient = github;
+                    if (process.env.ZIAIE_PAT) {
+                      const { getOctokit } = require('@actions/github');
+                      extClient = getOctokit(process.env.ZIAIE_PAT);
+                    }
+                    const externalResp = await extClient.rest.actions.getWorkflowRun({
                       owner: 'AMD-Zenai',
                       repo: 'ZenDNN_PyTorch_Plugin',
                       run_id: zentorchResult.external_run_id
@@ -314,7 +326,15 @@ jobs:
                     
                     console.log(`External ZenTorch status: ${externalResp.data.conclusion || externalResp.data.status}`);
                   } catch (zentorchError) {
-                    console.log(`❌ Could not get external ZenTorch status: ${zentorchError.message}`);
+                    console.log(`❌ Could not get live ZenTorch run; using cached status: ${zentorchError.message}`);
+                    allRuns.push({
+                      id: zentorchResult.external_run_id,
+                      name: 'ZenDNN_PyTorch_Plugin: zendnnl-pr',
+                      status: zentorchResult.external_status || 'pending',
+                      url: zentorchResult.external_run_url || '',
+                      type: 'triggered_workflow_run',
+                      repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin'
+                    });
                   }
                 }
 
@@ -369,16 +389,6 @@ jobs:
                   zentorch_included: zentorchResult.found,
                   currently_running: running.map(r => r.name)
                 };
-                
-              } catch (error) {
-                console.log(`❌ Error checking workflows: ${error.message}`);
-                return { 
-                  all_complete: false,  // ✅ Don't force complete on error
-                  workflows: [], 
-                  error: error.message,
-                  zentorch_included: false
-                };
-              }
             };
 
             // ✅ LONGER INITIAL WAIT for workflows to register
@@ -455,21 +465,30 @@ jobs:
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[]|select(.status=="skipped")]|length')
 
           FALLBACK_URL="https://github.com/${REPO}/pull/${PR_NUMBER}/checks"
+          COMMIT_URL="https://github.com/${REPO}/commit/${HEAD_SHA}"
 
-          # Determine overall status + MessageCard theme color (this webhook renders the
-          # legacy Office 365 "MessageCard" format, NOT Adaptive Cards).
+          # Teams "Workflows" webhooks accept MessageCard payloads but drop every
+          # link and button in them, so this posts an Adaptive Card instead, where
+          # Action.OpenUrl and markdown links both render.
+          case "$PR_URL" in
+            http*) ;;
+            *) PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}" ;;
+          esac
+
+          # Determine overall status, plus the Adaptive Card container style and text
+          # colour used for the header.
           if [ "$FAILED_COUNT" -gt 0 ]; then
-            ICON="🔴"; STATUS_TEXT="❌ SOME CHECKS FAILED"; THEME="D93F0B"
+            ICON="🔴"; STATUS_TEXT="❌ SOME CHECKS FAILED"; STYLE="attention"; COLOR="Attention"
           elif [ "$CANCELLED_COUNT" -gt 0 ]; then
-            ICON="🟠"; STATUS_TEXT="🟠 SOME CHECKS CANCELLED"; THEME="F2A100"
+            ICON="🟠"; STATUS_TEXT="🟠 SOME CHECKS CANCELLED"; STYLE="warning"; COLOR="Warning"
           elif [ "$FORCED_COMPLETION" = "true" ]; then
-            ICON="🟡"; STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"; THEME="F2C744"
+            ICON="🟡"; STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"; STYLE="warning"; COLOR="Warning"
           elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then
-            ICON="🟢"; STATUS_TEXT="✅ ALL CHECKS PASSED"; THEME="2EB67D"
+            ICON="🟢"; STATUS_TEXT="✅ ALL CHECKS PASSED"; STYLE="good"; COLOR="Good"
           elif [ "$ALL_COMPLETE" = "true" ] && [ "$TOTAL_COUNT" -eq 0 ]; then
-            ICON="⚪"; STATUS_TEXT="⚪ NO WORKFLOWS FOUND"; THEME="808080"
+            ICON="⚪"; STATUS_TEXT="⚪ NO WORKFLOWS FOUND"; STYLE="default"; COLOR="Default"
           else
-            ICON="🟡"; STATUS_TEXT="⏳ CHECKS IN PROGRESS"; THEME="F2C744"
+            ICON="🟡"; STATUS_TEXT="⏳ CHECKS IN PROGRESS"; STYLE="warning"; COLOR="Warning"
           fi
 
           # Completion status line
@@ -485,6 +504,7 @@ jobs:
           # Each row: emoji [name](url) — STATUS (repo, if from a different repository)
           echo "🔨 Building workflow results list..."
           WORKFLOWS_MD=$(echo "$WORKFLOWS" | jq -r --arg fallback "$FALLBACK_URL" --arg selfrepo "$REPO" '
+            def mdlabel: gsub("\\\\"; "\\\\") | gsub("\\["; "\\[") | gsub("\\]"; "\\]");
             [ .[] as $w
               | ($w.status | ascii_upcase) as $s
               | (if   $s=="SUCCESS"   then "✅"
@@ -496,54 +516,70 @@ jobs:
               | (if ($w.url==null or $w.url=="") then $fallback else $w.url end) as $url
               | (($w.repository // "")) as $repo
               | (if ($repo != "" and $repo != $selfrepo) then " (" + $repo + ")" else "" end) as $repotext
-              | $emoji + " [" + $w.name + "](" + $url + ") — **" + $s + "**" + $repotext
+              | $emoji + " [" + ($w.name | mdlabel) + "](" + $url + ") — **" + $s + "**" + $repotext
             ] | join("\n\n")')
           [ -z "$WORKFLOWS_MD" ] && WORKFLOWS_MD="_No workflows found._"
 
-          # Assemble a legacy MessageCard with jq so it is ALWAYS valid JSON
-          echo "🔨 Creating Teams MessageCard..."
+          # Assemble the Adaptive Card with jq so it is ALWAYS valid JSON
+          echo "🔨 Creating Teams Adaptive Card..."
           jq -n \
-            --arg summary "PR #$PR_NUMBER status" \
-            --arg theme "$THEME" \
             --arg title "$ICON PR #$PR_NUMBER — $PR_TITLE" \
             --arg status "$STATUS_TEXT" \
-            --arg author "$PR_AUTHOR" --arg sha "$SHORT_SHA" --arg msg "$COMPLETION_TEXT" \
+            --arg style "$STYLE" --arg color "$COLOR" \
+            --arg author "$PR_AUTHOR" --arg msg "$COMPLETION_TEXT" \
+            --arg sha "$SHORT_SHA" \
             --arg total "$TOTAL_COUNT" --arg passed "$SUCCESS_COUNT" --arg failed "$FAILED_COUNT" \
             --arg cancelled "$CANCELLED_COUNT" --arg skipped "$SKIPPED_COUNT" \
             --arg wfmd "$WORKFLOWS_MD" \
             --arg prurl "$PR_URL" --arg checksurl "$FALLBACK_URL" \
-            --arg commiturl "https://github.com/${REPO}/commit/${HEAD_SHA}" '
+            --arg commiturl "$COMMIT_URL" '
+            def mdlabel: gsub("\\\\"; "\\\\") | gsub("\\["; "\\[") | gsub("\\]"; "\\]");
             {
-              "@type": "MessageCard",
-              "@context": "http://schema.org/extensions",
-              summary: $summary,
-              themeColor: $theme,
-              title: $title,
-              sections: [
+              type: "message",
+              attachments: [
                 {
-                  activityTitle: $status,
-                  facts: [
-                    {name:"Author:",          value:$author},
-                    {name:"Commit:",          value:$sha},
-                    {name:"Status:",          value:$msg},
-                    {name:"Total Workflows:", value:$total},
-                    {name:"✅ Passed:",        value:$passed},
-                    {name:"❌ Failed:",        value:$failed},
-                    {name:"🟠 Cancelled:",     value:$cancelled},
-                    {name:"⏭️ Skipped:",       value:$skipped}
-                  ],
-                  markdown: true
-                },
-                {
-                  title: "All Workflow Results:",
-                  text: $wfmd,
-                  markdown: true
+                  contentType: "application/vnd.microsoft.card.adaptive",
+                  content: {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    type: "AdaptiveCard",
+                    version: "1.4",
+                    body: [
+                      {
+                        type: "Container",
+                        style: $style,
+                        bleed: true,
+                        items: [
+                          {type:"TextBlock", text:("[" + ($title | mdlabel) + "](" + $prurl + ")"),
+                           weight:"Bolder", size:"Medium", wrap:true},
+                          {type:"TextBlock", text:$status, weight:"Bolder", color:$color,
+                           size:"Large", wrap:true, spacing:"Small"}
+                        ]
+                      },
+                      {
+                        type: "FactSet",
+                        facts: [
+                          {title:"Repository:",      value:"ZenDNN"},
+                          {title:"Author:",          value:$author},
+                          {title:"Commit:",          value:("[" + $sha + "](" + $commiturl + ")")},
+                          {title:"Status:",          value:$msg},
+                          {title:"Total Workflows:", value:$total},
+                          {title:"✅ Passed:",        value:$passed},
+                          {title:"❌ Failed:",        value:$failed},
+                          {title:"🟠 Cancelled:",     value:$cancelled},
+                          {title:"⏭️ Skipped:",       value:$skipped}
+                        ]
+                      },
+                      {type:"TextBlock", text:"**All Workflow Results:**", weight:"Bolder",
+                       spacing:"Medium", wrap:true},
+                      {type:"TextBlock", text:$wfmd, wrap:true, spacing:"Small"}
+                    ],
+                    actions: [
+                      {type:"Action.OpenUrl", title:"View PR",         url:$prurl},
+                      {type:"Action.OpenUrl", title:"View All Checks", url:$checksurl},
+                      {type:"Action.OpenUrl", title:"View Commit",     url:$commiturl}
+                    ]
+                  }
                 }
-              ],
-              potentialAction: [
-                {"@type":"OpenUri", name:"View PR",         targets:[{os:"default", uri:$prurl}]},
-                {"@type":"OpenUri", name:"View All Checks", targets:[{os:"default", uri:$checksurl}]},
-                {"@type":"OpenUri", name:"View Commit",     targets:[{os:"default", uri:$commiturl}]}
               ]
             }' > card.json
 
