@@ -34,6 +34,16 @@ message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_VERSION=${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_PATH=${CMAKE_CXX_COMPILER}")
 
+# minimum msvc version
+# MSVC_VERSION tracks the MSVC toolset for both cl and clang-cl, whereas
+# CMAKE_CXX_COMPILER_VERSION reports the Clang version under clang-cl.
+if(MSVC AND MSVC_VERSION LESS 1943)
+  message(FATAL_ERROR
+    "${ZENDNNL_MSG_PREFIX}MSVC >= 19.43 (Visual Studio 2022 17.13) is "
+    "required. Found ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+    "(MSVC toolset ${MSVC_VERSION}).")
+endif()
+
 # project version
 set(ZENDNNL_PROJECT_VERSION ${PROJECT_VERSION})
 

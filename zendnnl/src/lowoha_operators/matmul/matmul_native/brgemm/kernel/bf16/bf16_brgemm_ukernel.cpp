@@ -165,12 +165,7 @@ INST(2, 2) INST(3, 2) INST(4, 2) INST(5, 2) INST(6, 2)
         // NR=16 (NV=1): MR ∈ {1..6}
         INST(1, 1) INST(2, 1) INST(3, 1) INST(4, 1) INST(5, 1) INST(6, 1)
 #undef INST
-        // clang-format on
-
-        using bf16_brgemm_fn_t
-        = void(*)(const uint16_t *, int, const uint16_t *, int, float *, int,
-                int, int, float, const float *, fused_postop_t, uint16_t *,
-                int);
+// clang-format on
 
 ZENDNNL_TARGET("avx512f,avx512bf16,fma")
 bf16_brgemm_fn_t select_bf16_brgemm_kernel(int MR, int NR) {

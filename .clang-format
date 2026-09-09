@@ -109,6 +109,7 @@ SpacesInSquareBrackets: false
 Standard:        Cpp11
 StatementMacros:
   - for_
+  - INST
   - PRAGMA_OMP
   - PRAGMA_OMP_SIMD
 TabWidth:        4
