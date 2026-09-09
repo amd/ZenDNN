@@ -20,12 +20,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
 #include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -82,7 +82,7 @@ inline int32_t *cache_or_compute_zp_compensation(const Key_matmul &key_obj,
     // 2D compensation depends on source data which changes per inference
     // Caching is enabled by default and requires weights to be constant
     const bool can_cache = (wei_zp == 0 && src_zp != 0) && is_weights_const
-            && ops::matmul_config_t::instance().get_zp_comp_cache();
+            && common::matmul_config_t::instance().get_zp_comp_cache();
 
     lru_cache_t<Key_matmul, int32_t *> &zp_comp_cache = get_zp_comp_lru_cache();
     // Compute strides based on transpose flags

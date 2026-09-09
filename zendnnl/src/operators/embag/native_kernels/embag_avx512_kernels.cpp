@@ -15,8 +15,8 @@
 # *******************************************************************************/
 
 #include <cstdint>
+#include "common/op_config.hpp"
 #include "embag_avx512_kernels.hpp"
-#include "operators/embag/embag_config.hpp"
 
 namespace zendnnl {
 namespace ops {
@@ -345,7 +345,7 @@ status_t embag_f16_avx512_kernel_t::execute(const context_type &context_,
     // TODO(embag-accum-singleton): the set_accum_type calls below duplicate
     // the F16-FMA-vs-F32 selection performed by dispatch_avx512_kernel() in
     // lowoha_operators/embedding_bag/dispatch_kernel.hpp. Keep both paths in
-    // sync until a shared helper is introduced. See embag_config.hpp
+    // sync until a shared helper is introduced. See common/op_config.hpp
     // set_accum_type doc for the full plan.
 
     const auto table_param = context_.get_param("table");

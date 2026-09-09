@@ -240,7 +240,7 @@ status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats,
-        zendnnl::ops::matmul_algo_t algo);
+        zendnnl::common::matmul_algo_t algo);
 
 /// W4A8 per-N-tile warm for ALGO 3 (plain-s8 + blocked per-tile caches).
 status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(

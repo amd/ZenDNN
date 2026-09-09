@@ -116,10 +116,10 @@ inline bool src_scale_is_collapsed_per_token(
 dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
-        zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
+        zendnnl::common::matmul_algo_t kernel, const void *weight_ptr,
         const int32_t *reorder_colsum = nullptr, int32_t neg_src_zp = 0,
-        zendnnl::ops::matmul_algo_t w4a8_algo
-        = zendnnl::ops::matmul_algo_t::none);
+        zendnnl::common::matmul_algo_t w4a8_algo
+        = zendnnl::common::matmul_algo_t::none);
 
 /**
  * @brief Per-call teardown for the metadata returned by create_dlp_post_op().

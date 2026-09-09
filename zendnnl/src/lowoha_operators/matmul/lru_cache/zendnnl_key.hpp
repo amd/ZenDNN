@@ -18,9 +18,9 @@
 #define _ZENDNNL_KEY_HPP
 
 #include "common/hash_object.hpp"
-#include "operators/matmul/matmul_config.hpp"
+#include "common/op_config.hpp"
 
-using matmul_algo_t = zendnnl::ops::matmul_algo_t;
+using matmul_algo_t = zendnnl::common::matmul_algo_t;
 //structure to make key
 struct Key_matmul {
     bool transpose_inp = false;

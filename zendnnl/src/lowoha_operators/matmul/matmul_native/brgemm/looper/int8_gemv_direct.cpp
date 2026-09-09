@@ -15,12 +15,12 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_gemv_direct.hpp"
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -34,7 +34,7 @@ namespace matmul {
 namespace native {
 
 using namespace zendnnl::error_handling;
-using zendnnl::ops::matmul_config_t;
+using zendnnl::common::matmul_config_t;
 
 namespace {
 

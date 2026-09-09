@@ -51,7 +51,7 @@
 #include <vector>
 
 #include "ck_test_helpers.hpp"
-#include "operators/matmul/matmul_config.hpp"
+#include "common/op_config.hpp"
 
 namespace {
 
@@ -69,11 +69,12 @@ using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 class WeightCacheOverride {
 public:
     explicit WeightCacheOverride(int32_t value)
-        : prev_(zendnnl::ops::matmul_config_t::instance().get_weight_cache()) {
-        zendnnl::ops::matmul_config_t::instance().set_weight_cache(value);
+        : prev_(zendnnl::common::matmul_config_t::instance()
+                          .get_weight_cache()) {
+        zendnnl::common::matmul_config_t::instance().set_weight_cache(value);
     }
     ~WeightCacheOverride() {
-        zendnnl::ops::matmul_config_t::instance().set_weight_cache(prev_);
+        zendnnl::common::matmul_config_t::instance().set_weight_cache(prev_);
     }
     WeightCacheOverride(const WeightCacheOverride &) = delete;
     WeightCacheOverride &operator=(const WeightCacheOverride &) = delete;

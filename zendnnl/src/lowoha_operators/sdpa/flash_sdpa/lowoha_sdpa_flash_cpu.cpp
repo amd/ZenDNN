@@ -145,7 +145,7 @@ inline void zendnn_gemm(int64_t m, int64_t n, int64_t k, float alpha,
         matmul_dtype.wei = zendnnl::common::data_type_t::f16;
     }
     params.dtypes = matmul_dtype;
-    params.lowoha_algo = zendnnl::ops::matmul_algo_t::aocl_dlp;
+    params.lowoha_algo = zendnnl::common::matmul_algo_t::aocl_dlp;
 
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;

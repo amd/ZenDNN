@@ -38,7 +38,7 @@
 #include <gtest/gtest.h>
 
 #include "ck_test_helpers.hpp"
-#include "operators/matmul/matmul_config.hpp"
+#include "common/op_config.hpp"
 
 namespace {
 

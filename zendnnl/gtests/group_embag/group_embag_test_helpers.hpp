@@ -42,8 +42,8 @@
 #include <ostream>
 #include <vector>
 
+#include "common/op_config.hpp"
 #include "gtest_utils.hpp"
-#include "operators/embag/embag_config.hpp"
 
 /** @brief Random parameter set for the TestGroupEmbag* fixtures.
  *

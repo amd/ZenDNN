@@ -3448,7 +3448,7 @@ status_t embag_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
                 params.dtypes.indices = indices_tensor.get_data_type();
                 params.dtypes.offsets = offsets_tensor.get_data_type();
 
-                // Use algo directly (embag_algo_t is aliased to ops::embag_algo_t)
+                // Use algo directly (embag_algo_t is aliased to common::embag_algo_t)
                 params.algo = algo;
                 if (kernel == embag_kernel_t::reference) {
                     params.kernel = kernel;

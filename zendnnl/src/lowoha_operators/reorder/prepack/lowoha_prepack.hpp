@@ -20,22 +20,22 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "common/op_config.hpp"
 #include "memory/memory_utils.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace reorder {
 
+using zendnnl::common::matmul_algo_t;
 using zendnnl::memory::data_type_t;
 using zendnnl::memory::status_t;
-using zendnnl::ops::matmul_algo_t;
 
 // Forward declaration: the public prepack API
 struct reorder_params_t;
 
-// Algo selection reuses zendnnl::ops::matmul_algo_t directly
-// (operators/matmul/matmul_config.hpp). The prepacked output produced
+// Algo selection reuses zendnnl::common::matmul_algo_t directly
+// (common/op_config.hpp). The prepacked output produced
 // here is exactly the layout consumed by the matching matmul algo.
 //
 // Supported algos:

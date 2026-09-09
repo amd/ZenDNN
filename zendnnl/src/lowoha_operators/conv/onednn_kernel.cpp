@@ -225,7 +225,7 @@ status_t conv_onednn_wrapper(const void *input, const void *filter,
         int post_op_index = 0;
 
         // Add post-operations from param
-        using namespace zendnnl::ops;
+        using namespace zendnnl::common;
         for (const auto &po : params.postop_) {
             switch (po.po_type) {
                 case post_op_type_t::relu:

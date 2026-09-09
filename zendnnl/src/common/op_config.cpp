@@ -14,12 +14,12 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "matmul_config.hpp"
+#include "common/op_config.hpp"
 #include <cstring>
 #include "common/zendnnl_global.hpp"
 
 namespace zendnnl {
-namespace ops {
+namespace common {
 
 using namespace zendnnl::error_handling;
 
@@ -446,5 +446,174 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
     return matmul_algo_t::algo_count;
 }
 
-} // namespace ops
+void embag_config_t::set_default_config() {
+    // Set default configuration for embag
+    set_kernel(static_cast<int32_t>(embag_kernel_t::none));
+    set_thread_algo(static_cast<int32_t>(eb_thread_algo_t::table_threaded));
+    set_accum_type(data_type_t::f32); // Default to F32 accumulation
+}
+
+status_t embag_config_t::set_user_config(json config_json) {
+    // Set user-defined configuration for embag from json
+    auto runtime_variables_json = config_json["runtime_variables"];
+    if (runtime_variables_json.empty()) { return status_t::failure; }
+
+    int32_t embag_kernel = static_cast<int32_t>(embag_kernel_t::none);
+    auto embag_json = runtime_variables_json["embag"];
+    if (!embag_json.empty()) {
+        auto embag_kernel_json = embag_json["kernel"];
+        if (!embag_kernel_json.empty()) {
+            auto embag_kernel_str
+                    = embag_kernel_json.template get<std::string>();
+            if (!embag_kernel_str.empty()) {
+                embag_kernel = static_cast<int32_t>(
+                        str_to_embag_kernel(embag_kernel_str));
+            }
+        }
+    }
+
+    set_kernel(embag_kernel);
+    // TODO: Add support for user flexibility to set accumulation type.
+    set_accum_type(data_type_t::f32);
+    return status_t::success;
+}
+
+void embag_config_t::set_env_config() {
+    // Set environment variables configuration for embag
+    char *kernel_env = std::getenv("ZENDNNL_EMBAG_ALGO");
+    int32_t embag_kernel = static_cast<int32_t>(embag_kernel_t::none);
+    if (kernel_env) {
+        std::string kernelStr(kernel_env);
+        std::transform(kernelStr.begin(), kernelStr.end(), kernelStr.begin(),
+                [](unsigned char c) { return std::tolower(c); });
+        if (kernelStr == "auto") {
+            embag_kernel = static_cast<int32_t>(embag_kernel_t::fbgemm);
+        } else {
+            try {
+                int32_t kernel = std::stoi(kernelStr);
+                if (kernel > static_cast<int32_t>(embag_kernel_t::none)
+                        && kernel < static_cast<int32_t>(
+                                   embag_kernel_t::kernel_count)) {
+                    embag_kernel = static_cast<int32_t>(embag_kernel_t(kernel));
+                } else {
+                    embag_kernel = static_cast<int32_t>(
+                            embag_kernel_t::kernel_count);
+                }
+            } catch (const std::invalid_argument &e) {
+                embag_kernel
+                        = static_cast<int32_t>(embag_kernel_t::kernel_count);
+            } catch (const std::out_of_range &e) {
+                embag_kernel
+                        = static_cast<int32_t>(embag_kernel_t::kernel_count);
+            }
+        }
+    }
+    set_kernel(embag_kernel);
+
+    // Set thread algorithm from environment variable
+    char *thread_env = std::getenv("ZENDNNL_EMBAG_THREAD_ALGO");
+    int32_t thread_val = static_cast<int32_t>(eb_thread_algo_t::table_threaded);
+    if (thread_env) {
+        std::string threadStr(thread_env);
+        std::transform(threadStr.begin(), threadStr.end(), threadStr.begin(),
+                [](unsigned char c) { return std::tolower(c); });
+        if (threadStr == "auto") {
+            thread_val = static_cast<int32_t>(eb_thread_algo_t::auto_tuner);
+        } else {
+            try {
+                int32_t algo = std::stoi(threadStr);
+                if (algo > static_cast<int32_t>(eb_thread_algo_t::none)
+                        && algo < static_cast<int32_t>(
+                                   eb_thread_algo_t::thread_algo_count)) {
+                    thread_val = static_cast<int32_t>(eb_thread_algo_t(algo));
+                } else {
+                    thread_val = static_cast<int32_t>(
+                            eb_thread_algo_t::thread_algo_count);
+                }
+            } catch (const std::invalid_argument &e) {
+                thread_val = static_cast<int32_t>(
+                        eb_thread_algo_t::thread_algo_count);
+            } catch (const std::out_of_range &e) {
+                thread_val = static_cast<int32_t>(
+                        eb_thread_algo_t::thread_algo_count);
+            }
+        }
+    }
+    set_thread_algo(thread_val);
+
+    // TODO: Add support for user flexibility to set accumulation type.
+    set_accum_type(data_type_t::f32);
+}
+
+void embag_config_t::set_kernel(int32_t kernel) {
+    embag_kernel = static_cast<embag_kernel_t>(kernel);
+}
+
+int32_t embag_config_t::get_kernel() {
+    return static_cast<int32_t>(embag_kernel);
+}
+
+void embag_config_t::set_accum_type(data_type_t type) {
+    embag_accum_type = type;
+}
+
+data_type_t embag_config_t::get_accum_type() {
+    return embag_accum_type;
+}
+
+void embag_config_t::set_thread_algo(int32_t algo) {
+    thread_algo = static_cast<eb_thread_algo_t>(algo);
+}
+
+eb_thread_algo_t embag_config_t::get_thread_algo() {
+    return thread_algo;
+}
+
+embag_config_t &embag_config_t::instance() {
+    // The static local variable 'instance' is created on first call
+    // and reused for all subsequent calls, providing global access
+    // to configuration.
+    static embag_config_t instance;
+    return instance;
+}
+
+embag_kernel_t embag_config_t::str_to_embag_kernel(std::string kernel) {
+    //transform kernel to lower case.
+    std::transform(kernel.begin(), kernel.end(), kernel.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+    if (kernel == "none") {
+        return embag_kernel_t::none;
+    } else if (kernel == "auto_tuner") {
+        return embag_kernel_t::auto_tuner;
+    } else if (kernel == "native") {
+        return embag_kernel_t::native;
+    } else if (kernel == "fbgemm") {
+        return embag_kernel_t::fbgemm;
+    } else if (kernel == "reference") {
+        return embag_kernel_t::reference;
+    }
+
+    return embag_kernel_t::kernel_count;
+}
+
+eb_thread_algo_t embag_config_t::str_to_thread_algo(std::string algo) {
+    //transform algo to lower case.
+    std::transform(algo.begin(), algo.end(), algo.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+    if (algo == "batch_threaded" || algo == "0") {
+        return eb_thread_algo_t::batch_threaded;
+    } else if (algo == "table_threaded" || algo == "1") {
+        return eb_thread_algo_t::table_threaded;
+    } else if (algo == "ccd_threaded" || algo == "2") {
+        return eb_thread_algo_t::ccd_threaded;
+    } else if (algo == "hybrid_threaded" || algo == "3") {
+        return eb_thread_algo_t::hybrid_threaded;
+    }
+
+    return eb_thread_algo_t::batch_threaded;
+}
+
+} // namespace common
 } // namespace zendnnl

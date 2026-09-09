@@ -27,7 +27,7 @@ namespace lowoha {
 namespace matmul {
 namespace native {
 
-using zendnnl::ops::post_op_type_t;
+using zendnnl::common::post_op_type_t;
 
 /// Detect the first fuseable activation post-op from the post-op chain.
 /// Returns fused_postop_t::none if no fuseable activation is found.

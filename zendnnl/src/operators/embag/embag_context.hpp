@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "common/op_config.hpp"
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_context.hpp"
 
@@ -27,8 +28,6 @@ namespace zendnnl {
 namespace ops {
 
 using namespace zendnnl::memory;
-
-enum class embag_algo_t : uint8_t { none = 0, sum = 1, mean = 2, max = 3 };
 
 /** @class embag_context_t
  *  @brief context for @c embag_operator_t.
@@ -87,7 +86,7 @@ private:
 #endif
 namespace interface {
 using embag_context_t = zendnnl::ops::embag_context_t;
-using embag_algo_t = zendnnl::ops::embag_algo_t;
+using embag_algo_t = zendnnl::common::embag_algo_t;
 } // namespace interface
 
 } //namespace zendnnl

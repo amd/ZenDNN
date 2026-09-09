@@ -63,7 +63,7 @@ status_t bmm_based_sdpa(const void *query, const void *key, const void *value,
     std::vector<matmul::matmul_post_op> mask_postops;
     if (attn_mask != nullptr) {
         matmul::matmul_post_op mask_po;
-        mask_po.po_type = zendnnl::ops::post_op_type_t::binary_add;
+        mask_po.po_type = zendnnl::common::post_op_type_t::binary_add;
         mask_po.buff = const_cast<void *>(attn_mask);
         mask_po.dtype = params.mask_dt == data_type_t::none ? data_type_t::f32
                                                             : params.mask_dt;

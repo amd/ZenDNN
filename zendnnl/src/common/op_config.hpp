@@ -14,20 +14,54 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#ifndef _MATMUL_CONFIG_HPP_
-#define _MATMUL_CONFIG_HPP_
+#ifndef _OP_CONFIG_HPP_
+#define _OP_CONFIG_HPP_
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 #include "common/data_types.hpp"
-#include "operators/common/operator_config.hpp"
+#include "common/error_status.hpp"
+#include "nlohmann/json.hpp"
+
+using json = nlohmann::json;
+using status_t = zendnnl::error_handling::status_t;
 
 namespace zendnnl {
-namespace ops {
+namespace common {
 
-using zendnnl::common::data_type_t;
+/** @class op_config_t
+ *  @brief A base class for operator config.
+ *
+ *  Given an operator, it will have specific runtime parameters that leads
+ *  to optimal performance.
+ *
+ *  operator config can be inherited to different operators and runtime
+ *  parameters can be updated accordingly.
+ *
+ */
+class op_config_t {
+public:
+    /** @brief Set default runtime variables.
+  */
+    virtual void set_default_config() = 0;
+
+    /** @brief Set runtime variables from json.
+  */
+    virtual status_t set_user_config(json config_json) = 0;
+
+    /** @brief Set runtime variables from environment.
+  */
+    virtual void set_env_config() = 0;
+
+    /** @brief Virtual destructor
+  *
+  *  Virtual since this class acts as virtual base class.
+  */
+    virtual ~op_config_t() = default;
+};
 
 /** @enum matmul_algo_t
  *  @brief defines different algo levels.
@@ -216,18 +250,6 @@ public:
    */
     int32_t get_tile_n();
 
-    /** @brief Sets tile_k size.
-  *
-  * @param size The tile size for K dimension.
-  */
-    void set_tile_k(int32_t size);
-
-    /** @brief Get tile_k size.
-   *
-   * @return tile_k size.
-   */
-    int32_t get_tile_k();
-
     /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -286,7 +308,173 @@ private:
     int32_t tile_n; /**< Tile size for N dimension. */
 };
 
-} // namespace ops
+/** @enum embag_algo_t
+ *  @brief Embedding bag reduction mode.
+ */
+enum class embag_algo_t : uint8_t { none = 0, sum = 1, mean = 2, max = 3 };
+
+/** @enum embag_kernel_t
+ *  @brief defines different kernel levels.
+ *
+ * Defines all available embedding bag kernel backends.
+ */
+enum class embag_kernel_t : int32_t {
+    none = -1, /*!< No kernel selected */
+    dynamic_dispatch = 0, /*!< Dynamic dispatch */
+    native = 1, /*!< Native kernel */
+    fbgemm = 2, /*!< FBGEMM kernel */
+    reference = 3, /*!< Reference kernel */
+    auto_tuner = 4, /*!< Auto-tuner */
+    kernel_count /*!< Kernel count */
+};
+
+/** @enum eb_thread_algo_t
+ *  @brief Defines different threading algorithms for group embedding bag operations.
+ *
+ * These algorithms control how work is distributed across threads when
+ * processing multiple embedding tables in parallel.
+ */
+enum class eb_thread_algo_t : int32_t {
+    none = -1, /*!< No thread algorithm selected */
+    dynamic_dispatch = 0, /*!< Dynamic dispatch */
+    table_threaded = 1, /*!< Thread-per-table parallelism */
+    batch_threaded = 2, /*!< Sequential tables with batch-level threading */
+    ccd_threaded = 3, /*!< CCD-aware threading with nested parallelism */
+    hybrid_threaded = 4, /*!< Hybrid threading when tables < threads */
+    auto_tuner = 5, /*!< Auto-tuner thread algorithm */
+    thread_algo_count /*!< Thread algorithm count */
+};
+
+/**
+* @class embag_config_t
+* @brief config for @c embag_operator_t.
+*
+* This class encapsulates all configuration parameters and methods
+* required to control the behavior of the Embedding Bag operator.
+* It supports setting default, user, and environment-based configurations,
+* and provides a singleton instance for global access.
+*
+* Usage:
+* - Use @c instance() to access the singleton configuration object.
+* - Use @c set_default_config() to set default configuration.
+* - Use @c set_user_config() to set configuration from JSON file.
+* - Use @c set_env_config() to initialize configuration from environment variables.
+*
+* Example:
+* @code
+* embag_config_t &config = embag_config_t::instance();
+* config.set_default_config();
+* config.set_user_config(config_json);
+* config.set_env_config();
+* @endcode
+*
+* @sa embag_operator_t
+*/
+class embag_config_t final : public op_config_t {
+public:
+    void set_default_config() override;
+    status_t set_user_config(json config_json) override;
+    void set_env_config() override;
+
+    /** @brief Sets embedding bag kernel.
+  *
+  * @param kernel The Embedding Bag kernel to set.
+  */
+    void set_kernel(int32_t kernel);
+
+    /** @brief Get embedding bag kernel.
+   *
+   * @return embedding bag kernel.
+   */
+    int32_t get_kernel();
+
+    /** @brief Sets the accumulation type for the reference kernel.
+   *
+   * Communicates which accumulation precision the reference kernel should
+   * use when validating the output of a given embedding-bag backend. The
+   * actual kernel (FBGEMM, native AVX512 F16-FMA, native AVX512 F32, AVX2,
+   * etc.) writes this value immediately before invoking its compute path,
+   * and the reference kernel reads it to produce a bit-exact match.
+   *
+   * Note: this mirrors the matmul_config_t::set_accum_type pattern. It is
+   * a process-wide singleton; callers running the reference kernel
+   * concurrently with multiple actual kernels should serialize those flows.
+   *
+   * TODO(embag-accum-singleton): this field is process-wide and
+   * unsynchronized. Two known issues:
+   *   1. Duplicated write logic - dispatch_avx512_kernel() and the
+   *      embag_{f16,f32}_avx512_kernel_t::execute() paths each call
+   *      set_accum_type() with the same F16-FMA-vs-F32 selection rule,
+   *      so any change must be kept in sync in both places.
+   *   2. Data race - lowoha::group_embedding_bag_direct() invokes
+   *      dispatch_avx512_kernel() from inside #pragma omp parallel, so
+   *      mixed-dtype groups concurrently write this field (UB per the
+   *      C++ memory model). Today this is benign because only the
+   *      reference kernel reads accum_type and the lowoha path does
+   *      not run it, but a future ref-validation hookup would observe
+   *      a torn / last-writer-wins value.
+   * Likely fix: make embag_accum_type thread_local (matches the
+   * producer -> ref-kernel same-thread contract) and route the operator
+   * execute paths through a shared helper to remove the duplication.
+   *
+   * @param type The accumulation data type (data_type_t::f32 or data_type_t::f16).
+   */
+    void set_accum_type(data_type_t type);
+
+    /** @brief Get the accumulation type for the reference kernel.
+   *
+   * @return The current accumulation data type.
+   */
+    data_type_t get_accum_type();
+
+    /** @brief Sets thread algorithm for group embedding bag.
+  *
+  * @param algo The thread algorithm to set.
+  */
+    void set_thread_algo(int32_t algo);
+
+    /** @brief Get thread algorithm for group embedding bag.
+   *
+   * @return thread algorithm.
+   */
+    eb_thread_algo_t get_thread_algo();
+
+    static embag_config_t &instance();
+
+    /** @brief Convert from string to embag_kernel.
+  *
+  *  @param str_ : string contains embag kernel name.
+  *  @return embag kernel for appropriate string.
+  *          embag_kernel_t::kernel_count if string is not
+  *          appropriate.
+  */
+    embag_kernel_t str_to_embag_kernel(std::string kernel);
+
+    /** @brief Convert from string to thread algorithm.
+  *
+  *  @param str_ : string contains thread algo name.
+  *  @return thread algorithm for appropriate string.
+  */
+    eb_thread_algo_t str_to_thread_algo(std::string algo);
+
+private:
+    /**
+  * @brief Private constructor for singleton pattern.
+  *
+  * The constructor is private to prevent direct instantiation of the class.
+  * Use the @c instance() method to access the single global instance.
+  */
+    embag_config_t() = default;
+
+    embag_kernel_t embag_kernel {
+            embag_kernel_t::none}; /**< Embag runtime kernel. */
+    eb_thread_algo_t thread_algo {
+            eb_thread_algo_t::table_threaded}; /**< Thread algorithm. */
+    data_type_t embag_accum_type {data_type_t::
+                    f32}; /**< Accumulation type for reference kernel. Default F32. */
+};
+
+} // namespace common
 } // namespace zendnnl
 
 #endif

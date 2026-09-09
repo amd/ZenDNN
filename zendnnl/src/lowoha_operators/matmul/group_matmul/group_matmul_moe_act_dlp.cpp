@@ -38,7 +38,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-using namespace zendnnl::ops;
+using namespace zendnnl::common;
 using zendnnl::common::bfloat16_t;
 using zendnnl::memory::data_type_t;
 

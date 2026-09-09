@@ -198,17 +198,17 @@ void w4a8_populate_plain_s8_cache(const std::vector<const void *> &weight,
         const std::vector<matmul_params> &params, int num_ops,
         std::vector<void *> &w4a8_s8_out, bool &any_w4a8);
 
-inline bool w4a8_uses_native_s4(zendnnl::ops::matmul_algo_t algo) {
-    return algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
+inline bool w4a8_uses_native_s4(zendnnl::common::matmul_algo_t algo) {
+    return algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
 }
 
 /// Resolve W4A8 matmul algo for run_dlp (dense + group).
 /// aocl_dlp_blocked uses native s4; every other input uses aocl_dlp.
-inline zendnnl::ops::matmul_algo_t w4a8_algo_for(
-        zendnnl::ops::matmul_algo_t algo) {
+inline zendnnl::common::matmul_algo_t w4a8_algo_for(
+        zendnnl::common::matmul_algo_t algo) {
     return w4a8_uses_native_s4(algo)
-            ? zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
-            : zendnnl::ops::matmul_algo_t::aocl_dlp;
+            ? zendnnl::common::matmul_algo_t::aocl_dlp_blocked
+            : zendnnl::common::matmul_algo_t::aocl_dlp;
 }
 
 /// W4A8 reorder + cache; path must match runtime (separate native/simulated LRUs).
@@ -216,7 +216,7 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const bool is_weights_const, const char order, const char trans,
         data_type_t wei_dt, data_type_t src_dt, int weight_cache_type,
-        int sym_quant_group_size, zendnnl::ops::matmul_algo_t algo);
+        int sym_quant_group_size, zendnnl::common::matmul_algo_t algo);
 
 /**
  * @brief Execute single matrix multiplication using AOCL DLP backend
@@ -251,7 +251,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         float alpha, float beta, int lda, int ldb, int ldc, char mem_format_a,
         char mem_format_b, const void *A, const void *B, void *C,
         const matmul_data_types &dtypes, const matmul_params &lowoha_param,
-        const void *bias, zendnnl::ops::matmul_algo_t kernel,
+        const void *bias, zendnnl::common::matmul_algo_t kernel,
         bool is_weights_const);
 
 /**

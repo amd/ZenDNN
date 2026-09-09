@@ -24,7 +24,6 @@ namespace common {
 
 using namespace zendnnl::error_handling;
 using json = nlohmann::json;
-using namespace zendnnl::ops;
 
 namespace {
 
@@ -77,7 +76,8 @@ bool parse_env_log_level(const char *raw, log_level_t &out) {
 }
 
 void apply_global_cache_off_to_matmul(
-        zendnnl::ops::matmul_config_t &matmul_config, bool global_cache_off) {
+        zendnnl::common::matmul_config_t &matmul_config,
+        bool global_cache_off) {
     if (!global_cache_off) { return; }
 
     matmul_config.set_weight_cache(0);

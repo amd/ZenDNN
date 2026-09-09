@@ -137,7 +137,7 @@ struct PrepackedWeightKeyHash {
 /// insert transparently fall back to their thread-local repack
 /// path, so correctness is unaffected; the only cost is the
 /// amortised pack hit on every call for the (N+1)th unique weight.
-/// Defined in kernel_cache.cpp to avoid including matmul_config.hpp
+/// Defined in kernel_cache.cpp to avoid including common/op_config.hpp
 /// from this header.
 uint32_t get_weight_cache_capacity();
 

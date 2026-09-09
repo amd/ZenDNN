@@ -685,8 +685,8 @@ struct LastInvocationStats {
     /// this invocation.  Lets tests distinguish "AOCL DLP warm path
     /// was eligible (= `aocl_dlp_blocked`)" from "inner kernel is
     /// oneDNN / libxsmm / native, no AOCL DLP warm path taken".
-    zendnnl::ops::matmul_algo_t inner_kernel
-            = zendnnl::ops::matmul_algo_t::none;
+    zendnnl::common::matmul_algo_t inner_kernel
+            = zendnnl::common::matmul_algo_t::none;
 
     /// Accumulated AOCL DLP probe stats across primary warm
     /// (`warm_aocl_n_tile` or `warm_aocl`) AND any cross-warm

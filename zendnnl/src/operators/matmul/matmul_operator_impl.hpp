@@ -16,8 +16,8 @@
 #ifndef _MATMUL_OPERATOR_IMPL_HPP_
 #define _MATMUL_OPERATOR_IMPL_HPP_
 
+#include "common/op_config.hpp"
 #include "common/zendnnl_global.hpp"
-#include "matmul_config.hpp"
 #include "matmul_context.hpp"
 #include "operators/common/operator_impl.hpp"
 

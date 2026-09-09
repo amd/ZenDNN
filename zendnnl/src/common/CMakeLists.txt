@@ -25,6 +25,8 @@ set(common_sources
   hash_object.cpp
   platform_info.cpp
   config_manager.cpp
+  post_op.cpp
+  op_config.cpp
   zendnnl_object.cpp
   hashable_object.cpp
   zendnnl_global_block.cpp)
@@ -46,6 +48,8 @@ set(common_headers
   platform_info.hpp
   config_params.hpp
   config_manager.hpp
+  post_op.hpp
+  op_config.hpp
   zendnnl_global_block.hpp
   error_status.hpp
   lru.hpp

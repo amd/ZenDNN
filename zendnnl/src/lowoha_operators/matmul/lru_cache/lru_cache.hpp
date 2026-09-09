@@ -23,8 +23,8 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
-#include "operators/matmul/matmul_config.hpp"
 #include <unordered_map>
 namespace zendnnl {
 namespace lowoha {
@@ -38,7 +38,7 @@ class lru_cache_t {
 public:
     //Constructor
     lru_cache_t(uint32_t capacity
-            = ops::matmul_config_t::instance().get_lru_cache_capacity());
+            = common::matmul_config_t::instance().get_lru_cache_capacity());
     // Destructor
     ~lru_cache_t();
 

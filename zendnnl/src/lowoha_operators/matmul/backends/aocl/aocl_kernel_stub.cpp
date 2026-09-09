@@ -50,7 +50,7 @@ using namespace zendnnl::error_handling;
 
 void run_dlp(char, char, char, int, int, int, float, float, int, int, int, char,
         char, const void *, const void *, void *, const matmul_data_types &,
-        const matmul_params &, const void *, zendnnl::ops::matmul_algo_t,
+        const matmul_params &, const void *, zendnnl::common::matmul_algo_t,
         bool) {
     apilog_error(
             "AOCL-DLP matmul kernel (run_dlp) invoked but ZenDNNL was built "

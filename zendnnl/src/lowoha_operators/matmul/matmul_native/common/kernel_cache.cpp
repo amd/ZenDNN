@@ -17,10 +17,10 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include <algorithm>
 #include <cstring>
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_bkc.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_gemv_bkc.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -31,7 +31,7 @@ namespace native {
 // Sourced from matmul_config_t (env: ZENDNNL_LRU_CACHE_CAPACITY).
 // Default UINT32_MAX → eviction disabled.
 uint32_t get_weight_cache_capacity() {
-    return ops::matmul_config_t::instance().get_lru_cache_capacity();
+    return common::matmul_config_t::instance().get_lru_cache_capacity();
 }
 
 PrepackedWeightCache &PrepackedWeightCache::instance() {

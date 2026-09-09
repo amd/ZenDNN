@@ -68,7 +68,7 @@ struct MatmulConfig {
     bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
     zendnnl::common::data_type_t bias_dt; /**< Data type for the bias tensor
                                         (e.g., f32, bf16). Defaults to f32 if not specified. */
-    std::vector<zendnnl::ops::post_op_type_t>
+    std::vector<zendnnl::common::post_op_type_t>
             post_ops; /**< List of post operations
                                                       to apply (e.g., relu, gelu). */
     zendnnl::common::data_type_t post_op_dt; /**< Datatype of post operation. */

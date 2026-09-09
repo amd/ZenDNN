@@ -546,8 +546,8 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
             }
             id++;
 
-            zendnnl::ops::matmul_config_t &matmul_config
-                    = zendnnl::ops::matmul_config_t::instance();
+            zendnnl::common::matmul_config_t &matmul_config
+                    = zendnnl::common::matmul_config_t::instance();
             int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo()
                                               : matmul_config.get_algo();
             matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
@@ -976,8 +976,8 @@ void inputModelFileParser(std::ifstream &infile,
             cfg.dt.push_back(options.sdt);
             cfg.dt.push_back(options.wdt);
             cfg.dt.push_back(options.ddt);
-            zendnnl::ops::matmul_config_t &matmul_config
-                    = zendnnl::ops::matmul_config_t::instance();
+            zendnnl::common::matmul_config_t &matmul_config
+                    = zendnnl::common::matmul_config_t::instance();
             int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo()
                                               : matmul_config.get_algo();
             matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
@@ -1053,8 +1053,8 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
         cfg.dt.push_back(options.sdt);
         cfg.dt.push_back(options.wdt);
         cfg.dt.push_back(options.ddt);
-        zendnnl::ops::matmul_config_t &matmul_config
-                = zendnnl::ops::matmul_config_t::instance();
+        zendnnl::common::matmul_config_t &matmul_config
+                = zendnnl::common::matmul_config_t::instance();
         int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo()
                                           : matmul_config.get_algo();
         matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
@@ -1459,8 +1459,8 @@ static std::vector<CacheMode> parse_cache_sweep_modes(const std::string &s) {
 
 static void resolve_kernel(MatmulConfig &cfg, const global_options &options,
         const char *dtype_kernel) {
-    zendnnl::ops::matmul_config_t &matmul_config
-            = zendnnl::ops::matmul_config_t::instance();
+    zendnnl::common::matmul_config_t &matmul_config
+            = zendnnl::common::matmul_config_t::instance();
     const int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo()
                                             : matmul_config.get_algo();
     const matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);

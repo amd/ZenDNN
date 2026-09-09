@@ -970,7 +970,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         float alpha, float beta, int lda, int ldb, int ldc, char mem_format_a,
         char mem_format_b, const void *A, const void *B, void *C,
         const matmul_data_types &dtypes, const matmul_params &lowoha_param,
-        const void *bias, zendnnl::ops::matmul_algo_t kernel,
+        const void *bias, zendnnl::common::matmul_algo_t kernel,
         bool is_weights_const) {
 
     bool is_weight_blocked = false;
@@ -1029,10 +1029,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             && dtypes.src == data_type_t::s8;
 
     // W4A8: s4 wei + dynamic-quant s8 src. Used to skip WOQ s4 reorder below.
-    const bool is_w4a8
-            = (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp
-                      || kernel
-                              == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked)
+    const bool is_w4a8 = (kernel == zendnnl::common::matmul_algo_t::aocl_dlp
+                                 || kernel
+                                         == zendnnl::common::matmul_algo_t::
+                                                 aocl_dlp_blocked)
             && is_w4a8_config(lowoha_param);
 
     // W4A8 aocl_dlp reports s8 B; blocked DLP keeps packed s4.
@@ -1134,7 +1134,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     }
 
     // AOCL blocked kernel reordering for 2D MatMul
-    if (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+    if (kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
             && is_weights_const && !is_w4a8) {
         //call reorder and cache function
         bool blocked_flag = false;
@@ -1196,7 +1196,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             is_weight_blocked = true;
             mem_format_b = 'r';
         }
-    } else if (kernel == zendnnl::ops::matmul_algo_t::aocl_dlp
+    } else if (kernel == zendnnl::common::matmul_algo_t::aocl_dlp
             && (dtypes.wei == data_type_t::s4 || dtypes.wei == data_type_t::u4)
             && dtypes.src == data_type_t::bf16) {
         // WOQ expands the 4-bit input into a bf16-blocked layout, so the
@@ -1231,7 +1231,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     }
     // WOQ s4 blocked path (not W4A8).
     else if (dtypes.wei == data_type_t::s4
-            && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            && kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
             && !is_w4a8) {
         if (dtypes.dst == data_type_t::bf16) {
             aocl_gemm_bf16s4f32obf16(layout, transA, transB, M, N, K, alpha,
@@ -1253,7 +1253,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     }
     // U4 blocked AOCL-DLP kernel path (skip this path for non-blocked kernels)
     else if (dtypes.wei == data_type_t::u4
-            && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked) {
+            && kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked) {
         if (dtypes.dst == data_type_t::bf16) {
             aocl_gemm_bf16u4f32obf16(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int16_t *>(A), lda, mem_format_a,
@@ -1599,7 +1599,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // Free reordered buffer for AOCL blocked non-cached
     bool weight_cache_disabled = (weight_cache_type == 0
             && reordered_mem != nullptr && lowoha_param.mem_format_b != 'r'
-            && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked);
+            && kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked);
     if (weight_cache_disabled || simulated_woq_free_buff) {
         zendnnl_aligned_free(reordered_mem);
         reordered_mem = nullptr;
@@ -1627,7 +1627,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 
     dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias,
             dtypes, N, K, /*M=*/0, /*zp_comp_acc=*/nullptr,
-            /*zp_comp_ndim=*/0, zendnnl::ops::matmul_algo_t::aocl_dlp, B);
+            /*zp_comp_ndim=*/0, zendnnl::common::matmul_algo_t::aocl_dlp, B);
     md_t m_ = M;
     md_t n_ = N;
     md_t k_ = K;

@@ -13,26 +13,19 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-set(ops_common_sources
-  post_op.cpp)
-
 set(ops_common_headers
   operator_context.hpp
   operator_impl.hpp
   operator.hpp
-  operator_kernel.hpp
-  operator_config.hpp
-  post_op.hpp)
+  operator_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
-    PRIVATE ${ops_common_sources}
     PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
-    PRIVATE ${ops_common_sources}
     PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
 endif()
 

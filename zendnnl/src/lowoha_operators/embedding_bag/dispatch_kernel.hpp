@@ -17,8 +17,8 @@
 #ifndef _LOWOHA_DISPATCH_KERNEL_HPP
 #define _LOWOHA_DISPATCH_KERNEL_HPP
 
+#include "common/op_config.hpp"
 #include "lowoha_embag_common.hpp"
-#include "operators/embag/embag_config.hpp"
 #include "operators/embag/native_kernels/embag_avx512_kernels.hpp"
 #if ZENDNNL_DEPENDS_FBGEMM
 #include "fbgemm_kernel.hpp"
@@ -66,7 +66,7 @@ static void embag_native_kernel(const void *table, const void *indices,
     const data_type_t table_dtype = params.dtypes.table;
     const bool fp16_scale_bias = params.fp16_scale_bias;
 
-    // Use algo directly since lowoha::embag_algo_t is aliased to ops::embag_algo_t
+    // Use algo directly since lowoha::embag_algo_t is aliased to common::embag_algo_t
     const embag_algo_t algo = params.algo;
 
     const bool is_weights = params.is_weights;
@@ -701,10 +701,10 @@ static void dispatch_avx512_kernel(const void *table, const void *indices,
     // TODO(embag-accum-singleton): this set_accum_type write races with
     // sibling threads when dispatch_avx512_kernel is called from
     // group_embedding_bag_direct's #pragma omp parallel region with
-    // mixed-dtype groups. See embag_config.hpp set_accum_type doc.
+    // mixed-dtype groups. See common/op_config.hpp set_accum_type doc.
     // Likely fix: make embag_accum_type thread_local.
-    zendnnl::ops::embag_config_t &embag_config
-            = zendnnl::ops::embag_config_t::instance();
+    zendnnl::common::embag_config_t &embag_config
+            = zendnnl::common::embag_config_t::instance();
 
 #if ZENDNNL_DEPENDS_FBGEMM
     if (params.kernel == embag_kernel_t::fbgemm && can_use_fbgemm(params)) {

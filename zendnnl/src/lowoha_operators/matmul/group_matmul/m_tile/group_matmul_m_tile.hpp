@@ -894,7 +894,7 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
         const bool prepacked_b_ok = allow_prepacked_b
                 && params[i].mem_format_b == 'r'
                 && params[i].lowoha_algo
-                        == zendnnl::ops::matmul_algo_t::moe_custom_kernel;
+                        == zendnnl::common::matmul_algo_t::moe_custom_kernel;
         if (params[i].mem_format_b != 'n' && !reordered_pergroup_s8
                 && !prepacked_b_ok) {
             return false;

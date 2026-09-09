@@ -6559,9 +6559,9 @@ int run_lowoha_reorder_bf16_scale_dynamic_quant_test() {
 //==============================================================================
 
 int run_lowoha_weight_prepack_f32_test() {
+    using zendnnl::common::matmul_algo_t;
     using zendnnl::common::size_of;
     using zendnnl::lowoha::matmul::kernel_to_string;
-    using zendnnl::ops::matmul_algo_t;
 
     // Tunable knobs. Only supported algo is aocl_dlp_blocked
     // (libxsmm_blocked / onednn_blocked are not supported by the prepack
@@ -6639,9 +6639,9 @@ int run_lowoha_weight_prepack_f32_test() {
 }
 
 int run_lowoha_weight_prepack_bf16_test() {
+    using zendnnl::common::matmul_algo_t;
     using zendnnl::common::size_of;
     using zendnnl::lowoha::matmul::kernel_to_string;
-    using zendnnl::ops::matmul_algo_t;
 
     // Tunable knobs. Only supported algo is aocl_dlp_blocked
     // (libxsmm_blocked / onednn_blocked are not supported by the prepack
@@ -6726,9 +6726,9 @@ int run_lowoha_weight_prepack_bf16_test() {
 }
 
 int run_lowoha_weight_prepack_s8_test() {
+    using zendnnl::common::matmul_algo_t;
     using zendnnl::common::size_of;
     using zendnnl::lowoha::matmul::kernel_to_string;
-    using zendnnl::ops::matmul_algo_t;
 
     // Tunable knobs. Only supported algo is aocl_dlp_blocked
     // (libxsmm_blocked / onednn_blocked are not supported by the prepack

@@ -19,16 +19,16 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include "common/post_op.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
-#include "operators/common/post_op.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
 
-using zendnnl::ops::post_op_type_t;
+using zendnnl::common::post_op_type_t;
 
 // AVX-512 math helpers (avx512_exp, avx512_tanh, avx512_sigmoid, avx512_erf)
 // are provided by avx512_math.hpp — shared with the microkernel epilogue.

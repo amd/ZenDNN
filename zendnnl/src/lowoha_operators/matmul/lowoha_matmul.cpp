@@ -38,7 +38,7 @@ using zendnnl::common::size_of;
 void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
         int K, float alpha, const void *A, int lda, const void *B, int ldb,
         float beta, void *C, int ldc, matmul_data_types &dtypes,
-        zendnnl::ops::matmul_algo_t &kernel, char mem_format_a,
+        zendnnl::common::matmul_algo_t &kernel, char mem_format_a,
         char mem_format_b, matmul_params &lowoha_param,
         matmul_batch_params_t &batch_params, const void *bias,
         bool is_weights_const, int num_threads) {

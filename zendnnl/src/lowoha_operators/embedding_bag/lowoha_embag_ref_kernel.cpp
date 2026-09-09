@@ -22,8 +22,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace embag {
 
+using zendnnl::common::embag_config_t;
 using zendnnl::ops::can_use_f16_fma_kernel;
-using zendnnl::ops::embag_config_t;
 using zendnnl::ops::half_to_float;
 
 template <typename InType, typename IndexType, typename OffsetType,

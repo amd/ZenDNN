@@ -41,12 +41,12 @@
 #include <utility>
 #include <vector>
 
+#include "common/op_config.hpp"
 #include "custom_kernel/dispatch.hpp"
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -55,7 +55,7 @@ namespace matmul {
 // Match the original group_matmul_dispatch.cpp using-declarations so
 // source files including this header can refer to matmul_algo_t,
 // matmul_config_t, post_op_type_t, etc. without namespace prefixes.
-using namespace zendnnl::ops;
+using namespace zendnnl::common;
 using zendnnl::common::size_of;
 
 // Short string renderer for `grp_matmul_gated_act_t` — used by APILOG

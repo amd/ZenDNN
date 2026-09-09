@@ -397,8 +397,8 @@ int bench(const std::string &in_filename, const std::string &out_filename,
         const bool isLOWOHA, size_t cache_size) {
 
     std::vector<MatmulConfig> matmulConfig;
-    zendnnl::ops::matmul_config_t &matmul_config
-            = zendnnl::ops::matmul_config_t::instance();
+    zendnnl::common::matmul_config_t &matmul_config
+            = zendnnl::common::matmul_config_t::instance();
     matmul_config.set_env_config();
     bool isPipeline = false;
     if (inputMode == InputMode::FILE) {

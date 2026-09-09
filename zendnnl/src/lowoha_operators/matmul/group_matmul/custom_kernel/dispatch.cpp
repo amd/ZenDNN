@@ -536,7 +536,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // (AUTO WITHOUT the mixed flag has already downgraded WC 2→1 upstream, so
     // it never reaches here with WC==2.)
     const int wc_mode
-            = zendnnl::ops::matmul_config_t::instance().get_weight_cache();
+            = zendnnl::common::matmul_config_t::instance().get_weight_cache();
     const bool cache_off = (wc_mode == 0);
     // AUTO mixed-in-place mode (grp ALGO 0 + WC=2 + prepack/cross_warm):
     // exactly ONE layout may mutate the shared weight buffer, and that

@@ -20,8 +20,8 @@
 #include <cstdint>
 #include <string>
 #include "common/logging.hpp"
+#include "common/post_op.hpp"
 #include "common/zendnnl_global.hpp"
-#include "operators/common/post_op.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -80,7 +80,7 @@ struct conv_data_types {
  * @brief Structure for post-operation parameters
  */
 struct conv_postop {
-    zendnnl::ops::post_op_type_t po_type; ///< Type of post-operation
+    zendnnl::common::post_op_type_t po_type; ///< Type of post-operation
     void *buff; ///< Buffer for binary operations
     data_type_t dtype; ///< Data type of the buffer
     std::vector<int64_t> dims; ///< Dimensions of the buffer
@@ -91,7 +91,7 @@ struct conv_postop {
      * @brief Default constructor for postop
      */
     conv_postop()
-        : po_type(zendnnl::ops::post_op_type_t::none)
+        : po_type(zendnnl::common::post_op_type_t::none)
         , buff(nullptr)
         , dtype(data_type_t::none)
         , dims()

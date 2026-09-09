@@ -21,18 +21,18 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include "common/op_config.hpp"
+#include "common/post_op.hpp"
 #include "lowoha_operators/matmul/lru_cache/lru_cache.hpp"
 #include "lowoha_operators/matmul/lru_cache/zendnnl_key.hpp"
 #include "memory/memory_utils.hpp"
-#include "operators/common/post_op.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
 using namespace zendnnl::memory;
-using namespace zendnnl::ops;
+using namespace zendnnl::common;
 
 /**
  * @brief Structure to hold data types for matrix multiplication operands
@@ -49,7 +49,7 @@ struct matmul_data_types {
  * @brief Structure for post-operation parameters
  */
 struct matmul_post_op {
-    zendnnl::ops::post_op_type_t po_type; ///< Type of post-operation
+    zendnnl::common::post_op_type_t po_type; ///< Type of post-operation
     void *buff; ///< Buffer for binary operations
     data_type_t dtype; ///< Data type of the buffer
     std::vector<int64_t> dims; ///< Dimensions of the buffer
@@ -61,7 +61,7 @@ struct matmul_post_op {
    * @brief Default constructor for matmul_post_op
    */
     matmul_post_op()
-        : po_type(zendnnl::ops::post_op_type_t::none)
+        : po_type(zendnnl::common::post_op_type_t::none)
         , buff(nullptr)
         , dtype(data_type_t::none)
         , dims()
@@ -83,8 +83,8 @@ struct matmul_post_op {
     float alpha_or_default() const noexcept {
         if (has_alpha()) { return alpha; }
         switch (po_type) {
-            case zendnnl::ops::post_op_type_t::elu:
-            case zendnnl::ops::post_op_type_t::swish: return 1.0f;
+            case zendnnl::common::post_op_type_t::elu:
+            case zendnnl::common::post_op_type_t::swish: return 1.0f;
             default: return 0.0f;
         }
     }
@@ -337,7 +337,7 @@ inline bool has_per_group_wei_scale(
  */
 static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
     const int32_t env_cache_type
-            = zendnnl::ops::matmul_config_t::instance().get_weight_cache();
+            = zendnnl::common::matmul_config_t::instance().get_weight_cache();
     return std::min(env_cache_type, weight_cache_type);
 }
 
@@ -357,7 +357,7 @@ static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
  * PREPACK + CROSS_WARM + unlimited LRU capacity all hold.
  */
 static inline bool is_grp_auto_mixed_inplace_active() {
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     return cfg.get_weight_cache() == 2 && cfg.get_grp_auto_mixed_inplace();
 }
 
@@ -374,7 +374,7 @@ static inline bool is_grp_auto_mixed_inplace_active() {
 static inline bool should_warm_weight_cache(int32_t weight_cache_type) {
     return weight_cache_type == 1
             || (weight_cache_type == 2
-                    && zendnnl::ops::matmul_config_t::instance()
+                    && zendnnl::common::matmul_config_t::instance()
                                .get_grp_auto_mixed_inplace());
 }
 
@@ -386,7 +386,7 @@ static inline bool should_warm_weight_cache(int32_t weight_cache_type) {
  */
 static inline int32_t warm_wct_for_full_weight_bf16(int32_t weight_cache_type) {
     return (weight_cache_type == 2
-                   && zendnnl::ops::matmul_config_t::instance()
+                   && zendnnl::common::matmul_config_t::instance()
                               .get_grp_auto_mixed_inplace())
             ? 2
             : 1;

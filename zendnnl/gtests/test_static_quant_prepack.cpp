@@ -47,9 +47,9 @@
 
 namespace {
 
+using zendnnl::common::matmul_algo_t;
 using zendnnl::memory::data_type_t;
 using zendnnl::memory::status_t;
-using zendnnl::ops::matmul_algo_t;
 
 struct PrepackCase {
     uint64_t m, k, n;
@@ -616,9 +616,9 @@ TEST(StaticQuantPrepackGuard, U8SrcWithSymGroupRejected) {
 // than silently compute a wrong result. A symmetric s8 source (src_zp == 0) on
 // the same prepacked buffer stays valid.
 TEST(StaticQuantPrepackGuard, S8SrcAsymmetricPrepackedRejected) {
+    using zendnnl::common::matmul_algo_t;
     using zendnnl::memory::data_type_t;
     using zendnnl::memory::status_t;
-    using zendnnl::ops::matmul_algo_t;
 
     const int m = 8, k = 32, n = 16;
     const int lda = k, ldb = n, ldc = n;

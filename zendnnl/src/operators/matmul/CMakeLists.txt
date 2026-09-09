@@ -19,17 +19,16 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 endif()
 add_subdirectory(onednn)
 
+# matmul_config.cpp/hpp moved to src/common/op_config.{cpp,hpp}.
 set(matmul_operator_sources
   matmul_context.cpp
   matmul_operator_impl.cpp
-  matmul_config.cpp
   matmul_ref_kernel.cpp)
 
 set(matmul_operator_public_headers
   matmul_context.hpp
   matmul_operator_impl.hpp
-  matmul_operator.hpp
-  matmul_config.hpp)
+  matmul_operator.hpp)
 
 set(matmul_operator_private_headers
   matmul_kernel_list.hpp

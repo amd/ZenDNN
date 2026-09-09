@@ -51,10 +51,10 @@
 #include <cstdlib>
 #include <vector>
 
+#include "common/op_config.hpp"
 #include "group_matmul_test_helpers.hpp"
 #include "gtest_utils.hpp"
 #include "moe_test_utils.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
@@ -73,11 +73,12 @@ namespace mt = moe_test_utils;
 class WeightCacheGuard {
 public:
     explicit WeightCacheGuard(int32_t v)
-        : prev_(zendnnl::ops::matmul_config_t::instance().get_weight_cache()) {
-        zendnnl::ops::matmul_config_t::instance().set_weight_cache(v);
+        : prev_(zendnnl::common::matmul_config_t::instance()
+                          .get_weight_cache()) {
+        zendnnl::common::matmul_config_t::instance().set_weight_cache(v);
     }
     ~WeightCacheGuard() {
-        zendnnl::ops::matmul_config_t::instance().set_weight_cache(prev_);
+        zendnnl::common::matmul_config_t::instance().set_weight_cache(prev_);
     }
     WeightCacheGuard(const WeightCacheGuard &) = delete;
     WeightCacheGuard &operator=(const WeightCacheGuard &) = delete;

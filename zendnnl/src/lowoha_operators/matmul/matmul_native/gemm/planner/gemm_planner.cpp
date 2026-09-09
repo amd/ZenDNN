@@ -17,16 +17,16 @@
 #include "lowoha_operators/matmul/matmul_native/gemm/planner/gemm_planner.hpp"
 #include <algorithm>
 #include <cmath>
+#include "common/op_config.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
 
-using zendnnl::ops::post_op_type_t;
+using zendnnl::common::post_op_type_t;
 using namespace zendnnl::error_handling;
 
 static inline int round_up(int x, int m) {

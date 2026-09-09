@@ -25,8 +25,8 @@
 #include <string>
 #include "common/config_params.hpp"
 #include "common/error_status.hpp"
+#include "common/op_config.hpp"
 #include "nlohmann/json.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace common {

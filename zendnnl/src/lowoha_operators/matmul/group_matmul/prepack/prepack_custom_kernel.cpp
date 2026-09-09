@@ -30,7 +30,7 @@ namespace custom_kernel {
 
 using zendnnl::common::bfloat16_t;
 using zendnnl::common::float16_t;
-using zendnnl::ops::matmul_config_t;
+using zendnnl::common::matmul_config_t;
 
 namespace ck = zendnnl::lowoha::matmul::custom_kernel;
 

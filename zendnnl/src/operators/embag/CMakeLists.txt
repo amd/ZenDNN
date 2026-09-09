@@ -19,14 +19,12 @@ add_subdirectory(native_kernels)
 set(embag_operator_sources
   embag_context.cpp
   embag_operator_impl.cpp
-  embag_ref_kernel.cpp
-  embag_config.cpp)
+  embag_ref_kernel.cpp)
 
 set(embag_operator_public_headers
   embag_context.hpp
   embag_operator_impl.hpp
-  embag_operator.hpp
-  embag_config.hpp)
+  embag_operator.hpp)
 
 set(embag_operator_private_headers
   embag_kernel_list.hpp

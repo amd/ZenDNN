@@ -127,4 +127,4 @@ If a helper would be reused across 2+ files, add it to `group_embag_test_helpers
 
 - **Don't grow `gtests/gtest_utils.{hpp,cpp}`** with group-embag-specific symbols; lift them into `group_embag_test_helpers.{hpp,cpp}` instead.
 - **Keep test files under ~1500 lines.** Split if they exceed that.
-- The `embag_accum_type` field on `embag_config_t` is process-wide and unsynchronized (see TODO in `embag_config.hpp`); mixed-dtype group invocations may flake if reference validation is ever wired in. The current group tests use a single dtype combo per call, side-stepping the race.
+- The `embag_accum_type` field on `embag_config_t` is process-wide and unsynchronized (see TODO in `common/op_config.hpp`); mixed-dtype group invocations may flake if reference validation is ever wired in. The current group tests use a single dtype combo per call, side-stepping the race.

@@ -91,7 +91,7 @@
 ///   * This header pulls only `<array>`, `<atomic>`, `<cstdint>`,
 ///     `<vector>` and `../group_matmul_parallel_common.hpp` (for
 ///     `kNTilePlanMaxExperts` and `matmul_algo_t` via the inline
-///     `using namespace zendnnl::ops;` in the common header).
+///     `using namespace zendnnl::common;` in the common header).
 ///   * `group_matmul_n_tile.hpp` re-includes this header so any
 ///     translation unit that includes the public N-tile interface
 ///     transitively gets the planner output types.
@@ -126,8 +126,8 @@ namespace matmul {
 // `GroupNTilePlan` (Section P.3) reads as `matmul_algo_t` — matches
 // the unqualified usage in the rest of the group_matmul code (the
 // using-decl is also brought in from `group_matmul_parallel_common.hpp`
-// via its inline `using namespace zendnnl::ops;`).
-using zendnnl::ops::matmul_algo_t;
+// via its inline `using namespace zendnnl::common;`).
+using zendnnl::common::matmul_algo_t;
 
 // =====================================================================
 // Section P.0 — N-tile shared constants

@@ -16,7 +16,7 @@
 
 #include "embag_ref_kernel.hpp"
 #include <cmath>
-#include "embag_config.hpp"
+#include "common/op_config.hpp"
 
 namespace zendnnl {
 namespace ops {

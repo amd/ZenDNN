@@ -22,10 +22,10 @@
 #include <vector>
 
 #include "aocl_dlp.h" // aocl-dlp header
+#include "common/post_op.hpp"
 #include "common/zendnnl_global.hpp"
 #include "memory/memory_utils.hpp"
 #include "memory/tensor.hpp"
-#include "operators/common/post_op.hpp"
 namespace zendnnl {
 namespace ops {
 using namespace zendnnl::memory;

@@ -939,7 +939,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         // everything else (incl. non-F16 paths) → F32. Restore F32
         // afterwards to avoid leaking F16 accum into a subsequent
         // non-F16 caller that reads the singleton.
-        zendnnl::ops::matmul_config_t::instance().set_accum_type(
+        zendnnl::common::matmul_config_t::instance().set_accum_type(
                 group_is_aocl_f16 ? data_type_t::f16 : data_type_t::f32);
     }
 

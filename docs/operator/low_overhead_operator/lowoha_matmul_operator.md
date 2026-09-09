@@ -921,7 +921,7 @@ W4A8 runs on **AOCL DLP** only. Dynamic entry: the library quantizes **bf16** ac
 ```cpp
 int lowoha_w4a8_matmul_example() {
   using namespace zendnnl::lowoha::matmul;
-  using zendnnl::ops::matmul_algo_t;
+  using zendnnl::common::matmul_algo_t;
 
   constexpr int M = 8, K = 128, N = 64;
   constexpr int NUM_GROUPS = K / 32;  // G = 4, group_size = 32
@@ -990,7 +990,7 @@ Static entry: the caller passes **s8** activations and populated `src_scale.buff
 ```cpp
 int lowoha_w4a8_static_matmul_example() {
   using namespace zendnnl::lowoha::matmul;
-  using zendnnl::ops::matmul_algo_t;
+  using zendnnl::common::matmul_algo_t;
 
   constexpr int M = 8, K = 128, N = 64;
   constexpr int NUM_GROUPS = K / 32;  // G = 4, group_size = 32

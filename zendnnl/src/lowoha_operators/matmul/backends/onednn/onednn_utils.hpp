@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "operators/matmul/matmul_config.hpp"
+#include "common/op_config.hpp"
 
 #if ZENDNNL_DEPENDS_ONEDNN
 #include "dnnl.hpp"
@@ -30,8 +30,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
-using zendnnl::ops::data_type_t;
-using zendnnl::ops::matmul_algo_t;
+using zendnnl::common::data_type_t;
+using zendnnl::common::matmul_algo_t;
 #if ZENDNNL_DEPENDS_ONEDNN
 using namespace dnnl;
 #endif

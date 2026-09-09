@@ -34,8 +34,6 @@ using namespace zendnnl::common;
 template <typename T>
 inline float apply_postop(float val, const conv_postop &postop,
         const void *binary_buff, const int64_t idx) {
-    using namespace zendnnl::ops;
-
     switch (postop.po_type) {
         case post_op_type_t::relu: return std::max(0.0f, val);
 

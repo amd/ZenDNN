@@ -30,9 +30,9 @@ namespace matmul {
 namespace group_matmul_prepack {
 namespace aocl_dlp {
 
+using zendnnl::common::matmul_algo_t;
+using zendnnl::common::matmul_config_t;
 using zendnnl::error_handling::status_t;
-using zendnnl::ops::matmul_algo_t;
-using zendnnl::ops::matmul_config_t;
 
 // ─────────────────────────────────────────────────────────────────────
 // AOCL DLP warm-pack — populate the per-dtype LRU reorder cache for

@@ -43,8 +43,8 @@
 
 #include <gtest/gtest.h>
 
+#include "common/op_config.hpp"
 #include "gtest_utils.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 namespace {
 

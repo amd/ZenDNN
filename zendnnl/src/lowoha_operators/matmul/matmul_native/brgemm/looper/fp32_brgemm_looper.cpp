@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/fp32_brgemm_looper.hpp"
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/fp32_brgemm_ukernel.hpp"
@@ -23,7 +24,6 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,8 +37,8 @@ namespace matmul {
 namespace native {
 
 using namespace zendnnl::error_handling;
-using zendnnl::ops::matmul_config_t;
-using zendnnl::ops::post_op_type_t;
+using zendnnl::common::matmul_config_t;
+using zendnnl::common::post_op_type_t;
 
 ZENDNNL_TARGET("avx512f")
 static void scale_tile(

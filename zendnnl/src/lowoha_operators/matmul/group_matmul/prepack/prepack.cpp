@@ -40,9 +40,9 @@ namespace lowoha {
 namespace matmul {
 namespace group_matmul_prepack {
 
+using zendnnl::common::matmul_algo_t;
 using zendnnl::error_handling::apilog_info;
 using zendnnl::error_handling::apilog_info_enabled;
-using zendnnl::ops::matmul_algo_t;
 
 // ─────────────────────────────────────────────────────────────────────
 // Internal helpers — file-local.
@@ -263,7 +263,7 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
     // Folding the toggle into the hash on every call is one
     // singleton-load (~1 ns) and keeps the hash regime simple.
     s = mix_hash(s,
-            static_cast<size_t>(zendnnl::ops::matmul_config_t::instance()
+            static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
                                         .get_weight_cache()));
     return s;
 }
@@ -331,7 +331,7 @@ inline size_t weight_pool_fingerprint(const PrepackParams &p) {
         s = mix_hash(s, bound);
     }
     s = mix_hash(s,
-            static_cast<size_t>(zendnnl::ops::matmul_config_t::instance()
+            static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
                                         .get_weight_cache()));
     return s;
 }
@@ -1694,8 +1694,8 @@ static void prepack_aocl_only_algo(
         } else {
             // Publish WC=1 before clearing the mixed flag (WC==2 is what gates every
             // in-place path; mirrors the dispatch downgrade order).  Leave W RAW.
-            zendnnl::ops::matmul_config_t::instance().set_weight_cache(1);
-            zendnnl::ops::matmul_config_t::instance()
+            zendnnl::common::matmul_config_t::instance().set_weight_cache(1);
+            zendnnl::common::matmul_config_t::instance()
                     .set_grp_auto_mixed_inplace(false);
             static std::atomic<bool> s_wc2_xwarm_downgrade_warned {false};
             if (!s_wc2_xwarm_downgrade_warned.exchange(

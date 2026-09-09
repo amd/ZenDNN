@@ -1156,13 +1156,13 @@ TEST(TestGroupMatmulWeightCacheInt8, SymQuantWc2StaysOutOfPlace) {
 
     reset_grp_matmul_caches();
     omp_set_num_threads(8);
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     // Restore the process WC mode AND clear the mixed-in-place flag on exit
     // so this test cannot leak sticky state into siblings.
     struct StateRestore {
         int32_t wc;
         ~StateRestore() {
-            auto &c = zendnnl::ops::matmul_config_t::instance();
+            auto &c = zendnnl::common::matmul_config_t::instance();
             c.set_weight_cache(wc);
             c.set_grp_auto_mixed_inplace(false);
         }

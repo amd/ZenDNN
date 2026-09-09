@@ -49,7 +49,7 @@ struct global_options {
     std::vector<size_t> n_values; /**< Vector of output columns
                                for each layer (multi-layer support). */
     bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
-    std::vector<zendnnl::ops::post_op_type_t>
+    std::vector<zendnnl::common::post_op_type_t>
             post_ops; /**< List of post operations
                                                       to apply (e.g., relu, gelu). */
     data_type_t post_op_dt; /**< Datatype of post operation. */

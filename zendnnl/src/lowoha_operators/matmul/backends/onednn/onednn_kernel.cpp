@@ -203,7 +203,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
         float alpha, const void *A, int lda, const void *B, int ldb, float beta,
         void *C, int ldc, matmul_params &lowoha_params,
         matmul_batch_params_t &batch_params, const void *bias,
-        zendnnl::ops::matmul_algo_t &kernel, size_t src_batch_stride,
+        zendnnl::common::matmul_algo_t &kernel, size_t src_batch_stride,
         size_t weight_batch_stride, size_t dst_batch_stride) {
     matmul_config_t &matmul_config = matmul_config_t::instance();
     int32_t weight_cache_type = matmul_config.get_weight_cache();

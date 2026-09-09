@@ -21,7 +21,7 @@
 #include <initializer_list>
 
 namespace zendnnl {
-namespace ops {
+namespace common {
 
 // a post_op refers to a localized operation on tensor data. this localized operattion involves
 // a single tensor element or a small neighborhood around an element. it is understood that such
@@ -137,7 +137,7 @@ struct post_op_t {
     std::string post_op_info(post_op_t post_op);
 };
 
-} //namespace ops
+} //namespace common
 
 // Keep `interface` undef'd for the rest of the TU (do NOT push/pop-restore):
 // `interface` is a public zendnnl namespace that consumers reference (e.g.
@@ -148,14 +148,14 @@ struct post_op_t {
 #undef interface
 #endif
 namespace interface {
-using post_op_type_t = zendnnl::ops::post_op_type_t;
-using elu_params_t = zendnnl::ops::elu_params_t;
-using leaky_relu_params_t = zendnnl::ops::leaky_relu_params_t;
-using swish_params_t = zendnnl::ops::swish_params_t;
-using clip_params_t = zendnnl::ops::clip_params_t;
-using binary_add_params_t = zendnnl::ops::binary_add_params_t;
-using binary_mul_params_t = zendnnl::ops::binary_mul_params_t;
-using post_op_t = zendnnl::ops::post_op_t;
+using post_op_type_t = zendnnl::common::post_op_type_t;
+using elu_params_t = zendnnl::common::elu_params_t;
+using leaky_relu_params_t = zendnnl::common::leaky_relu_params_t;
+using swish_params_t = zendnnl::common::swish_params_t;
+using clip_params_t = zendnnl::common::clip_params_t;
+using binary_add_params_t = zendnnl::common::binary_add_params_t;
+using binary_mul_params_t = zendnnl::common::binary_mul_params_t;
+using post_op_t = zendnnl::common::post_op_t;
 } // namespace interface
 } //namespace zendnnl
 #endif

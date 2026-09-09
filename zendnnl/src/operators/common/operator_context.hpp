@@ -24,10 +24,10 @@
 #include <vector>
 
 #include "common/hash_object.hpp"
+#include "common/post_op.hpp"
 #include "common/zendnnl_global.hpp"
 #include "memory/memory_utils.hpp"
 #include "memory/tensor.hpp"
-#include "operators/common/post_op.hpp"
 
 namespace zendnnl {
 /** @namespace zendnnl::ops

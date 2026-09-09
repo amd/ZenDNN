@@ -16,6 +16,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/int8_brgemm_looper.hpp"
 #include "common/bfloat16.hpp"
+#include "common/op_config.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/int8/int8_brgemm_ukernel.hpp"
@@ -23,7 +24,6 @@
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/native_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
-#include "operators/matmul/matmul_config.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,7 +37,7 @@ namespace matmul {
 namespace native {
 
 using namespace zendnnl::error_handling;
-using zendnnl::ops::matmul_config_t;
+using zendnnl::common::matmul_config_t;
 
 // ── INT8 VNNI B packing (panel-based, same layout as KC but per N-panel) ──
 // Packs s8 weights into NR_PACK-wide panels with 4-byte VNNI groups.

@@ -301,7 +301,7 @@ get_postop_metadata_cache() {
 //     and group_size are refreshed by patch_mutable_fields).
 std::size_t compute_postop_signature(const matmul_params &lowoha_param,
         const matmul_data_types &dtypes, int zp_comp_ndim, const void *bias,
-        zendnnl::ops::matmul_algo_t w4a8_algo, int M, int N) {
+        zendnnl::common::matmul_algo_t w4a8_algo, int M, int N) {
     std::size_t sig = 0;
     for (const auto &po : lowoha_param.postop_) {
         sig = sig * 31u + static_cast<std::size_t>(po.po_type);
@@ -678,16 +678,16 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         dlp_postop_metadata_holder_t *h, const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int M, int N, int K,
         int32_t *zp_comp_acc, int zp_comp_ndim,
-        zendnnl::ops::matmul_algo_t w4a8_algo,
+        zendnnl::common::matmul_algo_t w4a8_algo,
         const int32_t *reorder_colsum = nullptr, int32_t neg_src_zp = 0) {
     // NOTE: keep these flag definitions in lockstep with the build path in
     // create_dlp_post_op(). The hit path mirrors the build path's per-call
     // mutable-field updates, so any divergence in classification (especially
     // is_bf16_f32_per_token_sym vs is_non_quant_src_int8) would silently
     // corrupt scale_factor on cache hits.
-    const bool is_w4a8 = w4a8_algo != zendnnl::ops::matmul_algo_t::none;
+    const bool is_w4a8 = w4a8_algo != zendnnl::common::matmul_algo_t::none;
     const bool is_w4a8_native_sym
-            = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            = w4a8_algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
             && dtypes.wei == data_type_t::s4;
     bool is_int8 = dtypes.wei == data_type_t::s8 || is_w4a8_native_sym;
     size_t src_scale_nelems
@@ -1007,10 +1007,11 @@ static void patch_mutable_fields(dlp_metadata_t *md,
 dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         const void *bias, const matmul_data_types &dtypes, int N, int K, int M,
         int32_t *zp_comp_acc, int zp_comp_ndim,
-        zendnnl::ops::matmul_algo_t kernel, const void *weight_ptr,
+        zendnnl::common::matmul_algo_t kernel, const void *weight_ptr,
         const int32_t *reorder_colsum, int32_t neg_src_zp,
-        zendnnl::ops::matmul_algo_t w4a8_algo) {
-    const bool has_w4a8_algo = w4a8_algo != zendnnl::ops::matmul_algo_t::none;
+        zendnnl::common::matmul_algo_t w4a8_algo) {
+    const bool has_w4a8_algo
+            = w4a8_algo != zendnnl::common::matmul_algo_t::none;
     // Normalize zp_comp presence at the API boundary: a zp_comp slot is
     // present iff BOTH the dimensionality and the buffer are non-null.
     // Downstream sites disagree on what "present" means today — the
@@ -1074,11 +1075,11 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     bool is_woq
             = (dtypes.wei == data_type_t::s4 || dtypes.wei == data_type_t::u4)
             && dtypes.src == data_type_t::bf16
-            && kernel == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
+            && kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
 
     // Check if this is INT8 quantization case (incl. W4A8 native s4 weights).
     const bool is_w4a8_native_sym
-            = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked
+            = w4a8_algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
             && dtypes.wei == data_type_t::s4;
     bool is_int8 = dtypes.wei == data_type_t::s8 || is_w4a8_native_sym;
 
@@ -1399,7 +1400,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
         dlp_metadata->b_quant_op = &new_holder->b_quant_op;
         dlp_metadata->b_quant_op->quant_op_kind = DLP_QUANT_OP_QUANTIZE;
         const bool b_uses_native_s4
-                = w4a8_algo == zendnnl::ops::matmul_algo_t::aocl_dlp_blocked;
+                = w4a8_algo == zendnnl::common::matmul_algo_t::aocl_dlp_blocked;
         const DLP_TYPE b_sym_dtype = b_uses_native_s4 ? DLP_S4 : DLP_S8;
         dlp_metadata->b_quant_op->src_type = b_sym_dtype;
         dlp_metadata->b_quant_op->dst_type = b_sym_dtype;

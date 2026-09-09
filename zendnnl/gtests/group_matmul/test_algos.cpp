@@ -3479,12 +3479,13 @@ inline double max_abs_diff_t(const std::vector<std::vector<T>> &a,
 struct LruCapacityGuard {
     uint32_t prev;
     explicit LruCapacityGuard(uint32_t v)
-        : prev(zendnnl::ops::matmul_config_t::instance()
+        : prev(zendnnl::common::matmul_config_t::instance()
                           .get_lru_cache_capacity()) {
-        zendnnl::ops::matmul_config_t::instance().set_lru_cache_capacity(v);
+        zendnnl::common::matmul_config_t::instance().set_lru_cache_capacity(v);
     }
     ~LruCapacityGuard() {
-        zendnnl::ops::matmul_config_t::instance().set_lru_cache_capacity(prev);
+        zendnnl::common::matmul_config_t::instance().set_lru_cache_capacity(
+                prev);
     }
     LruCapacityGuard(const LruCapacityGuard &) = delete;
     LruCapacityGuard &operator=(const LruCapacityGuard &) = delete;
@@ -3502,7 +3503,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoDowngradesWc2WhenIneligible) {
     WeightCacheGuard wc(2);
     LruCapacityGuard cap(4096); // finite -> mixed-in-place ineligible
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 1) << "AUTO + WC=2 must downgrade to 1 "
                                             "when mixed-in-place is ineligible";
     EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
@@ -3520,7 +3521,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
     AlgoEnvGuard reset_algo(0);
     WeightCacheGuard wc(2); // capacity unlimited by default
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 2)
             << "AUTO + WC=2 with prepack+cross_warm+unlimited capacity must "
                "keep WC=2";
@@ -3541,7 +3542,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
     CustomKernelOverride ck_off(false); // CK off -> mixed ineligible
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 1)
             << "AUTO + WC=2 with custom kernel OFF must downgrade to "
                "out-of-place "
@@ -3570,7 +3571,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceMatchesWc1) {
         WeightCacheGuard wc(2); // AUTO + WC=2 -> mixed in-place
         mixed = run_min_grp_matmul();
     }
-    EXPECT_TRUE(zendnnl::ops::matmul_config_t::instance()
+    EXPECT_TRUE(zendnnl::common::matmul_config_t::instance()
                         .get_grp_auto_mixed_inplace())
             << "mixed-in-place must have engaged for this AUTO + WC=2 run";
     const double d = max_abs_diff(ref.dst, mixed.dst);
@@ -3654,7 +3655,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo1RespectsWc2) {
     AlgoEnvGuard algo1(1); // pinned AOCL — single layout
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+    EXPECT_EQ(
+            zendnnl::common::matmul_config_t::instance().get_weight_cache(), 2)
             << "pinned ALGO 1 (single AOCL backend) must keep WC=2";
 }
 
@@ -3666,7 +3668,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CustomKernelOnRespectsWc2) {
     CustomKernelOverride ck_on(true); // bf16 CK in-place pack (single consumer)
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+    EXPECT_EQ(
+            zendnnl::common::matmul_config_t::instance().get_weight_cache(), 2)
             << "ALGO 3 + CK keeps WC=2 (in-place handled safely in the pack "
                "layer)";
 }
@@ -3679,7 +3682,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CustomKernelOffRespectsWc2) {
     CustomKernelOverride ck_off(false); // pure AOCL DLP — single layout
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+    EXPECT_EQ(
+            zendnnl::common::matmul_config_t::instance().get_weight_cache(), 2)
             << "ALGO 3 with custom kernel off (AOCL DLP) must keep WC=2";
 }
 
@@ -3699,7 +3703,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CkInPlaceWc2MatchesWc1) {
         reset_grp_matmul_caches();
         WeightCacheGuard wc(1); // out-of-place reference
         ref = run_min_grp_matmul();
-        EXPECT_EQ(zendnnl::ops::matmul_config_t::instance().get_weight_cache(),
+        EXPECT_EQ(
+                zendnnl::common::matmul_config_t::instance().get_weight_cache(),
                 1);
     }
     {
@@ -3707,7 +3712,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CkInPlaceWc2MatchesWc1) {
         WeightCacheGuard wc(2); // in-place under test (fresh buffers)
         test = run_min_grp_matmul();
         EXPECT_EQ(
-                zendnnl::ops::matmul_config_t::instance().get_weight_cache(), 2)
+                zendnnl::common::matmul_config_t::instance().get_weight_cache(),
+                2)
                 << "ALGO 3 + CK must keep WC=2 (no downgrade)";
     }
 
@@ -3763,7 +3769,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3CkInPlaceWc2UnalignedWeight) {
 // tracks it every time.
 TEST(TestGroupMatmulWeightCacheDowngrade, EffectiveWeightCacheTypeLiveRead) {
     using namespace zendnnl::lowoha::matmul;
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     WeightCacheGuard restore(cfg.get_weight_cache()); // restore on scope exit
     cfg.set_weight_cache(2);
     EXPECT_EQ(effective_weight_cache_type(2), 2);
@@ -3789,7 +3795,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo2RespectsWc2) {
     AlgoEnvGuard algo2(2);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 2)
             << "pinned ALGO 2 (single AOCL layout) must keep WC=2";
     EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
@@ -3803,7 +3809,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo4RespectsWc2) {
     AlgoEnvGuard algo4(4);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 2)
             << "pinned ALGO 4 (multilevel CCD, single AOCL layout) must keep "
                "WC=2";
@@ -3817,7 +3823,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo5RespectsWc2) {
     AlgoEnvGuard algo5(5);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
-    auto &cfg = zendnnl::ops::matmul_config_t::instance();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 2)
             << "pinned ALGO 5 (per-expert, single AOCL layout) must keep WC=2";
     EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace());
@@ -3845,7 +3851,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
         WeightCacheGuard wc(2);
         mixed = run_min_grp_matmul();
     }
-    EXPECT_TRUE(zendnnl::ops::matmul_config_t::instance()
+    EXPECT_TRUE(zendnnl::common::matmul_config_t::instance()
                         .get_grp_auto_mixed_inplace())
             << "mixed-in-place must engage for AUTO + WC=2 with CK on";
     const double d = max_abs_diff(ref.dst, mixed.dst);
@@ -6552,7 +6558,7 @@ TEST(TestGroupMatmulMTileQuantGate, RejectsPerTensorAndMismatched) {
 TEST(TestGroupMatmulMTilePostopGate, AcceptsBinaryAddAndMul) {
     using namespace zendnnl::lowoha::matmul;
     using zendnnl::common::data_type_t;
-    using zendnnl::ops::post_op_type_t;
+    using zendnnl::common::post_op_type_t;
 
     const int num_ops = 4;
     std::vector<char> layout(num_ops, 'r');
@@ -6590,7 +6596,7 @@ TEST(TestGroupMatmulMTilePostopGate, AcceptsBinaryAddAndMul) {
 TEST(TestGroupMatmulMTilePostopGate, RejectsSoftmaxAndPooling) {
     using namespace zendnnl::lowoha::matmul;
     using zendnnl::common::data_type_t;
-    using zendnnl::ops::post_op_type_t;
+    using zendnnl::common::post_op_type_t;
 
     const int num_ops = 4;
     std::vector<char> layout(num_ops, 'r');

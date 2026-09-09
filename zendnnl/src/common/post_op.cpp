@@ -16,7 +16,7 @@
 #include "post_op.hpp"
 
 namespace zendnnl {
-namespace ops {
+namespace common {
 using namespace zendnnl::error_handling;
 post_op_t::post_op_t(post_op_type_t type_)
     : type {type_}
@@ -124,5 +124,5 @@ post_op_t::post_op_t(binary_mul_params_t params_)
     , binary_add_params {}
     , binary_mul_params {params_.scale, "binary_mul_tensor_"} {}
 
-} //namespace ops
+} //namespace common
 } //namespace zendnnl

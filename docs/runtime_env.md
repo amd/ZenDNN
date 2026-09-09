@@ -262,5 +262,5 @@ export ZENDNNL_PROFILE_LOG_LEVEL=4
 
 - `config/zendnnl_user_config.json` - Example JSON configuration file
 - `zendnnl/src/common/config_manager.cpp` - Configuration manager implementation
-- `zendnnl/src/operators/matmul/matmul_config.cpp` - MatMul configuration implementation
+- `zendnnl/src/common/op_config.cpp` - MatMul configuration implementation
 

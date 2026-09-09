@@ -50,7 +50,7 @@ struct EmbagConfig {
     size_t embedding_dims; /**< Size of each embedding vector. */
     size_t num_bags; /**< Number of bags (groups of indices) used in embedding bag operation. */
     size_t num_indices; /**< Total number of indices across all bags. */
-    zendnnl::ops::embag_algo_t algo; /**< Algorithm used for embag
+    zendnnl::common::embag_algo_t algo; /**< Algorithm used for embag
                                    computation (e.g., "sum", "mean", "max"). */
     int iters; /**< Number of iterations to run the benchmark. */
     std::vector<zendnnl::common::data_type_t> dt; /**< Data type for

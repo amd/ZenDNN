@@ -20,8 +20,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
+#include "common/op_config.hpp"
 #include "memory/memory_utils.hpp"
-#include "operators/embag/embag_config.hpp"
 #include "operators/embag/embag_context.hpp"
 
 namespace zendnnl {
@@ -33,10 +33,10 @@ using namespace zendnnl::memory;
 /** @brief Default number of threads per CCD (Core Complex Die) */
 constexpr int CCD_NUM_THREADS = 8;
 
-// Use the same embag_algo_t, embag_kernel_t, eb_thread_algo_t from ops namespace
-using embag_algo_t = zendnnl::ops::embag_algo_t;
-using embag_kernel_t = zendnnl::ops::embag_kernel_t;
-using eb_thread_algo_t = zendnnl::ops::eb_thread_algo_t;
+// Use the same embag_algo_t, embag_kernel_t, eb_thread_algo_t from common namespace
+using embag_algo_t = zendnnl::common::embag_algo_t;
+using embag_kernel_t = zendnnl::common::embag_kernel_t;
+using eb_thread_algo_t = zendnnl::common::eb_thread_algo_t;
 
 /**
  * @brief Structure to hold data types for embedding bag operands

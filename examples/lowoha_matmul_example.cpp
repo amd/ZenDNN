@@ -15,7 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_example.hpp"
-#include "operators/matmul/matmul_config.hpp"
+#include "common/op_config.hpp"
 
 #include <vector>
 
@@ -354,7 +354,7 @@ int run_lowoha_matmul_woq_bf16u4_test() {
 
 int run_lowoha_matmul_w4a8_test() {
     try {
-        using zendnnl::ops::matmul_algo_t;
+        using zendnnl::common::matmul_algo_t;
 
         // W4A8: M > 1; K/G divisible; (K/G) % 4 == 0 for sym_quant packing.
         constexpr int M = 8;
@@ -447,7 +447,7 @@ int run_lowoha_matmul_w4a8_test() {
 
 int run_lowoha_matmul_w4a8_static_test() {
     try {
-        using zendnnl::ops::matmul_algo_t;
+        using zendnnl::common::matmul_algo_t;
 
         constexpr int M = 8;
         constexpr int K = 128;

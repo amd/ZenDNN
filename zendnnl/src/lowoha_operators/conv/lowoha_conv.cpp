@@ -105,41 +105,43 @@ status_t conv_direct(const void *input, const void *filter, const void *bias,
         for (size_t i = 0; i < params.postop_.size(); ++i) {
             if (i > 0) ss << ",";
             switch (params.postop_[i].po_type) {
-                case zendnnl::ops::post_op_type_t::none: ss << "none"; break;
-                case zendnnl::ops::post_op_type_t::elu: ss << "elu"; break;
-                case zendnnl::ops::post_op_type_t::relu: ss << "relu"; break;
-                case zendnnl::ops::post_op_type_t::leaky_relu:
+                case zendnnl::common::post_op_type_t::none: ss << "none"; break;
+                case zendnnl::common::post_op_type_t::elu: ss << "elu"; break;
+                case zendnnl::common::post_op_type_t::relu: ss << "relu"; break;
+                case zendnnl::common::post_op_type_t::leaky_relu:
                     ss << "leaky_relu";
                     break;
-                case zendnnl::ops::post_op_type_t::gelu_tanh:
+                case zendnnl::common::post_op_type_t::gelu_tanh:
                     ss << "gelu_tanh";
                     break;
-                case zendnnl::ops::post_op_type_t::gelu_erf:
+                case zendnnl::common::post_op_type_t::gelu_erf:
                     ss << "gelu_erf";
                     break;
-                case zendnnl::ops::post_op_type_t::sigmoid:
+                case zendnnl::common::post_op_type_t::sigmoid:
                     ss << "sigmoid";
                     break;
-                case zendnnl::ops::post_op_type_t::swish: ss << "swish"; break;
-                case zendnnl::ops::post_op_type_t::tanh: ss << "tanh"; break;
-                case zendnnl::ops::post_op_type_t::softmax:
+                case zendnnl::common::post_op_type_t::swish:
+                    ss << "swish";
+                    break;
+                case zendnnl::common::post_op_type_t::tanh: ss << "tanh"; break;
+                case zendnnl::common::post_op_type_t::softmax:
                     ss << "softmax";
                     break;
-                case zendnnl::ops::post_op_type_t::pooling:
+                case zendnnl::common::post_op_type_t::pooling:
                     ss << "pooling";
                     break;
-                case zendnnl::ops::post_op_type_t::square:
+                case zendnnl::common::post_op_type_t::square:
                     ss << "square";
                     break;
-                case zendnnl::ops::post_op_type_t::abs: ss << "abs"; break;
-                case zendnnl::ops::post_op_type_t::sqrt: ss << "sqrt"; break;
-                case zendnnl::ops::post_op_type_t::exp: ss << "exp"; break;
-                case zendnnl::ops::post_op_type_t::log: ss << "log"; break;
-                case zendnnl::ops::post_op_type_t::clip: ss << "clip"; break;
-                case zendnnl::ops::post_op_type_t::binary_add:
+                case zendnnl::common::post_op_type_t::abs: ss << "abs"; break;
+                case zendnnl::common::post_op_type_t::sqrt: ss << "sqrt"; break;
+                case zendnnl::common::post_op_type_t::exp: ss << "exp"; break;
+                case zendnnl::common::post_op_type_t::log: ss << "log"; break;
+                case zendnnl::common::post_op_type_t::clip: ss << "clip"; break;
+                case zendnnl::common::post_op_type_t::binary_add:
                     ss << "binary_add";
                     break;
-                case zendnnl::ops::post_op_type_t::binary_mul:
+                case zendnnl::common::post_op_type_t::binary_mul:
                     ss << "binary_mul";
                     break;
                 default: ss << "unknown"; break;

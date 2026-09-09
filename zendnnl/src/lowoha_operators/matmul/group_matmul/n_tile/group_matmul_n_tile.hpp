@@ -112,12 +112,12 @@
 #include <vector>
 #include "common/zendnnl_compat.hpp"
 
-#include "operators/matmul/matmul_config.hpp" // matmul_algo_t
+#include "common/op_config.hpp" // matmul_algo_t
 // `group_matmul_parallel_common.hpp` provides:
 //   * `parse_env_int_strict`            — strict env parsing helper
 //   * `matmul_params` / `data_type_t`   — used by `flat_n_tile()` decl
 //   * `grp_matmul_gated_act_t`          — fused-act argument type
-//   * the inline `using namespace zendnnl::ops;` declaration
+//   * the inline `using namespace zendnnl::common;` declaration
 //
 // NOTE: `kNTilePlanMaxExperts` previously came from
 // `group_matmul_parallel_common.hpp`; it now lives in the companion
@@ -145,7 +145,7 @@ namespace matmul {
 // `GroupNTilePlan` reads as `matmul_algo_t` (matches the unqualified
 // usage in the rest of the group_matmul code, which gets the same
 // using-decl via `group_matmul_parallel_common.hpp`).
-using zendnnl::ops::matmul_algo_t;
+using zendnnl::common::matmul_algo_t;
 
 // N-tile shared constants (`kDecodeNTile`, `kNTilePlanMaxExperts`)
 // live in the companion planner header
