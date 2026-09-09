@@ -197,19 +197,29 @@ status_t group_matmul_moe_act_execute(
 /**
  * @brief Apply gated activation in-place on a row range of a single expert.
  *
- * Single-threaded — designed to be called from within OMP parallel regions
- * (ALGO 2 M-tile, ALGO 1/4/5 per-expert) for fused activation.
+ * Serial by default — that is what callers already inside an OMP parallel
+ * region need (ALGO 2 M-tile, ALGO 4/5 per-expert), since those parallelise
+ * across tiles / experts and a nested team here would oversubscribe.
  *
- * @param act       Activation type (none is a no-op).
- * @param dst       Expert output buffer [M, ldc].
- * @param row_start First row to process (inclusive).
- * @param row_end   Last row to process (exclusive).
- * @param N         Total columns (must be even: N = 2*dim).
- * @param ldc       Leading dimension of dst.
- * @param dst_dtype Data type of dst (f32, bf16, or f16).
+ * Pass `num_threads > 1` ONLY from a serial context to spread this expert's
+ * rows across a team.  ALGO 1 does that: its expert loop is serial with each
+ * GEMM owning the whole team, so the activation would otherwise run on one
+ * thread.  Doing it per expert inside the loop (rather than once after it)
+ * keeps `dst` hot in L3 from the GEMM that just wrote it.
+ *
+ *
+ * @param act         Activation type (none is a no-op).
+ * @param dst         Expert output buffer [M, ldc].
+ * @param row_start   First row to process (inclusive).
+ * @param row_end     Last row to process (exclusive).
+ * @param N           Total columns (must be even: N = 2*dim).
+ * @param ldc         Leading dimension of dst.
+ * @param dst_dtype   Data type of dst (f32, bf16, or f16).
+ * @param num_threads Team size for the row loop; 1 (default) = serial.
  */
 void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
-        int row_start, int row_end, int N, int ldc, data_type_t dst_dtype);
+        int row_start, int row_end, int N, int ldc, data_type_t dst_dtype,
+        int num_threads = 1);
 
 /**
  * @brief Apply swiglu_oai_mul to an M x pairs interleaved tile, in-place.

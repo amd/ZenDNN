@@ -124,8 +124,8 @@ void sequential_experts(const std::vector<char> &layout,
                 algo);
         // Fused activation: dst[i] is hot in L3 from the GEMM that just finished.
         if (fused_act != grp_matmul_gated_act_t::none) {
-            apply_gated_act_inplace(
-                    fused_act, dst[i], 0, M[i], N[i], ldc[i], act_dtype);
+            apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i], ldc[i],
+                    act_dtype, num_threads);
         }
     }
     return;
@@ -986,44 +986,9 @@ static int auto_select_algo(const std::vector<int> &M,
         }
     }
 
-    // Rule 0.7 — PROMPT M-tile REGIME routing.  ALGO 2 (flat_m_tile) is now a
-    // PURE M-tile executor (multi-tier hybrid + Phase-2 single-tier); the two
-    // non-M-tile regimes it used to handle via internal fallbacks are routed
-    // to the dedicated algos HERE, at selection time, so AUTO reproduces the
-    // exact executor flat_m_tile picked internally before the cleanup:
-    //   * kManyExperts (active_ops > num_threads) → ALGO 2 (multi-tier
-    //     hybrid).  A prompt frame here has many active experts with M
-    //     skewed from several hundred down to 1, so the tail must run
-    //     CONCURRENTLY with the giants rather than after them: the hybrid
-    //     puts the largest experts on multi-thread teams and drains the long
-    //     tail through an atomic counter, in one parallel region.  Safe by
-    //     construction — when its own gates decline (no lights to peel, or a
-    //     heavy pool too small to cover every heavy), `flat_m_tile` clamps
-    //     internally to the same sequential full-team path ALGO 1 runs.
-    //   * kWideN (shallow M: max_M>1 && total_need*2 ≤ num_threads) → ALGO 1
-    //     (sequential full-team): M is too shallow to feed the M-tile slicer;
-    //     the whole team streams each expert's weight once (the old wide-N
-    //     fallback's behaviour).
-    //   * kMTile → ALGO 2: the genuine M-tile regime (multi-tier or single-
-    //     tier is then chosen INSIDE flat_m_tile).
-    // Scope: applies only when the prompt algo is the INHERITED M-tile-family
-    // default (phase algo == 2 and the operator did not set it).  A pin means
-    // a pin in both directions — `AUTO_PROMPT_ALGO=2` is honoured verbatim by
-    // Rule 1 below rather than being re-routed to ALGO 1 on a wide-N frame,
-    // matching what the knob documents for every other value.  An explicit
-    // non-2 pin and the `=0` legacy escape hatch already fell through here;
-    // decode is unaffected.  The classifier's gates mirror flat_m_tile's
-    // internal ones (same kSliceTarget), so routing is parity-preserving for
-    // kWideN and kMTile.
-    if (!is_decode && !grp_matmul_auto_prompt_algo_is_set()
-            && get_grp_matmul_auto_prompt_algo() == 2) {
-        switch (classify_m_tile_regime(M, num_threads)) {
-            case m_tile_regime::kManyExperts:
-                return pick(m_tile_safe ? 2 : 1, "auto_rule07_many_experts", 2);
-            case m_tile_regime::kWideN: return pick(1, "auto_rule07_wide_n", 1);
-            case m_tile_regime::kMTile:
-                return pick(m_tile_safe ? 2 : 1, "auto_rule07_m_tile", 2);
-        }
+    // Rule 0.7 — PROMPT → ALGO 1
+    if (!is_decode && !grp_matmul_auto_prompt_algo_is_set()) {
+        return pick(1, "auto_rule07_prompt_seq", 1);
     }
 
     // Rule 1 — PHASE ENV.  Single-line phase classification (decode iff

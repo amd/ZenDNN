@@ -833,11 +833,13 @@ status_t group_matmul_moe_act_execute(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Single-threaded per-expert activation (for fused ALGO 1/2/4/5 paths)
+// Per-expert activation (for fused ALGO 1/2/4/5 paths).  Serial by
+// default; ALGO 1 passes a team size because its expert loop is serial.
 // ═══════════════════════════════════════════════════════════════════════
 
 void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
-        int row_start, int row_end, int N, int ldc, data_type_t dst_dtype) {
+        int row_start, int row_end, int N, int ldc, data_type_t dst_dtype,
+        int num_threads) {
 
     if (act == grp_matmul_gated_act_t::none || row_start >= row_end || !dst)
         return;
@@ -849,6 +851,12 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
     const int dim = N / 2;
     const bool use_avx512 = avx512f_available();
 
+    // `if (num_threads > 1)` keeps the construct INACTIVE for the callers
+    // that are already inside an OMP region (M-tile, ALGO 4/5), so they run
+    // exactly as before and never nest a team.  Rows are independent —
+    // each touches only `dst + m*ldc` — so no synchronisation is needed.
+    const int nt = (num_threads > 1) ? num_threads : 1;
+#pragma omp parallel for if (nt > 1) num_threads(nt) schedule(static)
     for (int m = row_start; m < row_end; ++m) {
         if (use_avx512) {
             if (dst_dtype == data_type_t::f32) {
