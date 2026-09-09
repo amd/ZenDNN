@@ -117,6 +117,9 @@ find_build_dependencies(${CMAKE_INSTALL_PREFIX})
 # build library
 add_subdirectory(src)
 
+# build tensor helper for in-tree examples/benchdnn
+add_subdirectory(tensor_helper)
+
 # build gtests
 add_subdirectory(gtests)
 

@@ -17,17 +17,17 @@
 #define _SDPA_BENCHDNN_HPP_
 
 #include "benchdnn.hpp"
-#include "example_utils.hpp"
 #include "sdpa_lowoha.hpp"
 #include "sdpa_tensor_factory.hpp"
 #include "sdpa_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace sdpa {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @brief Runs the SDPA benchmark suite.

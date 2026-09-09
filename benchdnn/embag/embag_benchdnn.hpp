@@ -20,14 +20,14 @@
 #include "embag_lowoha.hpp"
 #include "embag_tensor_factory.hpp"
 #include "embag_utils.hpp"
-#include "example_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace embag {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @brief Runs a single embag operation and measures timing.

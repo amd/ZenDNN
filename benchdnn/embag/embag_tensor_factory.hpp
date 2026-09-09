@@ -17,13 +17,13 @@
 #define _EMBAG_TENSOR_FACTORY_HPP_
 
 #include "benchdnn.hpp"
-#include "example_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace embag {
 
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 struct EmbagConfig;
 
 /**

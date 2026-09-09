@@ -16,16 +16,12 @@
 #ifndef _EXAMPLE_UTILS_HPP_
 #define _EXAMPLE_UTILS_HPP_
 
-#include <algorithm>
 #include <cstdlib>
-#include <cstring>
-#include <random>
-#include <variant>
-#include <vector>
 #if defined(_WIN32)
 #include <malloc.h>
 #endif
 
+#include "tensor_helper/tensor_factory.hpp"
 #include "zendnnl.hpp"
 
 #define MATMUL_M 10
@@ -41,78 +37,8 @@ namespace zendnnl {
  */
 namespace examples {
 using namespace zendnnl::interface;
-using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
-
-/** @class tensor_factory_t
- * @brief Quick generation of predefined tensors.
- */
-class tensor_factory_t {
-public:
-    /** @brief Index type */
-    using index_type = tensor_t::index_type;
-    using data_type = common::data_type_t;
-
-    /** @brief zero tensor */
-    tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
-            std::string tensor_name_ = "zero", tensor_t scale = tensor_t(),
-            tensor_t zp = tensor_t());
-
-    /** @brief uniform tensor */
-    tensor_t uniform_tensor(const std::vector<index_type> size_,
-            data_type dtype_, float val_, std::string tensor_name_ = "uniform",
-            tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
-
-    /** @brief broadcasted uniform tensor */
-    tensor_t broadcast_uniform_tensor(const std::vector<index_type> size_,
-            const std::vector<index_type> stride_, data_type dtype_, float val_,
-            std::string tensor_name_ = "broadcasted uniform",
-            tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
-
-    /** @brief non-uniform tensor */
-    tensor_t non_uniform_tensor(const std::vector<index_type> size_,
-            data_type dtype_, std::vector<int64_t> val_,
-            std::string tensor_name_ = "non_uniform",
-            tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
-
-    /** @brief uniform distributed tensor */
-    tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
-            data_type dtype_, float range_,
-            std::string tensor_name_ = "uniform dist", bool trans = false,
-            tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
-
-    /** @brief uniform distributed strided tensor */
-    tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
-            const std::vector<index_type> stride_, data_type dtype_,
-            float range_, std::string tensor_name_ = "strided uniform dist",
-            tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
-
-    /** @brief blocked tensor */
-    tensor_t blocked_tensor(const std::vector<index_type> size_,
-            data_type dtype_, float range_,
-            std::string tensor_name_ = "blocked", tensor_t scale = tensor_t(),
-            tensor_t zp = tensor_t());
-
-    /** @brief copy tensor */
-    tensor_t copy_tensor(const std::vector<index_type> size_, data_type dtype_,
-            StorageParam param, bool trans, bool is_blocked,
-            std::string tensor_name_ = "copy", tensor_t scale = tensor_t(),
-            tensor_t zp = tensor_t());
-
-    /** @brief Generate random indices tensor with optional padding index */
-    tensor_t random_indices_tensor(
-            const std::vector<index_type> size_, uint64_t num_embeddings);
-
-    /** @brief Generate random offsets tensor for bag boundaries */
-    tensor_t random_offsets_tensor(const std::vector<index_type> size_,
-            uint64_t num_indices, bool include_last_offset = true);
-
-    // /** @brief quant embag tensor random */
-    tensor_t quantized_embedding_tensor_random(
-            const std::vector<index_type> size_, data_type dtype_,
-            std::string tensor_name_ = "quant random",
-            bool fp16_scale_bias = true, float scale_min = 0.10,
-            float scale_max = 0.19, float bias_min = 0, float bias_max = 7);
-};
+using tensor_helper::StorageParam;
+using tensor_helper::tensor_factory_t;
 
 /** @class tensor_functions
  * @brief Quick generation of predefined tensors.

@@ -117,8 +117,12 @@ endif()
 
 add_executable(examples ${examples_sources})
 
-# Link to OpenMP
-target_link_libraries(examples PUBLIC OpenMP::OpenMP_CXX)
+# The tensor factory is an in-tree support helper for examples/benchdnn, not an
+# installed public ZenDNN package target.
+add_subdirectory("${ZENDNNL_SOURCE_DIR}/zendnnl/tensor_helper" tensor_helper)
+target_link_libraries(examples
+  PUBLIC OpenMP::OpenMP_CXX
+  PRIVATE tensor_helper)
 # target_link_libraries(examples
 #   OpenMP::OpenMP_CXX
 #   zendnnl::zendnnl_archive)

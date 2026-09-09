@@ -80,12 +80,12 @@ if(zendnnl_FOUND)
 endif()
 
 set(benchdnn_sources
-benchdnn.cpp
-${ZENDNNL_SOURCE_DIR}/examples/example_utils.cpp) # TODO: Replace example_utils.cpp with a dedicated common utils file
+benchdnn.cpp)
 
-include_directories(${ZENDNNL_SOURCE_DIR}/examples) # TODO: Replace with common utils directory
 include_directories(${ZENDNNL_SOURCE_DIR}/benchdnn)
+include_directories(SYSTEM ${ZENDNNL_SOURCE_DIR}/zendnnl)
 
+add_subdirectory("${ZENDNNL_SOURCE_DIR}/zendnnl/tensor_helper" tensor_helper)
 add_subdirectory(matmul)
 add_subdirectory(reorder)
 add_subdirectory(embag)
@@ -105,7 +105,8 @@ target_link_libraries(benchdnn
   normalization_benchdnn
   grp_matmul_benchdnn
   sdpa_benchdnn
-  benchdnn_utils)
+  benchdnn_utils
+  tensor_helper)
 
 # Link to whichever zendnnl library variant was built
 if(TARGET zendnnl::zendnnl_archive)

@@ -1,0 +1,687 @@
+/********************************************************************************
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# *     http://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# *******************************************************************************/
+
+#include "tensor_helper/tensor_factory.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <random>
+
+namespace zendnnl {
+namespace tensor_helper {
+
+using zendnnl::interface::bfloat16_t;
+using zendnnl::interface::data_type_t;
+using zendnnl::interface::float16_t;
+using zendnnl::interface::log_warning;
+using zendnnl::interface::tensor_layout_t;
+using zendnnl::interface::tensor_t;
+
+tensor_t tensor_factory_t::uniform_dist_strided_tensor(
+        const std::vector<index_type> size_,
+        const std::vector<index_type> aligned_size_, data_type dtype_,
+        float range_, std::string tensor_name_, tensor_t scale, tensor_t zp) {
+    auto udstensor = tensor_t()
+                             .set_name(tensor_name_)
+                             .set_size(size_)
+                             .set_data_type(dtype_)
+                             .set_aligned_size(aligned_size_)
+                             .set_storage();
+
+    if (scale.get_nelem() != 0) { udstensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { udstensor.set_quant_zero_point(zp); }
+
+    udstensor.create();
+
+    if (!udstensor.check()) {
+        log_warning("tensor creation of ", udstensor.get_name(), " failed.");
+    } else {
+        std::mt19937 gen(100);
+        std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
+
+        const auto aligned_size = udstensor.get_aligned_size();
+        auto buf_nelem = aligned_size[0];
+        for (size_t i = 1; i < aligned_size.size(); i++) {
+            buf_nelem *= aligned_size[i];
+        }
+        void *buf_vptr = udstensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::f32) {
+            float *buf_ptr = static_cast<float *>(buf_vptr);
+            std::generate(
+                    buf_ptr, buf_ptr + buf_nelem, [&] { return dist(gen); });
+        } else if (dtype_ == data_type::bf16) {
+            bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return bfloat16_t(dist(gen)); });
+        } else if (dtype_ == data_type::s8) {
+            const int min_s8
+                    = static_cast<int>(std::ceil(std::max(-128.0f, -range_)));
+            const int max_s8
+                    = static_cast<int>(std::floor(std::min(127.0f, range_)));
+            std::uniform_int_distribution<int> dist_s8(
+                    min_s8, std::max(min_s8, max_s8));
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return static_cast<int8_t>(dist_s8(gen)); });
+        } else {
+            log_warning(
+                    "tensor ", udstensor.get_name(), " unsupported data type.");
+        }
+    }
+    return udstensor;
+}
+
+tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
+        data_type dtype_, std::string tensor_name_, tensor_t scale,
+        tensor_t zp) {
+
+    auto ztensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_data_type(dtype_)
+                           .set_storage();
+
+    if (scale.get_nelem() != 0) { ztensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { ztensor.set_quant_zero_point(zp); }
+
+    ztensor.create();
+
+    if (!ztensor.check()) {
+        log_warning("tensor creation of ", ztensor.get_name(), " failed.");
+    } else {
+        auto buf_size = ztensor.get_buffer_sz_bytes();
+        void *buf_ptr = ztensor.get_raw_handle_unsafe();
+        std::memset(buf_ptr, 0, buf_size);
+    }
+    return ztensor;
+}
+
+tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
+        data_type dtype_, float val_, std::string tensor_name_, tensor_t scale,
+        tensor_t zp) {
+
+    auto utensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_data_type(dtype_)
+                           .set_storage();
+
+    if (scale.get_nelem() != 0) { utensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { utensor.set_quant_zero_point(zp); }
+
+    utensor.create();
+    if (!utensor.check()) {
+        log_warning("tensor creation of ", utensor.get_name(), " failed.");
+    } else {
+        auto buf_nelem = utensor.get_nelem();
+        void *buf_vptr = utensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::f32) {
+            float *buf_ptr = static_cast<float *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = val_;
+            }
+        } else if (dtype_ == data_type::bf16) {
+            bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = bfloat16_t(val_);
+            }
+        } else if (dtype_ == data_type::f16) {
+            float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = float16_t(val_);
+            }
+        } else if (dtype_ == data_type::s8) {
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = static_cast<int8_t>(val_);
+            }
+        } else if (dtype_ == data_type::s4) {
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            // Clamp val_ to S4 range [-8, 7] and quantize to nearest integer
+            float clamped_val = val_;
+            if (clamped_val < -8.0f) { clamped_val = -8.0f; }
+            if (clamped_val > 7.0f) { clamped_val = 7.0f; }
+            // Round to nearest integer: add 0.5 and truncate
+            int8_t quantized_val = static_cast<int8_t>(clamped_val >= 0.0f
+                            ? clamped_val + 0.5f
+                            : clamped_val - 0.5f);
+
+            // Pack the same value into both lower and upper halves of each byte
+            // Lower 4 bits: quantized_val & 0x0F
+            // Upper 4 bits: (quantized_val & 0x0F) << 4
+            uint8_t packed_byte
+                    = (quantized_val & 0x0F) | ((quantized_val & 0x0F) << 4);
+
+            const index_type packed_bytes = (buf_nelem + 1) / 2;
+            for (index_type i = 0; i < packed_bytes; ++i) {
+                buf_ptr[i] = static_cast<int8_t>(packed_byte);
+            }
+        } else if (dtype_ == data_type::u8) {
+            uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = static_cast<uint8_t>(val_);
+            }
+        } else {
+            log_warning(
+                    "tensor ", utensor.get_name(), " unsupported data type.");
+        }
+    }
+    return utensor;
+}
+
+tensor_t tensor_factory_t::broadcast_uniform_tensor(
+        const std::vector<index_type> size_,
+        const std::vector<index_type> stride_, data_type dtype_, float val_,
+        std::string tensor_name_, tensor_t scale, tensor_t zp) {
+
+    auto utensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_stride(stride_)
+                           .set_data_type(dtype_)
+                           .set_storage();
+
+    if (scale.get_nelem() != 0) { utensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { utensor.set_quant_zero_point(zp); }
+
+    utensor.create();
+
+    if (!utensor.check()) {
+        log_warning("tensor creation of ", utensor.get_name(), " failed.");
+    } else {
+        auto buf_nelem = utensor.get_nelem();
+        void *buf_vptr = utensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::f32) {
+            float *buf_ptr = static_cast<float *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = val_;
+            }
+        } else if (dtype_ == data_type::bf16) {
+            bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = bfloat16_t(val_);
+            }
+        } else if (dtype_ == data_type::f16) {
+            float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = float16_t(val_);
+            }
+        } else if (dtype_ == data_type::s8) {
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = static_cast<int8_t>(val_);
+            }
+        } else {
+            log_warning(
+                    "tensor ", utensor.get_name(), " unsupported data type.");
+        }
+    }
+    return utensor;
+}
+
+tensor_t tensor_factory_t::non_uniform_tensor(
+        const std::vector<index_type> size_, data_type dtype_,
+        std::vector<int64_t> val_, std::string tensor_name_, tensor_t scale,
+        tensor_t zp) {
+
+    auto utensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_data_type(dtype_)
+                           .set_storage();
+
+    if (scale.get_nelem() != 0) { utensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { utensor.set_quant_zero_point(zp); }
+
+    utensor.create();
+
+    if (!utensor.check()) {
+        log_warning("tensor creation of ", utensor.get_name(), " failed.");
+    } else {
+        auto buf_nelem = utensor.get_nelem();
+        void *buf_vptr = utensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::s64) {
+            int64_t *buf_ptr = static_cast<int64_t *>(buf_vptr);
+            for (index_type i = 0; i < buf_nelem; ++i) {
+                buf_ptr[i] = val_[i];
+            }
+        } else {
+            log_warning(
+                    "tensor ", utensor.get_name(), " unsupported data type.");
+        }
+    }
+    return utensor;
+}
+
+tensor_t tensor_factory_t::uniform_dist_tensor(
+        const std::vector<index_type> size_, data_type dtype_, float range_,
+        std::string tensor_name_, bool trans, tensor_t scale, tensor_t zp) {
+    auto udtensor = tensor_t()
+                            .set_name(tensor_name_)
+                            .set_size(size_)
+                            .set_data_type(dtype_)
+                            .set_storage();
+
+    if (scale.get_nelem() != 0) { udtensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { udtensor.set_quant_zero_point(zp); }
+
+    auto tensor_dim = udtensor.get_dim();
+    if (trans && tensor_dim >= 2) {
+        std::string tag;
+        for (size_t i = 0; i < tensor_dim; ++i) {
+            tag += 'a' + i;
+        }
+        std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+        udtensor.set_order(tag);
+    }
+    udtensor.create();
+
+    if (!udtensor.check()) {
+        log_warning("tensor creation of ", udtensor.get_name(), " failed.");
+    } else {
+        std::mt19937 gen(100);
+        std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
+
+        auto buf_nelem = udtensor.get_nelem();
+        void *buf_vptr = udtensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::f32) {
+            float *buf_ptr = static_cast<float *>(buf_vptr);
+            std::generate(
+                    buf_ptr, buf_ptr + buf_nelem, [&] { return dist(gen); });
+        } else if (dtype_ == data_type::bf16) {
+            bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return bfloat16_t(dist(gen)); });
+        } else if (dtype_ == data_type::f16) {
+            float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return float16_t(dist(gen)); });
+        } else if (dtype_ == data_type::s8) {
+            const int min_s8
+                    = static_cast<int>(std::ceil(std::max(-128.0f, -range_)));
+            const int max_s8
+                    = static_cast<int>(std::floor(std::min(127.0f, range_)));
+            std::uniform_int_distribution<int> dist_s8(
+                    min_s8, std::max(min_s8, max_s8));
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return static_cast<int8_t>(dist_s8(gen)); });
+        } else if (dtype_ == data_type::u8) {
+            std::uniform_int_distribution<int> dist_u8(0, range_);
+            uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return static_cast<uint8_t>(dist_u8(gen)); });
+        } else if (dtype_ == data_type::s32) {
+            std::uniform_int_distribution<int> dist_s32(-1 * range_, range_);
+            int32_t *buf_ptr = static_cast<int32_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return static_cast<int32_t>(dist_s32(gen)); });
+        } else if (dtype_ == data_type::s4) {
+            // S4 is packed: 2 x 4-bit values per byte, range [-8, 7]
+            // buf_nelem is the number of S4 elements, stored in buf_nelem/2 bytes
+            std::uniform_int_distribution<int> dist_s4(
+                    -8, 7); // S4 range: -8 to 7
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            size_t num_bytes = (buf_nelem + 1)
+                    / 2; // Round up for odd number of elements
+            for (size_t i = 0; i < num_bytes; ++i) {
+                int8_t low_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+                int8_t high_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+                buf_ptr[i] = low_nibble | (high_nibble << 4);
+            }
+        } else if (dtype_ == data_type::u4) {
+            // U4 is packed like S4: 2 x 4-bit values per byte, range [0, 15]
+            std::uniform_int_distribution<int> dist_u4(0, 15);
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            size_t num_bytes = (buf_nelem + 1) / 2;
+            for (size_t i = 0; i < num_bytes; ++i) {
+                int8_t low_nibble = static_cast<int8_t>(dist_u4(gen)) & 0x0F;
+                int8_t high_nibble = static_cast<int8_t>(dist_u4(gen)) & 0x0F;
+                buf_ptr[i] = low_nibble | (high_nibble << 4);
+            }
+        } else {
+            log_warning(
+                    "tensor ", udtensor.get_name(), " unsupported data type.");
+        }
+    }
+    return udtensor;
+}
+
+tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
+        data_type dtype_, float range_, std::string tensor_name_,
+        tensor_t scale, tensor_t zp) {
+
+    auto btensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_data_type(dtype_)
+                           .set_layout(tensor_layout_t::blocked);
+
+    if (scale.get_nelem() != 0) { btensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { btensor.set_quant_zero_point(zp); }
+
+    // uint64_t nelem = 1;
+    // for( auto i : size_) {
+    //   nelem *= i;
+    // }
+
+    // btensor.set_nelem(nelem).set_storage().create();
+    btensor.set_storage().create();
+
+    if (!btensor.check()) {
+        log_warning("tensor creation of ", btensor.get_name(), " failed.");
+    } else {
+        std::mt19937 gen(100);
+        std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
+
+        auto buf_nelem = btensor.get_nelem();
+        void *buf_vptr = btensor.get_raw_handle_unsafe();
+
+        if (dtype_ == data_type::f32) {
+            float *buf_ptr = static_cast<float *>(buf_vptr);
+            std::generate(
+                    buf_ptr, buf_ptr + buf_nelem, [&] { return dist(gen); });
+        } else if (dtype_ == data_type::bf16) {
+            bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return bfloat16_t(dist(gen)); });
+        } else if (dtype_ == data_type::f16) {
+            float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return float16_t(dist(gen)); });
+        } else if (dtype_ == data_type::s8) {
+            const int min_s8
+                    = static_cast<int>(std::ceil(std::max(-128.0f, -range_)));
+            const int max_s8
+                    = static_cast<int>(std::floor(std::min(127.0f, range_)));
+            std::uniform_int_distribution<int> dist_s8(
+                    min_s8, std::max(min_s8, max_s8));
+            int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+            std::generate(buf_ptr, buf_ptr + buf_nelem,
+                    [&] { return static_cast<int8_t>(dist_s8(gen)); });
+        } else {
+            log_warning(
+                    "tensor ", btensor.get_name(), " unsupported data type.");
+        }
+    }
+    return btensor;
+}
+
+tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
+        data_type dtype_, StorageParam param, bool trans, bool is_blocked,
+        std::string tensor_name_, tensor_t scale, tensor_t zp) {
+
+    auto ctensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size(size_)
+                           .set_data_type(dtype_);
+
+    auto tensor_dim = ctensor.get_dim();
+    if (trans && tensor_dim >= 2) {
+        std::string tag;
+        for (size_t i = 0; i < tensor_dim; ++i) {
+            tag += 'a' + i;
+        }
+        std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+        ctensor.set_order(tag);
+    }
+
+    if (scale.get_nelem() != 0) { ctensor.set_quant_scale(scale); }
+    if (zp.get_nelem() != 0) { ctensor.set_quant_zero_point(zp); }
+
+    if (is_blocked) {
+        ctensor.set_layout(tensor_layout_t::blocked);
+        // uint64_t nelem = 1;
+        // for( auto i : size_) {
+        //   nelem *= i;
+        // }
+        // ctensor.set_nelem(nelem);
+    }
+
+    if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
+        auto [reorder_size, reorder_buff]
+                = std::get<std::pair<size_t, void *>>(param);
+        ctensor.set_storage(reorder_buff, reorder_size);
+    } else if (std::holds_alternative<tensor_t>(param)) {
+        tensor_t input_tensor = std::get<tensor_t>(param);
+        ctensor.set_storage(input_tensor);
+    }
+    ctensor.create();
+
+    if (!ctensor.check()) {
+        log_warning("tensor creation of ", ctensor.get_name(), " failed.");
+    }
+    return ctensor;
+}
+
+tensor_t tensor_factory_t::random_indices_tensor(
+        const std::vector<index_type> size_, uint64_t num_embeddings) {
+    if (num_embeddings == 0
+            || num_embeddings > static_cast<uint64_t>(
+                       std::numeric_limits<int32_t>::max())) {
+        log_warning("invalid num_embeddings for s32 indices.");
+        return tensor_t();
+    }
+
+    auto indices_tensor = tensor_t()
+                                  .set_name("indices_tensor")
+                                  .set_size(size_)
+                                  .set_data_type(data_type_t::s32)
+                                  .set_storage()
+                                  .create();
+    if (!indices_tensor.check()) {
+        log_warning(
+                "tensor creation of ", indices_tensor.get_name(), " failed.");
+        return indices_tensor;
+    }
+
+    void *data = indices_tensor.get_raw_handle_unsafe();
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int32_t> dist(
+            0, static_cast<int32_t>(num_embeddings - 1));
+
+    index_type num_indices = size_[0];
+    int32_t *indices = static_cast<int32_t *>(data);
+
+    for (index_type i = 0; i < num_indices; ++i) {
+        indices[i] = dist(gen);
+    }
+
+    return indices_tensor;
+}
+
+tensor_t tensor_factory_t::random_offsets_tensor(
+        const std::vector<index_type> size_, uint64_t num_indices,
+        bool include_last_offset) {
+    auto tensor = tensor_t()
+                          .set_name("offsets_tensor")
+                          .set_size(size_)
+                          .set_data_type(data_type_t::s32)
+                          .set_storage()
+                          .create();
+    if (!tensor.check()) {
+        log_warning("tensor creation of ", tensor.get_name(), " failed.");
+        return tensor;
+    }
+
+    if (num_indices
+            > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        log_warning("tensor ", tensor.get_name(),
+                " num_indices is not representable in s32.");
+        return tensor;
+    }
+
+    void *data = tensor.get_raw_handle_unsafe();
+    int32_t *offsets = static_cast<int32_t *>(data);
+
+    index_type num_offsets = size_[0];
+    if (include_last_offset) { num_offsets--; }
+
+    for (index_type i = 0; i < num_offsets; ++i) {
+        offsets[i] = static_cast<int32_t>((i * num_indices) / num_offsets);
+    }
+
+    if (include_last_offset) {
+        offsets[num_offsets] = static_cast<int32_t>(num_indices);
+    }
+
+    return tensor;
+}
+
+// Convert float32 to float16 (stored as uint16_t)
+static uint16_t float_to_half(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+
+    uint32_t sign = (x >> 31) & 0x1;
+    int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = (x >> 13) & 0x3FF;
+
+    if (exponent <= 0) {
+        if (exponent < -10) { return static_cast<uint16_t>(sign << 15); }
+        mantissa = (x & 0x7FFFFF) | 0x800000;
+        mantissa >>= (1 - exponent + 13);
+        return static_cast<uint16_t>((sign << 15) | mantissa);
+    } else if (exponent >= 31) {
+        return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+    }
+
+    return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
+}
+
+tensor_t tensor_factory_t::quantized_embedding_tensor_random(
+        const std::vector<index_type> size_, data_type dtype_,
+        std::string tensor_name_, bool fp16_scale_bias, float scale_min,
+        float scale_max, float bias_min, float bias_max) {
+
+    if (size_.size() != 2 || size_[0] == 0 || size_[1] == 0) {
+        log_warning("quantized embedding tensor requires non-zero 2D size.");
+        return tensor_t();
+    }
+    if (dtype_ != data_type_t::s8 && dtype_ != data_type_t::s4
+            && dtype_ != data_type_t::u4) {
+        log_warning("quantized embedding tensor requires s8, s4, or u4 data.");
+        return tensor_t();
+    }
+
+    const size_t num_embeddings = static_cast<size_t>(size_[0]);
+    const size_t embedding_dim = static_cast<size_t>(size_[1]);
+    const size_t quantized_size
+            = (dtype_ == data_type_t::s4 || dtype_ == data_type_t::u4)
+            ? (embedding_dim + 1) / 2
+            : embedding_dim;
+    const size_t row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
+
+    uint64_t num_bytes = static_cast<uint64_t>(num_embeddings)
+            * static_cast<uint64_t>(row_size) * sizeof(uint8_t);
+
+    void *raw_buffer = malloc(num_bytes);
+
+    if (!raw_buffer) {
+        log_warning("malloc failed for ", num_bytes, " bytes");
+        return tensor_t();
+    }
+    std::memset(raw_buffer, 0, num_bytes);
+
+    auto qtensor = tensor_t()
+                           .set_name(tensor_name_)
+                           .set_size({num_embeddings, embedding_dim})
+                           .set_data_type(dtype_)
+                           .set_storage(raw_buffer, num_bytes)
+                           .create();
+    if (!qtensor.check()) {
+        log_warning("tensor creation of ", qtensor.get_name(), " failed.");
+        std::free(raw_buffer);
+        return tensor_t();
+    } else {
+        int8_t *input = static_cast<int8_t *>(raw_buffer);
+
+        // Random generators
+        std::mt19937 gen(std::random_device {}());
+        std::uniform_int_distribution<int> dist_s4(-8, 7);
+        std::uniform_int_distribution<int> dist_u4(0, 15);
+        std::uniform_int_distribution<int> dist_s8(-128, 127);
+        std::uniform_real_distribution<float> scale_dist(scale_min, scale_max);
+        std::uniform_real_distribution<float> bias_dist(bias_min, bias_max);
+
+        for (size_t i = 0; i < num_embeddings; ++i) {
+            const size_t row_base = i * row_size;
+            float scale = scale_dist(gen);
+            float bias = bias_dist(gen);
+
+            if (dtype_ == data_type_t::s4) {
+                std::memset(input + row_base, 0, quantized_size);
+                for (size_t j = 0; j < embedding_dim; ++j) {
+                    int8_t qval = dist_s4(gen);
+                    size_t byte_idx = j / 2;
+                    if (j % 2 == 0) {
+                        input[row_base + byte_idx] = (qval & 0x0F);
+                    } else {
+                        input[row_base + byte_idx] &= 0x0F;
+                        input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+                    }
+                }
+            } else if (dtype_ == data_type_t::u4) {
+                std::memset(input + row_base, 0, quantized_size);
+                for (size_t j = 0; j < embedding_dim; ++j) {
+                    uint8_t qval = dist_u4(gen);
+                    size_t byte_idx = j / 2;
+                    if (j % 2 == 0) {
+                        input[row_base + byte_idx] = (qval & 0x0F);
+                    } else {
+                        input[row_base + byte_idx] &= 0x0F;
+                        input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+                    }
+                }
+            } else {
+                for (size_t j = 0; j < embedding_dim; ++j) {
+                    int8_t qval = dist_s8(gen);
+                    input[row_base + j] = qval;
+                }
+            }
+
+            // Append scale and bias
+            if (fp16_scale_bias) {
+                uint16_t scale_fp16 = float_to_half(scale);
+                uint16_t bias_fp16 = float_to_half(bias);
+                std::memcpy(&input[row_base + quantized_size], &scale_fp16,
+                        sizeof(uint16_t));
+                std::memcpy(&input[row_base + quantized_size + 2], &bias_fp16,
+                        sizeof(uint16_t));
+            } else {
+                std::memcpy(&input[row_base + quantized_size], &scale,
+                        sizeof(float));
+                std::memcpy(&input[row_base + quantized_size + 4], &bias,
+                        sizeof(float));
+            }
+        }
+    }
+    return qtensor;
+}
+
+} // namespace tensor_helper
+} // namespace zendnnl

@@ -17,17 +17,17 @@
 #define _NORMALIZATION_BENCHDNN_HPP_
 
 #include "benchdnn.hpp"
-#include "example_utils.hpp"
 #include "normalization_lowoha.hpp"
 #include "normalization_tensor_factory.hpp"
 #include "normalization_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace normalization {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @brief Runs the full normalization benchmark suite from an input file and writes results to a CSV file.

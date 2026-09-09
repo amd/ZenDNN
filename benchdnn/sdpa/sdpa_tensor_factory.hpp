@@ -21,12 +21,13 @@
 // `sdpa_utils.hpp` (and its `SdpaConfig`) because nothing here references it;
 // callers that need `SdpaConfig` already include `sdpa_utils.hpp` directly.
 #include "benchdnn.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace sdpa {
 
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @enum qkv_layout_t

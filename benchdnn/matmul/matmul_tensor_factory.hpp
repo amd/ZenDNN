@@ -17,12 +17,13 @@
 #define _MATMUL_TENSOR_FACTORY_HPP_
 
 #include "benchdnn.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
 
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 struct MatmulConfig;
 
 /**

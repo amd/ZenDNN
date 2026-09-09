@@ -17,17 +17,17 @@
 #define _REORDER_BENCHDNN_HPP_
 
 #include "benchdnn.hpp"
-#include "example_utils.hpp"
 #include "reorder_lowoha.hpp"
 #include "reorder_tensor_factory.hpp"
 #include "reorder_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace reorder {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @brief Runs a single reorder operation and records timing statistics.

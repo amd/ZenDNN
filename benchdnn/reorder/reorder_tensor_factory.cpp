@@ -16,6 +16,7 @@
 
 #include "reorder_tensor_factory.hpp"
 #include <cmath>
+#include <random>
 #include "reorder_utils.hpp"
 
 namespace zendnnl {

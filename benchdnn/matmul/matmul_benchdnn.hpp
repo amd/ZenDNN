@@ -17,17 +17,17 @@
 #define _MATMUL_BENCHDNN_HPP_
 
 #include "benchdnn.hpp"
-#include "example_utils.hpp"
 #include "matmul_lowoha.hpp"
 #include "matmul_tensor_factory.hpp"
 #include "matmul_utils.hpp"
+#include "tensor_helper/tensor_factory.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::examples;
+using namespace zendnnl::tensor_helper;
 
 /**
  * @brief Runs a single matmul operation with optional bias and post-ops, and measures timing.
