@@ -695,7 +695,13 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
     return status_t::success;
 }
 
-// W4A8 full-weight warm-pack; algo must match runtime. ALGO 3 uses aocl_dlp.
+// ─────────────────────────────────────────────────────────────────────
+// W4A8 full-weight AOCL DLP warm-pack.
+//
+// Used by full-N ALGOs 1/2/5/6. `algo` must match the runtime
+// `w4a8_runtime_algo` decision: blocked DLP warms the native-s4 cache, while
+// plain DLP first expands s4→s8 and warms the simulated path's caches.
+// ALGO 3 uses the separate per-N-tile simulated warmer below.
 status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,

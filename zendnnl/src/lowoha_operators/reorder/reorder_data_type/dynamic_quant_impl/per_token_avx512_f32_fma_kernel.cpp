@@ -508,7 +508,7 @@ void dynamic_per_token_quant_f32_s8_native(
 
     // Nested-OMP guard.  When this kernel is called from inside an outer
     // parallel region (e.g. the per-expert dynamic-quant fallback in
-    // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+    // `execute_expert_slice` under ALGO 2/5/6, or Stage 2b of the
     // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
     // typically disabled — so the `#pragma omp parallel` block below
     // would receive a 1-thread team that only covers the first
@@ -725,7 +725,7 @@ void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
 
     // Nested-OMP guard.  When this kernel is called from inside an outer
     // parallel region (e.g. the per-expert dynamic-quant fallback in
-    // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+    // `execute_expert_slice` under ALGO 2/5/6, or Stage 2b of the
     // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
     // typically disabled — so the `#pragma omp parallel` block below
     // would receive a 1-thread team that only covers the first
@@ -934,7 +934,7 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
 
     // Nested-OMP guard.  When this kernel is called from inside an outer
     // parallel region (e.g. the per-expert dynamic-quant fallback in
-    // `execute_expert_slice` under ALGO 2/4/5, or Stage 2b of the
+    // `execute_expert_slice` under ALGO 2/5/6, or Stage 2b of the
     // fused-MoE M-tile vertical-fusion pipeline), nested parallelism is
     // typically disabled — so the `#pragma omp parallel` block below
     // would receive a 1-thread team that only covers the first

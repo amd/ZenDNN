@@ -17,7 +17,7 @@
 /// @file test_w4a8_per_group.cpp
 /// @brief Grouped MoE W4A8 per-group matmul tests (sparse expert routing).
 /// ALGO 3 W4A8 is always simulated (s4→s8) + aocl_dlp_blocked s8s8_sym_quant.
-/// Full-N ALGOs 1/2/4/5 follow w4a8_runtime_algo (blocked = native s4).
+/// Full-N ALGOs 1/2/5/6 follow w4a8_runtime_algo (blocked = native s4).
 
 #include <gtest/gtest.h>
 
@@ -133,7 +133,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
 
     tensor_factory_t tf;
     std::vector<tensor_t> inp(E), wt(E), bias(E), out_a0(E), out_a1(E),
-            out_a2(E), out_a3(E), out_a4(E), out_ref(E);
+            out_a2(E), out_a3(E), out_a6(E), out_ref(E);
     std::vector<int> active(E);
 
     const int64_t saved_seed = seed;
@@ -153,7 +153,7 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
         out_a1[e] = tf.zero_tensor({Mbuf, N}, out_dt);
         out_a2[e] = tf.zero_tensor({Mbuf, N}, out_dt);
         out_a3[e] = tf.zero_tensor({Mbuf, N}, out_dt);
-        out_a4[e] = tf.zero_tensor({Mbuf, N}, out_dt);
+        out_a6[e] = tf.zero_tensor({Mbuf, N}, out_dt);
         out_ref[e] = tf.zero_tensor({Mbuf, N}, out_dt);
     }
     seed = saved_seed;
@@ -192,12 +192,12 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
     ASSERT_EQ(st, status_t::success) << label << ": ALGO 3 failed";
 
     {
-        moe_test_utils::AlgoEnvGuard g(4);
+        moe_test_utils::AlgoEnvGuard g(6);
         reset_grp_matmul_caches();
-        st = group_matmul_kernel_test(inp, wt, bias, out_a4, algo, 1.0f, 0.0f,
+        st = group_matmul_kernel_test(inp, wt, bias, out_a6, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
     }
-    ASSERT_EQ(st, status_t::success) << label << ": ALGO 4 failed";
+    ASSERT_EQ(st, status_t::success) << label << ": ALGO 6 failed";
 
     {
         moe_test_utils::AlgoEnvGuard g(1);
@@ -236,9 +236,9 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
         EXPECT_TRUE(ok) << label << ": ALGO 3 vs 1 mismatch (e=" << e << ")";
 
         ok = true;
-        compare_tensor_2D_matrix(out_a4[e], out_a1[e], M_e, N, K, rtol_bf16,
+        compare_tensor_2D_matrix(out_a6[e], out_a1[e], M_e, N, K, rtol_bf16,
                 abs_tol, ok, false, 1.0f, true);
-        EXPECT_TRUE(ok) << label << ": ALGO 4 vs 1 mismatch (e=" << e << ")";
+        EXPECT_TRUE(ok) << label << ": ALGO 6 vs 1 mismatch (e=" << e << ")";
     }
 }
 

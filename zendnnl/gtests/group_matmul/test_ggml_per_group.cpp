@@ -355,7 +355,7 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
     // AUTO (env_algo=0): this decode-class per-group call (pre-quantized s8, so
     // dynamic_quant=no) routes to ALGO 3 (N-tile) AND enables the AUTO-only
     // cross-warm, which AOT-warms the full-weight layout (shared by ALGO
-    // 1/2/4/5) alongside the per-tile ALGO-3 layout.
+    // 1/2/5/6) alongside the per-tile ALGO-3 layout.
     moe_test_utils::AlgoEnvGuard algo_auto(0);
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
     prepack::clear_fingerprint_cache_for_test();
@@ -380,7 +380,7 @@ TEST(GroupMatmulGgmlPerGroup, NtileDlpActuallyTilesNBF16) {
                    "stable="
                 << stable << " N=" << N << " num_threads=" << num_threads;
         // AUTO-only cross-warm must AOT-warm the OTHER layout class (full-weight,
-        // used by ALGO 1/2/4/5) alongside the per-tile ALGO-3 primary above.
+        // used by ALGO 1/2/5/6) alongside the per-tile ALGO-3 primary above.
         EXPECT_NE(stats.cross_warm_regime, prepack::CrossWarmRegime::none)
                 << "cross-warm did not fire under AUTO (env_algo=0)";
     } else {

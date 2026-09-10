@@ -277,7 +277,7 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
 //
 // This is the key for the AUTO mixed-in-place warm latch + completion record.
 // The in-place mutation is a property of the WEIGHT BUFFER, not of any tuning
-// context: a prompt call (ALGO 1/2/4/5) and a decode call (ALGO 3) — or two
+// context: a prompt call (ALGO 1/2/5/6) and a decode call (ALGO 3) — or two
 // calls differing only in thread count / tile alignment — that SHARE the same
 // weight buffer must contend on the SAME latch, otherwise one could read or
 // out-of-place-reorder a half-mutated buffer while the other is mid in-place
@@ -507,7 +507,7 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     // weight buffer.
     //
     // Key on the WEIGHT-POOL IDENTITY fingerprint (NOT the full `fingerprint()`).
-    // In mixed mode the prompt (ALGO 1/2/4/5) and the decode (ALGO 3) prepacks
+    // In mixed mode the prompt (ALGO 1/2/5/6) and the decode (ALGO 3) prepacks
     // BOTH touch the SAME weight buffers and BOTH do an in-place full-weight
     // AOCL reorder of them: the prompt as its primary warm, the decode via
     // `cross_warm` -> `warm_aocl` (warm_wct=2).  The latch must serialise EVERY
@@ -561,7 +561,7 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
 
 // AOCL DLP backend wrapper — calls the existing FULL-WEIGHT warmer
 // with the per-call vectors taken straight from `PrepackParams`.
-// Used by ALGOs 1, 2, 4, 5 (no column tiling) and by ALGO 3's
+// Used by ALGOs 1, 2, 5, 6 (no column tiling) and by ALGO 3's
 // fallback paths (STABLE_NTILE off, narrow-N escape, missing thread
 // context).  Returns the `packed_ok` count for the apilog probe line.
 // Resolve the `is_weights_const` vector for a warm-pack call.  An
@@ -602,7 +602,7 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_sym_quant(
     // `p.group_size` (0 = per-token; > 0 = per-group K/G) selects the
     // sym-quant reorder granularity so the warmed AOCL slot matches the
     // runtime key for a per-group `{M,G}` src / `{G,N}` wei call (the
-    // fallback a per-group layer routed to ALGO 1/2/4/5 will read).
+    // fallback a per-group layer routed to ALGO 1/2/5/6 will read).
     aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, st,
             p.group_size);
@@ -1412,7 +1412,7 @@ inline bool ck_eligible(const PrepackParams &p) {
 // `cross_warm` opportunistically populates the OTHER regime so the
 // transition is seamless.  Decision is CUSTOM_KERNEL-aware:
 //
-//   * From any non-ALGO-3 prepack (1 / 2 / 4 / 5):
+//   * From any non-ALGO-3 prepack (1 / 2 / 5 / 6):
 //       - CK=1 ⇒ warm custom-kernel pack (regime 3); decode will use it.
 //       - CK=0 ⇒ warm per-tile AOCL DLP with nr_align=1 (regime 2);
 //                covers the typical Op2 non-tight decode path.
@@ -1464,8 +1464,8 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
     // phase (decode ↔ prompt) would route to in the same process.  That
     // only pays off under AUTO (`ZENDNNL_GRP_MATMUL_ALGO=0`), where the
     // phase selector may legitimately route successive calls to different
-    // ALGOs.  When the user PINS a single ALGO (1..5) every call runs
-    // that one ALGO, so the cross-warm target cache is never consulted
+    // ALGOs.  When the user PINS a single generic ALGO ({1,2,3,5,6}), every
+    // call runs that one ALGO, so the cross-warm target cache is never consulted
     // and eagerly packing it is pure warm-up waste (extra CPU during
     // warm-up plus a resident LRU footprint that scales with
     // experts × tiles).  Any pinned-ALGO fallback (e.g. an unsafe-shape
@@ -1551,7 +1551,7 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         return;
     }
 
-    // ALGO 1 / 2 / 4 / 5 → cross-warm the regime the upcoming ALGO 3
+    // ALGO 1 / 2 / 5 / 6 → cross-warm the regime the upcoming ALGO 3
     // decode will use, selected by the CUSTOM_KERNEL env knob.
     if (ck_eligible(p)) {
         // CK=1: decode will use custom kernel → warm regime 3.
@@ -1601,13 +1601,13 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────
-// ALGOs 1, 2, 4, 5 — AOCL DLP only (when inner kernel matches).
+// ALGOs 1, 2, 5, 6 — AOCL DLP only (when inner kernel matches).
 //
 // The four bodies are identical today; kept as separate symbols so
 // the modular contract holds and per-ALGO specialisation is a
 // drop-in change, not a refactor.
 // ─────────────────────────────────────────────────────────────────────
-// Shared body for the AOCL-only scheduling ALGOs (1, 2, 4, 5).  These
+// Shared body for the AOCL-only scheduling ALGOs (1, 2, 5, 6).  These
 // have no per-tile / custom-kernel primary warm of their own: they
 // warm the full-weight AOCL DLP cache when the inner kernel is
 // `aocl_dlp_blocked`, then defer to `cross_warm` to prefill whatever
@@ -1627,7 +1627,7 @@ static void prepack_aocl_only_algo(
     bool primary_did_aocl_fw = false;
     const char *primary_label = "none";
 
-    // AUTO mixed-in-place ordering: for a prompt-class call (ALGO 1/2/4/5)
+    // AUTO mixed-in-place ordering: for a prompt-class call (ALGO 1/2/5/6)
     // the primary is the AOCL full-weight reorder, which mutates the weight
     // buffer IN PLACE under mixed mode.  It MUST run AFTER `cross_warm` has
     // packed the decode layout (CK / per-tile) OUT-OF-PLACE from the raw
@@ -1887,12 +1887,12 @@ void prepack_for_algo_3(const PrepackParams &p) {
             cwr, primary_label);
 }
 
-void prepack_for_algo_4(const PrepackParams &p) {
-    prepack_aocl_only_algo(p, /*scheduling_algo=*/4);
-}
-
 void prepack_for_algo_5(const PrepackParams &p) {
     prepack_aocl_only_algo(p, /*scheduling_algo=*/5);
+}
+
+void prepack_for_algo_6(const PrepackParams &p) {
+    prepack_aocl_only_algo(p, /*scheduling_algo=*/kGrpMatmulAlgoMultilevel);
 }
 
 void clear_fingerprint_cache_for_test() {

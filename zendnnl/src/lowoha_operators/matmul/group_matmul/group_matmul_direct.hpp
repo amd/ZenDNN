@@ -198,7 +198,7 @@ status_t group_matmul_moe_act_execute(
  * @brief Apply gated activation in-place on a row range of a single expert.
  *
  * Serial by default — that is what callers already inside an OMP parallel
- * region need (ALGO 2 M-tile, ALGO 4/5 per-expert), since those parallelise
+ * region need (ALGO 2 M-tile, ALGO 5/6 per-expert), since those parallelise
  * across tiles / experts and a nested team here would oversubscribe.
  *
  * Pass `num_threads > 1` ONLY from a serial context to spread this expert's
@@ -251,7 +251,7 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
  * `execute_act_rows_scalar` (scalar fallback) in
  * `group_matmul_moe_act.cpp`), so this helper is never called with
  * silu / gelu.  (Note: the sibling helper `apply_gated_act_inplace`
- * in the same TU IS used by ALGO 1 / 2 / 4 / 5 dispatcher paths
+ * in the same TU IS used by ALGO 1 / 2 / 5 / 6 dispatcher paths
  * and by the ALGO 3 Sequential strategy's tight-split-halves
  * fallback — but it is NOT called from inside
  * `group_matmul_moe_act_execute`.)  For the TIGHT caller layout the
@@ -370,7 +370,7 @@ bool apply_gated_act_inplace_dlp(grp_matmul_gated_act_t act, void *dst,
  *     Pass 2: Op2 (down_proj)                  via parallel dispatch.
  *   Both passes honour ZENDNNL_GRP_MATMUL_ALGO.  The dispatcher may
  *   fuse the gated activation into Pass 1's epilogue (all activations
- *   on ALGO 1/2/4/5, and swiglu_oai_mul on ALGO 3); otherwise a
+ *   on ALGO 1/2/5/6, and swiglu_oai_mul on ALGO 3); otherwise a
  *   separate activation sub-pass is applied to Pass 1's output before
  *   Pass 2.  Per-expert deep fusion of Op1 → activation → Op2 chained
  *   at L1/L2/L3 boundaries is a possible future extension.
@@ -725,7 +725,7 @@ void clear_fused_moe_scratch();
  * @return true if the gated activation was fused into the ALGO's epilogue
  *         (caller should skip the separate activation pass).  false if
  *         the caller must apply activation separately.  Today:
- *           ALGO 1 / 2 / 4 / 5 — always fuse any supported activation.
+ *           ALGO 1 / 2 / 5 / 6 — always fuse any supported activation.
  *           ALGO 3 N-tile      — fuses swiglu_oai_mul only (interleaved
  *                                layout); silu_and_mul / gelu_and_mul are
  *                                returned unfused because their split-

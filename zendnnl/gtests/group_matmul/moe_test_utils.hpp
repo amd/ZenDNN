@@ -826,13 +826,14 @@ struct NTileStrategyOverride {
 //            the env-unset / sentinel-`-1` path resolves to the
 //            documented per-phase default (PROMPT=2, DECODE=3) via
 //            the cached getter, NOT to 0.
-//   * 1..5 — force the matching ALGO for that phase.
+//   * 1,2,3,5,6 — force the matching generic ALGO for that phase.
+//   * 4    — request the W8A8 whole-call interceptor for that phase. On
+//            `unimplemented`, generic routing inherits the phase default
+//            policy; 4 itself is never a generic pin.
 //   * < 0  — sentinel "no override"; falls through to the cached env
 //            path (which applies the documented defaults).
-//   * > 5  — clamps to the documented per-phase default in the
-//            getter (PROMPT=2, DECODE=3), matching the env-parse
-//            "validate or fall back to default" convention used by
-//            the other int env getters in this codebase.
+//   * > 6  — invalid; inherits the documented phase default and does not
+//            count as an explicit policy pin.
 struct AutoPromptAlgoOverride {
     int prev;
     explicit AutoPromptAlgoOverride(int value) {

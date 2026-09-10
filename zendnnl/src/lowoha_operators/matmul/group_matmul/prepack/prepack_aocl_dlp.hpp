@@ -199,7 +199,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
 ///     `extra_input_hash = hash(group_size)` and `group_size` drives the
 ///     reorder — the exact key a per-group `{M,G}` src / `{G,N}` wei
 ///     call builds at runtime.  Warms the AOCL fallback a per-group layer
-///     routed to ALGO 1/2/4/5 (or an ALGO-3 CK-refused expert) will read.
+///     routed to ALGO 1/2/5/6 (or an ALGO-3 CK-refused expert) will read.
 status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
@@ -233,7 +233,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
         AoclDlpPackProbeStats &stats, int group_size = 0);
 
-/// W4A8 full-weight warm for ALGOs 1/2/4/5. @param algo must match runtime.
+/// W4A8 full-weight warm for ALGOs 1/2/5/6. @param algo must match runtime.
 status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,

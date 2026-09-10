@@ -296,8 +296,8 @@ TEST_F(TestPrepackPerAlgoFunctions, EagerWarmsAllExpertsWhenTotalEqualsActive) {
     prepack::prepack_for_algo_1(h.pp);
     prepack::prepack_for_algo_2(h.pp);
     prepack::prepack_for_algo_3(h.pp);
-    prepack::prepack_for_algo_4(h.pp);
     prepack::prepack_for_algo_5(h.pp);
+    prepack::prepack_for_algo_6(h.pp);
 
     // Probe the custom-kernel cache.  ALGO 3's body warms it (BF16 +
     // custom-kernel-on satisfied via `make_harness`); the other ALGO
@@ -2208,8 +2208,8 @@ static std::vector<EnvCase> make_bucket_a_cases() {
             env_case("algo_1", V {{"ZENDNNL_GRP_MATMUL_ALGO", "1"}}),
             env_case("algo_2", V {{"ZENDNNL_GRP_MATMUL_ALGO", "2"}}),
             env_case("algo_3", V {{"ZENDNNL_GRP_MATMUL_ALGO", "3"}}),
-            env_case("algo_4", V {{"ZENDNNL_GRP_MATMUL_ALGO", "4"}}),
             env_case("algo_5", V {{"ZENDNNL_GRP_MATMUL_ALGO", "5"}}),
+            env_case("algo_6", V {{"ZENDNNL_GRP_MATMUL_ALGO", "6"}}),
 
             // ── ZENDNNL_MATMUL_WEIGHT_CACHE ──────────────────────────────
             // Closes B6: AOCL warmer must short-circuit when set to 0.
@@ -2361,8 +2361,8 @@ static std::vector<EnvCase> make_interaction_matrix_cases() {
             // Each non-3 ALGO production path with prepack engaged.
             env_case("algo1_prepack_on", V {{"ZENDNNL_GRP_MATMUL_ALGO", "1"}}),
             env_case("algo2_prepack_on", V {{"ZENDNNL_GRP_MATMUL_ALGO", "2"}}),
-            env_case("algo4_prepack_on", V {{"ZENDNNL_GRP_MATMUL_ALGO", "4"}}),
             env_case("algo5_prepack_on", V {{"ZENDNNL_GRP_MATMUL_ALGO", "5"}}),
+            env_case("algo6_prepack_on", V {{"ZENDNNL_GRP_MATMUL_ALGO", "6"}}),
 
             // Auto-ALGO + custom on — let the auto-picker decide while
             // custom kernel pack warm fires.
@@ -2990,12 +2990,12 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo3DisablesCrossWarm) {
                "(regime 3) still fires for all experts.";
 }
 
-// ALGO 2 / 4 / 5 share the `prepack_aocl_only_algo` body with ALGO 1,
+// ALGO 2 / 5 / 6 share the `prepack_aocl_only_algo` body with ALGO 1,
 // so the AUTO-only gate must short-circuit cross-warm for each of them
 // identically.  This parametric test guards against a future
 // per-ALGO divergence in that shared path (e.g. someone splitting the
 // four forwarders into bespoke bodies and dropping the gate from one).
-TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo245DisableCrossWarm) {
+TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo256DisableCrossWarm) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
@@ -3006,8 +3006,8 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo245DisableCrossWarm) {
     };
     const AlgoCase cases[] = {
             {2, &prepack::prepack_for_algo_2},
-            {4, &prepack::prepack_for_algo_4},
             {5, &prepack::prepack_for_algo_5},
+            {6, &prepack::prepack_for_algo_6},
     };
 
     for (const auto &c : cases) {

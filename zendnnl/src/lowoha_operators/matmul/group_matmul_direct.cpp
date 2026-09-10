@@ -27,6 +27,7 @@
 #include "group_matmul/detect_internal_alloc.hpp"
 #include "group_matmul/group_matmul_direct.hpp"
 #include "group_matmul/group_matmul_parallel_common.hpp"
+#include "group_matmul/ntile_flat_parallel/ntile_flat_parallel.hpp"
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -863,6 +864,12 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             ? static_cast<size_t>(params[0].active_matmul)
             : num_ops_input;
     const bool single_expert_parallel = (src.size() == 1 && num_ops == 1);
+    // Classify only the compute-active prefix. Framework callers may append
+    // prepack-only experts to M; a large-M cold expert must not turn this
+    // call's decode request into prompt.
+    const grp_matmul_phase call_phase = classify_grp_matmul_phase(M, num_ops);
+    const grp_matmul_ntile_flat_parallel_request_source algo4_source
+            = resolve_grp_matmul_ntile_flat_parallel_request(call_phase);
 
     // ── F16 ISA gate + reference-accum-type setup ────────────────────
     // The single-op path runs `kernel_select` per call, which both
@@ -1138,18 +1145,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     });
     if (val != status_t::success) { return val; }
 
-    // ── Active-set + prepack accounting ───────────────────────────────
-    // `num_ops` (matmul-processing count; every dispatcher iterates
-    // `[0, num_ops)`) and `single_expert_parallel` are computed once near
-    // the top of this function so the always-on guards and the dispatch
-    // routing share one verdict — see their definition there.
-    //
-    // `num_ops_total` (the prepack iteration count) is NOT materialised
-    // here: each scheduling ALGO body reads `params[0].total_matmul` when
-    // building its `PrepackParams` (falling back to `M.size()` for legacy
-    // callers under the uniform-eager `ZENDNNL_GRP_MATMUL_PREPACK=1`
-    // default; set the env to `0` to restore the strict lazy-only path).
-
+    // Start common instrumentation before either the whole-call interceptor
+    // or generic dispatch so every successful execution reaches the same
+    // profiler, summary log, and test-observability epilogue.
     profiler_t profiler;
     bool is_profile = is_profile_enabled();
     if (is_profile) { profiler.tbp_start(); }
@@ -1161,10 +1159,159 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             = resolve_num_threads(params[0].num_threads, omp_mt);
     thread_guard tg(num_threads, omp_mt);
 
-    // Cache the apilog gate; the post-dispatch L1 summary at the bottom
-    // of this function reads it through a single predicted-not-taken
-    // branch when API logging is below info level.
     static const bool s_l1_log = apilog_info_enabled();
+    auto finish_success = [&]() -> status_t {
+        if (is_profile) { profiler.tbp_stop(); }
+
+        // One summary path serves both generic execution and the W8A8
+        // whole-call interceptor.
+        if (s_l1_log || is_profile) {
+            std::ostringstream ss;
+            ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops
+               << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
+               << " exec_algo=" << executed_algo_from_gemm_mode(gemm_mode)
+               << " threads=" << num_threads
+               << " dtype=" << dt_name(params[0].dtypes.src) << ">"
+               << dt_name(params[0].dtypes.wei) << ">"
+               << dt_name(params[0].dtypes.dst) << " layout=" << layout[0]
+               << uniformity_marker(layout)
+               << " transA=" << (transA[0] ? 'T' : 'N')
+               << uniformity_marker(transA)
+               << " transB=" << (transB[0] ? 'T' : 'N')
+               << uniformity_marker(transB) << " alpha[0]=" << alpha[0]
+               << uniformity_marker(alpha) << " beta[0]=" << beta[0]
+               << uniformity_marker(beta)
+               << " wconst[0]=" << (is_weights_const[0] ? 1 : 0)
+               << uniformity_marker(is_weights_const) << " lda[0]=" << lda[0]
+               << " ldb[0]=" << ldb[0]
+               << " ldc[0]=" << (ldc.empty() ? -1 : ldc[0]) << " N[0]=" << N[0]
+               << " K[0]=" << K[0] << " M=[";
+
+            int64_t m_sum = 0;
+            for (size_t i = 0; i < num_ops; ++i) {
+                if (i > 0) { ss << ','; }
+                ss << M[i];
+                m_sum += M[i];
+            }
+            ss << "](sum=" << m_sum << ")";
+
+            const bool has_act = (gated_act != nullptr
+                    && gated_act->act != grp_matmul_gated_act_t::none);
+            const bool has_fused = (fused_moe != nullptr);
+            const bool has_moe = (moe_postop != nullptr);
+            ss << " fused=[";
+            bool need_comma = false;
+            if (has_act) {
+                ss << "act=" << act_name(gated_act->act);
+                need_comma = true;
+            }
+            if (has_fused) {
+                if (need_comma) { ss << ','; }
+                ss << "down_proj=N_down[0]=" << fused_moe->N_down[0];
+                need_comma = true;
+            }
+            if (has_moe) {
+                if (need_comma) { ss << ','; }
+                ss << "moe_postop(tokens=" << moe_postop->num_tokens
+                   << ",topk=" << moe_postop->topk << ')';
+                need_comma = true;
+            }
+            if (!need_comma) { ss << "none"; }
+            ss << ']';
+            ss << " sequential_chain="
+               << ((src.size() == 1 && !single_expert_parallel) ? 1 : 0);
+
+            if (s_l1_log) { apilog_info(ss.str()); }
+            if (is_profile) {
+                profilelog_verbose(ss.str(),
+                        " time=", profiler.tbp_elapsedtime(),
+                        profiler.get_res_str());
+            }
+        }
+
+        if (zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.load(
+                    std::memory_order_relaxed)) {
+            zendnnl::lowoha::matmul::test_api::
+                    s_last_group_matmul_direct_gemm_mode.store(
+                            gemm_mode, std::memory_order_relaxed);
+        }
+        return status_t::success;
+    };
+
+    // ── ALGO 4: W8A8 grouped-MoE fast path ──────────────────────────
+    // Attempt only after the public API's always-on structural checks and
+    // enabled diagnostic contract have accepted the original caller inputs.
+    // This preserves the same rejection semantics as every generic ALGO; the
+    // specialized executor then applies its stricter W8A8 eligibility checks.
+    //
+    // A quantized MoE block whose experts arrive pre-grouped is entirely
+    // weight-bandwidth-bound at decode batch sizes, and the generic planner
+    // cannot express "touch each weight byte once, against an activation
+    // already in registers". When the arguments prove one of its two exact
+    // input modes, run it directly:
+    //   * bf16_dynamic: BF16 src, private runtime quantization, BF16 W2
+    //     output reusing src.
+    //   * s8_prequantized: caller S8 src + positive finite per-token BF16/F32
+    //     scales, and caller-owned BF16 dst_down over the exact same tight,
+    //     BF16-sized backing as the S8 prefix.
+    //
+    // `unimplemented` means "not this shape, nothing written". Both BF16 and
+    // caller-prequantized S8 may fall through to main's generic fused-MoE
+    // implementation. The generic path safely serves ALGO4's same-backing
+    // layout through its ordered two-pass execution; an enabled
+    // vertical-fusion attempt detects the unequal S8 read / BF16 write byte
+    // strides and declines before writes.
+    if (algo4_source != grp_matmul_ntile_flat_parallel_request_source::none) {
+        status_t fast_st = status_t::unimplemented;
+        if (moe_postop != nullptr && gated_act != nullptr
+                && fused_moe != nullptr) {
+            fast_st = ntile_flat_parallel::try_execute(layout, transA, transB,
+                    M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                    is_weights_const, params, moe_postop, gated_act, fused_moe);
+        }
+        static const bool s_algo4_log
+                = zendnnl::error_handling::apilog_verbose_enabled();
+        if (s_algo4_log) {
+            const char *result = fast_st == status_t::success
+                    ? "triggered"
+                    : (fast_st == status_t::unimplemented ? "eligibility_failed"
+                                                          : "execution_error");
+            const char *fallback = "none";
+            if (fast_st == status_t::unimplemented) {
+                fallback = algo4_source
+                                == grp_matmul_ntile_flat_parallel_request_source::
+                                        global
+                        ? "generic_auto"
+                        : (call_phase == grp_matmul_phase::decode
+                                          ? "decode_default_policy"
+                                          : "prompt_default_policy");
+            }
+            zendnnl::error_handling::apilog_verbose(
+                    "[GRP_MATMUL.ALGO4] source=",
+                    grp_matmul_ntile_flat_parallel_request_source_name(
+                            algo4_source),
+                    " phase=", grp_matmul_phase_name(call_phase),
+                    " fast_path=", result, " fallback=", fallback);
+        }
+        if (fast_st == status_t::success) {
+            gemm_mode = "ntile_flat_parallel";
+            return finish_success();
+        } else if (fast_st != status_t::unimplemented) {
+            return fast_st;
+        }
+    }
+
+    // ── Active-set + prepack accounting ───────────────────────────────
+    // `num_ops` (matmul-processing count; every dispatcher iterates
+    // `[0, num_ops)`) and `single_expert_parallel` are computed once near
+    // the top of this function so the always-on guards and the dispatch
+    // routing share one verdict — see their definition there.
+    //
+    // `num_ops_total` (the prepack iteration count) is NOT materialised
+    // here: each scheduling ALGO body reads `params[0].total_matmul` when
+    // building its `PrepackParams` (falling back to `M.size()` for legacy
+    // callers under the uniform-eager `ZENDNNL_GRP_MATMUL_PREPACK=1`
+    // default; set the env to `0` to restore the strict lazy-only path).
 
     std::vector<matmul_params> exec_params(params.begin(),
             params.begin()
@@ -1297,7 +1444,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                 // (ALGO 3 pinned, or AUTO where the per-phase selector picks ALGO 3 for
                 // decode) so the two-pass legacy dispatch N-tiles each op's per-group
                 // weight via `do_tile`'s per-tile repack; pinned non-N-tile algos
-                // (1/2/4/5) keep the full-weight reorder ('r').  GGML is per-group, so
+                // (1/2/5/6) keep the full-weight reorder ('r').  GGML is per-group, so
                 // vertical fusion (per-token only) always declines and the call always
                 // lands on the two-pass dispatch — the SAME contract as the non-fused
                 // path, which is why both Op1 and Op2 share one skip_reorder verdict.
@@ -1460,7 +1607,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             // the flat_n_tile per-group path then reorders each weight INTERNALLY per
             // N-tile (`do_tile`'s `{G, n_tile}` sym-quant repack) — the GEMM handles
             // the reorder after N-tiling, exactly like a caller-provided per-group s8
-            // weight.  Pinned non-N-tile algos (1/2/4/5) keep the full-weight
+            // weight.  Pinned non-N-tile algos (1/2/5/6) keep the full-weight
             // reorder-at-unpack (they consume the reordered 'r' weight directly).
             const int ggml_grp_algo = get_grp_matmul_algo();
             const bool ggml_skip_reorder
@@ -1489,12 +1636,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                         }
                         if (!ggml_is_sym_quant(exec_params[i])) {
                             log_error(
-                                    "group_matmul_direct: GGML packed weights "
+                                    "group_matmul_direct: GGML packed "
+                                    "weights "
                                     "on expert ",
                                     i,
-                                    " require sym-quant per-group int8 with an "
+                                    " require sym-quant per-group int8 "
+                                    "with an "
                                     "s8 source "
-                                    "(enable ZENDNNL_ENABLE_GROUP_DQ so the "
+                                    "(enable ZENDNNL_ENABLE_GROUP_DQ so "
+                                    "the "
                                     "source is "
                                     "quantized to s8 before the unpack).");
                             return status_t::failure;
@@ -1544,9 +1694,11 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                         "group_matmul_direct: a pre-reordered weight "
                         "(mem_format_b='r') could not be consumed by the "
                         "custom "
-                        "kernel (CK disabled or unsupported shape/host). Such "
+                        "kernel (CK disabled or unsupported shape/host). "
+                        "Such "
                         "a "
-                        "weight is VNNI-packed and has no safe fallback path.");
+                        "weight is VNNI-packed and has no safe fallback "
+                        "path.");
                 return status_t::failure;
             }
 
@@ -1564,100 +1716,7 @@ status_t group_matmul_direct(const std::vector<char> &layout,
         }
     }
 
-    if (is_profile) { profiler.tbp_stop(); }
-
-    // ── L1 APILOG (single per-call summary) ───────────────────────────
-    // Built once; consumed by both apilog (full structured line) and
-    // profilelog (same line + timing breakdown).  Skipped entirely
-    // when both gates are off.  See the helper-comment block above
-    // `dt_name` for the format contract.
-    if (s_l1_log || is_profile) {
-        std::ostringstream ss;
-        ss << "[GRP_MATMUL.CALL] num_ops=" << num_ops
-           << " mode=" << (gemm_mode != nullptr ? gemm_mode : "null")
-           << " exec_algo=" << executed_algo_from_gemm_mode(gemm_mode)
-           << " threads=" << num_threads
-           << " dtype=" << dt_name(params[0].dtypes.src) << ">"
-           << dt_name(params[0].dtypes.wei) << ">"
-           << dt_name(params[0].dtypes.dst) << " layout=" << layout[0]
-           << uniformity_marker(layout) << " transA=" << (transA[0] ? 'T' : 'N')
-           << uniformity_marker(transA) << " transB=" << (transB[0] ? 'T' : 'N')
-           << uniformity_marker(transB) << " alpha[0]=" << alpha[0]
-           << uniformity_marker(alpha) << " beta[0]=" << beta[0]
-           << uniformity_marker(beta)
-           << " wconst[0]=" << (is_weights_const[0] ? 1 : 0)
-           << uniformity_marker(is_weights_const) << " lda[0]=" << lda[0]
-           << " ldb[0]=" << ldb[0] << " ldc[0]=" << (ldc.empty() ? -1 : ldc[0])
-           << " N[0]=" << N[0] << " K[0]=" << K[0] << " M=[";
-
-        int64_t m_sum = 0;
-        for (size_t i = 0; i < num_ops; ++i) {
-            if (i > 0) { ss << ','; }
-            ss << M[i];
-            m_sum += M[i];
-        }
-        ss << "](sum=" << m_sum << ")";
-
-        // Fused-operation summary — empty list when this is a plain GEMM,
-        // otherwise records activation kind, fused down-projection (with
-        // N_down for cross-checking), and weighted-reduce post-op
-        // (with token count + topk).
-        const bool has_act = (gated_act != nullptr
-                && gated_act->act != grp_matmul_gated_act_t::none);
-        const bool has_fused = (fused_moe != nullptr);
-        const bool has_moe = (moe_postop != nullptr);
-        ss << " fused=[";
-        bool need_comma = false;
-        if (has_act) {
-            ss << "act=" << act_name(gated_act->act);
-            need_comma = true;
-        }
-        if (has_fused) {
-            if (need_comma) { ss << ','; }
-            ss << "down_proj=N_down[0]=" << fused_moe->N_down[0];
-            need_comma = true;
-        }
-        if (has_moe) {
-            if (need_comma) { ss << ','; }
-            ss << "moe_postop(tokens=" << moe_postop->num_tokens
-               << ",topk=" << moe_postop->topk << ')';
-            need_comma = true;
-        }
-        if (!need_comma) { ss << "none"; }
-        ss << ']';
-        ss << " sequential_chain="
-           << ((src.size() == 1 && !single_expert_parallel) ? 1 : 0);
-
-        if (s_l1_log) { apilog_info(ss.str()); }
-        if (is_profile)
-            profilelog_verbose(ss.str(), " time=", profiler.tbp_elapsedtime(),
-                    profiler.get_res_str());
-    }
-
-    // Test-only inspection hook: publish the resolved `gemm_mode`
-    // (a static literal owned by `flat_n_tile`'s `gemm_mode_label`
-    // or one of the per-algo executors) so gtests can assert which
-    // executor path actually ran without a public-API change.
-    //
-    // Gated on `s_capture_gemm_mode`:
-    //   * Production builds never arm it → branch-not-taken on a
-    //     relaxed atomic load whose cache line is in Shared state
-    //     across cores.  No coherence traffic, ~1 cycle total.
-    //   * Tests arm via `GemmModeCaptureGuard` (RAII in
-    //     `moe_test_utils.hpp`) for the scope of the assertion.
-    // Without the gate the unconditional store marks its cache
-    // line Modified on every dispatcher call, ping-ponging the
-    // line across cores under concurrent traffic — a hidden tax
-    // for multi-rank serving deployments that have no use for
-    // the hook.  See the doc-block on `s_capture_gemm_mode` in
-    // `group_matmul/group_matmul_parallel_common.hpp`.
-    if (zendnnl::lowoha::matmul::test_api::s_capture_gemm_mode.load(
-                std::memory_order_relaxed)) {
-        zendnnl::lowoha::matmul::test_api ::s_last_group_matmul_direct_gemm_mode
-                .store(gemm_mode, std::memory_order_relaxed);
-    }
-
-    return status_t::success;
+    return finish_success();
 }
 
 } // namespace matmul

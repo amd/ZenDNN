@@ -27,7 +27,7 @@
 ///                                          fallback every other ALGO
 ///                                          may route to under safety
 ///                                          clamps.
-///   * ALGO 4  (`parallel_multilevel`)    — CCD-aware adaptive
+///   * ALGO 6  (`parallel_multilevel`)    — CCD-aware adaptive
 ///                                          scheduling.
 ///   * ALGO 5  (`parallel_per_expert`)    — per-expert parallel.
 ///   * ALGO 0  auto-select (`auto_select_algo`) + safety clamps.
@@ -131,7 +131,7 @@ void sequential_experts(const std::vector<char> &layout,
     return;
 }
 
-// ── ALGO=4: multilevel — CCD-aware adaptive scheduling ──────────────────
+// ── ALGO=6: multilevel — CCD-aware adaptive scheduling ──────────────────
 //
 // (A) Few experts, large M: multi-CCD per expert, all concurrent.
 // (B) Few experts + small M, or many experts: round-based, 1 CCD each.
@@ -157,7 +157,7 @@ void parallel_multilevel(const std::vector<char> &layout,
         if (gemm_mode_out != nullptr) { *gemm_mode_out = s; }
     };
     // Default to SKIP so a no-op early return (empty call / num_threads<=0)
-    // reports exec_algo=0 rather than a real ALGO-4 run; the two regime
+    // reports exec_algo=0 rather than a real ALGO-6 run; the two regime
     // branches below overwrite it with the executed path.
     set_ml_mode("multilevel_skip");
 
@@ -169,13 +169,13 @@ void parallel_multilevel(const std::vector<char> &layout,
     // executor is ever entered, so no per-regime all-inactive guard is needed
     // here.  The per-slot M<=0 guards below still cover the mixed case.
 
-    // Generic ahead-of-time weight pre-pack for ALGO 4.
+    // Generic ahead-of-time weight pre-pack for ALGO 6.
     // See sequential_experts above for the contract; identical short-
     // circuits, only the scheduling-algo tag differs.  `num_threads`
     // is forwarded so cross_warm can prefill regime 2 for the upcoming
     // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
     // ALGO 1 call site for the full rationale).
-    group_matmul_prepack::prepack_for_algo_4(
+    group_matmul_prepack::prepack_for_algo_6(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
                     get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
@@ -372,8 +372,8 @@ void parallel_per_expert(const std::vector<char> &layout,
 //       ALGO 3 arrow can fire, so it is unaffected by n_tile_safe.)
 //
 //   Other ALGOs are unaffected by this helper:
-//     * Forced `env_algo ∈ {1, 2, 4, 5}` is respected as-is
-//       (m_tile_safe is checked separately for ALGO 2; ALGO 1/4/5
+//     * Forced `env_algo ∈ {1, 2, 5, 6}` is respected as-is
+//       (m_tile_safe is checked separately for ALGO 2; ALGO 1/5/6
 //       have no tile-safety gate).
 //
 //   What N-tile accepts today is intentionally one single shape:
@@ -684,13 +684,15 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 // policy; set the env to `0` for the legacy cascade, or `1` to
 // pin the legacy sequential_experts prompt path).
 //
-// AUTO never emits ALGO 4 or 5 of its own accord.  ALGO 4/5 are reached only by
-// an explicit request the selector honours: a global `ZENDNNL_GRP_MATMUL_ALGO=
-// {4,5}` force, or an `AUTO_{PROMPT,DECODE}_ALGO={4,5}` phase-env pin (Rule 1).
+// AUTO's built-in heuristics never emit ALGO 5 or ALGO 6. Both generic
+// schedulers remain reachable through an explicit global or phase pin.
 // The one refinement is Rule 0.6a, which does NOT invent an ALGO-5 pick — it
 // QUALIFIES an operator's decode `AUTO_DECODE_ALGO=5` pin, honouring it only for
 // INT8 (s8) saturated-team decode and declining it (→ decode default) otherwise;
 // with no pin set the invariant is exact.
+// value 4 requests the earlier W8A8 whole-call interceptor; after an
+// eligibility decline it is deliberately NOT a generic pin and this selector
+// runs the inherited phase-default policy.
 //
 // Decision precedence (tightest first):
 //
@@ -698,7 +700,7 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //      Capacity carve-out: beyond `GroupNTilePlan::kMaxExperts` the
 //      N-tile planner's R3 gate falls back to its Sequential strategy,
 //      so ALGO 3 would be no better than ALGO 1.  This is the one site
-//      where the no-4-no-5 invariant costs throughput — ALGO 5's
+//      where the no-5-no-6 invariant costs throughput — ALGO 5's
 //      per-expert wave schedule was the only PARALLEL option past that
 //      ceiling; `ZENDNNL_GRP_MATMUL_ALGO=5` recovers it.  Phase env
 //      cannot override this — the R3 gate is structural.
@@ -715,11 +717,12 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
 //                  `max_M >  kDecodeMaxM` (prompt) →
 //                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (default 2)
-//      When the active phase env is non-zero (the default cases),
-//      that ALGO is returned directly with the same m_tile_safe /
-//      n_tile_safe clamps the global ALGO env path applies in
-//      `select_grp_matmul_algo`.  The defaults give an out-of-the-
-//      box auto policy: ALGO 2 (flat_m_tile + multi-tier hybrid +
+//      A generic non-zero value is returned directly with the same
+//      m_tile_safe / n_tile_safe clamps the global ALGO env path applies in
+//      `select_grp_matmul_algo`. Value 4 has already requested W8A8 and, on
+//      decline, behaves as an unset setting here so the inherited default
+//      refinements still run. The defaults give an out-of-the-box auto
+//      policy: ALGO 2 (flat_m_tile + multi-tier hybrid +
 //      wide-N fallback) for prompt — the M-tile multi-tier targets
 //      skewed-M prompt shapes, while the wide-N fallback keeps
 //      few-expert light frames on the legacy ALGO 1 path; safety
@@ -785,13 +788,13 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_single_thread", 1);
     }
 
-    // INVARIANT — AUTO never returns ALGO 4 or 5 of its own accord; every rule
-    // that once answered 5 answers `n_tile_safe ? 3 : 1`.  Rule 0.6a below does
+    // INVARIANT — AUTO never returns ALGO 5 or 6 of its own accord; every rule
+    // that once answered 5 answers `n_tile_safe ? 3 : 1`. Rule 0.6a below does
     // NOT break this: it never SELECTS 5, it only QUALIFIES an operator's
     // explicit decode `AUTO_DECODE_ALGO=5` pin (honour for INT8 saturated-team
-    // decode, decline → decode default otherwise).  Keep new rules inside the
-    // no-4-no-5 set.  The invariant constrains the HEURISTICS, not the operator:
-    // an explicit phase pin or global force of 4/5 is honoured.
+    // decode, decline → decode default otherwise). Keep new rules inside the
+    // no-5-no-6 set. The invariant constrains the HEURISTICS, not the operator:
+    // an explicit phase pin or global force of 5/6 is honoured.
     //
     // Rule 0 — STRUCTURAL capacity carve-out, placed before the phase env so
     // it catches every shape that would otherwise reach the N-tile planner's
@@ -800,8 +803,14 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_rule0_capacity", 1);
     }
 
-    const int max_M = *std::max_element(M.begin(), M.end());
-    const bool is_decode = (max_M <= kDecodeMaxM);
+    const int max_M = max_active_grp_matmul_m(M, M.size());
+    const grp_matmul_phase phase = classify_grp_matmul_phase(max_M);
+    const bool is_decode = phase == grp_matmul_phase::decode;
+    // One snapshot carries raw request, generic effective value, and pin
+    // status. In particular, a request 4 fallback maps to the default
+    // effective value without suppressing any default-policy refinement.
+    const grp_matmul_auto_phase_setting phase_setting
+            = get_grp_matmul_auto_phase_setting(phase);
 
     // ACTIVE-COMPUTE expert count = |{ i : M[i] > 0 }|, NOT M.size() and NOT the
     // framework `total_matmul` pool: a legacy caller may pass a padded vector
@@ -846,8 +855,8 @@ static int auto_select_algo(const std::vector<int> &M,
     // (pre-gate semantics).  ALGO 5 has no tiling precondition, so an honoured
     // pin needs no m_tile_safe / n_tile_safe clamp.
     const bool decode_pin_is_5 = is_decode
-            && grp_matmul_auto_decode_algo_is_set()
-            && get_grp_matmul_auto_decode_algo() == 5;
+            && phase_setting.pins_generic_policy()
+            && phase_setting.requested_algo == 5;
     bool decode_algo5_pin_declined = false;
     bool decode5_wei_not_s8 = false;
     bool decode5_low_occupancy = false;
@@ -921,9 +930,8 @@ static int auto_select_algo(const std::vector<int> &M,
     // A gate-declined decode `=5` pin is treated as UNSET here, which re-enables
     // the decode policy rules (0.45 / 0.5 / 0.6) below and, with Rule 1's
     // default substitution, lands the call exactly where an unset pin would.
-    const bool phase_env_pinned = !decode_algo5_pin_declined
-            && (is_decode ? grp_matmul_auto_decode_algo_is_set()
-                          : grp_matmul_auto_prompt_algo_is_set());
+    const bool phase_env_pinned
+            = !decode_algo5_pin_declined && phase_setting.pins_generic_policy();
 
     // Rule 0.45 — SINGLE DENSE EXPERT DECODE → ALGO 3 (N-tile).
     // A lone expert (`num_ops == 1`) in decode would otherwise be diverted by
@@ -991,13 +999,15 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_rule07_prompt_seq", 1);
     }
 
-    // Rule 1 — PHASE ENV.  Single-line phase classification (decode iff
-    // `max_M ≤ kDecodeMaxM`) drives which env is consulted.  When the
-    // active phase env is non-zero the operator has explicitly pinned
-    // that algo for the phase — return it directly, with the same
-    // m_tile_safe / n_tile_safe correctness clamps the global ALGO env
-    // path applies.  Non-tile-safe + ALGO 3 falls to ALGO 1; non-m-tile-
-    // safe + ALGO 2 falls to ALGO 1.  These clamps emit no WARN: the
+    // Rule 1 — PHASE SETTING. Shared phase classification drives which
+    // setting is consulted. A generic non-zero request pins that algo for
+    // the phase; request 4 reaches here only after a BF16 W8A8 hook decline
+    // and exposes the inherited default as its generic effective value, with
+    // `phase_env_pinned=false` so Rules 0.45/0.5/0.6/0.7 above retain their
+    // normal authority. Apply the same m_tile_safe / n_tile_safe correctness
+    // clamps as the global ALGO env path. Non-tile-safe + ALGO 3 falls to
+    // ALGO 1; non-m-tile-safe + ALGO 2 falls to ALGO 1. These clamps emit no
+    // WARN: the
     // `[GRP_MATMUL.ALGO WARN]` line belongs to `select_grp_matmul_algo`'s
     // global-env branch, which this path does not reach — reaching here
     // means the global ALGO was AUTO.  Operators see the clamp on the
@@ -1012,19 +1022,18 @@ static int auto_select_algo(const std::vector<int> &M,
     // mean "as if unset" instead of a third, otherwise-unreachable policy.
     const int phase_algo = decode_algo5_pin_declined
             ? kGrpMatmulAutoDecodeAlgoDefault
-            : (is_decode ? get_grp_matmul_auto_decode_algo()
-                         : get_grp_matmul_auto_prompt_algo());
-    if (phase_algo >= 1 && phase_algo <= 5) {
+            : phase_setting.generic_effective_algo;
+    if (is_grp_matmul_generic_algo(phase_algo)) {
         if (phase_algo == 2 && !m_tile_safe) {
             return pick(1, "auto_phase_env", phase_algo);
         }
         if (phase_algo == 3 && !n_tile_safe) {
             return pick(1, "auto_phase_env", phase_algo);
         }
-        // ALGO 4 and 5 are honoured here.  The no-4-no-5 invariant governs
+        // ALGO 5 and 6 are honoured here.  The no-5-no-6 invariant governs
         // what auto-select picks ON ITS OWN, not what an operator may ask
         // for: a phase pin is an explicit request, and silently rewriting it
-        // to 3 (as this did until now) made `AUTO_{PROMPT,DECODE}_ALGO={4,5}`
+        // to 3 would make `AUTO_{PROMPT,DECODE}_ALGO={5,6}`
         // look supported while doing something else, with a warning on every
         // single call.  Neither algo has a tiling precondition, so no clamp
         // applies.
@@ -1068,7 +1077,7 @@ static int auto_select_algo(const std::vector<int> &M,
 
 // ── ALGO selection ──────────────────────────────────────────────────────
 //
-// Returns ALGO number (1-5).  Driven by:
+// Returns a canonical generic ALGO number ({1,2,3,5,6}).  Driven by:
 //   * `check_m_tile_safe` / `check_n_tile_extra` — helper checks that
 //     determine whether the M-tile slicer is safe to use and whether
 //     the extra constraints required by the N-tile path are satisfied
@@ -1093,16 +1102,20 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
                                      /*allow_prepacked_b=*/true)
             && check_n_tile_extra(M, params, num_ops_eff);
 
-    // Manual override: ZENDNNL_GRP_MATMUL_ALGO=1..5.
+    // Manual generic override: ZENDNNL_GRP_MATMUL_ALGO={1,2,3,5,6}.
     //   ALGO 2 (M-tile): needs m_tile_safe (row-major, uniform dtypes).
     //   ALGO 3 (N-tile): needs n_tile_safe (+ unpacked B, no buffer post-ops).
-    //   ALGO 1/4/5:      no tiling → no safety guard needed (BLAS handles all).
+    //   ALGO 1/5/6:      no tiling → no safety guard needed (BLAS handles all).
     // Unsafe env overrides fall back to ALGO 1 rather than failing, so
     // callers that force-deploy a given ALGO never hit a hard error on
     // shape edge cases.
-    const int env_algo = get_grp_matmul_algo();
-    if (env_algo >= 1 && env_algo <= 5) {
-        int algo = env_algo;
+    // Inspect the raw requested selector so numeric 4 is unmistakably outside
+    // this generic branch. Global 4 has already attempted W8A8 and falls
+    // through to AUTO below; a global generic pin returns here before any
+    // phase setting can affect routing.
+    const int requested_algo = get_grp_matmul_requested_algo();
+    if (is_grp_matmul_generic_algo(requested_algo)) {
+        int algo = requested_algo;
         // Silent-override → apilog_warning so a user debugging
         // `ZENDNNL_GRP_MATMUL_ALGO=3 but actually ran ALGO 1` sees the
         // reason in the library log.  Gated by apilog_warning_enabled()
@@ -1194,7 +1207,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // (and its one-shot log) is stable for the rest of the run.
     //
     // PINNED algos keep a single layout per weight and so KEEP WC=2:
-    //   * ALGO 1/2/4/5 — one AOCL reorder layout per buffer, via AOCL's
+    //   * ALGO 1/2/5/6 — one AOCL reorder layout per buffer, via AOCL's
     //     own in-place path (aocl_kernel.cpp, size-gated with an out-of-
     //     place fall-back when the blocked layout exceeds the plain size).
     //   * ALGO 3 + CUSTOM_KERNEL off — pure AOCL DLP, single layout.
@@ -1330,7 +1343,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 }
             }
         } else {
-            // Pinned ALGO (1..5) under WC=2: a single reorder layout owns each
+            // Pinned generic ALGO under WC=2: a single reorder layout owns each
             // weight buffer, so the backends' normal in-place path is already
             // safe.  Mixed mode is AUTO-only — clear the flag deterministically
             // so a value left set by a prior AUTO run cannot leak into the
@@ -1345,7 +1358,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             layout, M, N, K, params, num_threads, &algo_trace);
 
     // Decide whether the chosen ALGO fuses the gated activation inline.
-    //   - ALGOs 1/2/4/5 always fuse (per-expert or per-M-tile).
+    //   - ALGOs 1/2/5/6 always fuse (per-expert or per-M-tile).
     //   - ALGO 3 fuses whenever the activation layout fits the N-tile
     //     split, either because:
     //       (i) the caller passed a tight [M, I]-layout destination
@@ -1390,8 +1403,11 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // Gated by apilog_info_enabled() (cached); free when logging is off.
     static const bool s_dispatch_log = apilog_info_enabled();
     if (s_dispatch_log && !M.empty()) {
-        const int env_algo = get_grp_matmul_algo();
-        const int max_M_v = *std::max_element(M.begin(), M.end());
+        const int requested_algo = get_grp_matmul_requested_algo();
+        const int env_algo = requested_algo == kGrpMatmulAlgoNTileFlatParallel
+                ? kGrpMatmulAlgoAuto
+                : requested_algo;
+        const int max_M_v = max_active_grp_matmul_m(M, M.size());
         const int max_N_v = *std::max_element(N.begin(), N.end());
         const int max_K_v = *std::max_element(K.begin(), K.end());
         // Representative expert for the quant-mode hint fields below.  In MoE
@@ -1413,12 +1429,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const size_t wei_elem_b = size_of(params[rep].dtypes.wei);
         const size_t wei_per_expert_mb
                 = (static_cast<size_t>(max_K_v) * max_N_v * wei_elem_b) >> 20;
-        // Phase + per-phase env values for telemetry.  The phase
-        // classification mirrors `auto_select_algo`'s phase gate so the
-        // log reflects the routing decision the planner actually made.
-        const bool is_decode = (max_M_v <= kDecodeMaxM);
-        const int phase_env_prompt = get_grp_matmul_auto_prompt_algo();
-        const int phase_env_decode = get_grp_matmul_auto_decode_algo();
+        // Phase + unified per-phase settings for telemetry. Surface both the
+        // raw accepted request and generic effective value so phase request 4
+        // is visible without implying that numeric 4 reached this dispatcher.
+        const grp_matmul_phase phase = classify_grp_matmul_phase(max_M_v);
+        const auto prompt_setting = get_grp_matmul_auto_prompt_setting();
+        const auto decode_setting = get_grp_matmul_auto_decode_setting();
         // Reason — which gate drove the chosen ALGO.
         //
         //   * env_ok / env_fallback  — global `ZENDNNL_GRP_MATMUL_ALGO` hit
@@ -1439,7 +1455,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // `auto_phase_env_clamp` with no clamp anywhere in the call.
         std::string reason_buf;
         const char *reason = nullptr;
-        if (env_algo >= 1 && env_algo <= 5) {
+        if (is_grp_matmul_generic_algo(env_algo)) {
             reason = (env_algo == use_algo) ? "env_ok" : "env_fallback";
         } else if (algo_trace.reason != nullptr) {
             reason = algo_trace.reason;
@@ -1523,13 +1539,15 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // fork (e.g. ALGO 2 -> sequential-full-team when active_ops>num_threads,
         // or ALGO 2 -> vertical fusion in the fused path) — is reported by the
         // post-exec `[GRP_MATMUL.CALL]` line via `mode=` (precise branch) and
-        // `exec_algo=` (the real 1..5).  Compare those two lines to see any
-        // selection-vs-execution divergence.
+        // `exec_algo=` (the real generic scheduler ID).  Compare those two
+        // lines to see any selection-vs-execution divergence.
         apilog_info("[GRP_MATMUL.ALGO] chosen=ALGO_", use_algo,
-                " env_algo=", env_algo, " reason=", reason,
-                " phase=", (is_decode ? "decode" : "prompt"),
-                " auto_prompt_env=", phase_env_prompt,
-                " auto_decode_env=", phase_env_decode,
+                " requested_algo=", requested_algo, " env_algo=", env_algo,
+                " reason=", reason, " phase=", grp_matmul_phase_name(phase),
+                " auto_prompt_requested=", prompt_setting.requested_algo,
+                " auto_prompt_env=", prompt_setting.generic_effective_algo,
+                " auto_decode_requested=", decode_setting.requested_algo,
+                " auto_decode_env=", decode_setting.generic_effective_algo,
                 " act=", act_name(fused_act),
                 " act_fused=", (act_fused ? "yes" : "no"),
                 " ck_eligible_hint=", (ck_hint ? "yes" : "no"),
@@ -1601,8 +1619,13 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             return false;
         }
     }
-    // ALGO 3/AUTO: always simulated W4A8 (s4→s8). Inner 1 or 4 both
-    // run blocked s8s8_sym_quant after this widen; there is no native s4.
+    // ── W4A8 plain materialization for the N-tile path ───────────────
+    // ALGO 3 (including AUTO before final selection) widens s4→s8 for
+    // per-tile column slicing. Full-N ALGOs 1/2/5/6 retain main's
+    // native-or-simulated policy: blocked DLP consumes native s4, while plain
+    // DLP uses its matching simulated-s8 cache. Keeping this population gated
+    // to ALGO 3/AUTO avoids num_ops × (mutex + hash) work on other schedulers.
+    // The side table does not mutate weight[] or params.
     const int dispatch_num_ops = static_cast<int>(M.size());
     static thread_local std::vector<void *> w4a8_s8_ptrs;
     bool any_w4a8 = false;
@@ -1645,7 +1668,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                     act_dtype, gemm_mode_out,
                     any_w4a8 ? &w4a8_s8_ptrs : nullptr);
             break;
-        case 4:
+        case kGrpMatmulAlgoMultilevel:
             // parallel_multilevel owns its gemm_mode (multilevel_concurrent /
             // multilevel_rounds), written into gemm_mode_out.
             parallel_multilevel(layout, transA, transB, M, N, K, alpha, src,

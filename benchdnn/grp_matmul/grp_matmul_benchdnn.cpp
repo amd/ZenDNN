@@ -86,15 +86,22 @@
 ///     >0 → per-group src_scale {M, K/src_group_size}.
 ///
 /// Env vars (all read by the library, not parsed by this driver):
-///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5 - select parallel strategy
-///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert
+///   ZENDNNL_GRP_MATMUL_ALGO=0|1|2|3|4|5|6 - select whole-call mode
+///     0=auto, 1=sequential, 2=flat_ccd_m_tile, 3=flat_ccd_n_tile,
+///     4=W8A8_fused_MoE attempt in both phases, 5=per_expert, 6=multilevel
+///   ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=0..6 - AUTO decode setting
+///     (default 3); 4 attempts W8A8, then inherits decode default policy
+///   ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO=0..6 - AUTO prompt setting
+///     (default 2); 4 attempts W8A8, then inherits prompt default policy
+///   Global generic ALGO {1,2,3,5,6} suppresses either phase-4 request.
 ///   ZENDNNL_GRP_MATMUL_PREPACK=0|1      - master switch for ahead-of-time weight prepack (default 1)
 ///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0|1 - in-house custom kernel for ALGO 3 (default 1)
 ///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0|1 - DQ-INT8 sub-kernel toggle inside the master CK (default 1)
 ///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=N - per-thread N-tile floor override (0 = use default)
 ///   ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=0|1 - stable AOCL DLP cache key under MoE churn (default 1)
 ///   ZENDNNL_MATMUL_ALGO=N               - select inner kernel (default: aocl_dlp_blocked)
-///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1     - global weight-reorder cache toggle (default 1)
+///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1|2   - global weight-pack mode (default 1);
+///                                          mode 0 makes W8A8 ALGO 4 decline
 
 #include "grp_matmul_benchdnn.hpp"
 #include "grp_matmul_utils.hpp"
@@ -917,7 +924,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
               << std::endl;
     std::cout << "  Group MatMul Benchmark" << std::endl;
     std::cout << "  Configs    : " << configs.size() << std::endl;
-    std::cout << "  GRP_ALGO   : " << (ver_env ? ver_env : "default(1)")
+    std::cout << "  GRP_ALGO   : " << (ver_env ? ver_env : "default(0:auto)")
               << std::endl;
     std::cout << "  MATMUL_ALGO: " << (algo_env ? algo_env : "default(1)")
               << std::endl;

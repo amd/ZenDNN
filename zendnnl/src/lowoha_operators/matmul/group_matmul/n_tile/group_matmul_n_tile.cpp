@@ -377,7 +377,7 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     // cover it: it says the bytes behind a LIVE pointer are stable, not
     // that the address will not be recycled for different weights.
     const bool cache_off
-            = (zendnnl::ops::matmul_config_t::instance().get_weight_cache()
+            = (zendnnl::common::matmul_config_t::instance().get_weight_cache()
                     == 0);
     if (cache_off || !weights_const || buff == nullptr || N <= 0) {
         return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
@@ -4569,10 +4569,9 @@ void flat_n_tile(const std::vector<char> &layout,
         const int env_order = get_grp_matmul_n_order();
         const bool is_auto_resolved
                 = (env_order == 0 && plan.auto_resolved_order >= 0);
-        int max_M_log = 0;
-        for (int e = 0; e < num_ops; ++e)
-            if (M[e] > max_M_log) max_M_log = M[e];
-        const bool is_decode_log = (max_M_log <= kDecodeMaxM);
+        const grp_matmul_phase phase_log
+                = classify_grp_matmul_phase(M, static_cast<size_t>(num_ops));
+        const bool is_decode_log = phase_log == grp_matmul_phase::decode;
         const char *strategy_name
                 = (plan.strategy == GroupNTileStrategy::Sequential)
                 ? "Sequential"
@@ -4623,7 +4622,7 @@ void flat_n_tile(const std::vector<char> &layout,
         apilog_info("[GRP_MATMUL.PLAN] flat_n_tile strategy=", strategy_name,
                 " path=", path_name,
                 " kernel=", (use_custom ? "custom" : "standard"),
-                " phase=", (is_decode_log ? "decode" : "prompt"),
+                " phase=", grp_matmul_phase_name(phase_log),
                 " act=", act_name(fused_act),
                 " fused_epilogue=", (fused_epilogue ? "yes" : "no"),
                 " tight=", (plan.tight_fused_epilogue ? "yes" : "no"),

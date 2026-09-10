@@ -18,8 +18,8 @@
 /// weight pre-pack module.
 ///
 /// Each of the five scheduling ALGOs (1=sequential_experts,
-/// 2=flat_m_tile, 3=flat_n_tile, 4=parallel_multilevel,
-/// 5=parallel_per_expert) calls its matching
+/// 2=flat_m_tile, 3=flat_n_tile, 5=parallel_per_expert,
+/// 6=parallel_multilevel) calls its matching
 /// `prepack_for_algo_X(...)` as the first action of its body.  Each
 /// per-ALGO function:
 ///
@@ -288,8 +288,8 @@ struct PrepackParams {
     // full-weight fallback would prefill cache entries the runtime
     // never queries (the runtime's per-tile keys depend on
     // num_threads + nr_align, which we don't know here), so the
-    // skip avoids wasting CPU on misaligned reorders.  ALGOs 1, 2, 4,
-    // 5 don't use this field — their warmer is full-weight by design
+    // skip avoids wasting CPU on misaligned reorders.  ALGOs 1, 2, 5,
+    // 6 don't use this field — their warmer is full-weight by design
     // and runs unconditionally on the AOCL DLP path.
     int num_threads = 0;
 
@@ -313,7 +313,7 @@ struct PrepackParams {
     // already-positive case — it does not turn a zero into a one for
     // the gate's purposes.
     //
-    // ALGOs 1, 2, 4, 5 don't read this field — their full-weight
+    // ALGOs 1, 2, 5, 6 don't read this field — their full-weight
     // warmer doesn't decompose by tile and doesn't need an alignment.
     int nr_align = 0;
 };
@@ -328,7 +328,7 @@ struct PrepackParams {
 ///
 /// `num_threads` and `nr_align` default to 0 — only ALGO 3 (flat_n_tile)
 /// supplies them so the AOCL DLP warmer can mirror the strict-stable
-/// per-tile decomposition.  ALGOs 1, 2, 4, 5 use the full-weight
+/// per-tile decomposition.  ALGOs 1, 2, 5, 6 use the full-weight
 /// warmer regardless and the defaults are correct for them.
 ///
 /// `act` / `act_dtype` default to `none` — only the fused-MoE / gated-
@@ -460,7 +460,7 @@ inline PrepackParams build_prepack_params(
     p.act_dtype = act_dtype;
     // Per-group group size.  Prefer the caller-supplied value; otherwise
     // DERIVE it from the per-group `{G, N}` weight scale so EVERY ALGO's
-    // prepack (1/2/4/5 as well as 3) — none of which pass an explicit
+    // prepack (1/2/5/6 as well as 3) — none of which pass an explicit
     // group_size — still warms the correct per-group layout.  Mirrors the
     // runtime AOCL sym-quant key derivation (`run_dlp`: src_grp =
     // K / (nelems / M) = K / G), so a per-group layer warms the AOCL
@@ -478,7 +478,7 @@ inline PrepackParams build_prepack_params(
     //
     // Derive `dynamic_quant` + `compute_dtype` from the per-call
     // `params[0]` whenever a params vector is present.  Doing it HERE
-    // means EVERY ALGO entry point (1/2/4/5 as well as 3) reaches
+    // means EVERY ALGO entry point (1/2/5/6 as well as 3) reaches
     // `ck_eligible_int8` and cross-warms the int8 CK pack family the
     // same way bf16 does — without each call site having to forward the
     // flags.  This guarantees the prompt-phase (ALGO 1/2) prepack
@@ -556,7 +556,7 @@ inline PrepackParams build_prepack_params(
 // covers every firing expert plus the prepack-extras tail.  See the
 // file-level doc-block above for the uniform-eager semantic.
 //
-// Functionally, ALGOs 1, 2, 4, 5 are identical (warm AOCL DLP iff
+// Functionally, ALGOs 1, 2, 5, 6 are identical (warm AOCL DLP iff
 // inner == aocl_dlp_blocked).  ALGO 3 additionally warms the BF16
 // custom-kernel pack cache when its eligibility predicate holds.
 // Five separate symbols are kept because the modular contract is
@@ -566,8 +566,8 @@ inline PrepackParams build_prepack_params(
 void prepack_for_algo_1(const PrepackParams &p); // sequential_experts
 void prepack_for_algo_2(const PrepackParams &p); // flat_m_tile
 void prepack_for_algo_3(const PrepackParams &p); // flat_n_tile
-void prepack_for_algo_4(const PrepackParams &p); // parallel_multilevel
 void prepack_for_algo_5(const PrepackParams &p); // parallel_per_expert
+void prepack_for_algo_6(const PrepackParams &p); // parallel_multilevel
 
 /// Clear the process-wide fingerprint cache.  Test-only API used by
 /// gtest cases that need a clean fingerprint state to avoid false
@@ -634,7 +634,7 @@ void clear_fingerprint_cache_for_test();
 /// `cross_warm()`:
 ///   * `none`               — env `ZENDNNL_GRP_MATMUL_CROSS_WARM=0`, OR
 ///                            a pinned ALGO (`ZENDNNL_GRP_MATMUL_ALGO`
-///                            in 1..5 — cross-warm is AUTO-only), OR
+///                            in {1,2,3,5,6} — cross-warm is AUTO-only), OR
 ///                            inner_kernel != aocl_dlp_blocked, OR
 ///                            the structural skip path on ALGO 3 where
 ///                            the primary already covered the
@@ -678,7 +678,7 @@ namespace test_api {
 /// observable side-effects.  Mirrors what the PREPACK apilog line
 /// reports, but in a struct that gtest can `EXPECT_*` on.
 struct LastInvocationStats {
-    /// Scheduling ALGO whose per-ALGO function was called (1..5).
+    /// Scheduling ALGO whose per-ALGO function was called ({1,2,3,5,6}).
     int scheduling_algo = 0;
 
     /// Inner kernel resolved by `prelude(...)::resolve_kernel()` for

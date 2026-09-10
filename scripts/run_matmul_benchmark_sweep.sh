@@ -18,13 +18,14 @@ set -euo pipefail
 #                                   6  = LibxSMM
 #                                   10 = Native GEMM
 #                                   11 = Native BRGEMM
-#   -v, --ver <N>[,N,...]         Group matmul strategy version(s) (for grp_matmul)
+#   -v, --ver <N>[,N,...]         Group matmul selector(s) (for grp_matmul)
 #                                   0  = Auto (selects V1, V2, or V3 based on shape)
 #                                   1  = Sequential (experts serial, all threads per GEMM)
 #                                   2  = Flat CCD adaptive tile (hybrid M/N, framework-safe)
 #                                   3  = Flat CCD N-tile (no nested OMP, framework-safe)
-#                                   4  = Multilevel CCD-aware (nested OMP)
+#                                   4  = W8A8 fused-MoE fast path (AUTO fallback)
 #                                   5  = Per-expert (1 thread per expert, parallel-for)
+#                                   6  = Multilevel CCD-aware (nested OMP)
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N[,N,...]>     OMP thread/core count(s). Comma-separated
 #                                 values sweep cores, e.g. -t 32,64,128
@@ -268,8 +269,8 @@ echo "================================================================"
 echo "  Benchmark: $OP"
 echo "  Input   : $INPUT_FILE"
 if [[ "$OP" == "grp_matmul" ]]; then
-echo "  Versions: ${VERS[*]}"
-echo "  Algo    : ${ALGOS[*]}"
+echo "  GRP_ALGO : ${VERS[*]}"
+echo "  MATMUL_ALGO: ${ALGOS[*]}"
 else
 echo "  Algos   : ${ALGOS[*]}"
 fi
@@ -320,7 +321,7 @@ if [[ "$OP" == "grp_matmul" ]]; then
     for algo in "${ALGOS[@]}"; do
         for ver in "${VERS[@]}"; do
             OUTFILE="$OUTDIR/grp_matmul_${TAG}_v${ver}_algo${algo}_${OMP_NUM_THREADS}t${CTAG}.csv"
-            echo "--- grp_matmul V${ver} ALGO=${algo} ---"
+            echo "--- grp_matmul GRP_ALGO=${ver} MATMUL_ALGO=${algo} ---"
 
             ZENDNNL_GRP_MATMUL_ALGO=$ver \
             ZENDNNL_MATMUL_ALGO=$algo \
@@ -329,7 +330,7 @@ if [[ "$OP" == "grp_matmul" ]]; then
                 $CACHE_ARG \
                 2>&1 | tee "$OUTFILE"
 
-            echo "--- V${ver} ALGO=${algo} done → $OUTFILE ---"
+            echo "--- GRP_ALGO=${ver} MATMUL_ALGO=${algo} done → $OUTFILE ---"
             echo ""
         done
     done

@@ -1127,11 +1127,11 @@ TEST_P(TestGroupMatmulQuant, INT8_DYNAMIC_GEMM_F32) {
     }
     EXPECT_TRUE(ok);
 
-    // TODO: Add per-ALGO coverage tests for ZENDNNL_GRP_MATMUL_ALGO=1..5.
-    // get_grp_matmul_algo() reads the env var on every call (no caching),
-    // so setenv/putenv can switch algos within a single test process.
+    // TODO: Add per-ALGO coverage tests for the generic selector set
+    // ZENDNNL_GRP_MATMUL_ALGO={1,2,3,5,6}.  Use AlgoEnvGuard so the
+    // test-only override bypasses the cached production env read.
     // Exercise all dispatch paths (1=sequential, 2=flat_ccd_m_tile,
-    // 3=flat_ccd_n_tile, 4=multilevel, 5=per_expert). Add in a follow-up PR.
+    // 3=flat_ccd_n_tile, 5=per_expert, 6=multilevel). Add in a follow-up PR.
 }
 
 INSTANTIATE_TEST_SUITE_P(GroupMatmulQuant, TestGroupMatmulQuant,

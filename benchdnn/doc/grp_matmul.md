@@ -26,14 +26,16 @@ with independent memory layouts.
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto), `1` (sequential), `2` (flat CCD M-tile), `3` (flat CCD N-tile), `4` (multilevel), `5` (per-expert) | Parallel strategy. Default `0` auto-selects. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | `0` (auto), `1` (sequential), `2` (flat CCD M-tile), `3` (flat CCD N-tile), `4` (W8A8 fused-MoE fast path), `5` (per-expert), `6` (multilevel) | Whole-call mode. Global 4 attempts either BF16-dynamic W8A8 or caller-prequantized S8 W8A8 in both phases. ALGO 4's direct-S8 fast path requires per-token BF16/F32 scales and caller-provided BF16 `dst_down` rows over the exact same BF16-sized backing as the tight S8 source prefix (`dst_down[i] == src[i]`, `ldc_down[i] == hidden`). Separate, offset, partial, padded, and cross-expert destinations decline the fast path. Any eligibility decline falls back to generic AUTO, whose merged prequantized-S8 support validates its own destination contract; ALGO 4 execution/allocation failures remain terminal. A global generic pin suppresses phase-local W8A8 requests. |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | `0`, `1`, `2`, `3`, `4`, `5`, `6` | AUTO-only decode setting (`max active M <= 32`, default `3`). Value 4 attempts W8A8 for decode only. Any eligibility decline inherits the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | `0`, `1`, `2`, `3`, `4`, `5`, `6` | AUTO-only prompt setting (`max active M > 32`, default `2`). Value 4 attempts W8A8 for prompt only. Any eligibility decline inherits the complete prompt default policy. |
 | `ZENDNNL_MATMUL_ALGO` | `1`, `3`, `10`, `11`, ... | Backend GEMM kernel. Default from config. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | `0` / `1` | Ahead-of-time weight prepack.  Default `1` (ON) — eagerly warms the AOCL DLP / custom-kernel weight cache for all expert slots on the first call that observes a given configuration, so the timed iterations never pay an on-the-fly reorder cost.  Set `0` to fall back to the legacy lazy-on-first-touch behaviour (useful when comparing first-iter latency with and without prepack). |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `0` / `1` | Master switch for the in-house AVX-512 microkernels under ALGO 3 — the BF16 (`bf16:bf16:{bf16,f32}`), DQ-INT8 (`s8:s8:{bf16,f32}`, sym/asym), and native FP16 (`f16:f16:{f16,f32}`) families.  Default `1` (ON); set `0` to force the AOCL DLP path.  Per-call eligibility (dtype tuple, `alpha=1`, `beta=0`, `N % pack_nr == 0`, const weights, …) and the per-family ISA gate still apply, so ineligible calls transparently fall back to AOCL DLP regardless of this knob.  Exception: an `f16` call on a host without AVX-512-FP16 is rejected upstream by `group_matmul_direct` with `status_t::isa_unsupported` (the whole call fails) rather than falling back — no F16 GEMM backend can run without the ISA. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` | `0` / `1` | Sub-switch for the DQ-INT8 CK family (requires the master knob ON and AVX-512 VNNI).  Default `1` (ON).  Set `0` to A/B just the int8 fast path against the AOCL DLP `s8s8s32obf16_sym_quant` reference, leaving the BF16 / FP16 CK paths untouched. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16` | `0` / `1` | Sub-switch for the native AVX-512-FP16 CK family (requires the master knob ON plus AVX-512-FP16 ISA and a toolchain that compiled the FP16 intrinsics).  Default `1` (ON).  Set `0` to route f16 calls to the AOCL DLP F16 reference, leaving the BF16 / INT8 CK paths untouched. |
 | `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | `0` / `1` | Pin ALGO 3's per-expert thread count to a `num_threads`-only formula so AOCL DLP cache keys stay stable under MoE routing variation (active-expert filtering, batch-size shifts).  Default `1` (ON). |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `0` / `1` | Standard weight-reorder cache for AOCL DLP / BRGEMM.  Setting `0` disables both lazy and prepack populations (every call re-reorders). |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | `0` / `1` / `2` | Weight-pack policy shared with operator execution. Setting `0` disables AOCL lazy/prepack population, makes custom kernels use non-persistent per-call packs, and makes W8A8 ALGO 4 decline before writes; BF16 and caller-prequantized S8 may then use generic execution. Modes 1 and 2 keep ALGO 4's private out-of-place complete-tensor packs. Existing entries are released by the corresponding quiescent clear hooks, not merely by changing this runtime mode. |
 | `OMP_NUM_THREADS` | integer | Number of OpenMP threads. |
 
 For the full operator-side semantics of these knobs, see `docs/operator/low_overhead_operator/lowoha_group_matmul_operator.md` (sections **Environment variables** and **Weight caching, prepack, and memory**) and `docs/runtime_env.md` (section **Group MatMul Configuration**).
@@ -259,13 +261,14 @@ Use `scripts/run_matmul_benchmark_sweep.sh` for automated benchmarking:
 | `prompt` | `benchdnn/input/grp_matmul/grp_matmul_prompt.txt` |
 | `decode` | `benchdnn/input/grp_matmul/grp_matmul_decode.txt` |
 
-### Version flags (`-v`)
+### Group selector flags (`-v`)
 
 | Version | Strategy | Best for |
 |---------|----------|----------|
 | `0` | Auto-select | Default — picks V1, V2, or V3 based on shape |
-| `1` | Sequential | Experts serial, all threads per GEMM (default) |
+| `1` | Sequential | Experts serial, all threads per GEMM |
 | `2` | Flat CCD adaptive tile | Framework-safe: no nested OMP, hybrid M/N-tiling per expert |
 | `3` | Flat CCD N-tile | Framework-safe: no nested OMP, proportional CCD + N-tiling |
-| `4` | Multilevel CCD-aware | Nested OMP, inter-expert concurrency |
+| `4` | W8A8 fused-MoE fast path | Explicit BF16-dynamic/direct-S8 W8A8 attempt; ineligible calls fall back to generic AUTO |
 | `5` | Per-expert | Many experts (>= threads), 1 thread each |
+| `6` | Multilevel CCD-aware | Nested OMP, inter-expert concurrency |

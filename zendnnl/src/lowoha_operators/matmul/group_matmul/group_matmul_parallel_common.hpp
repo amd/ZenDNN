@@ -14,7 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// Library-internal helpers shared by the ALGO 1..5 parallel paths.
+/// Library-internal helpers shared by the generic scheduling-ALGO paths.
 ///
 /// Each ALGO implementation (`sequential_experts`, `flat_m_tile`,
 /// `flat_n_tile`, `parallel_multilevel`, `parallel_per_expert`) is
@@ -34,6 +34,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -58,6 +59,30 @@ namespace matmul {
 using namespace zendnnl::common;
 using zendnnl::common::size_of;
 
+// Group-matmul selector identities.  These are deliberately independent of
+// `matmul_algo_t`: that enum names inner GEMM kernels, while these values name
+// whole-call grouped scheduling/interception modes.
+//
+// Selector 4 is the W8A8 whole-call interceptor; selector 6 owns the generic
+// multilevel scheduler.
+inline constexpr int kGrpMatmulAlgoAuto = 0;
+inline constexpr int kGrpMatmulAlgoMultilevel = 6;
+inline constexpr int kGrpMatmulAlgoNTileFlatParallel = 4;
+
+inline constexpr bool is_grp_matmul_generic_algo(int algo) {
+    return algo == 1 || algo == 2 || algo == 3 || algo == 5
+            || algo == kGrpMatmulAlgoMultilevel;
+}
+
+inline constexpr bool is_grp_matmul_phase_algo(int algo) {
+    return algo == kGrpMatmulAlgoAuto || is_grp_matmul_generic_algo(algo);
+}
+
+inline constexpr bool is_grp_matmul_requested_algo(int algo) {
+    return is_grp_matmul_phase_algo(algo)
+            || algo == kGrpMatmulAlgoNTileFlatParallel;
+}
+
 // Short string renderer for `grp_matmul_gated_act_t` — used by APILOG
 // lines and gemm_mode_out strings; keeps activation names consistent
 // across executors.
@@ -76,6 +101,43 @@ inline const char *act_name(grp_matmul_gated_act_t a) {
 // (small) from L3-tight shapes (medium) from DRAM-streaming (large).
 inline constexpr int kDecodeMaxM = 32; // per-expert M ≤ this → "decode"
 inline constexpr int kMinNTile = 512; // prompt-path per-thread N
+
+/// Runtime phase used by AUTO group-matmul policy and W8A8 interception.
+///
+/// A call is decode when the maximum M in its active operation prefix is at
+/// most `kDecodeMaxM`; otherwise it is prompt. Empty prefixes are decode (their
+/// effective max M is zero), although normal dispatch short-circuits them
+/// before phase-specific execution.
+enum class grp_matmul_phase { decode, prompt };
+
+inline constexpr grp_matmul_phase classify_grp_matmul_phase(int max_active_m) {
+    return max_active_m <= kDecodeMaxM ? grp_matmul_phase::decode
+                                       : grp_matmul_phase::prompt;
+}
+
+inline int max_active_grp_matmul_m(
+        const std::vector<int> &M, size_t active_prefix) {
+    const size_t count = std::min(active_prefix, M.size());
+    if (count == 0) return 0;
+    return *std::max_element(
+            M.begin(), M.begin() + static_cast<std::ptrdiff_t>(count));
+}
+
+/// Classify only the first `active_prefix` entries. This overload is used by
+/// `group_matmul_direct`, where trailing M entries may describe prepack-only
+/// experts and must not turn a decode call into prompt.
+inline grp_matmul_phase classify_grp_matmul_phase(
+        const std::vector<int> &M, size_t active_prefix) {
+    return classify_grp_matmul_phase(max_active_grp_matmul_m(M, active_prefix));
+}
+
+inline grp_matmul_phase classify_grp_matmul_phase(const std::vector<int> &M) {
+    return classify_grp_matmul_phase(M, M.size());
+}
+
+inline constexpr const char *grp_matmul_phase_name(grp_matmul_phase phase) {
+    return phase == grp_matmul_phase::decode ? "decode" : "prompt";
+}
 
 // ── Single-op (num_ops == 1) specialisation scope ───────────────────────
 // SINGLE SOURCE OF TRUTH for the optimisations added for a lone expert.
@@ -158,7 +220,7 @@ inline constexpr int kFewExpertsAlgo2Pref = 8;
 
 // ── Executed-ALGO from gemm_mode ────────────────────────────────────────
 // Maps the executor-written `gemm_mode` string (the authoritative record of
-// what ACTUALLY ran) to the ALGO that actually executed (1..5), so the
+// what ACTUALLY ran) to the ALGO that actually executed ({1,2,3,5,6}), so the
 // post-exec `[GRP_MATMUL.CALL]` line can surface `exec_algo=` alongside
 // `mode=`.  Together with the pre-exec `[GRP_MATMUL.ALGO] chosen=` selection
 // line, this makes any selection-vs-execution divergence explicit instead of
@@ -166,7 +228,8 @@ inline constexpr int kFewExpertsAlgo2Pref = 8;
 // `chosen=ALGO_2 ... exec_algo=1 mode=flat_m_tile_seq_clamp`).
 //
 // Returns 0 for null / unrecognised modes OR for explicit no-op markers
-// (`*_skip` — nothing executed), and 1..5 for a recognised executed path.
+// (`*_skip` — nothing executed), and a generic scheduler ID for a recognised
+// executed path.
 // So `exec_algo=0` means "no GEMM ran or mode not understood", NOT "ALGO 0".
 // ORDER MATTERS: the `flat_m_tile_seq_clamp` special case (ALGO-1 behaviour
 // wearing an ALGO-2 mode prefix) and the `*_skip` markers must be checked
@@ -190,7 +253,8 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
     if (starts("flat_m_tile")) return 2;
     if (starts("vertical_fusion")) return 2; // M-tile fused pipeline
     if (starts("flat_n_tile")) return 3;
-    if (starts("multilevel")) return 4;
+    if (starts("ntile_flat_parallel")) return kGrpMatmulAlgoNTileFlatParallel;
+    if (starts("multilevel")) return kGrpMatmulAlgoMultilevel;
     if (starts("per_expert")) return 5;
     if (starts("fused_moe")) {
         // Composite: derive from the Op1 executor sub-mode.
@@ -275,186 +339,234 @@ inline bool parse_env_int_strict(const char *e, int &out) {
     return true;
 }
 
-/// ZENDNNL_GRP_MATMUL_ALGO = "1".."5" force a specific ALGO, "0"/unset
-/// = auto-select.  Strict single-digit validation: only the literal
-/// characters `'1'..'5'` (as the FIRST byte, with no further bytes
-/// implied here) are honoured.  This is already strict — `"5xyz"`
-/// returns 5 because we only inspect the first byte, but no current
-/// ZenDNN deployment passes such values and there is no doc-promised
-/// behaviour to disagree with.
+/// ZENDNNL_GRP_MATMUL_ALGO selects AUTO (0), a generic scheduler
+/// ({1,2,3,5,6}), or the W8A8 whole-call interceptor (4). Single-digit
+/// parsing preserves the historical first-byte behaviour: e.g. `"5xyz"`
+/// returns 5 because only the first byte is inspected.
 ///
 /// Cached + override pattern (matches `get_grp_matmul_auto_prompt_algo`).
-/// The cached `static const` snapshot of `std::getenv` is taken on the
-/// first call; the override atomic `s_grp_matmul_algo_override` (sentinel
-/// `-1` = no override) lets gtests flip the effective value mid-process
-/// without paying the `std::getenv` cost on every production call.  The
-/// `AlgoEnvGuard` RAII helper in `moe_test_utils.hpp` sets BOTH the env
-/// AND the override atomic, so every existing call site that wraps with
-/// `AlgoEnvGuard(N)` continues to observe `N` without source-level changes.
+/// Return the process-requested group-matmul selector, including W8A8 ALGO 4.
+///
+/// ALGO 4 is an additive W8A8 fused-MoE fast-path request. Generic group
+/// matmul sees it as AUTO (0) after an eligibility decline. Main's generic
+/// fused-MoE path accepts both BF16 and caller-prequantized S8.
+///
+/// The cached `static const` snapshot of `std::getenv` is taken on the first
+/// call; the override atomic (sentinel `-1` = no override) lets gtests flip
+/// the requested value mid-process.
 inline std::atomic<int> &test_api_algo_override();
-inline int get_grp_matmul_algo() {
+inline int get_grp_matmul_requested_algo() {
     const int ovr = test_api_algo_override().load(std::memory_order_relaxed);
-    if (ovr >= 0) return (ovr >= 1 && ovr <= 5) ? ovr : 0;
+    if (ovr >= 0)
+        return is_grp_matmul_requested_algo(ovr) ? ovr : kGrpMatmulAlgoAuto;
     static const int v = []() {
         const char *env = std::getenv("ZENDNNL_GRP_MATMUL_ALGO");
-        return (env && env[0] >= '1' && env[0] <= '5') ? (env[0] - '0') : 0;
+        const int requested = (env != nullptr) ? (env[0] - '0') : -1;
+        return is_grp_matmul_requested_algo(requested) ? requested
+                                                       : kGrpMatmulAlgoAuto;
     }();
     return v;
 }
 
-// ── Auto-select per-phase overrides (consulted only under ALGO=0) ─────
-//
-// The auto-selector (`auto_select_algo` in `group_matmul_dispatch.cpp`)
-// classifies every call as either DECODE (`max_M ≤ kDecodeMaxM=32`) or
-// PROMPT (otherwise) and picks an ALGO via these two phase envs.  When
-// the active phase env is `0`, the legacy 3-rule cascade fires instead
-// (Rule 1: num_ops ≥ num_threads → ALGO 3; Rule 2: num_ops ≤ 8 →
-// ALGO 1; Rule 3: prompt → ALGO 1, decode → ALGO 3).
-//
-// IMPORTANT: these envs are ONLY consulted under `ZENDNNL_GRP_MATMUL_
-// ALGO=0` (auto).  When the global ALGO env is set to 1..5 the user
-// has explicitly pinned that algo for every call regardless of phase;
-// the phase envs are never read in that path (see
-// `select_grp_matmul_algo` in `group_matmul_dispatch.cpp`).
-//
-// Defaults — chosen to give a sensible out-of-the-box auto policy
-// per phase:
-//
-//   AUTO_PROMPT_ALGO default = 2 (flat_m_tile, the M-tile planner).
-//     With the M-tile multi-tier hybrid (engaged on skewed-M prompts,
-//     gated by `ZENDNNL_GRP_MATMUL_M_TILE_HYBRID=0`) and the wide-N
-//     memory-bound fallback (always-on; engages on
-//     `total_need * 2 <= num_threads`), ALGO 2 covers the prompt
-//     envelope:
-//       * skewed-M prompt: multi-tier hybrid path.
-//       * few-expert / light prompt frames: wide-N fallback routes to
-//         sequential-with-full-team — equivalent to the legacy ALGO 1
-//         path on these shapes.
-//       * other prompt frames: ALGO 2 single-tier Phase 2 (M-weighted
-//         distribution) — the existing M-tile baseline.
-//     Safety clamp: when `!m_tile_safe` the auto path falls back
-//     to ALGO 1, matching the global `ALGO=2` env path.  Set
-//     `AUTO_PROMPT_ALGO=1` to restore the legacy sequential_experts
-//     default as an escape hatch.
-//
-//   AUTO_DECODE_ALGO default = 3 (flat_n_tile / N-tile rounds path).
-//     Safety clamp: when `!n_tile_safe` the auto path falls back to
-//     ALGO 1, matching the global `ALGO=3` env path.
-//
-// Set the env to `0` explicitly to restore the legacy 3-rule cascade
-// for the matching phase.  Set to a specific algo (1..5) to pin that
-// phase to a single ALGO.
-//
-// Structural gates that ALWAYS fire (independent of phase env):
-//   * R0 capacity (`num_ops > kNTilePlanMaxExperts=256`) → ALGO 1.
-//     Phase env cannot override the N-tile planner's capacity
-//     ceiling.
-//
-// NOTE: auto-select never emits ALGO 4 or ALGO 5.  Setting either
-// here is clamped (with a [WARN]) to `n_tile_safe ? 3 : 1`; only the
-// global `ZENDNNL_GRP_MATMUL_ALGO` can force 4 or 5.
-//
-// Telemetry: the `[GRP_MATMUL.ALGO]` apilog line surfaces `phase=`
-// (prompt/decode) and `auto_prompt_env=` / `auto_decode_env=` (the
-// active value of each phase env, post-override) so operators can
-// confirm in one grep which routing decision fired.
-//
-// Mid-process env changes have no effect (cached static const); tests
-// override via the atomics below.
-
-// ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO = { 0, 1..5 } — cached, default 2.
-//   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
-//   the call classifies as PROMPT (`max_M > kDecodeMaxM`).  Value 0
-//   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
-//   the prompt phase (with the same m_tile_safe / n_tile_safe safety
-//   clamps the global `ALGO` env path applies).  Default 2
-//   (flat_m_tile + multi-tier hybrid + wide-N fallback) is the
-//   out-of-the-box prompt choice — see the doc-block on this group
-//   of envs for the rationale.
-inline std::atomic<int> &test_api_auto_prompt_algo_override();
-inline int get_grp_matmul_auto_prompt_algo() {
-    // Strict env parsing — non-numeric input falls back to the documented
-    // default 2 (flat_m_tile).  Bogus values (< 0 OR > 5) also clamp
-    // to the default so a typo cannot accidentally pin an unintended
-    // algo.
-    static constexpr int kDefault = 2;
-    const int ovr = test_api_auto_prompt_algo_override().load(
-            std::memory_order_relaxed);
-    if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
-    static const int v = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO");
-        int parsed = 0;
-        if (!parse_env_int_strict(e, parsed)) return kDefault;
-        return (parsed >= 0 && parsed <= 5) ? parsed : kDefault;
-    }();
-    return v;
+/// Generic scheduler selection. ALGO 4 is deliberately normalized to AUTO:
+/// it selects only the private W8A8 MoE hook and is not a sixth generic
+/// scheduler.
+inline int get_grp_matmul_algo() {
+    const int requested = get_grp_matmul_requested_algo();
+    return requested == kGrpMatmulAlgoNTileFlatParallel ? kGrpMatmulAlgoAuto
+                                                        : requested;
 }
 
-// Decode-phase default, shared so the gate-declined `AUTO_DECODE_ALGO=5`
-// fallback in `auto_select_algo` resolves to the SAME algo an unset decode env
-// would (Rule 1 substitutes this for the pinned 5), without duplicating the
-// literal `3` at two sites that must agree.
+/// Legacy global-only predicate retained for tests and callers that only need
+/// to inspect `ZENDNNL_GRP_MATMUL_ALGO`. Production interception uses the
+/// phase-aware resolver below.
+inline bool get_grp_matmul_ntile_flat_parallel() {
+    return get_grp_matmul_requested_algo() == kGrpMatmulAlgoNTileFlatParallel;
+}
+
+// ── Auto-select per-phase settings (consulted only under ALGO=0) ───────
+//
+// AUTO classifies each call with `classify_grp_matmul_phase()` and reads one
+// cached setting for the matching phase:
+//
+//   AUTO_PROMPT_ALGO default = 2 (flat_m_tile and its default refinements).
+//   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
+//
+// Accepted explicit values are {0,1,2,3,4,5,6}:
+// scheduler identities beyond that set:
+//   * 0 restores the legacy 3-rule cascade.
+//   * {1,2,3,5,6} pin that generic scheduler for the matching phase.
+//   * 4 requests the W8A8 whole-call interceptor for the matching phase. If
+//     eligibility declines, generic routing inherits the phase's normal
+//     default policy (including refinements and safety clamps); numeric 4 is
+//     never dispatched as a generic scheduler.
+//
+// A global generic pin {1,2,3,5,6} suppresses phase W8A8 requests.
+// Global ALGO 4 requests W8A8 in both phases and wins over a phase setting.
+// Any `unimplemented` attempt may fall through to generic fused-MoE; actual
+// ALGO4 allocation/execution errors remain terminal in `group_matmul_direct`.
+//
+// Strict integer parsing is preserved. Unset, malformed, and out-of-range
+// values inherit the documented default and do not count as an explicit
+// policy pin. Mid-process env changes have no effect; tests use the atomics.
+//
+// Value and explicit-presence state intentionally live in ONE cached object.
+// Keeping separate static snapshots lets a first-call race or later parser
+// edit make `value` and `is_set` disagree.
+
+// Named decode default is also consumed by the qualified ALGO-5 pin fallback
+// in auto_select_algo; keeping one constexpr prevents those policies drifting.
 inline constexpr int kGrpMatmulAutoDecodeAlgoDefault = 3;
 
-// ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO = { 0, 1..5 } — cached, default 3.
-//   Phase env consulted by `auto_select_algo` when `ALGO=0` (auto) AND
-//   the call classifies as DECODE (`max_M ≤ kDecodeMaxM`).  Value 0
-//   defers to the legacy 3-rule cascade; 1..5 forces that ALGO for
-//   the decode phase (with the same safety clamps as the prompt
-//   path).  Default 3 (N-tile rounds + CK) is the out-of-the-box
-//   decode choice.
-inline std::atomic<int> &test_api_auto_decode_algo_override();
-inline int get_grp_matmul_auto_decode_algo() {
-    static constexpr int kDefault = kGrpMatmulAutoDecodeAlgoDefault;
-    const int ovr = test_api_auto_decode_algo_override().load(
-            std::memory_order_relaxed);
-    if (ovr >= 0) return (ovr <= 5) ? ovr : kDefault;
-    static const int v = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO");
-        int parsed = 0;
-        if (!parse_env_int_strict(e, parsed)) return kDefault;
-        return (parsed >= 0 && parsed <= 5) ? parsed : kDefault;
-    }();
-    return v;
+inline constexpr int grp_matmul_default_algo_for_phase(grp_matmul_phase phase) {
+    return phase == grp_matmul_phase::decode ? kGrpMatmulAutoDecodeAlgoDefault
+                                             : 2;
 }
 
-// True when the operator has EXPLICITLY chosen a prompt phase algo —
-// either via the test override atomic or a parseable
-// `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` env value (including `0`, the
-// explicit "legacy cascade" request).  Lets the default-policy few-
-// experts ALGO 2 preference defer to an explicit pin while still firing
-// out-of-the-box.  Env presence is cached on first call (same pattern as
-// the value getter); test overrides read the live atomic.
-//
-// The accepted range MUST match the value getter's.  That getter clamps
-// anything outside 0..5 to the documented default, so treating an
-// out-of-range value as "set" would claim a pin that was never honoured:
-// `AUTO_PROMPT_ALGO=99` would resolve to 2 and then suppress the very
-// rules the inherited default is supposed to run.
-inline bool grp_matmul_auto_prompt_algo_is_set() {
+struct grp_matmul_auto_phase_setting {
+    static constexpr int kNoRequest = -1;
+
+    /// Accepted explicit env/override value, or `kNoRequest` when the setting
+    /// is unset, malformed, or outside the accepted selector set.
+    int requested_algo = kNoRequest;
+
+    /// Value visible to generic routing. Phase request 4 maps to the inherited
+    /// phase default so it can never reach the generic ALGO switch.
+    int generic_effective_algo = kGrpMatmulAlgoAuto;
+
+    constexpr bool has_explicit_request() const {
+        return requested_algo != kNoRequest;
+    }
+    constexpr bool requests_ntile_flat_parallel() const {
+        return requested_algo == kGrpMatmulAlgoNTileFlatParallel;
+    }
+    /// Explicit {0,1,2,3,5,6} overrides the inherited policy. Explicit 0
+    /// counts because it deliberately selects the legacy cascade. Phase 4
+    /// does not: after an ALGO4 decline, all default refinements run.
+    constexpr bool pins_generic_policy() const {
+        return has_explicit_request() && !requests_ntile_flat_parallel();
+    }
+};
+
+inline constexpr grp_matmul_auto_phase_setting
+make_grp_matmul_auto_phase_setting(grp_matmul_phase phase, int requested) {
+    const int default_algo = grp_matmul_default_algo_for_phase(phase);
+    if (!is_grp_matmul_requested_algo(requested)) {
+        return {grp_matmul_auto_phase_setting::kNoRequest, default_algo};
+    }
+    return {requested,
+            requested == kGrpMatmulAlgoNTileFlatParallel ? default_algo
+                                                         : requested};
+}
+
+inline grp_matmul_auto_phase_setting parse_grp_matmul_auto_phase_setting(
+        const char *env, grp_matmul_phase phase) {
+    int parsed = 0;
+    if (!parse_env_int_strict(env, parsed)) {
+        return make_grp_matmul_auto_phase_setting(
+                phase, grp_matmul_auto_phase_setting::kNoRequest);
+    }
+    return make_grp_matmul_auto_phase_setting(phase, parsed);
+}
+
+inline std::atomic<int> &test_api_auto_prompt_algo_override();
+inline std::atomic<int> &test_api_auto_decode_algo_override();
+
+inline grp_matmul_auto_phase_setting get_grp_matmul_auto_prompt_setting() {
     const int ovr = test_api_auto_prompt_algo_override().load(
             std::memory_order_relaxed);
-    if (ovr >= 0) return ovr <= 5;
-    static const bool s = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO");
-        int parsed = 0;
-        return parse_env_int_strict(e, parsed) && parsed >= 0 && parsed <= 5;
+    if (ovr >= 0) {
+        return make_grp_matmul_auto_phase_setting(
+                grp_matmul_phase::prompt, ovr);
+    }
+    static const grp_matmul_auto_phase_setting setting = []() {
+        return parse_grp_matmul_auto_phase_setting(
+                std::getenv("ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO"),
+                grp_matmul_phase::prompt);
     }();
-    return s;
+    return setting;
 }
 
-// Decode counterpart of `grp_matmul_auto_prompt_algo_is_set()`, with the
-// same range agreement against `get_grp_matmul_auto_decode_algo()`.
-inline bool grp_matmul_auto_decode_algo_is_set() {
+inline grp_matmul_auto_phase_setting get_grp_matmul_auto_decode_setting() {
     const int ovr = test_api_auto_decode_algo_override().load(
             std::memory_order_relaxed);
-    if (ovr >= 0) return ovr <= 5;
-    static const bool s = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO");
-        int parsed = 0;
-        return parse_env_int_strict(e, parsed) && parsed >= 0 && parsed <= 5;
+    if (ovr >= 0) {
+        return make_grp_matmul_auto_phase_setting(
+                grp_matmul_phase::decode, ovr);
+    }
+    static const grp_matmul_auto_phase_setting setting = []() {
+        return parse_grp_matmul_auto_phase_setting(
+                std::getenv("ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO"),
+                grp_matmul_phase::decode);
     }();
-    return s;
+    return setting;
+}
+
+inline grp_matmul_auto_phase_setting get_grp_matmul_auto_phase_setting(
+        grp_matmul_phase phase) {
+    return phase == grp_matmul_phase::decode
+            ? get_grp_matmul_auto_decode_setting()
+            : get_grp_matmul_auto_prompt_setting();
+}
+
+// Compatibility observers used by existing telemetry/tests. Both fields are
+// derived from the same setting snapshot; there is no independent cached
+// presence bit.
+inline int get_grp_matmul_auto_prompt_algo() {
+    return get_grp_matmul_auto_prompt_setting().generic_effective_algo;
+}
+inline int get_grp_matmul_auto_decode_algo() {
+    return get_grp_matmul_auto_decode_setting().generic_effective_algo;
+}
+inline bool grp_matmul_auto_prompt_algo_is_set() {
+    return get_grp_matmul_auto_prompt_setting().pins_generic_policy();
+}
+inline bool grp_matmul_auto_decode_algo_is_set() {
+    return get_grp_matmul_auto_decode_setting().pins_generic_policy();
+}
+
+enum class grp_matmul_ntile_flat_parallel_request_source {
+    none,
+    global,
+    auto_decode,
+    auto_prompt,
+};
+
+/// Resolve whether this call should attempt the W8A8 whole-call interceptor.
+///
+/// This MUST inspect `get_grp_matmul_requested_algo()`: the normalized generic
+/// getter maps global 7 to AUTO and would lose global precedence.
+inline grp_matmul_ntile_flat_parallel_request_source
+resolve_grp_matmul_ntile_flat_parallel_request(grp_matmul_phase phase) {
+    const int global_requested = get_grp_matmul_requested_algo();
+    if (global_requested == kGrpMatmulAlgoNTileFlatParallel) {
+        return grp_matmul_ntile_flat_parallel_request_source::global;
+    }
+    if (global_requested != kGrpMatmulAlgoAuto) {
+        return grp_matmul_ntile_flat_parallel_request_source::none;
+    }
+
+    const auto phase_setting = get_grp_matmul_auto_phase_setting(phase);
+    if (!phase_setting.requests_ntile_flat_parallel()) {
+        return grp_matmul_ntile_flat_parallel_request_source::none;
+    }
+    return phase == grp_matmul_phase::decode
+            ? grp_matmul_ntile_flat_parallel_request_source::auto_decode
+            : grp_matmul_ntile_flat_parallel_request_source::auto_prompt;
+}
+
+inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
+        grp_matmul_ntile_flat_parallel_request_source source) {
+    switch (source) {
+        case grp_matmul_ntile_flat_parallel_request_source::none: return "none";
+        case grp_matmul_ntile_flat_parallel_request_source::global:
+            return "global";
+        case grp_matmul_ntile_flat_parallel_request_source::auto_decode:
+            return "auto_decode";
+        case grp_matmul_ntile_flat_parallel_request_source::auto_prompt:
+            return "auto_prompt";
+    }
+    return "none";
 }
 
 // ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE = { 0, 1 } — cached, default 1 (ON).
@@ -617,11 +729,10 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_f16_override {-1};
 //     unset" behaviour.
 inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 
-// Sentinel `-1` = no override.  Settable values: 0 (explicit legacy
-// 3-rule cascade — escape hatch from the new default phase pin),
-// 1..5 (force the matching ALGO for the phase matching the override's
-// name).  Override semantics in `get_grp_matmul_auto_prompt_algo()` /
-// `get_grp_matmul_auto_decode_algo()`:
+// Sentinel `-1` = no override. Settable values: 0 (explicit legacy
+// 3-rule cascade), {1,2,3,5,6} (force the matching generic ALGO), and 4
+// (request the matching phase's W8A8 whole-call attempt). Override semantics
+// live in the unified `grp_matmul_auto_phase_setting` getters:
 //   * any negative value (including the `-1` sentinel) → fall
 //     through to the cached env path (which itself applies the
 //     documented defaults — 2 for prompt, 3 for decode).
@@ -629,10 +740,10 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_nr_override {-1};
 //                  Production deployments that want pre-default-flip
 //                  behaviour use this (or the env equivalent
 //                  `AUTO_*_ALGO=0`).
-//   * 1..5       — adopted as the override value.
-//   * > 5        — clamped to the documented default (2 for prompt,
-//                  3 for decode), matching the env-parse validation
-//                  behaviour.
+//   * 1,2,3,5,6  — adopted as the override value.
+//   * 4          — retained as the raw W8A8 request while generic routing
+//                  sees the inherited default (2 prompt / 3 decode).
+//   * > 6        — invalid: inherits the default and is not a policy pin.
 inline std::atomic<int> s_grp_matmul_auto_prompt_algo_override {-1};
 inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 
@@ -660,8 +771,9 @@ inline std::atomic<int> s_grp_matmul_decode_algo5_gate_override {-1};
 inline std::atomic<int> s_grp_matmul_kblock_override {-1};
 
 // Sentinel `-1` = no override (use cached env path).  Settable values
-// 0..5 mirror `get_grp_matmul_algo()` parse output (`0` = AUTO,
-// `1..5` = forced ALGO_N, `> 5` clamped to AUTO by the getter).  The
+// 0..6 mirror the requested selector surface (`0` = AUTO,
+// `{1,2,3,5,6}` = forced generic ALGO_N, `4` = W8A8 whole-call hook,
+// invalid values clamped to AUTO by the getter).  The
 // `AlgoEnvGuard` RAII helper in `gtests/group_matmul/moe_test_utils.hpp`
 // sets the env-var AND stores into this atomic so that any gtest using
 // `AlgoEnvGuard(N)` continues to flip the effective algo mid-process —
@@ -972,7 +1084,7 @@ inline bool get_grp_matmul_custom_kernel_f16() {
 //
 //   Auto-select-only: cross-warm fires exclusively under
 //   `ZENDNNL_GRP_MATMUL_ALGO=0` (AUTO).  When a single ALGO is pinned
-//   (1..5) the same scheduling path serves every call, so the
+//   ({1,2,3,5,6}) the same scheduling path serves every call, so the
 //   cross-warm target regime (which belongs to a DIFFERENT ALGO) would
 //   never be queried — the helper short-circuits and the pinned path
 //   prepacks only what it itself uses.  A pinned-ALGO fallback (e.g. an
@@ -1422,7 +1534,7 @@ inline std::pair<int, int> aligned_n_split(
 inline constexpr size_t kL3PerCcdBytes = 32UL * 1024UL * 1024UL;
 
 /// Aggregate L3 the planner uses to bound the experts-per-round
-/// budget (ALGO 3 N-tile, ALGO 4 multilevel).  `num_ccds` comes from
+/// budget (ALGO 3 N-tile, ALGO 6 multilevel).  `num_ccds` comes from
 /// summarise_topology() so this stays consistent with how the rest
 /// of the planner partitions the team.
 inline size_t get_grp_l3_total_bytes(int num_ccds) {
@@ -1461,7 +1573,7 @@ inline matmul_algo_t resolve_kernel() {
     return algo;
 }
 
-/// W4A8 matmul policy for full-N ALGOs (1/2/4/5): follow inner kernel
+/// W4A8 matmul policy for full-N ALGOs (1/2/5/6): follow inner kernel
 /// (aocl_dlp = simulated s8, aocl_dlp_blocked = native s4).
 /// ALGO 3 has no native s4 path; runtime N-tile/Sequential force
 /// aocl_dlp_blocked after s8 substitution.
@@ -1482,7 +1594,7 @@ inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
         matmul_algo_t algo) {
 
     // Inactive expert (no routed tokens): nothing to compute.  Returning
-    // early keeps the per-expert ALGOs (1/4/5) from driving the backend
+    // early keeps the per-expert ALGOs (1/5/6) from driving the backend
     // GEMM with M == 0, where tile-count math divides by the row count and
     // traps (SIGFPE).  The M-tile / N-tile ALGOs flatten over rows and skip
     // empty experts implicitly, so this is the only path that needs the
@@ -1556,8 +1668,8 @@ inline bool get_grp_matmul_enable_group_dq() {
 // it — the dispatcher in `group_matmul_dispatch.cpp` and the
 // fused-MoE legacy path in `group_matmul_fused_moe.cpp` both do this.
 
-/// Peek at the ALGO the dispatcher would pick for this call (1=seq,
-/// 2=m_tile, 3=n_tile, 4=multilevel, 5=per_expert).  Mirrors the
+/// Peek at the generic ALGO the dispatcher would pick for this call (1=seq,
+/// 2=m_tile, 3=n_tile, 5=per_expert, 6=multilevel).  Mirrors the
 /// dispatcher's full gating: ZENDNNL_GRP_MATMUL_ALGO override, m/n
 /// tile-safety checks, auto_select_algo on env=0.  Pure observer
 /// (no side-effects); used by the fused-MoE entry to choose tight

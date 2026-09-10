@@ -833,7 +833,7 @@ status_t group_matmul_moe_act_execute(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Per-expert activation (for fused ALGO 1/2/4/5 paths).  Serial by
+// Per-expert activation (for fused ALGO 1/2/5/6 paths).  Serial by
 // default; ALGO 1 passes a team size because its expert loop is serial.
 // ═══════════════════════════════════════════════════════════════════════
 

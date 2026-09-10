@@ -18,7 +18,7 @@ consume, and which bug class does each test lock down".
 
 | Question | Answer |
 |---|---|
-| What gets tested? | The public `group_matmul_direct(...)` dispatcher and everything reachable from it: scheduling ALGOs 1..5, the custom microkernels (BF16 / FP16 / DQ-INT8 — direct-surface + e2e, see §4.6), F16 basic correctness (see §4.1), fused-MoE (Op1 + activation + Op2), gated activations, MoE post-op (weighted reduce), per-expert active/total contract, internal-alloc patterns, prepack module, quantization (WOQ + INT8 + dynamic). |
+| What gets tested? | The public `group_matmul_direct(...)` dispatcher and everything reachable from it: generic scheduling ALGOs `{1,2,3,5,6}`, global and phase-aware AUTO ALGO 4 W8A8 fused-MoE interception (including direct S8), the custom microkernels (BF16 / FP16 / DQ-INT8 — direct-surface + e2e, see §4.6), F16 basic correctness (see §4.1), fused-MoE (Op1 + activation + Op2), gated activations, MoE post-op (weighted reduce), per-expert active/total contract, internal-alloc patterns, prepack module, quantization (WOQ + INT8 + dynamic). |
 | What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `zendnnl/gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
 | Single binary? | Yes. All test files in this folder compile into the same `gtests` executable produced by the parent CMakeLists. Filter via `--gtest_filter=*Prepack*`, `--gtest_filter=*FusedMoE*`, etc. |
 | Helpers reuse policy? | One sibling header (`moe_test_utils.hpp`) for cross-file helpers; one helper TU (`group_matmul_test_helpers.{hpp,cpp}`) for the dispatch shim + quant fixture. File-local helpers stay in anonymous namespaces inside their owning `.cpp`. |
@@ -152,7 +152,7 @@ Lives in `zendnnl/src/lowoha_operators/matmul/group_matmul/group_matmul_direct.h
 
 ```cpp
 zendnnl::lowoha::matmul::group_matmul_prepack::
-    prepack_for_algo_1(p) ... prepack_for_algo_5(p);
+    prepack_for_algo_1(p); // likewise 2, 3, 5, and 6
 zendnnl::lowoha::matmul::group_matmul_prepack::aocl_dlp::
     warm_pack_all_aocl_dlp_experts(...);
 zendnnl::lowoha::matmul::group_matmul_prepack::aocl_dlp::
@@ -225,12 +225,19 @@ Covered by `[11] TestFusedMoEActiveMatmul`, `[14] TestFusedMoEActiveTotalEdge`,
 `[19] TestPrepackFusedMoEEndToEnd` (Pass 2 K_down sizing regression),
 and the entire prepack section.
 
-### 4.5 Scheduling ALGOs (1..5)
+### 4.5 Group MatMul selector identities
+Selector 4 is the W8A8 interceptor in the current interface; the generic
+multilevel scheduler that older revisions exposed as 4 moved to selector 6.
+Compatibility tests and deployments that pin multilevel must therefore use 6.
+The value is not interpreted by dtype, so an ineligible W8A8 request has one
+deterministic fallback policy.
+
 - 1 `sequential_experts`            — covered by `[7]` and `[8]` in `test_algos.cpp`
 - 2 `flat_m_tile`                   — covered by `[7]` and `[8]`
 - 3 `flat_n_tile`                   — covered by `[7]`, `[8]`, `[18]`-`[28]` (the prepack module's hot path is ALGO 3)
-- 4 `parallel_multilevel`           — covered by `[7]` and `[8]`
+- 4 W8A8 fused-MoE interceptor      — covered by `ntile_flat_parallel/test_ntile_flat_parallel.cpp` and `TestGroupMatmulAutoPhaseEnv`; includes global/phase precedence, max-M 32/33 classification, BF16-dynamic and caller-prequantized S8 numerics, signed-vs-biased microkernel equivalence, required same-backing S8/BF16 fast-path destinations, separate/padded/unsafe fast-path destination rejection, scale/ownership/row-pointer rejection, and BF16/direct-S8 fallback to main's generic fused-MoE implementation
 - 5 `parallel_per_expert`           — covered by `[7]` and `[8]`
+- 6 `parallel_multilevel`           — covered by `[7]` and `[8]`
 
 The env-knob matrix in `test_prepack.cpp` `[26]`-`[28]` runs each ALGO
 in its own subprocess for full coverage of the `static const`-cached
@@ -317,7 +324,7 @@ per-element comparison on `0 == 0`.
 ### 4.8 Prepack module
 | Surface | Test |
 |---|---|
-| Per-ALGO functions ([1..5])      | `test_prepack.cpp` `[18]` |
+| Per-ALGO functions (`{1,2,3,5,6}`) | `test_prepack.cpp` `[18]` |
 | Backend warmer (custom-kernel)   | `[16]`, `[17]` (pointer churn) |
 | Backend warmer (AOCL DLP, full)  | `[23]` |
 | Backend warmer (AOCL DLP, per-tile) | `[18]` AoclDlpNTile* |
@@ -334,13 +341,16 @@ per-element comparison on `0 == 0`.
 ## 5. Env vars consumed
 
 All knobs the prepack / dispatch / kernel layers read are listed below.
-`gtests/group_matmul/test_prepack.cpp` `[26]`-`[28]` exercises every
-*cached* knob in a subprocess (because `static const` IIFEs cache on
-first read for the process lifetime, in-process `setenv` is a no-op).
+`gtests/group_matmul/test_prepack.cpp` `[26]`-`[28]` exercises the prepack
+knobs in subprocesses; `TestGroupMatmulAutoPhaseEnv` does the same for the
+phase selectors. Subprocesses are required because `static const` IIFEs cache
+the first read for the process lifetime.
 
 | Env var | Default | Cached? | What it gates |
 |---|---|---|---|
-| `ZENDNNL_GRP_MATMUL_ALGO` | auto | NO (re-read each call) | Force scheduling ALGO 1..5; tests use `AlgoEnvGuard` for in-process flips |
+| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception in both phases; a global generic pin suppresses phase-local 4 |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | 2 | yes (test override available) | AUTO prompt setting. Value 4 requests W8A8 only for `max active M > 32`; on decline, generic dispatch inherits the complete prompt default policy. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | ON | yes | Master prepack switch (PR-443) |
 | `ZENDNNL_GRP_MATMUL_CROSS_WARM` | ON | yes | Opportunistic CK-aware cross-regime warm in `prepack/prepack.cpp::cross_warm` (eliminates decode-first-call spike when prompt-only warmup runs) |
 | `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | ON | yes | Pin n_thr to a num_threads-only formula -> AOCL cache key stability |
@@ -356,8 +366,8 @@ first read for the process lifetime, in-process `setenv` is a no-op).
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR` | 0 (auto -> 32) | yes | Pack/microkernel NR (32 or 64) |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT` | OFF | yes | Per-expert L2-friendly subtile_cols |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` | 0 (off) | yes | Override outer N-tile minimum |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 1 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP cache; 0 short-circuits the prepack AOCL warmer |
-| `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | AOCL DLP reorder LRU capacity.  Caps the prepack guarantee — populated entries can be evicted under pressure.  No effect on the custom-kernel pack arena (intentionally eviction-immune). |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 1 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; 0 short-circuits the prepack AOCL warmer and makes W8A8 ALGO 4 decline without publishing a private packed entry. Changing modes does not itself flush entries from an earlier W8A8 generation. |
+| `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | Capacity for AOCL DLP reorder and W8A8 ALGO-4 complete-tensor LRUs. Caps their populated entries; no effect on the custom-kernel pack arena (intentionally eviction-immune). |
 | `ZENDNNL_DIAGNOSTICS_ENABLE` | ON (set `=0` to disable) | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Default-enabled so contract violations are surfaced; the `[15]` subprocess test re-asserts the knob explicitly via `setenv(..., "1")` to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
 
 Cached = read once via `static const v = []() { getenv(...); }()` at first

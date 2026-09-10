@@ -41,7 +41,7 @@
 ///   7. Otherwise runs the legacy two-pass via
 ///      `run_fused_moe_legacy_two_pass()`: Op1+act through
 ///      `group_matmul_run_parallel_dispatch` (which internally picks
-///      ALGO 1..5 / flat_n_tile / flat_m_tile / etc.), then Op2
+///      generic ALGO {1,2,3,5,6} / flat_n_tile / flat_m_tile / etc.), then Op2
 ///      through the same dispatcher with `act=none`.
 ///   8. Runs an optional MoE weighted-reduce post-op (Stage 4).
 ///   9. Composes the gemm_mode string for profiler / apilog.
@@ -52,7 +52,7 @@
 ///                                   `try_flat_m_tile_pipeline_bf16`.
 ///   * `group_matmul_n_tile.cpp`  — `flat_n_tile`.
 ///   * `group_matmul_dispatch.cpp`— `group_matmul_run_parallel_dispatch`
-///                                   (ALGO 1..5 routing).
+///                                   (generic ALGO routing).
 /// This file owns only the fused-MoE-specific glue: validation, arena
 /// management, Op2-dispatch-scratch population, and the dispatch fork.
 ///
@@ -87,7 +87,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -103,6 +102,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "m_tile/group_matmul_m_tile.hpp" // try_flat_m_tile_pipeline_bf16
+#include "ntile_flat_parallel/ntile_flat_parallel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -222,6 +222,7 @@ inline void reset_thread_local_fused_moe_state() {
     std::vector<void *> {}.swap(s.op1_dst_internal);
     std::vector<void *> {}.swap(s.op2_dst_internal);
     std::vector<int> {}.swap(s.op1_ldc_local);
+    ntile_flat_parallel::reset_thread_local_scratch();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -247,7 +248,7 @@ inline void reset_thread_local_fused_moe_state() {
 //      backend's wide-arena helper is swiglu-only).
 //
 //   3. `env_algo ∈ {0, 3}` — tight requires Op1 to run in flat_n_tile;
-//      a caller forcing ALGO 1/2/4/5 explicitly asked for a non-N-tile
+//      a caller forcing ALGO 1/2/5/6 explicitly asked for a non-N-tile
 //      strategy and silently flipping them violates intent.
 //
 //   4. Env override `ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT`: unset (auto)
@@ -1077,6 +1078,7 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
         p.dtypes.dst = params[i].dtypes.dst;
         p.dtypes.bias = fused.bias_dt_down;
         p.num_threads = params[i].num_threads;
+        p.weight_cache_type = params[i].weight_cache_type;
         // `dtypes.compute` carries over, but `dynamic_quant` is DERIVED:
         // Op2's source is always the float Op1 output, so it needs a source
         // quant pass exactly when its own compute dtype is int8.  Inheriting
@@ -1200,7 +1202,7 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
 // there for the engagement contract.  Only the legacy two-pass
 // wrapper stays here because it is ALGO-agnostic: it forwards each
 // pass through `group_matmul_run_parallel_dispatch`, which internally
-// picks ALGO 1..5 based on shape and env knobs.
+// picks a generic ALGO from {1,2,3,5,6} based on shape and env knobs.
 
 // Legacy two-pass MoE dispatch.  Pass 1 = Op1 (W13 + optional gated
 // activation) via `group_matmul_run_parallel_dispatch`.  Pass 2 = Op2
@@ -1343,7 +1345,8 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
 
     // ── Pass 2: Op2 (down_proj) dispatch ────────────────────────────────
     // Single route: `group_matmul_run_parallel_dispatch` with `act=none`.
-    // Honours `ZENDNNL_GRP_MATMUL_ALGO` (1..5) and `ZENDNNL_MATMUL_ALGO`
+    // Honours generic `ZENDNNL_GRP_MATMUL_ALGO` values {1,2,3,5,6} and
+    // `ZENDNNL_MATMUL_ALGO`
     // for inner BLAS, and routes through the custom BF16 microkernel
     // inside flat_n_tile when `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1` and
     // the ALGO 3 path is selected.
@@ -1505,7 +1508,8 @@ status_t group_matmul_fused_moe_execute(
     // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
     // both the tight-arena decision below and the vertical-fusion gate at
     // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
-    // env algo (1..5) is clamped by m_tile_safe / n_tile_safe inside
+    // generic env algo ({1,2,3,5,6}) is clamped by m_tile_safe /
+    // n_tile_safe inside
     // `select_grp_matmul_algo`, so e.g. a pinned ALGO 2 on an m-tile-unsafe
     // shape resolves to 1 and vertical fusion must NOT engage.
     const int resolved_algo
@@ -1598,10 +1602,10 @@ status_t group_matmul_fused_moe_execute(
     // Vertical fusion is an M-tile (ALGO 2) executor, NOT a separate
     // ALGO — it slots into the M-tile branch.  Only engage it when the
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
-    // (1..5) that is exactly the pinned value; under AUTO (env 0) it is
+    // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0) it is
     // the auto-selector's per-phase choice (prompt -> 2, decode -> 3 by
     // default).  This keeps vertical fusion inside the ALGO-2 decision
-    // tree and stops it from overriding a pinned ALGO 1/3/4/5 (e.g. an
+    // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an
     // ALGO-3 N-tile decode run, where it previously still *attempted*
     // before falling through to legacy two-pass).  Uses the same
     // resolver `pick_fused_moe_want_tight` consults for its ALGO-3 tight
@@ -1754,6 +1758,7 @@ void clear_fused_moe_scratch() {
     if (omp_in_parallel()) return;
 #pragma omp parallel
     { reset_thread_local_fused_moe_state(); }
+    ntile_flat_parallel::flush_packed_weight_cache();
 }
 
 } // namespace matmul

@@ -28,10 +28,12 @@ set(lowoha_group_matmul_sources
   group_matmul/prepack/prepack_aocl_dlp.cpp
   group_matmul/prepack/prepack_custom_kernel.cpp
   group_matmul/custom_kernel/pack.cpp
+  group_matmul/custom_kernel/ntile_flat_parallel_pack.cpp
   group_matmul/custom_kernel/ukernel/bf16_microkernel.cpp
   group_matmul/custom_kernel/ukernel/int8_microkernel.cpp
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp
-  group_matmul/custom_kernel/dispatch.cpp)
+  group_matmul/custom_kernel/dispatch.cpp
+  group_matmul/ntile_flat_parallel/ntile_flat_parallel.cpp)
 
 # AOCL-DLP backed MoE gated activations: only built when AOCL-DLP is enabled.
 if(ZENDNNL_DEPENDS_AOCLDLP)
