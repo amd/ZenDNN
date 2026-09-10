@@ -790,6 +790,65 @@ jobs:
           fi
 
         
+  trigger-zenTF:
+    runs-on: amd-zenai-arc-xsmall-dind
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+     - name: Trigger ZenTF workflow
+       run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_TensorFlow_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnnl-pr",
+            "client_payload": {
+              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "zentf_use_local_zendnnl": "1",
+              "zendnnl_pr_number": "${{ github.event.pull_request.number }}",
+              "zendnnl_pr_title": "${{ github.event.pull_request.title }}",
+              "zendnnl_pr_author": "${{ github.event.pull_request.user.login }}",
+              "zendnnl_pr_url": "${{ github.event.pull_request.html_url }}",
+              "triggering_repo": "AMD-Zenai/ZenDNN",
+              "triggering_event": "${{ github.event_name }}"
+            }
+          }'
+       shell: bash
+  check-zenTF-status:
+   needs: [trigger-zenTF]
+   runs-on: amd-zenai-arc-xsmall-dind
+   steps:
+    - name: Check TensorFlow plugin status
+      env:
+        GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
+        REPO_ZENDNN: AMD-Zenai/ZenDNN
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        echo "Checking ZenTF CI status for commit $COMMIT_SHA..."
+
+        for i in {1..360}; do
+          status=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_TensorFlow_Plugin CI") | .state' | tail -n 1)
+
+          echo "Attempt $i: ZenTF CI status = $status"
+
+          if [[ "$status" == "success" ]]; then
+            echo "ZenTF workflow succeeded."
+            exit 0
+          fi
+
+          if [[ "$status" == "failure" ]]; then
+            echo "ZenTF workflow failed."
+            exit 1
+          fi
+
+          sleep 30
+        done
+
+        echo "Timeout: ZenTF CI did not finish within 3 hours."
+        exit 1
+
   Zendnnl_build_Push: 
    runs-on: zendnnl_presub_server
    if: ${{ github.event_name == 'push' }}
