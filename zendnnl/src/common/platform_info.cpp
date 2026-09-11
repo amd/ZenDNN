@@ -31,6 +31,7 @@ platform_info_t::platform_info_t()
     , is_avx512f {false}
     , is_avx512bw {false}
     , is_avx512vl {false}
+    , is_avx512_vnni {false}
     , is_avx512_f16_native {false}
     , isa_version {0}
     , cpu_family {0}
@@ -54,6 +55,7 @@ status_t platform_info_t::populate() {
     is_avx512f = cpu.hasFlag(ECpuidFlag::avx512f);
     is_avx512bw = cpu.hasFlag(ECpuidFlag::avx512bw);
     is_avx512vl = cpu.hasFlag(ECpuidFlag::avx512vl);
+    is_avx512_vnni = cpu.hasFlag(ECpuidFlag::avx512_vnni);
     detect_f16_isa();
 
     return status_t::success;
@@ -84,6 +86,10 @@ bool platform_info_t::get_avx512_f16_status() const {
 
 bool platform_info_t::get_avx512_bw_vl_status() const {
     return is_avx512bw && is_avx512vl;
+}
+
+bool platform_info_t::get_avx512_vnni_status() const {
+    return is_avx512_vnni;
 }
 
 uint32_t platform_info_t::get_isa_version() const {

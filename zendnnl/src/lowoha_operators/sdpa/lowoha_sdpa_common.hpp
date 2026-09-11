@@ -108,6 +108,13 @@ struct sdpa_params {
     double scale;
     bool is_causal;
     double dropout_p;
+    // Dynamically quantize BF16 Q/K per token for an INT8 QK matmul.
+    bool is_qk_quant;
+    // Dynamically quantize BF16 V per channel and the softmax tile to U8 for
+    // an INT8 PV matmul.  Independent of is_qk_quant -- neither, either, or
+    // both may be set.  ZENDNNL_SDPA_INT8_QK / ZENDNNL_SDPA_INT8_PV override
+    // the corresponding field when the variable is present.
+    bool is_pv_quant;
 
     // num_threads is int32_t to match the type used by OpenMP APIs
     int32_t num_threads;
@@ -149,6 +156,8 @@ struct sdpa_params {
         , scale(0.0)
         , is_causal(false)
         , dropout_p(0.0)
+        , is_qk_quant(false)
+        , is_pv_quant(false)
         , num_threads(0)
         , kernel(sdpa_kernel_t::none) {}
 };

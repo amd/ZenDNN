@@ -87,6 +87,14 @@ public:
    */
     ZENDNNL_API bool get_avx512_bw_vl_status() const;
 
+    /** @brief Get AVX-512 VNNI status.
+   *
+   *  Required by AOCL-DLP s8xs8 and u8xs8 integer GEMM kernels.
+   *
+   *  @return true if the platform supports AVX512-VNNI.
+   */
+    ZENDNNL_API bool get_avx512_vnni_status() const;
+
     /** @brief Get isa version
    *  @return isa version.
    */
@@ -125,6 +133,7 @@ private:
     bool is_avx512f;
     bool is_avx512bw;
     bool is_avx512vl;
+    bool is_avx512_vnni;
     bool is_avx512_f16_native;
     uint32_t isa_version;
     uint32_t cpu_family;

@@ -49,6 +49,11 @@ struct SimdOps<scalar_tag> {
 
     static inline void vec_storeu(float *p, VecF32 x) { *p = x.v; }
 
+    static inline void vec_u8_storeu(uint8_t *p, VecF32 x) {
+        const float clamped = std::fmax(0.0f, std::fmin(255.0f, x.v));
+        *p = static_cast<uint8_t>(std::nearbyint(clamped));
+    }
+
     static inline VecF32 vec_set1(float f) { return VecF32 {f}; }
 
     static inline VecF32 vec_add(VecF32 a, VecF32 b) {
@@ -139,6 +144,15 @@ struct SimdOps<avx512_tag> {
     LOWOHA_SIMD_AVX512_ATTR
     static inline void vec_storeu(float *p, VecF32 x) {
         _mm512_storeu_ps(p, x);
+    }
+
+    LOWOHA_SIMD_AVX512_ATTR
+    static inline void vec_u8_storeu(uint8_t *p, VecF32 x) {
+        const __m512 clamped = _mm512_min_ps(
+                _mm512_max_ps(x, _mm512_setzero_ps()), _mm512_set1_ps(255.0f));
+        const __m512i i32 = _mm512_cvtps_epi32(clamped);
+        _mm_storeu_si128(
+                reinterpret_cast<__m128i *>(p), _mm512_cvtusepi32_epi8(i32));
     }
 
     LOWOHA_SIMD_AVX512_ATTR

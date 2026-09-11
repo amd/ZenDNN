@@ -27,8 +27,10 @@
 # ---------------------------------------------------------------------------
 set(lowoha_flash_sdpa_sources
     lowoha_flash_sdpa.cpp
+    lowoha_sdpa_int8_utils.cpp
     lowoha_flash_sdpa_utils.cpp
-    lowoha_sdpa_flash_cpu.cpp)
+    lowoha_sdpa_flash_cpu.cpp
+    lowoha_sdpa_flash_cpu_int8.cpp)
 
 set(lowoha_flash_sdpa_public_headers
     lowoha_flash_sdpa.hpp

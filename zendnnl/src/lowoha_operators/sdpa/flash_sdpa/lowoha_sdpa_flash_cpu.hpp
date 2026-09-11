@@ -38,8 +38,8 @@ struct sdpa_flash_cpu_mask_view {
     int64_t strides[4];
 };
 
-/// Eagerly free the thread-local flash scratch buffer.
-/// The buffer is also freed automatically when the thread exits (RAII).
+/// Eagerly free the thread-local floating-point and INT8 flash scratch buffers.
+/// The buffers are also freed automatically when the thread exits (RAII).
 void sdpa_flash_cpu_free_scratch();
 
 status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
@@ -48,7 +48,7 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_tensor_view &value, double dropout_p,
         bool is_causal, const sdpa_flash_cpu_mask_view *mask,
         const double *scale_opt, data_type_t qkv_dt, data_type_t mask_dtype,
-        int num_threads = 0);
+        bool is_qk_quant, bool is_pv_quant, int num_threads = 0);
 
 } // namespace sdpa
 } // namespace lowoha

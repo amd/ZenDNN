@@ -91,7 +91,8 @@ status_t flash_sdpa(const void *query, const void *key, const void *value,
 
     return sdpa_flash_cpu_run_internal(ov, qv, kv, vv, params.dropout_p,
             params.is_causal, mask_ptr, scale_opt, params.qkv_dt,
-            params.mask_dt, params.num_threads);
+            params.mask_dt, params.is_qk_quant, params.is_pv_quant,
+            params.num_threads);
 }
 
 } // namespace sdpa

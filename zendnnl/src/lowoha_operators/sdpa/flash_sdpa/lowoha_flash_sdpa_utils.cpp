@@ -140,6 +140,32 @@ status_t validate_flash_sdpa_inputs(const void *query, const void *key,
         log_error("sdpa_flash_cpu: qkv_dt must be f32, bf16, or f16");
         return status_t::failure;
     }
+    const bool any_int8_quant = params.is_qk_quant || params.is_pv_quant;
+    if (any_int8_quant && params.qkv_dt != data_type_t::bf16) {
+        log_error(
+                "sdpa_flash_cpu: dynamic INT8 quantization currently requires "
+                "BF16 Q/K/V");
+        return status_t::unimplemented;
+    }
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    if (any_int8_quant) {
+        log_error(
+                "sdpa_flash_cpu: dynamic INT8 quantization requires an "
+                "AOCL-DLP enabled build");
+        return status_t::unimplemented;
+    }
+#endif
+    // VNNI is required by the s8xs8 / u8xs8 matmuls; F, BW and VL are
+    // required by group_dynamic_quant (lowoha_reorder.cpp).
+    if (any_int8_quant
+            && (!zendnnl_platform_info().get_avx512f_status()
+                    || !zendnnl_platform_info().get_avx512_bw_vl_status()
+                    || !zendnnl_platform_info().get_avx512_vnni_status())) {
+        log_error(
+                "sdpa_flash_cpu: dynamic INT8 quantization requires "
+                "AVX512-F, AVX512-BW, AVX512-VL, and AVX512-VNNI");
+        return status_t::isa_unsupported;
+    }
 
     // --- dropout (only 0 supported) ---
     if (params.dropout_p != 0.0) {
@@ -162,7 +188,7 @@ status_t validate_flash_sdpa_inputs(const void *query, const void *key,
             return status_t::failure;
         }
         if (params.mask_ndims > 0 && attn_mask == nullptr) {
-            log_error("sdpa_flash_cpu: attn_mask is null but mask_ndims is %d",
+            log_error("sdpa_flash_cpu: attn_mask is null but mask_ndims is ",
                     params.mask_ndims);
             return status_t::failure;
         }

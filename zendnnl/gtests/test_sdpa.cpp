@@ -119,6 +119,134 @@ tensor_t make_zero_tensor(tensor_factory_t &tf,
     });
 }
 
+void run_bf16_int8_dynamic_quant_test(tensor_factory_t &tensor_factory,
+        uint64_t batch, uint64_t num_heads, uint64_t kv_num_heads,
+        uint64_t seq_len_q, uint64_t seq_len_kv, uint64_t head_dim,
+        bool is_causal, bool has_mask, const std::string &qkv_order,
+        bool is_qk_quant = true, bool is_pv_quant = true) {
+    auto query_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::bf16, 1.0f,
+            qkv_order);
+    auto key_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len_kv, head_dim}, data_type_t::bf16,
+            1.0f, qkv_order);
+    auto value_tensor = make_uniform_tensor(tensor_factory,
+            {batch, kv_num_heads, seq_len_kv, head_dim}, data_type_t::bf16,
+            1.0f, qkv_order);
+    auto mask_tensor = has_mask
+            ? tensor_factory.uniform_dist_tensor(
+                      {1UL, 1UL, seq_len_q, seq_len_kv}, data_type_t::f32, 0.5f)
+            : tensor_t();
+    auto output_tensor = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::bf16,
+            qkv_order);
+    auto output_tensor_ref = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::bf16,
+            qkv_order);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    status_t status = sdpa_kernel_test(query_tensor, key_tensor, value_tensor,
+            mask_tensor, output_tensor, scale, is_causal, has_mask,
+            sdpa_kernel_t::flash, is_qk_quant, is_pv_quant);
+    if (status == status_t::unimplemented
+            || status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "Dynamic INT8 SDPA requires AOCL-DLP and AVX512-VNNI";
+    }
+    status_t ref_status = sdpa_kernel_test(query_tensor, key_tensor,
+            value_tensor, mask_tensor, output_tensor_ref, scale, is_causal,
+            has_mask, sdpa_kernel_t::reference);
+
+    bool ok = status == status_t::success && ref_status == status_t::success;
+    float worst_actual = 0.0f;
+    float worst_expected = 0.0f;
+    float worst_error = 0.0f;
+    uint64_t worst_b = 0, worst_h = 0, worst_s = 0, worst_d = 0;
+    if (ok) {
+        // A fixed band is intentional here: the generic SDPA reduction bound
+        // grows with seq_len_kv and becomes too permissive for an INT8 test.
+        constexpr float atol = 8e-2f;
+        constexpr float rtol = 5e-2f;
+        for (uint64_t b = 0; b < batch && ok; ++b) {
+            for (uint64_t h = 0; h < num_heads && ok; ++h) {
+                for (uint64_t s = 0; s < seq_len_q && ok; ++s) {
+                    for (uint64_t d = 0; d < head_dim; ++d) {
+                        const float actual = output_tensor.at({b, h, s, d});
+                        const float expected
+                                = output_tensor_ref.at({b, h, s, d});
+                        const float error = std::fabs(actual - expected);
+                        // A NaN compares false against everything, so it
+                        // would slip through the tolerance test below and
+                        // would never beat worst_error either. Fail on it
+                        // explicitly, and record it so the diagnostic points
+                        // at the offending element rather than at whichever
+                        // finite element happened to be worst.
+                        const bool non_finite = !std::isfinite(actual)
+                                || !std::isfinite(expected);
+                        if (non_finite || error > worst_error) {
+                            worst_actual = actual;
+                            worst_expected = expected;
+                            worst_error = error;
+                            worst_b = b;
+                            worst_h = h;
+                            worst_s = s;
+                            worst_d = d;
+                        }
+                        if (non_finite
+                                || error > atol + rtol * std::fabs(expected)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(ok) << "worst mismatch [" << worst_b << "," << worst_h << ","
+                    << worst_s << "," << worst_d << "]: actual=" << worst_actual
+                    << ", expected=" << worst_expected
+                    << ", abs_error=" << worst_error;
+}
+
+TEST(SdpaInt8DynamicQuantTest, BF16_FUSED_INT8_PV_MASKED_GQA_BSHD) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/4, /*kv_num_heads=*/2,
+            /*seq_len_q=*/5, /*seq_len_kv=*/5, /*head_dim=*/16,
+            /*is_causal=*/true, /*has_mask=*/true, kBshdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true);
+}
+
+TEST(SdpaInt8DynamicQuantTest, BF16_FUSED_INT8_PV_MULTIPLE_KV_TILES) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/1, /*kv_num_heads=*/1,
+            /*seq_len_q=*/3, /*seq_len_kv=*/513, /*head_dim=*/16,
+            /*is_causal=*/false, /*has_mask=*/false, kBhsdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true);
+}
+
+// QK-only mode: the INT8 QK matmul feeds a BF16 probability tile, so this is
+// the only case that exercises the p_bf16 scratch and the BF16 PV GEMM.
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_QK_ONLY_MASKED_GQA_BSHD) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/4, /*kv_num_heads=*/2,
+            /*seq_len_q=*/5, /*seq_len_kv=*/5, /*head_dim=*/16,
+            /*is_causal=*/true, /*has_mask=*/true, kBshdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/false);
+}
+
+// PV-only mode: no Q scale exists to carry the attention factor, so this is
+// the only case that exercises folding it into the BF16 QK GEMM alpha.
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_PV_ONLY_MASKED_GQA_BSHD) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/4, /*kv_num_heads=*/2,
+            /*seq_len_q=*/5, /*seq_len_kv=*/5, /*head_dim=*/16,
+            /*is_causal=*/true, /*has_mask=*/true, kBshdOrder,
+            /*is_qk_quant=*/false, /*is_pv_quant=*/true);
+}
+
 /**
  * @brief Supported additive-mask shape variants.
  *

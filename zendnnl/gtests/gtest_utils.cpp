@@ -4282,7 +4282,8 @@ status_t build_sdpa_params_from_tensors(tensor_t &query_tensor,
 
 status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
         tensor_t &value_tensor, tensor_t &mask_tensor, tensor_t &output_tensor,
-        float scale, bool is_causal, bool has_mask, sdpa_kernel_t kernel) {
+        float scale, bool is_causal, bool has_mask, sdpa_kernel_t kernel,
+        bool is_qk_quant, bool is_pv_quant) {
     try {
         sdpa_params params {};
         void *q_data = nullptr;
@@ -4298,12 +4299,16 @@ status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
         if (prep_status != status_t::success) { return prep_status; }
 
         params.kernel = kernel;
+        params.is_qk_quant = is_qk_quant;
+        params.is_pv_quant = is_pv_quant;
 
         log_info("SDPA LOWOHA: Calling sdpa_direct with batch=", params.batch,
                 ", num_heads=", params.num_heads, ", seq_len=", params.seq_len,
                 ", kv_num_heads=", params.kv_num_heads,
                 ", head_dim=", params.head_dim, ", scale=", params.scale,
                 ", is_causal=", params.is_causal, ", has_mask=", has_mask,
+                ", is_qk_quant=", params.is_qk_quant,
+                ", is_pv_quant=", params.is_pv_quant,
                 ", kernel=", kernel_to_string(params.kernel));
 
         status_t status

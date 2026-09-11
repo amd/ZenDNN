@@ -35,6 +35,8 @@ Include `lowoha_operators/sdpa/lowoha_sdpa.hpp` (namespace `zendnnl::lowoha::sdp
 - Thread-local scratch buffer reuse across calls
 - Self- and cross-attention support, with optional additive 2-D / 4-D mask and causal masking
 - FP32 / BF16 / FP16 inputs with FP32 internal precision for numerical stability
+- Optional BF16 dynamic-INT8 compute for Q×K^T and/or probability×V using
+  ZenDNN reorder and matmul APIs
 
 ## API signature
 
@@ -83,6 +85,8 @@ struct sdpa_params {
   double scale;            // Attention scale (0 = auto: 1/sqrt(head_dim))
   bool is_causal;          // Enable causal (upper-triangular) masking
   double dropout_p;        // Dropout probability (must be 0)
+  bool is_qk_quant;        // BF16 Q/K dynamic-INT8 Q×K^T compute (default false)
+  bool is_pv_quant;        // BF16 V / u8 probability INT8 P×V compute (default false)
 
   int32_t num_threads;     // Number of OpenMP threads (0 = auto)
 };
@@ -105,6 +109,8 @@ struct sdpa_params {
 | `scale` | `double` | Attention scale; `0` = auto (`1/sqrt(head_dim)`) |
 | `is_causal` | `bool` | Enable causal (upper-triangular) masking |
 | `dropout_p` | `double` | Dropout probability (must be `0`) |
+| `is_qk_quant` | `bool` | Quantize BF16 Q/K per token and run Q×K^T in INT8; requires AOCL-DLP and AVX512-VNNI |
+| `is_pv_quant` | `bool` | Quantize BF16 V per channel and the softmax tile to u8, and run probability×V in INT8; requires AOCL-DLP and AVX512-VNNI |
 | `num_threads` | `int32_t` | OpenMP thread count; `0` = auto |
 
 #### `seq_len` vs `kv_seq_len`
@@ -153,6 +159,49 @@ The flash backend uses per-tensor BHSD strides to support non-contiguous memory 
 
 > **Note:** Internal precision is FP32 across all paths. Both the Q×K^T and softmax×V matmuls write FP32 outputs into the per-thread accumulators (`aocl_gemm_bf16bf16f32of32` for BF16 inputs, `aocl_gemm_f16f16f32of32` for FP16 inputs, `aocl_gemm_f32f32f32of32` for FP32 inputs). Online-softmax max/sum reductions and the running output accumulator stay in FP32. `out_dt` must either equal `qkv_dt` or be `data_type_t::none`.
 
+#### Dynamic INT8 compute
+
+`is_qk_quant` and `is_pv_quant` independently select INT8 compute for the two
+attention matmuls. Both default to `false`, both require BF16 Q/K/V with BF16
+output, and each may be set on its own:
+
+| `is_qk_quant` | `is_pv_quant` | Q×K^T | probability×V |
+| --- | --- | --- | --- |
+| `false` | `false` | BF16 | BF16 |
+| `true` | `false` | INT8 s8×s8 | BF16 |
+| `false` | `true` | BF16 | INT8 u8×s8 |
+| `true` | `true` | INT8 s8×s8 | INT8 u8×s8 |
+
+Either flag selects INT8 only when the Q/K/V data type is BF16. FP32 and FP16
+calls continue through their normal floating-point paths, so mixed-dtype
+workloads are unaffected. Both flags require the flash backend; requesting
+either with another kernel returns `status_t::unimplemented`.
+
+The public tensor data types do not change. Internally, with `is_qk_quant`:
+
+- Q and K are quantized once per head to symmetric s8 with one scale per token,
+  through a single LOWOHA `group_dynamic_quant` call.
+- Q×K^T uses s8×s8 via `matmul_direct` and writes dequantized FP32 scores.
+- The attention scale is folded into the per-token Q dequantization scales.
+
+With `is_pv_quant`:
+
+- V is quantized once per KV head to per-channel s8. All V heads are processed
+  by one grouped per-channel `group_dynamic_quant` call across the configured
+  SDPA thread team.
+- The online-softmax exponential loop writes its known `[0, 1]` output directly
+  as u8 with scale `1/255`, avoiding a separate probability min/max scan or
+  reorder.
+- probability×V uses u8×s8 and accumulates dequantized FP32 output.
+
+When `is_pv_quant` is set without `is_qk_quant`, Q×K^T stays on the BF16 GEMM
+with the attention scale folded into its alpha, and only the V and probability
+tensors are quantized.
+
+Online softmax max/sum reductions and the running output accumulator remain
+FP32 in every combination. Both paths require an AOCL-DLP-enabled build and
+AVX512-F, AVX512-BW, AVX512-VL and AVX512-VNNI.
+
 ##### ISA requirement for FP16
 
 The FP16 paths require **AVX512-FP16** at runtime (CPUID leaf 7, subleaf 0, EDX bit 23; available on Zen 5 / Sapphire Rapids and later). The operator probes this via `zendnnl_platform_info().get_avx512_f16_status()` and rejects FP16 calls early with `status_t::isa_unsupported` when the ISA is absent, mirroring the gate enforced by the matmul backend (`lowoha_matmul.cpp`).
@@ -190,9 +239,14 @@ flash_sdpa()
   │
   ▼
 sdpa_flash_cpu_run_internal()
-  │  Runtime SIMD dispatch:
-  │    if (AVX-512 available) → SimdOps<avx512_tag>  (16-lane __m512)
-  │    else                   → SimdOps<scalar_tag>   (1-lane scalar)
+  │  1. Reject FP16 without AVX512-FP16
+  │  2. INT8 ISA gate: is_qk_quant || is_pv_quant requires
+  │     AVX512-F, AVX512-BW, AVX512-VL, AVX512-VNNI (else isa_unsupported)
+  │  3. Runtime SIMD dispatch:
+  │       if (AVX-512 available) → SimdOps<avx512_tag>  (16-lane __m512)
+  │       else                   → SimdOps<scalar_tag>   (1-lane scalar)
+  │  4. if (is_qk_quant || is_pv_quant) → sdpa_flash_cpu_run_int8()
+  │       returns here; does not enter the floating-point dispatch below
   │
   ▼
 flash_attention_kernel_sa_dispatch<SimdTag>()
@@ -226,7 +280,7 @@ The kernel implements the online softmax flash attention algorithm, which avoids
 
 2. **Online Softmax**: For each Q tile, the kernel iterates over KV tiles and maintains running statistics (row-wise max and sum) to compute the softmax incrementally. When a new KV tile produces a larger max, the previously accumulated output is rescaled.
 
-3. **Memory Efficiency**: Scratch memory per thread is `O(q_split × kv_split + q_split × head_dim)` instead of `O(S × S)` for the full attention matrix. Scratch buffers are thread-local and reused across calls.
+3. **Memory Efficiency**: Scratch memory per thread is `O(q_split × kv_split + q_split × head_dim)` instead of `O(S × S)` for the full attention matrix. Scratch buffers are thread-local and reused across calls. The dynamic-INT8 path is the exception: its quantized Q/K/V buffers are whole-tensor, `O(batch × heads × seq_len × head_dim)`, and therefore grow with sequence length — see **Scratch memory** below.
 
 4. **Parallelization**: The outer loop over `batch × heads × q_tiles` work items is parallelized with `#pragma omp parallel for schedule(static)`.
 
@@ -644,7 +698,12 @@ int lowoha_sdpa_cross_attention_example() {
    | `seq_len < 192` | 32 | 512 | Small tiles preserve parallelism for short sequences |
    | `batch > 4` (override) | 512 | 512 | Larger Q tiles when batch parallelism is sufficient |
 
-2. **Scratch memory**: Each thread uses a private, grow-only scratch arena (sized from the selected tiles) managed by a `thread_local` allocator (`flash_scratch_acquire`) and reused across calls. Call `sdpa_flash_cpu_free_scratch()` to release it eagerly.
+2. **Scratch memory**: Each calling thread retains grow-only scratch storage
+   that is reused across calls. The dynamic-INT8 path also retains its
+   quantized Q/K/V, scale, FP32 tile, and BF16/u8 probability buffers, avoiding
+   repeated allocation and value-initialization for stable or smaller shapes.
+   Call `sdpa_flash_cpu_free_scratch()` on the owning thread to release all
+   retained flash scratch storage eagerly.
 
    | Buffer | Size | Purpose |
    |--------|------|---------|
