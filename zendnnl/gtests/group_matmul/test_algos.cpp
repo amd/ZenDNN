@@ -7146,6 +7146,11 @@ static void run_and_compare_standalone_f32(StandaloneMTileShapeF32 &s,
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::lowoha::matmul::status_t;
 
+    // Both runs below share one weight pool and clear the caches in between,
+    // which the in-place mode forbids: run 1 would rewrite the buffer and
+    // run 2 would then repack already-packed bytes.  Pin out-of-place.
+    WeightCacheGuard wc_out_of_place(1);
+
     {
         auto pr = s.params;
         AlgoEnvGuard algo_guard_ref(algo_ref);
@@ -7946,6 +7951,10 @@ static void run_kblock_case(int num_threads, int M, int N, int K, int nr,
 
     auto p = build_kblock_probe(
             num_threads, M, N, K, with_bias, f32_dst, lda_pad, ldc_pad);
+
+    // `kblock_reference` recomputes from `p.weis` AFTER the dispatch below,
+    // so the weight pool must survive the call unmodified.  Pin out-of-place.
+    WeightCacheGuard wc_out_of_place(1);
 
     bool kblock_ran = false;
     {

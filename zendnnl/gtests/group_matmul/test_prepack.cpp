@@ -81,7 +81,16 @@
 //      warm-pack hook through the dispatcher).
 // ===============================================================================
 
-class TestFusedMoECacheStress : public ::testing::Test {};
+// These suites assert eager warm-pack counts and re-run shared weight pools
+// across cache clears.  Both are out-of-place contracts: under the in-place
+// mode the warmers deliberately skip (the runtime packs lazily instead) and a
+// re-run would repack an already-mutated buffer.  Pin mode 1 for them.
+struct OutOfPlaceCacheFixture {
+    WeightCacheGuard wc_out_of_place {1};
+};
+
+class TestFusedMoECacheStress : public ::testing::Test,
+                                private OutOfPlaceCacheFixture {};
 
 TEST_F(TestFusedMoECacheStress, ColdThenWarm) {
     using namespace zendnnl::lowoha::matmul;
@@ -144,7 +153,8 @@ TEST_F(TestFusedMoECacheStress, ColdThenWarm) {
 //      expert to miss; the rest stay hits.
 // ===============================================================================
 
-class TestFusedMoEPointerChurn : public ::testing::Test {};
+class TestFusedMoEPointerChurn : public ::testing::Test,
+                                 private OutOfPlaceCacheFixture {};
 
 TEST_F(TestFusedMoEPointerChurn, ReallocOneExpertOnlyMisses) {
     using namespace zendnnl::lowoha::matmul;
@@ -202,7 +212,8 @@ TEST_F(TestFusedMoEPointerChurn, ReallocOneExpertOnlyMisses) {
 //      inner != aocl_dlp_blocked) plus the ALGO 3 custom-kernel branch.
 // ===============================================================================
 
-class TestPrepackPerAlgoFunctions : public ::testing::Test {};
+class TestPrepackPerAlgoFunctions : public ::testing::Test,
+                                    private OutOfPlaceCacheFixture {};
 
 namespace {
 // Build a minimal `PrepackParams` that points at caller-owned vectors.
@@ -804,7 +815,8 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3PerTilePathRunsWithThreadContext) {
 //      surface the regression.
 // ===============================================================================
 
-class TestPrepackFusedMoEEndToEnd : public ::testing::Test {};
+class TestPrepackFusedMoEEndToEnd : public ::testing::Test,
+                                    private OutOfPlaceCacheFixture {};
 
 TEST_F(TestPrepackFusedMoEEndToEnd, BothPassesWarmAllExperts) {
     using namespace zendnnl::lowoha::matmul;
@@ -1389,7 +1401,8 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulPrepackResultInvariance,
 //          load-bearing short-circuit (not "warm-pack runs always").
 // ===============================================================================
 
-class TestPrepackClearCacheDirect : public ::testing::Test {};
+class TestPrepackClearCacheDirect : public ::testing::Test,
+                                    private OutOfPlaceCacheFixture {};
 
 TEST_F(TestPrepackClearCacheDirect, CustomKernelCacheClearEvictsEntries) {
     using namespace zendnnl::lowoha::matmul;
@@ -1513,7 +1526,8 @@ TEST_F(TestPrepackClearCacheDirect, FingerprintClearEnablesPrepackReFire) {
 //      5 and by ALGO 3 fallbacks (STABLE_NTILE off, narrow-N escape).
 // ===============================================================================
 
-class TestPrepackAoclDlpFullWeight : public ::testing::Test {};
+class TestPrepackAoclDlpFullWeight : public ::testing::Test,
+                                     private OutOfPlaceCacheFixture {};
 
 TEST_F(TestPrepackAoclDlpFullWeight, SkipsNonConstExperts) {
     using namespace zendnnl::lowoha::matmul;
@@ -1603,7 +1617,8 @@ TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
 //      cache_hits = E.
 // ===============================================================================
 
-class TestPrepackVariableN : public ::testing::Test {};
+class TestPrepackVariableN : public ::testing::Test,
+                             private OutOfPlaceCacheFixture {};
 
 TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
     using namespace zendnnl::lowoha::matmul;
@@ -1758,7 +1773,8 @@ TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
 //          would see 1 MISS at e=255.
 // ===============================================================================
 
-class TestPrepackStress : public ::testing::Test {};
+class TestPrepackStress : public ::testing::Test,
+                          private OutOfPlaceCacheFixture {};
 
 namespace {
 
@@ -2427,7 +2443,8 @@ INSTANTIATE_TEST_SUITE_P(GrpMatmulEnvInteraction,
 //      cache is untouched).
 // ===============================================================================
 
-class TestPrepackCrossWarmRegimes : public ::testing::Test {
+class TestPrepackCrossWarmRegimes : public ::testing::Test,
+                                    private OutOfPlaceCacheFixture {
 protected:
     // Arms `prepack::test_api::s_capture_last_invocation` for the test's
     // scope so the gated mutex+write inside `log_pack_probe` actually
@@ -3262,7 +3279,8 @@ TEST_F(TestPrepackFingerprintInvariance, PoolSizeChangeRefireWarm) {
 //      refusal cases, and that all-good config does fire CK warm.
 // ===============================================================================
 
-class TestPrepackCkGateSymmetry : public ::testing::Test {
+class TestPrepackCkGateSymmetry : public ::testing::Test,
+                                  private OutOfPlaceCacheFixture {
 protected:
     // See note on `TestPrepackCrossWarmRegimes::prepack_stats_guard_` —
     // same gate, scoped to each `TEST_F` body in this fixture.
@@ -4062,7 +4080,8 @@ namespace ck = zendnnl::lowoha::matmul::custom_kernel;
 
 // Per-expert s8 weight buffers — unique pointers so the LRU key
 // (which is the raw pointer) sees one entry per expert.
-class TestPrepackInt8WarmDtypeFamily : public ::testing::Test {
+class TestPrepackInt8WarmDtypeFamily : public ::testing::Test,
+                                       private OutOfPlaceCacheFixture {
 protected:
     void SetUp() override {
         if (!ck::avx512vnni_available()) {

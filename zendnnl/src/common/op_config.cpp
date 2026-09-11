@@ -29,7 +29,7 @@ void matmul_config_t::set_default_config() {
     int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
     set_algo(matmul_algo);
     set_bmm_algo(bmm_algo);
-    set_weight_cache(1);
+    set_weight_cache(2);
     set_otf_bpack(0);
     set_zp_comp_cache(true); // Enable ZP compensation caching by default
     set_accum_type(data_type_t::f32); // Default to F32 accumulation
@@ -42,7 +42,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     // get matmul_algo
     int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
     int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
-    int32_t matmul_weight_cache = 1;
+    int32_t matmul_weight_cache = 2;
     int32_t matmul_otf_bpack_json = 0;
     bool zp_comp_cache_enabled = true; // Default enabled
     uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
@@ -95,7 +95,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
             auto matmul_weight_cache_str
                     = matmul_weight_cache_json.template get<std::string>();
             if (!matmul_weight_cache_str.empty()) {
-                // 0: disabled, 1: out-of-place (default), 2: inplace
+                // 0: disabled, 1: out-of-place, 2: inplace (default)
                 if (matmul_weight_cache_str == "0") {
                     matmul_weight_cache = 0;
                 } else if (matmul_weight_cache_str == "1") {
@@ -108,8 +108,8 @@ status_t matmul_config_t::set_user_config(json config_json) {
                             matmul_weight_cache_str,
                             "'; expected \"0\" (disabled), \"1\" "
                             "(out-of-place) or \"2\" (in-place). "
-                            "Defaulting to 1 (out-of-place).");
-                    matmul_weight_cache = 1;
+                            "Defaulting to 2 (in-place).");
+                    matmul_weight_cache = 2;
                 }
             }
         }
@@ -213,16 +213,16 @@ void matmul_config_t::set_env_config() {
 
     set_bmm_algo(bmm_algo);
     char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
-    [[maybe_unused]] int32_t matmul_weight_cache = 1;
+    [[maybe_unused]] int32_t matmul_weight_cache = 2;
     if (weight_cache_env) {
-        // 0: disabled, 1: out-of-place (default), 2: inplace.
+        // 0: disabled, 1: out-of-place, 2: inplace (default).
         // Parse defensively: stoi throws on non-numeric input, which would
         // otherwise crash matmul initialisation. Treat anything not in
         // {0, 1, 2} as user error and fall back to the safe default with a
         // warning so misconfigurations are visible rather than silently
         // ignored.
         bool valid = false;
-        int32_t weight_cache = 1;
+        int32_t weight_cache = 2;
         try {
             size_t consumed = 0;
             weight_cache = std::stoi(weight_cache_env, &consumed);
@@ -239,7 +239,7 @@ void matmul_config_t::set_env_config() {
             apilog_warning("Unrecognized ZENDNNL_MATMUL_WEIGHT_CACHE value '",
                     weight_cache_env,
                     "'; expected 0 (disabled), 1 (out-of-place) or "
-                    "2 (in-place). Defaulting to 1 (out-of-place).");
+                    "2 (in-place). Defaulting to 2 (in-place).");
         }
     }
     set_weight_cache(matmul_weight_cache);

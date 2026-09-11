@@ -282,13 +282,15 @@ private:
     data_type_t
             matmul_accum_type; /**< Accumulation type for reference kernel. */
     /// Matmul weight cache type (0=disabled, 1=out-of-place, 2=in-place).
+    /// Defaults to 2: backends that support in-place weight packing use it,
+    /// and the rest fall back to out-of-place caching on their own.
     /// Atomic because the grouped dispatcher can mutate it at runtime
     /// (`set_weight_cache(1)` on the WEIGHT_CACHE=2 AUTO safety downgrade)
     /// concurrently with other threads reading it via `get_weight_cache()`;
     /// a plain int32_t there is a C++ data race.  Relaxed ordering is
     /// sufficient — the value is an independent flag, not a release gate
     /// for other memory.
-    std::atomic<int32_t> matmul_weight_cache {1};
+    std::atomic<int32_t> matmul_weight_cache {2};
     /// Grouped-matmul AUTO "mixed in-place" mode for WEIGHT_CACHE=2.  When
     /// set, the grouped AUTO path keeps WC=2 (instead of downgrading to 1)
     /// and routes asymmetrically: the AOCL full-weight (prompt) reorder

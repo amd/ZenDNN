@@ -100,7 +100,7 @@
 ///   ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE=N - per-thread N-tile floor override (0 = use default)
 ///   ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=0|1 - stable AOCL DLP cache key under MoE churn (default 1)
 ///   ZENDNNL_MATMUL_ALGO=N               - select inner kernel (default: aocl_dlp_blocked)
-///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1|2   - global weight-pack mode (default 1);
+///   ZENDNNL_MATMUL_WEIGHT_CACHE=0|1|2   - global weight-pack mode (default 2);
 ///                                          mode 0 makes W8A8 ALGO 4 decline
 
 #include "grp_matmul_benchdnn.hpp"
