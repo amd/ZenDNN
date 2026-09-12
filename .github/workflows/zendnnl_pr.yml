@@ -598,7 +598,7 @@ jobs:
       # The configure/build commands invoke these explicitly so they work
       # regardless of what is on PATH.
       CMAKE: "/c/Program Files/Python312/Lib/site-packages/cmake/data/bin/cmake.exe"
-      NINJA: "/c/Program Files/Python312/Scripts/ninja.exe"
+      NINJA: "/c/msvsn2022/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
       # Only if the Windows SDK isn't auto-discovered: point the loader at an
       # SDK wrapper .bat. Most machines don't need this.
       # MSVCENV_BAT: C:/ZenDNN/msvcenv.bat
@@ -607,11 +607,32 @@ jobs:
       shell: bash
       run: |
         echo "Cleaning old workspace data..."
+        runner_root="${ACTIONS_RUNNER_ROOT:-}"
+        if [ -z "${runner_root}" ] && [ -n "${GITHUB_WORKSPACE:-}" ]; then
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          if [ "$(basename "${parent}")" = "_work" ]; then
+            runner_root="$(dirname "${parent}")"
+          fi
+        fi
+        if [ -n "${runner_root}" ]; then
+          echo "Clearing runner diagnostic logs under ${runner_root}/_diag"
+          rm -rf "${runner_root}/_diag"/* 2>/dev/null || true
+          if [ -d "${runner_root}/_work" ]; then
+            for entry in "${runner_root}/_work"/*; do
+              [ -e "${entry}" ] || continue
+              case "$(basename "${entry}")" in
+                _actions|_temp|_tool|_PipelineMapping|_update|_update.sh) continue ;;
+              esac
+              echo "Removing stale workspace ${entry}"
+              rm -rf "${entry}" 2>/dev/null || true
+            done
+          fi
+        fi
         ls -al "$GITHUB_WORKSPACE" || true
         rm -rf "$GITHUB_WORKSPACE"/* || true
         rm -rf "$GITHUB_WORKSPACE"/.[!.]* || true
         echo "Workspace cleaned."
-        ls -al "$GITHUB_WORKSPACE"
+        ls -al "$GITHUB_WORKSPACE" || true
 
     - name: Checkout repository
       uses: actions/checkout@v6
@@ -685,10 +706,30 @@ jobs:
       if: always()
       shell: bash
       run: |
-        echo "Cleaning up workspace..."
+        echo "Cleaning up workspace and runner caches..."
+        runner_root="${ACTIONS_RUNNER_ROOT:-}"
+        if [ -z "${runner_root}" ] && [ -n "${GITHUB_WORKSPACE:-}" ]; then
+          parent="$(dirname "${GITHUB_WORKSPACE}")"
+          if [ "$(basename "${parent}")" = "_work" ]; then
+            runner_root="$(dirname "${parent}")"
+          fi
+        fi
         rm -rf "$GITHUB_WORKSPACE/build-msvc" || true
-        rm -f "$GITHUB_WORKSPACE/msvc_build_output.log" || true
-        rm -f "$GITHUB_WORKSPACE/msvc_gtest_output.log" || true
+        rm -f "$GITHUB_WORKSPACE/msvc_build_output.log" \
+              "$GITHUB_WORKSPACE/msvc_gtest_output.log" || true
+        if [ -n "${runner_root}" ]; then
+          # Do not clear _work/_actions here: post-job steps still need the
+          # downloaded action bundles after this cleanup step completes.
+          rm -rf "${runner_root}/_diag"/* 2>/dev/null || true
+          rm -f "${runner_root}/actions-runner-win-x64-"*.zip 2>/dev/null || true
+          if [ -d "${runner_root}/bin.2.337.0" ]; then
+            rm -rf "${runner_root}/bin.2.336.0" "${runner_root}/externals.2.336.0" 2>/dev/null || true
+          fi
+        fi
+        rm -rf /c/Temp/* 2>/dev/null || true
+        if [ -n "${TEMP:-}" ] && [ -d "${TEMP}" ]; then
+          find "${TEMP}" -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+        fi
         echo "Workspace cleanup completed"
 
   trigger-zenTorch:
