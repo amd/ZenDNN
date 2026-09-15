@@ -54,6 +54,25 @@ on:
 
 permissions:
   contents: read
+  actions: write
+
+# A new commit on the same PR supersedes its older CI run. Keep manual,
+# repository-dispatch and main-push runs independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Compile at 32 cores; pin gtest OpenMP to 24 on presub/push boxes.
+# ZENDNNL_BUILD_SYS_NPROC caps ExternalProject -j; CMAKE_BUILD_PARALLEL_LEVEL
+# and --parallel cap the top-level cmake --build; --num_threads pins gtests.
+env:
+  ZENDNNL_CI_BUILD_NPROC: '32'
+  ZENDNNL_CI_TEST_NPROC: '24'
+  OMP_NUM_THREADS: '24'
+  MKL_NUM_THREADS: '24'
+  OPENBLAS_NUM_THREADS: '24'
+  BLIS_NUM_THREADS: '24'
+  CMAKE_BUILD_PARALLEL_LEVEL: '32'
 
 jobs:
   jira-id-check:
@@ -280,8 +299,8 @@ jobs:
         
         # Build ZenDNNL
         mkdir -p build && cd build
-        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
-        cmake --build . --target=all |& tee $WORKSPACE/build_output.log
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DZENDNNL_BUILD_SYS_NPROC=$ZENDNNL_CI_BUILD_NPROC
+        cmake --build . --target=all --parallel $ZENDNNL_CI_BUILD_NPROC |& tee $WORKSPACE/build_output.log
       shell: bash
       
     - name: Verify build output
@@ -310,7 +329,7 @@ jobs:
         echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
         
         # Run the gtests with configurable parameters
-        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS |& tee $WORKSPACE/gtest_output.log
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
@@ -324,7 +343,7 @@ jobs:
         echo "Running ai_gtests with filter: presub"
         
         # Run the ai_gtests with configurable parameters
-        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*" |& tee $WORKSPACE/ai_gtest_output.log
+        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*" --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/ai_gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/ai_gtest_output.log"; then
@@ -378,6 +397,24 @@ jobs:
          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
           "https://api.github.com/repos/AMD-Zenai/ZenDNN_tools/statuses/${{ github.event.client_payload.zendnntools_ref_sha }}" \
           -d "{\"state\":\"${state}\",\"context\":\"${{ github.repository }} CI\",\"description\":\"${{ github.repository }} ${state}\"}"
+
+    - name: Cancel remaining jobs after GCC failure
+      if: failure()
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel")
+        echo "Cancel request returned HTTP ${code}"
+        if [ "$code" != "202" ] && [ "$code" != "409" ]; then
+          echo "::warning::Could not cancel remaining jobs (HTTP ${code})"
+        fi
+
   Zendnnl_build_Clang_PR:
     runs-on: zendnnl_presub_server
     needs: [jira-id-check, license-header-check, clang-format-check]
@@ -500,8 +537,8 @@ jobs:
 
         # Build ZenDNNL using the clang toolchain
         mkdir -p build && cd build
-        cmake .. -DCMAKE_C_COMPILER="$CC_BIN" -DCMAKE_CXX_COMPILER="$CXX_BIN" -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
-        cmake --build . --target=all |& tee $WORKSPACE/clang_build_output.log
+        cmake .. -DCMAKE_C_COMPILER="$CC_BIN" -DCMAKE_CXX_COMPILER="$CXX_BIN" -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DZENDNNL_BUILD_SYS_NPROC=$ZENDNNL_CI_BUILD_NPROC
+        cmake --build . --target=all --parallel $ZENDNNL_CI_BUILD_NPROC |& tee $WORKSPACE/clang_build_output.log
       shell: bash
 
     - name: Verify clang build output
@@ -530,7 +567,7 @@ jobs:
         echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
 
         # Run the gtests with configurable parameters
-        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS |& tee $WORKSPACE/clang_gtest_output.log
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/clang_gtest_output.log
 
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/clang_gtest_output.log"; then
@@ -544,7 +581,7 @@ jobs:
         echo "Running ai_gtests with filter: presub"
 
         # Run the ai_gtests with configurable parameters
-        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*" |& tee $WORKSPACE/clang_ai_gtest_output.log
+        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*" --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/clang_ai_gtest_output.log
 
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/clang_ai_gtest_output.log"; then
@@ -586,6 +623,23 @@ jobs:
         rm -f $WORKSPACE/clang_gtest_output.log
         echo "Workspace cleanup completed"
       shell: bash
+
+    - name: Cancel remaining jobs after Clang failure
+      if: failure()
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel")
+        echo "Cancel request returned HTTP ${code}"
+        if [ "$code" != "202" ] && [ "$code" != "409" ]; then
+          echo "::warning::Could not cancel remaining jobs (HTTP ${code})"
+        fi
 
   Zendnnl_build_MSVC_PR:
     runs-on: windows_runner
@@ -673,16 +727,17 @@ jobs:
           -DZENDNNL_BUILD_TYPE=RelWithDebInfo \
           -DZENDNNL_DEPENDS_ONEDNN=ON \
           -DZENDNNL_BUILD_GTEST=ON -DZENDNNL_BUILD_AI_GTESTS=ON \
+          -DZENDNNL_BUILD_SYS_NPROC=$ZENDNNL_CI_BUILD_NPROC \
           |& tee "$GITHUB_WORKSPACE/msvc_build_output.log"
 
         # The first build also fetches and builds the dependencies
         # (aocl-utils, AOCL-DLP, oneDNN, LIBXSMM, FBGEMM, GoogleTest), so it
         # takes a while. Artifacts are installed under build-msvc/install/.
-        "$CMAKE" --build build-msvc |& tee -a "$GITHUB_WORKSPACE/msvc_build_output.log"
+        "$CMAKE" --build build-msvc --parallel $ZENDNNL_CI_BUILD_NPROC |& tee -a "$GITHUB_WORKSPACE/msvc_build_output.log"
 
-        echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
+        echo "Running gtests with filter: $GTEST_FILTER iterations: $TEST_ITERATIONS num_threads=$ZENDNNL_CI_TEST_NPROC"
         ./build-msvc/install/gtests/gtests.exe --gtest_filter="$GTEST_FILTER" \
-          --test "$TEST_ITERATIONS" \
+          --test "$TEST_ITERATIONS" --num_threads "$ZENDNNL_CI_TEST_NPROC" \
           |& tee "$GITHUB_WORKSPACE/msvc_gtest_output.log"
 
         if grep -F -q "[  FAILED  ]" "$GITHUB_WORKSPACE/msvc_gtest_output.log"; then
@@ -1022,8 +1077,8 @@ jobs:
         
         # Build ZenDNNL
         mkdir -p build && cd build
-        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
-        cmake --build . --target=all |& tee $WORKSPACE/build_output.log
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DZENDNNL_BUILD_SYS_NPROC=$ZENDNNL_CI_BUILD_NPROC
+        cmake --build . --target=all --parallel $ZENDNNL_CI_BUILD_NPROC |& tee $WORKSPACE/build_output.log
       shell: bash
       
     - name: Verify build output
@@ -1063,6 +1118,7 @@ jobs:
         else
           echo "Using default test iterations"
         fi
+        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC}"
         
         echo "Running command: ${cmd}"
         
@@ -1085,7 +1141,7 @@ jobs:
         echo "Running ai_gtests with filter: postsub"
         
         # Run the ai_gtests with configurable parameters
-        ./install/gtests/gtests --ai_test_mode post-sub --gtest_filter="AITests/*:-AITests/TestBatch*" |& tee $WORKSPACE/ai_gtest_output.log
+        ./install/gtests/gtests --ai_test_mode post-sub --gtest_filter="AITests/*:-AITests/TestBatch*" --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/ai_gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/ai_gtest_output.log"; then
@@ -1249,8 +1305,8 @@ jobs:
         
         # Build ZenDNNL with ASAN
         mkdir -p build && cd build
-        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DCMAKE_BUILD_TYPE=Debug -DZENDNNL_BUILD_ASAN=ON
-        cmake --build . --target=all |& tee $WORKSPACE/asan_build_output.log
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DCMAKE_BUILD_TYPE=Debug -DZENDNNL_BUILD_ASAN=ON -DZENDNNL_BUILD_SYS_NPROC=$ZENDNNL_CI_BUILD_NPROC
+        cmake --build . --target=all --parallel $ZENDNNL_CI_BUILD_NPROC |& tee $WORKSPACE/asan_build_output.log
       shell: bash
       
     - name: Verify ASAN build output
@@ -1290,6 +1346,7 @@ jobs:
         else
           echo "Using default test iterations"
         fi
+        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC}"
         
         echo "Running command: ${cmd}"
         
