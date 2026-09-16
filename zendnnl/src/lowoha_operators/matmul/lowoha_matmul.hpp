@@ -210,6 +210,64 @@ ZENDNNL_API status_t group_matmul_direct(const std::vector<char> &layout,
         const grp_matmul_gated_act_params *gated_act = nullptr,
         const grp_matmul_fused_moe_params *fused_moe = nullptr);
 
+/**
+ * @brief Clear AOCL DLP matmul weight caches (typed LRUs, symquant, woq,
+ *        w4a8, GGML unpack, zero-point compensation).
+ *
+ * No-op when ZenDNNL is built without AOCL-DLP (`ZENDNNL_DEPENDS_AOCLDLP=0`).
+ * GGML unpack is cleared only as part of that AOCL-DLP implementation; an
+ * AOCL-off build does not drop the GGML LRU from this wrapper.
+ *
+ * @note Call only during a quiescent window: no in-flight matmul/group_matmul
+ *       and no thread holding cached weight pointers. Not safe inside an OMP
+ *       parallel region.
+ */
+ZENDNNL_API void clear_matmul_aocl_weight_caches();
+
+/**
+ * @brief Clear the calling thread's AOCL DLP post-op metadata cache.
+ *
+ * The cache is per-thread and keyed by weight pointer. After this call,
+ * subsequent AOCL post-op setup on this thread rebuilds metadata until
+ * the cache is repopulated.
+ *
+ * No-op when ZenDNNL is built without AOCL-DLP (`ZENDNNL_DEPENDS_AOCLDLP=0`).
+ *
+ * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
+ *       Only the calling thread is cleared.
+ */
+ZENDNNL_API void clear_matmul_aocl_postop_metadata_cache();
+
+/**
+ * @brief Clear oneDNN blocked matmul weight cache.
+ *
+ * No-op when ZenDNNL is built without oneDNN (`ZENDNNL_DEPENDS_ONEDNN=0`).
+ *
+ * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
+ */
+ZENDNNL_API void clear_matmul_onednn_weight_caches();
+
+/**
+ * @brief Clear native prepacked weight caches (FP32/BF16/INT8 native paths).
+ *
+ * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
+ */
+ZENDNNL_API void clear_matmul_native_weight_caches();
+
+/**
+ * @brief Clear AOCL, oneDNN, and native weight caches used by
+ *        @ref matmul_direct, plus the calling thread's AOCL post-op
+ *        metadata cache.
+ *
+ * Preferred entry point when releasing cached reordered weights for
+ * @ref matmul_direct on those three backends. Does not clear
+ * group_matmul-only caches (custom-kernel packs, n-tile packs, scale
+ * memo, prepack fingerprints) or LibXSMM blocked weights.
+ *
+ * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
+ */
+ZENDNNL_API void clear_matmul_weight_caches();
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

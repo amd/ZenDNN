@@ -20,9 +20,13 @@
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#if ZENDNNL_DEPENDS_AOCLDLP
+#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
+#endif
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
+#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "matmul_native/native_matmul.hpp"
 #include "partitioning/bmm/looper/bmm_looper.hpp"
@@ -451,6 +455,33 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     }
 
     return status_t::success;
+}
+
+ZENDNNL_API void clear_matmul_aocl_weight_caches() {
+    zendnnl::lowoha::matmul::clear_aocl_matmul_weight_caches();
+}
+
+ZENDNNL_API void clear_matmul_aocl_postop_metadata_cache() {
+#if ZENDNNL_DEPENDS_AOCLDLP
+    zendnnl::lowoha::matmul::clear_aocl_postop_metadata_cache();
+#endif
+}
+
+ZENDNNL_API void clear_matmul_native_weight_caches() {
+    zendnnl::lowoha::matmul::native::clear_all_weight_caches();
+}
+
+ZENDNNL_API void clear_matmul_onednn_weight_caches() {
+#if ZENDNNL_DEPENDS_ONEDNN
+    zendnnl::lowoha::matmul::clear_onednn_matmul_weight_cache();
+#endif
+}
+
+ZENDNNL_API void clear_matmul_weight_caches() {
+    clear_matmul_aocl_weight_caches();
+    clear_matmul_aocl_postop_metadata_cache();
+    clear_matmul_onednn_weight_caches();
+    clear_matmul_native_weight_caches();
 }
 
 } // namespace matmul

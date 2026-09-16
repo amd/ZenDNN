@@ -904,11 +904,13 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
         bool &is_comparison_successful);
 
 /** @fn clear_matmul_test_caches
- *  @brief Clear all matmul weight caches used by gtests.
+ *  @brief Clear matmul_direct weight caches used by gtests.
  *
- *  Clears AOCL, oneDNN (when enabled), and native prepacked weight caches.
+ *  Forwards to `zendnnl::lowoha::matmul::clear_matmul_weight_caches()`
+ *  (AOCL, oneDNN, native, plus the calling thread's AOCL post-op metadata).
  *  Intended for fixture TearDown() to avoid stale pointer-keyed entries from
- *  freed tensors affecting subsequent tests.
+ *  freed tensors affecting subsequent tests. Does not clear group-matmul-only
+ *  caches; use `reset_grp_matmul_caches()` for those.
  */
 void clear_matmul_test_caches();
 
@@ -920,12 +922,9 @@ void clear_matmul_test_caches();
  *       DQ-INT8 (`clear_custom_kernel_pack_cache_int8()`), and FP16
  *       (`clear_custom_kernel_pack_cache_f16()`); each is a disjoint singleton.
  *    2. Prepack-module fingerprint cache (`clear_fingerprint_cache_for_test()`)
- *    3. All matmul weight caches via `clear_matmul_test_caches()`:
- *         - AOCL DLP weight LRU (typed: float, int16_t, uint16_t, int8_t;
- *           plus symquant + woq when enabled)
- *         - AOCL DLP zero-point compensation cache
- *         - oneDNN matmul weight cache (when ZENDNNL_DEPENDS_ONEDNN)
- *         - native prepacked weight caches
+ *    3. `matmul_direct` AOCL / oneDNN / native caches (and calling-thread
+ *       AOCL post-op metadata) via `clear_matmul_test_caches()` →
+ *       `clear_matmul_weight_caches()`
  *
  *  Required for any `group_matmul` test running in the same process as
  *  another test that touches the same shape (the AOCL weight LRU is

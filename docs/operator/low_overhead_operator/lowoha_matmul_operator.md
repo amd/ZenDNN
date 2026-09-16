@@ -11,6 +11,7 @@
 - [Usage Examples](#usage-examples)
 - [Reorder Quantization](#reorder-quantization-source-quantization-via-reorder)
 - [Weight Caching and Reordering](#weight-caching-and-reordering)
+- [Clearing Weight Caches](#clearing-weight-caches)
 - [Zero-Point Compensation Caching (INT8)](#zero-point-compensation-caching-int8)
 - [Backend Selection](#backend-selection)
 
@@ -1081,6 +1082,22 @@ One of the key features of LowOHA MatMul is **automatic weight reordering and ca
 3. **Cache Eviction**:
    - When cache is full, least recently used weights are evicted
    - Evicted weights are freed to make room for new entries
+
+### Clearing Weight Caches
+
+These APIs flush **`matmul_direct`** weight caches for the **AOCL-DLP, oneDNN, and native** backends. Call them only in a quiescent window: no in-flight `matmul_direct` (or `group_matmul_direct`) and no thread holding cached weight pointers. They are not safe inside an OpenMP parallel region.
+
+| API | What it clears |
+|-----|----------------|
+| `clear_matmul_weight_caches()` | Preferred entry: AOCL, oneDNN, and native caches used by `matmul_direct`, plus the **calling thread's** AOCL post-op metadata |
+| `clear_matmul_aocl_weight_caches()` | AOCL-DLP typed LRUs, symquant, WOQ, W4A8, GGML unpack, and zero-point compensation. No-op when built without AOCL-DLP (`ZENDNNL_DEPENDS_AOCLDLP=0`); GGML unpack is not dropped in that stub |
+| `clear_matmul_aocl_postop_metadata_cache()` | Calling thread's AOCL post-op metadata LRU only. No-op without AOCL-DLP |
+| `clear_matmul_onednn_weight_caches()` | oneDNN blocked weight cache. No-op when built without oneDNN (`ZENDNNL_DEPENDS_ONEDNN=0`) |
+| `clear_matmul_native_weight_caches()` | Native FP32/BF16/INT8 prepacked weight caches |
+
+They do **not** clear group-matmul-only caches (custom-kernel packs, n-tile packs, scale memo, prepack fingerprints) or LibXSMM blocked weights. AOCL/oneDNN/native LRUs are process-wide, so a call can also drop entries that `group_matmul_direct` warmed on those same backends; that is shared storage, not a group-matmul flush API.
+
+Declarations: `zendnnl::lowoha::matmul` in `lowoha_operators/matmul/lowoha_matmul.hpp`.
 
 ## Zero-Point Compensation Caching (INT8)
 

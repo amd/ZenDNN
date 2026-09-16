@@ -15,22 +15,15 @@
 # *******************************************************************************/
 
 #include "gtest_utils.hpp"
-#include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
-#include "memory/memory_utils.hpp"
-#if ZENDNNL_DEPENDS_AOCLDLP
-#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
-#endif
 #include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
-#include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 
 namespace {
 
@@ -79,18 +72,10 @@ uint16_t gtest_fp32_to_fp16(float f) {
 } // anonymous namespace
 
 void clear_matmul_test_caches() {
-    zendnnl::lowoha::matmul::clear_aocl_matmul_weight_caches();
-    // Each gtest case is a fresh "model" with new weight buffers, so the
-    // per-thread post-op metadata cache (keyed by weight_ptr) holds stale
-    // entries that point to freed test memory. Drop them between cases.
-#if ZENDNNL_DEPENDS_AOCLDLP
-    zendnnl::lowoha::matmul::clear_aocl_postop_metadata_cache();
-#endif
-#if ZENDNNL_DEPENDS_ONEDNN
-    zendnnl::lowoha::matmul::clear_onednn_matmul_weight_cache();
-#endif
-    using namespace zendnnl::lowoha::matmul::native;
-    clear_all_weight_caches();
+    // Public umbrella: AOCL + calling-thread postop + oneDNN + native.
+    // Each gtest case is a fresh "model" with new weight buffers, so
+    // pointer-keyed entries would otherwise outlive freed test memory.
+    zendnnl::lowoha::matmul::clear_matmul_weight_caches();
 }
 
 void reset_grp_matmul_caches() {
