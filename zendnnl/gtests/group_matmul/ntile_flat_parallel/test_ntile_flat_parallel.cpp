@@ -723,6 +723,7 @@ TEST(W8A8MoEPack, RejectsUnalignedGeometry) {
             status_t::op_bad_io);
 }
 
+#if ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
 TEST(W8A8MoEMicrokernel, SignedS8MatchesBiasedU8GateUp) {
     SKIP_IF_NO_ISA();
     constexpr int64_t N = w8a8::block_n;
@@ -791,6 +792,7 @@ TEST(W8A8MoEMicrokernel, SignedS8MatchesBiasedU8GateUp) {
         EXPECT_EQ(from_signed, from_biased) << "rows=" << rows;
     }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Numerics
@@ -2015,6 +2017,7 @@ TEST(W8A8MoECache, FlushStartsNewGenerationAtSameAddress) {
     clear_fused_moe_scratch();
 }
 
+#if ZENDNNL_NTILE_FLAT_PARALLEL_KERNELS_COMPILED
 // ---------------------------------------------------------------------------
 // Gate/up epilogue: SiLU value classes
 // ---------------------------------------------------------------------------
@@ -2230,3 +2233,4 @@ TEST(W8A8MoESiluEpilogue, TinyExtremeAndNonFiniteAreWellBehaved) {
               << bf16_to_f32(got[25]) << ", x=-200 -> " << bf16_to_f32(got[27])
               << ", x=-300 -> " << bf16_to_f32(got[29]) << "\n";
 }
+#endif
