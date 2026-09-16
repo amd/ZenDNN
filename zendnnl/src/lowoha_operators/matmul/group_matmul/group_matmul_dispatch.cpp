@@ -55,6 +55,8 @@
 
 #include <omp.h>
 
+#include "expert_parallel/group_matmul_expert_parallel.hpp" // parallel_per_expert
+#include "expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 pin gate
 #include "group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "m_tile/group_matmul_m_tile.hpp" // flat_m_tile + M-tile env knobs
@@ -272,67 +274,8 @@ void parallel_multilevel(const std::vector<char> &layout,
     return;
 }
 
-// ── ALGO=5: per_expert ─────────────────────────────────────────────────
-// Parallel-for over experts; each expert is executed by a single thread (no
-// intra-expert N-split).  This is NOT a 1:1 expert↔thread mapping: with
-// `schedule(dynamic, 1)`, and whenever `num_ops > num_threads`, a thread
-// processes several experts sequentially (~num_ops/num_threads each).
-//
-// `schedule(dynamic, 1)`: MoE routing is M-skewed (per-expert token counts
-// range from 1 to many), so a static partition leaves threads that drew
-// light experts idle while heavy-expert threads run long — worst when
-// `num_ops > num_threads` and each thread must process several experts in
-// sequence.  Dynamic scheduling with chunk 1 lets a thread grab the next
-// unprocessed expert as soon as it finishes, balancing the skew.  Each
-// iteration writes only its own expert's `dst[i]` slice, so there is no
-// cross-iteration dependency that dynamic ordering could violate.
-
-void parallel_per_expert(const std::vector<char> &layout,
-        const std::vector<bool> &transA, const std::vector<bool> &transB,
-        const std::vector<int> &M, const std::vector<int> &N,
-        const std::vector<int> &K, const std::vector<float> &alpha,
-        const std::vector<const void *> &src, const std::vector<int> &lda,
-        const std::vector<const void *> &weight, const std::vector<int> &ldb,
-        const std::vector<const void *> &bias, const std::vector<float> &beta,
-        const std::vector<void *> &dst, const std::vector<int> &ldc,
-        const std::vector<bool> &is_weights_const,
-        std::vector<matmul_params> &params, int num_threads,
-        grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
-
-    const size_t num_ops = M.size();
-    if (num_ops == 0 || num_threads <= 0) { return; }
-
-    // Generic ahead-of-time weight pre-pack for ALGO 5.  `num_threads`
-    // is forwarded so cross_warm can prefill regime 2 for the upcoming
-    // ALGO 3 decode path when CUSTOM_KERNEL=0 (see the comment on the
-    // ALGO 1 call site for the full rationale).
-    group_matmul_prepack::prepack_for_algo_5(
-            group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
-                    transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
-                    fused_act, act_dtype,
-                    /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
-
-    matmul_algo_t algo = resolve_kernel();
-    scoped_active_levels guard(1);
-
-#pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
-    for (size_t i = 0; i < num_ops; ++i) {
-        // Inactive experts (M<=0) are padded placeholder slots that may carry
-        // null src/dst/weight pointers; skip them so the slice/activation calls
-        // never dereference null (matches the M==0 guards in the sequential /
-        // m-tile / n-tile executors).
-        if (M[i] <= 0) { continue; }
-        execute_expert_slice(layout[i], transA[i], transB[i], M[i], N[i], K[i],
-                alpha[i], src[i], lda[i], weight[i], ldb[i], bias[i], beta[i],
-                dst[i], ldc[i], is_weights_const[i], 1, params[i], algo);
-        if (fused_act != grp_matmul_gated_act_t::none) {
-            apply_gated_act_inplace(
-                    fused_act, dst[i], 0, M[i], N[i], ldc[i], act_dtype);
-        }
-    }
-    return;
-}
+// ALGO 5 (per-expert parallel) moved to
+// `expert_parallel/group_matmul_expert_parallel.cpp`.
 
 // M-tile (ALGO 2) safety predicate hoisted to
 // `group_matmul_parallel_common.hpp` as `check_m_tile_safe` (inline).
@@ -676,13 +619,14 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 }
 
 // Auto-select (ALGO 0) heuristic — used when the caller leaves
-// ZENDNNL_GRP_MATMUL_ALGO unset.  Picks between {ALGO 1, ALGO 2,
-// ALGO 3} via the legacy 3-rule cascade, OR pins to a specific
-// ALGO per phase via the AUTO_PROMPT_ALGO / AUTO_DECODE_ALGO envs
-// (defaults: PROMPT=2 (flat_m_tile + multi-tier hybrid + wide-N
-// fallback) / DECODE=3 (N-tile + CK) — the out-of-the-box auto
-// policy; set the env to `0` for the legacy cascade, or `1` to
-// pin the legacy sequential_experts prompt path).
+// ZENDNNL_GRP_MATMUL_ALGO unset.  The out-of-the-box routing is:
+//   * Prompt — Rule 0.7 unconditionally selects ALGO 1 (sequential
+//     full-team) for all dtypes unless AUTO_PROMPT_ALGO is explicitly set.
+//     Setting AUTO_PROMPT_ALGO=2 enables the M-tile (flat_m_tile) path
+//     for prompt; setting 0 falls back to the legacy 3-rule cascade.
+//   * Decode — Rule 0.5 / 0.45 / 0.6 apply shape and phase heuristics,
+//     defaulting to ALGO 3 (N-tile + CK).  Setting AUTO_DECODE_ALGO=0
+//     restores the legacy 3-rule cascade.
 //
 // AUTO's built-in heuristics never emit ALGO 5 or ALGO 6. Both generic
 // schedulers remain reachable through an explicit global or phase pin.
@@ -705,6 +649,26 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //      ceiling; `ZENDNNL_GRP_MATMUL_ALGO=5` recovers it.  Phase env
 //      cannot override this — the R3 gate is structural.
 //
+//   0.45. DECODE only, single dense-FFN shape → ALGO 3 (N-tile).
+//      Fires when num_ops==1 and the single expert's M qualifies as
+//      "dense decode" (is_dense_ffn_decode).  ALGO 3's adaptive tiling
+//      and K-blocking are tuned for this shape; ALGO 1 would treat it
+//      as a plain sequential GEMM.  Yields to an explicit decode pin.
+//      (label: auto_rule045_single_dense_decode)
+//
+//   0.5. DECODE only, few experts (total_experts ≤ 8) → occupancy arrow.
+//      A pure thread-occupancy test, dtype-agnostic, two outcomes:
+//        active_ops * 4 >= num_threads → ALGO 3 (N-tile; clamps to ALGO 1
+//                                        when !n_tile_safe)
+//        otherwise                     → ALGO 1 (full-team sequential)
+//      Never ALGO 2 — that is opt-in only (see the no-auto-2 invariant).
+//      Mixtral-class shapes (8 experts, topk=2 → 2 active) take the ALGO 1
+//      arm on any real host.  Models with >8 experts never reach this rule
+//      and inherit the ALGO 3 decode default from Rule 1.
+//      Prompt is handled by Rule 0.7; this rule never fires for prompt.
+//      Yields to an explicit decode pin.
+//      (labels: auto_rule05_ntile_occupancy, auto_rule05_few_active)
+//
 //   0.6. DECODE, active_ops > num_threads → ALGO 3 (N-tile).
 //      `active_ops` counts the experts that actually fire (`M[i] > 0`),
 //      not the padded slot count.  ALGO 3's single round is infeasible
@@ -713,23 +677,29 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 //      planner picks the strategy.  Yields to an explicit
 //      `AUTO_DECODE_ALGO` pin; prompt is never routed by this rule.
 //
+//   0.7. PROMPT, AUTO_PROMPT_ALGO not explicitly set → ALGO 1 (always).
+//      When the caller sets ZENDNNL_GRP_MATMUL_ALGO=0 and has NOT
+//      explicitly set ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO, Rule 0.7
+//      fires unconditionally for all dtypes and shapes and returns
+//      ALGO 1 (sequential full-team).  No per-dtype or shape-based
+//      heuristic overrides this.  To use ALGO 2 for prompt you must
+//      explicitly set AUTO_PROMPT_ALGO=2.
+//      (label: auto_rule07_prompt_seq)
+//
 //   1. PHASE ENV — `max_M ≤ kDecodeMaxM` (decode) →
 //                  `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` (default 3)
 //                  `max_M >  kDecodeMaxM` (prompt) →
-//                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (default 2)
+//                  `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` (explicitly set; see
+//                   Rule 0.7 for the unset case)
 //      A generic non-zero value is returned directly with the same
 //      m_tile_safe / n_tile_safe clamps the global ALGO env path applies in
 //      `select_grp_matmul_algo`. Value 4 has already requested W8A8 and, on
 //      decline, behaves as an unset setting here so the inherited default
-//      refinements still run. The defaults give an out-of-the-box auto
-//      policy: ALGO 2 (flat_m_tile + multi-tier hybrid +
-//      wide-N fallback) for prompt — the M-tile multi-tier targets
-//      skewed-M prompt shapes, while the wide-N fallback keeps
-//      few-expert light frames on the legacy ALGO 1 path; safety
-//      clamp falls back to ALGO 1 when `!m_tile_safe` — and ALGO 3
-//      (N-tile rounds + CK) for decode.  Set `AUTO_PROMPT_ALGO=1` to
-//      restore the legacy sequential_experts prompt path, or the env
-//      to `0` for the legacy 3-rule cascade.
+//      refinements still run. Note: when AUTO_PROMPT_ALGO is NOT explicitly
+//      set, Rule 0.7 fires BEFORE this block and returns ALGO 1; this block
+//      only runs for prompt when the env var is explicitly set to a value.
+//      For decode, the default is ALGO 3 (N-tile rounds + CK).  Set
+//      `AUTO_PROMPT_ALGO=0` for the legacy 3-rule cascade.
 //
 //   2. LEGACY RULES (phase env == 0):
 //
@@ -788,12 +758,26 @@ static int auto_select_algo(const std::vector<int> &M,
         return pick(1, "auto_single_thread", 1);
     }
 
-    // INVARIANT — AUTO never returns ALGO 5 or 6 of its own accord; every rule
-    // that once answered 5 answers `n_tile_safe ? 3 : 1`. Rule 0.6a below does
-    // NOT break this: it never SELECTS 5, it only QUALIFIES an operator's
+    // INVARIANT — AUTO never returns ALGO 2, 5 or 6 of its own accord.
+    //
+    //   * no-auto-2: ALGO 2 (flat_m_tile) is OPT-IN ONLY.  No rule below may
+    //     answer 2; the former Rule 0.5 kMTile arm now answers 1.  ALGO 2 is
+    //     reachable exclusively through an explicit `ZENDNNL_GRP_MATMUL_ALGO=2`
+    //     (global pin, handled in `select_grp_matmul_algo`) or an explicit
+    //     `AUTO_{DECODE,PROMPT}_ALGO=2` phase pin (Rule 1 below, which only
+    //     runs when `pins_generic_policy()` is true, i.e. the env was set).
+    //     NOTE: `grp_matmul_default_algo_for_phase(prompt)` is still 2, but it
+    //     is unreachable as a routing outcome — Rule 0.7 returns ALGO 1 before
+    //     Rule 1 can consume it whenever the prompt env is unset.  It only
+    //     surfaces when the operator explicitly set the prompt knob.
+    //   * no-5-no-6: every rule that once answered 5 answers
+    //     `n_tile_safe ? 3 : 1`.
+    //
+    // Rule 0.6a below does NOT break this: it never SELECTS 5, it only
+    // QUALIFIES an operator's
     // explicit decode `AUTO_DECODE_ALGO=5` pin (honour for INT8 saturated-team
     // decode, decline → decode default otherwise). Keep new rules inside the
-    // no-5-no-6 set. The invariant constrains the HEURISTICS, not the operator:
+    // no-2-no-5-no-6 set. The invariant constrains the HEURISTICS, not the operator:
     // an explicit phase pin or global force of 5/6 is honoured.
     //
     // Rule 0 — STRUCTURAL capacity carve-out, placed before the phase env so
@@ -829,107 +813,22 @@ static int auto_select_algo(const std::vector<int> &M,
         total_experts = static_cast<int>(params[0].total_matmul);
     }
 
-    // Rule 0.6a — QUALIFY the decode `AUTO_DECODE_ALGO=5` pin.
-    // ALGO 5 (parallel_per_expert: one active expert per thread, no intra-expert
-    // N-split) was measured to BEAT the ALGO 3 decode default on INT8 MoE decode
-    // (e.g. Qwen3 / Qwen3.6 +3-14% at 32 threads) but to REGRESS on bf16 MoE and
-    // on under-occupied frames — one-expert-per-thread then runs at the speed of
-    // the heaviest expert and cannot fill the team.  So AUTO never emits ALGO 5
-    // on its own; an operator opts in with the explicit
-    // `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=5` pin, and this gate HONOURS that pin
-    // only where the win holds — ALL of:
-    //   * decode phase (`is_decode`);
-    //   * every ACTIVE expert carries s8 weights (bf16 loses across the board);
-    //   * `active_ops >= num_threads` (team saturated one-expert-per-thread;
-    //     below that ALGO 3's intra-expert N-tile keeps the machine busier).
-    // The pin is deliberately NOT fenced to a model or shape: it is a per-
-    // deployment opt-in, so an operator sets it only where ALGO 5 helps (the
-    // measured INT8 Qwen3/3.6 case) and any other INT8 saturated decode the
-    // deployment runs is honoured on the same terms.  When the pin is 5 but a
-    // term fails it is DECLINED: `phase_env_pinned` is cleared just below so the
-    // normal decode rules (0.45 / 0.5 / 0.6) run, and Rule 1 substitutes the
-    // decode DEFAULT for the pinned 5 — the call behaves EXACTLY as if
-    // `AUTO_DECODE_ALGO` were unset.  A decline is surfaced (trace + a
-    // once-per-process WARN naming the failing term) rather than silently doing
-    // nothing.  `ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE=0` honours the pin verbatim
-    // (pre-gate semantics).  ALGO 5 has no tiling precondition, so an honoured
-    // pin needs no m_tile_safe / n_tile_safe clamp.
-    const bool decode_pin_is_5 = is_decode
-            && phase_setting.pins_generic_policy()
-            && phase_setting.requested_algo == 5;
-    bool decode_algo5_pin_declined = false;
-    bool decode5_wei_not_s8 = false;
-    bool decode5_low_occupancy = false;
-    if (decode_pin_is_5 && get_grp_matmul_decode_algo5_gate()) {
-        // EVERY ACTIVE expert must carry s8 weights — probing one representative
-        // slot is not enough.  ALGO 5 imposes no uniform-dtype clamp (only the
-        // tiled ALGO 2 / ALGO 3 paths reject a per-expert mismatch), so a group
-        // whose first active expert is s8 and whose later active experts are
-        // bf16 is reachable through the public API, and probing only the first
-        // slot would hand the very bf16 experts this gate excludes to ALGO 5.
-        // Inactive `M[i] <= 0` placeholders are skipped (they never reach a
-        // kernel); an active slot with no `params` entry declines conservatively.
-        bool all_active_wei_s8 = true;
-        int active_seen = 0;
-        for (size_t i = 0; i < M.size(); ++i) {
-            if (M[i] <= 0) { continue; }
-            ++active_seen;
-            if (i >= params.size() || params[i].dtypes.wei != data_type_t::s8) {
-                all_active_wei_s8 = false;
-                break;
-            }
-        }
-        decode5_wei_not_s8 = !(all_active_wei_s8 && active_seen > 0);
-        decode5_low_occupancy = active_ops < num_threads;
-        decode_algo5_pin_declined = decode5_wei_not_s8 || decode5_low_occupancy;
-    }
-    if (decode_pin_is_5 && !decode_algo5_pin_declined && trace != nullptr) {
-        trace->decode5_pin_honoured = true;
-    }
-    if (decode_algo5_pin_declined) {
-        if (trace != nullptr) { trace->decode5_pin_declined = true; }
-        // WARNING level (the default api-log level), ONCE per process: a
-        // declined pin is a persistent misconfiguration and decode re-runs this
-        // selector on every token, so a per-call warning would flood the log.
-        // Named CAUSE + escape hatch, not just the fact; the per-call detail
-        // stays on the trace and the info-level `[GRP_MATMUL.ALGO]` line.
-        // Emitted HERE, where the decline is decided, so every caller inherits
-        // it — including the fused path, which bypasses the parallel dispatcher.
-        static const bool s_warn = apilog_warning_enabled();
-        if (s_warn) {
-            static std::atomic<bool> s_warned {false};
-            if (!s_warned.exchange(true, std::memory_order_relaxed)) {
-                apilog_warning(
-                        "[GRP_MATMUL.ALGO WARN] "
-                        "ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=5 DECLINED and "
-                        "NOT "
-                        "in effect: ",
-                        (decode5_wei_not_s8 ? "weights are not s8 on every "
-                                              "ACTIVE expert"
-                                            : ""),
-                        ((decode5_wei_not_s8 && decode5_low_occupancy) ? "; "
-                                                                       : ""),
-                        (decode5_low_occupancy ? "active_ops < num_threads"
-                                               : ""),
-                        " (active_ops=", active_ops,
-                        " num_threads=", num_threads,
-                        ").  ALGO 5 (parallel_per_expert) only beats ALGO 3 "
-                        "for "
-                        "INT8 decode at or above full-team occupancy; this "
-                        "call "
-                        "falls back to the normal decode policy, exactly as if "
-                        "the pin were unset.  Set "
-                        "ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE=0 to honour the "
-                        "pin "
-                        "verbatim, or ZENDNNL_GRP_MATMUL_ALGO=5 to force ALGO "
-                        "5 "
-                        "for every call.  Logged once per process.");
-            }
-        }
-    }
-    // A gate-declined decode `=5` pin is treated as UNSET here, which re-enables
-    // the decode policy rules (0.45 / 0.5 / 0.6) below and, with Rule 1's
-    // default substitution, lands the call exactly where an unset pin would.
+    // Rule 0.6a — QUALIFY an `AUTO_{DECODE,PROMPT}_ALGO=5` pin.  The qualifier
+    // itself lives with the ALGO it governs, in
+    // `expert_parallel/group_matmul_expert_parallel_policy.hpp`; what stays
+    // here is only how its verdict feeds the rule table below.  A declined
+    // DECODE pin behaves exactly as if `AUTO_DECODE_ALGO` were unset; a
+    // declined PROMPT pin redirects to `kGrpMatmulAlgo5PromptDeclineAlgo`.
+    const algo5_pin_verdict algo5_pin = decide_algo5_pin(phase_setting,
+            is_decode, M, params, active_ops, num_threads, trace);
+    const bool decode_algo5_pin_declined = algo5_pin.decode_declined;
+    const bool prompt_algo5_pin_declined = algo5_pin.prompt_declined;
+
+    // A gate-declined DECODE pin is treated as UNSET, re-enabling the decode
+    // rules (0.45 / 0.5 / 0.6) below.  A declined PROMPT pin is deliberately
+    // NOT folded in: the redirect to ALGO 3 is decided once in `phase_algo`
+    // below, so a future prompt rule gating on `!phase_env_pinned` cannot
+    // silently preempt it.
     const bool phase_env_pinned
             = !decode_algo5_pin_declined && phase_setting.pins_generic_policy();
 
@@ -957,17 +856,31 @@ static int auto_select_algo(const std::vector<int> &M,
     // prompt — to reproduce the old internal routing:
     //   * kWideN (shallow M) → ALGO 1 (full-team sequential = old wide-N).
     //   * kMTile             → ALGO 2 (tier chosen inside flat_m_tile).
-    // kManyExperts cannot fire here (total_experts ≤ kFewExpertsAlgo2Pref(8)
-    // ≤ num_threads on any real host); the arm is defensive only.
+    // TWO outcomes only — ALGO 3 or ALGO 1.  Never ALGO 2 (see the
+    // `no-auto-2` invariant above), and no M-tile regime classification:
+    // the arrow is a pure occupancy test.
+    //
+    // ALGO 3 splits each expert's N across the team, so it earns its
+    // round-based schedule only when there are enough ACTIVE experts to keep
+    // that team busy — at most `kDecodeNTileThreadFactor` threads per active
+    // expert.  Below that the team is far wider than the expert count and the
+    // full-team sequential ALGO 1 wins, because each expert then gets the
+    // whole team for its own N-split with no round overhead.  The
+    // Mixtral-class shape lands here: 8 experts with topk=2 means 2 active,
+    // so `2*4 = 8 < 32` on any real host → ALGO 1.  Models with more than
+    // `kFewExpertsAlgo2Pref` experts never reach this rule at all and take
+    // the ALGO 3 decode default from Rule 1.
+    //
+    // Deliberately DTYPE-AGNOSTIC: the same arrow applies to bf16, f16, f32
+    // and every INT8 / WOQ variant.  The only dtype-dependent part is the
+    // `n_tile_safe` clamp, which is a legality gate (a shape ALGO 3 cannot
+    // column-slice must not be handed to it), not a performance heuristic.
     if (is_decode && total_experts <= kFewExpertsAlgo2Pref
             && !phase_env_pinned) {
-        switch (classify_m_tile_regime(M, num_threads)) {
-            case m_tile_regime::kManyExperts:
-                return pick(n_tile_safe ? 3 : 1, "auto_rule05_many_experts", 3);
-            case m_tile_regime::kWideN: return pick(1, "auto_rule05_wide_n", 1);
-            case m_tile_regime::kMTile:
-                return pick(m_tile_safe ? 2 : 1, "auto_rule05_m_tile", 2);
+        if (active_ops * kDecodeNTileThreadFactor >= num_threads) {
+            return pick(n_tile_safe ? 3 : 1, "auto_rule05_ntile_occupancy", 3);
         }
+        return pick(1, "auto_rule05_few_active", 1);
     }
 
     // Rule 0.6 — DECODE with MORE ACTIVE EXPERTS THAN THREADS.
@@ -1020,9 +933,14 @@ static int auto_select_algo(const std::vector<int> &M,
     // the pinned `5` and hand it back.  Substituting the default — rather than
     // falling through to the Rule 2 legacy cascade — is what makes "declined"
     // mean "as if unset" instead of a third, otherwise-unreachable policy.
+    // A declined PROMPT pin substitutes ALGO 3, not the prompt default.  The
+    // `phase_algo == 3 && !n_tile_safe` clamp below still applies, so a shape
+    // N-tile cannot serve falls to ALGO 1 rather than running an unsafe plan.
     const int phase_algo = decode_algo5_pin_declined
             ? kGrpMatmulAutoDecodeAlgoDefault
-            : phase_setting.generic_effective_algo;
+            : (prompt_algo5_pin_declined
+                              ? kGrpMatmulAlgo5PromptDeclineAlgo
+                              : phase_setting.generic_effective_algo);
     if (is_grp_matmul_generic_algo(phase_algo)) {
         if (phase_algo == 2 && !m_tile_safe) {
             return pick(1, "auto_phase_env", phase_algo);
@@ -1109,12 +1027,33 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
     // Unsafe env overrides fall back to ALGO 1 rather than failing, so
     // callers that force-deploy a given ALGO never hit a hard error on
     // shape edge cases.
+    // PRECEDENCE — the per-phase knobs outrank the global selector.
+    //
+    // `ZENDNNL_GRP_MATMUL_AUTO_{DECODE,PROMPT}_ALGO`, when explicitly set for
+    // THIS call's phase, wins over `ZENDNNL_GRP_MATMUL_ALGO`.  An operator
+    // tuning one phase should not have to clear the global knob first, and
+    // the phase knob is the more specific statement of intent.
+    //
+    // It is applied by SUPPRESSING the global branch below rather than by
+    // returning here, so the phase value still flows through
+    // `auto_select_algo`'s Rule 1.  That keeps three things in one place:
+    // the m_tile / n_tile legality clamps, the ALGO 5 pin qualifier
+    // (Rule 0.6a — which must still be able to decline a `=5` phase pin on
+    // bf16 or under-occupied decode), and the `=0` legacy-cascade meaning.
+    //
+    // `has_explicit_request()` (not `pins_generic_policy()`) is the test, so
+    // a phase `=4` W8A8 request also outranks the global; if that attempt
+    // declines it inherits the phase default policy rather than silently
+    // falling back to the global pin.
+    const grp_matmul_phase call_phase = classify_grp_matmul_phase(M, M.size());
+    const bool phase_knob_set = get_grp_matmul_auto_phase_setting(call_phase)
+                                        .has_explicit_request();
+
     // Inspect the raw requested selector so numeric 4 is unmistakably outside
     // this generic branch. Global 4 has already attempted W8A8 and falls
-    // through to AUTO below; a global generic pin returns here before any
-    // phase setting can affect routing.
+    // through to AUTO below.
     const int requested_algo = get_grp_matmul_requested_algo();
-    if (is_grp_matmul_generic_algo(requested_algo)) {
+    if (!phase_knob_set && is_grp_matmul_generic_algo(requested_algo)) {
         int algo = requested_algo;
         // Silent-override → apilog_warning so a user debugging
         // `ZENDNNL_GRP_MATMUL_ALGO=3 but actually ran ALGO 1` sees the
@@ -1142,7 +1081,7 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
             static const bool s_log = apilog_warning_enabled();
             if (s_log) {
                 apilog_warning(
-                        "[GRP_MATMUL Level2 dispatch WARN] env_algo=3 "
+                        "[GRP_MATMUL.ALGO WARN] env_algo=3 "
                         "(flat_n_tile) "
                         "REJECTED: n_tile unsafe.  Common rejection reasons: "
                         "non-row-major layout, per-expert dtype mismatch, "
@@ -1564,6 +1503,10 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 (algo_trace.decode5_pin_honoured ? "yes" : "no"),
                 " decode5_pin_declined=",
                 (algo_trace.decode5_pin_declined ? "yes" : "no"),
+                " prompt5_pin_honoured=",
+                (algo_trace.prompt5_pin_honoured ? "yes" : "no"),
+                " prompt5_pin_declined=",
+                (algo_trace.prompt5_pin_declined ? "yes" : "no"),
                 " caller_tight=", (caller_layout_tight ? "yes" : "no"));
     }
 

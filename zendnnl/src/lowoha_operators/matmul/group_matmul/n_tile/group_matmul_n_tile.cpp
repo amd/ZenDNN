@@ -2838,7 +2838,7 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // num_threads / num_ops` is num_ops-dependent, which would
     // re-introduce shape sensitivity into the cache key.  The
     // single-round ManyExperts shape (when num_ops ≤ batch_max) gives
-    // the same parallelism plus a sub-µs end-of-region barrier.
+    // the same parallelism plus a single end-of-region barrier.
     if (!use_custom_at_plan_time && get_grp_matmul_aocl_stable_ntile()) {
         const int stable = aocl_stable_n_thr(topo.num_threads, topo.max_N);
         const int max_align_slots
@@ -4008,14 +4008,19 @@ void flat_n_tile(const std::vector<char> &layout,
     if (kctx.enabled && !use_custom) {
         static const bool s_skip_log = apilog_info_enabled();
         if (s_skip_log) {
-            apilog_info(
-                    "[GRP_MATMUL.PLAN.SKIP_CUSTOM] reason="
-                    "wide_swiglu_correctness_guard "
-                    "(fused_epilogue=1 tight=0 → custom writes "
-                    "compacted [M,I] into caller's [M,2I] buffer, "
-                    "leaving cols [I,2I) uninitialised; downstream "
-                    "moe_postop on full 2I would reduce garbage). "
-                    "FALLBACK to kernel=standard wide matmul + "
+            apilog_info("[GRP_MATMUL.PLAN.SKIP_CUSTOM] reason=",
+                    (ck_per_group ? "per_group_quant_excluded"
+                                  : "wide_swiglu_correctness_guard"),
+                    ck_per_group
+                            ? " (per-group source scale cannot be sliced "
+                              "per-column by the CK tiler; CK is "
+                              "disqualified for this call)."
+                            : " (fused_epilogue=1 tight=0: custom writes "
+                              "compacted [M,I] into caller's [M,2I] buffer,"
+                              " leaving cols [I,2I) uninitialised; "
+                              "downstream moe_postop on full 2I would reduce"
+                              " garbage).",
+                    " FALLBACK to kernel=standard wide matmul + "
                     "separate activation pass.");
         }
     }

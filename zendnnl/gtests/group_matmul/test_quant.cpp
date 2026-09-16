@@ -1472,3 +1472,192 @@ TEST(TestGroupDynamicQuant, LeadingInactiveExpertFirstActiveIsRepresentative) {
             << "first active expert must carry the per-token src_scale the "
                "grouped-prequant routing branch requires";
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// `reorder_quant_buffers_t` grow-only pooling.
+//
+// Regression guard for the leak fixed by "make the pooled zp buffer grow-only
+// too".  The per-expert executors reach ONE pooled `static thread_local`
+// instance of this type (see `get_thread_local_quant_buffers()`), so its
+// destructor runs at thread exit, not per call.  Assigning a fresh `malloc`
+// over a live pointer on such an instance therefore leaks a block — which is
+// what the pre-fix code did on `zp_buf`, on the asymmetric-u8 path where it is
+// the only one of the three that gets allocated late.
+//
+// These assertions FAIL on the pre-fix code: a naked `malloc` per request
+// returns a different pointer every time, so the no-regrowth and
+// shrink-request cases below would see the pointer change.
+TEST(TestReorderQuantBuffers, GrowOnlyReusesAllocationAndTracksCapacity) {
+    using zendnnl::lowoha::matmul::reorder_quant_buffers_t;
+
+    reorder_quant_buffers_t b;
+
+    // First request allocates.
+    ASSERT_TRUE(b.ensure_src(1024));
+    ASSERT_TRUE(b.ensure_scale(512));
+    ASSERT_TRUE(b.ensure_zp(256));
+    uint8_t *src0 = b.src_buf;
+    uint8_t *scale0 = b.scale_buf;
+    uint8_t *zp0 = b.zp_buf;
+    ASSERT_NE(src0, nullptr);
+    ASSERT_NE(scale0, nullptr);
+    ASSERT_NE(zp0, nullptr);
+    EXPECT_GE(b.src_cap, 1024u);
+    EXPECT_GE(b.scale_cap, 512u);
+    EXPECT_GE(b.zp_cap, 256u);
+
+    // A request that FITS must not reallocate — this is what makes the pool a
+    // pool, and what the naked-malloc version could not do.  All three are
+    // asserted because the bug was a PARTIAL conversion: two buffers had
+    // capacities and the third did not.
+    EXPECT_TRUE(b.ensure_src(1024));
+    EXPECT_TRUE(b.ensure_scale(512));
+    EXPECT_TRUE(b.ensure_zp(256));
+    EXPECT_EQ(b.src_buf, src0);
+    EXPECT_EQ(b.scale_buf, scale0);
+    EXPECT_EQ(b.zp_buf, zp0) << "zp_buf must be pooled like its two siblings";
+
+    // A SMALLER request must not reallocate either (grow-only, not resize).
+    EXPECT_TRUE(b.ensure_src(16));
+    EXPECT_TRUE(b.ensure_scale(16));
+    EXPECT_TRUE(b.ensure_zp(16));
+    EXPECT_EQ(b.src_buf, src0);
+    EXPECT_EQ(b.scale_buf, scale0);
+    EXPECT_EQ(b.zp_buf, zp0);
+    EXPECT_GE(b.src_cap, 1024u) << "capacity must not shrink";
+    EXPECT_GE(b.zp_cap, 256u);
+
+    // Growth updates the capacity so the next fitting request is still a
+    // no-op.  A capacity left stale after a regrowth would reallocate every
+    // call, which is the leak shape on a pooled instance.
+    ASSERT_TRUE(b.ensure_zp(4096));
+    EXPECT_GE(b.zp_cap, 4096u);
+    uint8_t *zp1 = b.zp_buf;
+    EXPECT_TRUE(b.ensure_zp(4096));
+    EXPECT_EQ(b.zp_buf, zp1);
+
+    // `release()` returns a pooled instance's memory without waiting for
+    // thread exit, and leaves it usable.
+    b.release();
+    EXPECT_EQ(b.src_buf, nullptr);
+    EXPECT_EQ(b.scale_buf, nullptr);
+    EXPECT_EQ(b.zp_buf, nullptr);
+    EXPECT_EQ(b.src_cap, 0u);
+    EXPECT_EQ(b.scale_cap, 0u);
+    EXPECT_EQ(b.zp_cap, 0u);
+    EXPECT_TRUE(b.ensure_zp(64));
+    EXPECT_NE(b.zp_buf, nullptr);
+}
+
+// Move must carry all three (pointer, capacity) pairs and clear the source.
+// A move that copied a pointer without its capacity would double-free; one
+// that carried a pointer and left it in the source would double-free too.
+TEST(TestReorderQuantBuffers, MoveTransfersAllThreeBuffersAndCapacities) {
+    using zendnnl::lowoha::matmul::reorder_quant_buffers_t;
+
+    reorder_quant_buffers_t a;
+    ASSERT_TRUE(a.ensure_src(2048));
+    ASSERT_TRUE(a.ensure_scale(1024));
+    ASSERT_TRUE(a.ensure_zp(512));
+    uint8_t *src0 = a.src_buf;
+    uint8_t *scale0 = a.scale_buf;
+    uint8_t *zp0 = a.zp_buf;
+
+    reorder_quant_buffers_t moved(std::move(a));
+    EXPECT_EQ(moved.src_buf, src0);
+    EXPECT_EQ(moved.scale_buf, scale0);
+    EXPECT_EQ(moved.zp_buf, zp0);
+    EXPECT_GE(moved.src_cap, 2048u);
+    EXPECT_GE(moved.scale_cap, 1024u);
+    EXPECT_GE(moved.zp_cap, 512u);
+    EXPECT_EQ(a.src_buf, nullptr) << "moved-from must not retain ownership";
+    EXPECT_EQ(a.scale_buf, nullptr);
+    EXPECT_EQ(a.zp_buf, nullptr);
+    EXPECT_EQ(a.src_cap, 0u);
+    EXPECT_EQ(a.scale_cap, 0u);
+    EXPECT_EQ(a.zp_cap, 0u);
+
+    reorder_quant_buffers_t assigned;
+    ASSERT_TRUE(assigned.ensure_zp(8));
+    assigned = std::move(moved);
+    EXPECT_EQ(assigned.zp_buf, zp0);
+    EXPECT_GE(assigned.zp_cap, 512u);
+    EXPECT_EQ(moved.zp_buf, nullptr);
+    EXPECT_EQ(moved.zp_cap, 0u);
+}
+
+// ===============================================================================
+// Overflowing / malformed quantization dims must fail cleanly, not wrap.
+//
+// The per-expert wrapper sized its internal scale, zero-point and source
+// buffers with an unchecked `int64_t n = 1; for (d : dims) n *= d;`.  Signed
+// overflow is undefined behaviour, and a wrapped product reaching the allocator
+// is either a near-`SIZE_MAX` request or — worse — a small one that the
+// subsequent row writes overrun.  `{INT64_MAX, 2}` is enough to trigger it.
+//
+// This path matters more since ALGO 5's fused pipeline became default-on: it
+// deliberately skips the grouped DQ pre-pass, so every expert reaches this
+// per-expert wrapper, where the grouped arena's already-checked sizing used to
+// stand in front of it.
+//
+// A non-positive extent is rejected for the same reason: treating it as an
+// empty allocation hands back a buffer the caller's own M*K row math indexes
+// past.
+TEST(TestReorderQuantBuffers, OverflowingOrMalformedScaleDimsFailCleanly) {
+    using namespace zendnnl::lowoha::matmul;
+    using zendnnl::common::data_type_t;
+
+    constexpr int M = 4;
+    constexpr int K = 16;
+    std::vector<uint16_t> src_bf16(static_cast<size_t>(M) * K, 0);
+
+    // dims that must all be refused before any allocation is attempted.
+    const std::vector<std::vector<int64_t>> bad_dims = {
+            {INT64_MAX, 2}, // product overflows int64
+            {INT64_MAX, INT64_MAX}, // and again, both extents
+            {M, 0}, // zero extent
+            {M, -1}, // negative extent
+            {}, // no extent at all
+    };
+
+    for (const auto &dims : bad_dims) {
+        std::ostringstream lbl;
+        lbl << "dims={";
+        for (size_t i = 0; i < dims.size(); ++i) {
+            lbl << (i ? "," : "") << dims[i];
+        }
+        lbl << "}";
+        SCOPED_TRACE(lbl.str());
+
+        matmul_params p {};
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.quant_params.src_scale.dims = dims;
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.buff
+                = nullptr; // force the internal-alloc path
+
+        matmul_batch_params_t bp {};
+        bp.Batch_A = 1;
+        bp.Batch_B = 1;
+
+        reorder_quant_buffers_t buffers;
+        const void *src = src_bf16.data();
+        int reordered_lda = K;
+        size_t src_type_size = sizeof(uint16_t);
+
+        // Must return a status, not trap, wrap, or attempt a wild allocation.
+        const status_t st = reorder_quantization_wrapper(src, /*lda=*/K,
+                reordered_lda, src_type_size, p, bp, /*transA=*/false, M, K,
+                /*num_threads=*/1, buffers);
+        EXPECT_EQ(st, status_t::failure)
+                << "malformed scale dims must be rejected before sizing the "
+                   "pooled buffer";
+        EXPECT_EQ(buffers.scale_buf, nullptr)
+                << "no scale buffer may be allocated for dims that were "
+                   "rejected";
+    }
+}

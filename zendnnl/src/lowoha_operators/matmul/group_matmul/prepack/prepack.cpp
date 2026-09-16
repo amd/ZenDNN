@@ -17,6 +17,7 @@
 #include "prepack.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -48,6 +49,40 @@ using zendnnl::error_handling::apilog_info_enabled;
 // Internal helpers — file-local.
 // ─────────────────────────────────────────────────────────────────────
 namespace {
+
+/// True when mixed in-place mode applies to THIS weight dtype.
+///
+/// The in-place mutation is bf16-ONLY: `warm_pack_all_aocl_dlp_experts` is its
+/// sole owner and serves bf16 alone, while the int8 sym-quant and W4A8 warmers
+/// always pack out-of-place.
+///
+/// Deciding on the dtype HERE, rather than walking the mixed-mode prepack path
+/// and being forced back to out-of-place down in the backend, keeps every
+/// non-bf16 weight on the plain path — which is both cheaper (the thread-local
+/// warmed-fingerprint memo instead of the serialising warm latch) and simpler:
+/// nothing mutates the weight buffer, so the historical
+/// primary-then-`cross_warm` order needs no reordering.
+///
+/// Safe to key on the dtype even though the process-wide verdict must stay
+/// derived from process-constant env: a weight BUFFER has one dtype for its
+/// lifetime, so this cannot flip mid-run the way a per-call configuration
+/// could.
+///
+/// Scope is GROUPED MATMUL ONLY, and deliberately kept local to this file:
+/// `is_grp_auto_mixed_inplace_active()` already requires the
+/// `grp_auto_mixed_inplace` flag that only the grouped dispatcher sets, so
+/// single matmul and BMM keep WC=2 in-place caching for every dtype and are
+/// untouched by this predicate.
+///
+/// NOT a drop-in replacement for `is_grp_auto_mixed_inplace_active()` at every
+/// site.  The custom-kernel dispatcher uses that predicate NEGATED, to force
+/// its own pack out-of-place while the AOCL prompt reorder owns the single
+/// in-place mutation; narrowing it there by dtype would make the int8 CK pack
+/// a SECOND mutator of the same buffer.  Use this only where the question is
+/// "may I mutate this weight in place?".
+inline bool mixed_inplace_for_wei(data_type_t wei_dtype) {
+    return is_grp_auto_mixed_inplace_active() && wei_dtype == data_type_t::bf16;
+}
 
 // Process-wide fingerprint cache (Fix A — see lines 97-126 below for
 // the rationale and the thread-safety contract).  `warm_pack_*` is
@@ -96,7 +131,7 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
     // produce identical hashes regardless of permutation, and every
     // pool member contributes its bits so subset changes are reliably
     // observable.  Cost is O(num_ops_total) per call — for a 32-
-    // expert MoE block that's ~32 8-byte XORs ≈ 30 ns, dwarfed by
+    // expert MoE block that's ~32 8-byte XORs, negligible vs
     // the matmul body that follows.  `uintptr_t` is the canonical
     // pointer-to-integer alias (defined in <cstdint>); the previous
     // `reinterpret_cast<size_t>` was implementation-defined on non-
@@ -214,7 +249,7 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
     // dst-agnostic) but the cross_warm regime decision for gated +
     // f32 (refused) differs from gated + bf16 (eligible), and the
     // Fix-B per-tile-AOCL-skip would apply the wrong logic.  Cost:
-    // six mix_hash calls (~15 ns), negligible vs the matmul body.
+    // six mix_hash calls, negligible vs the matmul body.
     s = mix_hash(s, static_cast<size_t>(p.src_dtype));
     s = mix_hash(s, static_cast<size_t>(p.wei_dtype));
     s = mix_hash(s, static_cast<size_t>(p.dst_dtype));
@@ -356,8 +391,8 @@ inline size_t weight_pool_fingerprint(const PrepackParams &p) {
 // first encounter with a fingerprint records it once for all other
 // threads.  Steady-state cost on the warm path: one `lock_guard`
 // + one `unordered_set::insert` (lookup-only after the first call)
-// ≈ 80-150 ns.  Vs the ~ms-class matmul body, the overhead is
-// imperceptible — and replaces the per-call 256-lookup
+// The overhead is negligible vs the matmul body — and replaces the
+// per-call 256-lookup
 // `warm_aocl_n_tile` cost that was previously paid for every
 // thread × fingerprint pair.
 //
@@ -367,12 +402,84 @@ inline size_t weight_pool_fingerprint(const PrepackParams &p) {
 static std::mutex s_warmed_fps_mtx;
 static std::unordered_set<size_t> s_warmed_fps;
 
+// Generation counter for the thread-local memo below.  Bumped by
+// `clear_fingerprint_cache_for_test()`, which is the ONLY thing that ever
+// removes entries from `s_warmed_fps` (runtime is insert-only).  Without it a
+// thread that had latched a memo would keep reporting "already warmed" after a
+// test cleared the shared set, and the re-warm those tests exist to check
+// would be silently skipped.
+static std::atomic<uint64_t> s_warmed_fps_gen {0};
+
 inline bool already_warmed(const PrepackParams &p, int scheduling_algo) {
     const size_t fp = fingerprint(p, scheduling_algo);
+
+    // Steady-state short-circuit, BEFORE the mutex.
+    //
+    // `s_warmed_fps` is insert-only at runtime, so once a fingerprint is in it
+    // the answer for that fingerprint can never revert to false within a
+    // generation — which makes the shared lookup pure repeat work on every call
+    // after the first.  It is not free: `s_warmed_fps_mtx` is a single
+    // process-wide mutex taken once per group_matmul call per MoE layer, and
+    // the per-expert ALGOs reach it SERIALLY, ahead of their parallel region,
+    // on the decode path where the GEMM body is microseconds.
+    //
+    // A thread-local set (not a single slot) because consecutive decode calls
+    // do NOT repeat a fingerprint: every MoE layer has its own weight pool, and
+    // the fused Op1 / Op2 passes within one layer fingerprint differently too,
+    // so a one-entry memo would thrash and never hit.  The working set is
+    // layers x passes x algos — small and bounded per thread.
+    //
+    // Only a CONFIRMED hit is memoised, so the memo can never manufacture an
+    // "already warmed" the shared set did not already agree on; the first two
+    // calls for a fingerprint still take the lock.
+    //
+    // The generation is read before the lock and stored with the entry, so a
+    // thread that observes a bumped generation drops its memo and then takes
+    // the mutex, whose acquire orders it after the clear's release.  One window
+    // is NOT closed: a thread that loads the old generation and then hits its
+    // memo can answer "warmed" against a set cleared in between, for exactly
+    // that one call, self-healing on the next.  This is a logical TOCTOU, not a
+    // reordering artefact, so no stronger memory order would fix it — closing
+    // it needs the generation re-read after a memo hit, or the clear
+    // serialised against calls in flight.  Left open deliberately: the only
+    // caller of `clear_fingerprint_cache_for_test()` is test setup, with no
+    // concurrent group_matmul in flight, and a spurious skip there would cost
+    // a re-warm rather than correctness.
+    const uint64_t gen = s_warmed_fps_gen.load(std::memory_order_relaxed);
+    thread_local std::unordered_set<size_t> tl_warmed;
+    thread_local uint64_t tl_gen = 0;
+    if (tl_gen != gen) {
+        tl_warmed.clear();
+        tl_gen = gen;
+    } else if (tl_warmed.count(fp) != 0) {
+        return true;
+    }
+
     // `insert(fp).second` is true on insertion (NEW fp) and false when
     // the fp was already present.  Negating gives "was-already-warmed".
-    std::lock_guard<std::mutex> lk(s_warmed_fps_mtx);
-    return !s_warmed_fps.insert(fp).second;
+    bool was_already;
+    {
+        std::lock_guard<std::mutex> lk(s_warmed_fps_mtx);
+        was_already = !s_warmed_fps.insert(fp).second;
+    }
+    if (was_already) {
+        // Cap the per-thread memo.  Only REPEATING fingerprints get here — a
+        // caller whose weights move every call never reaches this branch at
+        // all, since a fresh fingerprint yields `was_already == false` — so
+        // the bound that matters is the size of a repeating working set.  That
+        // is `layers x passes x algos`, a few hundred for the largest shipping
+        // model, and the cap is well clear of it.
+        //
+        // Clearing rather than evicting one entry keeps this branch O(1) and
+        // allocation-free.  It is the wrong policy for a cyclic working set
+        // LARGER than the cap, which would be cleared precisely when entries
+        // were about to be reused; that is worth revisiting if a real caller
+        // ever approaches the bound, but none does today.
+        constexpr size_t kMaxTlWarmed = 1024;
+        if (tl_warmed.size() >= kMaxTlWarmed) { tl_warmed.clear(); }
+        tl_warmed.insert(fp);
+    }
+    return was_already;
 }
 
 // ── Per-fingerprint warm latch (AUTO mixed-in-place mode ONLY) ─────────
@@ -487,7 +594,11 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     // regardless of whether the framework opted into the
     // `total_matmul > active_matmul` contract.  Set
     // `ZENDNNL_GRP_MATMUL_PREPACK=0` to restore the lazy-only path.
-    const bool mixed_inplace = is_grp_auto_mixed_inplace_active();
+    // Keyed on the WEIGHT DTYPE, not just the process mode: only a bf16 weight
+    // is ever mutated in place, so every other dtype takes the plain
+    // out-of-place path below and keeps its thread-local memo fast path
+    // instead of serialising on the warm latch.
+    const bool mixed_inplace = mixed_inplace_for_wei(p.wei_dtype);
 
     if (!mixed_inplace) {
         // Out-of-place fast path: insert-and-go.  A concurrent skipper may
@@ -803,7 +914,8 @@ inline const char *next_hit_for_label(
     // the same next-hit semantics (the DLP prompt path that hits is the
     // bf16 LRU resp. the sym-quant LRU).
     if (std::strcmp(primary, "aocl_full_weight") == 0
-            || std::strcmp(primary, "aocl_full_weight_sym_quant") == 0) {
+            || std::strcmp(primary, "aocl_full_weight_sym_quant") == 0
+            || std::strcmp(primary, "aocl_full_weight_inplace") == 0) {
         switch (cross) {
             case CrossWarmRegime::custom_kernel_pack:
                 return "[ALGO_3+CK_decode, ALGO_1+DLP_prompt]";
@@ -1635,7 +1747,13 @@ static void prepack_aocl_only_algo(
     // and corrupt.  So in mixed mode we run cross_warm FIRST, then the
     // in-place full-weight primary LAST.  In normal (out-of-place) mode
     // nothing mutates W, so the historical primary-then-cross order stands.
-    const bool mixed_inplace = is_grp_auto_mixed_inplace_active();
+    //
+    // Must use the SAME dtype-aware predicate as `prelude()`: it decides
+    // whether this call holds the warm latch, and the two would disagree if
+    // one keyed on the dtype and the other on the process mode alone.  A
+    // non-bf16 weight is never mutated, so it takes the primary-then-cross
+    // branch and needs no reordering.
+    const bool mixed_inplace = mixed_inplace_for_wei(p.wei_dtype);
 
     // The full-weight (prompt) primary warm.  bf16 takes the in-place path
     // under mixed mode (via the flag inside `warm_pack_all_aocl_dlp_experts`);
@@ -1900,6 +2018,12 @@ void clear_fingerprint_cache_for_test() {
         std::lock_guard<std::mutex> lk(s_warmed_fps_mtx);
         s_warmed_fps.clear();
     }
+    // Invalidate every thread's `already_warmed` memo.  Bumped AFTER the set is
+    // cleared and read by `already_warmed` BEFORE it takes the lock, so a
+    // concurrent caller either sees the new generation (memo dropped) or
+    // latches a stale stamp that the next call rejects — never a memo that
+    // outlives the set it was derived from.
+    s_warmed_fps_gen.fetch_add(1, std::memory_order_relaxed);
     // Also drop the AUTO mixed-in-place warm latches AND the completed-warm
     // record so a fresh test run re-warms (and re-mutates) from raw weights
     // instead of short-circuiting on a stale "already warmed" fingerprint.

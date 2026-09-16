@@ -88,6 +88,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include "common/zendnnl_compat.hpp"
@@ -95,6 +96,8 @@
 #include <omp.h>
 
 #include "detect_internal_alloc.hpp"
+#include "expert_parallel/group_matmul_expert_parallel.hpp" // try_expert_parallel_pipeline
+#include "expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 fusion knob
 #include "group_matmul_direct.hpp"
 #include "group_matmul_parallel_common.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
@@ -117,6 +120,17 @@ using zendnnl::common::size_of;
 // ═══════════════════════════════════════════════════════════════════════
 
 namespace {
+
+/// True when the dispatcher reported a caller-prepacked custom-kernel VNNI
+/// weight it could not route to the custom kernel.  The dispatcher writes this
+/// through `gemm_mode` and runs NO compute, so both fused-MoE passes must turn
+/// it into a hard failure rather than treating the untouched destination as a
+/// result.  Kept in one place so the sentinel string is not spelled out at
+/// each check.  Mirrors the plain-route conversion in `group_matmul_direct`.
+inline bool prepacked_no_ck_sentinel(const char *gemm_mode) {
+    return gemm_mode != nullptr
+            && std::strcmp(gemm_mode, "error_prepacked_no_ck") == 0;
+}
 
 // Per-thread persistent Op1 arena used by fused-MoE internal-alloc.
 // Owns a single 64-byte-aligned slab whose capacity monotonically
@@ -223,6 +237,9 @@ inline void reset_thread_local_fused_moe_state() {
     std::vector<void *> {}.swap(s.op2_dst_internal);
     std::vector<int> {}.swap(s.op1_ldc_local);
     ntile_flat_parallel::reset_thread_local_scratch();
+    // The per-expert dynamic-quant pool: every DA8W8 fused call quantizes
+    // W2's float intermediate per expert, so this holds a high-water block.
+    get_thread_local_quant_buffers().release();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1294,6 +1311,26 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
                     bias, beta, op1_dst, op1_ldc, is_weights_const, params,
                     num_threads, &pass1_mode, act, act_dtype);
 
+    // CK-only-or-fail, fused-MoE side.  `group_matmul_run_parallel_dispatch`
+    // reports an unservable caller-prepacked CK VNNI weight through the
+    // `gemm_mode` sentinel and runs no compute; its `bool` return means
+    // "activation was fused", NOT success.  `group_matmul_direct` converts
+    // that sentinel for the plain route, but the fused-MoE entry returns its
+    // own status and was dropping it — so a prepacked weight that declined
+    // every CK consumer fell through to a regular GEMM here and reported
+    // success over bytes it had misread.  Fail closed on both passes, matching
+    // the plain route's contract.
+    if (prepacked_no_ck_sentinel(pass1_mode)) {
+        log_error(
+                "group_matmul_fused_moe: fused_moe Op1 received a "
+                "pre-reordered "
+                "weight (mem_format_b='r') that only the custom kernel can "
+                "consume, and the resolved ALGO is not the custom-kernel "
+                "path. Such a weight is VNNI-packed and has no safe "
+                "fallback.");
+        return status_t::failure;
+    }
+
     // Separate-pass activation when the dispatcher cannot fuse (e.g.
     // ALGO 3 + silu_and_mul / gelu_and_mul on wide arena).  Never
     // fires in tight mode.
@@ -1364,6 +1401,16 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
             scratch.beta_down, op2_dst, op2_ldc, is_weights_const,
             scratch.params_down, num_threads, &pass2_mode,
             grp_matmul_gated_act_t::none, act_dtype);
+    if (prepacked_no_ck_sentinel(pass2_mode)) {
+        log_error(
+                "group_matmul_fused_moe: fused_moe Op2 received a "
+                "pre-reordered "
+                "weight (mem_format_b='r') that only the custom kernel can "
+                "consume, and the resolved ALGO is not the custom-kernel "
+                "path. Such a weight is VNNI-packed and has no safe "
+                "fallback.");
+        return status_t::failure;
+    }
     if (s_optime) {
         // Close the timing window FIRST (see Op1 note) so the measured
         // region excludes the reductions / logging below.
@@ -1512,8 +1559,14 @@ status_t group_matmul_fused_moe_execute(
     // n_tile_safe inside
     // `select_grp_matmul_algo`, so e.g. a pinned ALGO 2 on an m-tile-unsafe
     // shape resolves to 1 and vertical fusion must NOT engage.
-    const int resolved_algo
-            = select_grp_matmul_algo(layout, M, N, K, params, num_threads);
+    // The trace is collected HERE rather than defaulted away: a fused ALGO 5
+    // call bypasses `group_matmul_run_parallel_dispatch`, which is the only
+    // other place that renders `[GRP_MATMUL.ALGO]`.  Without this the
+    // `*_pin_honoured` flags are dropped exactly when a pin IS honoured — the
+    // case an operator sets the pin to observe.
+    auto_algo_trace algo_trace;
+    const int resolved_algo = select_grp_matmul_algo(
+            layout, M, N, K, params, num_threads, &algo_trace);
     const bool want_tight = pick_fused_moe_want_tight(
             op1_internal, act, env_algo_fused, resolved_algo);
 
@@ -1602,9 +1655,10 @@ status_t group_matmul_fused_moe_execute(
     // Vertical fusion is an M-tile (ALGO 2) executor, NOT a separate
     // ALGO — it slots into the M-tile branch.  Only engage it when the
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
-    // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0) it is
-    // the auto-selector's per-phase choice (prompt -> 2, decode -> 3 by
-    // default).  This keeps vertical fusion inside the ALGO-2 decision
+    // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0)
+    // the resolved algo is 1 for prompt (Rule 0.7 — unconditional ALGO 1
+    // when AUTO_PROMPT_ALGO is not explicitly set) or 3 for decode by
+    // default, so ALGO 2 vertical fusion is an M-tile-path only.  This keeps vertical fusion inside the ALGO-2 decision
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an
     // ALGO-3 N-tile decode run, where it previously still *attempted*
     // before falling through to legacy two-pass).  Uses the same
@@ -1617,8 +1671,15 @@ status_t group_matmul_fused_moe_execute(
     // algo AND on vertical fusion being enabled at all (the knob defaults
     // to DISABLED), since the hazard verdict has no other consumer — so no
     // caller pays for the scan on the default path.
+    // ALGO 5's fused pipeline drops the same barrier as ALGO 2's, so it
+    // inherits the same alias precondition and is screened by the same scan.
+    // Its knob defaults ON, so unlike ALGO 2 the scan is on the default path
+    // for a resolved-ALGO-5 call; gating on the resolved ALGO keeps every
+    // other call from paying for it.
     const bool vf_knob_on = (get_grp_matmul_m_tile_vertical_fusion() != -1);
-    const bool src_op2dst_hazard = (resolved_algo == 2) && vf_knob_on
+    const bool vf_algo_eligible = (resolved_algo == 2 && vf_knob_on)
+            || expert_parallel_fusion_eligible(resolved_algo);
+    const bool src_op2dst_hazard = vf_algo_eligible
             && fused_moe_src_op2dst_hazard(M, K, lda, transA, src, op2_dst,
                     op2_ldc, fused.N_down, params, num_ops);
     if (src_op2dst_hazard && s_apilog) {
@@ -1627,6 +1688,9 @@ status_t group_matmul_fused_moe_execute(
                 "reason=src_op2dst_alias");
     }
     const bool vf_algo_allowed = (resolved_algo == 2) && !src_op2dst_hazard;
+    const bool expert_parallel_fusion_allowed
+            = expert_parallel_fusion_eligible(resolved_algo)
+            && !src_op2dst_hazard;
 
     const char *pass1_mode = nullptr;
     const char *pass2_mode = nullptr;
@@ -1645,25 +1709,86 @@ status_t group_matmul_fused_moe_execute(
                 fused.ldb_down, fused.bias_down, scratch.beta_down, op2_dst,
                 op2_ldc, act, act_dtype, is_weights_const, params,
                 scratch.params_down, num_threads);
+    } else if (expert_parallel_fusion_allowed) {
+        if (s_apilog) {
+            apilog_info(
+                    "[GRP_MATMUL.EXEC] op=fused_moe "
+                    "enter=vertical_fusion_attempt_expert_parallel");
+        }
+        // Stages through `op1_dst` at `op1_ldc`, exactly where the two-pass
+        // would leave the activated W13 output, so caller-allocated and
+        // internal-arena modes need no distinction here.
+        const pipeline_half_t w13 {transA, N, K, alpha, weight, ldb, bias, beta,
+                op1_dst, op1_ldc, params};
+        const pipeline_half_t w2 {scratch.transA_down, fused.N_down,
+                scratch.K_down, scratch.alpha_down, fused.down_weight,
+                fused.ldb_down, fused.bias_down, scratch.beta_down, op2_dst,
+                op2_ldc, scratch.params_down};
+        const expert_parallel_result ep_result
+                = try_expert_parallel_pipeline(layout, transB, M, src, lda,
+                        is_weights_const, act, act_dtype, num_threads, w13, w2);
+        // A mid-region failure is TERMINAL: the pipeline has already written
+        // part of the destinations and `reorder_quantization_wrapper` may have
+        // rebound `params` (source dtype, pooled scale pointers) on the
+        // experts that got that far.  Falling through to the two-pass would
+        // rerun it against that mutated state, not against the caller's
+        // original input.  Fail instead of producing a plausible-looking
+        // wrong answer.
+        if (ep_result == expert_parallel_result::failed) {
+            if (s_apilog) {
+                apilog_info(
+                        "[GRP_MATMUL.EXEC] op=fused_moe "
+                        "exit=vertical_fusion_expert_parallel_failed");
+            }
+            return status_t::failure;
+        }
+        vertical_fusion_engaged
+                = (ep_result == expert_parallel_result::completed);
     }
     if (vertical_fusion_engaged) {
         if (s_apilog) {
             apilog_info(
                     "[GRP_MATMUL.EXEC] op=fused_moe exit=vertical_fusion_ok");
+            // Only on THIS branch: a declined pipeline falls through to the
+            // two-pass, which reaches `group_matmul_run_parallel_dispatch` and
+            // renders the same flags there.  Emitting unconditionally would
+            // double-report them.
+            apilog_info("[GRP_MATMUL.ALGO] op=fused_moe chosen=ALGO_",
+                    resolved_algo, " decode5_pin_honoured=",
+                    (algo_trace.decode5_pin_honoured ? "yes" : "no"),
+                    " decode5_pin_declined=",
+                    (algo_trace.decode5_pin_declined ? "yes" : "no"),
+                    " prompt5_pin_honoured=",
+                    (algo_trace.prompt5_pin_honoured ? "yes" : "no"),
+                    " prompt5_pin_declined=",
+                    (algo_trace.prompt5_pin_declined ? "yes" : "no"));
         }
         // Differentiate BF16 end-to-end / WOQ-INT4 / DQ-INT8 in the
         // profiler / apilog so per-route timings can be partitioned
-        // downstream.  The eligibility wrapper guarantees both halves
-        // share the same regime, so a single probe of
-        // `params[0].dtypes.wei` (with `dynamic_quant` to distinguish
-        // DQ-INT8 from a hypothetical static-INT8 placeholder) suffices.
-        const data_type_t wei0
-                = (!params.empty()) ? params[0].dtypes.wei : data_type_t::none;
-        const bool is_woq_wei
-                = (wei0 == data_type_t::s4 || wei0 == data_type_t::u4);
-        const bool is_dqint8_wei = (wei0 == data_type_t::s8)
-                && (!params.empty()) && params[0].dynamic_quant;
-        if (is_dqint8_wei)
+        // downstream.  Every expert that fused shares one regime, so a
+        // single representative probe suffices — but it has to be an ACTIVE
+        // expert.  MoE decode routinely leaves leading experts inactive, and
+        // an inactive slot is a padded placeholder whose dtypes were never
+        // classified, so probing slot 0 can label a DA8W8 layer as float and
+        // land its time in the wrong bucket — destroying exactly the
+        // partition these tags exist to create.
+        size_t probe = params.size();
+        for (size_t i = 0; i < M.size() && i < params.size(); ++i) {
+            if (M[i] > 0) {
+                probe = i;
+                break;
+            }
+        }
+        const data_type_t wei_probe = (probe < params.size())
+                ? params[probe].dtypes.wei
+                : data_type_t::none;
+        const bool is_woq_wei = (wei_probe == data_type_t::s4
+                || wei_probe == data_type_t::u4);
+        const bool is_dqint8_wei = (wei_probe == data_type_t::s8)
+                && (probe < params.size()) && params[probe].dynamic_quant;
+        if (expert_parallel_fusion_allowed)
+            pass1_mode = expert_parallel_fusion_mode_tag(wei_probe);
+        else if (is_dqint8_wei)
             pass1_mode = "vertical_fusion_dqint8";
         else if (is_woq_wei)
             pass1_mode = "vertical_fusion_woq";

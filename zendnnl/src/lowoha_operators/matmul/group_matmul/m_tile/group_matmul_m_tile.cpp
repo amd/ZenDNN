@@ -471,10 +471,12 @@ inline void dqint8_compact_and_requant_slice(
 //                        (ALGO 1 equivalent) + a one-time WARN.
 //
 // The former internal "round-based" (per-expert) and "wide-N" (sequential
-// full-team) PERF fallbacks were removed: `auto_select_algo` (Rule 0.6 /
-// Rule 0.7 via `classify_m_tile_regime`) now peels those regimes off to
-// ALGO 5 / ALGO 1 at selection time, so AUTO reproduces the same executor
-// while ALGO 2 stays pure.
+// full-team) PERF fallbacks were removed: `auto_select_algo` (Rules 0.5 /
+// 0.6 / 0.7) now peels those regimes off at selection time, so ALGO 2 stays
+// a pure M-tile executor.  Note AUTO no longer selects ALGO 2 at all (the
+// `no-auto-2` invariant in `auto_select_algo`): reaching this executor
+// requires an explicit `ZENDNNL_GRP_MATMUL_ALGO=2` or
+// `AUTO_{DECODE,PROMPT}_ALGO=2`.
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
@@ -694,8 +696,8 @@ void flat_m_tile(const std::vector<char> &layout,
     }
 
     // ── CCD topology (universal: handles any num_threads) ──
-    // F7 — Zen 3 / 4 / 5 classic-CCD assumption: 8 cores per CCD with
-    // shared L3 per CCD.  Dense (c-class) parts deviate — they use
+    // F7 — classic-CCD topology assumption: 8 cores per CCD with shared
+    // L3 per CCD.  Dense (c-class) CPU variants deviate — they use
     // 16-core CCDs with one L3 per CCD; the planner's striping math
     // still schedules correctly there but treats each large CCD as two
     // 8-core groups (i.e. CCD locality is per 8-core stripe rather
@@ -1307,9 +1309,10 @@ void flat_m_tile(const std::vector<char> &layout,
     // The wide-N memory-bound regime — few actives × shallow M × large N,
     // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — used to fall back here
     // to a sequential-full-team loop (an ALGO-1 equivalent).  That decision
-    // now lives in `auto_select_algo` (Rule 0.7 via `classify_m_tile_regime`,
-    // same gate constants), which routes the regime to ALGO 1 for AUTO so
-    // ALGO 2 stays a PURE M-tile executor.
+    // now lives in `auto_select_algo`, whose few-expert decode arrow
+    // (Rule 0.5) routes low-occupancy frames to ALGO 1 directly, so ALGO 2
+    // stays a PURE M-tile executor.  AUTO never selects ALGO 2 now; this
+    // executor is reached only through an explicit env pin.
     //
     // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
     // the single-tier M-tile plan below: this is CORRECT (the regime is
@@ -1745,8 +1748,8 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     //
     // Scratch budget caps `slice_M` per expert so each thread's
     // `(slice_M × N_w13) × inter_elem` staging buffer fits in L2.
-    // Default 512 KB matches Zen 4 / Zen 5 per-core L2 (~1 MB) with
-    // headroom for W13 + W2 weight blocks the inner kernel co-loads.
+    // Default 512 KB fits within a 1 MB per-core L2 with headroom
+    // for W13 + W2 weight blocks the inner kernel co-loads.
     //
     // We compute the EXACT byte count per thread up front (slice_M is
     // known once the planner returns).  If any thread's slice exceeds

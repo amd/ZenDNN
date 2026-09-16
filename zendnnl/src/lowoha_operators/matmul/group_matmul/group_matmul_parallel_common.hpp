@@ -68,9 +68,14 @@ using zendnnl::common::size_of;
 inline constexpr int kGrpMatmulAlgoAuto = 0;
 inline constexpr int kGrpMatmulAlgoMultilevel = 6;
 inline constexpr int kGrpMatmulAlgoNTileFlatParallel = 4;
+// One whole expert per thread, no intra-expert split.  Named for the same
+// reason as its siblings above: the selector compares against it in several
+// files, and a bare `5` there says nothing about the strategy it selects.
+inline constexpr int kGrpMatmulAlgoExpertParallel = 5;
 
 inline constexpr bool is_grp_matmul_generic_algo(int algo) {
-    return algo == 1 || algo == 2 || algo == 3 || algo == 5
+    return algo == 1 || algo == 2 || algo == 3
+            || algo == kGrpMatmulAlgoExpertParallel
             || algo == kGrpMatmulAlgoMultilevel;
 }
 
@@ -218,6 +223,18 @@ inline constexpr int kFewExpertsAlgo1 = 8;
 /// Falls back to ALGO 1 when the shape is not m_tile_safe.
 inline constexpr int kFewExpertsAlgo2Pref = 8;
 
+/// Threads-per-active-expert factor for the few-expert DECODE arrow
+/// (Rule 0.5 in `auto_select_algo`).  ALGO 3 splits each expert's N across
+/// the team, so it needs enough ACTIVE experts to be worth its round-based
+/// schedule: the rule takes ALGO 3 when
+/// `active_ops * kDecodeNTileThreadFactor >= num_threads`, i.e. when there is
+/// at most this many threads per active expert.  Below that the team is too
+/// wide for the expert count and full-team sequential (ALGO 1) wins — the
+/// Mixtral-class shape (8 experts, topk=2 → 2 active on a 32+ thread team)
+/// lands there.  Dtype-agnostic by design; only the `n_tile_safe` legality
+/// clamp differs per dtype.
+inline constexpr int kDecodeNTileThreadFactor = 4;
+
 // ── Executed-ALGO from gemm_mode ────────────────────────────────────────
 // Maps the executor-written `gemm_mode` string (the authoritative record of
 // what ACTUALLY ran) to the ALGO that actually executed ({1,2,3,5,6}), so the
@@ -251,11 +268,16 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
     if (starts("flat_m_tile_seq_clamp")) return 1; // sequential full-team
     if (starts("sequential")) return 1; // "sequential" / "..._experts"
     if (starts("flat_m_tile")) return 2;
+    // Must precede the generic `vertical_fusion` arm, which would otherwise
+    // claim it by prefix and report an ALGO 5 execution as ALGO 2.
+    if (starts("vertical_fusion_expert_parallel")) {
+        return kGrpMatmulAlgoExpertParallel;
+    }
     if (starts("vertical_fusion")) return 2; // M-tile fused pipeline
     if (starts("flat_n_tile")) return 3;
     if (starts("ntile_flat_parallel")) return kGrpMatmulAlgoNTileFlatParallel;
     if (starts("multilevel")) return kGrpMatmulAlgoMultilevel;
-    if (starts("per_expert")) return 5;
+    if (starts("per_expert")) return kGrpMatmulAlgoExpertParallel;
     if (starts("fused_moe")) {
         // Composite: derive from the Op1 executor sub-mode.
         const char *op1 = std::strstr(mode, "op1=");
@@ -401,8 +423,11 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 //     default policy (including refinements and safety clamps); numeric 4 is
 //     never dispatched as a generic scheduler.
 //
-// A global generic pin {1,2,3,5,6} suppresses phase W8A8 requests.
-// Global ALGO 4 requests W8A8 in both phases and wins over a phase setting.
+// PRECEDENCE: an explicitly-set phase knob for the ACTIVE phase outranks the
+// global `ZENDNNL_GRP_MATMUL_ALGO`, whatever the global is set to.  A phase
+// `=4` therefore requests W8A8 even under a global generic pin, and an
+// explicit non-4 phase knob suppresses a global `=4` for that phase.  The
+// global only applies when the matching phase knob is unset.
 // Any `unimplemented` attempt may fall through to generic fused-MoE; actual
 // ALGO4 allocation/execution errors remain terminal in `group_matmul_direct`.
 //
@@ -417,6 +442,10 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 // Named decode default is also consumed by the qualified ALGO-5 pin fallback
 // in auto_select_algo; keeping one constexpr prevents those policies drifting.
 inline constexpr int kGrpMatmulAutoDecodeAlgoDefault = 3;
+
+// NOTE: `kGrpMatmulAlgo5PromptDeclineAlgo` moved to
+// `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
+// rest of the ALGO 5 pin qualifier.  Include that header to read it.
 
 inline constexpr int grp_matmul_default_algo_for_phase(grp_matmul_phase phase) {
     return phase == grp_matmul_phase::decode ? kGrpMatmulAutoDecodeAlgoDefault
@@ -534,25 +563,37 @@ enum class grp_matmul_ntile_flat_parallel_request_source {
 
 /// Resolve whether this call should attempt the W8A8 whole-call interceptor.
 ///
-/// This MUST inspect `get_grp_matmul_requested_algo()`: the normalized generic
-/// getter maps global 7 to AUTO and would lose global precedence.
+/// PRECEDENCE — the per-phase knob for THIS phase outranks the global
+/// selector, matching `select_grp_matmul_algo`.  So:
+///   * phase knob `=4`            → attempt W8A8 for this phase, even when a
+///                                  global generic pin is set.
+///   * phase knob explicitly set
+///     to anything else           → no W8A8; the explicit phase choice wins
+///                                  over a global `=4`.
+///   * phase knob unset           → fall back to the global selector.
+///
+/// This MUST inspect `get_grp_matmul_requested_algo()` for the global leg: the
+/// normalized generic getter maps a global 4 to AUTO and would lose it.
 inline grp_matmul_ntile_flat_parallel_request_source
 resolve_grp_matmul_ntile_flat_parallel_request(grp_matmul_phase phase) {
+    const auto phase_setting = get_grp_matmul_auto_phase_setting(phase);
+    if (phase_setting.requests_ntile_flat_parallel()) {
+        return phase == grp_matmul_phase::decode
+                ? grp_matmul_ntile_flat_parallel_request_source::auto_decode
+                : grp_matmul_ntile_flat_parallel_request_source::auto_prompt;
+    }
+    // An explicitly-set non-4 phase knob is a deliberate choice of a generic
+    // scheduler (or of the legacy cascade); it suppresses a global W8A8
+    // attempt for this phase.
+    if (phase_setting.has_explicit_request()) {
+        return grp_matmul_ntile_flat_parallel_request_source::none;
+    }
+
     const int global_requested = get_grp_matmul_requested_algo();
     if (global_requested == kGrpMatmulAlgoNTileFlatParallel) {
         return grp_matmul_ntile_flat_parallel_request_source::global;
     }
-    if (global_requested != kGrpMatmulAlgoAuto) {
-        return grp_matmul_ntile_flat_parallel_request_source::none;
-    }
-
-    const auto phase_setting = get_grp_matmul_auto_phase_setting(phase);
-    if (!phase_setting.requests_ntile_flat_parallel()) {
-        return grp_matmul_ntile_flat_parallel_request_source::none;
-    }
-    return phase == grp_matmul_phase::decode
-            ? grp_matmul_ntile_flat_parallel_request_source::auto_decode
-            : grp_matmul_ntile_flat_parallel_request_source::auto_prompt;
+    return grp_matmul_ntile_flat_parallel_request_source::none;
 }
 
 inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
@@ -591,36 +632,9 @@ inline bool get_grp_matmul_dense_decode_ntile() {
     return v;
 }
 
-// ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE = { 0, 1 } — cached, default 1 (ON).
-//   QUALIFIER kill-switch for the decode `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO=5`
-//   pin (see Rule 0.6a / Rule 1 in `group_matmul_dispatch.cpp`).  AUTO never
-//   emits ALGO 5 on its own; an operator opts in with the `AUTO_DECODE_ALGO=5`
-//   pin.  When this gate is ON (the default) that pin is HONOURED only where the
-//   measured win holds — a decode frame whose every ACTIVE expert carries s8
-//   weights AND whose active expert count saturates the team
-//   (`active_ops >= num_threads`).  The gate is model-agnostic: it fences on
-//   dtype and occupancy, NOT on a shape/hidden-size fingerprint, so the pin is a
-//   per-deployment opt-in the operator sets only where ALGO 5 helps (the
-//   measured INT8 Qwen3/3.6 case).  On any OTHER decode frame — bf16 weights or
-//   a team the active experts cannot saturate (where ALGO 5 REGRESSES) — the pin
-//   is DECLINED and the call falls back to the normal decode policy exactly as
-//   if the pin were unset.  Set `=0` to HONOUR the pin verbatim for every decode
-//   call (the pre-gate semantics, dtype/occupancy unchecked).  Non-numeric input
-//   → default 1.  The `test_api` override atom below lets a gtest A/B the gate
-//   mid-process, which the cached env read cannot.
-inline std::atomic<int> &test_api_decode_algo5_gate_override();
-inline bool get_grp_matmul_decode_algo5_gate() {
-    const int ovr = test_api_decode_algo5_gate_override().load(
-            std::memory_order_relaxed);
-    if (ovr >= 0) return ovr != 0;
-    static const bool v = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE");
-        int parsed = 0;
-        if (!parse_env_int_strict(e, parsed)) return true; // default / junk: On
-        return parsed != 0;
-    }();
-    return v;
-}
+// NOTE: `get_grp_matmul_{decode,prompt}_algo5_gate()` moved to
+// `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
+// ALGO 5 pin qualifier they gate.  Include that header to call them.
 
 // NOTE: `get_grp_n_tile_fused_act()` moved to
 // `group_matmul_n_tile.hpp` (Section A.4) together with the rest of
@@ -755,13 +769,16 @@ inline std::atomic<int> s_grp_matmul_auto_decode_algo_override {-1};
 // setting the env var after the first call has already latched it.
 inline std::atomic<int> s_grp_matmul_dense_decode_ntile_override {-1};
 
+// NOTE: `s_grp_matmul_{decode,prompt}_algo5_gate_override` moved to
+// `expert_parallel/group_matmul_expert_parallel_policy.hpp` (same `test_api`
+// namespace).  Include that header to access them.
+
 // Sentinel `-1` = no override (use the cached env path, default ON).
-// `0` / `1` force the decode ALGO 5 pin qualifier
-// (`ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE`) off / on for the lifetime of a test,
-// so a gtest can A/B a qualified `AUTO_DECODE_ALGO=5` pin (s8 + occupancy)
-// against a verbatim-honoured one inside one process — same cached-env
-// rationale as the dense-decode atom above.
-inline std::atomic<int> s_grp_matmul_decode_algo5_gate_override {-1};
+// `0` / `1` force `ZENDNNL_ENABLE_GROUP_DQ` off / on.  Needed because
+// `get_grp_matmul_enable_group_dq()` latches its env read, so a plain
+// `setenv` after any prior library call is invisible; a test that wants
+// the per-expert DQ fallback must use this.
+inline std::atomic<int> s_grp_matmul_enable_group_dq_override {-1};
 
 // Sentinel `-1` = no override (use the cached env path).  `0` / `1` force
 // `ZENDNNL_GRP_MATMUL_KBLOCK` off / on, and `2` restores the automatic
@@ -869,9 +886,9 @@ inline std::atomic<int> &test_api_algo_override() {
 inline std::atomic<int> &test_api_dense_decode_ntile_override() {
     return test_api::s_grp_matmul_dense_decode_ntile_override;
 }
-inline std::atomic<int> &test_api_decode_algo5_gate_override() {
-    return test_api::s_grp_matmul_decode_algo5_gate_override;
-}
+// NOTE: `test_api_{decode,prompt}_algo5_gate_override()` moved to
+// `expert_parallel/group_matmul_expert_parallel_policy.hpp` together with the
+// atoms they return.  Include that header to call them.
 
 inline int get_grp_n_rounds_mode() {
     const int ovr = test_api::s_grp_n_rounds_mode_override.load(
@@ -960,9 +977,10 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   same address.  That hazard is now addressed at the library
 //   level: the CK path honours `ZENDNNL_MATMUL_WEIGHT_CACHE` with
 //   the same semantics as the AOCL DLP path.
-//     - `ZENDNNL_MATMUL_WEIGHT_CACHE=1` (default): pointer-keyed
-//       LRU cache stays warm across calls (production MoE serving
-//       with a stable model — the common case).
+//     - `ZENDNNL_MATMUL_WEIGHT_CACHE=2` (default): in-place reuse
+//       where the path supports it; otherwise pointer-keyed LRU cache
+//       stays warm across calls (production MoE serving with a stable
+//       model — the common case).  Mode `1` forces out-of-place LRU.
 //     - `ZENDNNL_MATMUL_WEIGHT_CACHE=0`: per-call caller-owned
 //       packed buffers are allocated fresh and freed after the
 //       call, so a recycled pointer can never hit a stale entry.
@@ -1253,9 +1271,9 @@ inline bool get_grp_matmul_prepack() {
 // Trade-off: at low num_ops (num_ops × stable < num_threads),
 // some threads idle in the strict-stable plan.  Accepted as the
 // cost of the cache-stability guarantee — for typical MoE decode
-// workloads, the per-call cache-hit savings (tens of milliseconds
-// of avoided reorders) dominate the per-call thread-utilisation
-// loss (sub-ms).
+// workloads, the per-call cache-hit savings from avoided reorders
+// dominate the per-call thread-utilisation loss from the idle
+// threads in a strict-stable plan.
 //
 // `participating_n_thr` (group_matmul_n_tile.cpp) retains secondary
 // clamps by `align_cap = N / nr_align` and `team_size` as defence-
@@ -1530,7 +1548,7 @@ inline std::pair<int, int> aligned_n_split(
     return even_split();
 }
 
-/// 32 MB of L3 per CCD on Zen 3 / 4 / 5 classic-CCD topologies.
+/// 32 MB of L3 per CCD on current-generation classic-CCD CPU topologies.
 inline constexpr size_t kL3PerCcdBytes = 32UL * 1024UL * 1024UL;
 
 /// Aggregate L3 the planner uses to bound the experts-per-round
@@ -1585,12 +1603,32 @@ inline matmul_algo_t w4a8_runtime_algo(
             : matmul_algo_t::aocl_dlp;
 }
 
-/// Thin wrapper around matmul_execute that packages per-expert slice
-/// arguments into the batch/params objects the kernel expects.
-inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
-        int N, int K, float alpha, const void *src, int lda, const void *weight,
-        int ldb, const void *bias, float beta, void *dst, int ldc,
-        bool is_weights_const, int num_thr, matmul_params &params,
+/// The per-thread dynamic-quant buffer pool `execute_expert_slice` quantizes
+/// through.  Pooled because the per-expert executors (ALGO 1 / 5 / 6) reach it
+/// once per expert inside the parallel region, where a stack instance would
+/// cost a malloc/free pair each time.  Named rather than function-local so
+/// `reset_thread_local_fused_moe_state()` can `release()` it, as with
+/// `ntile_flat_parallel::reset_thread_local_scratch()`.
+inline reorder_quant_buffers_t &get_thread_local_quant_buffers() {
+    static thread_local reorder_quant_buffers_t buffers;
+    return buffers;
+}
+
+/// Status-bearing form of `execute_expert_slice`, for callers that can
+/// propagate a failure instead of only logging it.  The per-expert source
+/// quantization can fail at RUNTIME (a pooled allocation, not just bad
+/// metadata a gate could screen), and on that path the destination is left
+/// unwritten — so a caller that reports success regardless would publish a
+/// stale intermediate.  `matmul_execute` returns void, so the quantization
+/// is the only stage that can report anything.
+///
+/// `execute_expert_slice` remains the void form for the callers that have no
+/// way to carry a status out (ALGO 1/6 and the N-tile executors run this
+/// inside parallel regions whose contracts are unchanged).
+inline status_t execute_expert_slice_checked(char layout, bool transA,
+        bool transB, int M, int N, int K, float alpha, const void *src, int lda,
+        const void *weight, int ldb, const void *bias, float beta, void *dst,
+        int ldc, bool is_weights_const, int num_thr, matmul_params &params,
         matmul_algo_t algo) {
 
     // Inactive expert (no routed tokens): nothing to compute.  Returning
@@ -1599,7 +1637,7 @@ inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
     // traps (SIGFPE).  The M-tile / N-tile ALGOs flatten over rows and skip
     // empty experts implicitly, so this is the only path that needs the
     // guard.  Sparse MoE routing (e.g. 6 of 15 experts firing) relies on it.
-    if (M <= 0) { return; }
+    if (M <= 0) { return status_t::success; }
 
     matmul_batch_params_t bp;
     bp.Batch_A = 1;
@@ -1616,18 +1654,36 @@ inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
     // quantization path, preserving the legacy behaviour.
     int reordered_lda = lda;
     size_t src_type_size = size_of(params.dtypes.src);
-    reorder_quant_buffers_t quant_buffers;
+    // Pooled per thread, not constructed per expert: each worker owns its
+    // experts and consumes the buffer within one call, so the grow-only
+    // reuse is safe.
+    reorder_quant_buffers_t &quant_buffers = get_thread_local_quant_buffers();
     if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
                 params, bp, transA, M, K, num_thr, quant_buffers)
             != status_t::success) {
         log_error("execute_expert_slice: reorder_quantization_wrapper failed");
-        return;
+        return status_t::failure;
     }
 
     matmul_execute(layout, transA, transB, M, N, K, alpha, src,
             params.dynamic_quant ? reordered_lda : lda, weight, ldb, bias, beta,
             dst, ldc, is_weights_const, src_type_size,
             size_of(params.dtypes.dst), num_thr, kernel, params, bp, 0);
+    return status_t::success;
+}
+
+/// Thin wrapper around matmul_execute that packages per-expert slice
+/// arguments into the batch/params objects the kernel expects.
+inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
+        int N, int K, float alpha, const void *src, int lda, const void *weight,
+        int ldb, const void *bias, float beta, void *dst, int ldc,
+        bool is_weights_const, int num_thr, matmul_params &params,
+        matmul_algo_t algo) {
+    // Failure is already logged by the checked form; discarding it here keeps
+    // the historical contract of this entry point.
+    (void)execute_expert_slice_checked(layout, transA, transB, M, N, K, alpha,
+            src, lda, weight, ldb, bias, beta, dst, ldc, is_weights_const,
+            num_thr, params, algo);
 }
 
 /// ZENDNNL_ENABLE_GROUP_DQ — opt-in/out for the grouped dynamic-quant
@@ -1635,12 +1691,23 @@ inline void execute_expert_slice(char layout, bool transA, bool transB, int M,
 /// other than a literal "0").  When OFF, group matmul skips the grouped
 /// source-quant pre-pass and dynamic quantization falls back to the
 /// per-expert `reorder_quantization_wrapper` inside `execute_expert_slice`
-/// (legacy path).  Intentionally NOT cached so gtests can flip it
-/// per-scope via setenv; the getenv cost is negligible next to a GEMM.
+/// (legacy path).
+///
+/// The env read is latched: this sits on the serial critical path once per
+/// fused-MoE call, and an int8 MoE decode call is only a few microseconds
+/// against a `getenv` that scans the whole environment block.  Latching makes
+/// a later `setenv` invisible, so tests use
+/// `s_grp_matmul_enable_group_dq_override` (sentinel -1 = no override).
 inline bool get_grp_matmul_enable_group_dq() {
-    const char *env = std::getenv("ZENDNNL_ENABLE_GROUP_DQ");
-    if (env == nullptr || env[0] == '\0') return true; // default ON
-    return !(env[0] == '0' && env[1] == '\0'); // "0" => OFF
+    const int ovr = test_api::s_grp_matmul_enable_group_dq_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
+    static const bool v = []() {
+        const char *env = std::getenv("ZENDNNL_ENABLE_GROUP_DQ");
+        if (env == nullptr || env[0] == '\0') return true; // default ON
+        return !(env[0] == '0' && env[1] == '\0'); // "0" => OFF
+    }();
+    return v;
 }
 
 // NOTE: The N-tile shared utilities — `sort_indices_by_m`,
@@ -1694,6 +1761,12 @@ struct auto_algo_trace {
     // qualifier (not all-s8, or active_ops < num_threads) and the call fell back
     // to the decode default exactly as if the pin were unset.
     bool decode5_pin_declined = false;
+    // Prompt twins of the two booleans above, kept separate so one
+    // `[GRP_MATMUL.ALGO]` line still names which phase's pin was involved.
+    bool prompt5_pin_honoured = false;
+    // Declined on occupancy alone (the prompt gate has no dtype term); the
+    // call falls back to ALGO 3, not to the prompt default.
+    bool prompt5_pin_declined = false;
 };
 
 int select_grp_matmul_algo(const std::vector<char> &layout,

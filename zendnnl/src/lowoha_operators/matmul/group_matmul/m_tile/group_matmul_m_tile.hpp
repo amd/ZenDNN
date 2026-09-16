@@ -235,8 +235,8 @@ inline std::atomic<int> s_grp_matmul_m_tile_vertical_fusion_override {
 // Caps `slice_M` per expert so the thread-local `(slice_M × 2·I)`
 // bf16 staging buffer fits in L2 with headroom for the W13 and W2
 // weight blocks loaded by the inner matmul kernels.  Default 512 KB
-// matches the Zen 4 / Zen 5 per-core L2 capacity (1 MB) split
-// roughly 50/50 between staging and weight footprint.  Settable
+// fits within a 1 MB per-core L2 capacity, split roughly 50/50
+// between staging and weight footprint.  Settable
 // via `ZENDNNL_GRP_MATMUL_M_TILE_PIPELINE_SCRATCH_KB={-1, 1..N}` (env)
 // or this atomic.
 //
@@ -258,8 +258,8 @@ inline std::atomic<int> s_grp_matmul_m_tile_vertical_fusion_override {
 // `M_TILE_` infix matches the sibling M-tile knobs — see the
 // rationale on `s_grp_matmul_m_tile_vertical_fusion_override`.
 //
-// On hosts with smaller L2 (e.g. legacy Zen 2 / 3 at 512 KB / core)
-// callers should lower to ~256 KB; on c-class large-L2 parts the
+// On CPUs with smaller per-core L2 (e.g. 512 KB / core) callers
+// should lower to ~256 KB; on c-class large-L2 CPUs the
 // default leaves headroom and a larger value (1024 KB+) can be
 // tried.  The planner emits zero `slice_M` for any expert whose
 // `2 · I[e] · sizeof(bf16)` already exceeds the budget — those
@@ -478,10 +478,11 @@ inline int get_grp_matmul_m_tile_slice_target() {
 // to pick internally.  The gates mirror flat_m_tile's old internal gates
 // EXACTLY (same kSliceTarget, same total_need / max_M math) so the routing
 // is parity-preserving, not coincidental:
-//   * kManyExperts — `active_ops > num_threads`.  A single-tier M-tile plan
-//                    cannot give < 1 thread per active expert, so AUTO hands
-//                    the regime to ALGO 2's multi-tier hybrid, which peels
-//                    the heavy experts onto teams and drains the tail.
+//   * kManyExperts — `active_ops > num_threads`.  M-tile cannot give
+//                    every expert its own thread(s), so AUTO routes to the
+//                    N-tile executor (ALGO 3), which parallelises within
+//                    each expert by column-slicing instead of row-slicing.
+//                    Falls to ALGO 1 when the shape is not N-tile-safe.
 //   * kWideN       — `max_M > 1 && total_need*2 <= num_threads`, where
 //                    `total_need = Σ_active min(M[i], ceil(M[i]/kSliceTarget))`.
 //                    M is too shallow to feed the slicer; AUTO routes to

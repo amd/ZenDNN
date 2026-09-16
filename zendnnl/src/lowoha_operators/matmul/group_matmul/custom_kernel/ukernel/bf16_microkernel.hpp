@@ -43,9 +43,10 @@
 /// Inner-loop pattern follows `bf16_brgemm_ukernel.cpp`:
 ///   * K-pair unroll-by-2 to expose ILP between two B-load batches
 ///   * VDPBF16PS (AVX512_BF16) for one FMA per 2 K-elements
-///   * `_mm512_cvtneps_pbh` for the FP32→BF16 store conversion
+///   * `f32_to_bf16x16` (software RNE sequence, AVX-512F only) for the
+///     FP32→BF16 store conversion
 ///
-/// Register-pressure caps (Zen4/5: 32 zmm):
+/// Register-pressure caps (32 zmm available on AVX-512 CPUs):
 ///   * NV=2 (NR=32): max MR=8 — 16 acc + 2 b + 1 a ≈ 19 zmms (clean)
 ///   * NV=4 (NR=64): max MR=6 — 24 acc + 4 b + 1 a ≈ 29 zmms (clean);
 ///                   MR=8 spills 5 zmms (matches BRGEMM).

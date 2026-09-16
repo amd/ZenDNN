@@ -237,8 +237,8 @@ static inline __m512 silu_avx512(__m512 x) {
 // base `avx512f,avx512bw,avx512vl,fma` set used by the rest of this
 // header) because the FP-domain bitwise intrinsics
 // `_mm512_and_ps` / `_mm512_andnot_ps` / `_mm512_xor_ps` live in
-// AVX-512 DQ (header `avx512dqintrin.h`).  All Zen 3+ and
-// Skylake-X+ CPUs that ship AVX-512 also ship AVX-512 DQ — the
+// AVX-512 DQ (header `avx512dqintrin.h`).  All AVX-512 CPUs that
+// this library targets also ship AVX-512 DQ — the
 // pre-existing AVX-512 platform gate elsewhere in the library is
 // sufficient to ensure this code path is only entered on
 // DQ-capable hardware.

@@ -376,4 +376,130 @@ TEST(GroupReorderModelE2E, F16WarmUpThenInferenceFetchesReorderedWeights) {
         zendnnl_aligned_free(prepacked[e]);
 }
 
+// ===============================================================================
+// Caller-prepacked CK weights must NOT reach a non-CK executor.
+//
+// `mem_format_b == 'r'` + `lowoha_algo == moe_custom_kernel` means the caller
+// handed us custom-kernel VNNI bytes.  Only ALGO 3 + the custom kernel can read
+// that layout; every other executor runs the regular AOCL / BRGEMM kernel, which
+// would consume the packed bytes as if they were plain row-major — producing
+// silently wrong output rather than an error.
+//
+// `group_matmul_run_parallel_dispatch` has always enforced this
+// (`error_prepacked_no_ck`, any `use_algo != 3`), but the fused ALGO 5 pipeline
+// executes `execute_expert_slice` directly and never reaches that dispatcher, so
+// it bypassed the contract.  Pinning ALGO 5 over prepacked weights must FAIL,
+// not succeed: the fused pipeline declines the layout, the call falls through to
+// the two-pass, and the dispatcher's guard rejects it there.
+//
+// Asserting `failure` rather than a numeric check is deliberate — the bug's
+// signature is `success` with corrupt output, so a value comparison could only
+// catch it by knowing what the corruption looks like.
+TEST(GroupReorderModelE2E, PrepackedCkWeightsRejectedOnFusedAlgo5) {
+    using zendnnl::lowoha::matmul::group_matmul_direct;
+    using zendnnl::ops::matmul_algo_t;
+
+    constexpr int E = 4;
+    constexpr int M = 8;
+    constexpr int K = 32; // hidden
+    constexpr int N = 64; // gate_up width (even: gated act halves it)
+
+    reset_grp_matmul_caches();
+    mt::AlgoEnvGuard algo_guard(5); // pin the per-expert scheduler
+    // Leave vertical fusion at its default (ON) — the point is that the
+    // DEFAULT-on fused path must honour the contract.
+
+    tensor_factory_t tf {};
+    std::vector<tensor_t> inp(E), w13(E), w2(E), d1(E), d2(E);
+    std::vector<const void *> w13_raw(E), w2_raw(E);
+    for (int e = 0; e < E; ++e) {
+        inp[e] = tf.uniform_dist_tensor({M, K}, data_type_t::bf16, 2.0, false);
+        w13[e] = tf.uniform_dist_tensor({K, N}, data_type_t::bf16, 2.0, false);
+        // Down weight: consumes the post-activation width (N/2) -> hidden.
+        w2[e] = tf.uniform_dist_tensor(
+                {N / 2, K}, data_type_t::bf16, 2.0, false);
+        d1[e] = tf.uniform_dist_tensor({M, N}, data_type_t::bf16, 2.0);
+        d2[e] = tf.uniform_dist_tensor({M, K}, data_type_t::bf16, 2.0);
+        w13_raw[e] = w13[e].get_raw_handle_unsafe();
+        w2_raw[e] = w2[e].get_raw_handle_unsafe();
+    }
+
+    // Prepack BOTH halves into caller-owned CK VNNI buffers, exactly as the
+    // tests above do for the ALGO 3 path.
+    auto prepack_half = [&](const std::vector<const void *> &src_w, int k_dim,
+                                int n_dim, std::vector<void *> &out_bufs) {
+        std::vector<rdr::reorder_params_t> rp(E);
+        for (int e = 0; e < E; ++e) {
+            rp[e].is_prepack = true;
+            rp[e].prepack.algo = matmul_algo_t::moe_custom_kernel;
+            rp[e].prepack.wei_dtype = data_type_t::bf16;
+            rp[e].prepack.src_dtype = data_type_t::bf16;
+            rp[e].prepack.K = k_dim;
+            rp[e].prepack.N = n_dim;
+            rp[e].prepack.ldb = n_dim;
+            rp[e].prepack.transposed = false;
+            rp[e].prepack.pack_nr = 0;
+            const size_t bytes = rdr::weight_prepack_size(rp[e]);
+            ASSERT_GT(bytes, 0u);
+            out_bufs[e] = zendnnl_aligned_alloc(64, bytes);
+            ASSERT_NE(out_bufs[e], nullptr);
+        }
+        ASSERT_EQ(rdr::group_reorder(src_w, out_bufs, rp),
+                zendnnl::memory::status_t::success);
+    };
+
+    std::vector<void *> pk13(E, nullptr), pk2(E, nullptr);
+    prepack_half(w13_raw, K, N, pk13);
+    prepack_half(w2_raw, N / 2, K, pk2);
+
+    std::vector<char> layouts(E, 'r');
+    std::vector<bool> transAs(E, false), transBs(E, false), is_wc(E, true);
+    std::vector<int> Ms(E, M), Ns(E, N), Ks(E, K);
+    std::vector<float> alphas(E, 1.0f), betas(E, 0.0f);
+    std::vector<int> ldas(E, K), ldbs(E, N), ldcs(E, N);
+    std::vector<const void *> srcs(E), weis(E), no_bias(E, nullptr);
+    std::vector<void *> dsts(E), dsts2(E);
+    std::vector<matmul_params> params(E);
+    for (int e = 0; e < E; ++e) {
+        srcs[e] = inp[e].get_raw_handle_unsafe();
+        weis[e] = pk13[e];
+        dsts[e] = d1[e].get_raw_handle_unsafe();
+        dsts2[e] = d2[e].get_raw_handle_unsafe();
+        params[e].dtypes.src = data_type_t::bf16;
+        params[e].dtypes.wei = data_type_t::bf16;
+        params[e].dtypes.dst = data_type_t::bf16;
+        params[e].dtypes.bias = data_type_t::none;
+        params[e].mem_format_b = 'r'; // caller-prepacked ...
+        params[e].lowoha_algo
+                = matmul_algo_t::moe_custom_kernel; // ... as CK VNNI
+        params[e].num_threads = 0;
+    }
+
+    // Fused MoE: W13 -> silu_and_mul -> W2, the shape ALGO 5 fuses.
+    std::vector<const void *> pk2_const(pk2.begin(), pk2.end());
+    auto fused = mt::make_fused_moe_op2(E, K, pk2_const, no_bias);
+    fused.dst_down = dsts2;
+    fused.ldc_down = std::vector<int>(E, K);
+    for (int e = 0; e < E; ++e) {
+        fused.ldb_down[e] = K;
+    }
+    grp_matmul_gated_act_params act {};
+    act.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    const status_t st = group_matmul_direct(layouts, transAs, transBs, Ms, Ns,
+            Ks, alphas, srcs, ldas, weis, ldbs, no_bias, betas, dsts, ldcs,
+            is_wc, params, /*moe_postop=*/nullptr, &act, &fused);
+
+    EXPECT_EQ(st, status_t::failure)
+            << "a caller-prepacked CK VNNI weight pinned to ALGO 5 must fail "
+               "closed via the CK-only contract (error_prepacked_no_ck); "
+               "returning success means a non-CK kernel consumed the packed "
+               "bytes as raw row-major and the output is silently corrupt";
+
+    for (int e = 0; e < E; ++e) {
+        zendnnl_aligned_free(pk13[e]);
+        zendnnl_aligned_free(pk2[e]);
+    }
+}
+
 } // namespace

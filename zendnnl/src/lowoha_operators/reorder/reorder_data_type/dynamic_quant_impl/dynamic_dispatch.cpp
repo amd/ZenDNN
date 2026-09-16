@@ -24,6 +24,85 @@ namespace zendnnl {
 namespace lowoha {
 namespace reorder {
 
+namespace {
+
+/// Select the per-token kernel for this src/dst dtype pair and run it over `M`
+/// CONTIGUOUS rows.
+///
+/// Exists because the kernels take no leading dimension, so a strided source
+/// cannot be handed to them as one `[M, N]` block — it has to be driven a row
+/// at a time. Both callers below need the same dtype selection, so it lives
+/// here rather than being duplicated or wrapped in a loop in place (the latter
+/// would indent the whole cascade and obscure which part is the strided
+/// logic).
+///
+/// The caller owns scale staging (bf16/f16 narrowing) and all row striding;
+/// this function assumes `src` and `dst` already point at the first row of a
+/// contiguous run.
+///
+/// Returns false, having written nothing, when the dtype pair has no kernel.
+bool dispatch_per_token_contiguous_rows(const void *src, void *dst,
+        float *scale_f32, int32_t *zp_out, const reorder_params_t &params,
+        bool is_symmetric, bool f16_use_fp16fma, int64_t M, int64_t N) {
+    bool dispatched = false;
+    if (is_symmetric) {
+        if (params.src_dtype == data_type_t::bf16
+                && params.dst_dtype == data_type_t::s8) {
+            dynamic_per_token_quant_bf16_s8_native(
+                    static_cast<const uint16_t *>(src),
+                    static_cast<int8_t *>(dst), scale_f32, M, N);
+            dispatched = true;
+        } else if (params.src_dtype == data_type_t::f32
+                && params.dst_dtype == data_type_t::s8) {
+            dynamic_per_token_quant_f32_s8_native(
+                    static_cast<const float *>(src), static_cast<int8_t *>(dst),
+                    scale_f32, M, N);
+            dispatched = true;
+        } else if (params.src_dtype == data_type_t::f16
+                && params.dst_dtype == data_type_t::s8) {
+            if (f16_use_fp16fma) {
+                dynamic_per_token_quant_f16_s8_avx512fp16(
+                        static_cast<const uint16_t *>(src),
+                        static_cast<int8_t *>(dst), scale_f32, M, N);
+            } else {
+                dynamic_per_token_quant_f16_s8_native(
+                        static_cast<const uint16_t *>(src),
+                        static_cast<int8_t *>(dst), scale_f32, M, N);
+            }
+            dispatched = true;
+        }
+    } else {
+        if (params.src_dtype == data_type_t::bf16
+                && params.dst_dtype == data_type_t::u8) {
+            dynamic_per_token_quant_bf16_u8_native(
+                    static_cast<const uint16_t *>(src),
+                    static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+            dispatched = true;
+        } else if (params.src_dtype == data_type_t::f32
+                && params.dst_dtype == data_type_t::u8) {
+            dynamic_per_token_quant_f32_u8_native(
+                    static_cast<const float *>(src),
+                    static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+            dispatched = true;
+        } else if (params.src_dtype == data_type_t::f16
+                && params.dst_dtype == data_type_t::u8) {
+            if (f16_use_fp16fma) {
+                dynamic_per_token_quant_f16_u8_avx512fp16(
+                        static_cast<const uint16_t *>(src),
+                        static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+            } else {
+                dynamic_per_token_quant_f16_u8_native(
+                        static_cast<const uint16_t *>(src),
+                        static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+            }
+            dispatched = true;
+        }
+    }
+    return dispatched;
+}
+
+} // namespace
+
 /**
  * @brief Dispatch fused per-token dynamic quantization (native AVX-512 path)
  *
@@ -42,6 +121,11 @@ namespace reorder {
  * can_use_f16_fma_kernel() (defaults to FP16-FMA when the
  * AVX512-FP16 ISA is available and the library was not built with
  * -DZENDNNL_NATIVE_F32_ACCUM=ON).
+ *
+ * A strided source is driven one row at a time (see `dispatch_per_token_contiguous_rows`).
+ * Per-token scale is row-local, so slicing by row is numerically identical to
+ * the whole-block call; without it a strided caller fell back to the scalar
+ * reference path.
  *
  * @return true if a matching kernel was dispatched, false otherwise
  */
@@ -76,59 +160,48 @@ bool dispatch_fused_per_token(const void *src, void *dst,
             ? can_use_f16_fma_kernel()
             : false;
 
-    if (is_symmetric) {
-        if (params.src_dtype == data_type_t::bf16
-                && params.dst_dtype == data_type_t::s8) {
-            dynamic_per_token_quant_bf16_s8_native(
-                    static_cast<const uint16_t *>(src),
-                    static_cast<int8_t *>(dst), scale_f32, M, N);
-            dispatched = true;
-        } else if (params.src_dtype == data_type_t::f32
-                && params.dst_dtype == data_type_t::s8) {
-            dynamic_per_token_quant_f32_s8_native(
-                    static_cast<const float *>(src), static_cast<int8_t *>(dst),
-                    scale_f32, M, N);
-            dispatched = true;
-        } else if (params.src_dtype == data_type_t::f16
-                && params.dst_dtype == data_type_t::s8) {
-            if (f16_use_fp16fma) {
-                dynamic_per_token_quant_f16_s8_avx512fp16(
-                        static_cast<const uint16_t *>(src),
-                        static_cast<int8_t *>(dst), scale_f32, M, N);
-            } else {
-                dynamic_per_token_quant_f16_s8_native(
-                        static_cast<const uint16_t *>(src),
-                        static_cast<int8_t *>(dst), scale_f32, M, N);
-            }
-            dispatched = true;
-        }
+    int32_t *const zp_out
+            = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+
+    // A strided source cannot be passed whole to these no-leading-dimension
+    // kernels, but one row is contiguous whatever the pitch, so drive them a
+    // row at a time.
+    const bool src_strided
+            = params.has_src_strides() && !params.is_src_contiguous();
+    if (!src_strided) {
+        dispatched = dispatch_per_token_contiguous_rows(src, dst, scale_f32,
+                zp_out, params, is_symmetric, f16_use_fp16fma, M, N);
     } else {
-        int32_t *zp_out
-                = static_cast<int32_t *>(params.quant_params.zero_point.buff);
-        if (params.src_dtype == data_type_t::bf16
-                && params.dst_dtype == data_type_t::u8) {
-            dynamic_per_token_quant_bf16_u8_native(
-                    static_cast<const uint16_t *>(src),
-                    static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
-            dispatched = true;
-        } else if (params.src_dtype == data_type_t::f32
-                && params.dst_dtype == data_type_t::u8) {
-            dynamic_per_token_quant_f32_u8_native(
-                    static_cast<const float *>(src),
-                    static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
-            dispatched = true;
-        } else if (params.src_dtype == data_type_t::f16
-                && params.dst_dtype == data_type_t::u8) {
-            if (f16_use_fp16fma) {
-                dynamic_per_token_quant_f16_u8_avx512fp16(
-                        static_cast<const uint16_t *>(src),
-                        static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
-            } else {
-                dynamic_per_token_quant_f16_u8_native(
-                        static_cast<const uint16_t *>(src),
-                        static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
-            }
-            dispatched = true;
+        // Rows advance by exactly N on the destination, so a strided dst is
+        // not modelled. `dst_strides` is reserved and unpopulated today;
+        // declining on its presence fails safe if that changes.
+        //
+        // A non-unit INNERMOST stride must also decline.  Driving the kernels
+        // a row at a time only works because a row is contiguous, which holds
+        // for `{row, 1}` but not for `{row, s}` with `s != 1` — there the row
+        // itself is gathered, and passing its base pointer would silently
+        // quantize the wrong elements.  The generic path below handles that
+        // layout element-by-element, so declining here preserves it.
+        if (params.src_strides.size() < 2 || params.has_dst_strides()
+                || params.src_strides.back() != 1) {
+            return false;
+        }
+        // `{row, 1}` or `{batch, row, 1}`: the row stride is the
+        // second-from-last entry.
+        const int64_t src_row_elems
+                = params.src_strides[params.src_strides.size() - 2];
+        const int64_t src_elem_bytes
+                = (params.src_dtype == data_type_t::f32) ? 4 : 2;
+        for (int64_t m = 0; m < M; ++m) {
+            dispatched = dispatch_per_token_contiguous_rows(
+                    static_cast<const uint8_t *>(src)
+                            + m * src_row_elems * src_elem_bytes,
+                    static_cast<uint8_t *>(dst) + m * N, scale_f32 + m,
+                    is_symmetric ? nullptr : zp_out + m, params, is_symmetric,
+                    f16_use_fp16fma, /*M=*/1, N);
+            // The dtype pair cannot change between rows, so one failure is
+            // final.
+            if (!dispatched) { return false; }
         }
     }
 

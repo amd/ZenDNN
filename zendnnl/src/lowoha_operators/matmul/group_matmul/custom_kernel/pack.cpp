@@ -720,7 +720,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     // hands the caller's own `weight` buffer to the kernel as the packed
     // stream, and that buffer is not guaranteed 64-byte aligned — so the
     // bf16 microkernel reads the B-stream with the UNALIGNED
-    // `_mm512_loadu_si512` (vmovdqu64).  On Zen 4 / Zen 5 that load is as
+    // `_mm512_loadu_si512` (vmovdqu64).  On AVX-512 CPUs that load is as
     // fast as the aligned form when the address happens to be aligned
     // (out-of-place packs, which still come from zendnnl_aligned_alloc(64));
     // a non-64-aligned in-place base only pays a cache-line split-load

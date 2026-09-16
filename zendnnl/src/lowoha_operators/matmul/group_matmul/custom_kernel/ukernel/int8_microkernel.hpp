@@ -74,7 +74,7 @@
 ///     ordering holds — the compensation row is precomputed at pack
 ///     time to undo the resulting `+128 × sum_wei` bias.
 ///
-/// Register-pressure budget (Zen4/5: 32 zmm).  The K-loop footprint is
+/// Register-pressure budget (32 zmm available on AVX-512-VNNI CPUs).  The K-loop footprint is
 ///
 ///   kBuffers*MR*NV + (kPipelineB ? 2*NV : 0) + MR + 1
 ///
@@ -85,7 +85,7 @@
 /// this note omitted them, and so declared NV=4 safe up to MR=6 when
 /// the real footprint spills from MR=3 up.
 ///
-/// VPDPBUSD has 5-cycle latency on Zen4 / 4-cycle on Zen5 at 2/cycle
+/// VPDPBUSD has 4-5 cycle latency at 2/cycle
 /// throughput, so a specialisation needs 8 independent accumulator
 /// chains to be issue- rather than latency-bound.  `kBuffers` supplies
 /// them by splitting the s32 accumulators into sets fed from

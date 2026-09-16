@@ -818,9 +818,9 @@ status_t group_matmul_moe_act_execute(
     if (total_rows == 0) return status_t::success;
 
     // Single runtime dispatch into target-attributed execute function.
-    // ZenDNN targets AMD Zen4+ where AVX-512F implies BW/VL/FMA (all are
-    // part of the base AVX-512 package on Zen4/5).  Xeon Phi (KNL/KNM)
-    // has F without BW/VL but is not a supported platform.  This matches
+    // The supported AVX-512 platforms all include BW/VL/FMA as part of
+    // the base AVX-512 package.  Xeon Phi (KNL/KNM) has F without
+    // BW/VL but is not a supported platform.  This matches
     // the dispatch pattern in group_matmul_moe_postop.cpp.
     if (avx512f_available())
         execute_act_rows_avx512(act, dst_dtype, dst, row_offsets, N, ldc,

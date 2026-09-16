@@ -161,6 +161,94 @@ TEST_P(TestReorder, BF16_DYN_QUANT) {
 
 /** @fn TEST_P
  *  @param TestReorder parameterized test class to initialize parameters
+ *  @param BF16_DYN_QUANT_STRIDED user-defined name of test
+ *  @brief Round-trip test: dynamic quantization from a STRIDED (row-padded)
+ *         source.
+ *
+ *  This combination had no coverage: every `use_strided_src = true` case lived
+ *  in `test_strided_cases.cpp`, which never sets `dynamic_quant`, and every
+ *  case here set `use_strided_src = false`.  It is not an exotic pairing —
+ *  `reorder_quantization_wrapper` produces exactly it whenever a matmul source
+ *  has `lda != K`, which is the ordinary MoE token-gather shape, so it is on
+ *  the default path.
+ *
+ *  It is also the path `dispatch_fused_per_token` serves by driving the
+ *  per-token kernels one row at a time, and that row walk is only valid
+ *  because the INNERMOST stride is 1.  The round trip below is what pins that:
+ *  a wrong row advance shows up as a dequantized value that does not match its
+ *  source element.
+ */
+TEST_P(TestReorder, BF16_DYN_QUANT_STRIDED) {
+    if (!use_LOWOHA) { GTEST_SKIP(); }
+    // 1D is out of scope, not merely awkward: `reorder_direct`'s per-token
+    // branch requires `is_2d()`, so a 1D source can never reach the row walk
+    // this test exists to pin, and the harness's 1D "strided" layout is
+    // trailing slack after a single row rather than a row pitch.
+    if (lowoha_params.batch == 0) { GTEST_SKIP(); }
+    bool is_symmetric = lowoha_params.is_symmetric;
+    data_type_t src_dtype = data_type_t::bf16;
+    data_type_t compute_dtype
+            = is_symmetric ? data_type_t::s8 : data_type_t::u8;
+    log_lowoha_test_info(lowoha_params, src_dtype, compute_dtype, true, true);
+    log_info("Dynamic Quantization (strided source): ",
+            is_symmetric ? "Symmetric (S8)" : "Asymmetric (U8)");
+
+    std::vector<size_t> shape = get_lowoha_shape(lowoha_params);
+    std::vector<size_t> strided_shape = get_lowoha_strided_shape(lowoha_params);
+    std::vector<size_t> quant_shape = get_lowoha_quant_shape(lowoha_params);
+
+    auto src_tensor = tensor_factory.uniform_dist_strided_tensor(
+            shape, strided_shape, src_dtype, 2.0f);
+    auto quant_tensor = tensor_factory.zero_tensor(shape, compute_dtype);
+
+    auto scale_tensor
+            = tensor_factory.zero_tensor(quant_shape, data_type_t::f32);
+    tensor_t zp_tensor;
+    if (!is_symmetric) {
+        zp_tensor = tensor_factory.zero_tensor(quant_shape, data_type_t::s32);
+    }
+
+    // ---- Step 1: Dynamic Quantization (BF16 -> S8/U8), strided source ----
+    lowoha_params.src_dtype = src_dtype;
+    lowoha_params.dst_dtype = compute_dtype;
+    lowoha_params.use_strided_src = true;
+    lowoha_params.lowoha_algo = reorder_algo_t::native;
+
+    status_t quant_status = lowoha_reorder_kernel_test(src_tensor, quant_tensor,
+            scale_tensor, zp_tensor, lowoha_params, /*dynamic_quant=*/true);
+    if (quant_status != status_t::success) {
+        log_error("Dynamic quantization (strided BF16 -> ",
+                is_symmetric ? "S8" : "U8", ") failed");
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    // ---- Step 2: Dequantization (S8/U8 -> BF16), contiguous ----
+    auto dequant_tensor = tensor_factory.zero_tensor(shape, src_dtype);
+
+    ReorderType dequant_params = lowoha_params;
+    dequant_params.src_dtype = compute_dtype;
+    dequant_params.dst_dtype = src_dtype;
+    dequant_params.use_strided_src = false;
+    dequant_params.lowoha_algo = reorder_algo_t::native;
+
+    status_t dequant_status = lowoha_reorder_kernel_test(quant_tensor,
+            dequant_tensor, scale_tensor, zp_tensor, dequant_params);
+    if (dequant_status != status_t::success) {
+        log_error("Dequantization (", is_symmetric ? "S8" : "U8",
+                " -> BF16) failed");
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    bool is_test_successful = true;
+    compare_lowoha_quant_output(src_tensor, dequant_tensor, scale_tensor,
+            lowoha_params, is_test_successful);
+    EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestReorder parameterized test class to initialize parameters
  *  @param F16_DYN_QUANT user-defined name of test
  *  @brief Round-trip test: F16 dynamic quantization (S8/U8) and dequantization
  *

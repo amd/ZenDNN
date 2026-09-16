@@ -55,7 +55,24 @@ status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
     // Dynamic Quantization Mode
     //============================================================================
     if (params.dynamic_quant) {
-        // Validate dynamic quantization parameters and shape
+        // The stride check is a PRECONDITION, not a diagnostic, so it runs
+        // outside `op_instrumentation::validate`: that wrapper skips its body
+        // entirely under `ZENDNNL_DIAGNOSTICS_ENABLE=0`, which is a supported
+        // production mode.  The per-token branch below walks a strided source
+        // by forming row pointers from `src_strides`, so a non-positive or
+        // wrong-rank stride vector is an out-of-bounds access rather than a
+        // wrong answer, and it has to fail cleanly even with diagnostics off.
+        //
+        // Cheap enough to be unconditional: it returns immediately when the
+        // caller passed no strides, and otherwise walks a 2-3 element vector.
+        // Order-independent too — it only reads `N()` after confirming the
+        // stride rank matches the shape rank, so it does not depend on the
+        // shape validation below having run first.
+        if (validate_reorder_strides(params) != status_t::success) {
+            return status_t::failure;
+        }
+
+        // Validate dynamic quantization parameters and shape.
         status_t dq_status = op_instrumentation::validate([&]() {
             if (validate_dynamic_quant_params(src, params)
                     != status_t::success) {
@@ -117,8 +134,12 @@ status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
         static const int32_t dq_algo_override
                 = get_dynamic_quant_algo_override();
 
+        // No contiguity requirement on the PER-TOKEN branch: a per-token scale
+        // is row-local, and `dispatch_fused_per_token` serves a strided source
+        // by driving the same kernels one row at a time.  Only the two
+        // whole-tile entries below still need contiguity, so they keep the
+        // check on their own calls.
         if (dst != nullptr && params.is_2d()
-                && (!params.has_src_strides() || params.is_src_contiguous())
                 && is_per_channel_row_dims(scale_dims_dq, params.src_shape)) {
 
             if (((dq_algo_override == 0 && algo_dq == reorder_algo_t::native)
@@ -136,6 +157,7 @@ status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
                 }
                 return status_t::success;
             } else if (dq_algo_override == 2
+                    && (!params.has_src_strides() || params.is_src_contiguous())
                     && dispatch_unfused_per_token(
                             src, dst, params, params.M(), params.N())) {
                 if (is_profile) {
@@ -149,6 +171,7 @@ status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
                 }
                 return status_t::success;
             } else if (dq_algo_override == 3
+                    && (!params.has_src_strides() || params.is_src_contiguous())
                     && dispatch_fused_per_token_ref(
                             src, dst, params, params.M(), params.N())) {
                 if (is_profile) {

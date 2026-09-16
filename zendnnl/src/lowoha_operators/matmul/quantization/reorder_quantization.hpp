@@ -27,12 +27,92 @@ namespace matmul {
 
 /**
  * @brief RAII holder for buffers allocated during reorder quantization.
- *        Automatically frees on scope exit; non-copyable, move-only.
+ *        Non-copyable, move-only; frees on destruction.
+ *
+ *        May be a POOLED per-thread instance (see
+ *        `get_thread_local_quant_buffers()`), in which case destruction is at
+ *        thread exit, not end of call: pointers the wrapper rebinds into it
+ *        (the returned `src`, `src_scale.buff`, `src_zp.buff`) stay valid only
+ *        until the same thread's next quantization.  `release()` frees early.
  */
 struct reorder_quant_buffers_t {
     uint8_t *src_buf = nullptr;
     uint8_t *scale_buf = nullptr;
     uint8_t *zp_buf = nullptr;
+
+    // Bytes currently held by each buffer above, which is what makes a POOLED
+    // instance reusable.  The pool is reached once per expert per call from
+    // inside a parallel region, and the naive `src_buf = malloc(n)` this
+    // replaced overwrote a live pointer every time — leaking one block per
+    // expert per call, unbounded on a long-lived server.  Tracking the
+    // capacity lets `ensure_*` keep the existing block whenever it is already
+    // big enough, so a steady-state call allocates nothing at all and the
+    // buffer settles at the largest expert's size.
+    //
+    // A buffer without a capacity would silently reintroduce that leak, so all
+    // three carry one.
+    size_t src_cap = 0;
+    size_t scale_cap = 0;
+    size_t zp_cap = 0;
+
+    /// Largest block a pooled buffer keeps once the caller stops needing it,
+    /// and the ratio that decides "stops needing".  Retention has to be
+    /// BOUNDED, not merely leak-free: a prompt call sizes `src_buf` at
+    /// `max_expert_M * K`, and with one pool per worker thread an unbounded
+    /// grow-only policy would hold that peak — hundreds of MB across a wide
+    /// team — through every later decode token, for the life of the process.
+    ///
+    /// Shrinking below a generous hysteresis costs at most the malloc/free
+    /// pair this pool exists to avoid, and only on a phase change rather than
+    /// per call, so the worst case degrades to the pre-pool behaviour while
+    /// capping resident memory.
+    static constexpr size_t kPoolRetainFloorBytes = 1u << 20; // 1 MiB
+    static constexpr size_t kPoolShrinkRatio = 8;
+
+    /// Size `buf` to hold `bytes`, reusing the existing block when it already
+    /// fits and is not disproportionately large.
+    ///
+    /// Allocates BEFORE freeing, so an OOM returns false with the previous
+    /// buffer and capacity still valid and the caller can bail safely.
+    static bool ensure_buf(uint8_t *&buf, size_t &cap, size_t bytes) {
+        const bool fits = (bytes <= cap) && (buf != nullptr);
+        const bool oversized = fits && cap > kPoolRetainFloorBytes
+                && bytes < cap / kPoolShrinkRatio;
+        if (fits && !oversized) { return true; }
+        uint8_t *grown = static_cast<uint8_t *>(malloc(bytes));
+        if (grown == nullptr) {
+            // Keep the oversized block rather than failing the call: it still
+            // satisfies `bytes`, and reclaiming memory is not worth an error.
+            return fits;
+        }
+        free(buf);
+        buf = grown;
+        cap = bytes;
+        return true;
+    }
+    bool ensure_src(size_t bytes) {
+        return ensure_buf(src_buf, src_cap, bytes);
+    }
+    bool ensure_scale(size_t bytes) {
+        return ensure_buf(scale_buf, scale_cap, bytes);
+    }
+    bool ensure_zp(size_t bytes) { return ensure_buf(zp_buf, zp_cap, bytes); }
+
+    /// Free all three buffers and drop the capacities.  For pooled instances,
+    /// which otherwise hold their largest-ever request until thread exit — on
+    /// a server, a prompt-sized block held through every later decode.
+    /// `ensure_*` re-grows afterwards, so this only costs one reallocation.
+    void release() {
+        free(src_buf);
+        free(scale_buf);
+        free(zp_buf);
+        src_buf = nullptr;
+        scale_buf = nullptr;
+        zp_buf = nullptr;
+        src_cap = 0;
+        scale_cap = 0;
+        zp_cap = 0;
+    }
 
     reorder_quant_buffers_t() = default;
     ~reorder_quant_buffers_t() {
@@ -44,9 +124,17 @@ struct reorder_quant_buffers_t {
     reorder_quant_buffers_t(const reorder_quant_buffers_t &) = delete;
     reorder_quant_buffers_t &operator=(const reorder_quant_buffers_t &)
             = delete;
+    // Capacities move with their buffers: a moved-from object must not claim
+    // capacity it no longer owns, or its next `ensure_*` returns freed memory.
     reorder_quant_buffers_t(reorder_quant_buffers_t &&o) noexcept
-        : src_buf(o.src_buf), scale_buf(o.scale_buf), zp_buf(o.zp_buf) {
+        : src_buf(o.src_buf)
+        , scale_buf(o.scale_buf)
+        , zp_buf(o.zp_buf)
+        , src_cap(o.src_cap)
+        , scale_cap(o.scale_cap)
+        , zp_cap(o.zp_cap) {
         o.src_buf = o.scale_buf = o.zp_buf = nullptr;
+        o.src_cap = o.scale_cap = o.zp_cap = 0;
     }
     reorder_quant_buffers_t &operator=(reorder_quant_buffers_t &&o) noexcept {
         if (this != &o) {
@@ -56,7 +144,11 @@ struct reorder_quant_buffers_t {
             src_buf = o.src_buf;
             scale_buf = o.scale_buf;
             zp_buf = o.zp_buf;
+            src_cap = o.src_cap;
+            scale_cap = o.scale_cap;
+            zp_cap = o.zp_cap;
             o.src_buf = o.scale_buf = o.zp_buf = nullptr;
+            o.src_cap = o.scale_cap = o.zp_cap = 0;
         }
         return *this;
     }
@@ -118,7 +210,10 @@ struct group_reorder_quant_buffers_t {
  * @param[in]     M                Number of rows
  * @param[in]     K                Shared (inner) dimension
  * @param[in]     num_threads      Thread count for the reorder operation
- * @param[out]    buffers          RAII holder; freed automatically on scope exit
+ * @param[out]    buffers          RAII holder, grown in place; may be a
+ *                                 per-thread pooled instance, in which case
+ *                                 the rebound pointers stay valid only until
+ *                                 this thread's next call.
  *
  * @return status_t::success  Quantization performed, skipped (not eligible),
  *                            or reorder failed gracefully

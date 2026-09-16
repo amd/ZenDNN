@@ -41,6 +41,36 @@ using zendnnl::lowoha::reorder::get_single_granularity;
 using zendnnl::lowoha::reorder::granularity_type_t;
 using zendnnl::lowoha::reorder::reorder_algo_t;
 
+namespace {
+
+/// Byte size of a `dims` product, computed with checked arithmetic.
+///
+/// The naive `int64_t n = 1; for (d : dims) n *= d;` is undefined behaviour on
+/// overflow (signed), and a wrapped value reaching an allocator becomes either
+/// an undersized buffer that later slices overrun or a near-`SIZE_MAX` request.
+/// `{INT64_MAX, 2}` is enough to trigger it.  Accumulate in `size_t` so the
+/// `zendnnl_mul_overflow` MSVC fallback gets the unsigned operands it assumes.
+///
+/// A non-positive extent is rejected rather than clamped: a 0 or negative dim
+/// is malformed metadata here, and silently treating it as an empty allocation
+/// would hand the caller a buffer its own row math then indexes past.
+///
+/// Mirrors the checked sizing already used by the grouped arena path below.
+bool checked_dims_bytes(
+        const std::vector<int64_t> &dims, size_t elem_size, size_t *out_bytes) {
+    if (dims.empty() || elem_size == 0) { return false; }
+    size_t n = 1;
+    for (const int64_t d : dims) {
+        if (d <= 0) { return false; }
+        if (zendnnl_mul_overflow(n, static_cast<size_t>(d), &n)) {
+            return false;
+        }
+    }
+    return !zendnnl_mul_overflow(n, elem_size, out_bytes);
+}
+
+} // namespace
+
 status_t reorder_quantization_wrapper(const void *&src, const int lda,
         int &reordered_lda, size_t &src_type_size, matmul_params &params,
         matmul_batch_params_t &batch_params, const bool transA, const int M,
@@ -108,13 +138,17 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
 
     void *scale_buff = const_cast<void *>(params.quant_params.src_scale.buff);
     if (!scale_buff) {
-        int64_t n = 1;
-        for (auto d : params.quant_params.src_scale.dims) {
-            n *= d;
+        size_t scale_bytes = 0;
+        if (!checked_dims_bytes(params.quant_params.src_scale.dims,
+                    size_of(params.quant_params.src_scale.dt), &scale_bytes)) {
+            log_error(
+                    "Reorder quantization: invalid or overflowing scale "
+                    "dims");
+            return status_t::failure;
         }
-        buffers.scale_buf = static_cast<uint8_t *>(malloc(static_cast<size_t>(n)
-                * size_of(params.quant_params.src_scale.dt)));
-        if (!buffers.scale_buf) {
+        // Grow-only for the same reason as `src_buf`: `buffers` may be a
+        // pooled thread_local instance.
+        if (!buffers.ensure_scale(scale_bytes)) {
             log_error("Reorder quantization: failed to allocate scale buffer");
             return status_t::failure;
         }
@@ -218,14 +252,17 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
     if (needs_zp) {
         zp_buff = const_cast<void *>(params.quant_params.src_zp.buff);
         if (!zp_buff) {
-            int64_t n = 1;
-            for (auto d : params.quant_params.src_zp.dims) {
-                n *= d;
+            size_t zp_bytes = 0;
+            if (!checked_dims_bytes(params.quant_params.src_zp.dims,
+                        size_of(params.quant_params.src_zp.dt), &zp_bytes)) {
+                log_error(
+                        "Reorder quantization: invalid or overflowing "
+                        "zero-point dims");
+                return status_t::failure;
             }
-            buffers.zp_buf
-                    = static_cast<uint8_t *>(malloc(static_cast<size_t>(n)
-                            * size_of(params.quant_params.src_zp.dt)));
-            if (!buffers.zp_buf) {
+            // Grow-only for the same reason as `src_buf` / `scale_buf`:
+            // `buffers` may be a pooled thread_local instance.
+            if (!buffers.ensure_zp(zp_bytes)) {
                 log_error(
                         "Reorder quantization: failed to allocate zero-point "
                         "buffer");
@@ -241,9 +278,21 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
         rp.quant_params.zero_point.dims = params.quant_params.src_zp.dims;
     }
 
-    buffers.src_buf = static_cast<uint8_t *>(
-            malloc(static_cast<size_t>(batch_A * phys_rows * phys_cols)));
-    if (!buffers.src_buf) {
+    // Checked for the same reason as the scale/zp sizes above: this product is
+    // three caller-influenced extents wide, and the s8 destination is
+    // 1 byte/element, so a wrapped count becomes an undersized buffer that
+    // `reorder_direct` then writes batch_A * phys_rows * phys_cols bytes into.
+    size_t src_elems = 0;
+    if (!checked_dims_bytes(
+                {batch_A, phys_rows, phys_cols}, /*elem_size=*/1, &src_elems)) {
+        log_error(
+                "Reorder quantization: invalid or overflowing source extents");
+        return status_t::failure;
+    }
+    // Grow-only: `buffers` may be a pooled thread_local instance reused
+    // across experts and calls, so a blind malloc over the live pointer
+    // would leak one buffer per expert per call.
+    if (!buffers.ensure_src(src_elems)) {
         log_error(
                 "Reorder quantization: failed to allocate quantized source "
                 "buffer");
@@ -293,17 +342,25 @@ status_t reorder_quantization_wrapper(const void *&src, const int lda,
         if (needs_zp) { params.quant_params.src_zp.buff = zp_buff; }
 
         if (apilog_info_enabled()) {
-            int64_t ns = 1;
-            for (auto d : params.quant_params.src_scale.dims) {
-                ns *= d;
-            }
-            int64_t nz = 0;
-            if (needs_zp) {
-                nz = 1;
-                for (auto d : params.quant_params.src_zp.dims) {
-                    nz *= d;
+            // Checked like the sizing above, even though these only feed a log
+            // line: signed overflow is UB regardless of what the value is used
+            // for, and a caller-supplied scale buffer reaches here without
+            // having gone through `checked_dims_bytes`.  Reports 0 on
+            // malformed dims rather than a wrapped count.
+            const auto elems = [](const std::vector<int64_t> &dims) -> size_t {
+                size_t n = 1;
+                for (const int64_t d : dims) {
+                    if (d <= 0
+                            || zendnnl_mul_overflow(
+                                    n, static_cast<size_t>(d), &n)) {
+                        return 0;
+                    }
                 }
-            }
+                return dims.empty() ? 0 : n;
+            };
+            const size_t ns = elems(params.quant_params.src_scale.dims);
+            const size_t nz
+                    = needs_zp ? elems(params.quant_params.src_zp.dims) : 0;
             apilog_info(is_dynamic ? "Dynamic" : "Static",
                     needs_zp ? " asymmetric" : " symmetric",
                     " quantization: source converted from ",

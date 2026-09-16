@@ -49,9 +49,13 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/ntile_flat_parallel_microkernel.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -92,6 +96,278 @@ enum class weight_role_t : uint32_t { gate_up = 0, down = 1 };
 // Row-tile quantum handed to one row-dispatch call. The microkernel itself is
 // instantiated for 1..4 rows and iterates within each tile.
 constexpr int64_t block_m = 32;
+
+// ---------------------------------------------------------------------------
+// Optional pass profiling.
+//
+// Every eligibility failure here returns `unimplemented` and the caller falls
+// through to the generic path, so without this a deployment cannot tell
+// whether this file ran at all, let alone which pass its time went to.
+// Enabled by `ZENDNNL_NTILE_FLAT_PARALLEL_PROFILE=1`; the counters are
+// untouched and the timers compile to nothing observable otherwise.
+// ---------------------------------------------------------------------------
+bool profile_enabled() {
+    static const bool v = []() {
+        const char *e = std::getenv("ZENDNNL_NTILE_FLAT_PARALLEL_PROFILE");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return v;
+}
+
+uint64_t now_ns() {
+    return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+}
+
+struct profile_acc_t {
+    enum { p_quant_src = 0, p_gate_up, p_quant_mid, p_down, p_postop, p_count };
+    enum { g_gate_up = 0, g_down, g_count };
+
+    std::atomic<uint64_t> pass_ns[p_count] {};
+    // Summed over calls: the slowest thread, and the per-thread mean. Their
+    // ratio is the imbalance the partition controls.
+    std::atomic<uint64_t> gemm_crit_ns[g_count] {};
+    std::atomic<uint64_t> gemm_mean_ns[g_count] {};
+    std::atomic<uint64_t> engaged {0};
+    std::atomic<uint64_t> declined {0};
+
+    ~profile_acc_t() {
+        const auto load = [](const std::atomic<uint64_t> &a) {
+            return a.load(std::memory_order_relaxed);
+        };
+        const uint64_t ok = load(engaged);
+        const uint64_t no = load(declined);
+        if (ok == 0 && no == 0) { return; }
+
+        static const char *const names[p_count] = {"quantize src",
+                "gate_up gemm", "quantize mid", "down gemm", "postop reduce"};
+        uint64_t total = 0;
+        for (int i = 0; i < p_count; ++i) {
+            total += load(pass_ns[i]);
+        }
+        std::fprintf(stderr,
+                "\n[zendnnl ntile_flat_parallel] engaged=%llu declined=%llu  "
+                "pipeline=%.1f ms\n",
+                static_cast<unsigned long long>(ok),
+                static_cast<unsigned long long>(no),
+                static_cast<double>(total) / 1e6);
+        for (int i = 0; i < p_count; ++i) {
+            const uint64_t ns = load(pass_ns[i]);
+            std::fprintf(stderr, "  %-14s %9.2f ms  %5.1f%%", names[i],
+                    static_cast<double>(ns) / 1e6,
+                    total ? 100.0 * static_cast<double>(ns)
+                                    / static_cast<double>(total)
+                          : 0.0);
+            const int g = (i == p_gate_up) ? g_gate_up
+                                           : (i == p_down ? g_down : -1);
+            if (g >= 0) {
+                const double crit = static_cast<double>(load(gemm_crit_ns[g]));
+                const double mean = static_cast<double>(load(gemm_mean_ns[g]));
+                std::fprintf(stderr, "   thread imbalance %.2fx",
+                        mean > 0.0 ? crit / mean : 0.0);
+            }
+            std::fprintf(stderr, "\n");
+        }
+        std::fflush(stderr);
+    }
+};
+
+profile_acc_t &profile_acc() {
+    static profile_acc_t a;
+    return a;
+}
+
+/// Scope timer for one pass. Cheap enough to leave in the hot path: when
+/// profiling is off it holds a null slot and never reads the clock.
+struct pass_timer_t {
+    std::atomic<uint64_t> *slot = nullptr;
+    uint64_t t0 = 0;
+    explicit pass_timer_t(int idx) {
+        if (profile_enabled()) {
+            slot = &profile_acc().pass_ns[idx];
+            t0 = now_ns();
+        }
+    }
+    pass_timer_t(const pass_timer_t &) = delete;
+    pass_timer_t &operator=(const pass_timer_t &) = delete;
+    ~pass_timer_t() {
+        if (slot != nullptr) {
+            slot->fetch_add(now_ns() - t0, std::memory_order_relaxed);
+        }
+    }
+};
+
+/// Records one GEMM pass's per-thread busy times as a (slowest, mean) pair.
+void record_gemm_threads(int gemm, const uint64_t *thread_ns, int nth) {
+    if (nth <= 0) { return; }
+    uint64_t crit = 0;
+    uint64_t sum = 0;
+    for (int t = 0; t < nth; ++t) {
+        crit = std::max(crit, thread_ns[t]);
+        sum += thread_ns[t];
+    }
+    auto &a = profile_acc();
+    a.gemm_crit_ns[gemm].fetch_add(crit, std::memory_order_relaxed);
+    a.gemm_mean_ns[gemm].fetch_add(
+            sum / static_cast<uint64_t>(nth), std::memory_order_relaxed);
+}
+
+/// Counts one entry into `try_execute` as engaged or declined. Default is
+/// declined, so any early return out of the eligibility gates is recorded
+/// without having to touch each one.
+struct outcome_tracker_t {
+    bool ok = false;
+    ~outcome_tracker_t() {
+        if (!profile_enabled()) { return; }
+        auto &a = profile_acc();
+        (ok ? a.engaged : a.declined).fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Cost-weighted contiguous partition of the flattened (row tile, N block) space.
+//
+// `schedule(static)` gives every thread the same NUMBER of (tile, nb) pairs,
+// but a pair costs one 32-column weight-block load plus arithmetic
+// proportional to that tile's row count, and routed decode batches are
+// heavily skewed -- Qwen3.6 at batch 32 runs 32:29:21:...:1:1:1 over 46
+// experts. Equal counts therefore hand one thread the widest expert and
+// another nothing but single-row experts, and the widest thread sets the
+// critical path for the whole pass.
+//
+// Two cheaper-looking fixes are worse. A finer row tile balances the
+// arithmetic but fragments the weight stream. `schedule(dynamic)` balances
+// well and gives up the sequential walk entirely. Partitioning the same
+// flattened space into contiguous runs of equal COST keeps both properties:
+// `nb` stays innermost so a thread still walks consecutive output-channel
+// blocks of one expert, and only the chunk boundaries move.
+//
+// `bias` is the row count at which a tile's arithmetic matches one
+// weight-block load. The modelled critical path is within a few percent for
+// anything in 8..64, so it does not need per-shape tuning.
+// ---------------------------------------------------------------------------
+constexpr int64_t kRowCostBias = 24;
+
+/// `ZENDNNL_NTILE_FLAT_PARALLEL_COST_PARTITION=0` reproduces the equal-count
+/// split `schedule(static)` used to perform, so one build can measure both.
+bool cost_partition_enabled() {
+    static const bool v = []() {
+        const char *e
+                = std::getenv("ZENDNNL_NTILE_FLAT_PARALLEL_COST_PARTITION");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return v;
+}
+
+int64_t row_cost_bias() {
+    static const int64_t v = []() -> int64_t {
+        const char *e
+                = std::getenv("ZENDNNL_NTILE_FLAT_PARALLEL_ROW_COST_BIAS");
+        if (e == nullptr) { return kRowCostBias; }
+        char *end = nullptr;
+        const long parsed = std::strtol(e, &end, 10);
+        if (end == e || *end != '\0' || parsed <= 0) { return kRowCostBias; }
+        return static_cast<int64_t>(parsed);
+    }();
+    return v;
+}
+
+/// Fills `bounds[0..nth]` with flattened-index boundaries enclosing as close
+/// to equal cost as the tile granularity allows. Cost is constant within a row
+/// tile, so each tile is one uniform run and the whole scan is
+/// O(num_tiles + nth) rather than O(num_tiles * nb_count).
+void partition_by_cost(const int32_t *tile_rows, int64_t num_tiles,
+        int64_t nb_count, int nth, int64_t *bounds) {
+    const int64_t total_iters = num_tiles * nb_count;
+    bounds[0] = 0;
+    for (int t = 1; t <= nth; ++t) {
+        bounds[t] = total_iters;
+    }
+    if (nth <= 1 || total_iters <= 0) { return; }
+
+    if (!cost_partition_enabled()) {
+        // Equal iteration counts, largest chunks first -- what `collapse(2)`
+        // with `schedule(static)` and no chunk size hands out.
+        const int64_t base = total_iters / nth;
+        const int64_t rem = total_iters % nth;
+        for (int t = 1; t < nth; ++t) {
+            bounds[t] = bounds[t - 1] + base + (t - 1 < rem ? 1 : 0);
+        }
+        return;
+    }
+
+    // Checked arithmetic: bias is caller-configurable (env var) and a
+    // pathological value causes signed int64 overflow (UB) in the product
+    // and the accumulation.  Detect overflow via zendnnl_mul_overflow /
+    // zendnnl_add_overflow; fall back to uniform partitioning on any hit so
+    // the partition is still correct, just not cost-optimal.
+    const int64_t bias = row_cost_bias();
+    int64_t total_cost = 0;
+    bool cost_overflow = false;
+    for (int64_t b = 0; b < num_tiles && !cost_overflow; ++b) {
+        int64_t unit = 0, tile_cost = 0;
+        if (zendnnl_add_overflow(
+                    bias, static_cast<int64_t>(tile_rows[b]), &unit)
+                || zendnnl_mul_overflow(unit, nb_count, &tile_cost)
+                || zendnnl_add_overflow(total_cost, tile_cost, &total_cost)) {
+            cost_overflow = true;
+        }
+    }
+    // Equal-count fallback: safe, always correct, used when cost overflows.
+    if (cost_overflow || total_cost <= 0) { return; }
+
+    int64_t tile = 0; // run straddling the cursor
+    int64_t before = 0; // cumulative cost of tiles [0, tile)
+    for (int t = 1; t < nth; ++t) {
+        int64_t tc_t = 0;
+        // `total_cost * t` can overflow when total_cost is near INT64_MAX/2.
+        // Fall back to uniform on overflow; the per-thread target is then
+        // total_iters * t / nth which thread_range computes independently.
+        if (zendnnl_mul_overflow(total_cost, static_cast<int64_t>(t), &tc_t)) {
+            for (int u = t; u < nth; ++u) {
+                bounds[u] = bounds[u - 1]
+                        + (total_iters - bounds[u - 1]) / (nth - u + 1);
+            }
+            return;
+        }
+        const int64_t target = tc_t / nth;
+        while (tile < num_tiles
+                && before + (bias + tile_rows[tile]) * nb_count <= target) {
+            before += (bias + tile_rows[tile]) * nb_count;
+            ++tile;
+        }
+        int64_t idx = total_iters;
+        if (tile < num_tiles) {
+            const int64_t unit = bias + tile_rows[tile];
+            int64_t within = unit > 0 ? (target - before) / unit : 0;
+            within = std::min(std::max<int64_t>(within, 0), nb_count);
+            idx = tile * nb_count + within;
+        }
+        // Rounding must never walk the cursor backwards: a thread with a
+        // reversed range would silently skip its tiles' output columns.
+        bounds[t] = std::min(std::max(idx, bounds[t - 1]), total_iters);
+    }
+}
+
+/// Resolve one thread's flattened range. `bounds` is sized for `nth`, but
+/// OpenMP is allowed to hand back a smaller team than `num_threads` asked
+/// for; the old `parallel for` absorbed that silently. Fall back to an even
+/// split over whatever team actually arrived so every (tile, nb) pair keeps
+/// exactly one owner.
+void thread_range(const int64_t *bounds, int nth, int64_t total_iters, int tid,
+        int team, int64_t &lo, int64_t &hi) {
+    if (team == nth) {
+        lo = bounds[tid];
+        hi = bounds[tid + 1];
+        return;
+    }
+    const int64_t base = total_iters / team;
+    const int64_t rem = total_iters % team;
+    lo = static_cast<int64_t>(tid) * base + std::min<int64_t>(tid, rem);
+    hi = lo + base + (tid < rem ? 1 : 0);
+}
 
 // ---------------------------------------------------------------------------
 // Packed weight, cached for the weight's life.
@@ -240,6 +516,14 @@ struct scratch_t {
     std::vector<int32_t> tile_slot;
     std::vector<int64_t> tile_row0;
     std::vector<int32_t> tile_rows;
+    // Per-thread [begin, end) over the flattened (row tile, N block) space,
+    // one set per GEMM pass since the two have different N block counts.
+    std::vector<int64_t> bounds_gate_up;
+    std::vector<int64_t> bounds_down;
+    // Two buffers: the gate/up timings are still needed after the down phase
+    // has overwritten its own, since both are reduced once the region closes.
+    std::vector<uint64_t> thread_ns;
+    std::vector<uint64_t> thread_ns_down;
     std::vector<int64_t> row_off;
     std::vector<int64_t> slot_expert_gate_up;
     std::vector<int64_t> slot_expert_down;
@@ -501,6 +785,11 @@ status_t try_execute(const std::vector<char> &layout,
     (void)fused_moe;
     return status_t::unimplemented;
 #else
+    // Declared before the gates so every early return is counted as a
+    // decline; the successful path flips it just before handing off to the
+    // post-op.
+    outcome_tracker_t outcome;
+
     // This path packs both complete expert tensors, so running it without a
     // persistent pack would repack the model on every token. Honour the
     // process-wide cache-disable contract by declining before any output is
@@ -1047,11 +1336,10 @@ status_t try_execute(const std::vector<char> &layout,
         // The pipeline runs as four passes over one global (row tile, N block)
         // space rather than per-expert. Giving a thread a whole expert would
         // remove the barriers between passes and keep the intermediate in that
-        // core's cache, which sounds strictly better and measured 3% slower
-        // end to end (decode step 106.4 ms vs 103.4 ms): at decode an expert
-        // holds one or two rows, so splitting each expert across threads is
-        // what actually balances the layer, and the barriers cost less than
-        // the imbalance they avoid.
+        // core's cache, but at decode an expert holds only one or two rows,
+        // so splitting each expert across threads is what actually balances
+        // the layer — the barriers cost less than the load imbalance they
+        // avoid.
         int64_t num_tiles = 0;
         for (size_t i = 0; i < num_active; ++i) {
             num_tiles += div_up(M[i], block_m);
@@ -1075,80 +1363,166 @@ status_t try_execute(const std::vector<char> &layout,
             }
         }
 
-        // Every pass runs on the same `nth`-wide team on purpose: resizing a
-        // team between passes makes the runtime tear it down and rebuild it
-        // mid-pipeline, which costs far more at decode token counts than the
-        // fork it would save.
-        if (!s8_prequantized) {
-#pragma omp parallel for num_threads(nth) schedule(static)
-            for (int64_t m = 0; m < total_rows; ++m) {
-                quantize_row_u8(Aq_src + m * hidden, As[m], row_src[m], hidden);
-                if (row_scale_bf16[m] != 0) {
-                    const int16_t scale_bf16
-                            = zendnnl::common::bfloat16_t::f32_to_bf16_val(
-                                    As[m]);
-                    As[m] = zendnnl::common::bfloat16_t::bf16_to_f32_val(
-                            scale_bf16);
-                    if (row_scale_dst[m] != nullptr) {
-                        std::memcpy(row_scale_dst[m], &scale_bf16,
-                                sizeof(scale_bf16));
+        // Cost-weighted thread boundaries for the two GEMM passes. Derived
+        // once here because both passes walk the same row tiles and only
+        // differ in how many N blocks each tile carries.
+        const size_t bounds_size = static_cast<size_t>(nth) + 1;
+        int64_t *bounds_gate_up
+                = scratch_t::reserve(sc.bounds_gate_up, bounds_size);
+        int64_t *bounds_down = scratch_t::reserve(sc.bounds_down, bounds_size);
+        partition_by_cost(
+                tile_rows, num_tiles, ctx.nb_gate_up, nth, bounds_gate_up);
+        partition_by_cost(tile_rows, num_tiles, ctx.nb_down, nth, bounds_down);
+        const bool prof = profile_enabled();
+        uint64_t *thread_ns
+                = scratch_t::reserve(sc.thread_ns, static_cast<size_t>(nth));
+        uint64_t *thread_ns_down = scratch_t::reserve(
+                sc.thread_ns_down, static_cast<size_t>(nth));
+
+        // One parallel region for the whole pipeline, with barriers between
+        // phases instead of four separate regions.
+        //
+        // The passes always ran on one `nth`-wide team to avoid resizing it
+        // mid-pipeline, but they still opened and closed a region each. At
+        // decode that dominates: profiling showed the intermediate
+        // requantization costing ~1 ms per call for a few microseconds of
+        // arithmetic, because 256 rows over 32 threads is far too little work
+        // to amortise a fork and a team-wide wake. An `omp for` inside a live
+        // region carries the same implicit barrier without the join, so the
+        // phase boundaries survive and three of the four forks do not.
+        uint64_t phase_ns[profile_acc_t::p_count] = {};
+        // Actual team size: OMP may create fewer workers than `nth` (the
+        // thread_range code handles this).  Only threads [0, actual_team)
+        // write to thread_ns, so record_gemm_threads must iterate only that
+        // range.  Captured from tid==0 inside the region; the implicit
+        // barrier at the region close makes it safe to read after.
+        int actual_team = nth;
+#pragma omp parallel num_threads(nth)
+        {
+            const int tid = omp_get_thread_num();
+            const int team = omp_get_num_threads();
+            if (tid == 0) { actual_team = team; }
+            uint64_t mark = prof ? now_ns() : 0;
+
+            if (!s8_prequantized) {
+#pragma omp for schedule(static)
+                for (int64_t m = 0; m < total_rows; ++m) {
+                    quantize_row_u8(
+                            Aq_src + m * hidden, As[m], row_src[m], hidden);
+                    if (row_scale_bf16[m] != 0) {
+                        const int16_t scale_bf16
+                                = zendnnl::common::bfloat16_t::f32_to_bf16_val(
+                                        As[m]);
+                        As[m] = zendnnl::common::bfloat16_t::bf16_to_f32_val(
+                                scale_bf16);
+                        if (row_scale_dst[m] != nullptr) {
+                            std::memcpy(row_scale_dst[m], &scale_bf16,
+                                    sizeof(scale_bf16));
+                        }
+                    } else if (row_scale_dst[m] != nullptr) {
+                        std::memcpy(row_scale_dst[m], &As[m], sizeof(As[m]));
                     }
-                } else if (row_scale_dst[m] != nullptr) {
-                    std::memcpy(row_scale_dst[m], &As[m], sizeof(As[m]));
+                }
+                if (prof && tid == 0) {
+                    phase_ns[profile_acc_t::p_quant_src] = now_ns() - mark;
+                    mark = now_ns();
                 }
             }
-        }
 
-        // With `nb` innermost a thread's static chunk walks consecutive
-        // output-channel blocks of one expert, so the weight stream stays
-        // sequential.
-        if (!s8_prequantized) {
-#pragma omp parallel for num_threads(nth) schedule(static) collapse(2)
-            for (int64_t b = 0; b < num_tiles; ++b) {
-                for (int64_t nb = 0; nb < ctx.nb_gate_up; ++nb) {
+            // Each thread walks its own contiguous run of the flattened
+            // (row tile, N block) space. With `nb` innermost that run is
+            // still a sequential walk over consecutive output-channel blocks.
+            {
+                const int64_t nbc = ctx.nb_gate_up;
+                int64_t i = 0, end = 0;
+                thread_range(bounds_gate_up, nth, num_tiles * nbc, tid, team, i,
+                        end);
+                const uint64_t t0 = prof ? now_ns() : 0;
+                if (!s8_prequantized) {
+                    for (; i < end; ++i) {
+                        const int64_t b = i / nbc;
+                        const int64_t nb = i - b * nbc;
+                        const int64_t slot = tile_slot[b];
+                        const int64_t r0 = tile_row0[b];
+                        gate_up_block<false>(ctx, slot_e_gate_up[slot], slot,
+                                nb, Aq_src + r0 * hidden, As + r0,
+                                intermediate + r0 * inter, tile_rows[b], inter);
+                    }
+                } else {
+                    for (; i < end; ++i) {
+                        const int64_t b = i / nbc;
+                        const int64_t nb = i - b * nbc;
+                        const int64_t slot = tile_slot[b];
+                        const int64_t r0 = tile_row0[b];
+                        const int64_t local_row = r0 - row_off[slot];
+                        gate_up_block<true>(ctx, slot_e_gate_up[slot], slot, nb,
+                                static_cast<const uint8_t *>(src[slot])
+                                        + local_row * hidden,
+                                As + r0, intermediate + r0 * inter,
+                                tile_rows[b], inter);
+                    }
+                }
+                if (prof) { thread_ns[tid] = now_ns() - t0; }
+            }
+            // The gate/up output is N-split, so each row about to be
+            // requantized was written by several threads. This barrier is the
+            // one that makes that safe; it replaces a region join.
+#pragma omp barrier
+            if (prof && tid == 0) {
+                phase_ns[profile_acc_t::p_gate_up] = now_ns() - mark;
+                mark = now_ns();
+            }
+
+#pragma omp for schedule(static)
+            for (int64_t m = 0; m < total_rows; ++m) {
+                quantize_row_u8(Aq_mid + m * inter, As[m],
+                        intermediate + m * inter, inter);
+            }
+            if (prof && tid == 0) {
+                phase_ns[profile_acc_t::p_quant_mid] = now_ns() - mark;
+                mark = now_ns();
+            }
+
+            {
+                const int64_t nbc = ctx.nb_down;
+                int64_t i = 0, end = 0;
+                thread_range(
+                        bounds_down, nth, num_tiles * nbc, tid, team, i, end);
+                const uint64_t t0 = prof ? now_ns() : 0;
+                for (; i < end; ++i) {
+                    const int64_t b = i / nbc;
+                    const int64_t nb = i - b * nbc;
                     const int64_t slot = tile_slot[b];
                     const int64_t r0 = tile_row0[b];
-                    gate_up_block<false>(ctx, slot_e_gate_up[slot], slot, nb,
-                            Aq_src + r0 * hidden, As + r0,
-                            intermediate + r0 * inter, tile_rows[b], inter);
+                    const int out_ldc = slot_ldc[slot];
+                    down_block(ctx, slot_e_down[slot], slot, nb,
+                            Aq_mid + r0 * inter, As + r0,
+                            slot_dst[slot] + (r0 - row_off[slot]) * out_ldc,
+                            tile_rows[b], out_ldc);
                 }
+                if (prof) { thread_ns_down[tid] = now_ns() - t0; }
             }
-        } else {
-#pragma omp parallel for num_threads(nth) schedule(static) collapse(2)
-            for (int64_t b = 0; b < num_tiles; ++b) {
-                for (int64_t nb = 0; nb < ctx.nb_gate_up; ++nb) {
-                    const int64_t slot = tile_slot[b];
-                    const int64_t r0 = tile_row0[b];
-                    const int64_t local_row = r0 - row_off[slot];
-                    gate_up_block<true>(ctx, slot_e_gate_up[slot], slot, nb,
-                            static_cast<const uint8_t *>(src[slot])
-                                    + local_row * hidden,
-                            As + r0, intermediate + r0 * inter, tile_rows[b],
-                            inter);
-                }
+            // Last phase: the region's own join is the trailing barrier.
+            if (prof && tid == 0) {
+                phase_ns[profile_acc_t::p_down] = now_ns() - mark;
             }
         }
 
-#pragma omp parallel for num_threads(nth) schedule(static)
-        for (int64_t m = 0; m < total_rows; ++m) {
-            quantize_row_u8(
-                    Aq_mid + m * inter, As[m], intermediate + m * inter, inter);
-        }
-
-#pragma omp parallel for num_threads(nth) schedule(static) collapse(2)
-        for (int64_t b = 0; b < num_tiles; ++b) {
-            for (int64_t nb = 0; nb < ctx.nb_down; ++nb) {
-                const int64_t slot = tile_slot[b];
-                const int64_t r0 = tile_row0[b];
-                const int out_ldc = slot_ldc[slot];
-                down_block(ctx, slot_e_down[slot], slot, nb,
-                        Aq_mid + r0 * inter, As + r0,
-                        slot_dst[slot] + (r0 - row_off[slot]) * out_ldc,
-                        tile_rows[b], out_ldc);
+        if (prof) {
+            auto &acc = profile_acc();
+            for (int p = 0; p < profile_acc_t::p_count; ++p) {
+                acc.pass_ns[p].fetch_add(
+                        phase_ns[p], std::memory_order_relaxed);
             }
+            record_gemm_threads(
+                    profile_acc_t::g_gate_up, thread_ns, actual_team);
+            record_gemm_threads(
+                    profile_acc_t::g_down, thread_ns_down, actual_team);
         }
 
         // ── The caller's existing weighted reduction ────────────────────
+        pass_timer_t pt_post(profile_acc_t::p_postop);
+        outcome.ok = true;
         return group_matmul_moe_postop_execute(moe_postop,
                 static_cast<int>(down_oc), nth, params[0].dtypes.dst);
     } catch (const std::length_error &) {

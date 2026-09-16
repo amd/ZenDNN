@@ -72,7 +72,7 @@
 ///   * Act          — none / swiglu_oai_mul / silu_and_mul / gelu_and_mul.
 ///   * DstDt        — kF16 or kF32 store (gated kinds are kF16-only).
 ///
-/// Register-pressure caps (Zen5 / Sapphire-Rapids: 32 zmm):
+/// Register-pressure caps (32 zmm available on AVX-512-FP16 CPUs):
 ///   FP16 accumulators pack 32 cols/zmm (vs the bf16 path's 16
 ///   FP32 cols/zmm), so the accumulator footprint is HALF the bf16
 ///   sibling's — every (MR, NV) tuple the bf16 selector instantiates

@@ -57,6 +57,7 @@
 #include "common/bfloat16.hpp"
 #include "common/float16.hpp"
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/group_matmul/expert_parallel/group_matmul_expert_parallel_policy.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/m_tile/group_matmul_m_tile.hpp"
@@ -962,6 +963,88 @@ struct DecodeAlgo5GateOverride {
             = delete;
     DecodeAlgo5GateOverride(DecodeAlgo5GateOverride &&) = delete;
     DecodeAlgo5GateOverride &operator=(DecodeAlgo5GateOverride &&) = delete;
+};
+
+// RAII override for the grouped dynamic-quant pre-pass
+// (`ZENDNNL_ENABLE_GROUP_DQ`).  `1` = grouped pre-pass (the production
+// default), `0` = per-expert quantization inside `execute_expert_slice`,
+// `-1` = restore the env path.
+//
+// Must be used instead of `EnvVarGuard` on this knob:
+// `get_grp_matmul_enable_group_dq()` latches its env read in a function-local
+// `static const`, so a `setenv` after any prior library call in the process is
+// invisible and BOTH arms of an A/B would silently run the same path and still
+// pass.  `reset_grp_matmul_caches()` cannot un-latch it either.
+struct GroupDqOverride {
+    int prev;
+    explicit GroupDqOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_enable_group_dq_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~GroupDqOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_enable_group_dq_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    GroupDqOverride(const GroupDqOverride &) = delete;
+    GroupDqOverride &operator=(const GroupDqOverride &) = delete;
+    GroupDqOverride(GroupDqOverride &&) = delete;
+    GroupDqOverride &operator=(GroupDqOverride &&) = delete;
+};
+
+// RAII override for the ALGO 5 fused W13 -> act -> W2 pipeline
+// (`ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION`).  `1` = fused executor (the
+// production default), `0` = legacy two-pass, `-1` = restore the env path.
+//
+// The A/B handle for comparing the fused path against the two-pass over the
+// same buffers.  What to assert depends on the regime: the FLOAT path differs
+// from the two-pass only in where the barrier falls, so any output difference
+// is a bug rather than a tolerance; DA8W8 additionally swaps W2's source
+// quantization from the grouped AVX-512 kernel to the per-token ones driven a
+// row at a time, which match it exactly (see the DA8W8 note on
+// `try_expert_parallel_pipeline`).
+struct Algo5VerticalFusionOverride {
+    int prev;
+    explicit Algo5VerticalFusionOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_algo5_vertical_fusion_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~Algo5VerticalFusionOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_algo5_vertical_fusion_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    Algo5VerticalFusionOverride(const Algo5VerticalFusionOverride &) = delete;
+    Algo5VerticalFusionOverride &operator=(const Algo5VerticalFusionOverride &)
+            = delete;
+    Algo5VerticalFusionOverride(Algo5VerticalFusionOverride &&) = delete;
+    Algo5VerticalFusionOverride &operator=(Algo5VerticalFusionOverride &&)
+            = delete;
+};
+
+// Prompt twin of the guard above, for the `AUTO_PROMPT_ALGO=5` pin qualifier
+// (`ZENDNNL_GRP_MATMUL_PROMPT_ALGO5_GATE`).  `0` honours the prompt pin
+// verbatim at any occupancy, `1` applies the occupancy qualifier, `-1`
+// restores the env path.
+struct PromptAlgo5GateOverride {
+    int prev;
+    explicit PromptAlgo5GateOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_prompt_algo5_gate_override.exchange(
+                               value, std::memory_order_relaxed);
+    }
+    ~PromptAlgo5GateOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_prompt_algo5_gate_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    PromptAlgo5GateOverride(const PromptAlgo5GateOverride &) = delete;
+    PromptAlgo5GateOverride &operator=(const PromptAlgo5GateOverride &)
+            = delete;
+    PromptAlgo5GateOverride(PromptAlgo5GateOverride &&) = delete;
+    PromptAlgo5GateOverride &operator=(PromptAlgo5GateOverride &&) = delete;
 };
 
 // RAII guard for the ALGO 3 N-tile heavy-threshold knob (the test-

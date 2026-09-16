@@ -152,8 +152,9 @@ inline input_mode_t classify_uniform_input_mode(const std::vector<int> &M,
  * partial, padded, and cross-expert destinations are rejected. The BF16
  * SiLU-times-up intermediate is still dynamically requantized before W2.
  *
- * The path requires both `ZENDNNL_MATMUL_WEIGHT_CACHE != 0` and a nonzero
- * effective per-call `matmul_params::weight_cache_type`; with caching disabled
+ * The path requires all of: `ZENDNNL_MATMUL_WEIGHT_CACHE != 0`, a nonzero
+ * effective per-call `matmul_params::weight_cache_type`, and a non-zero LRU
+ * cache capacity (`ZENDNNL_LRU_CACHE_CAPACITY`); with any of these absent
  * it declines before writing output. The dispatcher may then use main's
  * generic BF16 or caller-prequantized-S8 fused-MoE implementation.
  * The complete-tensor LRU honors `ZENDNNL_LRU_CACHE_CAPACITY` exactly. While

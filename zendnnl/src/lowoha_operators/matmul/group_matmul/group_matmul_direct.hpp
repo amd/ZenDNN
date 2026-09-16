@@ -365,15 +365,18 @@ bool apply_gated_act_inplace_dlp(grp_matmul_gated_act_t act, void *dst,
  * When provided to group_matmul_direct, the entire MoE block is executed
  * as a single API call.
  *
- * Current implementation — always two-pass for all GRP_ALGO values:
- *     Pass 1: Op1 (gate+up) + gated activation via parallel dispatch.
- *     Pass 2: Op2 (down_proj)                  via parallel dispatch.
- *   Both passes honour ZENDNNL_GRP_MATMUL_ALGO.  The dispatcher may
- *   fuse the gated activation into Pass 1's epilogue (all activations
- *   on ALGO 1/2/5/6, and swiglu_oai_mul on ALGO 3); otherwise a
- *   separate activation sub-pass is applied to Pass 1's output before
- *   Pass 2.  Per-expert deep fusion of Op1 → activation → Op2 chained
- *   at L1/L2/L3 boundaries is a possible future extension.
+ * Current implementation — three possible paths, in priority order:
+ *   1. Fused per-expert pipeline (ALGO 5 only, default ON via
+ *      ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION): Op1 → activation →
+ *      Op2 for each expert in a single OMP region, so the W13
+ *      intermediate stays cache-resident.  Engaged by
+ *      try_expert_parallel_pipeline; declines to path 2 if ineligible.
+ *   2. Two-pass via group_matmul_run_parallel_dispatch: Pass 1 runs
+ *      Op1 + gated activation (fused into the epilogue on ALGO 1/2/5/6,
+ *      separate sub-pass on ALGO 3); Pass 2 runs Op2.  Both passes
+ *      honour ZENDNNL_GRP_MATMUL_ALGO.
+ *   3. Error — the call returns status_t::failure (e.g. prepacked
+ *      custom-kernel weight on a non-ALGO-3 path).
  *
  * The weighted-reduce (moe_postop) always runs in a separate pass after
  * Op2 since it requires all experts' outputs to be complete.
@@ -614,9 +617,11 @@ struct grp_matmul_fused_moe_params {
  * @brief Execute fused MoE: Op1(gate+up) → activation → Op2(down_proj)
  *        → optional MoE post-op (weighted reduce).
  *
- * The flow runs as two passes of group_matmul_run_parallel_dispatch;
- * both passes honour ZENDNNL_GRP_MATMUL_ALGO.  See
- * grp_matmul_fused_moe_params (above) for the full design note.
+ * Attempts the fused per-expert pipeline (try_expert_parallel_pipeline)
+ * first when eligible; otherwise falls back to two passes of
+ * group_matmul_run_parallel_dispatch, both honouring
+ * ZENDNNL_GRP_MATMUL_ALGO.  See grp_matmul_fused_moe_params (above)
+ * for the full design note.
  *
  * When `moe_postop` is non-null, the weighted-reduce post-op is invoked
  * automatically after Op2 with `D = fused.N_down[0]` (the planner has

@@ -26,7 +26,7 @@
 ///     output[t, d] = Σ_k  topk_weights[t, k] * row_ptrs[t*topk+k][d]
 ///
 /// Two implementations selected at runtime via ISA detection:
-///   - AVX-512 (default on Zen 3/4/5): 16 floats / 16 bf16 per iteration
+///   - AVX-512: 16 floats / 16 bf16 per iteration
 ///   - Scalar fallback: when AVX-512 is unavailable
 
 #include <cstring>

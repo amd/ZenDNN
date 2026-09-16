@@ -50,22 +50,63 @@ User-facing knob for `group_matmul_direct` (the grouped GEMM dispatcher used by 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
 | `ZENDNNL_GRP_MATMUL_ALGO` | Selects the grouped-matmul whole-call mode. `0` (AUTO) lets the library pick per call. `{1,2,3,5,6}` pin a generic scheduler globally and suppress phase-local W8A8 requests. `4` attempts the private symmetric per-channel W8A8 fused-MoE fast path in both phases, in either BF16-dynamic or caller-prequantized S8 mode. ALGO 4's direct-S8 fast path requires positive finite per-token BF16/F32 source scales, caller-owned BF16 `dst_down`, and `row_ptrs` that permute destination rows. `dst_down[i]` must be the tight BF16 view over the exact same BF16-sized backing as `src[i]` (`ldc_down[i] == hidden`), whose leading bytes hold the S8 source prefix; separate, offset, partial, padded, and cross-expert destinations decline ALGO 4. Any eligibility decline writes nothing and falls back to generic AUTO, whose merged prequantized-S8 path validates its own destination contract. ALGO 4 allocation/execution errors remain terminal. Read once and cached on first reference. | `0` (AUTO) | `0` (AUTO), `1` (sequential), `2` (flat M-tile), `3` (flat N-tile), `4` (two-mode W8A8 fused-MoE attempt), `5` (per-expert), `6` (multilevel CCD) |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | AUTO-only decode setting (`max active M <= 32`). `{1,2,3,5,6}` pin a generic decode scheduler; `0` selects the legacy cascade; `4` attempts W8A8 only for decode. Any eligibility decline inherits the normal decode default policy (default 3 plus all existing refinements/safety clamps), never numeric 4. | `3` | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | AUTO-only prompt setting (`max active M > 32`). `{1,2,3,5,6}` pin a generic prompt scheduler; `0` selects the legacy cascade; `4` attempts W8A8 only for prompt. Any eligibility decline inherits the normal prompt default policy (default 2 plus all existing refinements/safety clamps), never numeric 4. | `2` | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | Forces a specific ALGO for the decode phase (`max active M <= 32`) when the global `ZENDNNL_GRP_MATMUL_ALGO` is `0` (AUTO). `{1,2,3,5,6}` pin that generic scheduler for decode; `0` defers to the legacy 3-rule cascade; `4` attempts W8A8 only for decode. A declined value inherits the decode default policy (ALGO 3, N-tile) with all shape-safety clamps applied — a shape ALGO 3 cannot N-tile-slice falls to **ALGO 1**. Overridden by a non-zero global `ZENDNNL_GRP_MATMUL_ALGO`. | `3` | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | Forces a specific ALGO for the prompt phase (`max active M > 32`) when the global `ZENDNNL_GRP_MATMUL_ALGO` is `0` (AUTO). **When this variable is not set, prompt always selects ALGO 1** (sequential full-team, Rule 0.7 — unconditional for all dtypes and shapes). Setting to `{1,2,3,5,6}` forces that ALGO; the safety clamps still apply: an n_tile_safe failure clamps ALGO 3 → **ALGO 1**, and an m_tile_safe failure clamps ALGO 2 → **ALGO 1**. ALGO 2 (M-tile) for prompt is never auto-selected — it requires explicitly setting this variable to `2`. `0` defers to the legacy 3-rule cascade (which also selects ALGO 1 for most prompt shapes). `4` attempts W8A8 for prompt; a declined attempt returns to ALGO 1. A `5` declined for occupancy (`active_ops < num_threads`) redirects to ALGO 3 — or to ALGO 1 when the shape is not N-tile-safe. Overridden by a non-zero global `ZENDNNL_GRP_MATMUL_ALGO`. | unset (→ ALGO 1) | `0`, `1`, `2`, `3`, `4`, `5`, `6` |
 
-Selector precedence is global `4` (attempt in either phase), then any global
-generic pin, then the matching phase setting under global AUTO. The inactive
-phase setting has no effect. All three variables are cached; set them before
-the first grouped-matmul call.
+**Selector precedence (highest first):**
+
+1. `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` / `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO`
+   — the knob matching *this call's phase*, when explicitly set. It outranks
+   `ZENDNNL_GRP_MATMUL_ALGO` whatever the global is set to, so tuning one phase
+   does not require clearing the global first. A phase `4` requests W8A8 for
+   that phase even under a global generic pin; an explicit non-`4` phase knob
+   suppresses a global `4` for that phase.
+2. `ZENDNNL_GRP_MATMUL_ALGO` — governs the phase whose knob is **unset**. A
+   global `4` attempts W8A8; a global generic pin `{1,2,3,5,6}` pins that
+   scheduler.
+3. AUTO heuristics, when neither the matching phase knob nor the global is set.
+
+The knob for the inactive phase has no effect on the current call. Safety
+clamps always apply last: ALGO 2 requires `m_tile_safe` and ALGO 3 requires
+`n_tile_safe`, and either failure falls back to **ALGO 1**. A phase `=5` pin is
+still subject to the ALGO 5 occupancy/dtype qualifier. All three variables are
+cached; set them before the first grouped-matmul call.
 
 > Internal tuning knobs (planner thresholds, custom-kernel sub-knobs,
 > prepack-cache sizing, etc.) live inside the implementation and are
-> not part of the user-facing contract.  They are documented in
+> not part of the user-facing contract.  Shared ones are documented in
 > `zendnnl/src/lowoha_operators/matmul/group_matmul/
-> group_matmul_parallel_common.hpp` for library developers; production
-> deployments should not need them.  If a workload requires one, file
-> an issue describing the problem and we will assess whether to
-> promote the knob to user-visible status.
+> group_matmul_parallel_common.hpp`; per-ALGO ones live with their ALGO
+> (`m_tile/`, `n_tile/`, `expert_parallel/`).  Production deployments
+> should not need them.  If a workload requires one, file an issue
+> describing the problem and we will assess whether to promote the knob
+> to user-visible status.
+>
+> One exception is worth knowing, because it changes what executes
+> rather than only how fast it runs: under a resolved ALGO 5, a fused
+> MoE call runs W13, the gated activation and W2 in a single per-expert
+> pass instead of two passes.  It is on by default for the dtype
+> regimes that support it and declines to the two-pass elsewhere.  Set
+> `ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION=0` to force the two-pass
+> everywhere — the A/B baseline, and the escape hatch if a deployment
+> sees a regression.
+>
+> Two further ALGO 5 knobs are documented here only because a declined pin
+> names them in a default-level warning, so an operator can be pointed at
+> them by the library itself:
+> `ZENDNNL_GRP_MATMUL_DECODE_ALGO5_GATE` and
+> `ZENDNNL_GRP_MATMUL_PROMPT_ALGO5_GATE`, both `{0,1}` defaulting to `1`.
+> At `1` an `AUTO_{DECODE,PROMPT}_ALGO=5` pin is honoured only where ALGO 5
+> was measured to win (decode also requires s8 weights on every active
+> expert; both require the active experts to saturate the thread team).
+> Set either to `0` to honour the corresponding pin verbatim.  Both are read
+> once and cached, so setting them after the first grouped call has no
+> effect.  Any non-numeric or out-of-domain value resolves to the default.
+>
+> `ZENDNNL_ENABLE_GROUP_DQ` (`{0,1}`, default `1`) selects the grouped
+> source-quantization pre-pass; `0` falls back to per-expert quantization.
+> It is likewise cached from this release onward — previously it was re-read
+> on every call, so an in-process `setenv` no longer takes effect.
 
 ### Examples
 

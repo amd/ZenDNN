@@ -298,7 +298,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
     // specialisations are FMA-latency bound because the number of
     // independent accumulator chains (MR × NV) is below the critical
     // `FMA_latency × FMA_throughput = 4 × 2 = 8` needed to saturate
-    // issue on Zen4/5.  Double-buffering splits the accumulators into
+    // issue on this microarchitecture.  Double-buffering splits the accumulators into
     // two parallel sets fed from even / odd K-pairs; the sets are
     // summed at the end of the K-loop.  This doubles the chain count
     // and brings MR=2, MR=3 from latency-bound to issue-bound.  MR=1
@@ -436,7 +436,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         // vmovdqu64).  Out-of-place packs come from zendnnl_aligned_alloc(64),
         // but the WEIGHT_CACHE=2 in-place path hands us the caller's own
         // weight buffer, which is not guaranteed 64-byte aligned.  On
-        // Zen 4 / Zen 5 vmovdqu64 has identical throughput to vmovdqa64
+        // On AVX-512 CPUs, vmovdqu64 has identical throughput to vmovdqa64
         // when the address happens to be aligned (the common case), so the
         // only cost is a cache-line split load on a genuinely unaligned
         // base — accepted to let in-place packing apply regardless of how
@@ -458,7 +458,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
         // ── No software prefetch in the K-loop (intentional) ────────────
         // A `_mm_prefetch(B + N K-pairs ahead, _MM_HINT_T0)` per outer
         // iteration was tried.  It regressed throughput because the Zen
-        // 4 / Zen 5 hardware prefetcher already detects the streaming
+        // CPU hardware prefetcher already detects the streaming
         // (kp_stride-strided) B access pattern reliably and the K-loop
         // is not memory-latency bound at the shapes that reach this
         // kernel.  Adding software prefetch consumed load-port issue

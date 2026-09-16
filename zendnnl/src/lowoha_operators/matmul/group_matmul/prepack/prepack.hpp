@@ -630,7 +630,7 @@ void clear_fingerprint_cache_for_test();
 /// a HIT/MISS trace see at a glance whether cross-warm ran AND which
 /// backend path got opportunistically warmed for the OTHER algo regime.
 ///
-/// The four states map to the four reachable code paths in
+/// The six states map to the six reachable code paths in
 /// `cross_warm()`:
 ///   * `none`               — env `ZENDNNL_GRP_MATMUL_CROSS_WARM=0`, OR
 ///                            a pinned ALGO (`ZENDNNL_GRP_MATMUL_ALGO`

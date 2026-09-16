@@ -967,7 +967,7 @@ inline int auto_pick_n_order(int num_ops) {
 ///
 /// Heap-free: stack array of kNTilePlanMaxExperts for the desc-sort
 /// temp; beyond that the ordering is skipped (correct, just unsorted).
-/// Mode 4 is O(num_ops²) ≤ 64K comparisons — well under 10 µs.
+/// Mode 4 is O(num_ops²) ≤ 64K comparisons — low overhead vs the GEMM body.
 ///
 /// `auto_resolved_out` (optional): when env mode = 0, the resolved
 /// concrete sub-mode is written here for APILOG diagnostics.

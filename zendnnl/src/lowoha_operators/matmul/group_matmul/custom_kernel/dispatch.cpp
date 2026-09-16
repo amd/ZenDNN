@@ -474,7 +474,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // ── Run-once invariants (CPU + dtypes + activation) ──────────────
     // The dispatcher serves two ISA families: bf16 variants need
     // AVX-512 BF16 (VDPBF16PS); DQ-INT8 variants need AVX-512 VNNI
-    // (VPDPBUSD).  On the Zen 4/5 targets VNNI is a strict superset of
+    // (VPDPBUSD).  On AVX-512-VNNI CPUs, VNNI is a strict superset of
     // BF16, but on broader x86 (e.g. Cascade Lake / Ice Lake) VNNI
     // exists WITHOUT BF16.  Refuse early ONLY when NEITHER family's ISA
     // is present; the precise per-variant ISA gate runs after
@@ -497,11 +497,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // upload and the dispatcher would read freed memory in
     // `dispatch_tile`.
     //
-    // Resolution: when the toggle is non-1 we DO NOT refuse CK.
+    // Resolution: when wc_mode == 0 we DO NOT refuse CK.
     // Instead each per-expert pack below is routed through
     // `get_or_pack_weight_bf16(..., disable_cache=true)`, which
     // allocates a fresh aligned buffer, packs into it, and returns
-    // the raw pointer without touching the LRU singleton.  The raw
+    // the raw pointer without touching the LRU singleton.
+    // (wc_mode 1 and 2 both use the LRU; only 0 disables it.)  The raw
     // pointers land in `out.owned_packed_ptrs[i]` AND
     // `out.packed_ptrs[i]` (alias), so `dispatch_tile()` reads them
     // transparently and the `CallContext` destructor /
@@ -520,8 +521,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // on the next call.
     // Weight-cache mode drives how the CK pack is stored:
     //   0 → no cache: pack into per-call caller-owned buffers (LRU bypass).
-    //   1 → out-of-place cache (default): pack into an LRU-owned buffer.
-    //   2 → in-place: bf16/even-K packs are written back into the caller's
+    //   1 → out-of-place cache: pack into an LRU-owned buffer.
+    //   2 → in-place (default): bf16/even-K packs are written back into the caller's
     //       weight buffer (saves a packed buffer); int8 (compensation row
     //       makes the pack larger than the raw weight) and odd-K bf16 fall
     //       back to the out-of-place cache inside get_or_pack_weight_*.
@@ -564,7 +565,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     //
     // DQ-INT8 family additionally requires the AVX-512 VNNI feature
     // (VPDPBUSD), which is a strict superset of AVX-512 BF16 on the
-    // Zen 4/5 microarchitectures we target but on broader x86 silicon
+    // AVX-512-VNNI CPUs, but on broader x86 silicon
     // is an independent feature flag.  Refuse cleanly with a specific
     // tag so the user can distinguish "no AVX-512 VNNI" from "wrong
     // dtype" in apilog.
@@ -602,7 +603,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 "DQ-INT8 custom kernel requires AVX-512 VNNI "
                 "(VPDPBUSD) — runtime CPU detection failed");
     }
-    // FP16 variants require native AVX-512-FP16 (VFMADD*PH).  On Zen4
+    // FP16 variants require native AVX-512-FP16 (VFMADD*PH).  On CPUs without that ISA
     // and other AVX-512 parts without FP16, `avx512f16_available()`
     // returns false (and on a toolchain without the intrinsics the
     // microkernels weren't compiled), so refuse cleanly and fall back
@@ -1738,7 +1739,7 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // kernel calls, spreading the rows so each call's MR is either
     // `mr_base` or `mr_base + 1`.  First `n_big` calls take mr_base+1.
     // Avoids thin-tail MR=1 / MR=2 calls that would otherwise cap FMA
-    // ILP (MR<4 is latency-limited on Zen4/5 with 4-cycle FMA dep).
+    // ILP (MR<4 is latency-limited at 4-5 cycle FMA dep).
     //
     // Worked examples (max_mr=8):
     //   M= 9 → 2 calls [5, 4]   (naive would be [8, 1] — MR=1 tail)

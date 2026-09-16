@@ -2838,6 +2838,237 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDynamicQuantBothPasses) {
     }
 }
 
+// ALGO 5's fused pipeline (`try_expert_parallel_pipeline`) must agree with the
+// legacy two-pass over the SAME buffers.  Both legs below run the identical
+// fused-MoE call under a global ALGO 5 pin; the only difference is
+// `ZENDNNL_GRP_MATMUL_ALGO5_VERTICAL_FUSION`, so this needs no independent
+// reference — the two-pass IS the oracle.
+//
+// Tolerance differs by regime, and the reason is a kernel swap rather than a
+// change of definition:
+//   * FLOAT — only the barrier position differs, so the result must be
+//     EXACT.  Any difference at all is a bug.
+//   * DA8W8 — fusing bypasses the grouped dynamic-quant pre-pass (which is
+//     inherently a between-passes barrier over all experts), so W2's source
+//     quantization moves to `dispatch_fused_per_token`, which drives the same
+//     AVX-512 per-token kernels a row at a time.  Granularity, row set, scale
+//     formula and rounding all match, so this is EXACT too — hence the zero
+//     tolerance below for both regimes.
+//
+// The M vector is deliberately awkward: a LEADING INACTIVE expert (the common
+// MoE decode shape, and the slot a representative-slot dtype probe would have
+// read) plus a decode-shaped `M=1` expert alongside larger ones.
+//
+// Each leg asserts from the captured gemm_mode that the intended executor
+// actually ran, because a silent decline is the failure mode this pipeline is
+// built around and would otherwise make both legs trivially equal.
+TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using zendnnl::common::data_type_t;
+
+    constexpr int dim = 32;
+    constexpr int H = 32;
+    constexpr int num_ops = 4;
+    constexpr int N_gate_up = 2 * dim;
+    constexpr int K_in = H;
+    constexpr int K_down = dim;
+    constexpr int M_max = 32;
+    const std::vector<int> Ms {0, 1, 8, M_max};
+
+    // Parameterised over the float dtypes the pipeline admits and the
+    // harness can express.  `is_pipeline_act_dtype` also admits f16, but
+    // `bool_to_fp_dt`/`TypedBuffers` are bool-keyed (bf16 vs f32) across this
+    // whole file, so f16 needs a dtype-keyed harness first — and a runtime
+    // guard besides, since an f16 call needs host AVX-512-FP16 and a GCC >= 12
+    // build or `group_matmul_direct` rejects it with `isa_unsupported`.
+    // Tracked as a known gap rather than silently widened: adding f16 to this
+    // loop without both would fail on every machine lacking the ISA.
+    for (const bool is_bf16 : {true, false}) {
+        const data_type_t fp_dt = bool_to_fp_dt(is_bf16);
+        for (const bool int8_regime : {false, true}) {
+            // Every kind the pipeline's gate whitelists, so the parity
+            // matrix and that switch stay in step.
+            for (const auto act_type : {grp_matmul_gated_act_t::none,
+                         grp_matmul_gated_act_t::silu_and_mul,
+                         grp_matmul_gated_act_t::gelu_and_mul,
+                         grp_matmul_gated_act_t::swiglu_oai_mul}) {
+                const int K_down_eff
+                        = (act_type == grp_matmul_gated_act_t::none) ? N_gate_up
+                                                                     : K_down;
+                SCOPED_TRACE(std::string("dt=") + (is_bf16 ? "bf16" : "f32")
+                        + " regime=" + (int8_regime ? "da8w8" : "float")
+                        + " act=" + std::to_string(static_cast<int>(act_type)));
+
+                tensor_factory_t factory {};
+                std::vector<tensor_t> src_t(num_ops), src_scale_t(num_ops);
+                for (int i = 0; i < num_ops; ++i) {
+                    const size_t M_e = static_cast<size_t>(std::max(Ms[i], 1));
+                    src_scale_t[i]
+                            = factory.zero_tensor({M_e, 1}, data_type_t::f32);
+                    src_t[i] = int8_regime
+                            ? factory.uniform_dist_tensor({M_e, K_in}, fp_dt,
+                                      2.0, false, src_scale_t[i], tensor_t {})
+                            : factory.uniform_dist_tensor(
+                                      {M_e, K_in}, fp_dt, 2.0);
+                }
+
+                // Weights: s8 + per-channel scale for DA8W8, plain float otherwise.
+                std::vector<tensor_t> w1_t(num_ops), w1_scale_t(num_ops),
+                        w1_zp_t(num_ops), w2_t(num_ops), w2_scale_t(num_ops),
+                        w2_zp_t(num_ops);
+                for (int i = 0; i < num_ops; ++i) {
+                    auto w1_ref = factory.uniform_dist_tensor(
+                            {K_in, N_gate_up}, fp_dt, 2.0);
+                    auto w2_ref = factory.uniform_dist_tensor(
+                            {static_cast<size_t>(K_down_eff), H}, fp_dt, 2.0);
+                    if (int8_regime) {
+                        ASSERT_EQ(quant_params_compute(factory, w1_ref, fp_dt,
+                                          data_type_t::s8, {1, N_gate_up},
+                                          data_type_t::f32, w1_scale_t[i],
+                                          w1_zp_t[i], &w1_t[i]),
+                                status_t::success);
+                        ASSERT_EQ(quant_params_compute(factory, w2_ref, fp_dt,
+                                          data_type_t::s8, {1, H},
+                                          data_type_t::f32, w2_scale_t[i],
+                                          w2_zp_t[i], &w2_t[i]),
+                                status_t::success);
+                    } else {
+                        w1_t[i] = w1_ref;
+                        w2_t[i] = w2_ref;
+                    }
+                }
+
+                std::vector<const void *> srcs(num_ops), wei1_p(num_ops),
+                        wei2_p(num_ops);
+                for (int i = 0; i < num_ops; ++i) {
+                    srcs[i] = src_t[i].get_raw_handle_unsafe();
+                    wei1_p[i] = w1_t[i].get_raw_handle_unsafe();
+                    wei2_p[i] = w2_t[i].get_raw_handle_unsafe();
+                }
+
+                auto gv_op1
+                        = GemmVecs::uniform(num_ops, M_max, N_gate_up, K_in);
+                gv_op1.Ms = Ms;
+                gv_op1.is_wc.assign(num_ops, true);
+
+                std::vector<const void *> no_bias(num_ops, nullptr);
+
+                // One leg of the A/B.  Params are rebuilt per leg because the
+                // executors mutate them (a grouped pre-pass rewrites `dtypes.src`
+                // to s8 and clears `dynamic_quant`), so sharing them across legs
+                // would let the first leg decide the second's path.
+                auto run_leg = [&](int vf, TypedBuffers &d1, TypedBuffers &d2,
+                                       std::string &mode_out) {
+                    reset_grp_matmul_caches();
+                    AlgoEnvGuard algo_guard(5);
+                    Algo5VerticalFusionOverride vf_guard(vf);
+
+                    d1.alloc(num_ops, static_cast<size_t>(M_max) * N_gate_up,
+                            is_bf16);
+                    d2.alloc(num_ops, static_cast<size_t>(M_max) * H, is_bf16);
+                    auto d1_p = d1.ptrs(is_bf16);
+                    auto d2_p = d2.ptrs(is_bf16);
+
+                    grp_matmul_gated_act_params act {};
+                    act.act = act_type;
+                    auto fused
+                            = make_fused_moe_op2(num_ops, H, wei2_p, no_bias);
+                    fused.dst_down = d2_p;
+                    fused.ldc_down = std::vector<int>(num_ops, H);
+                    if (int8_regime) {
+                        fused.down_scale.resize(num_ops);
+                        fused.down_zp.resize(num_ops);
+                        for (int i = 0; i < num_ops; ++i) {
+                            copy_attached_scale(w2_t[i], fused.down_scale[i]);
+                            copy_attached_zp(w2_t[i], fused.down_zp[i]);
+                        }
+                    }
+
+                    std::vector<matmul_params> p(num_ops);
+                    for (int i = 0; i < num_ops; ++i) {
+                        p[i] = make_uniform_params(1, fp_dt)[0];
+                        p[i].dtypes.src = fp_dt;
+                        p[i].dtypes.dst = fp_dt;
+                        if (int8_regime) {
+                            p[i].dtypes.wei = data_type_t::s8;
+                            p[i].dtypes.compute = data_type_t::s8;
+                            p[i].dynamic_quant = true;
+                            copy_attached_scale(
+                                    src_t[i], p[i].quant_params.src_scale);
+                            copy_attached_scale(
+                                    w1_t[i], p[i].quant_params.wei_scale);
+                            copy_attached_zp(w1_t[i], p[i].quant_params.wei_zp);
+                        }
+                    }
+
+                    GemmModeCaptureGuard mode_guard;
+                    ASSERT_EQ(group_matmul_direct(gv_op1.layout, gv_op1.transA,
+                                      gv_op1.transB, gv_op1.Ms, gv_op1.Ns,
+                                      gv_op1.Ks, gv_op1.alpha, srcs, gv_op1.lda,
+                                      wei1_p, gv_op1.ldb, no_bias, gv_op1.beta,
+                                      d1_p, gv_op1.ldc, gv_op1.is_wc, p,
+                                      nullptr, &act, &fused),
+                            status_t::success)
+                            << "vf=" << vf;
+                    const char *mode
+                            = test_api::s_last_group_matmul_direct_gemm_mode
+                                      .load(std::memory_order_relaxed);
+                    ASSERT_NE(mode, nullptr) << "vf=" << vf;
+                    mode_out = mode;
+                };
+
+                TypedBuffers d1_fused, d2_fused, d1_two_pass, d2_two_pass;
+                std::string mode_fused, mode_two_pass;
+                run_leg(1, d1_fused, d2_fused, mode_fused);
+                run_leg(0, d1_two_pass, d2_two_pass, mode_two_pass);
+
+                // Prove each leg took the executor it was asked for.  Without
+                // this, a silent decline on the fused leg would make the
+                // comparison below pass vacuously.
+                EXPECT_NE(mode_fused.find("vertical_fusion_expert_parallel"),
+                        std::string::npos)
+                        << "fused leg did not engage the pipeline: "
+                        << mode_fused;
+                EXPECT_EQ(mode_two_pass.find("vertical_fusion_expert_parallel"),
+                        std::string::npos)
+                        << "two-pass leg unexpectedly fused: " << mode_two_pass;
+
+                // Liveness. `verify_per_expert_2d` only DIFFS the two buffers and
+                // `TypedBuffers::alloc` zero-fills, so two legs that both skipped
+                // their GEMMs would compare equal and pass. Assert the fused leg
+                // actually produced something before trusting the comparison.
+                {
+                    const data_type_t fp = bool_to_fp_dt(is_bf16);
+                    float max_abs = 0.0f;
+                    for (int e = 0; e < static_cast<int>(Ms.size()); ++e) {
+                        for (int r = 0; r < Ms[e]; ++r) {
+                            for (int c = 0; c < H; ++c) {
+                                max_abs = std::max(max_abs,
+                                        std::abs(d2_fused.at(e,
+                                                static_cast<size_t>(r) * H + c,
+                                                fp)));
+                            }
+                        }
+                    }
+                    ASSERT_GT(max_abs, 0.0f)
+                            << "fused down-proj output is all zero: the GEMMs "
+                               "were "
+                               "skipped, so the parity comparison is vacuous";
+                }
+
+                const Tol tol = Tol {0.0f, 0.0f};
+                verify_per_expert_2d(d2_fused, H, d2_two_pass, H, Ms, H,
+                        bool_to_fp_dt(is_bf16), tol,
+                        "algo5_fused_vs_two_pass_down");
+                verify_per_expert_2d(d1_fused, N_gate_up, d1_two_pass,
+                        N_gate_up, Ms, K_down_eff, bool_to_fp_dt(is_bf16), tol,
+                        "algo5_fused_vs_two_pass_inter");
+            }
+        }
+    }
+}
+
 // Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ=1, the production default —
 // group_dynamic_quant converts src to s8 and engages the grouped-s8 CK)
 // must produce the SAME fused-MoE output as the legacy runtime-hoist
@@ -2940,14 +3171,14 @@ TEST(TestFusedMoEQuantDynINT8AllAlgos, GroupDqVsRuntimeHoistParity) {
 
     // Path A: grouped pre-quant (production default).
     {
-        EnvVarGuard group_dq_on("ZENDNNL_ENABLE_GROUP_DQ", "1");
+        GroupDqOverride group_dq_on(1);
         reset_grp_matmul_caches();
         ASSERT_EQ(run_fused(d2_groupdq.ptrs(is_bf16)), status_t::success)
                 << "fused with ENABLE_GROUP_DQ=1";
     }
     // Path B: legacy per-expert runtime hoist.
     {
-        EnvVarGuard group_dq_off("ZENDNNL_ENABLE_GROUP_DQ", "0");
+        GroupDqOverride group_dq_off(0);
         reset_grp_matmul_caches();
         ASSERT_EQ(run_fused(d2_hoist.ptrs(is_bf16)), status_t::success)
                 << "fused with ENABLE_GROUP_DQ=0";

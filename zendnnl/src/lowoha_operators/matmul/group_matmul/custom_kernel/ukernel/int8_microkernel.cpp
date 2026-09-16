@@ -272,7 +272,7 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // K-quads, summed (s32 add) after the K-loop and before the
     // compensation correction.  It exists to raise the independent
     // chain count `kBuffers*MR*NV` to the VPDPBUSD latency × throughput
-    // product (4 cycles × 2/cycle = 8 chains on Zen5) — below that the
+    // product (giving 8 saturating chains at 2/cycle) — below that the
     // loop is latency bound.  `kBudget` is the largest kBuffers that
     // still fits `kBuffers*MR*NV + MR + 1` under 30 zmm; `kChainCap`
     // stops it growing past the 8 chains that saturate the issue port.
