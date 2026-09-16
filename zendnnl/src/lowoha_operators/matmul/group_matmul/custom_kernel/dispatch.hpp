@@ -331,6 +331,14 @@ struct CallContext {
     /// correctness conditions (bf16 / act=none / bias-free / deep-K /
     /// M > max_mr) are still enforced by the `dispatch_tile()` gate.
     bool kblock_auto = false;
+    /// True when this call has exactly one expert (`num_ops == 1`).
+    /// Gates the o-block-outer loop nesting in `dispatch_tile()`: that
+    /// reordering was characterised only on dense single-expert FFN
+    /// shapes, so multi-expert MoE frames keep the original MR-call-outer
+    /// order until they are measured.  The two orders are numerically
+    /// equivalent, so this is a performance-scope guard, not a
+    /// correctness one.
+    bool single_expert = false;
     // Representative L2-friendly N-chunk width (worst case, sized from
     // the call's m_max).  Kept as a single value for APILOG / debug
     // output; the actual per-expert values live in `subtile_cols_per_expert`

@@ -1093,6 +1093,383 @@ TEST(CkUkernelEngages, OnCanonicalShapeGeluFused) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// O-BLOCK-OUTER LOOP NESTING — strict correctness at the threshold
+//
+// `dispatch_tile` switches from MR-call-outer to o-block-outer
+// traversal once a tile needs `kOblockOuterMinCalls` (3) MR calls.
+// Both orders issue the same microkernel calls with the same operand
+// pairs; only the visiting order and the pointer arithmetic that
+// derives `A_chunk` / `Tight_row` per call differ.  A row-offset or
+// stride mistake in the swapped loops is therefore invisible to any
+// test that never reaches three MR calls.
+//
+// Nothing else in this file reaches it.  The parameterised matrix
+// tops out at M=16, which is two calls at the default NR=32
+// (max_mr=8).  The only case that does reach three is the NR=64
+// M=16 shape (max_mr=6), and that lives under `CkUkernelCorrectness`
+// whose engagement assertion is deliberately suite-level
+// (`ASSERT_GT(engaged, 0)`, see the doc-block there) — an individual
+// case is permitted to bypass CK entirely.  A bypassing case still
+// matches the scalar reference via the fallback executor, so a
+// regression in the swapped loops could ride through unnoticed.
+//
+// The two tests below close that hole.  Each asserts CK engagement
+// STRICTLY and compares every element against the scalar reference,
+// so neither a silent fallback nor a wrong row offset can pass.
+//
+// Shape rationale (shared by both):
+//   * M=17 at NR=32 is ceil(17/8) = 3 MR calls — the first M that
+//     takes the new order, i.e. exactly the threshold boundary.
+//   * K=1024 keeps `pick_l2_subtile_cols` far above a single
+//     o-block (384 cols = 12 o-blocks per sub-tile).  This matters:
+//     when a sub-tile holds only one o-block the two loop orders
+//     emit an identical call sequence, so a degenerate shape would
+//     make the test vacuous while still appearing to pass.
+//   * N=2048 over `kCkTestThreads` leaves 512 cols per thread, ample
+//     slack to keep the planner in the per-tile dispatch path.
+//
+// These tests deliberately do NOT use `mt::fill_src` / `mt::fill_wei1`.
+// Those patterns are sign-alternating with a short period, so at
+// K=1024 the accumulation cancels down to |acc| ~ 2e-3 — an order of
+// magnitude BELOW the absolute term of `tol_act` (0.02).  Every
+// element then compares equal regardless of which A row the kernel
+// actually read, which makes a row-offset test silently vacuous.
+// This was not hypothetical: with the shared fills, deliberately
+// corrupting the swapped branch's row offset still passed.  The fills
+// below give row m a magnitude of 1.5^m so that mixing up ANY two
+// rows — including adjacent ones — exceeds the 15% relative bound.
+// ──────────────────────────────────────────────────────────────────
+
+// Which MR call owns row `m`, mirroring the balanced partition in
+// `dispatch_tile`: `n_calls = ceil(M / max_mr)` calls of `M / n_calls`
+// rows each, with the first `M % n_calls` calls taking one extra row.
+// At M=17 / max_mr=8 that is [6, 6, 5], NOT [8, 8, 1] — so the naive
+// `m / max_mr` mislabels rows 6-7 and 12-15.  Only used to make an
+// assertion message point at the right call.
+inline int mr_call_of_row(int m, int M, int max_mr) {
+    const int n_calls = (M + max_mr - 1) / max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+    const int big_rows = n_big * (mr_base + 1);
+    return (m < big_rows) ? m / (mr_base + 1)
+                          : n_big + (m - big_rows) / mr_base;
+}
+
+// Row m is scaled by 1.5^m: adjacent rows differ by 33%, comfortably
+// past `tol_act`'s 15% relative term, so an off-by-one row offset in
+// the swapped loops cannot hide inside the tolerance band.
+// `e` additionally separates experts, so a multi-expert case cannot pass
+// by reading the wrong expert's A panel.
+inline void fill_row_discriminating_src(
+        std::vector<bfloat16_t> &v, int M, int K, int e = 0) {
+    for (int m = 0; m < M; ++m) {
+        const float row_scale = 0.02f * (1.0f + 0.25f * static_cast<float>(e))
+                * std::pow(1.5f, static_cast<float>(m));
+        for (int k = 0; k < K; ++k) {
+            v[static_cast<size_t>(m) * K + k] = bfloat16_t(
+                    row_scale * (1.0f + 0.1f * static_cast<float>(k % 3)));
+        }
+    }
+}
+
+// All-positive weights: the shared `fill_wei1` straddles zero and
+// cancels over K, which is what collapses the accumulation into the
+// tolerance floor.  Keeping every entry positive makes |acc| grow
+// with K instead of cancelling.
+inline void fill_noncancelling_wei(std::vector<bfloat16_t> &v, int K, int N) {
+    for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+            v[static_cast<size_t>(k) * N + n] = bfloat16_t(
+                    0.01f * (1.0f + 0.1f * static_cast<float>((k + n) % 5)));
+        }
+    }
+}
+TEST(CkOblockOuterNesting, WideBranchAtThresholdMatchesRef) {
+    CK_SKIP_IF_NO_BF16_ISA();
+
+    mt::AlgoEnvGuard algo_guard(3);
+    mt::CustomKernelOverride ck_guard(true);
+    ::reset_grp_matmul_caches();
+
+    // num_ops == 1: the swap is gated on `ctx.single_expert`, so a
+    // multi-expert call would take the original nesting and leave
+    // these tests exercising nothing.
+    constexpr int kNumOps = 1;
+    constexpr int M = 17, K = 1024, N = 2048;
+
+    std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+        wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+        dst_bufs[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        fill_row_discriminating_src(src_bufs[e], M, K);
+        fill_noncancelling_wei(wei_bufs[e], K, N);
+    }
+
+    std::vector<char> layout(kNumOps, 'r');
+    std::vector<bool> transA(kNumOps, false), transB(kNumOps, false);
+    std::vector<int> Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+    std::vector<float> alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+    std::vector<int> lda(kNumOps, K), ldb(kNumOps, N), ldc(kNumOps, N);
+    std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps);
+    std::vector<const void *> bias_ptrs(kNumOps, nullptr);
+    std::vector<void *> dst_ptrs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_ptrs[e] = src_bufs[e].data();
+        wei_ptrs[e] = wei_bufs[e].data();
+        dst_ptrs[e] = dst_bufs[e].data();
+    }
+    std::vector<bool> is_wc(kNumOps, true);
+
+    std::vector<mt::matmul_params> params(kNumOps);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::bf16;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.bias = data_type_t::none;
+        p.num_threads = kCkTestThreads;
+    }
+
+    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+    const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
+            alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
+            is_wc, params,
+            /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+    ASSERT_EQ(status, status_t::success);
+
+    const char *mode = zendnnl::lowoha::matmul::test_api ::
+                               s_last_group_matmul_direct_gemm_mode.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr)
+            << "group_matmul_direct did not publish a gemm_mode";
+    // Strict, not suite-level: if this shape silently falls back, the
+    // scalar comparison below would still pass on the fallback's output
+    // and the o-block-outer loops would go completely untested.
+    ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+            << "M=17 (3 MR calls) act=none ran on '" << mode
+            << "' instead of the BF16 microkernel, so the o-block-outer "
+               "wide branch was never executed.  This test only has value "
+               "when CK engages — fix the bypass rather than relaxing this "
+               "assertion.";
+
+    const auto tol = mt::tol_act(/*is_bf16=*/true);
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            const float ref = ref_gemm_act(m, n, K, N, src_bufs[0].data(), K,
+                    wei_bufs[0].data(), N, /*bias=*/nullptr, data_type_t::none,
+                    grp_matmul_gated_act_t::none);
+            const float got = to_f32(dst_bufs[0][m * N + n]);
+            const float bound = std::abs(ref) * tol.rel + tol.abs;
+            ASSERT_NEAR(got, ref, bound)
+                    << "o-block-outer wide branch mismatch at m=" << m
+                    << " n=" << n
+                    << " (M=17, 3 MR calls).  A row offset or "
+                       "block stride in the swapped loops is the likely "
+                       "cause; note m="
+                    << m << " lands in MR call "
+                    << mr_call_of_row(m, M, /*max_mr=*/8) << ".";
+        }
+    }
+}
+
+// Gated-activation sibling of the above.  Exercises the other swapped
+// loop in `dispatch_tile` — the one that writes the halved-width tight
+// arena, where the per-call destination offset additionally folds in
+// `sub_col_base / 2` and `b * (pack_nr / 2)`.  That extra halving is
+// precisely the kind of arithmetic the wide branch cannot cover.
+TEST(CkOblockOuterNesting, GatedBranchAtThresholdMatchesRef) {
+    CK_SKIP_IF_NO_BF16_ISA();
+
+    mt::AlgoEnvGuard algo_guard(3);
+    mt::CustomKernelOverride ck_guard(true);
+    ::reset_grp_matmul_caches();
+
+    // num_ops == 1: the swap is gated on `ctx.single_expert`, so a
+    // multi-expert call would take the original nesting and leave
+    // these tests exercising nothing.
+    constexpr int kNumOps = 1;
+    constexpr int M = 17, K = 1024, N = 2048;
+    constexpr int I = N / 2;
+
+    std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+        wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+        dst_bufs[e].assign(static_cast<size_t>(M) * I, bfloat16_t(0.0f));
+        fill_row_discriminating_src(src_bufs[e], M, K);
+        fill_noncancelling_wei(wei_bufs[e], K, N);
+    }
+
+    std::vector<char> layout(kNumOps, 'r');
+    std::vector<bool> transA(kNumOps, false), transB(kNumOps, false);
+    std::vector<int> Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+    std::vector<float> alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+    std::vector<int> lda(kNumOps, K), ldb(kNumOps, N);
+    // ldc < N selects the tight fused epilogue — the gated swapped loop.
+    std::vector<int> ldc(kNumOps, I);
+    std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps);
+    std::vector<const void *> bias_ptrs(kNumOps, nullptr);
+    std::vector<void *> dst_ptrs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_ptrs[e] = src_bufs[e].data();
+        wei_ptrs[e] = wei_bufs[e].data();
+        dst_ptrs[e] = dst_bufs[e].data();
+    }
+    std::vector<bool> is_wc(kNumOps, true);
+
+    std::vector<mt::matmul_params> params(kNumOps);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::bf16;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.bias = data_type_t::none;
+        p.num_threads = kCkTestThreads;
+    }
+
+    zendnnl::lowoha::matmul::grp_matmul_gated_act_params act_params {};
+    act_params.act = grp_matmul_gated_act_t::silu_and_mul;
+
+    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+    const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
+            alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
+            is_wc, params,
+            /*moe_postop=*/nullptr, &act_params);
+    ASSERT_EQ(status, status_t::success);
+
+    const char *mode = zendnnl::lowoha::matmul::test_api ::
+                               s_last_group_matmul_direct_gemm_mode.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr)
+            << "group_matmul_direct did not publish a gemm_mode";
+    ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+            << "M=17 (3 MR calls) silu_and_mul + tight dst ran on '" << mode
+            << "' instead of the BF16 microkernel, so the o-block-outer "
+               "gated branch was never executed.  Fix the bypass rather "
+               "than relaxing this assertion.";
+
+    const auto tol = mt::tol_act(/*is_bf16=*/true);
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < I; ++n) {
+            const float ref = ref_gemm_act(m, n, K, I, src_bufs[0].data(), K,
+                    wei_bufs[0].data(), N, /*bias=*/nullptr, data_type_t::none,
+                    grp_matmul_gated_act_t::silu_and_mul);
+            const float got = to_f32(dst_bufs[0][m * I + n]);
+            const float bound = std::abs(ref) * tol.rel + tol.abs;
+            ASSERT_NEAR(got, ref, bound)
+                    << "o-block-outer gated branch mismatch at m=" << m
+                    << " n=" << n
+                    << " (M=17, 3 MR calls).  Suspect the "
+                       "halved-width tight destination offset; note m="
+                    << m << " lands in MR call "
+                    << mr_call_of_row(m, M, /*max_mr=*/8) << ".";
+        }
+    }
+}
+
+// Multi-expert guard.  `dispatch_tile` is the shared per-tile leaf, so a
+// MoE frame reaches the same code; the swap is held to num_ops == 1 via
+// `ctx.single_expert` because it was only characterised on dense FFN
+// shapes.  This case is the same M=17 threshold shape with four experts,
+// which therefore keeps the original MR-call-outer nesting.
+//
+// Two jobs.  Permanently, it pins numerical correctness for MoE at the
+// threshold.  During review of the guard it also serves as the control:
+// with a deliberate fault injected into the swapped loops, the two
+// single-expert tests above fail while this one still passes — which is
+// what demonstrates that multi-expert never enters that code.
+TEST(CkOblockOuterNesting, MultiExpertAtThresholdKeepsOriginalNesting) {
+    CK_SKIP_IF_NO_BF16_ISA();
+
+    mt::AlgoEnvGuard algo_guard(3);
+    mt::CustomKernelOverride ck_guard(true);
+    ::reset_grp_matmul_caches();
+
+    constexpr int kNumOps = 4;
+    constexpr int M = 17, K = 1024, N = 2048;
+
+    std::vector<std::vector<bfloat16_t>> src_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> wei_bufs(kNumOps);
+    std::vector<std::vector<bfloat16_t>> dst_bufs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_bufs[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.0f));
+        wei_bufs[e].assign(static_cast<size_t>(K) * N, bfloat16_t(0.0f));
+        dst_bufs[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        fill_row_discriminating_src(src_bufs[e], M, K, e);
+        fill_noncancelling_wei(wei_bufs[e], K, N);
+    }
+
+    std::vector<char> layout(kNumOps, 'r');
+    std::vector<bool> transA(kNumOps, false), transB(kNumOps, false);
+    std::vector<int> Ms(kNumOps, M), Ns(kNumOps, N), Ks(kNumOps, K);
+    std::vector<float> alpha(kNumOps, 1.0f), beta(kNumOps, 0.0f);
+    std::vector<int> lda(kNumOps, K), ldb(kNumOps, N), ldc(kNumOps, N);
+    std::vector<const void *> src_ptrs(kNumOps), wei_ptrs(kNumOps);
+    std::vector<const void *> bias_ptrs(kNumOps, nullptr);
+    std::vector<void *> dst_ptrs(kNumOps);
+    for (int e = 0; e < kNumOps; ++e) {
+        src_ptrs[e] = src_bufs[e].data();
+        wei_ptrs[e] = wei_bufs[e].data();
+        dst_ptrs[e] = dst_bufs[e].data();
+    }
+    std::vector<bool> is_wc(kNumOps, true);
+
+    std::vector<mt::matmul_params> params(kNumOps);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::bf16;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.bias = data_type_t::none;
+        p.num_threads = kCkTestThreads;
+    }
+
+    moe_test_utils::GemmModeCaptureGuard gemm_mode_guard;
+
+    const auto status = group_matmul_direct(layout, transA, transB, Ms, Ns, Ks,
+            alpha, src_ptrs, lda, wei_ptrs, ldb, bias_ptrs, beta, dst_ptrs, ldc,
+            is_wc, params,
+            /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+    ASSERT_EQ(status, status_t::success);
+
+    const char *mode = zendnnl::lowoha::matmul::test_api ::
+                               s_last_group_matmul_direct_gemm_mode.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr)
+            << "group_matmul_direct did not publish a gemm_mode";
+    ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+            << "M=17 4-expert act=none ran on '" << mode
+            << "' instead of the BF16 microkernel.  Without CK engagement "
+               "this case cannot speak to the multi-expert guard at all.";
+
+    // Every expert is checked: a guard that leaked for some expert index
+    // would show up as one bad expert rather than a uniform failure.
+    const auto tol = mt::tol_act(/*is_bf16=*/true);
+    for (int e = 0; e < kNumOps; ++e) {
+        for (int m = 0; m < M; ++m) {
+            for (int n = 0; n < N; ++n) {
+                const float ref = ref_gemm_act(m, n, K, N, src_bufs[e].data(),
+                        K, wei_bufs[e].data(), N,
+                        /*bias=*/nullptr, data_type_t::none,
+                        grp_matmul_gated_act_t::none);
+                const float got = to_f32(dst_bufs[e][m * N + n]);
+                const float bound = std::abs(ref) * tol.rel + tol.abs;
+                ASSERT_NEAR(got, ref, bound)
+                        << "multi-expert mismatch at expert=" << e << " m=" << m
+                        << " n=" << n
+                        << " (M=17); row is in MR "
+                           "call "
+                        << mr_call_of_row(m, M, /*max_mr=*/8) << ".";
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
 // CK-REFUSAL TIGHT FALLBACK regression — silu_and_mul / gelu_and_mul
 //
 // Pins the production-correctness contract from the

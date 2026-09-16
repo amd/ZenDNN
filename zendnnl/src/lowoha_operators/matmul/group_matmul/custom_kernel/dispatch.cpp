@@ -825,6 +825,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // false; the bf16 / act=none / bias-free / deep-K / M>max_mr guards in
     // dispatch_tile still apply, so only W2 decode actually K-blocks.
     out.kblock_auto = is_dense_ffn_decode(num_ops, m_max);
+    out.single_expert = (num_ops == 1);
     // Map framework activation → CK ActKind.  Order matters: refusal
     // gate above guarantees `act` is one of {none, swiglu_oai_mul,
     // silu_and_mul, gelu_and_mul} at this point.
@@ -1580,6 +1581,17 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
         }
     }
 }
+
+// Minimum MR-call count at which `dispatch_tile` switches to o-block-outer
+// loop nesting.  Below this the swap does not pay: it trades one redundant
+// walk of the sub-tile's B strip for re-reading the A panel once per o-block,
+// and at 2 calls that is a measured wash-to-slight-loss on a cold cache
+// (-0.5% on Llama-8B, -1.1% on Llama-3B).  From 3 calls up the saved walks
+// dominate on every shape and both cache modes.
+//
+// Paired with `ctx.single_expert`: the reordering only engages for
+// num_ops == 1.  See the use site for why MoE is excluded.
+inline constexpr int kOblockOuterMinCalls = 3;
 } // namespace
 
 void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
@@ -1776,6 +1788,50 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                                     * bias_elem_bytes
                     : nullptr;
 
+            // ── Loop nesting: o-block outer vs MR-call outer ──────────
+            // MR-call outer makes every MR call re-walk the whole
+            // sub-tile's B strip, so the reuse distance for one o-block's
+            // B is the entire sub-tile (512 KB on Llama-8B gate+up).
+            // o-block outer shrinks that distance to a single A chunk
+            // (64 KB), keeping the o-block's 256 KB of B hot across all
+            // MR calls.  `dispatch_tile_bf16_kblocked` already nests this
+            // way; this brings the straight-line path in line with it.
+            //
+            // Restricted to single-expert calls: the reordering was only
+            // characterised on dense FFN shapes (num_ops == 1).  MoE tiles
+            // are narrower because N is split across more concurrent work,
+            // so the o-block count per sub-tile — and with it the whole
+            // benefit — can differ.  Both orders compute the same result,
+            // so this is a scope guard, not a correctness one.
+            if (ctx.single_expert && n_calls >= kOblockOuterMinCalls) {
+                for (int b = 0; b < n_blocks; ++b) {
+                    const bfloat16_t *Bpacked_blk = Bpacked_blk_base
+                            + static_cast<size_t>(b) * o_blk_stride;
+                    const void *bias_blk = (bias_blk_base != nullptr)
+                            ? static_cast<const void *>(bias_blk_base
+                                      + static_cast<size_t>(b) * ctx.pack_nr
+                                              * bias_elem_bytes)
+                            : nullptr;
+                    int m_off_b = 0;
+                    for (int c = 0; c < n_calls; ++c) {
+                        const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+                        const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+                        const bfloat16_t *A_chunk
+                                = A + static_cast<size_t>(m_off_b) * lda;
+                        bfloat16_t *Tight_row
+                                = static_cast<bfloat16_t *>(tight_dst)
+                                + static_cast<size_t>(m_off_b) * tight_ldc
+                                + (sub_col_base / 2)
+                                + static_cast<size_t>(b) * (ctx.pack_nr / 2);
+                        kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
+                                /*Cout=*/nullptr, /*ldc=*/0,
+                                static_cast<void *>(Tight_row), tight_ldc, K);
+                        m_off_b += mr_now;
+                    }
+                }
+                continue;
+            }
+
             int m_off = 0;
             for (int c = 0; c < n_calls; ++c) {
                 const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
@@ -1831,6 +1887,35 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
                 ? static_cast<const char *>(bias)
                         + static_cast<size_t>(sub_col_base) * bias_elem_bytes
                 : nullptr;
+
+        if (ctx.single_expert && n_calls >= kOblockOuterMinCalls) {
+            for (int b = 0; b < n_blocks; ++b) {
+                const bfloat16_t *Bpacked_blk = Bpacked_blk_base
+                        + static_cast<size_t>(b) * o_blk_stride;
+                const void *bias_blk = (bias_blk_base != nullptr)
+                        ? static_cast<const void *>(bias_blk_base
+                                  + static_cast<size_t>(b) * ctx.pack_nr
+                                          * bias_elem_bytes)
+                        : nullptr;
+                int m_off_b = 0;
+                for (int c = 0; c < n_calls; ++c) {
+                    const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+                    const ukernel_fn_t kfn = ctx.kfn_table[mr_now];
+                    const bfloat16_t *A_chunk
+                            = A + static_cast<size_t>(m_off_b) * lda;
+                    std::byte *Wide_row = Tight_bytes
+                            + (static_cast<size_t>(m_off_b) * tight_ldc
+                                      + sub_col_base
+                                      + static_cast<size_t>(b) * ctx.pack_nr)
+                                    * dst_elem_bytes;
+                    kfn(A_chunk, lda, Bpacked_blk, bias_blk, ctx.bias_kind,
+                            Wide_row, tight_ldc,
+                            /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
+                    m_off_b += mr_now;
+                }
+            }
+            continue;
+        }
 
         int m_off = 0;
         for (int c = 0; c < n_calls; ++c) {
