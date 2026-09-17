@@ -1471,6 +1471,21 @@ static void resolve_kernel(MatmulConfig &cfg, const global_options &options,
     }
 }
 
+// LOWOHA kernel_select uses ZENDNNL_MATMUL_ALGO / ZENDNNL_BMM_ALGO when
+// params.lowoha_algo is unset. Catalog rows still name aocl_dlp_blocked, so
+// stamp the process-wide algo onto cfg.kernel_name before the expansion
+// table, CSV, and sweep-dedup signature so they describe the kernel that
+// will run (e.g. runner -a 3 -> onednn_blocked).
+static void apply_executed_kernel(
+        MatmulConfig &cfg, const global_options &options) {
+    zendnnl::ops::matmul_config_t &matmul_config
+            = zendnnl::ops::matmul_config_t::instance();
+    const int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo()
+                                            : matmul_config.get_algo();
+    const matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
+    if (algo != matmul_algo_t::none) { cfg.kernel_name = algoToStr(algo); }
+}
+
 // Merge a catalog dtype onto a base config. The input file has priority: only
 // fields the row did not provide (see MatmulConfig::provided) are filled from
 // the catalog, which acts purely as a default source. Numeric/bool quant
@@ -1480,8 +1495,10 @@ static void resolve_kernel(MatmulConfig &cfg, const global_options &options,
 // swept dtype's full profile -- dt plus the weight/src quant granularity,
 // group sizes and scale dtypes -- overrides the file so the dtype axis truly
 // sweeps (e.g. a per-token entry becomes per-token even if the row was
-// per-group). Non-quant fields (kernel, bias, transpose, alpha/beta, iters)
-// still come from the file.
+// per-group). Non-quant fields (bias, transpose, alpha/beta, iters) still
+// come from the file. Kernel is filled here only when the row omitted it;
+// apply_executed_kernel later overwrites it from ZENDNNL_MATMUL_ALGO /
+// ZENDNNL_BMM_ALGO when that env algo is set.
 static void apply_sweep_dtype(MatmulConfig &cfg, const SweepDTypeSpec &spec,
         const global_options &options, bool force_profile) {
     if (force_profile || !cfg.provided.dt) {
@@ -1520,32 +1537,102 @@ static std::vector<MatmulConfig> expand_m_sweep(
     return out;
 }
 
+static bool quantized_weight_dtype(const MatmulConfig &cfg) {
+    return cfg.dt.size() >= 2
+            && (cfg.dt[1] == data_type_t::s8 || cfg.dt[1] == data_type_t::s4
+                    || cfg.dt[1] == data_type_t::u4);
+}
+
+// Per-group scale tensors encode K / group_size groups. A group size of 0 or
+// one that does not divide K would create a zero or truncated scale shape.
+static std::string per_group_scale_skip_reason(const MatmulConfig &cfg) {
+    if (cfg.scale_granularity == "group"
+            && (cfg.group_size == 0 || cfg.k % cfg.group_size != 0)) {
+        return "weight group_size=" + std::to_string(cfg.group_size)
+                + " does not divide K=" + std::to_string(cfg.k);
+    }
+    const bool has_src_scale = cfg.src_dynamic_quant
+            || (cfg.dt.size() >= 2 && cfg.dt[0] == data_type_t::s8
+                    && cfg.dt[1] == data_type_t::s8);
+    if (has_src_scale && cfg.src_scale_granularity == "per-group"
+            && (cfg.src_group_size == 0 || cfg.k % cfg.src_group_size != 0)) {
+        return "src_group_size=" + std::to_string(cfg.src_group_size)
+                + " does not divide K=" + std::to_string(cfg.k);
+    }
+    return {};
+}
+
+static void note_sweep_skip(
+        bool log_skips, size_t *skipped, const std::string &msg) {
+    if (!log_skips) { return; }
+    commonlog_warning(msg);
+    if (skipped) { ++*skipped; }
+}
+
 // --- dtype sweep ----------------------------------------------------------
 // Expand one config across the requested catalog dtypes. Each entry applies its
 // dtype/quant profile (subject to force_profile), is checked with the shared
 // --input_file validator, and normalized. Entries that are invalid or require
-// the LOWOHA path when it is off are dropped.
+// the LOWOHA path when it is off are dropped, with one warning per skipped
+// profile when log_skips is true (callers log once per base shape, not per M).
 static std::vector<MatmulConfig> expand_dtype_sweep(const MatmulConfig &base,
         const std::vector<size_t> &dtype_indices, const global_options &options,
-        bool force_profile, bool is_lowoha) {
+        bool force_profile, bool is_lowoha, bool log_skips, size_t *skipped) {
     std::vector<MatmulConfig> out;
+    const std::string kn = "k=" + std::to_string(base.k) + ", n="
+            + std::to_string(base.n_values.empty() ? 0 : base.n_values[0]);
     if (dtype_indices.empty()) {
+        if (options.ndims > 2 && quantized_weight_dtype(base)) {
+            note_sweep_skip(log_skips, skipped,
+                    "Skipping quantized BMM file row (" + kn
+                            + "); BMM sweep supports bf16/fp32 only.");
+            return out;
+        }
+        const std::string why = per_group_scale_skip_reason(base);
+        if (!why.empty()) {
+            note_sweep_skip(log_skips, skipped,
+                    "Skipping file dtype for " + kn + ": " + why + ".");
+            return out;
+        }
         out.push_back(base);
         return out;
     }
     out.reserve(dtype_indices.size());
     for (const size_t dtype_idx : dtype_indices) {
         const SweepDTypeSpec &spec = lookup_dtype(dtype_idx);
-        if (spec.requires_lowoha && !is_lowoha) { continue; }
+        const std::string tag
+                = std::string("sweep dtype '") + spec.name + "' (" + kn + ")";
+        if (spec.requires_lowoha && !is_lowoha) {
+            note_sweep_skip(log_skips, skipped,
+                    "Skipping " + tag + ": quantized profiles require "
+                                        "--lowoha=true.");
+            continue;
+        }
+        // BMM tensor creation currently does not attach weight quantization
+        // metadata and explicitly disables dynamic source quantization. Until
+        // that metadata is implemented, only the float catalog profiles are
+        // executable for ndims > 2.
+        if (options.ndims > 2 && spec.requires_lowoha) {
+            note_sweep_skip(log_skips, skipped,
+                    "Skipping " + tag + ": quantized BMM is not supported.");
+            continue;
+        }
         MatmulConfig cfg = base;
         apply_sweep_dtype(cfg, spec, options, force_profile);
         // Reuse the exact same dtype/quant validation as the --input_file path
         // instead of a parallel sweep-only validator.
-        const std::string ctx = std::string("sweep dtype '") + spec.name
-                + "' (k=" + std::to_string(cfg.k)
-                + ", n=" + std::to_string(cfg.n_values[0]) + ")";
-        if (!validate_dtype_fields(cfg, ctx)) { continue; }
+        if (!validate_dtype_fields(cfg, tag)) {
+            // validate_dtype_fields already logs the specific error.
+            if (log_skips && skipped) { ++*skipped; }
+            continue;
+        }
         normalize_w4a8_quant_config(cfg);
+        const std::string why = per_group_scale_skip_reason(cfg);
+        if (!why.empty()) {
+            note_sweep_skip(
+                    log_skips, skipped, "Skipping " + tag + ": " + why + ".");
+            continue;
+        }
         out.push_back(std::move(cfg));
     }
     return out;
@@ -1596,7 +1683,8 @@ static void print_sweep_expansion_table(
     const std::vector<Col> tail = {{"M", 7}, {"K", 8}, {"N", 8}, {"dt", 16},
             {"kernel", 18}, {"w_gran", 9}, {"w_grp", 7}, {"w_sdt", 7},
             {"src_dq", 7}, {"src_gran", 11}, {"src_grp", 8}, {"src_sdt", 8},
-            {"cache", 6}};
+            {"cache", 6}, {"wconst", 7}, {"trA", 4}, {"trB", 4}, {"alpha", 8},
+            {"beta", 8}, {"bias", 5}, {"bdt", 6}, {"postops", 16}};
     cols.insert(cols.end(), tail.begin(), tail.end());
 
     auto print_row = [&](const std::vector<std::string> &vals) {
@@ -1636,6 +1724,27 @@ static void print_sweep_expansion_table(
         vals.push_back(disp_src_group_size(c));
         vals.push_back(disp_src_scale_dt(c));
         vals.push_back(cache_mode_to_str(c.cache_mode));
+        vals.push_back(std::to_string(c.is_weights_const));
+        vals.push_back(std::to_string(c.isTransA));
+        vals.push_back(std::to_string(c.isTransB));
+        {
+            std::ostringstream ab;
+            ab << c.alpha;
+            vals.push_back(ab.str());
+            ab.str(std::string());
+            ab.clear();
+            ab << c.beta;
+            vals.push_back(ab.str());
+        }
+        vals.push_back(std::to_string(c.isBiasEnabled));
+        vals.push_back(
+                c.isBiasEnabled ? datatypeToStr(c.bias_dt) : std::string());
+        std::string postop_str;
+        for (size_t j = 0; j < c.post_ops.size(); ++j) {
+            if (j) { postop_str += ':'; }
+            postop_str += postOpsToStr(c.post_ops[j]);
+        }
+        vals.push_back(postop_str);
         print_row(vals);
     }
     std::cout << std::flush;
@@ -1662,14 +1771,16 @@ std::vector<MatmulConfig> expand_matmul_sweep(
             = dtype_indices.empty() ? 1 : dtype_indices.size();
     out.reserve(base.size() * m_values.size() * dtype_factor * cache_factor);
 
-    // A benchmark is uniquely identified by the shape plus the full dtype/quant
-    // config it ends up running, so dedup on the final config signature rather
-    // than on shape alone. This keeps distinct rows that share a shape but differ
-    // in quant (e.g. per-group vs per-token) while still collapsing genuinely
-    // identical configs -- whether they come from repeated input rows or from a
-    // forced-dtype sweep where several catalog dtypes reduce to the same dt.
+    // A benchmark is uniquely identified by the GEMM it runs, not by (K,N)
+    // alone. Dedup on the final config signature so rows that share a shape
+    // but differ in quant, transpose, bias, or post-ops stay distinct (e.g.
+    // BERT-large vs DLRMv2 both use (1024,1024)). Genuinely identical configs
+    // still collapse unless --sweep_dedup=false -- repeated input rows,
+    // DistilBERT reusing BERT (384,64), or a forced-dtype sweep where several
+    // catalog dtypes reduce to the same dt.
     std::set<std::string> seen_configs;
     size_t duplicate_configs = 0;
+    size_t incompatible_configs = 0;
     auto config_signature = [](const MatmulConfig &c) {
         std::ostringstream os;
         os << c.bs << '|' << c.m << '|' << c.k << '|' << c.n_values[0] << '|';
@@ -1680,33 +1791,61 @@ std::vector<MatmulConfig> expand_matmul_sweep(
            << c.group_size << '|' << static_cast<int>(c.scale_dt) << '|'
            << c.src_dynamic_quant << '|' << c.src_scale_granularity << '|'
            << c.src_group_size << '|' << static_cast<int>(c.src_scale_dt) << '|'
-           << static_cast<int>(c.cache_mode);
+           << static_cast<int>(c.cache_mode) << '|' << c.is_weights_const << '|'
+           << c.isTransA << '|' << c.isTransB << '|' << std::hexfloat << c.alpha
+           << '|' << c.beta << std::defaultfloat << '|' << c.isBiasEnabled
+           << '|';
+        // Only fold in the epilogue dtypes that this config actually uses: a
+        // disabled bias or a non-binary post-op leaves its dtype at the struct
+        // default, which says nothing about the GEMM being run.
+        if (c.isBiasEnabled) { os << static_cast<int>(c.bias_dt); }
+        os << '|';
+        for (const auto po : c.post_ops) {
+            os << static_cast<int>(po) << ',';
+        }
+        os << '|';
+        if (!c.binary_post_ops_pos.empty()) {
+            os << static_cast<int>(c.post_op_dt);
+        }
         return os.str();
     };
 
     for (const auto &base_cfg : base) {
         if (base_cfg.n_values.size() != 1) {
-            commonlog_warning("Skipping pipeline row '", base_cfg.modelName,
-                    "' during sweep expansion.");
+            if (base_cfg.modelName.empty()) {
+                commonlog_warning("Skipping pipeline (multi-N) row k=",
+                        base_cfg.k, " during sweep expansion.");
+            } else {
+                commonlog_warning("Skipping pipeline row '", base_cfg.modelName,
+                        "' during sweep expansion.");
+            }
             continue;
         }
         if (base_cfg.k == 0 || base_cfg.n_values[0] == 0) { continue; }
 
         // Compose the independent axes: first vary M, then dtype on each
-        // M-expanded config, then cache mode on each dtype-expanded config. Dedup
-        // the fully-built configs.
+        // M-expanded config, then cache mode on each dtype-expanded config.
+        // Dedup the fully-built configs unless --sweep_dedup=false.
+        // Log incompatible dtype/quant drops once per base row (first M), not
+        // once per expanded M, so a long M list does not spam the log.
+        bool log_dtype_skips = true;
         for (const MatmulConfig &m_cfg : expand_m_sweep(base_cfg, m_values)) {
             for (MatmulConfig &d_cfg : expand_dtype_sweep(m_cfg, dtype_indices,
-                         options, force_profile, is_lowoha)) {
+                         options, force_profile, is_lowoha, log_dtype_skips,
+                         log_dtype_skips ? &incompatible_configs : nullptr)) {
                 for (MatmulConfig &cfg :
                         expand_cache_sweep(d_cfg, cache_modes)) {
-                    if (!seen_configs.insert(config_signature(cfg)).second) {
+                    apply_executed_kernel(cfg, options);
+                    if (options.sweep_dedup
+                            && !seen_configs.insert(config_signature(cfg))
+                                        .second) {
                         duplicate_configs++;
                         continue;
                     }
                     out.push_back(std::move(cfg));
                 }
             }
+            log_dtype_skips = false;
         }
     }
 
@@ -1718,9 +1857,15 @@ std::vector<MatmulConfig> expand_matmul_sweep(
     std::cout << "Sweep expansion: " << base.size() << " input row(s) -> "
               << out.size() << " config(s) (M x dtype"
               << (cache_modes.empty() ? "" : " x cache") << " cross-product).";
-    if (duplicate_configs > 0) {
+    if (!options.sweep_dedup) {
+        std::cout << " Dedup disabled; kept all expanded configs.";
+    } else if (duplicate_configs > 0) {
         std::cout << " Skipped " << duplicate_configs
                   << " duplicate config(s).";
+    }
+    if (incompatible_configs > 0) {
+        std::cout << " Skipped " << incompatible_configs
+                  << " incompatible dtype/quant profile(s).";
     }
     std::cout << std::endl;
 

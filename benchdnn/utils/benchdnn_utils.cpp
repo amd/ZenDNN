@@ -881,6 +881,17 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
             return NOT_OK;
         }
         options.src_scale_dt = src_scale_dt;
+    } else if (arg.find("--sweep_dedup=") == 0) {
+        const std::string val = arg.substr(14);
+        if (val == "true" || val == "1") {
+            options.sweep_dedup = true;
+        } else if (val == "false" || val == "0") {
+            options.sweep_dedup = false;
+        } else {
+            commonlog_error("Invalid value for sweep_dedup='", val,
+                    "'. Use true/false or 1/0.");
+            return NOT_OK;
+        }
     } else if (arg.find("--sweep=") == 0) {
         const std::string val = arg.substr(8);
         if (val == "true" || val == "1") {

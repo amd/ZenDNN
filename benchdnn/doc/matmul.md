@@ -188,6 +188,22 @@ Use `--num_weight_buffers=<n>` with `--cache_mode=warm` to control how many dist
 
 ---
 
+### 6. In-binary sweep (`--sweep`)
+
+Expand a compact input file across **M**, **dtype/quant**, and optionally **cache mode** inside one benchdnn process. Useful with the shape files in `input/matmul/benchmark_sweep/`.
+
+See **[matmul_sweep.md](matmul_sweep.md)** for flags, dtype catalog, M defaults, shell-wrapper usage, and coverage notes.
+
+Quick example:
+
+```sh
+./build/benchdnn/benchdnn --op=matmul --lowoha=true \
+  --sweep=true --m_sweep=1:128:512 --dtype_sweep=all \
+  --input_file=benchdnn/input/matmul/benchmark_sweep/llm_matmul_shapes.txt
+```
+
+---
+
 ## Output
 
 The benchmark prints the following for each input:

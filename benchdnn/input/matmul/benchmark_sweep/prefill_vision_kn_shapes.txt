@@ -1,0 +1,106 @@
+# PyTorch vision / multimodal (K,N) matmul shapes
+#
+# Contains the remaining PyTorch model shapes from:
+#   bf16_pytorch_models_eval.txt and fp32_pytorch_models_eval.txt
+#
+# Format: M, K, N, iters, src:wei:dst, bias, bias_dt, postOp, postOp_dt, kernel, weights_const, transA, transB, alpha, beta, wei_scale_gran, wei_group_size, wei_scale_dt, warmup_iters
+# M=1 is a template; M and dtype are expanded via sweep.
+# PyTorch warmup_iters is 500. For each (K,N), iters is the lowest source value
+# across M values (100, 200, or 1000) to keep large-M sweeps practical.
+#
+# M values used in the source files but NOT in the default --m_sweep:
+#   128, 256, 4096, 8192, 16384
+# Default benchdnn M sweep: 1, 4, 8, 16, 32, 64, 512, 1024, 2048
+# Recommended extended sweep:
+#   -m 1:4:8:16:32:64:128:256:512:1024:2048:4096:8192:16384
+#
+# Total unique (K,N) in this file: 86
+# ═══════════════════════════════════════════════════════════════════════
+# PYTORCH VISION / MULTIMODAL SHAPES  (86 shapes)
+# ═══════════════════════════════════════════════════════════════════════
+1, 2, 1280, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 32, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 40, 77, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 40, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 64, 77, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 64, 160, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 64, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 64, 476, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 64, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 77, 40, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 77, 64, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 77, 80, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 77, 160, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 80, 77, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 80, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 128, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 256, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 4096, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 30000, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 128, 30522, 200, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 160, 64, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 160, 77, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 160, 256, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 256, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 256, 128, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 256, 160, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 256, 256, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 256, 1024, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 320, 320, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 320, 1280, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 320, 2560, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 32, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 54, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 64, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 384, 1536, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 476, 64, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 40, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 64, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 80, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 128, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 1024, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 30522, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 32128, 200, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 50265, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 512, 250112, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 640, 640, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 640, 5120, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 320, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 640, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 1280, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 2304, 200, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 30522, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 32000, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 32005, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 50005, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 50257, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 50265, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 768, 50272, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 256, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 29056, 200, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 32000, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 50265, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1024, 128112, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1280, 320, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1280, 640, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1280, 10240, 200, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1536, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1536, 384, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1536, 6144, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 1536, 128100, 100, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 512, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 640, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 8008, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2816, 1280, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 2, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 128, 1000, bf16:bf16:bf16, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500

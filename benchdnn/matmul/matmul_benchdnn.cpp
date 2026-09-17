@@ -434,11 +434,9 @@ int bench(const std::string &in_filename, const std::string &out_filename,
                     "--sweep is only supported with --input_model_file or "
                     "--input_file; "
                     "ignoring sweep.");
-        } else if (isPipeline) {
-            commonlog_warning(
-                    "--sweep does not support pipeline (multi-layer) configs; "
-                    "ignoring sweep.");
         } else {
+            // Pipeline (multi-N) rows are skipped inside expand_matmul_sweep;
+            // a mixed file still sweeps its single-layer rows.
             try {
                 matmulConfig
                         = expand_matmul_sweep(matmulConfig, options, isLOWOHA);
@@ -448,6 +446,9 @@ int bench(const std::string &in_filename, const std::string &out_filename,
                             "configurations.");
                     return NOT_OK;
                 }
+                // Pipeline rows were skipped during expansion; remaining
+                // configs are single-layer, so use the non-pipeline results path.
+                isPipeline = false;
             } catch (const std::exception &e) {
                 testlog_error("Sweep expansion failed: ", e.what());
                 return NOT_OK;

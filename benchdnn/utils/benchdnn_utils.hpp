@@ -91,6 +91,7 @@ struct global_options {
             dtype_sweep_str; /**< Comma-separated sweep dtypes or "all" for --dtype_sweep. */
     std::string
             cache_sweep_str; /**< Comma-separated cache modes (hot,cold,warm) for --cache_sweep; empty = no cache sweep. */
+    bool sweep_dedup; /**< When true (default), collapse identical expanded configs. When false, keep every expanded row. */
 
     // SDPA-specific options (used by --op=sdpa).
     // Two different conventions are used for the default-constructed values below:
@@ -157,6 +158,7 @@ struct global_options {
         , m_sweep_str("")
         , dtype_sweep_str("")
         , cache_sweep_str("")
+        , sweep_dedup(true)
         , num_heads(0)
         , seq_len(0)
         , kv_seq_len(0)

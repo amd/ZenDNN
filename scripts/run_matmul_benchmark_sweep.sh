@@ -39,6 +39,9 @@ set -euo pipefail
 #   -d, --dtype-sweep <list|all>  In-binary dtype sweep (comma-separated names or 'all'),
 #                                 e.g. -d all. Forwarded as --sweep=true --dtype_sweep=...
 #                                 (matmul/bmm only)
+#   --keep-duplicates             Forwarded as --sweep_dedup=false. Keep every expanded
+#                                 row (do not collapse identical DistilBERT/BERT shapes,
+#                                 or catalog dtypes that reduce to the same config).
 #   -p, --perf [profile]          External perf stat (matmul/bmm only)
 #   -P, --perf-internal [profile] Internal perf counters (matmul/bmm only)
 #   -h, --help                    Show this help
@@ -88,6 +91,7 @@ THREADS_ARG=""
 CACHE_MODES_ARG=""
 M_SWEEP_ARG=""
 DTYPE_SWEEP_ARG=""
+KEEP_DUPLICATES=0
 OUTDIR="$REPO_ROOT/build"
 PERF_MODE=0
 PERF_PROFILE="cache"
@@ -116,6 +120,7 @@ while [[ $# -gt 0 ]]; do
         -C|--cache-mode) CACHE_MODES_ARG="$2"; shift 2 ;;
         -m|--m-sweep)     M_SWEEP_ARG="$2"; shift 2 ;;
         -d|--dtype-sweep) DTYPE_SWEEP_ARG="$2"; shift 2 ;;
+        --keep-duplicates) KEEP_DUPLICATES=1; shift ;;
         -o|--outdir)  OUTDIR="$2"; shift 2 ;;
         -p|--perf)
             PERF_MODE=1
@@ -215,6 +220,7 @@ if [[ -n "$M_SWEEP_ARG" || -n "$DTYPE_SWEEP_ARG" ]]; then
     SWEEP_ARGS="--sweep=true"
     [[ -n "$M_SWEEP_ARG" ]]     && SWEEP_ARGS="$SWEEP_ARGS --m_sweep=$M_SWEEP_ARG"
     [[ -n "$DTYPE_SWEEP_ARG" ]] && SWEEP_ARGS="$SWEEP_ARGS --dtype_sweep=$DTYPE_SWEEP_ARG"
+    [[ "$KEEP_DUPLICATES" -eq 1 ]] && SWEEP_ARGS="$SWEEP_ARGS --sweep_dedup=false"
     if [[ $PERF_MODE -eq 1 ]]; then
         echo "WARNING: -p/--perf runs one perf stat per input line; with -m/-d each line"
         echo "         expands to many configs, so counters aggregate across them."
@@ -285,7 +291,8 @@ echo "  Cache   : hot (default)"
 fi
 if [[ -n "$SWEEP_ARGS" ]]; then
 echo "  M sweep : ${M_SWEEP_ARG:-(binary default)}"
-echo "  Dtype   : ${DTYPE_SWEEP_ARG:-all}"
+echo "  Dtype   : ${DTYPE_SWEEP_ARG:-(file dtype)}"
+echo "  Dedup   : $([[ "$KEEP_DUPLICATES" -eq 1 ]] && echo off || echo on)"
 fi
 if [[ $PERF_MODE -eq 1 ]]; then echo "  HW Perf : External perf stat ($PERF_PROFILE)"
 elif [[ $PERF_MODE -eq 2 ]]; then echo "  HW Perf : Internal perf_event_open ($PERF_PROFILE)"

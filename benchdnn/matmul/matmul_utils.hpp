@@ -66,12 +66,18 @@ struct MatmulConfig {
     std::vector<zendnnl::common::data_type_t> dt; /**< Data types for
                                                 input, weights, and output (e.g., f32:f32:f32). */
     bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
-    zendnnl::common::data_type_t bias_dt; /**< Data type for the bias tensor
-                                        (e.g., f32, bf16). Defaults to f32 if not specified. */
-    std::vector<zendnnl::common::post_op_type_t>
+    zendnnl::common::data_type_t bias_dt = zendnnl::common::data_type_t::
+            f32; /**< Data type for the bias tensor
+                                        (e.g., f32, bf16). Defaults to f32 if not specified.
+                                        The input parsers skip this field when bias is
+                                        disabled, so it must not be left indeterminate. */
+    std::vector<zendnnl::ops::post_op_type_t>
             post_ops; /**< List of post operations
                                                       to apply (e.g., relu, gelu). */
-    zendnnl::common::data_type_t post_op_dt; /**< Datatype of post operation. */
+    zendnnl::common::data_type_t post_op_dt = zendnnl::common::data_type_t::
+            f32; /**< Datatype of post operation.
+                                        Only parsed for binary post-ops, so it must not
+                                        be left indeterminate for the other cases. */
     std::vector<int> binary_post_ops_pos; /**< List of positions for
                                         binary post-operations. */
     std::string kernel_name; /**< Name of the kernel backend
@@ -207,6 +213,8 @@ void normalize_w4a8_quant_config(MatmulConfig &cfg);
  * Reads `options.m_sweep_str` (default M list when empty) and
  * `options.dtype_sweep_str` (empty = preserve file dtype; `all` or
  * comma-separated dtype names when --dtype_sweep is set).
+ * Identical expanded configs are collapsed unless `options.sweep_dedup`
+ * is false (`--sweep_dedup=false`).
  * Clones each parsed config and patches M + dtype/quant fields.
  */
 std::vector<MatmulConfig> expand_matmul_sweep(
