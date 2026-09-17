@@ -56,18 +56,24 @@
 #                       chosen to match the UTC ISO-8601 stamps used in logs)
 #   --ops LIST          Comma-separated subset of ops to run; default =
 #                       full nightly sweep (everything except batchmatmul).
-#                       Valid names: matmul, group_matmul, reorder, softmax,
+#                       Valid names: matmul, group_matmul, group_matmul_unit,
+#                                    custom_kernel, reorder, softmax,
 #                                    sdpa, normalization, embedding,
-#                                    embedding_bag,
+#                                    embedding_bag, group_embedding,
+#                                    group_embag, static_quant_prepack,
+#                                    weight_cache_inplace,
 #                                    lru_cache, postop_cache, omp_api,
-#                                    matmul_ai_primitive, matmul_ai_lowoha,
-#                                    embag_ai_primitive, embag_ai_lowoha,
+#                                    matmul_ai_lowoha, embag_ai_lowoha,
+#                                    gemv_ai_lowoha, batchmatmul_ai_lowoha,
 #                                    batchmatmul (opt-in only; ~38h)
-#                       (*_ai_* ops pin --ai_test_mode postsub plus
-#                        --lowoha false (primitive) or --lowoha true (lowoha).)
+#                       (*_ai_* ops pin --ai_test_mode postsub. There is no
+#                        primitive twin: AI fixtures GTEST_SKIP on
+#                        --lowoha false.)
 #   --seed N            Fixed seed for reproducibility (default: time-based)
 #   --num-threads N     Forwarded to gtests --num_threads
-#   --lowoha VAL        Forwarded to gtests --lowoha (true|false|1|0)
+#   --lowoha VAL        Forwarded to gtests --lowoha (true|false|1|0).
+#                       Default true. --lowoha false skips LOWOHA-only
+#                       fixtures (matmul, embag, embedding, batchmatmul, AI).
 #   --extra ARG         Extra arg forwarded verbatim to gtests. Repeatable:
 #                       pass --extra once per arg to preserve shell quoting,
 #                       e.g. --extra --gtest_repeat=2 --extra --gtest_color=no.
@@ -86,7 +92,7 @@
 #   ./scripts/run_nightly_gtests.sh --binary ./build/install/gtests/gtests \
 #                                   --output-dir /scratch/nightly
 #   ./scripts/run_nightly_gtests.sh \
-#       --ops matmul_ai_primitive,matmul_ai_lowoha,embag_ai_primitive,embag_ai_lowoha
+#       --ops matmul_ai_lowoha,embag_ai_lowoha,gemv_ai_lowoha,batchmatmul_ai_lowoha
 #   ./scripts/run_nightly_gtests.sh --ops batchmatmul   # opt-in; ~38h
 # ===== USAGE_END =====
 #
@@ -124,69 +130,98 @@ log_error()  { _log ERROR "$@"; }
 # Two kinds of ops live in OP_FILTER:
 #   * Randomised ops (matmul, group_matmul, reorder, ..., batchmatmul) sweep
 #     random parameter tuples and inherit the global --seed / --num-threads /
-#     --lowoha if supplied; their OP_EXTRA entry is empty.
-#   * AI ops (matmul_ai_*, embag_ai_*) run the deterministic curated parameter
-#     set under a specific test mode. They pin --ai_test_mode and --lowoha at
-#     the per-op level via OP_EXTRA so the policy is recorded with the op,
-#     not implicit on the command line.
+#     --lowoha; their OP_EXTRA entry is empty.
+#   * AI ops (matmul_ai_lowoha, embag_ai_lowoha, gemv_ai_lowoha,
+#     batchmatmul_ai_lowoha) run the deterministic curated parameter set.
+#     They pin --ai_test_mode postsub via OP_EXTRA. Nightly always passes
+#     --lowoha true (gtest default is also true); --lowoha false is a skip
+#     of the whole suite, not a primitive-operator path.
 #
-# group_matmul uses a wildcard (GroupMatmul*/*) so all twelve group_matmul
-# instantiations land in one log file.
+# Filter patterns are anchored at the start of gtest's full test name
+# (<instantiation>/<class>.<test> for parameterized suites, <class>.<test> for
+# TEST/TEST_F). A trailing '/*' therefore restricts a pattern to parameterized
+# suites only, which is why the plain-suite ops below are matched on a bare
+# prefix (e.g. 'Sdpa*', not 'Sdpa/*') -- otherwise sibling TEST_F suites added
+# later silently drop out of the sweep.
 #
-# OP_NAMES is the *default* nightly sweep (order = run order). Everything
-# listed here finishes within ~3-4 hours total. batchmatmul takes ~38h on
-# default test_num=400 and is therefore excluded from the default; it stays
-# in OP_FILTER so users can opt in explicitly via `--ops batchmatmul`.
+# group_matmul uses a wildcard (GroupMatmul*) so every group_matmul
+# instantiation lands in one log file.
+#
+# OP_NAMES is the *default* nightly sweep (order = run order). The only
+# registered op kept out of this list is batchmatmul: it takes ~38h on
+# default test_num=400. It stays in OP_FILTER so users can opt in via
+# `--ops batchmatmul`. All other suites, including the large group_embedding /
+# group_embag / gemv_ai / batchmatmul_ai sweeps, run by default.
 # ------------------------------------------------------------------------------
 OP_NAMES=(
   matmul
   group_matmul
+  group_matmul_unit
+  custom_kernel
   reorder
   softmax
   sdpa
   normalization
   embedding
   embedding_bag
+  group_embedding
+  group_embag
+  static_quant_prepack
+  weight_cache_inplace
   lru_cache
   postop_cache
   omp_api
-  matmul_ai_primitive
   matmul_ai_lowoha
-  embag_ai_primitive
   embag_ai_lowoha
+  gemv_ai_lowoha
+  batchmatmul_ai_lowoha
 )
 declare -A OP_FILTER=(
   [matmul]='Matmul/*'
   [batchmatmul]='BatchMatmul/*'
-  [group_matmul]='GroupMatmul*/*'
-  [reorder]='Reorder/*'
+  [group_matmul]='GroupMatmul*'
+  # TEST_F (non-parameterized) group_matmul suites. These carry no
+  # instantiation prefix, so the 'GroupMatmul*' pattern above cannot reach
+  # them and they need their own op. Listed as explicit prefixes rather than
+  # a broad 'Test*' glob so they do not also re-run the postop_cache suites.
+  [group_matmul_unit]='W8A8MoE*:Ggml*:FusedMoE*:GrpMatmulEnv*:GroupPerChannelQuant*:GroupPerGroupQuant*:TestGroupMatmul*:TestGroupDynamicQuant*:TestFusedMoE*:TestPrepack*:TestSingleExpertParallelRouting*:TestDispatcherActiveTotalNegative*:TestReorderQuantBuffers*'
+  # Custom-kernel suites, split out from group_matmul_unit for log
+  # granularity. 'Ck*' catches the TEST_F suites; '*/Ck*' catches the
+  # parameterized ones, whose instantiation prefixes (Defaults, ShapeMatrix,
+  # SymAndAsym, Override64, GatingMatrix, All{Supported,Rejected}Tuples) do
+  # not begin with 'Ck'.
+  [custom_kernel]='Ck*:*/Ck*'
+  [reorder]='Reorder*:GroupReorder*'
   [softmax]='Softmax/*'
-  [sdpa]='Sdpa/*'
-  [normalization]='Normalization/*'
+  [sdpa]='Sdpa*'
+  [normalization]='Normalization*'
   [embedding]='Embedding/*'
   [embedding_bag]='EmbeddingBag/*'
+  [group_embedding]='GroupEmbedding*'
+  [group_embag]='GroupEmbag*'
   # Fast, deterministic unit/utility suites (no randomized data). Included in
-  # the default sweep; each finishes in well under a second.
+  # the default sweep; each finishes within a few seconds.
+  [static_quant_prepack]='StaticQuantPrepack*'
+  [weight_cache_inplace]='TestWeightCacheInplace*'
   [lru_cache]='LruCacheTryGet.*'
   [postop_cache]='*PostopCache*'
   [omp_api]='OmpApiTest.*'
-  [matmul_ai_primitive]='AITests/TestMatmul*'
   [matmul_ai_lowoha]='AITests/TestMatmul*'
-  [embag_ai_primitive]='AITests/TestEmbagAI*'
   [embag_ai_lowoha]='AITests/TestEmbagAI*'
+  [gemv_ai_lowoha]='AIGemvTests*'
+  [batchmatmul_ai_lowoha]='AITests/TestBatchMatmulAI*'
 )
-# Per-op flag policy. Appended AFTER the global --seed/--num-threads/--lowoha
+# Per-op extra flags. Appended AFTER the global --seed/--num-threads/--lowoha
 # /--extra so they win on conflict (the gtests parser uses last-write-wins via
 # its umap, see gtest_utils.cpp::Parser::operator()).
-#   *_primitive : --lowoha false  -> primitive operator path
-#   *_lowoha    : --lowoha true   -> LOWOHA operator path
-# Both AI variants pin --ai_test_mode postsub so the curated parameter set is
-# deterministic and identical across the two kernel paths.
+# AI ops pin --ai_test_mode postsub so the curated parameter set is
+# deterministic. --lowoha is not pinned here: nightly defaults it to true
+# for every op (see LOWOHA below).
 declare -A OP_EXTRA=(
-  [matmul_ai_primitive]='--ai_test_mode postsub --lowoha false'
-  [matmul_ai_lowoha]='--ai_test_mode postsub --lowoha true'
-  [embag_ai_primitive]='--ai_test_mode postsub --lowoha false'
-  [embag_ai_lowoha]='--ai_test_mode postsub --lowoha true'
+  [matmul_ai_lowoha]='--ai_test_mode postsub'
+  [embag_ai_lowoha]='--ai_test_mode postsub'
+  [gemv_ai_lowoha]='--ai_test_mode postsub'
+  [batchmatmul_ai_lowoha]='--ai_test_mode postsub'
 )
 
 # Per-op wall-clock timeout in seconds. A hung op is killed (SIGTERM, then
@@ -210,7 +245,10 @@ DATE_STAMP="$(date -u +%Y%m%d)"
 OPS_REQUESTED=""
 SEED=""
 NUM_THREADS=""
-LOWOHA=""
+# gtests is LOWOHA-only: --lowoha false makes matmul/embag/embedding/
+# batchmatmul and all AI fixtures GTEST_SKIP. Nightly therefore always
+# forwards --lowoha true unless the caller overrides.
+LOWOHA="true"
 EXTRA_ARGS=()
 TIMEOUT_OVERRIDE=""
 DRY_RUN=0
