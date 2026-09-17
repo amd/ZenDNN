@@ -1158,7 +1158,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_bf16s4f32of32,
-                    aocl_reorder_bf16s4f32of32, weight_cache_type);
+                    aocl_reorder_bf16s4f32of32,
+                    (weight_cache_type == 2) ? 1 : weight_cache_type);
         } else if (lowoha_param.dtypes.wei == data_type_t::s8) {
             if (is_s8_sym_quant_scales) {
                 // B-side K-group size from wei {G,N}, independent of src
