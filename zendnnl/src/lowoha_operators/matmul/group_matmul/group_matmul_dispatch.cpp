@@ -123,7 +123,7 @@ void sequential_experts(const std::vector<char> &layout,
         execute_expert_slice(layout[i], transA[i], transB[i], M[i], N[i], K[i],
                 alpha[i], src[i], lda[i], weight[i], ldb[i], bias[i], beta[i],
                 dst[i], ldc[i], is_weights_const[i], num_threads, params[i],
-                algo);
+                resolve_expert_kernel(1, algo, params[i]));
         // Fused activation: dst[i] is hot in L3 from the GEMM that just finished.
         if (fused_act != grp_matmul_gated_act_t::none) {
             apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i], ldc[i],
@@ -233,7 +233,8 @@ void parallel_multilevel(const std::vector<char> &layout,
                 execute_expert_slice(layout[i], transA[i], transB[i], M[i],
                         N[i], K[i], alpha[i], src[i], lda[i], weight[i], ldb[i],
                         bias[i], beta[i], dst[i], ldc[i], is_weights_const[i],
-                        thr_per_op[i], params[i], algo);
+                        thr_per_op[i], params[i],
+                        resolve_expert_kernel(6, algo, params[i]));
                 if (fused_act != grp_matmul_gated_act_t::none) {
                     apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i],
                             ldc[i], act_dtype);
@@ -262,7 +263,8 @@ void parallel_multilevel(const std::vector<char> &layout,
                     execute_expert_slice(layout[e], transA[e], transB[e], M[e],
                             N[e], K[e], alpha[e], src[e], lda[e], weight[e],
                             ldb[e], bias[e], beta[e], dst[e], ldc[e],
-                            is_weights_const[e], ccd_size, params[e], algo);
+                            is_weights_const[e], ccd_size, params[e],
+                            resolve_expert_kernel(6, algo, params[e]));
                     if (fused_act != grp_matmul_gated_act_t::none) {
                         apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
                                 N[e], ldc[e], act_dtype);
@@ -526,9 +528,9 @@ static bool check_n_tile_extra(const std::vector<int> &M,
         if (any_quant) {
             // W4A8 (s4 weight): accepted on the N-tile path when is_w4a8_config
             // passes AND the shape is a valid per-group layout that flat_n_tile
-            // can column-slice.  flat_n_tile expands s4→s8 into the W4A8 LRU
-            // (no caller-param mutation) and rewrites tile_params to flow
-            // through the sym-quant GEMM path.
+            // can column-slice.  Inner aocl_dlp expands s4→s8 into the W4A8
+            // LRU and rewrites tile_params to flow through sym-quant GEMM;
+            // inner aocl_dlp_blocked slices packed s4 directly.
             // u4 remains rejected (no symmetric W4A8 support).
             if (params[i].dtypes.wei == data_type_t::u4) { return false; }
             if (is_w4a8_config(params[i])) {
@@ -538,8 +540,8 @@ static bool check_n_tile_extra(const std::vector<int> &M,
                 // the ALGO-1 path falls through to the reference W4A8 kernel.
                 return false;
 #else
-                // N-tile-specific extra gates beyond is_w4a8_config:
-                // plain row-major weight required for column slicing.
+                // ALGO 3 needs raw packed s4 (mem_format_b='n'); native
+                // prepack is full-N only.
                 if (params[i].mem_format_b != 'n') { return false; }
 #endif
                 const bool w4a8_src_ok
@@ -761,9 +763,10 @@ static int auto_select_algo(const std::vector<int> &M,
     // INVARIANT — AUTO never returns ALGO 2, 5 or 6 of its own accord.
     //
     //   * no-auto-2: ALGO 2 (flat_m_tile) is OPT-IN ONLY.  No rule below may
-    //     answer 2; the former Rule 0.5 kMTile arm now answers 1.  ALGO 2 is
-    //     reachable exclusively through an explicit `ZENDNNL_GRP_MATMUL_ALGO=2`
-    //     (global pin, handled in `select_grp_matmul_algo`) or an explicit
+    //     answer 2; Rule 0.5's occupancy arrow answers only 1 or 3. ALGO 2
+    //     is reachable exclusively through an explicit
+    //     `ZENDNNL_GRP_MATMUL_ALGO=2` (global pin, handled in
+    //     `select_grp_matmul_algo`) or an explicit
     //     `AUTO_{DECODE,PROMPT}_ALGO=2` phase pin (Rule 1 below, which only
     //     runs when `pins_generic_policy()` is true, i.e. the env was set).
     //     NOTE: `grp_matmul_default_algo_for_phase(prompt)` is still 2, but it
@@ -803,10 +806,10 @@ static int auto_select_algo(const std::vector<int> &M,
     const int active_ops = static_cast<int>(
             std::count_if(M.begin(), M.end(), [](int m) { return m > 0; }));
 
-    // TOTAL expert count for Rule 0.5's ALGO 2 preference.  `total_matmul` is
-    // only meaningful under the framework opt-in (`active_matmul > 0`); a legacy
-    // caller may leave it stale, so read it only then and only when it exceeds
-    // the active count (padded layout).
+    // TOTAL expert count scopes Rule 0.5 to few-expert layers. `total_matmul`
+    // is only meaningful under the framework opt-in (`active_matmul > 0`); a
+    // legacy caller may leave it stale, so read it only then and only when it
+    // exceeds the active count (padded layout).
     int total_experts = num_ops;
     if (!params.empty() && params[0].active_matmul > 0
             && params[0].total_matmul > static_cast<uint32_t>(total_experts)) {
@@ -834,31 +837,25 @@ static int auto_select_algo(const std::vector<int> &M,
 
     // Rule 0.45 — SINGLE DENSE EXPERT DECODE → ALGO 3 (N-tile).
     // A lone expert (`num_ops == 1`) in decode would otherwise be diverted by
-    // Rule 0.5 to `kWideN → ALGO 1`, since a single expert can never fill the
-    // team via M-tiling.  That path never reaches the N-tile planner where the
-    // single-expert optimisations live (adaptive tiling, ragged-N fallback,
-    // K-blocking), so route it to ALGO 3, mirroring the multi-expert decode
-    // default (Rule 2c).  `is_dense_ffn_decode` is the scope predicate shared
-    // with the adaptive N-tile sizer and the auto-K-blocking gate, keeping MoE
-    // and prompt untouched.  Honours an explicit decode pin and the
-    // n_tile_safe clamp; env-gated (default ON) for A/B.  Default and gates
-    // are pinned by the `SingleDenseExpertDecode*` tests in test_algos.cpp.
+    // Rule 0.5's low-occupancy arm to ALGO 1 because one active expert cannot
+    // satisfy the four-threads-per-expert threshold on a normal team. That
+    // path never reaches the N-tile planner where the single-expert
+    // optimisations live (adaptive tiling, ragged-N fallback, K-blocking), so
+    // route it to ALGO 3, mirroring the multi-expert decode default (Rule 2c).
+    // `is_dense_ffn_decode` is the scope predicate shared with the adaptive
+    // N-tile sizer and the auto-K-blocking gate, keeping MoE and prompt
+    // untouched. Honours an explicit decode pin and the n_tile_safe clamp;
+    // env-gated (default ON) for A/B. Default and gates are pinned by the
+    // `SingleDenseExpertDecode*` tests in test_algos.cpp.
     if (is_dense_ffn_decode(num_ops, max_M) && !phase_env_pinned && n_tile_safe
             && get_grp_matmul_dense_decode_ntile()) {
         return pick(3, "auto_rule045_single_dense_decode", 3);
     }
 
-    // DECODE-ONLY: prompt few-experts is handled by Rule 0.7 below, which
-    // preserves the peel to ALGO 1 that flat_m_tile's internal wide-N
-    // fallback used to do.  ALGO 2 is now a PURE M-tile executor without
-    // that fallback, so shallow-M decode (`M[i] < team_size`) would
-    // under-fill the team; classify the regime here — as Rule 0.7 does for
-    // prompt — to reproduce the old internal routing:
-    //   * kWideN (shallow M) → ALGO 1 (full-team sequential = old wide-N).
-    //   * kMTile             → ALGO 2 (tier chosen inside flat_m_tile).
-    // TWO outcomes only — ALGO 3 or ALGO 1.  Never ALGO 2 (see the
-    // `no-auto-2` invariant above), and no M-tile regime classification:
-    // the arrow is a pure occupancy test.
+    // Rule 0.5 — DECODE-ONLY few-expert occupancy arrow. Prompt
+    // few-expert calls are handled by Rule 0.7 below. There are only two
+    // outcomes: ALGO 3 or ALGO 1; the rule is deliberately independent of
+    // dtype and the old M-tile regime classification.
     //
     // ALGO 3 splits each expert's N across the team, so it earns its
     // round-based schedule only when there are enough ACTIVE experts to keep
@@ -868,14 +865,14 @@ static int auto_select_algo(const std::vector<int> &M,
     // whole team for its own N-split with no round overhead.  The
     // Mixtral-class shape lands here: 8 experts with topk=2 means 2 active,
     // so `2*4 = 8 < 32` on any real host → ALGO 1.  Models with more than
-    // `kFewExpertsAlgo2Pref` experts never reach this rule at all and take
+    // `kFewExpertsDecodeThreshold` experts never reach this rule and take
     // the ALGO 3 decode default from Rule 1.
     //
     // Deliberately DTYPE-AGNOSTIC: the same arrow applies to bf16, f16, f32
     // and every INT8 / WOQ variant.  The only dtype-dependent part is the
     // `n_tile_safe` clamp, which is a legality gate (a shape ALGO 3 cannot
     // column-slice must not be handed to it), not a performance heuristic.
-    if (is_decode && total_experts <= kFewExpertsAlgo2Pref
+    if (is_decode && total_experts <= kFewExpertsDecodeThreshold
             && !phase_env_pinned) {
         if (active_ops * kDecodeNTileThreadFactor >= num_threads) {
             return pick(n_tile_safe ? 3 : 1, "auto_rule05_ntile_occupancy", 3);
@@ -929,10 +926,11 @@ static int auto_select_algo(const std::vector<int> &M,
     // A gate-declined decode `=5` pin (Rule 0.6a) resolves to the DECODE DEFAULT
     // here, so the call lands exactly where an UNSET `AUTO_DECODE_ALGO` would.
     // Clearing `phase_env_pinned` above re-enabled the decode policy rules
-    // (0.45 / 0.5 / 0.6); this is the last step that would otherwise still read
-    // the pinned `5` and hand it back.  Substituting the default — rather than
-    // falling through to the Rule 2 legacy cascade — is what makes "declined"
-    // mean "as if unset" instead of a third, otherwise-unreachable policy.
+    // (0.45 / 0.5 / 0.6); this is the last step that would otherwise still
+    // read the pinned `5` and hand it back.  Substituting the default — rather
+    // than falling through to the Rule 2 legacy cascade — is what makes
+    // "declined" mean "as if unset" instead of a third, otherwise-unreachable
+    // policy.
     // A declined PROMPT pin substitutes ALGO 3, not the prompt default.  The
     // `phase_algo == 3 && !n_tile_safe` clamp below still applies, so a shape
     // N-tile cannot serve falls to ALGO 1 rather than running an unsafe plan.
@@ -1126,6 +1124,10 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const char **gemm_mode_out, grp_matmul_gated_act_t fused_act,
         data_type_t act_dtype) {
 
+    const bool custom_kernel_en = !params.empty()
+            && grp_matmul_custom_kernel_enabled(params[0].dtypes.wei,
+                    params[0].dtypes.dst, params[0].dtypes.compute);
+
     // ── WEIGHT_CACHE=2 (in-place) safety downgrade for grouped matmul ─────
     // In-place reorder/pack mutates the caller's weight buffer into a
     // backend-/layout-specific blocked form, so it is only safe when a
@@ -1217,8 +1219,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
 #endif
             const bool mixed_eligible = aocl_dlp_compiled
                     && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
-                    && get_grp_matmul_custom_kernel()
-                    && get_grp_matmul_fused_moe_tight() != 0
+                    && custom_kernel_en && get_grp_matmul_fused_moe_tight() != 0
                     && matmul_config_t::instance().get_lru_cache_capacity()
                             == std::numeric_limits<uint32_t>::max();
             if (mixed_eligible) {
@@ -1325,7 +1326,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             = (fused_act == grp_matmul_gated_act_t::swiglu_oai_mul)
             && get_grp_n_tile_fused_act();
     const bool a3_fuses = (use_algo == 3)
-            && a3_can_fuse_act(fused_act, get_grp_matmul_custom_kernel())
+            && a3_can_fuse_act(fused_act, custom_kernel_en)
             && (caller_layout_tight || wide_fuse_supported);
     const bool act_fused = a3_fuses
             || ((use_algo != 3) && (fused_act != grp_matmul_gated_act_t::none));
@@ -1412,14 +1413,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // checks not visible here (`transA`, `alpha`, `beta`,
         // `is_weights_const`, `ldb` min-row-stride, fused-act/bias dtype
         // matrix).  Surface as a hint, not a guarantee.
-        // Hoist `get_grp_matmul_custom_kernel()` to a named local — the
-        // value is consumed only here, but parking it up front matches
-        // the same "single read per log-line" pattern we applied to the
-        // PLAN apilog in `group_matmul_n_tile.cpp` and makes the log's
-        // read-set explicit at a glance.  The underlying getter caches
-        // its env value, so the saving is microscopic; clarity is the
-        // deliverable.
-        const int log_custom_kernel = get_grp_matmul_custom_kernel();
+        // Report the call-scoped effective value (W4A8 forces CK off), not
+        // merely the process-wide environment setting.
+        const int log_custom_kernel = custom_kernel_en;
         const int log_custom_kernel_int8 = get_grp_matmul_custom_kernel_int8();
         // BF16 family hint — same gate as before.
         const bool ck_hint_bf16 = (use_algo == 3) && log_custom_kernel
@@ -1562,17 +1558,15 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             return false;
         }
     }
-    // ── W4A8 plain materialization for the N-tile path ───────────────
-    // ALGO 3 (including AUTO before final selection) widens s4→s8 for
-    // per-tile column slicing. Full-N ALGOs 1/2/5/6 retain main's
-    // native-or-simulated policy: blocked DLP consumes native s4, while plain
-    // DLP uses its matching simulated-s8 cache. Keeping this population gated
-    // to ALGO 3/AUTO avoids num_ops × (mutex + hash) work on other schedulers.
-    // The side table does not mutate weight[] or params.
+    // ALGO 3/AUTO: materialize plain s8 only for ALGO 3's effective
+    // simulated W4A8 path.
     const int dispatch_num_ops = static_cast<int>(M.size());
     static thread_local std::vector<void *> w4a8_s8_ptrs;
     bool any_w4a8 = false;
-    if (use_algo == 3 || use_algo == 0) {
+    const bool w4a8_algo3_simulated
+            = w4a8_runtime_algo(/*scheduling_algo=*/3, resolve_kernel())
+            == matmul_algo_t::aocl_dlp;
+    if ((use_algo == 3 || use_algo == 0) && w4a8_algo3_simulated) {
         w4a8_populate_plain_s8_cache(weight, K, N, ldb, transB, params,
                 dispatch_num_ops, w4a8_s8_ptrs, any_w4a8);
     }

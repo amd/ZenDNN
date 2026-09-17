@@ -16,8 +16,8 @@
 
 /// @file test_w4a8_per_group.cpp
 /// @brief Grouped MoE W4A8 per-group matmul tests (sparse expert routing).
-/// ALGO 3 W4A8 is always simulated (s4→s8) + aocl_dlp_blocked s8s8_sym_quant.
-/// Full-N ALGOs 1/2/5/6 follow w4a8_runtime_algo (blocked = native s4).
+/// Under group AUTO, ALGO 3 uses native packed s4 and other schedulers use
+/// simulated s4→s8. Pinned group ALGOs preserve the inner-kernel choice.
 
 #include <gtest/gtest.h>
 
@@ -767,9 +767,9 @@ TEST(GroupMatmulW4A8PerGroup, FusedMoeAlgo3VsAlgo1BF16) {
 // Prepack OFF coverage (validates dispatch-level L1 path independently)
 // ═══════════════════════════════════════════════════════════════════════
 
-// ALGO 3 with prepack disabled — validates that the dispatch-level
-// w4a8_populate_plain_s8_cache fills L1 and runtime per-tile L2 reorders
-// work without any prepack pre-warming.
+// ALGO 3 with prepack disabled validates lazy runtime preparation without
+// pre-warming. The pinned ALGO preserves the selected inner kernel, so this
+// test intentionally does not claim native-S4 versus simulated-S8 coverage.
 TEST(GroupMatmulW4A8PerGroup, Algo3PrepackOffBF16) {
     moe_test_utils::AlgoEnvGuard algo3(3);
     moe_test_utils::EnvVarGuard prepack_off("ZENDNNL_GRP_MATMUL_PREPACK", "0");
@@ -794,10 +794,10 @@ TEST(GroupMatmulW4A8PerGroup, Algo1PrepackOffBF16) {
 // vLLM shape reproduction (triggers AOCL illegal-value edge case)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Reproduces the Qwen3-30B-A3B vLLM deployment shape that triggers AOCL
-// "illegal value" on per-tile reorder.  K=2048, N=1024, group_size=128
-// produces n_tile=172 with stable=6 threads — the exact parameters that
-// hit the AOCL s8s8s32os32_sym_quant validation.
+// Reproduces the Qwen3-30B-A3B vLLM deployment shape that previously
+// triggered an AOCL per-tile reorder validation failure. K=2048, N=1024,
+// group_size=128 exercises the same irregular N-tile decomposition in
+// whichever W4A8 mode the pinned inner kernel selects.
 TEST(GroupMatmulW4A8PerGroup, Algo3VllmQwen3ShapeBF16) {
     moe_test_utils::AlgoEnvGuard algo3(3);
     std::vector<int> rows(8, 0);

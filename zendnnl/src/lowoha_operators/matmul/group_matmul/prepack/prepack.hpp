@@ -170,7 +170,9 @@ struct PrepackParams {
     const std::vector<float> *alpha = nullptr;
     const std::vector<float> *beta = nullptr;
 
-    // Dtype context (read once from `params[0].dtypes` by the caller).
+    // Dtype context. Source classification follows the first active expert;
+    // weight / destination classification follows the call contract at
+    // `params[0]`.
     data_type_t src_dtype = data_type_t::none;
     data_type_t wei_dtype = data_type_t::none;
     data_type_t dst_dtype = data_type_t::none;
@@ -189,9 +191,8 @@ struct PrepackParams {
     int num_ops_active = 0;
     int num_ops_total = 0;
 
-    // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL — only consulted by
-    // `prepack_for_algo_3`.  Caller passes the cached env value via
-    // `get_grp_matmul_custom_kernel()`.
+    // Process-wide CUSTOM_KERNEL setting supplied by the caller. `ck_eligible`
+    // applies the per-call W4A8 override before using it.
     bool custom_kernel_on = false;
 
     // Gated activation kind for this dispatcher invocation, mirrored
@@ -230,10 +231,10 @@ struct PrepackParams {
     // ignored.  Default `none` means "no activation in flight" (legacy).
     data_type_t act_dtype = data_type_t::none;
 
-    // Per-expert bias dtype (read once from `params[0].dtypes.bias` by
-    // the caller).  Runtime CK supports `none / bf16 / f32` only; warming
-    // CK pack arena under any other bias dtype prefills entries the
-    // runtime never reads.  Default `none` is the safe no-bias case.
+    // Per-expert bias dtype from the call contract at `params[0]`. Runtime CK
+    // supports `none / bf16 / f32` only; warming CK pack arena under any other
+    // bias dtype prefills entries the runtime never reads. Default `none` is
+    // the safe no-bias case.
     data_type_t bias_dtype = data_type_t::none;
 
     // DQ-INT8 discriminators — mirror of the runtime
@@ -392,8 +393,7 @@ inline PrepackParams build_prepack_params(
     // though the runtime (which keys the same decision off the first active
     // expert) WILL engage the int8 path.  Also the source the per-group
     // group_size is derived from (below): an inactive expert 0 may carry no
-    // `{G, N}` wei scale.  wei / dst / bias dtypes are uniform across active
-    // AND inactive experts, so they stay on index 0.
+    // `{G, N}` wei scale.
     size_t rep = 0;
     for (size_t i = 0; i < params.size(); ++i) {
         if (i < M.size() && M[i] > 0) {
@@ -476,8 +476,8 @@ inline PrepackParams build_prepack_params(
 
     // DQ-INT8 discriminators (Gap A — int8/bf16 cross-warm parity).
     //
-    // Derive `dynamic_quant` + `compute_dtype` from the per-call
-    // `params[0]` whenever a params vector is present.  Doing it HERE
+    // Derive `dynamic_quant` + `compute_dtype` from the first active expert
+    // whenever a params vector is present. Doing it HERE
     // means EVERY ALGO entry point (1/2/5/6 as well as 3) reaches
     // `ck_eligible_int8` and cross-warms the int8 CK pack family the
     // same way bf16 does — without each call site having to forward the
@@ -487,7 +487,7 @@ inline PrepackParams build_prepack_params(
     // args remain a fallback for synthetic callers that pass an empty
     // params vector.
     //
-    // CRITICAL — sym/asym MUST be keyed off `params[0].dtypes.compute`
+    // CRITICAL — sym/asym MUST be keyed off `params[rep].dtypes.compute`
     // (s8 vs u8), the EXACT field the runtime resolver reads
     // (`flat_n_tile` `ck_compute_dtype`), for BOTH DQ-INT8 forms:
     //   * runtime hoist  (`dynamic_quant=true`, src still bf16), and

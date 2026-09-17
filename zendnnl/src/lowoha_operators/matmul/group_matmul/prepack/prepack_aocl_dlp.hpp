@@ -242,14 +242,17 @@ status_t warm_pack_all_aocl_dlp_experts_w4a8(
         data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats,
         zendnnl::common::matmul_algo_t algo);
 
-/// W4A8 per-N-tile warm for ALGO 3 (plain-s8 + blocked per-tile caches).
+/// W4A8 per-N-tile warm for ALGO 3.
+/// aocl_dlp_blocked warms native packed-s4 tiles; aocl_dlp keeps the existing
+/// plain-s8 + blocked per-tile caches.
 status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        int group_size, AoclDlpPackProbeStats &stats);
+        int group_size, AoclDlpPackProbeStats &stats,
+        zendnnl::common::matmul_algo_t algo);
 
 } // namespace aocl_dlp
 } // namespace group_matmul_prepack

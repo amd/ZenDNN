@@ -285,9 +285,10 @@ inline void reset_thread_local_fused_moe_state() {
 // with the vertical-fusion gate (avoids a second O(num_ops) selection
 // pass and a duplicate `[GRP_MATMUL.ALGO WARN]` on clamped shapes).
 inline bool pick_fused_moe_want_tight(bool op1_internal,
-        grp_matmul_gated_act_t act, int env_algo, int resolved_algo) {
+        grp_matmul_gated_act_t act, bool custom_kernel_en, int env_algo,
+        int resolved_algo) {
     if (!op1_internal) return false;
-    if (!a3_can_fuse_act(act, get_grp_matmul_custom_kernel())) return false;
+    if (!a3_can_fuse_act(act, custom_kernel_en)) return false;
     if (env_algo != 0 && env_algo != 3) return false;
     if (get_grp_matmul_fused_moe_tight() == 0) return false;
     return resolved_algo == 3;
@@ -1551,7 +1552,9 @@ status_t group_matmul_fused_moe_execute(
 
     // ── Step 3: pick wide-vs-tight Op1 arena layout ────────────────────
     const int env_algo_fused = get_grp_matmul_algo();
-    const bool custom_kernel_en = get_grp_matmul_custom_kernel();
+    const bool custom_kernel_en = !params.empty()
+            && grp_matmul_custom_kernel_enabled(params[0].dtypes.wei,
+                    params[0].dtypes.dst, params[0].dtypes.compute);
     // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
     // both the tight-arena decision below and the vertical-fusion gate at
     // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
@@ -1568,7 +1571,7 @@ status_t group_matmul_fused_moe_execute(
     const int resolved_algo = select_grp_matmul_algo(
             layout, M, N, K, params, num_threads, &algo_trace);
     const bool want_tight = pick_fused_moe_want_tight(
-            op1_internal, act, env_algo_fused, resolved_algo);
+            op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 
     // EXEC APILOG — one line per fused_moe call summarising arena
     // layout, per-side internal-alloc state, act-fusion choice, and
@@ -1590,7 +1593,7 @@ status_t group_matmul_fused_moe_execute(
                 (op2_internal ? "src_inplace" : "caller_dst_down"),
                 " env_algo=", env_algo_fused,
                 " env_tight=", log_fused_moe_tight,
-                " custom_kernel_env=", (custom_kernel_en ? "on" : "off"),
+                " custom_kernel_effective=", (custom_kernel_en ? "on" : "off"),
                 " num_ops=", (int)num_ops);
     }
 

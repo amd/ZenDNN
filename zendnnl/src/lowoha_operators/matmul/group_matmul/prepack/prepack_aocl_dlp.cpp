@@ -701,7 +701,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
 // Used by full-N ALGOs 1/2/5/6. `algo` must match the runtime
 // `w4a8_runtime_algo` decision: blocked DLP warms the native-s4 cache, while
 // plain DLP first expands s4→s8 and warms the simulated path's caches.
-// ALGO 3 uses the separate per-N-tile simulated warmer below.
+// ALGO 3 uses the separate per-N-tile warmer below for either mode.
 status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
@@ -779,14 +779,16 @@ status_t warm_pack_all_aocl_dlp_experts_w4a8(
     return status_t::success;
 }
 
-// W4A8 per-N-tile warm-pack for ALGO 3 (plain-s8 LRU + blocked per-tile LRU).
+// W4A8 per-N-tile warm-pack for ALGO 3. Native mode slices packed S4
+// directly; simulated mode populates the plain-S8 LRU first. Both modes then
+// warm the matching per-tile blocked cache.
 status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        int group_size, AoclDlpPackProbeStats &stats) {
+        int group_size, AoclDlpPackProbeStats &stats, matmul_algo_t algo) {
     if (total_count <= 0 || num_threads <= 0 || stable <= 0 || nr_align <= 0
             || group_size <= 0) {
         return status_t::success;
@@ -821,30 +823,34 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
 
         const int k = K[i], n = N[i];
 
-        // ── Plain cache: s4→s8 plain expansion into dedicated plain-s8 LRU ─
         const int64_t src_grp = static_cast<int64_t>(group_size);
-        Key_matmul w4a8_key(transB[i], k, n, ldb[i], weight[i],
-                static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
-                std::hash<int64_t> {}(src_grp));
-
+        const bool native = w4a8_uses_native_s4(algo);
         void *s8_buf = nullptr;
-        w4a8_cvt_and_cache_plain_s8(w4a8_key,
-                static_cast<const int8_t *>(weight[i]), s8_buf, k, n, ldb[i],
-                transB[i] == true);
+        if (!native) {
+            // ── Plain cache: s4→s8 plain expansion into dedicated plain-s8 LRU ─
+            Key_matmul w4a8_key(transB[i], k, n, ldb[i], weight[i],
+                    static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+                    std::hash<int64_t> {}(src_grp));
+            w4a8_cvt_and_cache_plain_s8(w4a8_key,
+                    static_cast<const int8_t *>(weight[i]), s8_buf, k, n,
+                    ldb[i], transB[i] == true);
 
-        if (s8_buf == nullptr) {
-            ++stats.total_attempted;
-            ++stats.skipped_invalid;
-            continue;
+            if (s8_buf == nullptr) {
+                ++stats.total_attempted;
+                ++stats.skipped_invalid;
+                continue;
+            }
         }
 
         // Per-tile blocked reorder (matches runtime run_dlp).
-        const int ldb_s8 = n;
+        const int tile_ldb = native ? ldb[i] : n;
+        const bool tile_transB = native ? (transB[i] == true) : false;
         const int align_cap = std::max(1, n / std::max(1, nr_align));
         const int n_thr_e = std::max(1, std::min(stable, align_cap));
 
         for (int tid = 0; tid < n_thr_e; ++tid) {
-            const auto split = aligned_n_split(n, n_thr_e, tid, nr_align);
+            const auto split = n_split_for_tile(n, n_thr_e, tid, nr_align,
+                    /*even_boundaries=*/native);
             const int col_start = split.first;
             const int col_end = split.second;
             const int n_tile = col_end - col_start;
@@ -856,16 +862,24 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
                 continue;
             }
 
-            const void *w_tile = static_cast<const char *>(s8_buf)
-                    + static_cast<size_t>(col_start) * sizeof(int8_t);
+            const void *w_tile = native
+                    ? static_cast<const void *>(
+                              static_cast<const char *>(weight[i])
+                              + packed_s4_col_byte_off(
+                                      col_start, ldb[i], tile_transB))
+                    : static_cast<const void *>(
+                              static_cast<const char *>(s8_buf)
+                              + static_cast<size_t>(col_start)
+                                      * sizeof(int8_t));
 
-            Key_matmul tile_key(false, k, n_tile, ldb_s8, w_tile,
+            Key_matmul tile_key(tile_transB, k, n_tile, tile_ldb, w_tile,
                     static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
                     std::hash<int64_t> {}(src_grp));
 
-            apilog_verbose("[W4A8.prepack.symquant] expert=", i, " tid=", tid,
-                    " col_start=", col_start, " n_tile=", n_tile, " K=", k,
-                    " ldb_s8=", ldb_s8, " group_size=", group_size,
+            apilog_verbose("[W4A8.prepack.ntile] expert=", i, " tid=", tid,
+                    " native=", native ? 1 : 0, " col_start=", col_start,
+                    " n_tile=", n_tile, " K=", k, " tile_ldb=", tile_ldb,
+                    " group_size=", group_size,
                     " w_tile_ptr=", static_cast<const void *>(w_tile));
 
             dlp_metadata_t symq_meta = {};
@@ -875,12 +889,22 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
             symq_meta.b_quant_op = &symq_b_quant_op;
 
             void *reordered = nullptr;
-            reorderAndCacheWeightsSymQuant<int8_t>(tile_key, w_tile, reordered,
-                    k, n_tile, ldb_s8, /*order=*/'r', /*trans=*/'n',
-                    /*mem_format_b=*/'n',
-                    aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
-                    aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
-                    /*weight_cache_type=*/1);
+            if (native) {
+                w4a8ReorderAndCacheWeightsAocl(tile_key,
+                        static_cast<const int8_t *>(w_tile), reordered, k,
+                        n_tile, tile_ldb, /*is_weights_const=*/true,
+                        /*order=*/'r', /*trans=*/tile_transB ? 't' : 'n',
+                        data_type_t::s4, data_type_t::s8,
+                        /*weight_cache_type=*/1, static_cast<int>(src_grp),
+                        algo);
+            } else {
+                reorderAndCacheWeightsSymQuant<int8_t>(tile_key, w_tile,
+                        reordered, k, n_tile, tile_ldb, /*order=*/'r',
+                        /*trans=*/'n', /*mem_format_b=*/'n',
+                        aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+                        aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
+                        /*weight_cache_type=*/1);
+            }
 
             if (reordered != nullptr) {
                 ++stats.packed_ok;
@@ -895,6 +919,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
     (void)stable;
     (void)nr_align;
     (void)group_size;
+    (void)algo;
     stats.total_attempted += static_cast<int>(bound);
     stats.skipped_invalid += static_cast<int>(bound);
 #endif

@@ -234,7 +234,8 @@ inline void execute_m_tile(int e, int local_tid, int team_size,
 
     execute_expert_slice(layout[e], transA[e], transB[e], slice_M, N[e], K[e],
             alpha[e], s, lda[e], weight[e], ldb[e], bias[e], beta[e], d, ldc[e],
-            is_weights_const[e], 1, slice_params, algo);
+            is_weights_const[e], 1, slice_params,
+            resolve_expert_kernel(2, algo, slice_params));
 }
 
 // M-tile with fused activation: apply immediately after GEMM while
@@ -312,7 +313,8 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
     local_params = params[e];
     execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e], K[e],
             alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e], beta[e],
-            dst[e], ldc[e], is_weights_const[e], 1, local_params, algo);
+            dst[e], ldc[e], is_weights_const[e], 1, local_params,
+            resolve_expert_kernel(2, algo, local_params));
     if (fused_act != grp_matmul_gated_act_t::none) {
         apply_gated_act_inplace(
                 fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
@@ -1281,7 +1283,7 @@ void flat_m_tile(const std::vector<char> &layout,
             execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e],
                     K[e], alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e],
                     beta[e], dst[e], ldc[e], is_weights_const[e], num_threads,
-                    local_params, algo);
+                    local_params, resolve_expert_kernel(2, algo, local_params));
             if (fused_act != grp_matmul_gated_act_t::none) {
                 apply_gated_act_inplace(
                         fused_act, dst[e], 0, M[e], N[e], ldc[e], act_dtype);
@@ -2111,7 +2113,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                     N_w13[e], K_in[e], alpha_w13[e], src_slice, lda_for_w13,
                     weight_w13[e], ldb_w13[e], bias_w13[e], beta_w13[e], sc.buf,
                     /*ldc=*/N_w13[e], is_weights_const[e], /*num_thr=*/1,
-                    w13_local, algo);
+                    w13_local, resolve_expert_kernel(2, algo, w13_local));
 
             // ── STAGE 2: in-place gated activation on scratch (2I → I) ──
             if (fused_act != grp_matmul_gated_act_t::none) {
@@ -2310,7 +2312,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
                     N_w2[e], K_w2[e], alpha_w2[e], src_for_w2, lda_for_w2,
                     weight_w2[e], ldb_w2[e], bias_w2[e], beta_w2[e],
                     dst_w2_slice, ldc_w2[e], is_weights_const[e], /*num_thr=*/1,
-                    w2_local, algo);
+                    w2_local, resolve_expert_kernel(2, algo, w2_local));
         }
     } // end #pragma omp parallel
 

@@ -863,6 +863,7 @@ inline void sort_indices_by_m(
 /// bf16 calls ignore it).  Both default to ON when unset; set the env
 /// to "0" to opt out (master "0" disables CK for all dtypes; int8 "0"
 /// disables only the DQ-INT8 fast path, leaving bf16 CK active).
+/// W4A8 forces CK OFF regardless of either environment setting.
 ///
 /// Even with the envs enabled, the dispatcher's per-call contract
 /// check (dtype tuple, no transA, α=1, β=0, N % pack_nr, supported
@@ -888,7 +889,10 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
         // `prepare_for_call` (built from the caller's per-expert
         // `mem_format_b == 'r'`).  Empty ⇒ no prepacked experts.
         const std::vector<bool> &weights_prepacked = {}) {
-    if (!get_grp_matmul_custom_kernel()) return;
+    if (!grp_matmul_custom_kernel_enabled(
+                wei_dtype, dst_dtype, compute_dtype)) {
+        return;
+    }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
     // arrives two ways and BOTH must honour the sub-toggle:

@@ -210,18 +210,11 @@ inline constexpr int kMinNTileInt8 = 512;
 /// `group_matmul_dispatch.cpp`.
 inline constexpr int kFewExpertsAlgo1 = 8;
 
-/// Few-experts threshold for the ALGO 0 default-policy ALGO 2 preference.
-/// When the GLOBAL ALGO env is auto (0) AND neither active phase env is
-/// explicitly pinned, a workload whose TOTAL expert count (framework
-/// `total_matmul` when set, else the active op count) is `≤
-/// kFewExpertsAlgo2Pref` routes to ALGO 2 (flat_m_tile) for BOTH prompt
-/// and decode — overriding the per-phase defaults (prompt 2 / decode 3).
-/// Targets few-expert layers, where ALGO 2 fits both prompt and decode.
-/// An explicit `AUTO_{PROMPT,DECODE}_ALGO` pin (including `=0` to request
-/// the legacy cascade) still wins — this is a DEFAULT refinement, not a
-/// hard clamp.
-/// Falls back to ALGO 1 when the shape is not m_tile_safe.
-inline constexpr int kFewExpertsAlgo2Pref = 8;
+/// Total-expert ceiling for Rule 0.5's decode occupancy policy. When the
+/// global ALGO is AUTO and the decode phase is not explicitly pinned, calls
+/// at or below this threshold choose between ALGO 3 and ALGO 1 using active
+/// expert occupancy. Larger expert pools inherit the normal decode default.
+inline constexpr int kFewExpertsDecodeThreshold = 8;
 
 /// Threads-per-active-expert factor for the few-expert DECODE arrow
 /// (Rule 0.5 in `auto_select_algo`).  ALGO 3 splits each expert's N across
@@ -613,8 +606,9 @@ inline constexpr const char *grp_matmul_ntile_flat_parallel_request_source_name(
 // ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE = { 0, 1 } — cached, default 1 (ON).
 //   AUTO-only (`ALGO=0`) routing knob for Rule 0.45: a lone expert
 //   (`num_ops == 1`) in decode goes to ALGO 3 rather than being diverted by
-//   Rule 0.5 to `kWideN → ALGO 1`, so it reaches the N-tile planner.  Set
-//   `=0` to restore the legacy diversion for A/B measurement.  Scope:
+//   Rule 0.5's low-occupancy arm to ALGO 1, so it reaches the N-tile planner.
+//   Set `=0` to restore the generic occupancy decision for A/B measurement.
+//   Scope:
 //   num_ops==1 + decode + n_tile_safe + phase env NOT explicitly pinned.
 //   Non-numeric input → default 1.  The `test_api` override atom below lets
 //   a gtest A/B the rule mid-process, which the cached env read cannot.
@@ -992,6 +986,9 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   want to bypass CK entirely (e.g. parity bisection against
 //   AOCL DLP) can still set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`.
 //
+//   W4A8 forces the effective per-call value OFF regardless of this env;
+//   CK has no s4 microkernel.
+//
 //   The dispatcher refuses cleanly and falls back to the standard
 //   AOCL DLP path for any expert that violates the CK contract
 //   (non-bf16, transA, alpha≠1, β≠0, N % pack_nr ≠ 0, non-const
@@ -1008,6 +1005,15 @@ inline bool get_grp_matmul_custom_kernel() {
         return e[0] != '0';
     }();
     return v;
+}
+
+/// W4A8 is always AOCL-DLP-only; CK has no s4 microkernel.  Keep this
+/// call-scoped so CK remains available for its BF16, INT8, and FP16 families.
+inline bool grp_matmul_custom_kernel_enabled(data_type_t wei_dtype,
+        data_type_t dst_dtype, data_type_t compute_dtype) {
+    return get_grp_matmul_custom_kernel()
+            && !(wei_dtype == data_type_t::s4 && dst_dtype == data_type_t::bf16
+                    && compute_dtype == data_type_t::s8);
 }
 
 // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = { "0", "1" } — cached, default ON.
@@ -1548,6 +1554,25 @@ inline std::pair<int, int> aligned_n_split(
     return even_split();
 }
 
+/// Wrapper around aligned_n_split with optional even boundary snapping for
+/// packed-s4 N-tile slices.
+inline std::pair<int, int> n_split_for_tile(
+        int N, int n_thr, int tid, int align, bool even_boundaries) {
+    auto s = aligned_n_split(N, n_thr, tid, align);
+    if (!even_boundaries) { return s; }
+    s.first &= ~1;
+    s.second = (tid == n_thr - 1) ? N : (s.second & ~1);
+    return s;
+}
+
+/// Byte offset of column `col_start` in a nibble-packed s4 B matrix.
+inline size_t packed_s4_col_byte_off(int col_start, int ldb, bool transB) {
+    const size_t nib = transB
+            ? static_cast<size_t>(col_start) * static_cast<size_t>(ldb)
+            : static_cast<size_t>(col_start);
+    return nib >> 1;
+}
+
 /// 32 MB of L3 per CCD on current-generation classic-CCD CPU topologies.
 inline constexpr size_t kL3PerCcdBytes = 32UL * 1024UL * 1024UL;
 
@@ -1591,16 +1616,29 @@ inline matmul_algo_t resolve_kernel() {
     return algo;
 }
 
-/// W4A8 matmul policy for full-N ALGOs (1/2/5/6): follow inner kernel
-/// (aocl_dlp = simulated s8, aocl_dlp_blocked = native s4).
-/// ALGO 3 has no native s4 path; runtime N-tile/Sequential force
-/// aocl_dlp_blocked after s8 substitution.
+/// W4A8 matmul policy:
+///   * group AUTO: ALGO 3 is native s4; every other scheduler is simulated;
+///   * pinned group ALGO: preserve the inner-kernel choice.
 inline matmul_algo_t w4a8_runtime_algo(
         int scheduling_algo, matmul_algo_t inner_kernel) {
-    if (scheduling_algo == 3) { return matmul_algo_t::aocl_dlp; }
+    if (get_grp_matmul_algo() == kGrpMatmulAlgoAuto) {
+        return scheduling_algo == 3 ? matmul_algo_t::aocl_dlp_blocked
+                                    : matmul_algo_t::aocl_dlp;
+    }
     return inner_kernel == matmul_algo_t::aocl_dlp_blocked
             ? matmul_algo_t::aocl_dlp_blocked
             : matmul_algo_t::aocl_dlp;
+}
+
+/// Resolve the effective inner kernel for one expert under the selected
+/// group-matmul scheduler.  Most dtype families preserve `inner_kernel`;
+/// scheduler-specific policies (currently W4A8 native-vs-simulated routing)
+/// are centralized here so individual executors do not encode dtype policy.
+inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
+        matmul_algo_t inner_kernel, const matmul_params &params) {
+    return is_w4a8_config(params)
+            ? w4a8_runtime_algo(scheduling_algo, inner_kernel)
+            : inner_kernel;
 }
 
 /// The per-thread dynamic-quant buffer pool `execute_expert_slice` quantizes

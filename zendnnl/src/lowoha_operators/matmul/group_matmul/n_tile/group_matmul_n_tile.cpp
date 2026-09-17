@@ -511,6 +511,9 @@ struct GroupNTileContext {
     // Plain-s8 W4A8 weights from dispatch (LRU-owned; not owned here).
     const std::vector<void *> *w4a8_s8_weights = nullptr;
 
+    // True when ALGO 3 W4A8 follows the aocl_dlp_blocked native s4 path.
+    bool w4a8_native = false;
+
     // Substitute the column-sliced plain-s8 buffer.  Caller then sets
     // wei=s8 and runs aocl_dlp_blocked so run_dlp hits the per-tile
     // sym-quant LRU that ALGO 3 W4A8 prepack warms.
@@ -638,7 +641,10 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
             "leave dst cols uncomputed");
     if (local_tid >= n_thr) return;
 
-    const auto split = aligned_n_split(N[e], n_thr, local_tid, plan.nr_align);
+    const bool native_s4_wei
+            = w4a8_native && params[e].dtypes.wei == data_type_t::s4;
+    const auto split = n_split_for_tile(N[e], n_thr, local_tid, plan.nr_align,
+            /*even_boundaries=*/native_s4_wei);
     const int col_start = split.first;
     const int col_end = split.second;
     const int n_tile = col_end - col_start;
@@ -775,9 +781,10 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
 
     // Weight: slice columns of op(B).  Shared by both the wide path
     // below and the tight-scratch path further down.
-    const size_t wei_off = transB[e]
-            ? static_cast<size_t>(col_start) * ldb[e] * wei_elem
-            : static_cast<size_t>(col_start) * wei_elem;
+    const size_t wei_off = native_s4_wei
+            ? packed_s4_col_byte_off(col_start, ldb[e], transB[e])
+            : (transB[e] ? static_cast<size_t>(col_start) * ldb[e] * wei_elem
+                         : static_cast<size_t>(col_start) * wei_elem);
     const auto *w = static_cast<const char *>(weight[e]) + wei_off;
 
     // bias: offset by col_start if present.  Same slicing rules for
@@ -816,17 +823,21 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     const void *w_for_tile = w;
     int ldb_for_tile = ldb[e];
     bool transB_for_tile = transB[e];
-    const bool w4a8_plain_s8 = apply_w4a8_substitution(
-            e, w_for_tile, ldb_for_tile, N[e], col_start);
+    const bool w4a8_plain_s8 = native_s4_wei
+            ? false
+            : apply_w4a8_substitution(
+                      e, w_for_tile, ldb_for_tile, N[e], col_start);
     if (w4a8_plain_s8) {
         // Plain s8 cache is always [K, N] row-major (non-transposed).
         transB_for_tile = false;
         tile_params.dtypes.wei = data_type_t::s8;
     }
-    // Per-tile W4A8 prepack stores blocked s8 packs.  aocl_dlp skips
-    // reorderAndCacheWeightsSymQuant, so those packs would never hit.
+    // Both W4A8 forms use the blocked tile backend: native keeps s4 and
+    // selects s8xs4, while simulated substitutes s8 and hits the prepacked
+    // sym-quant cache. Non-W4A8 tiles keep the planner's backend.
+    const bool is_w4a8_tile = native_s4_wei || w4a8_plain_s8;
     const matmul_algo_t tile_algo
-            = w4a8_plain_s8 ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
+            = is_w4a8_tile ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
 
     // ── Column-slice the weight quantization metadata ──────────────────
     // N-tile slices columns of B, so the weight scale must be re-anchored
@@ -3026,16 +3037,22 @@ inline void execute_sequential(
         const void *wei_for_call = ctx.weight[e];
         int ldb_for_call = ctx.ldb[e];
         bool transB_for_call = ctx.transB[e];
-        const bool w4a8_plain_s8 = ctx.apply_w4a8_substitution(
-                e, wei_for_call, ldb_for_call, ctx.N[e], 0);
+        const bool native_s4_wei
+                = ctx.w4a8_native && local_params.dtypes.wei == data_type_t::s4;
+        const bool w4a8_plain_s8 = native_s4_wei
+                ? false
+                : ctx.apply_w4a8_substitution(
+                          e, wei_for_call, ldb_for_call, ctx.N[e], 0);
         if (w4a8_plain_s8) {
             // Plain s8 cache is always [K, N] row-major (non-transposed).
             transB_for_call = false;
             local_params.dtypes.wei = data_type_t::s8;
         }
-        // Same as do_tile: ALGO 3 W4A8 is simulated s8 + blocked DLP.
+        // Same backend rule as do_tile, applied to the full-N Sequential
+        // fallback inside ALGO 3.
+        const bool is_w4a8_call = native_s4_wei || w4a8_plain_s8;
         const matmul_algo_t exec_algo
-                = w4a8_plain_s8 ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
+                = is_w4a8_call ? matmul_algo_t::aocl_dlp_blocked : plan.algo;
 
         const bool tight_caller = plan.fused_epilogue && ctx.ldc[e] < ctx.N[e];
         if (tight_caller) {
@@ -4379,13 +4396,16 @@ void flat_n_tile(const std::vector<char> &layout,
         }
     }
 
-    // W4A8 plain-s8 side table from dispatch (see w4a8_populate_plain_s8_cache).
+    const bool w4a8_native_layout
+            = w4a8_runtime_algo(/*scheduling_algo=*/3, algo)
+            == matmul_algo_t::aocl_dlp_blocked;
 
     GroupNTileContext ctx {layout, transA, transB, M, N, K, alpha, src, lda,
             weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
             fused_act, act_dtype, wei_elem, dst_elem, bias_elem, use_custom,
             use_custom ? &kctx : nullptr, &alloc_fail,
-            any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in};
+            any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
+            w4a8_native_layout};
 
     // `is_int8` drives the planner's int8-variant per-thread N floor
     // (`kDecodeNTileInt8` / `kMinNTileInt8` via the `*_for_variant`

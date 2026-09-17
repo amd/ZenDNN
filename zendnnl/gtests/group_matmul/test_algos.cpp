@@ -2530,6 +2530,34 @@ static AutoProbeShape build_auto_probe(
     return s;
 }
 
+// Rewrite a BF16 auto-select probe as n_tile-safe W4A8 (dynamic bf16 src,
+// packed s4 weights, per-group wei scale).  This lets the generic AUTO rules
+// be tested with W4A8 metadata without standing up the full GEMM stack.
+static void apply_w4a8_auto_probe(AutoProbeShape &s) {
+    using namespace zendnnl::lowoha::matmul;
+    static float wei_scale_sentinel = 1.0f;
+    for (size_t i = 0; i < s.params.size(); ++i) {
+        auto &p = s.params[i];
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::s4;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+        p.dynamic_quant = true;
+        p.mem_format_b = 'n';
+        p.quant_params.src_zp = {};
+        p.quant_params.wei_zp = {};
+        const int m = (i < s.M.size() && s.M[i] > 0) ? s.M[i] : 1;
+        const int n = (i < s.N.size()) ? s.N[i] : 2;
+        p.quant_params.src_scale.dims = {static_cast<int64_t>(m), 1};
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.buff = nullptr;
+        p.quant_params.wei_scale.dims
+                = {2, static_cast<int64_t>(n > 1 ? n : 2)};
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.buff = &wei_scale_sentinel;
+    }
+}
+
 } // namespace
 
 // Explicit-zero phase env (escape hatch for legacy behaviour) — sets
@@ -2951,11 +2979,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo3PinHonouredVerbatim) {
 // A lone expert (`num_ops == 1`) in decode is routed to ALGO 3 so it
 // reaches the N-tile planner where the dense-FFN optimisations live
 // (adaptive tiling, ragged-N fallback, auto K-blocking).  Without the
-// rule, Rule 0.5's few-experts branch classifies a shallow-M decode
-// frame as `kWideN` and diverts it to ALGO 1, which never touches that
-// planner.  The four tests below pin the rule's default and each of its
-// three gates; all use the same single-expert decode probe so the only
-// thing that varies is the gate under test.
+// rule, Rule 0.5's few-expert occupancy test sends one active expert to
+// ALGO 1, which never touches that planner. The four tests below pin the
+// rule's default and each of its three gates; all use the same
+// single-expert decode probe so only the gate under test varies.
 TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -2971,13 +2998,12 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeRoutesToAlgo3) {
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "Rule 0.45 (default ON) must route a single-expert decode "
-               "frame to ALGO 3 instead of Rule 0.5's kWideN → ALGO 1";
+               "frame to ALGO 3 instead of Rule 0.5's low-occupancy ALGO 1";
 }
 
 // Env gate off (`ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE=0`) → the rule is
-// skipped and the frame falls through to Rule 0.5, which classifies a
-// shallow-M single expert as `kWideN` → ALGO 1.  This is the A/B escape
-// hatch the knob exists for.
+// skipped and the frame falls through to Rule 0.5's low-occupancy ALGO 1
+// arm. This is the A/B escape hatch the knob exists for.
 TEST(TestGroupMatmulAutoPhaseEnv,
         SingleDenseExpertDecodeEnvOffFallsBackToAlgo1) {
     using namespace zendnnl::lowoha::matmul;
@@ -2991,8 +3017,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
-            << "DENSE_DECODE_NTILE=0 must restore the legacy few-experts "
-               "diversion (Rule 0.5 kWideN → ALGO 1)";
+            << "DENSE_DECODE_NTILE=0 must restore the generic few-expert "
+               "occupancy decision (Rule 0.5 → ALGO 1)";
 }
 
 // An explicit decode pin outranks the rule: Rule 0.45 only refines the
@@ -4160,41 +4186,28 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
             << "decode active(78) > threads(64) must route to ALGO 3";
 }
 
-// Few-experts decode policy (Rule 0.5) is now REGIME-AWARE, mirroring the
-// prompt Rule 0.7, because ALGO 2 is a pure M-tile executor (no internal
-// wide-N fallback).  A Mixtral-class 8-expert decode shape with shallow M
-// (max_M>1, total_need*2 ≤ num_threads) is the wide-N regime, so AUTO routes
-// it to ALGO 1 (full-team sequential) — exactly the executor the old ALGO 2
-// wide-N branch ran.  (Single-tier M-tile would under-fill the team here:
-// it splits M rows capped at M[i], so M < team_size leaves threads idle.)
+// Rule 0.5 is a dtype-agnostic occupancy test for few-expert decode.
+// Under-occupied frames use full-team sequential ALGO 1; frames with at most
+// four threads per active expert use N-tile ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeShallowMRoutesToAlgo1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // Mixtral-class decode: 8 experts, shallow decode-class M (max_M=16>1;
-    // total_need = 8*ceil(16/16) = 8; 2*8 = 16 ≤ 128 → wide-N regime).
+    // Mixtral-class decode: 8 active experts cannot fill a 128-thread team
+    // under the four-threads-per-expert threshold.
     auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
-            << "≤8-expert shallow-M decode is the wide-N regime → ALGO 1 "
-               "(full-team sequential = old ALGO 2 wide-N branch), not "
-               "single-tier";
+            << "8 active * 4 < 128 threads must select full-team ALGO 1";
 }
 
-// The other half of the few-experts decode split: a single-token-per-expert
-// decode (max_M==1) is NOT the wide-N regime (the gate excludes max_M==1, as
-// the old flat_m_tile wide-N gate did), so it stays on ALGO 2 single-tier —
-// the latency-optimal one-thread-per-expert CCD-stripe.
-// AUTO must never emit ALGO 2 (the `no-auto-2` invariant in
-// `auto_select_algo`).  `max_M == 1` is the one decode shape that fails the
-// kWideN test (`max_M > 1`) and so lands on the kMTile arm; that arm answers
-// ALGO 1, not ALGO 2.  This is also the right answer on its own terms: with
-// one row per expert an M-tile executor has no rows to slice across the team.
-// ALGO 2 for this shape requires an explicit pin — the
+// M does not alter Rule 0.5's occupancy decision. A single-token frame with
+// 8 active experts and 128 threads remains under-occupied and takes ALGO 1.
+// AUTO must never emit ALGO 2; that requires an explicit pin — the
 // `ExplicitPromptAlgo2PinBeatsRegimeRouting` and
 // `SingleDenseExpertDecodeHonoursExplicitPin` tests cover that direction.
 TEST(TestGroupMatmulAutoPhaseEnv,
@@ -4204,14 +4217,14 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // 8 experts, M=1: max_M==1 → wide-N excluded → kMTile arm.
+    // 8 active experts, M=1: 8 * 4 < 128.
     auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "AUTO must not select ALGO 2: a ≤8-expert single-token decode "
-               "(max_M==1) takes the kMTile arm, which answers ALGO 1";
+               "uses Rule 0.5's low-occupancy ALGO 1 arm";
 }
 
 // PRECEDENCE: `AUTO_{DECODE,PROMPT}_ALGO` outranks `ZENDNNL_GRP_MATMUL_ALGO`.
@@ -4289,7 +4302,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
 // assert ALGO 2 never comes back without an explicit env pin.  A new rule
 // that answers 2 fails here rather than silently changing production routing.
 // The sweep deliberately spans both phases and the expert-count / max_M
-// thresholds the rules key on (kDecodeMaxM=32, kFewExpertsAlgo2Pref=8).
+// thresholds the rules key on (kDecodeMaxM=32,
+// kFewExpertsDecodeThreshold=8).
 TEST(TestGroupMatmulAutoPhaseEnv, AutoNeverSelectsAlgo2AcrossShapeSweep) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4313,9 +4327,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, AutoNeverSelectsAlgo2AcrossShapeSweep) {
     }
 }
 
-// The few-experts ALGO 2 preference is a DEFAULT refinement: an explicit
-// decode phase pin still wins.  AUTO_DECODE_ALGO=3 on the same 8-expert
-// decode shape must yield ALGO 3, not the Rule 0.5 ALGO 2.
+// The few-expert occupancy policy is a DEFAULT refinement: an explicit
+// decode phase pin still wins. AUTO_DECODE_ALGO=3 on the same
+// under-occupied shape must yield ALGO 3, not Rule 0.5's ALGO 1.
 TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4330,7 +4344,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
             << "explicit AUTO_DECODE_ALGO=3 must win over the few-experts "
-               "ALGO 2 default preference";
+               "occupancy policy";
 }
 
 // Rule 0.5 counts the TOTAL experts (framework `total_matmul`), not the
@@ -4354,18 +4368,232 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
             << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
                "decode default ALGO 3";
 
-    // Same active count but total=8 → Rule 0.5 fires.  The shape is shallow-M
-    // decode (M=16, total_need=4*1=4, 2*4=8 ≤ 64 → wide-N regime), so the
-    // regime-aware Rule 0.5 routes it to ALGO 1 (= old ALGO 2 wide-N branch).
-    // The point of this test is that Rule 0.5 FIRED on total=8 (≠ the ALGO 3
-    // decode default it took at total=16), proving it keys on TOTAL not active.
+    // Same active count but total=8 → Rule 0.5 fires. Four active experts
+    // cannot satisfy 4*4 >= 64, so the occupancy arrow selects ALGO 1. The
+    // different outcome proves that TOTAL scopes entry to Rule 0.5 while
+    // ACTIVE count drives its occupancy decision.
     s.params[0].total_matmul = 8;
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
             << "total=8 (≤ threshold) must fire Rule 0.5 even with only 4 "
-               "active "
-               "experts; shallow-M decode → wide-N regime → ALGO 1";
+               "active experts; 4*4 < 64 → ALGO 1";
+}
+
+// ── W4A8 uses the generic Rule 0.5 decode occupancy policy ─────────────
+// There is no W4A8-only routing override.  Like every other dtype family,
+// few-expert decode takes ALGO 3 only when active_ops * factor fills the
+// requested team; otherwise full-team sequential ALGO 1 wins.
+
+TEST(TestGroupMatmulAutoPhaseEnv,
+        W4A8FewExpertsDecodeLowOccupancyRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_w4a8_auto_probe(s);
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            1)
+            << "8 active * 4 < 128 threads must route W4A8 through the "
+               "generic Rule 0.5 ALGO 1 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_few_active");
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv,
+        W4A8FewExpertsDecodeFullOccupancyRoutesToAlgo3) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/32);
+    apply_w4a8_auto_probe(s);
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            3)
+            << "8 active * 4 >= 32 threads must route W4A8 through the "
+               "generic Rule 0.5 ALGO 3 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
+}
+
+TEST(TestGroupMatmulW4A8RuntimeAlgo, AutoIgnoresInnerKernel) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard auto_algo(0);
+
+    EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp_blocked),
+            matmul_algo_t::aocl_dlp_blocked);
+    EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp),
+            matmul_algo_t::aocl_dlp_blocked);
+    EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp_blocked),
+            matmul_algo_t::aocl_dlp);
+    EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp),
+            matmul_algo_t::aocl_dlp);
+}
+
+TEST(TestGroupMatmulW4A8RuntimeAlgo, PinnedGroupAlgoRespectsInnerKernel) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+
+    {
+        AlgoEnvGuard pin_algo3(3);
+        EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp_blocked),
+                matmul_algo_t::aocl_dlp_blocked);
+        EXPECT_EQ(w4a8_runtime_algo(3, matmul_algo_t::aocl_dlp),
+                matmul_algo_t::aocl_dlp);
+    }
+    {
+        AlgoEnvGuard pin_algo1(1);
+        EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp_blocked),
+                matmul_algo_t::aocl_dlp_blocked);
+        EXPECT_EQ(w4a8_runtime_algo(1, matmul_algo_t::aocl_dlp),
+                matmul_algo_t::aocl_dlp);
+    }
+}
+
+TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard auto_algo(0);
+
+    auto w4a8 = build_auto_probe(
+            /*M=*/1, /*K=*/64, /*N=*/64, /*num_ops=*/1, /*num_threads=*/1);
+    apply_w4a8_auto_probe(w4a8);
+    const matmul_params &w4a8_params = w4a8.params.front();
+
+    matmul_params bf16_params;
+    bf16_params.dtypes.src = data_type_t::bf16;
+    bf16_params.dtypes.wei = data_type_t::bf16;
+    bf16_params.dtypes.dst = data_type_t::bf16;
+
+    EXPECT_EQ(resolve_expert_kernel(3, matmul_algo_t::aocl_dlp, w4a8_params),
+            matmul_algo_t::aocl_dlp_blocked);
+    EXPECT_EQ(resolve_expert_kernel(
+                      1, matmul_algo_t::aocl_dlp_blocked, w4a8_params),
+            matmul_algo_t::aocl_dlp);
+    EXPECT_EQ(resolve_expert_kernel(
+                      1, matmul_algo_t::aocl_dlp_blocked, bf16_params),
+            matmul_algo_t::aocl_dlp_blocked)
+            << "non-W4A8 experts must preserve the selected inner kernel";
+}
+
+TEST(TestGroupMatmulW4A8RuntimeAlgo, CustomKernelIsForcedOff) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    CustomKernelOverride ck_on(true);
+
+    matmul_params p;
+    p.dtypes.wei = data_type_t::s4;
+    p.dtypes.dst = data_type_t::bf16;
+    p.dtypes.compute = data_type_t::s8;
+    EXPECT_FALSE(grp_matmul_custom_kernel_enabled(
+            p.dtypes.wei, p.dtypes.dst, p.dtypes.compute));
+
+    p.dtypes.wei = data_type_t::bf16;
+    p.dtypes.compute = data_type_t::f32;
+    EXPECT_TRUE(grp_matmul_custom_kernel_enabled(
+            p.dtypes.wei, p.dtypes.dst, p.dtypes.compute))
+            << "the W4A8 override must not disable CK for other families";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // Default prompt Rule 0.7 selects ALGO 1 independently of dtype.
+    auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/32);
+    apply_w4a8_auto_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "W4A8 prompt must follow generic Rule 0.7 and take ALGO 1";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursExplicitPin) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoDecodeAlgoOverride pin_m_tile(2);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_w4a8_auto_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            2)
+            << "an explicit AUTO_DECODE_ALGO pin must outrank generic Rule 0.5";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursNTileSafetyClamp) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/32);
+    apply_w4a8_auto_probe(s);
+    for (auto &c : s.layout)
+        c = 'c';
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            1)
+            << "the generic ALGO 3 occupancy arm must honour n_tile_safe";
+    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "s8/W8A8 few-expert shallow-M decode must use Rule 0.5 → "
+               "ALGO 1";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8InactiveLeftoverUsesRule05Occupancy) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/28);
+    apply_w4a8_auto_probe(s);
+    s.M[0] = 0;
+    s.params[0].dtypes.src = data_type_t::bf16;
+    s.params[0].dtypes.wei = data_type_t::bf16;
+    s.params[0].dynamic_quant = false;
+    s.params[0].quant_params = {};
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            3)
+            << "7 active * 4 >= 28 threads must use Rule 0.5's ALGO 3 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
 }
 
 // Grouped-s8 post-quant call with INACTIVE experts must NOT be vetoed to
@@ -4373,9 +4601,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
 // experts at bf16 + dynamic_quant=false while active experts are s8 +
 // per-token src_scale.  check_m_tile_safe / check_n_tile_extra must skip
 // the inactive experts (and key dtype uniformity off the first active
-// one) so a >8-expert decode shape still routes to ALGO 3.  >8 experts
-// keeps Rule 0.5 (the ≤8 ALGO 2 preference) out of the picture so this
-// isolates the n_tile/m_tile eligibility veto.
+// one) so a >8-expert decode shape still routes to ALGO 3. More than 8
+// experts keeps Rule 0.5 out of the picture, isolating the n_tile/m_tile
+// eligibility veto.
 TEST(TestGroupMatmulAutoPhaseEnv, GroupedS8WithInactiveExpertsKeepsAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4746,6 +4974,18 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
             /*num_ops=*/4, /*num_threads=*/64, &algo);
     EXPECT_EQ(rule05.rfind("auto_rule05_", 0), 0u)
             << "few-expert decode must report a Rule 0.5 arm, got " << rule05;
+
+    // W4A8 uses the same Rule 0.5 occupancy decision.
+    {
+        auto s = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/8192,
+                /*num_ops=*/4, /*num_threads=*/64);
+        apply_w4a8_auto_probe(s);
+        auto_algo_trace trace;
+        algo = select_grp_matmul_algo(
+                s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
+        EXPECT_STREQ(trace.reason, "auto_rule05_few_active");
+        EXPECT_EQ(algo, 1);
+    }
 
     // Rule 0 — structural capacity carve-out.
     EXPECT_EQ(reason_for(/*M=*/8, /*K=*/2048, /*N=*/8192, /*num_ops=*/300,

@@ -692,7 +692,8 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(const PrepackParams &p) {
     return st;
 }
 
-// W4A8 full-weight warm; derive algo via w4a8_runtime_algo(target_algo, inner_kernel).
+// W4A8 full-weight warm; `algo` is the effective runtime verdict for the
+// scheduling ALGO this cache will serve.
 inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_w4a8(
         const PrepackParams &p, int group_size, matmul_algo_t algo) {
     aocl_dlp::AoclDlpPackProbeStats st;
@@ -758,11 +759,12 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile_sym_quant(
 
 // W4A8 per-tile warm for ALGO 3 / cross-warm.
 inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile_w4a8(
-        const PrepackParams &p, int stable, int nr_align_eff) {
+        const PrepackParams &p, int stable, int nr_align_eff,
+        matmul_algo_t algo) {
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_w4a8(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype,
-            p.num_threads, stable, nr_align_eff, p.w4a8_group_size, st);
+            p.num_threads, stable, nr_align_eff, p.w4a8_group_size, st, algo);
     return st;
 }
 
@@ -1017,12 +1019,12 @@ inline void log_pack_probe_skip(
         int scheduling_algo, const PrepackParams &p, PreludeSkipReason reason) {
     static const bool s_l3_log = apilog_info_enabled();
     if (!s_l3_log) { return; }
-    const char *state = (reason == PreludeSkipReason::env_disabled)
-            ? "disabled"
-            : "skipped_fingerprint";
-    const char *note = (reason == PreludeSkipReason::env_disabled)
-            ? " note=first_runtime_call_pays_lazy_reorder_cost"
-            : " note=already_warmed";
+    const char *state = "skipped_fingerprint";
+    const char *note = " note=already_warmed";
+    if (reason == PreludeSkipReason::env_disabled) {
+        state = "disabled";
+        note = " note=first_runtime_call_pays_lazy_reorder_cost";
+    }
     const std::string fp_str
             = format_fingerprint(fingerprint(p, scheduling_algo));
     apilog_info("[GRP_MATMUL.PREPACK] for=ALGO_", scheduling_algo,
@@ -1509,6 +1511,10 @@ inline bool ck_eligible_f16(const PrepackParams &p) {
 // per-call dtype switch (see `warm_pack_all_custom_kernel_experts` in
 // prepack_custom_kernel.cpp).
 inline bool ck_eligible(const PrepackParams &p) {
+    if (!grp_matmul_custom_kernel_enabled(
+                p.wei_dtype, p.dst_dtype, p.compute_dtype)) {
+        return false;
+    }
     return ck_eligible_bf16(p) || ck_eligible_int8(p) || ck_eligible_f16(p);
 }
 
@@ -1550,10 +1556,10 @@ inline bool ck_eligible(const PrepackParams &p) {
 // reorder instead).
 //
 // `out_regime` is written to indicate which branch ran: `none` if
-// cross-warm was skipped entirely (env off, a pinned ALGO, non-DLP
-// inner_kernel, or the structural skip on ALGO 3 where the primary
-// already covered the cross-warm target), otherwise the specific
-// regime that fired.
+// cross-warm was skipped entirely (env off, a pinned ALGO, a non-DLP
+// inner kernel for non-W4A8, or the structural skip on ALGO 3 where
+// the primary already covered the cross-warm target), otherwise the
+// specific regime that fired.
 // Callers thread `out_regime` into `log_pack_probe(...)` so the
 // `[GRP_MATMUL.PREPACK]` line can surface it.
 inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
@@ -1563,12 +1569,7 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
     out_regime = CrossWarmRegime::none;
     if (!get_grp_matmul_cross_warm()) { return; }
     const bool w4a8 = w4a8_aocl_warm_candidate(p);
-    const bool w4a8_plain_dlp_cross_warm
-            = w4a8 && inner_kernel == matmul_algo_t::aocl_dlp;
-    if (inner_kernel != matmul_algo_t::aocl_dlp_blocked
-            && !w4a8_plain_dlp_cross_warm) {
-        return;
-    }
+    if (inner_kernel != matmul_algo_t::aocl_dlp_blocked && !w4a8) { return; }
 
     // Auto-select-only gate.  Cross-warm always targets a DIFFERENT
     // scheduling ALGO's reorder cache than the one this prepack
@@ -1608,7 +1609,8 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
             if (!primary_did_aocl_fw) {
                 // Cross-warm upcoming ALGO 1 prompt layout.
                 const auto st_extra = warm_aocl_w4a8(p, p.w4a8_group_size,
-                        w4a8_runtime_algo(/*target_algo=*/1, inner_kernel));
+                        w4a8_runtime_algo(
+                                /*scheduling_algo=*/1, inner_kernel));
                 st_aocl.total_attempted += st_extra.total_attempted;
                 st_aocl.packed_ok += st_extra.packed_ok;
                 st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -1690,7 +1692,9 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
             //   W4A8 > DQ-INT8 > bf16.
             if (w4a8) {
                 const auto st_extra
-                        = warm_aocl_n_tile_w4a8(p, stable, nr_align_cross);
+                        = warm_aocl_n_tile_w4a8(p, stable, nr_align_cross,
+                                w4a8_runtime_algo(
+                                        /*scheduling_algo=*/3, inner_kernel));
                 st_aocl.total_attempted += st_extra.total_attempted;
                 st_aocl.packed_ok += st_extra.packed_ok;
                 st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -1760,11 +1764,9 @@ static void prepack_aocl_only_algo(
     // int8 sym-quant stays out-of-place (no in-place int8 path).
     auto warm_primary_full_weight = [&]() {
         const bool w4a8 = w4a8_aocl_warm_candidate(p);
-        // W4A8 reorders under plain aocl_dlp too; other families need aocl_dlp_blocked.
-        const bool w4a8_plain_dlp
-                = w4a8 && pre.inner_kernel == matmul_algo_t::aocl_dlp;
-        if (pre.inner_kernel != matmul_algo_t::aocl_dlp_blocked
-                && !w4a8_plain_dlp) {
+        // W4A8 always resolves to a DLP backend through
+        // w4a8_runtime_algo; other families need a blocked-DLP inner kernel.
+        if (pre.inner_kernel != matmul_algo_t::aocl_dlp_blocked && !w4a8) {
             return;
         }
         if (w4a8) {
@@ -1857,7 +1859,7 @@ void prepack_for_algo_2(const PrepackParams &p) {
 // caches when their respective gates hold:
 //
 //   * AOCL DLP: warmed under STABLE_NTILE when inner is aocl_dlp_blocked,
-//     or when W4A8 is on aocl_dlp (ALGO 3 still warms blocked s8 tiles).
+//     or for W4A8 (whose effective DLP backend comes from the policy helper).
 //
 //     Why STABLE_NTILE-gated: ALGO 3's runtime cache key includes
 //     SLICED `(weight_ptr_offset, n_tile)` from
@@ -1911,8 +1913,6 @@ void prepack_for_algo_3(const PrepackParams &p) {
     // future contributor edits one branch without the other.
     const bool eligible_ck = ck_eligible(p);
     const bool w4a8 = w4a8_aocl_warm_candidate(p);
-    const bool w4a8_plain_dlp
-            = w4a8 && pre.inner_kernel == matmul_algo_t::aocl_dlp;
 
     // AOCL DLP per-tile warm is also skipped when the custom kernel
     // will handle the actual compute (`eligible_ck` true): the
@@ -1930,8 +1930,8 @@ void prepack_for_algo_3(const PrepackParams &p) {
     // custom-kernel path and the savings are realised; deployments that
     // DO hit fallback pay a small one-time per-call cost on first miss.
     // No correctness impact either way.
-    // W4A8 per-tile warm also runs under plain aocl_dlp.
-    if ((pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked || w4a8_plain_dlp)
+    // W4A8 per-tile warm follows its effective runtime backend.
+    if ((pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked || w4a8)
             && get_grp_matmul_aocl_stable_ntile() && p.num_threads > 0
             && p.nr_align > 0 && !eligible_ck) {
         const int max_N = compute_max_n(p);
@@ -1942,7 +1942,9 @@ void prepack_for_algo_3(const PrepackParams &p) {
             // Strict-stable ManyExperts: per-tile decomposition matches
             // the runtime cache key.
             if (w4a8) {
-                st_aocl = warm_aocl_n_tile_w4a8(p, stable, nr_align_eff);
+                st_aocl = warm_aocl_n_tile_w4a8(p, stable, nr_align_eff,
+                        w4a8_runtime_algo(
+                                /*scheduling_algo=*/3, pre.inner_kernel));
                 primary_label = "aocl_per_tile_w4a8";
             } else if (int8_aocl_warm_candidate(p)) {
                 st_aocl = warm_aocl_n_tile_sym_quant(p, stable, nr_align_eff);
@@ -1956,11 +1958,18 @@ void prepack_for_algo_3(const PrepackParams &p) {
             // routes to Sequential which uses the full-weight key.  M3 —
             // W4A8 full-weight, sym-quant full-weight for DQ-INT8, bf16 otherwise.
             if (w4a8) {
-                // Sequential / narrow-N: one full-N tile in the s8 blocked
-                // LRU (same key as Sequential after s8 substitution).
-                st_aocl = warm_aocl_n_tile_w4a8(
-                        p, /*stable=*/1, /*nr_align=*/1);
-                primary_label = "aocl_per_tile_w4a8";
+                const matmul_algo_t a3_algo = w4a8_runtime_algo(
+                        /*scheduling_algo=*/3, pre.inner_kernel);
+                if (w4a8_uses_native_s4(a3_algo)) {
+                    st_aocl = warm_aocl_w4a8(p, p.w4a8_group_size, a3_algo);
+                    primary_label = "aocl_full_weight_w4a8";
+                } else {
+                    // Sequential / narrow-N: one full-N tile in the s8 blocked
+                    // LRU (same key as Sequential after s8 substitution).
+                    st_aocl = warm_aocl_n_tile_w4a8(
+                            p, /*stable=*/1, /*nr_align=*/1, a3_algo);
+                    primary_label = "aocl_per_tile_w4a8";
+                }
             } else if (int8_aocl_warm_candidate(p)) {
                 st_aocl = warm_aocl_sym_quant(p);
                 primary_label = "aocl_full_weight_sym_quant";

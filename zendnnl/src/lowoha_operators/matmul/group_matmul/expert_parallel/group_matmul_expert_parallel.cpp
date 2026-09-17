@@ -134,10 +134,21 @@ void parallel_per_expert(const std::vector<char> &layout,
     // `active < num_threads` means idle cores no tuning can reach.
     static const bool s_log_plan = apilog_info_enabled();
     if (s_log_plan) {
+        const matmul_algo_t first_kernel
+                = resolve_expert_kernel(5, algo, params[active[0]]);
+        bool mixed_kernels = false;
+        for (int a = 1; a < num_active; ++a) {
+            if (resolve_expert_kernel(5, algo, params[active[a]])
+                    != first_kernel) {
+                mixed_kernels = true;
+                break;
+            }
+        }
         apilog_info("[GRP_MATMUL.PLAN] algo=5 expert_parallel num_ops=",
                 num_ops, " active=", num_active, " team_req=", nthr, "/",
                 num_threads, " act=", (want_act ? "fused_pass" : "none"),
-                " kernel=", static_cast<int>(algo));
+                " kernel=", static_cast<int>(first_kernel),
+                " kernel_mixed=", (mixed_kernels ? 1 : 0));
     }
 
     // `if`: one firing expert has nothing to distribute, and that is the M=1
@@ -148,7 +159,8 @@ void parallel_per_expert(const std::vector<char> &layout,
         const int i = active[a];
         execute_expert_slice(layout[i], transA[i], transB[i], M[i], N[i], K[i],
                 alpha[i], src[i], lda[i], weight[i], ldb[i], bias[i], beta[i],
-                dst[i], ldc[i], is_weights_const[i], 1, params[i], algo);
+                dst[i], ldc[i], is_weights_const[i], 1, params[i],
+                resolve_expert_kernel(5, algo, params[i]));
         if (want_act) {
             apply_gated_act_inplace(
                     fused_act, dst[i], 0, M[i], N[i], ldc[i], act_dtype);
@@ -466,7 +478,8 @@ expert_parallel_result try_expert_parallel_pipeline(
                     M[i], w13.N[i], w13.K[i], w13.alpha[i], src[i], lda[i],
                     w13.weight[i], w13.ldb[i], w13.bias[i], w13.beta[i],
                     w13.dst[i], w13.ldc[i], is_weights_const[i], 1,
-                    w13.params[i], algo)
+                    w13.params[i],
+                    resolve_expert_kernel(5, algo, w13.params[i]))
                 != status_t::success) {
             slice_failed.store(true, std::memory_order_relaxed);
             continue;
@@ -483,7 +496,8 @@ expert_parallel_result try_expert_parallel_pipeline(
         if (execute_expert_slice_checked(layout[i], w2.transA[i], transB[i],
                     M[i], w2.N[i], w2.K[i], w2.alpha[i], w13.dst[i], w13.ldc[i],
                     w2.weight[i], w2.ldb[i], w2.bias[i], w2.beta[i], w2.dst[i],
-                    w2.ldc[i], is_weights_const[i], 1, w2.params[i], algo)
+                    w2.ldc[i], is_weights_const[i], 1, w2.params[i],
+                    resolve_expert_kernel(5, algo, w2.params[i]))
                 != status_t::success) {
             slice_failed.store(true, std::memory_order_relaxed);
             continue;
