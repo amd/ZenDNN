@@ -143,6 +143,100 @@ jobs:
             console.log('⚠️ Could not resolve a ZenTorch build for this PR head SHA.');
             return { found: false, external_run_url: '', reason: 'not_found', token_used: 'ZIAIE_PAT' };
 
+      - name: Find Triggered ZenTF Workflow
+        id: find_zentf
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.ZIAIE_PAT }}
+          script: |
+            const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+            const headSha = pr.head_sha;
+
+            console.log(`🔍 Resolving ZenTF build for PR #${pr.number} (head ${headSha})`);
+
+            const CONTEXT_MATCH = 'zendnn_tensorflow_plugin';
+
+            const runIdFromUrl = (url) => {
+              const m = (url || '').match(/\/actions\/runs\/(\d+)/);
+              return m ? Number(m[1]) : undefined;
+            };
+
+            const findByCommitStatus = async () => {
+              try {
+                const resp = await github.rest.repos.listCommitStatusesForRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: headSha,
+                  per_page: 100
+                });
+                const st = resp.data.find(s =>
+                  (s.context || '').toLowerCase().includes(CONTEXT_MATCH)
+                );
+                if (st) {
+                  console.log(`✅ ZenTF commit status: state=${st.state} url=${st.target_url || '(none)'}`);
+                  return {
+                    found: true,
+                    external_run_id: runIdFromUrl(st.target_url),
+                    external_run_url: st.target_url || '',
+                    external_repo: 'AMD-Zenai/ZenDNN_TensorFlow_Plugin',
+                    external_status: st.state,
+                    match: 'commit_status',
+                    token_used: 'ZIAIE_PAT'
+                  };
+                }
+              } catch (e) {
+                console.log(`⚠️ listCommitStatuses failed: ${e.message}`);
+              }
+              return null;
+            };
+
+            const findByDispatchHeuristic = async () => {
+              try {
+                const commit = await github.rest.repos.getCommit({
+                  owner: context.repo.owner, repo: context.repo.repo, ref: headSha
+                });
+                const commitTime = new Date(commit.data.commit.committer.date).getTime();
+                const runs = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner: 'AMD-Zenai', repo: 'ZenDNN_TensorFlow_Plugin',
+                  event: 'repository_dispatch', per_page: 30
+                });
+                const candidates = runs.data.workflow_runs
+                  .filter(r => (r.display_title || r.name || '') === 'zendnnl-pr')
+                  .filter(r => new Date(r.created_at).getTime() >= commitTime - 60000)
+                  .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                if (candidates.length > 0) {
+                  const run = candidates[0];
+                  console.log(`↪️ Heuristic ZenTF run: ${run.id} (${run.conclusion || run.status})`);
+                  return {
+                    found: true,
+                    external_run_id: run.id,
+                    external_run_url: run.html_url,
+                    external_repo: 'AMD-Zenai/ZenDNN_TensorFlow_Plugin',
+                    external_status: run.conclusion || run.status,
+                    match: 'dispatch_heuristic',
+                    token_used: 'ZIAIE_PAT'
+                  };
+                }
+              } catch (e) {
+                console.log(`⚠️ dispatch heuristic failed: ${e.message}`);
+              }
+              return null;
+            };
+
+            let heuristic = null;
+            const maxTries = 6;
+            for (let i = 1; i <= maxTries; i++) {
+              const byStatus = await findByCommitStatus();
+              if (byStatus && byStatus.external_run_url) return byStatus;
+              if (!heuristic) heuristic = await findByDispatchHeuristic();
+              console.log(`⏳ Attempt ${i}/${maxTries}: ZenTF link not ready yet, waiting 45s...`);
+              await new Promise(r => setTimeout(r, 45000));
+            }
+
+            if (heuristic) return heuristic;
+            console.log('⚠️ Could not resolve a ZenTF build for this PR head SHA.');
+            return { found: false, external_run_url: '', reason: 'not_found', token_used: 'ZIAIE_PAT' };
+
       - name: Wait for ALL workflows to complete
         id: wait_for_completion
         uses: actions/github-script@v9
@@ -155,15 +249,16 @@ jobs:
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
-            // Safe parsing of ZenTorch result
-            let zentorchResult = { found: false };
-            try {
-              const zentorchOutput = `${{ steps.find_zentorch.outputs.result || '{}' }}`;
-              zentorchResult = zentorchOutput ? JSON.parse(zentorchOutput) : { found: false };
-            } catch (error) {
-              console.log(`Could not parse zentorch result: ${error.message}`);
-              zentorchResult = { found: false };
-            }
+            const parsePluginResult = (raw, label) => {
+              try {
+                return raw ? JSON.parse(raw) : { found: false };
+              } catch (error) {
+                console.log(`Could not parse ${label} result: ${error.message}`);
+                return { found: false };
+              }
+            };
+            let zentorchResult = parsePluginResult(`${{ steps.find_zentorch.outputs.result || '{}' }}`, 'zentorch');
+            let zentfResult = parsePluginResult(`${{ steps.find_zentf.outputs.result || '{}' }}`, 'zentf');
             
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -174,20 +269,33 @@ jobs:
             if (zentorchResult.found) {
               console.log(`ZenTorch URL: ${zentorchResult.external_run_url}`);
             }
-            
+            console.log(`ZenTF external workflow found: ${zentfResult.found}`);
+            if (zentfResult.found) {
+              console.log(`ZenTF URL: ${zentfResult.external_run_url}`);
+            }
+
+            const isLocalPluginNoise = (name) => {
+              const n = (name || '').toLowerCase();
+              return n.includes('trigger-zentorch') || n.includes('trigger-zentf')
+                || n.includes('trigger-zen');
+            };
+
             const checkAllWorkflows = async () => {
-                // Define ALL important workflows including ZenTorch status check
                 const importantWorkflows = [
                   'commit message enforcement',
-                  'zendnnl_build_pr', 
-                  'check-zentorch-status',    // ✅ CRITICAL - This must complete!
+                  'zendnnl_build_pr',
+                  'zendnnl_build_clang',
+                  'zendnnl_build_msvc',
+                  'zentorch plugin ci',
+                  'zentf plugin ci',
+                  'check-zentorch-status',
+                  'check-zentf-status',
                   'asan-build',
                   'zendnnl_build_push',
                   'check jira id',
                   'verify jira id',
                   'check license headers',
-                  'verify license headers', 
-                  'trigger-zentorch-zendnnl'
+                  'verify license headers'
                 ];
 
                 console.log(`📊 Checking workflows for commit: ${ref.substring(0, 7)}`);
@@ -241,6 +349,7 @@ jobs:
                 
                 // Add local workflows
                 workflows.forEach(run => {
+                  if (isLocalPluginNoise(run.name)) return;
                   allRuns.push({
                     id: run.id,
                     name: run.name,
@@ -253,6 +362,7 @@ jobs:
 
                 // Add local checks (avoid duplicates)
                 checks.forEach(check => {
+                  if (isLocalPluginNoise(check.name)) return;
                   if (!allRuns.find(run => run.name === check.name)) {
                     allRuns.push({
                       id: check.id,
@@ -265,44 +375,39 @@ jobs:
                   }
                 });
 
-                // ✅ CRITICAL: Check if ZenTorch status check exists and is monitored
-                const zentorchStatusCheck = allRuns.find(run => 
-                  run.name.toLowerCase().includes('zentorch') && 
-                  run.name.toLowerCase().includes('status')
-                );
-                
-                if (!zentorchStatusCheck) {
-                  console.log(`⚠️  WARNING: ZenTorch status check not found in workflow list!`);
-                  console.log(`Looking for any ZenTorch-related checks...`);
-                  
-                  // Search more broadly for ZenTorch checks
-                  const allZentorchChecks = checks.filter(check => 
-                    check.name.toLowerCase().includes('zentorch')
-                  );
-                  
-                  if (allZentorchChecks.length > 0) {
-                    console.log(`Found ${allZentorchChecks.length} ZenTorch-related checks:`);
-                    allZentorchChecks.forEach(check => {
-                      console.log(`  - ${check.name}: ${check.conclusion || check.status}`);
-                      
-                      // Add missing ZenTorch checks
-                      if (!allRuns.find(run => run.id === check.id)) {
-                        allRuns.push({
-                          id: check.id,
-                          name: check.name,
-                          status: check.conclusion || check.status,
-                          url: check.html_url,
-                          type: 'check_run',
-                          repository: `${owner}/${repo}`
-                        });
-                      }
-                    });
+                // Prefer the plugin repo run URL over the local waiter/trigger checks.
+                if (zentorchResult.found) {
+                  for (let i = allRuns.length - 1; i >= 0; i--) {
+                    const n = (allRuns[i].name || '').toLowerCase();
+                    if (n.includes('zentorch') && allRuns[i].repository === `${owner}/${repo}`) {
+                      allRuns.splice(i, 1);
+                    }
+                  }
+                }
+                if (zentfResult.found) {
+                  for (let i = allRuns.length - 1; i >= 0; i--) {
+                    const n = (allRuns[i].name || '').toLowerCase();
+                    if ((n.includes('zentf') || n.includes('tensorflow_plugin')) && allRuns[i].repository === `${owner}/${repo}`) {
+                      allRuns.splice(i, 1);
+                    }
                   }
                 }
 
-                // Add external ZenTorch workflow if found
-                if (zentorchResult.found && zentorchResult.external_run_id) {
-                  console.log(`📡 Adding external ZenTorch workflow to monitoring...`);
+                const addExternalPlugin = async (result, extOwner, extRepo, label) => {
+                  if (!result.found || !result.external_run_id) {
+                    if (result.found && result.external_run_url) {
+                      allRuns.push({
+                        id: result.external_run_id || label,
+                        name: `${extRepo}: zendnnl-pr`,
+                        status: result.external_status || 'pending',
+                        url: result.external_run_url,
+                        type: 'triggered_workflow_run',
+                        repository: `${extOwner}/${extRepo}`
+                      });
+                    }
+                    return;
+                  }
+                  console.log(`📡 Adding external ${label} workflow to monitoring...`);
                   try {
                     let extClient = github;
                     if (process.env.ZIAIE_PAT) {
@@ -310,33 +415,37 @@ jobs:
                       extClient = getOctokit(process.env.ZIAIE_PAT);
                     }
                     const externalResp = await extClient.rest.actions.getWorkflowRun({
-                      owner: 'AMD-Zenai',
-                      repo: 'ZenDNN_PyTorch_Plugin',
-                      run_id: zentorchResult.external_run_id
+                      owner: extOwner,
+                      repo: extRepo,
+                      run_id: result.external_run_id
                     });
-                    
+                    const liveUrl = externalResp.data.html_url;
+                    result.external_run_url = liveUrl;
+                    result.external_status = externalResp.data.conclusion || externalResp.data.status;
                     allRuns.push({
                       id: externalResp.data.id,
-                      name: `ZenDNN_PyTorch_Plugin: ${externalResp.data.display_title || externalResp.data.name}`,
-                      status: externalResp.data.conclusion || externalResp.data.status,
-                      url: externalResp.data.html_url,
+                      name: `${extRepo}: ${externalResp.data.display_title || externalResp.data.name}`,
+                      status: result.external_status,
+                      url: liveUrl,
                       type: 'triggered_workflow_run',
-                      repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin'
+                      repository: `${extOwner}/${extRepo}`
                     });
-                    
-                    console.log(`External ZenTorch status: ${externalResp.data.conclusion || externalResp.data.status}`);
-                  } catch (zentorchError) {
-                    console.log(`❌ Could not get live ZenTorch run; using cached status: ${zentorchError.message}`);
+                    console.log(`External ${label} status: ${result.external_status} url=${liveUrl}`);
+                  } catch (pluginError) {
+                    console.log(`❌ Could not get live ${label} run; using cached status: ${pluginError.message}`);
                     allRuns.push({
-                      id: zentorchResult.external_run_id,
-                      name: 'ZenDNN_PyTorch_Plugin: zendnnl-pr',
-                      status: zentorchResult.external_status || 'pending',
-                      url: zentorchResult.external_run_url || '',
+                      id: result.external_run_id,
+                      name: `${extRepo}: zendnnl-pr`,
+                      status: result.external_status || 'pending',
+                      url: result.external_run_url || '',
                       type: 'triggered_workflow_run',
-                      repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin'
+                      repository: `${extOwner}/${extRepo}`
                     });
                   }
-                }
+                };
+
+                await addExternalPlugin(zentorchResult, 'AMD-Zenai', 'ZenDNN_PyTorch_Plugin', 'ZenTorch');
+                await addExternalPlugin(zentfResult, 'AMD-Zenai', 'ZenDNN_TensorFlow_Plugin', 'ZenTF');
 
                 // ✅ SEPARATE RUNNING vs COMPLETED CHECKS
                 const running = allRuns.filter(r => 
@@ -387,6 +496,9 @@ jobs:
                   completed_count: completed.length,
                   total_count: allRuns.length,
                   zentorch_included: zentorchResult.found,
+                  zentf_included: zentfResult.found,
+                  zentorch_run_url: zentorchResult.external_run_url || '',
+                  zentf_run_url: zentfResult.external_run_url || '',
                   currently_running: running.map(r => r.name)
                 };
             };
@@ -412,11 +524,12 @@ jobs:
               result = await checkAllWorkflows();
               
               // ✅ Special check for ZenTorch status
-              const zentorchStillRunning = result.currently_running?.find(name => 
-                name.toLowerCase().includes('zentorch')
-              );
-              if (zentorchStillRunning) {
-                console.log(`🎯 ZenTorch check still running: ${zentorchStillRunning}`);
+              const pluginStillRunning = result.currently_running?.find(name => {
+                const n = name.toLowerCase();
+                return n.includes('zentorch') || n.includes('zentf') || n.includes('pytorch_plugin') || n.includes('tensorflow_plugin');
+              });
+              if (pluginStillRunning) {
+                console.log(`🎯 Plugin check still running: ${pluginStillRunning}`);
               }
             }
 
@@ -466,6 +579,8 @@ jobs:
 
           FALLBACK_URL="https://github.com/${REPO}/pull/${PR_NUMBER}/checks"
           COMMIT_URL="https://github.com/${REPO}/commit/${HEAD_SHA}"
+          ZTORCH_URL=$(echo "$completion_json" | jq -r '.zentorch_run_url // empty')
+          ZTF_URL=$(echo "$completion_json" | jq -r '.zentf_run_url // empty')
 
           # Teams "Workflows" webhooks accept MessageCard payloads but drop every
           # link and button in them, so this posts an Adaptive Card instead, where
@@ -532,7 +647,8 @@ jobs:
             --arg cancelled "$CANCELLED_COUNT" --arg skipped "$SKIPPED_COUNT" \
             --arg wfmd "$WORKFLOWS_MD" \
             --arg prurl "$PR_URL" --arg checksurl "$FALLBACK_URL" \
-            --arg commiturl "$COMMIT_URL" '
+            --arg commiturl "$COMMIT_URL" \
+            --arg ztorchurl "$ZTORCH_URL" --arg ztfurl "$ZTF_URL" '
             def mdlabel: gsub("\\\\"; "\\\\") | gsub("\\["; "\\[") | gsub("\\]"; "\\]");
             {
               type: "message",
@@ -573,11 +689,15 @@ jobs:
                        spacing:"Medium", wrap:true},
                       {type:"TextBlock", text:$wfmd, wrap:true, spacing:"Small"}
                     ],
-                    actions: [
-                      {type:"Action.OpenUrl", title:"View PR",         url:$prurl},
-                      {type:"Action.OpenUrl", title:"View All Checks", url:$checksurl},
-                      {type:"Action.OpenUrl", title:"View Commit",     url:$commiturl}
-                    ]
+                    actions: (
+                      [
+                        {type:"Action.OpenUrl", title:"View PR",         url:$prurl},
+                        {type:"Action.OpenUrl", title:"View All Checks", url:$checksurl},
+                        {type:"Action.OpenUrl", title:"View Commit",     url:$commiturl}
+                      ]
+                      + (if ($ztorchurl | startswith("http")) then [{type:"Action.OpenUrl", title:"ZenTorch CI", url:$ztorchurl}] else [] end)
+                      + (if ($ztfurl | startswith("http")) then [{type:"Action.OpenUrl", title:"ZenTF CI", url:$ztfurl}] else [] end)
+                    )
                   }
                 }
               ]
