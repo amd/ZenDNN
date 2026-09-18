@@ -13,6 +13,12 @@ permissions:
   contents: read
   actions: read
 
+# One waiter per PR. Without this, every push leaves the previous notifier
+# polling for up to the job timeout and Teams gets a card per stale SHA.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
@@ -240,8 +246,6 @@ jobs:
       - name: Wait for ALL workflows to complete
         id: wait_for_completion
         uses: actions/github-script@v9
-        env:
-          ZIAIE_PAT: ${{ secrets.ZIAIE_PAT }}
         with:
           # Local workflow/check listing uses GITHUB_TOKEN. ZIAIE_PAT 403s on
           # Actions APIs and previously made this step report zero workflows.
@@ -375,77 +379,22 @@ jobs:
                   }
                 });
 
-                // Prefer the plugin repo run URL over the local waiter/trigger checks.
-                if (zentorchResult.found) {
-                  for (let i = allRuns.length - 1; i >= 0; i--) {
-                    const n = (allRuns[i].name || '').toLowerCase();
-                    if (n.includes('zentorch') && allRuns[i].repository === `${owner}/${repo}`) {
-                      allRuns.splice(i, 1);
-                    }
-                  }
-                }
-                if (zentfResult.found) {
-                  for (let i = allRuns.length - 1; i >= 0; i--) {
-                    const n = (allRuns[i].name || '').toLowerCase();
-                    if ((n.includes('zentf') || n.includes('tensorflow_plugin')) && allRuns[i].repository === `${owner}/${repo}`) {
-                      allRuns.splice(i, 1);
-                    }
-                  }
-                }
-
-                const addExternalPlugin = async (result, extOwner, extRepo, label) => {
-                  if (!result.found || !result.external_run_id) {
-                    if (result.found && result.external_run_url) {
-                      allRuns.push({
-                        id: result.external_run_id || label,
-                        name: `${extRepo}: zendnnl-pr`,
-                        status: result.external_status || 'pending',
-                        url: result.external_run_url,
-                        type: 'triggered_workflow_run',
-                        repository: `${extOwner}/${extRepo}`
-                      });
-                    }
-                    return;
-                  }
-                  console.log(`📡 Adding external ${label} workflow to monitoring...`);
-                  try {
-                    let extClient = github;
-                    if (process.env.ZIAIE_PAT) {
-                      const { getOctokit } = require('@actions/github');
-                      extClient = getOctokit(process.env.ZIAIE_PAT);
-                    }
-                    const externalResp = await extClient.rest.actions.getWorkflowRun({
-                      owner: extOwner,
-                      repo: extRepo,
-                      run_id: result.external_run_id
-                    });
-                    const liveUrl = externalResp.data.html_url;
-                    result.external_run_url = liveUrl;
-                    result.external_status = externalResp.data.conclusion || externalResp.data.status;
-                    allRuns.push({
-                      id: externalResp.data.id,
-                      name: `${extRepo}: ${externalResp.data.display_title || externalResp.data.name}`,
-                      status: result.external_status,
-                      url: liveUrl,
-                      type: 'triggered_workflow_run',
-                      repository: `${extOwner}/${extRepo}`
-                    });
-                    console.log(`External ${label} status: ${result.external_status} url=${liveUrl}`);
-                  } catch (pluginError) {
-                    console.log(`❌ Could not get live ${label} run; using cached status: ${pluginError.message}`);
-                    allRuns.push({
-                      id: result.external_run_id,
-                      name: `${extRepo}: zendnnl-pr`,
-                      status: result.external_status || 'pending',
-                      url: result.external_run_url || '',
-                      type: 'triggered_workflow_run',
-                      repository: `${extOwner}/${extRepo}`
-                    });
-                  }
+                // The local "ZenTorch/ZenTF plugin CI" jobs already block until the
+                // plugin run finishes and carry its conclusion, so they are the source
+                // of truth here. Querying the plugin repos instead means a cross-repo
+                // call that can 403 or hang on this runner, which used to leave the
+                // waiter polling a status that never changed. Only borrow the plugin
+                // run URL so the card and summary still link to the real build.
+                const linkPluginRun = (result, matches) => {
+                  if (!result.found || !result.external_run_url) return;
+                  const target = allRuns.find(r =>
+                    r.repository === `${owner}/${repo}` && matches((r.name || '').toLowerCase())
+                  );
+                  if (target) target.url = result.external_run_url;
                 };
 
-                await addExternalPlugin(zentorchResult, 'AMD-Zenai', 'ZenDNN_PyTorch_Plugin', 'ZenTorch');
-                await addExternalPlugin(zentfResult, 'AMD-Zenai', 'ZenDNN_TensorFlow_Plugin', 'ZenTF');
+                linkPluginRun(zentorchResult, n => n.includes('zentorch'));
+                linkPluginRun(zentfResult, n => n.includes('zentf') || n.includes('tensorflow_plugin'));
 
                 // ✅ SEPARATE RUNNING vs COMPLETED CHECKS
                 const running = allRuns.filter(r => 
@@ -510,12 +459,15 @@ jobs:
             let result = await checkAllWorkflows();
             let attempts = 0;
             const maxAttempts = 90;  // 90 minutes max wait for cross-repo builds
-            
+            // Bound wall-clock time too: counting iterations alone lets a slow or
+            // stalled API call stretch the waiter well past its intended window.
+            const deadline = Date.now() + maxAttempts * 60000;
+
             console.log(`\n🔍 INITIAL CHECK RESULTS:`);
             console.log(`Found ${result.total_count} workflows, ${result.running_count} still running`);
 
             // ✅ MONITOR UNTIL ALL COMPLETE (no forcing)
-            while (!result.all_complete && attempts < maxAttempts) {
+            while (!result.all_complete && attempts < maxAttempts && Date.now() < deadline) {
               attempts++;
               console.log(`\n⏳ ATTEMPT ${attempts}/${maxAttempts}:`);
               console.log(`   Still waiting for: ${result.currently_running?.join(', ') || 'unknown'}`);
