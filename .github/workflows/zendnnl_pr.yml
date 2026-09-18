@@ -329,7 +329,7 @@ jobs:
         echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
         
         # Run the gtests with configurable parameters
-        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/gtest_output.log
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC --presub true |& tee $WORKSPACE/gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
@@ -567,7 +567,7 @@ jobs:
         echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
 
         # Run the gtests with configurable parameters
-        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC |& tee $WORKSPACE/clang_gtest_output.log
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS --num_threads $ZENDNNL_CI_TEST_NPROC --presub true |& tee $WORKSPACE/clang_gtest_output.log
 
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/clang_gtest_output.log"; then
@@ -737,7 +737,7 @@ jobs:
 
         echo "Running gtests with filter: $GTEST_FILTER iterations: $TEST_ITERATIONS num_threads=$ZENDNNL_CI_TEST_NPROC"
         ./build-msvc/install/gtests/gtests.exe --gtest_filter="$GTEST_FILTER" \
-          --test "$TEST_ITERATIONS" --num_threads "$ZENDNNL_CI_TEST_NPROC" \
+          --test "$TEST_ITERATIONS" --num_threads "$ZENDNNL_CI_TEST_NPROC" --presub true \
           |& tee "$GITHUB_WORKSPACE/msvc_gtest_output.log"
 
         if grep -F -q "[  FAILED  ]" "$GITHUB_WORKSPACE/msvc_gtest_output.log"; then
@@ -1118,7 +1118,7 @@ jobs:
         else
           echo "Using default test iterations"
         fi
-        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC}"
+        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC} --presub true"
         
         echo "Running command: ${cmd}"
         
@@ -1346,7 +1346,7 @@ jobs:
         else
           echo "Using default test iterations"
         fi
-        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC}"
+        cmd="${cmd} --num_threads ${ZENDNNL_CI_TEST_NPROC} --presub true"
         
         echo "Running command: ${cmd}"
         
