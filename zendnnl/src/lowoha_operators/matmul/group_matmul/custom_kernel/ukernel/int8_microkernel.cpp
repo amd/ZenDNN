@@ -160,22 +160,42 @@ static inline void gelu_and_mul_store_pair_int(
 }
 
 // Finish the per-(m, v) dequant: subtract the precomputed s32
-// compensation, convert to FP32, scale by per-row `src_scale` and
-// per-channel `wei_scale`, and add the optional bias.  Factored out
-// of the epilogue so the gated / bf16-dst / f32-dst store paths share
-// one definition.  A free `static` function (not a lambda) so it can
-// carry its own `target` attribute — a lambda does not inherit
-// `ukernel_impl`'s, and the AVX-512 intrinsics would fail to inline.
-// The caller selects the compensation term (`128 * sum_wei` for sym,
-// `src_zp * sum_wei` for asym) so this helper stays compute-agnostic.
+// compensation, convert to FP32, then scale and add the optional bias.
+// Factored out of the epilogue so the gated / bf16-dst / f32-dst store
+// paths share one definition.  A free `static` function (not a lambda)
+// so it can carry its own `target` attribute — a lambda does not
+// inherit `ukernel_impl`'s, and the AVX-512 intrinsics would fail to
+// inline.  The caller selects the compensation term (`128 * sum_wei`
+// for sym, `src_zp * sum_wei` for asym) so this helper stays
+// compute-agnostic, and passes `scale_mv` pre-multiplied so the scale
+// and bias fold into one FMA.
 ZENDNNL_TARGET("avx512f,avx512dq,fma")
 static inline __m512 dequant_finish(__m512i acc_s32, __m512i correction,
-        __m512 src_scale_m, __m512 wei_scale_v, __m512 bias_v, bool has_bias) {
-    __m512 f = _mm512_cvtepi32_ps(_mm512_sub_epi32(acc_s32, correction));
-    f = _mm512_mul_ps(f, src_scale_m);
-    f = _mm512_mul_ps(f, wei_scale_v);
-    if (has_bias) f = _mm512_add_ps(f, bias_v);
-    return f;
+        __m512 scale_mv, __m512 bias_v, bool has_bias) {
+    const __m512 f = _mm512_cvtepi32_ps(_mm512_sub_epi32(acc_s32, correction));
+    return has_bias ? _mm512_fmadd_ps(f, scale_mv, bias_v)
+                    : _mm512_mul_ps(f, scale_mv);
+}
+
+// Load 16 bias columns as f32.  f16 is copied through memcpy because
+// `float16_t` must not be aliased as an integer type.
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 load_bias_f32(
+        const void *bias, BiasKind bias_kind, int v) {
+    if (bias_kind == BiasKind::bf16) {
+        const auto *bias_bf16 = static_cast<const bfloat16_t *>(bias);
+        const __m256i b16 = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i *>(bias_bf16 + v * 16));
+        return bf16x16_to_f32(b16);
+    }
+    if (bias_kind == BiasKind::f16) {
+        __m256i h16;
+        const auto *bias_bytes = static_cast<const char *>(bias);
+        std::memcpy(&h16, bias_bytes + static_cast<size_t>(v) * sizeof(h16),
+                sizeof(h16));
+        return _mm512_cvtph_ps(h16);
+    }
+    return _mm512_loadu_ps(static_cast<const float *>(bias) + v * 16);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -590,49 +610,21 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
         }
     }
 
-    // Load per-channel bias[v] if present (BF16 / FP32 / F16 → FP32 in
-    // registers).  Mirror of the bf16 sibling's bias load — the
-    // dispatcher resolves `bias_kind` once at `prepare_for_call`
-    // time and the branch is outside the per-(m, v) loop below.
+    // Optional bias is read in the store epilogue, at the dequant add:
+    // the s32 accumulator cannot hold a float seed.  fp32 bias is read
+    // from the caller's buffer; bf16 / f16 bias is widened once per tile
+    // into `bias_slab`.  `bias_f32` stays null when there is no bias and
+    // the epilogue then skips the load, keeping that path free of it.
     const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
-    __m512 bias_v[NV];
-    if (has_bias) {
-        if (bias_kind == BiasKind::bf16) {
-            const auto *bias_bf16 = static_cast<const bfloat16_t *>(bias);
+    alignas(64) float bias_slab[NV * 16];
+    const float *__restrict bias_f32 = static_cast<const float *>(bias);
+    if (has_bias && bias_kind != BiasKind::fp32) {
 #pragma GCC unroll 4
-            for (int v = 0; v < NV; ++v) {
-                __m256i b16 = _mm256_loadu_si256(
-                        reinterpret_cast<const __m256i *>(bias_bf16 + v * 16));
-                bias_v[v] = bf16x16_to_f32(b16);
-            }
-        } else if (bias_kind == BiasKind::f16) {
-            // f16 bias.  `_mm512_cvtph_ps` (VCVTPH2PS, part of
-            // AVX-512F — NOT the native AVX-512-FP16 ISA) widens 16 f16 lanes
-            // to fp32, so this path needs no AVX-512-FP16 toolchain / CPU.
-            //
-            // `float16_t` is a class wrapper, and casting `float16_t*` to
-            // `uint16_t*` (then reading it) is strict-aliasing UB — see
-            // common/float16.hpp.  Copy the 16-lane f16 payload through
-            // `memcpy` into a `__m256i` (once per tile — negligible cost) so the
-            // load stays well-defined under -O2 / -fstrict-aliasing.
-            const auto *bias_bytes = static_cast<const char *>(bias);
-#pragma GCC unroll 4
-            for (int v = 0; v < NV; ++v) {
-                __m256i h16;
-                std::memcpy(&h16,
-                        bias_bytes + static_cast<size_t>(v) * sizeof(h16),
-                        sizeof(h16));
-                bias_v[v] = _mm512_cvtph_ps(h16);
-            }
-        } else {
-            const auto *bias_fp32 = static_cast<const float *>(bias);
-#pragma GCC unroll 4
-            for (int v = 0; v < NV; ++v) {
-                bias_v[v] = _mm512_loadu_ps(bias_fp32 + v * 16);
-            }
+        for (int v = 0; v < NV; ++v) {
+            _mm512_store_ps(
+                    bias_slab + v * 16, load_bias_f32(bias, bias_kind, v));
         }
-    } else {
-        (void)bias_v;
+        bias_f32 = bias_slab;
     }
 
     // ── Fused dequant + store epilogue ─────────────────────────────
@@ -665,6 +657,12 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
             const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(m));
 #pragma GCC unroll 2
             for (int p = 0; p < n_pairs; ++p) {
+                const __m512 bias_lo = has_bias
+                        ? _mm512_loadu_ps(bias_f32 + 2 * p * 16)
+                        : _mm512_setzero_ps();
+                const __m512 bias_hi = has_bias
+                        ? _mm512_loadu_ps(bias_f32 + (2 * p + 1) * 16)
+                        : _mm512_setzero_ps();
                 __m512i corr_lo, corr_hi;
                 if constexpr (Compute == IntCompute::kS8_Sym) {
                     corr_lo = comp_sym_scaled[2 * p];
@@ -675,11 +673,12 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                     corr_hi = _mm512_mullo_epi32(zp, comp_v[2 * p + 1]);
                 }
                 const __m512 lo = dequant_finish(acc[buf0][m][2 * p], corr_lo,
-                        src_scale_m, wei_scale_v[2 * p], bias_v[2 * p],
+                        _mm512_mul_ps(src_scale_m, wei_scale_v[2 * p]), bias_lo,
                         has_bias);
                 const __m512 hi = dequant_finish(acc[buf0][m][2 * p + 1],
-                        corr_hi, src_scale_m, wei_scale_v[2 * p + 1],
-                        bias_v[2 * p + 1], has_bias);
+                        corr_hi,
+                        _mm512_mul_ps(src_scale_m, wei_scale_v[2 * p + 1]),
+                        bias_hi, has_bias);
                 bfloat16_t *dst = Cout_tight
                         + static_cast<size_t>(m) * ldc_tight + p * 16;
                 if constexpr (Act == ActKind::swiglu_oai_mul) {
@@ -701,6 +700,9 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
             const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(m));
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
+                const __m512 bias_cur = has_bias
+                        ? _mm512_loadu_ps(bias_f32 + v * 16)
+                        : _mm512_setzero_ps();
                 __m512i corr;
                 if constexpr (Compute == IntCompute::kS8_Sym) {
                     corr = comp_sym_scaled[v];
@@ -709,7 +711,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                             _mm512_set1_epi32(src_zp[m]), comp_v[v]);
                 }
                 const __m512 f = dequant_finish(acc[buf0][m][v], corr,
-                        src_scale_m, wei_scale_v[v], bias_v[v], has_bias);
+                        _mm512_mul_ps(src_scale_m, wei_scale_v[v]), bias_cur,
+                        has_bias);
                 if constexpr (Dst == DstDt::kBf16) {
                     bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_void)
                             + static_cast<size_t>(m) * ldc + v * 16;
