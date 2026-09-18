@@ -61,9 +61,11 @@ static inline int unsetenv(const char *name) {
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 3000
+#define MATMUL_SIZE_END_PRESUB 512
 #define MATMUL_LARGE_SIZE_END 10000
 #define BATCH_START 1
 #define BATCH_END 256
+#define BATCH_END_PRESUB 32
 #define TEST_PARTITIONS 3
 #define ENABLE_F32_RELAXATION 0
 #define POST_OPS_LIMIT 3
@@ -316,6 +318,14 @@ extern std::string cmd_lowoha;
 /** @brief Parsed --lowoha value; nullopt when unset or invalid. */
 std::optional<bool> parse_cmd_lowoha();
 extern uint32_t cmd_num_threads;
+/** @brief --presub true|false; nullopt when omitted (treated as false). */
+extern std::optional<bool> cmd_presub;
+
+/** @brief Effective upper bound for random M/K/N (`rand() %` span). */
+uint32_t matmul_size_end();
+/** @brief Effective upper bound for random batch size (`rand() %` span). */
+uint32_t batch_size_end();
+
 extern CLIParams cli_params;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
@@ -449,8 +459,9 @@ public:
     /** @brief to make object callable */
     void operator()(const int &argc, char *argv[], int64_t &seed,
             uint32_t &test_num, std::string &ai_test_mode, std::string &lowoha,
-            uint32_t &num_threads, std::string &input_file, std::string &op,
-            uint32_t &ndims, CLIParams &cli_params);
+            uint32_t &num_threads, std::optional<bool> &presub,
+            std::string &input_file, std::string &op, uint32_t &ndims,
+            CLIParams &cli_params);
 };
 
 bool is_binary_postop(post_op_type_t post_op);

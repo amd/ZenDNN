@@ -41,14 +41,14 @@
 GroupQuantMatmulType::GroupQuantMatmulType(
         uint32_t test_index, uint32_t total_tests) {
     std::mt19937 gen(rand());
-    matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+    matmul_m = MATMUL_SIZE_START + rand() % matmul_size_end();
     // K aligned to 4 — INT8 SYM/DYNAMIC tests previously rounded internally
     // (`sym_k = (k/4)*4`); centralising the alignment here lets the test
     // bodies use `k` directly.
-    uint64_t raw_k = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+    uint64_t raw_k = MATMUL_SIZE_START + rand() % matmul_size_end();
     matmul_k = (raw_k / 4) * 4;
     if (matmul_k == 0) { matmul_k = 4; }
-    matmul_n = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+    matmul_n = MATMUL_SIZE_START + rand() % matmul_size_end();
 
     if (cmd_num_threads) {
         num_threads = cmd_num_threads;

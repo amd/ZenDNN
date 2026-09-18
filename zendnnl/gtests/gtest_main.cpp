@@ -85,6 +85,7 @@ uint32_t test_num = 400;
 int64_t seed = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_lowoha {};
 uint32_t cmd_num_threads = 0;
+std::optional<bool> cmd_presub {};
 std::string cmd_input_file {};
 std::string cmd_operator {};
 uint32_t ndims = 2;
@@ -132,8 +133,8 @@ int main(int argc, char **argv) {
         // Command line argument parser
         Parser parse;
         parse(argc, argv, seed, test_num, ai_test_mode_str, cmd_lowoha,
-                cmd_num_threads, cmd_input_file, cmd_operator, ndims,
-                cli_params);
+                cmd_num_threads, cmd_presub, cmd_input_file, cmd_operator,
+                ndims, cli_params);
 
         static const std::unordered_set<std::string> k_input_file_ops
                 = {"matmul", "reorder", "embeddingbag", "embedding",
@@ -186,6 +187,11 @@ int main(int argc, char **argv) {
 
         srand(static_cast<unsigned int>(seed));
         std::cout << "Value " << seed << " is used as seed. \n";
+        if (cmd_presub.value_or(false)) {
+            std::cout << "Presub mode enabled: random M/K/N capped at "
+                      << MATMUL_SIZE_END_PRESUB << ", batch size capped at "
+                      << BATCH_END_PRESUB << ".\n";
+        }
 
         // --input_file and --op are paired; only populate the matching parameter vector.
         const bool input_file_mode = !cmd_input_file.empty();

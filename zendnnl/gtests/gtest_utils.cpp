@@ -165,13 +165,13 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
     std::mt19937 gen(rand());
     matmul_m = (matmul_input.m && *matmul_input.m > 0)
             ? *matmul_input.m
-            : MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+            : MATMUL_SIZE_START + rand() % matmul_size_end();
     matmul_k = (matmul_input.k && *matmul_input.k > 0)
             ? *matmul_input.k
-            : MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+            : MATMUL_SIZE_START + rand() % matmul_size_end();
     matmul_n = (matmul_input.n && *matmul_input.n > 0)
             ? *matmul_input.n
-            : MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+            : MATMUL_SIZE_START + rand() % matmul_size_end();
     transA = matmul_input.transA ? *matmul_input.transA : rand() % 2;
     transB = matmul_input.transB ? *matmul_input.transB : rand() % 2;
     // Post-op selection based on command-line input or random selection
@@ -684,7 +684,7 @@ BatchMatmulType::BatchMatmulType(const MatmulInput &matmul_input,
         uint32_t test_index, uint32_t total_tests) {
     batch_size = (matmul_input.batch_size && *matmul_input.batch_size > 0)
             ? *matmul_input.batch_size
-            : BATCH_START + rand() % BATCH_END;
+            : BATCH_START + rand() % batch_size_end();
     mat = MatmulType(matmul_input, test_index, total_tests,
             true); //set is_bmm=true
 }
@@ -1330,8 +1330,9 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
         uint32_t &tests, std::string &ai_test_mode, std::string &lowoha,
-        uint32_t &num_threads, std::string &input_file, std::string &op,
-        uint32_t &ndims, CLIParams &cli_params) {
+        uint32_t &num_threads, std::optional<bool> &presub,
+        std::string &input_file, std::string &op, uint32_t &ndims,
+        CLIParams &cli_params) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg.rfind("--", 0) == 0 && arg.find("gtest") == std::string::npos
@@ -1347,6 +1348,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
     read_from_umap("ai_test_mode", ai_test_mode);
     read_from_umap("lowoha", lowoha);
     read_from_umap("num_threads", num_threads);
+    read_from_umap("presub", presub);
     read_from_umap("input_file", input_file);
     read_from_umap("op", op);
     read_from_umap("ndims", ndims);
@@ -2764,6 +2766,17 @@ std::optional<bool> parse_bool_field(
 std::optional<bool> parse_cmd_lowoha() {
     if (cmd_lowoha.empty()) { return std::nullopt; }
     return parse_bool_field(cmd_lowoha, "lowoha");
+}
+
+uint32_t matmul_size_end() {
+    return cmd_presub.value_or(false)
+            ? static_cast<uint32_t>(MATMUL_SIZE_END_PRESUB)
+            : static_cast<uint32_t>(MATMUL_SIZE_END);
+}
+
+uint32_t batch_size_end() {
+    return cmd_presub.value_or(false) ? static_cast<uint32_t>(BATCH_END_PRESUB)
+                                      : static_cast<uint32_t>(BATCH_END);
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,

@@ -52,15 +52,15 @@ ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
     } else {
         M = (reorder_input.matmul_input.m && *reorder_input.matmul_input.m > 0)
                 ? *reorder_input.matmul_input.m
-                : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
+                : (MATMUL_SIZE_START + std::rand() % matmul_size_end());
         N = (reorder_input.matmul_input.n && *reorder_input.matmul_input.n > 0)
                 ? *reorder_input.matmul_input.n
-                : (MATMUL_SIZE_START + std::rand() % MATMUL_SIZE_END);
+                : (MATMUL_SIZE_START + std::rand() % matmul_size_end());
         // Default batch to a 3D-capable value unless dimensionality overrides it.
         batch = (reorder_input.matmul_input.batch_size
                         && *reorder_input.matmul_input.batch_size > 0)
                 ? *reorder_input.matmul_input.batch_size
-                : 2 + std::rand() % (BATCH_END - 1);
+                : 2 + std::rand() % (batch_size_end() - 1);
 
         // dim_choice: LOWOHA tensor rank after M/N/batch defaults. CLI --dim_choice:
         // 1 -> 1D (M=1, batch=0), 2 -> 2D (batch=1), 3 -> leave sizes (3D). If
@@ -86,7 +86,7 @@ ReorderType::ReorderType(const ReorderInput &reorder_input, uint32_t test_index,
                 batch = (reorder_input.matmul_input.batch_size
                                 && *reorder_input.matmul_input.batch_size > 0)
                         ? *reorder_input.matmul_input.batch_size
-                        : 2 + std::rand() % (BATCH_END - 1);
+                        : 2 + std::rand() % (batch_size_end() - 1);
             }
         }
         // Default data types (will be overridden by individual TEST_P tests)

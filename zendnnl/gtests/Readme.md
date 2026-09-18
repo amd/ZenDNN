@@ -45,18 +45,19 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 
 The following dimension ranges are used for randomly generated test cases (defined in `gtest_utils.hpp`):
 
-| Parameter | Min | Max | Description |
-|-----------|-----|-----|-------------|
-| **M** | 1 | 3000 | Number of rows in the output matrix |
-| **K** | 1 | 3000 | Inner dimension (columns of A / rows of B) |
-| **N** | 1 | 3000 | Number of columns in the output matrix |
-| **Batch Size** | 1 | 256 | Batch size for batch matrix multiplication |
+| Parameter | Min | Max (default) | Max (`--presub true`) | Description |
+|-----------|-----|---------------|------------------------|-------------|
+| **M** | 1 | 3000 | 512 | Number of rows in the output matrix |
+| **K** | 1 | 3000 | 512 | Inner dimension (columns of A / rows of B) |
+| **N** | 1 | 3000 | 512 | Number of columns in the output matrix |
+| **Batch Size** | 1 | 256 | 32 | Batch size for batch matrix multiplication |
 
 **Dimension Formula:**
 ```
-dimension = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END
+dimension = MATMUL_SIZE_START + rand() % matmul_size_end()
+batch     = BATCH_START + rand() % batch_size_end()
 ```
-Where `MATMUL_SIZE_START = 1` and `MATMUL_SIZE_END = 3000`.
+Where `MATMUL_SIZE_START = 1` and `BATCH_START = 1`. `matmul_size_end()` is `MATMUL_SIZE_END` (**3000**) by default, or `MATMUL_SIZE_END_PRESUB` (**512**) when `--presub true`. `batch_size_end()` is `BATCH_END` (**256**) by default, or `BATCH_END_PRESUB` (**32**) when `--presub true`.
 
 ## **Buffer Value Distribution**
 
@@ -325,6 +326,7 @@ ZenDNN flags: **`--<name> <value>`** (two tokens). Args whose name contains `gte
 | `--input_file` | CSV path; requires `--op` (add `--ndims 3` for batch matmul or `--lowoha` for reorder). Per-operator overrides are ignored — see [CLI flags vs input-file mode](#cli-flags-vs-input-file-mode). |
 | `--op` | With `--input_file`: `matmul`, `reorder`, `embeddingbag`, `embedding`, `normalization`. |
 | `--ai_test_mode` | AI gtests only (`ZENDNNL_BUILD_AI_GTESTS=ON`): `presub`, `nightly`, `minimal`, `accuracy`, … |
+| `--presub` | `true`/`false`/`1`/`0` (default **false**). When true, random M/K/N use `MATMUL_SIZE_END_PRESUB` (**512**) instead of `MATMUL_SIZE_END` (**3000**), and random batch size uses `BATCH_END_PRESUB` (**32**) instead of `BATCH_END` (**256**). Explicit `--m`/`--k`/`--n`/`--batch_size` and `--input_file` sizes are unchanged. |
 
 **Random-mode overrides** (CLI override mode only; **not** applied with `--input_file` — set values in the CSV instead):
 
