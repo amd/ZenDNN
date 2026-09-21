@@ -565,7 +565,6 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
     int64_t group_size = K; // Default per-tensor / per-channel (single K group)
     DLP_PARAM_DIM_TYPE outer_dim = DLP_PARAM_DIM_PER_TENSOR;
     const auto &dims = wei_scale.dims;
-    const size_t scale_len = get_num_elements(wei_scale.dims);
     if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
         if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
             group_size = K / dims[0]; // Per-group: dims = {G, N}
@@ -583,6 +582,8 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
         outer_dim = DLP_PARAM_DIM_PER_TENSOR;
     }
     dlp_metadata->b_quant_op->group_size = static_cast<int>(group_size);
+    const size_t scale_len = group_size != K ? static_cast<size_t>(N)
+                                             : get_num_elements(wei_scale.dims);
 
     // Weight dequant scale (dequant_scale_factors slot pre-wired by
     // init_metadata_holder).
@@ -600,8 +601,9 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
         dlp_metadata->b_quant_op->zero_point = &h->b_quant_zp;
         dlp_metadata->b_quant_op->zero_point->data
                 = const_cast<void *>(wei_zp.buff);
-        dlp_metadata->b_quant_op->zero_point->len
-                = get_num_elements(wei_zp.dims);
+        dlp_metadata->b_quant_op->zero_point->len = group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_zp.dims);
         dlp_metadata->b_quant_op->zero_point->stor_type
                 = (wei_zp.dt == data_type_t::s8) ? DLP_S8 : DLP_BF16;
         dlp_metadata->b_quant_op->zero_point->outer_dim = outer_dim;
@@ -906,7 +908,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
         md->b_quant_op->dequant_scale_factors->data
                 = const_cast<void *>(wei_scale.buff);
         md->b_quant_op->dequant_scale_factors->len
-                = get_num_elements(wei_scale.dims);
+                = md->b_quant_op->group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_scale.dims);
         md->b_quant_op->dequant_scale_factors->stor_type
                 = (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
     }
@@ -914,7 +918,9 @@ static void patch_mutable_fields(dlp_metadata_t *md,
             && lowoha_param.quant_params.wei_zp.buff) {
         const auto &wei_zp = lowoha_param.quant_params.wei_zp;
         md->b_quant_op->zero_point->data = const_cast<void *>(wei_zp.buff);
-        md->b_quant_op->zero_point->len = get_num_elements(wei_zp.dims);
+        md->b_quant_op->zero_point->len = md->b_quant_op->group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_zp.dims);
         md->b_quant_op->zero_point->stor_type
                 = (wei_zp.dt == data_type_t::s8) ? DLP_S8 : DLP_BF16;
     }
