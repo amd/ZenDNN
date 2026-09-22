@@ -33,6 +33,7 @@ void matmul_config_t::set_default_config() {
     set_otf_bpack(0);
     set_zp_comp_cache(true); // Enable ZP compensation caching by default
     set_accum_type(data_type_t::f32); // Default to F32 accumulation
+    set_dlp_m_hint(32);
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {
@@ -46,6 +47,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     int32_t matmul_otf_bpack_json = 0;
     bool zp_comp_cache_enabled = true; // Default enabled
     uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
+    int64_t dlp_m_hint = 32;
     auto matmul_json = runtime_variables_json["matmul"];
     if (!matmul_json.empty()) {
         auto matmul_algo_json = matmul_json["mm_kernel"];
@@ -80,6 +82,23 @@ status_t matmul_config_t::set_user_config(json config_json) {
         if (!tile_n_json.empty()) {
             tile_n = tile_n_json.template get<int32_t>();
             if (tile_n <= 0) { tile_n = 0; }
+        }
+        if (matmul_json.contains("dlp_m_hint")) {
+            const auto &dlp_m_hint_json = matmul_json["dlp_m_hint"];
+            bool valid = false;
+            if (dlp_m_hint_json.is_number_integer()) {
+                const int64_t value = dlp_m_hint_json.template get<int64_t>();
+                if (value >= 0) {
+                    dlp_m_hint = value;
+                    valid = true;
+                }
+            }
+            if (!valid) {
+                apilog_warning("Unrecognized matmul dlp_m_hint JSON value ",
+                        dlp_m_hint_json.dump(),
+                        "; expected a non-negative integer (0 disables "
+                        "hints). Defaulting to 32.");
+            }
         }
         auto bmm_algo_json = matmul_json["bmm_kernel"];
         if (!bmm_algo_json.empty()) {
@@ -149,6 +168,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     set_mm_partitioner_enabled(mm_partitioner_enabled);
     set_tile_m(tile_m);
     set_tile_n(tile_n);
+    set_dlp_m_hint(dlp_m_hint);
     // TODO: Add support for user flexibility to set accumulation type.
     set_accum_type(data_type_t::f32);
 
@@ -311,6 +331,25 @@ void matmul_config_t::set_env_config() {
     }
     set_tile_n(tile_n);
 
+    char *dlp_m_hint_env = std::getenv("ZENDNNL_DLP_M_HINT");
+    int64_t dlp_m_hint = 32;
+    if (dlp_m_hint_env) {
+        bool valid = false;
+        try {
+            size_t consumed = 0;
+            const int64_t value = std::stoll(dlp_m_hint_env, &consumed, 10);
+            valid = consumed == std::strlen(dlp_m_hint_env) && value >= 0;
+            if (valid) { dlp_m_hint = value; }
+        } catch (const std::exception &) { valid = false; }
+        if (!valid) {
+            apilog_warning("Unrecognized ZENDNNL_DLP_M_HINT value '",
+                    dlp_m_hint_env,
+                    "'; expected a non-negative base-10 integer (0 disables "
+                    "hints). Defaulting to 32.");
+        }
+    }
+    set_dlp_m_hint(dlp_m_hint);
+
     // TODO: Add support for user flexibility to set accumulation type.
     set_accum_type(data_type_t::f32);
 }
@@ -400,6 +439,14 @@ void matmul_config_t::set_tile_n(int32_t size) {
 
 int32_t matmul_config_t::get_tile_n() {
     return tile_n;
+}
+
+void matmul_config_t::set_dlp_m_hint(int64_t hint) {
+    dlp_m_hint = hint > 0 ? hint : 0;
+}
+
+int64_t matmul_config_t::get_dlp_m_hint() {
+    return dlp_m_hint;
 }
 
 matmul_config_t &matmul_config_t::instance() {

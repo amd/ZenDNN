@@ -92,9 +92,22 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const char order, const char trans, char mem_format_b,
         get_reorder_buff_size_func_ptr get_reorder_buf_size,
-        reorder_func_ptr<T> reorder_func, int weight_cache_type);
+        reorder_func_ptr<T> reorder_func, int weight_cache_type
+#if ZENDNNL_DEPENDS_AOCLDLP
+        ,
+        dlp_metadata_t *reorder_metadata = nullptr
+#endif
+);
 
 #if ZENDNNL_DEPENDS_AOCLDLP
+// Attach gemm_hints when ZENDNNL_DLP_M_HINT > 0. Otherwise returns postop_md
+// unchanged (nullptr if none). nt_hint comes from requested_num_threads, or
+// the current OpenMP nthreads-var when that argument is 0. Used by BF16 and
+// INT8 pure (non-sym-quant) DLP reorder/GEMM APIs.
+dlp_metadata_t *aocl_dlp_hints_metadata(dlp_metadata_t *postop_md,
+        dlp_gemm_hints_t &hints_storage, dlp_metadata_t &fallback_md,
+        int32_t requested_num_threads = 0);
+
 // The new AOCL DLP reorder API dropped the dedicated DLP_SYMM_STAT_QUANT
 // argument; the B-side quantization group size now travels inside the
 // dlp_metadata_t (via b_quant_op->group_size), which is the sole trailing
@@ -217,6 +230,17 @@ void w4a8ReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         const bool is_weights_const, const char order, const char trans,
         data_type_t wei_dt, data_type_t src_dt, int weight_cache_type,
         int sym_quant_group_size, zendnnl::common::matmul_algo_t algo);
+
+void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
+        void *&reorder_weights, const int k, const int n, const int ldb,
+        const bool is_weights_const, const char order, const char trans,
+        char mem_format_b, const matmul_quantization_params_t &quant_params,
+        data_type_t wei_dt, int weight_cache_type
+#if ZENDNNL_DEPENDS_AOCLDLP
+        ,
+        dlp_metadata_t *reorder_metadata = nullptr
+#endif
+);
 
 /**
  * @brief Execute single matrix multiplication using AOCL DLP backend

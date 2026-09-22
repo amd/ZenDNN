@@ -812,7 +812,12 @@ status_t aocl_dlp_utils_t::alloc_post_op(
             b_qop->dequant_scale_factors
                     = (dlp_qparam_t *)malloc(sizeof(dlp_qparam_t));
             (b_qop->dequant_scale_factors)->data = (void *)scale_ptr;
-            (b_qop->dequant_scale_factors)->len = scale_nelems;
+            // Per-group keeps all G*N values in the buffer but reports the
+            // per-group length (N); anything else reports its own length.
+            (b_qop->dequant_scale_factors)->len
+                    = (outer_dim == DLP_PARAM_DIM_TYPE::DLP_PARAM_DIM_PER_GROUP)
+                    ? static_cast<md_t>(weight_size[1])
+                    : scale_nelems;
             (b_qop->dequant_scale_factors)->stor_type
                     = get_aocl_store_type(scale_dt);
             (b_qop->dequant_scale_factors)->outer_dim = outer_dim;
@@ -826,7 +831,12 @@ status_t aocl_dlp_utils_t::alloc_post_op(
                 auto zp_size = weight_tensor.get_quant_zero_size();
                 auto zp_nelems = compute_product(zp_size);
                 (b_qop->zero_point)->data = const_cast<void *>(zp_ptr);
-                (b_qop->zero_point)->len = zp_nelems;
+                (b_qop->zero_point)->len
+                        = (outer_dim
+                                  == DLP_PARAM_DIM_TYPE::
+                                          DLP_PARAM_DIM_PER_GROUP)
+                        ? static_cast<md_t>(weight_size[1])
+                        : zp_nelems;
                 (b_qop->zero_point)->stor_type = get_aocl_store_type(
                         weight_tensor.get_quant_zero_data_type());
                 (b_qop->zero_point)->outer_dim = outer_dim;

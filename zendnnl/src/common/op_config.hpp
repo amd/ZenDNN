@@ -250,6 +250,16 @@ public:
    */
     int32_t get_tile_n();
 
+    /** @brief Sets AOCL DLP GEMM m_hint (0 = disabled, pass nullptr metadata).
+  *
+  * @param hint Expected M dimension for downstream BF16 and INT8 pure
+  *             (non-sym-quant) GEMMs after reorder.
+  */
+    void set_dlp_m_hint(int64_t hint);
+
+    /** @brief Get AOCL DLP GEMM m_hint (0 = hints disabled). */
+    int64_t get_dlp_m_hint();
+
     /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -308,6 +318,7 @@ private:
     bool mm_partitioner_enabled; /**< Enable MM partitioner. */
     int32_t tile_m; /**< Tile size for M dimension. */
     int32_t tile_n; /**< Tile size for N dimension. */
+    int64_t dlp_m_hint = 32; /**< AOCL DLP m_hint; 0 disables gemm_hints. */
 };
 
 /** @enum embag_algo_t

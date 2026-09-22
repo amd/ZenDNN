@@ -167,6 +167,35 @@ TEST(LruCacheTryGet, WorksWithKeyMatmul) {
     EXPECT_EQ(out, -1);
 }
 
+// run_dlp() folds the effective AOCL DLP m_hint / nt_hint into
+// extra_input_hash, because those values change the packed panel width: a pack
+// built under one hint pair must not be served to a GEMM running under another.
+// The two keys below differ in nothing but that fold, so they must not collide.
+TEST(LruCacheTryGet, KeyMatmulHintFoldSeparatesEntries) {
+    lru_cache_t<Key_matmul, int> cache(8);
+
+    int weight = 0;
+    const auto algo = static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked);
+    const Key_matmul unhinted(/*TransB=*/false, /*K=*/64, /*N=*/128,
+            /*ldb=*/128, &weight, algo, /*extra_input_hash=*/0);
+
+    std::size_t hinted_hash = 0;
+    hinted_hash = zendnnl::common::hash_combine(hinted_hash, int64_t {32});
+    hinted_hash = zendnnl::common::hash_combine(hinted_hash, int64_t {24});
+    const Key_matmul hinted(/*TransB=*/false, /*K=*/64, /*N=*/128, /*ldb=*/128,
+            &weight, algo, hinted_hash);
+
+    cache.add(unhinted, 1);
+
+    int out = -1;
+    EXPECT_TRUE(cache.try_get(unhinted, out));
+    EXPECT_EQ(out, 1);
+
+    out = -1;
+    EXPECT_FALSE(cache.try_get(hinted, out));
+    EXPECT_EQ(out, -1);
+}
+
 } // namespace
 } // namespace matmul
 } // namespace lowoha

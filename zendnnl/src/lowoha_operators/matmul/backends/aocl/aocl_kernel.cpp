@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <cstring> // std::memcpy (WC=2 in-place reorder write-back)
 #include <mutex>
+#include "common/op_config.hpp"
+#include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
@@ -26,6 +28,36 @@
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
+
+using zendnnl::common::matmul_config_t;
+using zendnnl::lowoha::resolve_num_threads;
+using zendnnl::lowoha::thread_guard;
+
+dlp_metadata_t *aocl_dlp_hints_metadata(dlp_metadata_t *postop_md,
+        dlp_gemm_hints_t &hints_storage, dlp_metadata_t &fallback_md,
+        int32_t requested_num_threads) {
+    const int64_t m_hint = matmul_config_t::instance().get_dlp_m_hint();
+    if (m_hint <= 0) { return postop_md; }
+
+    const int32_t nt = (requested_num_threads != 0)
+            ? resolve_num_threads(
+                      requested_num_threads, thread_guard::max_threads())
+            : omp_get_max_threads();
+    hints_storage.m_hint = m_hint;
+    hints_storage.nt_hint = nt;
+
+    dlp_metadata_t *md = postop_md;
+    if (!md) {
+        fallback_md = {};
+        md = &fallback_md;
+    }
+    apilog_verbose("[AOCL.hints] attaching gemm_hints (m_hint=",
+            hints_storage.m_hint, " nt_hint=", hints_storage.nt_hint,
+            " requested_nt=", requested_num_threads,
+            " md=", (postop_md ? "postop" : "fallback"), ")");
+    md->gemm_hints = &hints_storage;
+    return md;
+}
 
 // Extract nibble from packed 4-bit byte (low nibble if is_low_nibble=true, else high nibble)
 // For s4 (signed int4): sign-extends from bit 3, yielding range [-8, 7]
@@ -155,6 +187,7 @@ void cvt_s4_to_s8(const int8_t *weights, int8_t *wei_s8, int k, int n, int ldb,
 }
 
 namespace {
+
 template <typename T>
 lru_cache_t<Key_matmul, void *> &get_aocl_weight_cache() {
     static lru_cache_t<Key_matmul, void *> c;
@@ -368,7 +401,9 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const char order, const char trans, char mem_format_b,
         get_reorder_buff_size_func_ptr get_reorder_buf_size,
-        reorder_func_ptr<T> reorder_func, int weight_cache_type) {
+        reorder_func_ptr<T> reorder_func, int weight_cache_type,
+        dlp_metadata_t *reorder_metadata) {
+    dlp_metadata_t *reorder_meta = reorder_metadata;
     // Weight caching
     lru_cache_t<Key_matmul, void *> &matmul_weight_cache
             = get_aocl_weight_cache<T>();
@@ -394,13 +429,13 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         apilog_verbose(
                 "[AOCL.reorder] WEIGHT_CACHE_DISABLE — out-of-place reorder");
         size_t b_reorder_buf_siz_req
-                = get_reorder_buf_size(order, trans, 'B', k, n, nullptr);
+                = get_reorder_buf_size(order, trans, 'B', k, n, reorder_meta);
         size_t alignment = 64;
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
         reorder_weights = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
         reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k,
-                n, ldb, nullptr);
+                n, ldb, reorder_meta);
     }
     // Out-of-place reordering
     else if (weight_cache_type == 1) {
@@ -410,15 +445,15 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         if (!found_obj) {
             apilog_verbose(
                     "[AOCL.reorder MISS] weight cache miss — packing weights");
-            size_t b_reorder_buf_siz_req
-                    = get_reorder_buf_size(order, trans, 'B', k, n, nullptr);
+            size_t b_reorder_buf_siz_req = get_reorder_buf_size(
+                    order, trans, 'B', k, n, reorder_meta);
             size_t alignment = 64;
             size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1)
                     & ~(alignment - 1);
             reorder_weights
                     = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
-                    k, n, ldb, nullptr);
+                    k, n, ldb, reorder_meta);
             // Create new entry
             matmul_weight_cache.add(key, reorder_weights);
         } else {
@@ -469,7 +504,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         }
 
         size_t b_reorder_buf_siz_req
-                = get_reorder_buf_size(order, trans, 'B', k, n, nullptr);
+                = get_reorder_buf_size(order, trans, 'B', k, n, reorder_meta);
         // Two-part gate for engaging the in-place path:
         //
         //   1. b_reorder_buf_siz_req == plain_size
@@ -507,12 +542,12 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                         = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
                 if (!reorder_weights) { return false; }
                 reorder_func(order, trans, 'B', (T *)weights,
-                        (T *)reorder_weights, k, n, ldb, nullptr);
+                        (T *)reorder_weights, k, n, ldb, reorder_meta);
                 matmul_weight_cache.add(key, reorder_weights);
                 return true;
             }
             reorder_func(order, trans, 'B', (T *)weights, interim, k, n, ldb,
-                    nullptr);
+                    reorder_meta);
             std::memcpy(const_cast<void *>(weights), interim,
                     b_reorder_buf_siz_req);
             zendnnl_aligned_free(interim);
@@ -536,7 +571,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                 return false;
             }
             reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
-                    k, n, ldb, nullptr);
+                    k, n, ldb, reorder_meta);
             matmul_weight_cache.add(key, reorder_weights);
         }
     }
@@ -545,16 +580,17 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
 
 template bool reorderAndCacheWeights<int16_t>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<int16_t>, int);
+        reorder_func_ptr<int16_t>, int, dlp_metadata_t *);
 template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<float>, int);
+        reorder_func_ptr<float>, int, dlp_metadata_t *);
 template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<int8_t>, int);
+        reorder_func_ptr<int8_t>, int, dlp_metadata_t *);
 template bool reorderAndCacheWeights<uint16_t>(Key_matmul, const void *,
         void *&, int, int, int, char, char, char,
-        get_reorder_buff_size_func_ptr, reorder_func_ptr<uint16_t>, int);
+        get_reorder_buff_size_func_ptr, reorder_func_ptr<uint16_t>, int,
+        dlp_metadata_t *);
 
 template <typename T>
 bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
@@ -712,7 +748,8 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const bool is_weights_const, const char order, const char trans,
         char mem_format_b, const matmul_quantization_params_t &quant_params,
-        data_type_t wei_dt, int weight_cache_type) {
+        data_type_t wei_dt, int weight_cache_type,
+        dlp_metadata_t *reorder_metadata) {
     // WOQ always converts 4-bit weights to bf16 before reordering, so the
     // reordered buffer is strictly larger than the caller's 4-bit weight
     // buffer. In-place caching is therefore not feasible for the WOQ path; the
@@ -752,13 +789,13 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         int ldb_cvt = n;
         size_t b_reorder_buf_siz_req
                 = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                        order, 'n', 'B', k, n, nullptr);
+                        order, 'n', 'B', k, n, reorder_metadata);
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
         reorder_weights
                 = (int16_t *)zendnnl_aligned_alloc(alignment, reorder_size);
         aocl_reorder_bf16bf16f32of32(order, 'n', 'B', (int16_t *)cvt_weights,
-                (int16_t *)reorder_weights, k, n, ldb_cvt, nullptr);
+                (int16_t *)reorder_weights, k, n, ldb_cvt, reorder_metadata);
         zendnnl_aligned_free(cvt_weights);
         if (is_weights_const && weight_cache_type == 1) {
             // Create new entry
@@ -1047,11 +1084,41 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         dtypes_for_postop.wei = data_type_t::s8;
     }
 
+    // Paths that share one metadata object across reorder + GEMM so DLP sees
+    // identical hints/post-op wiring on both calls:
+    //   * bf16×bf16 and WOQ (bf16 src × s4/u4)
+    //   * INT8 pure (u8/s8 src × s8 wei), excluding s8×s8 sym-quant
+    const bool uses_unified_dlp_metadata
+            = (dtypes.src == data_type_t::bf16
+                      && (dtypes.wei == data_type_t::bf16
+                              || dtypes.wei == data_type_t::s4
+                              || dtypes.wei == data_type_t::u4))
+            || ((dtypes.src == data_type_t::u8 || dtypes.src == data_type_t::s8)
+                    && dtypes.wei == data_type_t::s8
+                    && !is_s8_sym_quant_scales);
+
+    // Storage the hints hang off; dlp_fallback_md is only used when
+    // dlp_base_md is null and there is nothing else to attach them to.
+    dlp_gemm_hints_t dlp_hints {};
+    dlp_metadata_t dlp_fallback_md {};
+    const bool dlp_hints_active = uses_unified_dlp_metadata
+            && aocl_dlp_hints_metadata(/*postop_md=*/nullptr, dlp_hints,
+                       dlp_fallback_md, lowoha_param.num_threads)
+                    != nullptr;
+
     // Sym-quant blocked cache keys include group_size.
     size_t cache_extra_hash = 0;
     if (is_s8_sym_quant_scales) {
         cache_extra_hash = std::hash<int64_t> {}(
                 sym_quant_group_size(lowoha_param.quant_params, M, N, K));
+    }
+    // Only folded when hints are live, so unhinted keys stay byte-identical to
+    // the ones the group-matmul warm-pack builds.
+    if (dlp_hints_active) {
+        cache_extra_hash = zendnnl::common::hash_combine(
+                cache_extra_hash, dlp_hints.m_hint);
+        cache_extra_hash = zendnnl::common::hash_combine(
+                cache_extra_hash, dlp_hints.nt_hint);
     }
     Key_matmul cache_key(transB == 't', K, N, ldb, B,
             static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
@@ -1133,6 +1200,25 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         }
     }
 
+    // Base metadata: bias, post-ops and quantization. Built before the reorder
+    // so the same dlp_metadata_t flows through reorder (when applicable) and
+    // the GEMM dispatch below. May be null when the call has none of those.
+    dlp_metadata_t *dlp_base_md = create_dlp_post_op(lowoha_param, bias,
+            dtypes_for_postop, N, K, M, zp_comp_acc, zp_comp_ndim, kernel, B,
+            reorder_colsum, colsum_neg_src_zp, w4a8_algo);
+
+    // What the GEMM gets: dlp_base_md with gemm_hints attached on the paths
+    // that support them, otherwise dlp_base_md untouched.
+    dlp_metadata_t *dlp_exec_md = uses_unified_dlp_metadata
+            ? aocl_dlp_hints_metadata(dlp_base_md, dlp_hints, dlp_fallback_md,
+                      lowoha_param.num_threads)
+            : dlp_base_md;
+
+    // What the reorder gets: the same object as the GEMM, but only once hints
+    // are actually attached -- an unhinted reorder must stay unhinted.
+    dlp_metadata_t *dlp_reorder_md
+            = (dlp_exec_md && dlp_exec_md->gemm_hints) ? dlp_exec_md : nullptr;
+
     // AOCL blocked kernel reordering for 2D MatMul
     if (kernel == zendnnl::common::matmul_algo_t::aocl_dlp_blocked
             && is_weights_const && !is_w4a8) {
@@ -1147,7 +1233,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             blocked_flag = reorderAndCacheWeights<int16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_bf16bf16f32of32,
-                    aocl_reorder_bf16bf16f32of32, weight_cache_type);
+                    aocl_reorder_bf16bf16f32of32, weight_cache_type,
+                    uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::f16) {
             blocked_flag = reorderAndCacheWeights<uint16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
@@ -1185,12 +1272,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                 blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                         reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                         aocl_get_reorder_buf_size_s8s8s32os32,
-                        aocl_reorder_s8s8s32os32, weight_cache_type);
+                        aocl_reorder_s8s8s32os32, weight_cache_type,
+                        uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
             } else if (lowoha_param.dtypes.src == data_type_t::u8) {
                 blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                         reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                         aocl_get_reorder_buf_size_u8s8s32os32,
-                        aocl_reorder_u8s8s32os32, weight_cache_type);
+                        aocl_reorder_u8s8s32os32, weight_cache_type,
+                        uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
             }
         }
         if (blocked_flag) {
@@ -1211,16 +1300,13 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         woqReorderAndCacheWeightsAocl(cache_key, static_cast<const int8_t *>(B),
                 reordered_mem, K, N, ldb, is_weights_const, 'r', transB,
                 mem_format_b, lowoha_param.quant_params, dtypes.wei,
-                woq_weight_cache_type);
+                woq_weight_cache_type,
+                uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         is_weight_blocked = true;
         mem_format_b = 'r';
         simulated_woq_free_buff
                 = !is_weights_const || woq_weight_cache_type != 1;
     }
-
-    dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias,
-            dtypes_for_postop, N, K, M, zp_comp_acc, zp_comp_ndim, kernel, B,
-            reorder_colsum, colsum_neg_src_zp, w4a8_algo);
 
     if (dtypes.src == data_type_t::f32 && dtypes.wei == data_type_t::f32
             && dtypes.dst == data_type_t::f32) {
@@ -1228,7 +1314,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                 static_cast<const float *>(A), lda, mem_format_a,
                 is_weight_blocked ? (float *)reordered_mem
                                   : static_cast<const float *>(B),
-                ldb, mem_format_b, beta, static_cast<float *>(C), ldc, aocl_po);
+                ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
+                dlp_base_md);
     }
     // WOQ s4 blocked path (not W4A8).
     else if (dtypes.wei == data_type_t::s4
@@ -1240,14 +1327,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     is_weight_blocked ? (int8_t *)reordered_mem
                                       : static_cast<const int8_t *>(B),
                     ldb, mem_format_b, beta, static_cast<int16_t *>(C), ldc,
-                    aocl_po);
+                    dlp_base_md);
         } else if (dtypes.dst == data_type_t::f32) {
             aocl_gemm_bf16s4f32of32(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int16_t *>(A), lda, mem_format_a,
                     is_weight_blocked ? (int8_t *)reordered_mem
                                       : static_cast<const int8_t *>(B),
                     ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
-                    aocl_po);
+                    dlp_base_md);
         } else {
             log_error("Unsupported data type for matmul");
         }
@@ -1261,14 +1348,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     is_weight_blocked ? (uint8_t *)reordered_mem
                                       : static_cast<const uint8_t *>(B),
                     ldb, mem_format_b, beta, static_cast<int16_t *>(C), ldc,
-                    aocl_po);
+                    dlp_base_md);
         } else if (dtypes.dst == data_type_t::f32) {
             aocl_gemm_bf16u4f32of32(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int16_t *>(A), lda, mem_format_a,
                     is_weight_blocked ? (uint8_t *)reordered_mem
                                       : static_cast<const uint8_t *>(B),
                     ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
-                    aocl_po);
+                    dlp_base_md);
         } else {
             log_error("Unsupported data type for matmul");
         }
@@ -1295,7 +1382,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     "require aocl_dlp_blocked inner kernel; the "
                     "aocl_dlp path cannot consume native-prepacked blocked "
                     "s4");
-            cleanup_dlp_post_op(aocl_po);
+            cleanup_dlp_post_op(dlp_base_md);
             return;
         }
         if (w4a8_prepacked_native) {
@@ -1309,7 +1396,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         }
         if (w4a8_reordered_mem == nullptr) {
             apilog_error("[AOCL.run_dlp W4A8] weight reorder failed");
-            cleanup_dlp_post_op(aocl_po);
+            cleanup_dlp_post_op(dlp_base_md);
             return;
         }
 
@@ -1320,7 +1407,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             aocl_gemm_s8s4s32obf16(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int8_t *>(A), lda, mem_format_a,
                     static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
-                    beta, static_cast<int16_t *>(C), ldc, aocl_po);
+                    beta, static_cast<int16_t *>(C), ldc, dlp_base_md);
         } else {
             apilog_verbose(
                     "[W4A8.GEMM] simulated aocl_gemm_s8s8s32obf16_sym_quant");
@@ -1331,10 +1418,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M, N, K,
                     alpha, static_cast<const int8_t *>(A), lda, mem_format_a,
                     static_cast<const int8_t *>(w4a8_reordered_mem), ldb, 'r',
-                    beta, static_cast<int16_t *>(C), ldc, aocl_po);
+                    beta, static_cast<int16_t *>(C), ldc, dlp_base_md);
         }
 
-        cleanup_dlp_post_op(aocl_po);
+        cleanup_dlp_post_op(dlp_base_md);
         if (!w4a8_prepacked_native
                 && (!is_weights_const || w4a8_weight_cache_type != 1)) {
             zendnnl_aligned_free(w4a8_reordered_mem);
@@ -1352,14 +1439,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     is_weight_blocked ? (int16_t *)reordered_mem
                                       : static_cast<const int16_t *>(B),
                     ldb, mem_format_b, beta, static_cast<int16_t *>(C), ldc,
-                    aocl_po);
+                    dlp_exec_md);
         } else if (dtypes.dst == data_type_t::f32) {
             aocl_gemm_bf16bf16f32of32(layout, transA, transB, M, N, K, alpha,
                     static_cast<const int16_t *>(A), lda, mem_format_a,
                     is_weight_blocked ? (int16_t *)reordered_mem
                                       : static_cast<const int16_t *>(B),
                     ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
-                    aocl_po);
+                    dlp_exec_md);
         }
     } else if (dtypes.src == data_type_t::bf16
             && dtypes.wei == data_type_t::s8) {
@@ -1370,7 +1457,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<int16_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::s8:
                 aocl_gemm_bf16s8s32os8(layout, transA, transB, M, N, K, alpha,
@@ -1378,7 +1465,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<int8_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::u8:
                 aocl_gemm_bf16s8s32ou8(layout, transA, transB, M, N, K, alpha,
@@ -1386,7 +1473,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<uint8_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::f32:
                 aocl_gemm_bf16s8s32of32(layout, transA, transB, M, N, K, alpha,
@@ -1394,7 +1481,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             default:
                 log_error(
@@ -1411,7 +1498,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<float *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::s8:
                 aocl_gemm_f32s8s32os8(layout, transA, transB, M, N, K, alpha,
@@ -1419,7 +1506,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<int8_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::u8:
                 aocl_gemm_f32s8s32ou8(layout, transA, transB, M, N, K, alpha,
@@ -1427,7 +1514,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<uint8_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             case data_type_t::bf16:
                 aocl_gemm_f32s8s32obf16(layout, transA, transB, M, N, K, alpha,
@@ -1435,7 +1522,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (int8_t *)reordered_mem
                                           : static_cast<const int8_t *>(B),
                         ldb, mem_format_b, beta, static_cast<int16_t *>(C), ldc,
-                        aocl_po);
+                        dlp_base_md);
                 break;
             default:
                 log_error(
@@ -1454,37 +1541,37 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                 aocl_gemm_u8s8s32ou8(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<uint8_t *>(C), ldc, aocl_po);
+                        static_cast<uint8_t *>(C), ldc, dlp_exec_md);
                 break;
             case data_type_t::s8:
                 aocl_gemm_u8s8s32os8(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<int8_t *>(C), ldc, aocl_po);
+                        static_cast<int8_t *>(C), ldc, dlp_exec_md);
                 break;
             case data_type_t::s32:
                 aocl_gemm_u8s8s32os32(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<int32_t *>(C), ldc, aocl_po);
+                        static_cast<int32_t *>(C), ldc, dlp_exec_md);
                 break;
             case data_type_t::f32:
                 aocl_gemm_u8s8s32of32(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<float *>(C), ldc, aocl_po);
+                        static_cast<float *>(C), ldc, dlp_exec_md);
                 break;
             case data_type_t::bf16:
                 aocl_gemm_u8s8s32obf16(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<int16_t *>(C), ldc, aocl_po);
+                        static_cast<int16_t *>(C), ldc, dlp_exec_md);
                 break;
             case data_type_t::f16:
                 aocl_gemm_u8s8s32of16(layout, transA, transB, M, N, K, alpha,
                         static_cast<const uint8_t *>(A), lda, mem_format_a,
                         weight_ptr, ldb, mem_format_b, beta,
-                        static_cast<uint16_t *>(C), ldc, aocl_po);
+                        static_cast<uint16_t *>(C), ldc, dlp_exec_md);
                 break;
             default:
                 log_error("Unsupported output data type for u8 source");
@@ -1506,7 +1593,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     aocl_gemm_s8s8s32of32_sym_quant(layout, transA, transB, M,
                             N, K, alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<float *>(C), ldc, aocl_po);
+                            static_cast<float *>(C), ldc, dlp_base_md);
                     break;
                 case data_type_t::bf16:
                     apilog_info(
@@ -1516,7 +1603,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M,
                             N, K, alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<int16_t *>(C), ldc, aocl_po);
+                            static_cast<int16_t *>(C), ldc, dlp_base_md);
                     break;
                 default:
                     log_error(
@@ -1530,37 +1617,37 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     aocl_gemm_s8s8s32ou8(layout, transA, transB, M, N, K, alpha,
                             static_cast<const int8_t *>(A), lda, mem_format_a,
                             weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<uint8_t *>(C), ldc, aocl_po);
+                            static_cast<uint8_t *>(C), ldc, dlp_exec_md);
                     break;
                 case data_type_t::s8:
                     aocl_gemm_s8s8s32os8(layout, transA, transB, M, N, K, alpha,
                             static_cast<const int8_t *>(A), lda, mem_format_a,
                             weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<int8_t *>(C), ldc, aocl_po);
+                            static_cast<int8_t *>(C), ldc, dlp_exec_md);
                     break;
                 case data_type_t::s32:
                     aocl_gemm_s8s8s32os32(layout, transA, transB, M, N, K,
                             alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<int32_t *>(C), ldc, aocl_po);
+                            static_cast<int32_t *>(C), ldc, dlp_exec_md);
                     break;
                 case data_type_t::f32:
                     aocl_gemm_s8s8s32of32(layout, transA, transB, M, N, K,
                             alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<float *>(C), ldc, aocl_po);
+                            static_cast<float *>(C), ldc, dlp_exec_md);
                     break;
                 case data_type_t::bf16:
                     aocl_gemm_s8s8s32obf16(layout, transA, transB, M, N, K,
                             alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<int16_t *>(C), ldc, aocl_po);
+                            static_cast<int16_t *>(C), ldc, dlp_exec_md);
                     break;
                 case data_type_t::f16:
                     aocl_gemm_s8s8s32of16(layout, transA, transB, M, N, K,
                             alpha, static_cast<const int8_t *>(A), lda,
                             mem_format_a, weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<uint16_t *>(C), ldc, aocl_po);
+                            static_cast<uint16_t *>(C), ldc, dlp_exec_md);
                     break;
                 default:
                     log_error("Unsupported output data type for s8 source");
@@ -1579,7 +1666,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (uint16_t *)reordered_mem
                                           : static_cast<const uint16_t *>(B),
                         ldb, mem_format_b, beta_f16, static_cast<uint16_t *>(C),
-                        ldc, aocl_po);
+                        ldc, dlp_base_md);
                 break;
             case data_type_t::f32:
                 aocl_gemm_f16f16f16of32(layout, transA, transB, M, N, K,
@@ -1588,7 +1675,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         is_weight_blocked ? (uint16_t *)reordered_mem
                                           : static_cast<const uint16_t *>(B),
                         ldb, mem_format_b, beta_f16, static_cast<float *>(C),
-                        ldc, aocl_po);
+                        ldc, dlp_base_md);
                 break;
             default:
                 log_error("Unsupported output data type for f16 source");
@@ -1615,7 +1702,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // No-op for cached holders (the common case); frees the per-call
     // holder + its heap-owned inv_scales[] for the BF16/INT8 per-token-sym
     // path. Safe with nullptr.
-    cleanup_dlp_post_op(aocl_po);
+    cleanup_dlp_post_op(dlp_base_md);
 }
 
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
@@ -1668,15 +1755,23 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                 &group_size, &mem_format_a, &mem_format_b, &metadata_array);
     } else if (dtypes.src == data_type_t::bf16
             && dtypes.dst == data_type_t::f32) {
+        dlp_gemm_hints_t bf16_hints {};
+        dlp_metadata_t bf16_hints_md {};
+        dlp_metadata_t *bf16_po = aocl_dlp_hints_metadata(
+                metadata_array, bf16_hints, bf16_hints_md, num_threads);
         apilog_info("executing aocl_batch_gemm_bf16bf16f32of32");
         aocl_batch_gemm_bf16bf16f32of32(&layout, &transA, &transB, &m_, &n_,
                 &k_, &alpha, reinterpret_cast<const bfloat16 **>(a_ptrs.data()),
                 &lda_, reinterpret_cast<const bfloat16 **>(b_ptrs.data()),
                 &ldb_, &beta, reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
                 1, // single group
-                &group_size, &mem_format_a, &mem_format_b, &metadata_array);
+                &group_size, &mem_format_a, &mem_format_b, &bf16_po);
     } else if (dtypes.src == data_type_t::bf16
             && dtypes.dst == data_type_t::bf16) {
+        dlp_gemm_hints_t bf16_hints {};
+        dlp_metadata_t bf16_hints_md {};
+        dlp_metadata_t *bf16_po = aocl_dlp_hints_metadata(
+                metadata_array, bf16_hints, bf16_hints_md, num_threads);
         apilog_info("executing aocl_batch_gemm_bf16bf16f32obf16");
         aocl_batch_gemm_bf16bf16f32obf16(&layout, &transA, &transB, &m_, &n_,
                 &k_, &alpha, reinterpret_cast<const bfloat16 **>(a_ptrs.data()),
@@ -1684,7 +1779,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                 &ldb_, &beta, reinterpret_cast<bfloat16 **>(c_ptrs.data()),
                 &ldc_,
                 1, // single group
-                &group_size, &mem_format_a, &mem_format_b, &metadata_array);
+                &group_size, &mem_format_a, &mem_format_b, &bf16_po);
     } else if (dtypes.src == data_type_t::f16
             && dtypes.dst == data_type_t::f16) {
         const uint16_t alpha_f16 = common::float16_t::f32_to_f16_val(alpha);

@@ -271,7 +271,8 @@ status_t validate_prepack_inputs(const char *caller, const void *weights,
 //   aocl_prepack      : writes the prepacked layout into the caller's
 //                       buffer.
 // ===========================================================================
-size_t aocl_compute_size(const prepack_params_t &params) {
+size_t aocl_compute_size(
+        const prepack_params_t &params, int32_t num_threads = 0) {
     using namespace zendnnl::lowoha::matmul;
 
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -293,8 +294,12 @@ size_t aocl_compute_size(const prepack_params_t &params) {
     }
 
     if (params.wei_dtype == data_type_t::bf16) {
+        dlp_gemm_hints_t bf16_hints {};
+        dlp_metadata_t bf16_md {};
+        dlp_metadata_t *reorder_meta = matmul::aocl_dlp_hints_metadata(
+                nullptr, bf16_hints, bf16_md, num_threads);
         const size_t req = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                order, trans, 'B', k, n, nullptr);
+                order, trans, 'B', k, n, reorder_meta);
         return round_up_align(req, kPrepackAlign);
     }
 
@@ -351,8 +356,12 @@ size_t aocl_compute_size(const prepack_params_t &params) {
         }
 
         if (params.src_dtype == data_type_t::u8) {
+            dlp_gemm_hints_t int8_hints {};
+            dlp_metadata_t int8_md {};
+            dlp_metadata_t *reorder_meta = matmul::aocl_dlp_hints_metadata(
+                    nullptr, int8_hints, int8_md, num_threads);
             const size_t req = aocl_get_reorder_buf_size_u8s8s32os32(
-                    order, trans, 'B', k, n, nullptr);
+                    order, trans, 'B', k, n, reorder_meta);
             // AOCL returns zero when the reorder is unsupported or its
             // parameters are invalid. Preserve that failure sentinel: adding
             // the ZenDNN column-sum tail to zero would otherwise make the size
@@ -368,8 +377,18 @@ size_t aocl_compute_size(const prepack_params_t &params) {
         }
 
         // src = s8 / bf16 / f32 / unspecified -> s8s8s32os32
+        // Attach m_hint only for INT8-pure src (s8). Mixed bf16/f32 src uses
+        // the same reorder API but GEMM does not take gemm_hints, so a
+        // hinted pack would mismatch the runtime kernel.
+        dlp_metadata_t *reorder_meta = nullptr;
+        dlp_gemm_hints_t int8_hints {};
+        dlp_metadata_t int8_md {};
+        if (params.src_dtype == data_type_t::s8) {
+            reorder_meta = matmul::aocl_dlp_hints_metadata(
+                    nullptr, int8_hints, int8_md, num_threads);
+        }
         const size_t req = aocl_get_reorder_buf_size_s8s8s32os32(
-                order, trans, 'B', k, n, nullptr);
+                order, trans, 'B', k, n, reorder_meta);
         return round_up_align(req, kPrepackAlign);
     }
 
@@ -379,8 +398,8 @@ size_t aocl_compute_size(const prepack_params_t &params) {
 #endif
 }
 
-status_t aocl_prepack(
-        const void *weights, const prepack_params_t &params, void *dst) {
+status_t aocl_prepack(const void *weights, const prepack_params_t &params,
+        void *dst, int32_t num_threads = 0) {
     using namespace zendnnl::lowoha::matmul;
 
 #if !ZENDNNL_DEPENDS_AOCLDLP
@@ -406,9 +425,13 @@ status_t aocl_prepack(
     }
 
     if (params.wei_dtype == data_type_t::bf16) {
+        dlp_gemm_hints_t bf16_hints {};
+        dlp_metadata_t bf16_md {};
+        dlp_metadata_t *reorder_meta = matmul::aocl_dlp_hints_metadata(
+                nullptr, bf16_hints, bf16_md, num_threads);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',
                 static_cast<const int16_t *>(weights),
-                static_cast<int16_t *>(dst), k, n, ldb, nullptr);
+                static_cast<int16_t *>(dst), k, n, ldb, reorder_meta);
         return status_t::success;
     }
 
@@ -461,18 +484,29 @@ status_t aocl_prepack(
         }
 
         if (params.src_dtype == data_type_t::u8) {
+            dlp_gemm_hints_t int8_hints {};
+            dlp_metadata_t int8_md {};
+            dlp_metadata_t *reorder_meta = matmul::aocl_dlp_hints_metadata(
+                    nullptr, int8_hints, int8_md, num_threads);
             aocl_reorder_u8s8s32os32(order, trans, 'B',
                     static_cast<const int8_t *>(weights),
-                    static_cast<int8_t *>(dst), k, n, ldb, nullptr);
+                    static_cast<int8_t *>(dst), k, n, ldb, reorder_meta);
             if (wants_colsum(params)) {
                 write_weight_colsum(weights, params, dst);
             }
             return status_t::success;
         }
 
+        dlp_metadata_t *reorder_meta = nullptr;
+        dlp_gemm_hints_t int8_hints {};
+        dlp_metadata_t int8_md {};
+        if (params.src_dtype == data_type_t::s8) {
+            reorder_meta = matmul::aocl_dlp_hints_metadata(
+                    nullptr, int8_hints, int8_md, num_threads);
+        }
         aocl_reorder_s8s8s32os32(order, trans, 'B',
                 static_cast<const int8_t *>(weights),
-                static_cast<int8_t *>(dst), k, n, ldb, nullptr);
+                static_cast<int8_t *>(dst), k, n, ldb, reorder_meta);
         return status_t::success;
     }
 
@@ -538,7 +572,8 @@ status_t ck_prepack(
 // Backend dispatchers: AOCL DLP blocked layout, or the group_matmul
 // custom-kernel VNNI pack-into-dst (selected by algo == moe_custom_kernel).
 // =====================================================================
-size_t backend_size_by_algo(const prepack_params_t &params) {
+size_t backend_size_by_algo(
+        const prepack_params_t &params, int32_t num_threads = 0) {
     if (params.algo == matmul_algo_t::moe_custom_kernel) {
         return ck_compute_size(params);
     }
@@ -550,7 +585,7 @@ size_t backend_size_by_algo(const prepack_params_t &params) {
     return round_up_align(dense_weight_bytes(params), kPrepackAlign);
 #endif
     if (params.algo == matmul_algo_t::aocl_dlp_blocked) {
-        return aocl_compute_size(params);
+        return aocl_compute_size(params, num_threads);
     }
     apilog_error("weight_prepack_size: algo not supported by prepack API (",
             kernel_to_string(params.algo),
@@ -558,8 +593,8 @@ size_t backend_size_by_algo(const prepack_params_t &params) {
     return 0;
 }
 
-status_t backend_prepack_by_algo(
-        const void *weights, const prepack_params_t &params, void *dst) {
+status_t backend_prepack_by_algo(const void *weights,
+        const prepack_params_t &params, void *dst, int32_t num_threads = 0) {
     if (params.algo == matmul_algo_t::moe_custom_kernel) {
         return ck_prepack(weights, params, dst);
     }
@@ -572,7 +607,7 @@ status_t backend_prepack_by_algo(
     return status_t::success;
 #endif
     if (params.algo == matmul_algo_t::aocl_dlp_blocked) {
-        return aocl_prepack(weights, params, dst);
+        return aocl_prepack(weights, params, dst, num_threads);
     }
     apilog_error("weight_prepack_into: algo not supported by prepack API (",
             kernel_to_string(params.algo),
@@ -606,7 +641,7 @@ size_t weight_prepack_size(const reorder_params_t &params) {
         apilog_info(ss.str());
     }
 
-    const size_t size = backend_size_by_algo(pp);
+    const size_t size = backend_size_by_algo(pp, params.num_threads);
     if (size > 0) { pp.cached_size = size; }
     return size;
 }
@@ -653,7 +688,8 @@ status_t weight_prepack_into(
 
     if (is_profile) { profiler.tbp_start(); }
 
-    const status_t st = backend_prepack_by_algo(weights, pp, dst);
+    const status_t st
+            = backend_prepack_by_algo(weights, pp, dst, params.num_threads);
 
     if (is_profile) {
         profiler.tbp_stop();

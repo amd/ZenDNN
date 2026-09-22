@@ -45,6 +45,7 @@
 
 #include "common/op_config.hpp"
 #include "gtest_utils.hpp"
+#include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 
 namespace {
 
@@ -137,4 +138,50 @@ TEST_F(TestWeightCacheInplace, Cached1D_InPlaceWeightMutation) {
                 << " — in-place reorder corrupted "
                    "the zero-point compensation";
     }
+}
+
+// The AOCL DLP m_hint / nt_hint pair changes the packed panel width, so
+// run_dlp() folds it into the weight-cache key (extra_input_hash). Drive the
+// pack cache directly to pin that contract: the same key must reuse the packed
+// buffer, and a key carrying the hint fold must produce a separate pack instead
+// of the layout built without hints.
+TEST_F(TestWeightCacheInplace, HintFoldedKeyPacksSeparately) {
+    constexpr int k = 256, n = 256;
+    const auto algo = static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked);
+
+    auto weights = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(k), static_cast<uint64_t>(n)},
+            data_type_t::bf16, 2.0, /*transB=*/false);
+    const void *weight_ptr = weights.get_raw_handle_unsafe();
+
+    const Key_matmul unhinted(/*TransB=*/false, k, n, /*ldb=*/n, weight_ptr,
+            algo, /*extra_input_hash=*/0);
+    std::size_t hinted_hash = 0;
+    hinted_hash = zendnnl::common::hash_combine(hinted_hash, int64_t {32});
+    hinted_hash = zendnnl::common::hash_combine(hinted_hash, int64_t {24});
+    const Key_matmul hinted(
+            /*TransB=*/false, k, n, /*ldb=*/n, weight_ptr, algo, hinted_hash);
+
+    // weight_cache_type 1: packs live in LRU-owned buffers (freed by
+    // clear_matmul_test_caches() in TearDown) and the plain weights stay
+    // untouched, so every call below packs from the same source bytes.
+    auto pack = [&](const Key_matmul &key) {
+        void *packed = nullptr;
+        zendnnl::lowoha::matmul::reorderAndCacheWeights<int16_t>(key,
+                weight_ptr, packed, k, n, /*ldb=*/n, /*order=*/'r',
+                /*trans=*/'n', /*mem_format_b=*/'n',
+                aocl_get_reorder_buf_size_bf16bf16f32of32,
+                aocl_reorder_bf16bf16f32of32, /*weight_cache_type=*/1);
+        return packed;
+    };
+
+    void *unhinted_pack = pack(unhinted);
+    ASSERT_NE(unhinted_pack, nullptr) << "unhinted weight pack failed";
+
+    EXPECT_EQ(pack(unhinted), unhinted_pack)
+            << "same key must hit the cache and reuse the packed buffer";
+
+    EXPECT_NE(pack(hinted), unhinted_pack)
+            << "hint-folded key reused the pack built without hints — a hint "
+               "change must re-pack";
 }
