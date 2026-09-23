@@ -352,6 +352,11 @@ protected:
         EXPECT_TRUE(ok_2);
     }
 
+    // Kernel then reference share the caller's weight buffer. Out-of-place
+    // cache avoids an in-place reorder mutating that buffer before the
+    // reference runs. Post-op cache is keyed on the caller pointer either way.
+    WeightCacheGuard weight_cache_out_of_place {1};
+
     uint64_t m {}, k {}, n {};
     bool transA {}, transB {};
     float alpha {1.0f}, beta {0.0f};
