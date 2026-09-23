@@ -46,6 +46,53 @@ namespace lowoha {
 namespace matmul {
 namespace {
 
+// Shrinking the capacity must leave the cache AT the new capacity, keeping the
+// most recently used entries.
+//
+// `set_capacity` used to hand `evict()` the overshoot (`size - capacity`), but
+// that argument means "reserve room for N more", so the request was to shrink
+// to `capacity - overshoot`.  With `capacity_` a uint32_t and the argument a
+// size_t, shrinking by more than the new capacity wrapped the bound to ~2^64,
+// the loop condition was false on entry, and the cache silently kept every
+// entry while reporting success.  A bounded cache that cannot be bounded is
+// the wrong failure direction: the grouped AUTO mixed-in-place mode refuses to
+// engage unless the LRU is unlimited precisely because a surprise eviction
+// there frees a buffer an in-flight GEMM still holds.
+TEST(LruCacheSetCapacity, ShrinkKeepsNewestUpToCapacity) {
+    lru_cache_t<int, int> cache(8);
+    for (int i = 0; i < 5; ++i) {
+        cache.add(i, i * 10);
+    }
+    ASSERT_EQ(cache.get_size(), 5);
+
+    // Touch 3 and 4 so they are unambiguously the most recent.
+    int out = -1;
+    ASSERT_TRUE(cache.try_get(3, out));
+    ASSERT_TRUE(cache.try_get(4, out));
+
+    cache.set_capacity(2);
+
+    EXPECT_EQ(cache.get_size(), 2)
+            << "shrinking to 2 must leave exactly 2 entries -- keeping all 5 "
+               "means the bound is unenforced, dropping to 0 means the shrink "
+               "was treated as a reservation";
+    EXPECT_TRUE(cache.try_get(4, out));
+    EXPECT_TRUE(cache.try_get(3, out));
+}
+
+// The reserve form keeps its own meaning: ask for one free slot in a cache of
+// capacity 4 and exactly one entry goes.
+TEST(LruCacheSetCapacity, ShrinkToZeroEmptiesTheCache) {
+    lru_cache_t<int, int> cache(4);
+    for (int i = 0; i < 4; ++i) {
+        cache.add(i, i);
+    }
+    ASSERT_EQ(cache.get_size(), 4);
+
+    cache.set_capacity(0);
+    EXPECT_EQ(cache.get_size(), 0);
+}
+
 // A populated key reads back as a hit with the stored value.
 TEST(LruCacheTryGet, HitReturnsTrueAndValue) {
     lru_cache_t<int, int> cache(8);

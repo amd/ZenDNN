@@ -410,10 +410,34 @@ struct grp_matmul_fused_moe_params {
     std::vector<const void *> down_weight;
     std::vector<int> N_down; ///< Per-expert output columns of down_proj.
     std::vector<int> ldb_down; ///< Leading dimension of down_weight per expert.
+    /// Bytes writable at EACH `down_weight[i]`, or 0 (default) for "exactly
+    /// the logical extent".  The Op1 sibling is
+    /// `matmul_params::wei_buffer_capacity_bytes`; this exists separately
+    /// because Op2 weights travel in this struct rather than in `params[]`.
+    /// Non-zero only when the caller allocated per-expert trailing slack,
+    /// which is what lets an int8 down_proj reorder IN PLACE instead of
+    /// holding a second full copy — its blocked layout is `N_down*4` bytes
+    /// larger than the logical weight (a mandatory VPDPBUSD compensation
+    /// row), so without slack the in-place gate can never fire.
+    ///
+    /// Scalar, unlike its per-expert neighbours above, because the extent
+    /// is a property of the ALLOCATION rather than of an expert: callers
+    /// carve `down_weight[]` out of one `[E, ...]` tensor, so every expert
+    /// gets the same stride.  A caller holding genuinely separate
+    /// per-expert allocations must leave this 0.
     std::vector<const void *>
             bias_down; ///< Per-expert bias for down_proj (nullptr OK).
     data_type_t bias_dt_down
             = data_type_t::none; ///< Bias dtype for Op2 (none = no bias).
+
+    /// Declared AFTER the pre-existing members on purpose.  This is a public
+    /// aggregate, so inserting a field ahead of `bias_down` would rebind
+    /// positional initialisers such as
+    /// `{down_weight, N_down, ldb_down, bias_down, bias_dt_down}` -- the
+    /// `std::vector` would be matched against this `size_t` and downstream
+    /// callers (zentorch among them) would stop compiling.  Appending keeps
+    /// every existing initialiser valid and leaves this defaulted to 0.
+    size_t down_wei_buffer_capacity_bytes = 0;
 
     // ─── Op2 (down_proj) weight quantization (optional) ──────────────────
     //

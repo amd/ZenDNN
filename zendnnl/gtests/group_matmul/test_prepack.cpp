@@ -69,6 +69,9 @@
 // `clear_custom_kernel_pack_cache()`.
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
+// `src_scale_is_collapsed_per_token` — the shared sym-quant scale-shape
+// predicate exercised by [34].
+#include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_aocl_dlp.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_custom_kernel.hpp"
@@ -829,7 +832,11 @@ TEST_F(TestPrepackFusedMoEEndToEnd, BothPassesWarmAllExperts) {
     // fires both AOCL and custom-kernel branches (the only path with
     // observable HIT/MISS counters is the custom-kernel side).
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     constexpr int E = 8; // total expert count
     constexpr int K = 4; // active fired count
@@ -973,7 +980,11 @@ TEST_P(TestPrepackKDownSynthesis, BothPassesWarmAllExperts) {
     // counters).  Per-tile AOCL DLP warm also runs but is unobservable
     // through public API (tested separately in [18]).
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     const auto &p = GetParam();
     const auto act = static_cast<grp_matmul_gated_act_t>(p.act_int);
@@ -1276,7 +1287,11 @@ TEST_P(TestPrepackResultInvariance, ConsistentAcrossIterations) {
     // per-tile when STABLE_NTILE is on).  The second call must
     // short-circuit via fingerprint cache and produce identical output.
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     const auto &p = GetParam();
     auto h = build_invariance_harness(p);
@@ -1547,6 +1562,7 @@ TEST_F(TestPrepackAoclDlpFullWeight, SkipsNonConstExperts) {
     ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(h.weight, h.K,
                       h.N, h.ldb, h.transB, h.is_weights_const,
                       /*total_count=*/4,
+                      /*src_dtype=*/data_type_t::bf16,
                       /*wei_dtype=*/data_type_t::bf16, st),
             status_t::success);
 
@@ -1585,6 +1601,7 @@ TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
     ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(h.weight, h.K,
                       h.N, h.ldb, h.transB, empty_iwc,
                       /*total_count=*/4,
+                      /*src_dtype=*/data_type_t::bf16,
                       /*wei_dtype=*/data_type_t::bf16, st),
             status_t::success);
 
@@ -1629,7 +1646,11 @@ TEST_F(TestPrepackVariableN, MixedNAcrossExperts) {
     reset_grp_matmul_caches();
 
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     const int E = 4;
     const int K_active = 2; // active prefix (gv.Ms[0..1] = M, [2..3] = 0)
@@ -1869,7 +1890,11 @@ TEST_F(TestPrepackStress, E64MultiIterationCacheStable) {
     reset_grp_matmul_caches();
 
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     // 64 experts, 8 firing each iteration.  Realistic decode-class
     // setting for gpt-oss-20B (32 experts, top-4) or DeepSeek-V2
@@ -1927,7 +1952,11 @@ TEST_F(TestPrepackStress, E256BoundaryAllExpertsWarmed) {
     reset_grp_matmul_caches();
 
     AlgoEnvGuard algo_guard(3);
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
+    // Override atom, not setenv: the getter latches in a `static const`,
+    // so with ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0 in the environment an
+    // EnvVarGuard cannot turn CK back on and this test silently stops
+    // reaching the branch it exists to cover.
+    moe_test_utils::CustomKernelOverride custom_guard(true);
 
     // 256 experts is `kNTilePlanMaxExperts` — the planner's hardcoded
     // upper bound for `stable_n_thr_per_expert` (single source of
@@ -3064,6 +3093,83 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo256DisableCrossWarm) {
                 << ": cross-warm regime 3 "
                    "(custom-kernel pack) must NOT fire.";
     }
+}
+
+// The other half of the cross-warm contract, and the one with no coverage
+// until now: a GLOBAL pin is not the only way to make the ALGO 3 decode
+// arena unreachable.  Under AUTO the per-PHASE knob
+// `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` can route decode away from ALGO 3
+// while the global selector stays on 0, and cross-warm has to notice --
+// otherwise it packs a full resident copy of every expert weight for an
+// arena nothing will ever read.
+//
+// The reachability rule is deliberately asymmetric and this pins it down:
+// {1, 2, 6} PROVE ALGO 3 unreachable, 5 does NOT.  A pinned-5 decode can be
+// declined by the Rule 0.6a occupancy qualifier and substitute the decode
+// default, which is 3 -- so 5 is the one generic pin that can still land
+// there, and skipping its warm would leave decode reordering from weights
+// the prompt pass has already mutated.  One redundant warm on a rare pin is
+// the deliberate price of that guarantee, so assert it rather than let a
+// future tidy-up "fix" the asymmetry.
+TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedAwayFromAlgo3SkipsWarm) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    for (int decode_pin : {1, 2, kGrpMatmulAlgoMultilevel}) {
+        reset_grp_matmul_caches();
+        prepack::test_api::clear_last_invocation_stats();
+
+        auto h = make_harness(/*total=*/4, /*active=*/4,
+                /*K=*/32, /*N=*/64, /*fill=*/0.222f);
+        h.pp.num_threads = 64;
+        h.pp.nr_align = 1;
+        ASSERT_TRUE(h.pp.custom_kernel_on) << "decode_pin=" << decode_pin;
+
+        // Global selector stays AUTO; only the decode PHASE is pinned.
+        AlgoEnvGuard algo_guard(0);
+        AutoDecodeAlgoOverride decode_guard(decode_pin);
+        prepack::prepack_for_algo_1(h.pp);
+
+        auto stats = prepack::test_api::get_last_invocation_stats();
+        EXPECT_TRUE(stats.valid) << "decode_pin=" << decode_pin;
+        EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+                static_cast<int>(prepack::CrossWarmRegime::none))
+                << "AUTO with decode pinned to " << decode_pin
+                << ": that pin cannot reach ALGO 3, so the decode arena is "
+                   "dead and cross-warm must not pack it -- doing so costs a "
+                   "full resident copy of every expert weight.";
+        EXPECT_EQ(stats.ck.cache_misses, 0) << "decode_pin=" << decode_pin;
+    }
+}
+
+TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedTo5StillCrossWarms) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    reset_grp_matmul_caches();
+    prepack::test_api::clear_last_invocation_stats();
+
+    auto h = make_harness(/*total=*/4, /*active=*/4,
+            /*K=*/32, /*N=*/64, /*fill=*/0.222f);
+    h.pp.num_threads = 64;
+    h.pp.nr_align = 1;
+    ASSERT_TRUE(h.pp.custom_kernel_on);
+
+    AlgoEnvGuard algo_guard(0);
+    AutoDecodeAlgoOverride decode_guard(kGrpMatmulAlgoExpertParallel);
+    prepack::prepack_for_algo_1(h.pp);
+
+    auto stats = prepack::test_api::get_last_invocation_stats();
+    ASSERT_TRUE(stats.valid);
+    EXPECT_NE(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none))
+            << "AUTO with decode pinned to ALGO 5 MUST still cross-warm: 5 is "
+               "the one generic pin that can be declined (Rule 0.6a) and fall "
+               "back to ALGO 3.  Skipping here would leave a declined decode "
+               "reordering from weights the in-place prompt pass has already "
+               "mutated -- silent bad output, not merely a slow first call.";
 }
 
 // Safety-clamp corner case.  When the user pins an ALGO but the shape
@@ -4623,6 +4729,144 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, WarmCoversAllFourActivations) {
         EXPECT_EQ(s_probe.cache_misses, 0);
     }
     ck::clear_custom_kernel_pack_cache_int8();
+}
+
+// ===============================================================================
+// [34] TestSymQuantScaleShapePredicates — the scale-shape predicates that
+//      decide whether an int8 call takes the AOCL sym-quant route.
+//
+// These are unit tests on the predicate rather than end-to-end runs because
+// the predicate is consumed from three places that MUST agree:
+//   * `is_s8_sym_quant_scales` (aocl_kernel.cpp)  — picks the reorder + GEMM
+//   * `is_sym_quant` x2        (aocl_postop.cpp)  — decides whether the scales
+//                                                   are consumed natively by
+//                                                   the sym-quant GEMM or wired
+//                                                   as post-op scale slots
+// If they disagree the scales are applied twice or not at all, so pinning the
+// shared predicate is what actually guards that contract.
+// ===============================================================================
+
+class TestSymQuantScaleShapePredicates : public ::testing::Test {};
+
+namespace {
+// Build quant params with the given src-scale element count and weight-scale
+// dims.  Only shapes matter to these predicates; the buffers are never read,
+// so a single scalar address serves as a non-null marker for every field.
+zendnnl::lowoha::matmul::matmul_quantization_params_t make_scale_shapes(
+        float &storage, int src_scale_nelems,
+        std::vector<int64_t> wei_scale_dims) {
+    zendnnl::lowoha::matmul::matmul_quantization_params_t qp;
+    qp.src_scale.buff = &storage;
+    qp.src_scale.dt = zendnnl::common::data_type_t::f32;
+    qp.src_scale.dims = {static_cast<int64_t>(src_scale_nelems)};
+    qp.wei_scale.buff = &storage;
+    qp.wei_scale.dt = zendnnl::common::data_type_t::f32;
+    qp.wei_scale.dims = std::move(wei_scale_dims);
+    return qp;
+}
+} // namespace
+
+// The DA8W8 decode case: one token, per-token src scale collapsed to a single
+// element, per-output-channel {1, N} weight scale.  Before this was admitted,
+// `src_scale_nelems > 1` was false and the {1, N} scale failed the per-group
+// `dims[0] > 1` test, so every single-token expert silently left sym-quant and
+// reordered into the plain s8 blocked LRU — a second copy of every weight that
+// no prepack warm targets.
+TEST_F(TestSymQuantScaleShapePredicates,
+        PerChannelWeightScaleAdmitsCollapsedPerToken) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {1, N});
+
+    EXPECT_TRUE(src_scale_is_collapsed_per_token(qp, /*M=*/1, N));
+}
+
+// The per-group {G>1, N} form that was already admitted must keep working —
+// this is the regression guard on broadening the predicate.
+TEST_F(TestSymQuantScaleShapePredicates, PerGroupWeightScaleStillAdmitted) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {4, N});
+
+    EXPECT_TRUE(src_scale_is_collapsed_per_token(qp, /*M=*/1, N));
+}
+
+// Above M==1 the collapsed-per-token helper must stay false: a per-token scale
+// then has more than one element and the caller's own `src_scale_nelems > 1`
+// arm is what admits it.  Keeping this false avoids two overlapping reasons
+// for the same verdict.
+TEST_F(TestSymQuantScaleShapePredicates, CollapsedFormIsMOneOnly) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {1, N});
+
+    EXPECT_FALSE(src_scale_is_collapsed_per_token(qp, /*M=*/2, N));
+}
+
+// A weight scale whose trailing dim is not N describes a different tensor and
+// must not be mistaken for either supported form.
+TEST_F(TestSymQuantScaleShapePredicates, MismatchedWeightScaleWidthRejected) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {1, N / 2});
+
+    EXPECT_FALSE(src_scale_is_collapsed_per_token(qp, /*M=*/1, N));
+}
+
+// The two shape helpers partition the 2-D weight-scale space at dims[0]==1:
+// exactly one may answer true for any given shape.  If a future edit lets both
+// fire, the sym-quant group size becomes ambiguous.
+TEST_F(TestSymQuantScaleShapePredicates, PerChannelAndPerGroupAreComplements) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 64;
+    float s = 1.0f;
+
+    for (int64_t g : {int64_t {1}, int64_t {2}, int64_t {8}}) {
+        const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {g, N});
+        const bool per_channel = has_per_channel_wei_scale(qp, N);
+        const bool per_group = has_per_group_wei_scale(qp, N);
+        EXPECT_NE(per_channel, per_group)
+                << "G=" << g << " must match exactly one shape helper";
+        EXPECT_EQ(per_channel, g == 1);
+    }
+}
+
+// Key-agreement invariant behind admitting the per-channel form without
+// packing anything new.  The prepack sym-quant warmer keys on
+// `src_grp = (p.group_size > 0) ? p.group_size : K` and packs
+// `b_quant_op.group_size = src_grp`; `build_prepack_params` only derives a
+// non-zero `group_size` from a weight scale with `dims[0] > 1`, so per-channel
+// leaves it at 0 and the warm side uses K.  The runtime must land on the same
+// K or it would key-hit an entry packed under a different grouping — same key,
+// different bytes, wrong numbers and no error.
+TEST_F(TestSymQuantScaleShapePredicates, SymQuantGroupSizeIsKForPerChannel) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    constexpr int K = 2048;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {1, N});
+
+    EXPECT_EQ(sym_quant_group_size(qp, /*M=*/1, N, K), static_cast<int64_t>(K))
+            << "per-channel must map to a single quant group spanning K, "
+               "matching the warm side's src_grp when group_size == 0";
+}
+
+// And the per-group form must still map to K/G, so broadening the predicate
+// did not disturb the grouping arithmetic the warm side mirrors.
+TEST_F(TestSymQuantScaleShapePredicates, SymQuantGroupSizeIsKOverGForPerGroup) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int N = 128;
+    constexpr int K = 2048;
+    constexpr int64_t G = 8;
+    float s = 1.0f;
+    const auto qp = make_scale_shapes(s, /*src_scale_nelems=*/1, {G, N});
+
+    EXPECT_EQ(sym_quant_group_size(qp, /*M=*/1, N, K),
+            static_cast<int64_t>(K) / G);
 }
 
 } // namespace

@@ -142,10 +142,10 @@ INST(4, 4)
 INST(6, 4) INST(1, 2) INST(2, 2) INST(3, 2) INST(4, 2) INST(6, 2) INST(1, 1)
         INST(2, 1) INST(3, 1) INST(4, 1) INST(6, 1)
 #undef INST
-        // clang-format on
+// clang-format on
 
-        ZENDNNL_TARGET("avx512f,avx512vnni,fma") int8_brgemm_fn_t
-        select_int8_brgemm_kernel(int MR, int NR) {
+ZENDNNL_TARGET("avx512f,avx512vnni,fma")
+int8_brgemm_fn_t select_int8_brgemm_kernel(int MR, int NR) {
     switch (NR) {
         case 64:
             switch (MR) {

@@ -980,7 +980,16 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     /*interleave_split_halves=*/interleave_split_halves,
                     &out.packed_ptrs_int8[i],
                     /*was_hit_out=*/&was_hit_unused,
-                    /*disable_cache=*/cache_off);
+                    /*disable_cache=*/cache_off,
+                    /*in_place=*/ck_in_place,
+                    // `prepare_for_call` does not receive `matmul_params`, so
+                    // the caller-declared capacity cannot reach here yet; 0
+                    // keeps the int8 in-place branch inert (its packed image
+                    // always exceeds the logical extent by the compensation
+                    // rows).  bf16 is unaffected -- it qualifies on exact size
+                    // equality and needs no declaration.  Plumb the per-expert
+                    // value through `prepare_for_call` to switch int8 on.
+                    /*wei_buffer_capacity_bytes=*/0);
             if (pst != status_t::success) {
                 return refuse("weight_pack_failed",
                         "get_or_pack_weight_int8 returned failure — "

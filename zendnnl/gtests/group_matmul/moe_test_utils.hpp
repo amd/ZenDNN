@@ -683,6 +683,41 @@ struct EnvVarGuard {
 // the lifetime exactly scope-bound; no test needs to transfer
 // ownership.
 
+// Same reason as `CustomKernelOverride`: both getters latch in a
+// `static const`, so `setenv` after the first read is a no-op and an
+// EnvVarGuard on these knobs silently compares a configuration against
+// itself.  These write the override atom instead.
+struct FusedMoeTightOverride {
+    int prev;
+    explicit FusedMoeTightOverride(bool value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_fused_moe_tight_override.exchange(
+                               value ? 1 : 0, std::memory_order_relaxed);
+    }
+    ~FusedMoeTightOverride() {
+        zendnnl::lowoha::matmul::test_api ::
+                s_grp_matmul_fused_moe_tight_override.store(
+                        prev, std::memory_order_relaxed);
+    }
+    FusedMoeTightOverride(const FusedMoeTightOverride &) = delete;
+    FusedMoeTightOverride &operator=(const FusedMoeTightOverride &) = delete;
+};
+
+struct NTileFusedActOverride {
+    int prev;
+    explicit NTileFusedActOverride(bool value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_n_tile_fused_act_override.exchange(
+                               value ? 1 : 0, std::memory_order_relaxed);
+    }
+    ~NTileFusedActOverride() {
+        zendnnl::lowoha::matmul::test_api ::s_grp_n_tile_fused_act_override
+                .store(prev, std::memory_order_relaxed);
+    }
+    NTileFusedActOverride(const NTileFusedActOverride &) = delete;
+    NTileFusedActOverride &operator=(const NTileFusedActOverride &) = delete;
+};
+
 struct CustomKernelOverride {
     int prev;
     explicit CustomKernelOverride(bool value) {

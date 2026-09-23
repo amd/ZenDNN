@@ -109,7 +109,8 @@ void parallel_per_expert(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_5(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    get_grp_matmul_custom_kernel(), num_threads,
+                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
@@ -427,7 +428,10 @@ expert_parallel_result try_expert_parallel_pipeline(
     group_matmul_prepack::prepack_for_algo_5(
             group_matmul_prepack::build_prepack_params(w13.weight, w13.K, w13.N,
                     w13.ldb, transB, is_weights_const, w13.params, M, ck_on,
-                    num_threads, /*nr_align=*/0, fused_act, act_dtype,
+                    num_threads,
+                    algo3_decode_nr_align(
+                            M, w13.N, w13.ldc, fused_act, w13.params),
+                    fused_act, act_dtype,
                     /*transA=*/&w13.transA, /*alpha=*/&w13.alpha,
                     /*beta=*/&w13.beta));
     group_matmul_prepack::prepack_for_algo_5(

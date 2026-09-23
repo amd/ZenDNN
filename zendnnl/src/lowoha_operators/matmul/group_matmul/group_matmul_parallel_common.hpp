@@ -228,6 +228,47 @@ inline constexpr int kFewExpertsDecodeThreshold = 8;
 /// clamp differs per dtype.
 inline constexpr int kDecodeNTileThreadFactor = 4;
 
+// ── Abort-class gemm_mode sentinels ─────────────────────────────────────
+// The group_matmul executors are void and the surrounding API is noexcept, so
+// a condition that leaves the caller's dst wrong is reported by writing one of
+// these strings through `gemm_mode_out`.  `group_matmul_direct` and the
+// fused-MoE dispatcher turn any mode matching `gemm_mode_is_error` into
+// `status_t::failure`, so the caller never consumes a dst the library knows is
+// bad.
+//
+// New sentinels MUST keep the `error_` prefix: the check is by prefix so a
+// sentinel added in an executor fails the call closed even if a translation
+// site is not updated.
+inline constexpr const char *kGrpMatmulErrPrefix = "error_";
+inline constexpr const char *kGrpMatmulErrPrepackedNoCk
+        = "error_prepacked_no_ck";
+/// ALGO 3 could not leave dst defined: a per-thread scratch allocation failed,
+/// or a fused-epilogue layout invariant was violated.  `flat_n_tile` logs the
+/// specific reason; the sentinel only has to fail the call.
+inline constexpr const char *kGrpNTileErrUndefinedDst
+        = "error_ntile_undefined_dst";
+/// The caller passed a tight destination (`ldc < N`) with a gated activation,
+/// but the resolved route has no tight-aware writer, so applying the
+/// activation would walk past the end of the caller's buffer.
+inline constexpr const char *kGrpMatmulErrTightNoFusedWriter
+        = "error_tight_dst_no_fused_writer";
+/// A weight-cache lookup missed on a buffer an earlier in-place (WC=2) reorder
+/// had already rewritten, so the AOCL backend refused to reorder it a second
+/// time (the raw weights are gone and the result would be silently wrong).
+/// The backend can only count the refusal -- `run_dlp` returns void and runs
+/// inside OMP regions -- so the dispatcher compares the count across the call
+/// and raises this, which fails the call rather than returning the dst that
+/// the refused reorder left undefined.
+inline constexpr const char *kGrpMatmulErrMutatedWeightMiss
+        = "error_mutated_weight_miss";
+
+inline bool gemm_mode_is_error(const char *mode) {
+    return mode != nullptr
+            && std::strncmp(mode, kGrpMatmulErrPrefix,
+                       std::strlen(kGrpMatmulErrPrefix))
+            == 0;
+}
+
 // ── Executed-ALGO from gemm_mode ────────────────────────────────────────
 // Maps the executor-written `gemm_mode` string (the authoritative record of
 // what ACTUALLY ran) to the ALGO that actually executed ({1,2,3,5,6}), so the
@@ -252,6 +293,10 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
     auto starts = [&](const char *p) {
         return std::strncmp(mode, p, std::strlen(p)) == 0;
     };
+    // Abort-class sentinels: the call is being failed, so no ALGO produced a
+    // usable result.  Checked first — an `error_` mode must never be reported
+    // as a successful execution of the path that raised it.
+    if (gemm_mode_is_error(mode)) return 0;
     // No-op / nothing-executed markers map to 0 (must precede the generic
     // prefixes they share, e.g. "flat_m_tile_skip" before "flat_m_tile").
     if (starts("skip")) return 0; // whole-call no-op (all M<=0)
@@ -547,6 +592,71 @@ inline bool grp_matmul_auto_decode_algo_is_set() {
     return get_grp_matmul_auto_decode_setting().pins_generic_policy();
 }
 
+/// Can this phase be ruled OUT of ALGO 3 for the whole process?
+///
+/// PROVABLE, not a heuristic — callers rely on it to skip a warm even
+/// while the prompt reorder mutates weights in place.
+/// Tracing every route a pinned phase can take through
+/// `select_grp_matmul_algo`:
+///
+///   * pinned 1        -- honoured;
+///   * pinned 2        -- honoured, or clamped to 1 when !m_tile_safe;
+///   * pinned 6        -- honoured, no tiling precondition to clamp on;
+///   * pinned 5        -- honoured, OR DECLINED by the Rule 0.6a occupancy
+///                        qualifier, after which decode substitutes the
+///                        decode default (3) and prompt substitutes 3
+///                        outright.  The ONLY pin that can still land on
+///                        ALGO 3;
+///   * unset           -- Rules 0.45/0.5/0.6/2a/2c pick 3 on shape.
+///
+/// So {1, 2, 6} prove ALGO 3 unreachable for that phase and {5, unset} do
+/// not.  Treating 5 as reachable costs one redundant warm on a rare pin
+/// and buys the guarantee outright, which is a far better trade than
+/// forbidding a documented fallback.
+inline bool grp_matmul_phase_cannot_reach_algo3(grp_matmul_phase phase) {
+    const auto setting = get_grp_matmul_auto_phase_setting(phase);
+    if (!setting.pins_generic_policy()) {
+        return false;
+    } // unset: shape decides
+    const int pinned = setting.generic_effective_algo;
+    return pinned == 1 || pinned == 2 || pinned == kGrpMatmulAlgoMultilevel;
+}
+
+/// The mirror: this phase will run ALGO 3 and nothing else.
+inline bool grp_matmul_phase_pinned_to_algo3(grp_matmul_phase phase) {
+    const auto setting = get_grp_matmul_auto_phase_setting(phase);
+    return setting.pins_generic_policy() && setting.generic_effective_algo == 3;
+}
+
+/// Will anything read the layout this cross-warm is about to pack?
+///
+/// Cross-warm prefills the layout the OTHER inference phase will read, so
+/// it only pays off when the two phases land on different ALGOs.
+/// `cross_warm` already skips a globally pinned ALGO for that reason, but
+/// the per-phase knobs open the same hole under AUTO: with
+/// `ZENDNNL_GRP_MATMUL_ALGO=0` and `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO`
+/// pinned away from 3, decode never reaches ALGO 3, yet an ALGO 1/2/5/6
+/// prepack still eagerly packs the ALGO 3 CK pack or AOCL per-tile arena —
+/// on an MoE, a full resident copy of every expert weight warmed for an
+/// executor that never runs.
+///
+/// The two directions are NOT symmetric, because they target different
+/// layouts:
+///
+///   * from ALGO {1,2,5,6} the target is the ALGO 3 DECODE arena (CK pack
+///     or AOCL per-tile).  Useless exactly when decode provably cannot
+///     reach ALGO 3.
+///   * from ALGO 3 the target is the PROMPT full-weight reorder, which
+///     every non-3 generic ALGO shares.  Useless only when prompt is
+///     pinned to ALGO 3 as well, i.e. when both phases run the same
+///     layout.  An UNSET prompt must stay reachable: Rule 0.7 sends it to
+///     ALGO 1, which is precisely the case the warm exists for.
+inline bool grp_matmul_cross_warm_target_reachable(int current_algo) {
+    return current_algo == 3
+            ? !grp_matmul_phase_pinned_to_algo3(grp_matmul_phase::prompt)
+            : !grp_matmul_phase_cannot_reach_algo3(grp_matmul_phase::decode);
+}
+
 enum class grp_matmul_ntile_flat_parallel_request_source {
     none,
     global,
@@ -712,6 +822,14 @@ inline bool a3_can_fuse_act(
 namespace test_api {
 inline std::atomic<int> s_grp_n_rounds_mode_override {-1};
 inline std::atomic<int> s_grp_matmul_custom_kernel_override {-1};
+// Fused-MoE arena knob.  Needed because the getter latches in a
+// `static const`, so a test that flips the env with setenv changes
+// nothing and silently compares a configuration against itself.
+// Sentinel `-1` = no override (env / default).
+inline std::atomic<int> s_grp_matmul_fused_moe_tight_override {-1};
+// ALGO 3 fused-epilogue knob.  Same latching problem as the arena knob
+// above.  Sentinel `-1` = no override (env / default).
+inline std::atomic<int> s_grp_n_tile_fused_act_override {-1};
 // DQ-INT8 CK sub-knob — independent from the master CK switch so
 // tests / deployments can toggle the int8 fast path without
 // disturbing the bf16 path.  Sentinel `-1` = no override (env / default).
@@ -946,6 +1064,9 @@ inline constexpr bool kDecodeTileAbOn = true;
 //   the full predicate.  Set "0" here to force wide (debug /
 //   layout-regression bisection).
 inline int get_grp_matmul_fused_moe_tight() {
+    const int ovr = test_api::s_grp_matmul_fused_moe_tight_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr;
     static const int v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT");
         if (e == nullptr || e[0] == '\0') return 1; // default: force-tight
@@ -1001,14 +1122,27 @@ inline bool get_grp_matmul_custom_kernel() {
     if (ovr >= 0) return ovr != 0;
     static const bool v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL");
-        if (e == nullptr || e[0] == '\0') return true; // default: ON
-        return e[0] != '0';
+        int parsed = 0;
+        // Strict parse AND domain check.  `e[0] != '0'` used to read
+        // "off" / "false" / "no" as ON, i.e. the opposite of what the
+        // operator wrote; `parse_env_int_strict` alone still accepted
+        // any integer, so `2` or `-1` would enable the kernel.  The
+        // documented domain is {0, 1} -- anything else is junk and
+        // resolves to the default.
+        if (!parse_env_int_strict(e, parsed)) return true;
+        if (parsed != 0 && parsed != 1) return true;
+        return parsed != 0;
     }();
     return v;
 }
 
 /// W4A8 is always AOCL-DLP-only; CK has no s4 microkernel.  Keep this
 /// call-scoped so CK remains available for its BF16, INT8, and FP16 families.
+///
+/// NOTE: this reads the MASTER knob only.  It is the right predicate for a
+/// caller that just needs "is the custom kernel family available at all",
+/// but NOT for one that must agree with whether the kernel will actually
+/// run -- that is `grp_matmul_custom_kernel_effective` below.
 inline bool grp_matmul_custom_kernel_enabled(data_type_t wei_dtype,
         data_type_t dst_dtype, data_type_t compute_dtype) {
     return get_grp_matmul_custom_kernel()
@@ -1032,7 +1166,23 @@ inline bool grp_matmul_custom_kernel_enabled(data_type_t wei_dtype,
 //                                                  int8 CK off (DQ-INT8
 //                                                  N-tile calls fall back
 //                                                  to AOCL DLP sym_quant).
-//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_INT8=1` → both on (default).
+//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_INT8=1` → both on.  DEFAULT.
+//
+//   Defaults ON so the master knob means one thing for every dtype: a
+//   deployment that leaves `_CUSTOM_KERNEL` at its default gets the custom
+//   kernel, not the custom kernel for bf16 and the DLP fallback for int8.
+//   The split default was a standing trap -- an operator A/B-ing
+//   `_CUSTOM_KERNEL` on a W8A8 model changed nothing about which int8
+//   kernel ran and drew conclusions from two identical configurations.
+//
+//   This knob previously defaulted OFF on throughput grounds: the int8 CK
+//   can be slower than the DLP sym-quant path on some shapes.  Do not flip
+//   it back on that basis alone -- the two paths are not interchangeable on
+//   accuracy for every W8A8 configuration, and the CK path is the one this
+//   default is validated against.
+//
+//   Set `0` to route DQ-INT8 to the DLP sym-quant path, for a parity
+//   bisection or to measure the throughput difference.
 //
 //   Implemented as a STATIC sub-knob: even if the master `_CUSTOM_KERNEL`
 //   knob is on, eligibility code paths that route a DQ-INT8 call to
@@ -1048,8 +1198,13 @@ inline bool get_grp_matmul_custom_kernel_int8() {
     if (ovr >= 0) return ovr != 0;
     static const bool v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8");
-        if (e == nullptr || e[0] == '\0') return true; // default: ON
-        return e[0] != '0';
+        int parsed = 0;
+        // Strict parse AND domain check, mirroring the master knob: junk
+        // input resolves to the default (now ON) rather than being read as
+        // a request to disable.
+        if (!parse_env_int_strict(e, parsed)) return true;
+        if (parsed != 0 && parsed != 1) return true;
+        return parsed != 0;
     }();
     return v;
 }
@@ -1063,10 +1218,12 @@ inline bool get_grp_matmul_custom_kernel_int8() {
 //   Cascade with the master `_CUSTOM_KERNEL` switch (same shape as the
 //   `_INT8` sub-knob):
 //     * `_CUSTOM_KERNEL=0`                      → every CK route off.
-//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_F16=0` → bf16 / int8 CK on,
-//                                                 f16 CK off (f16
-//                                                 N-tile calls fall back
-//                                                 to AOCL DLP F16).
+//     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_F16=0` → bf16 CK on, f16 CK
+//                                                 off (f16 N-tile calls
+//                                                 fall back to AOCL DLP
+//                                                 F16).  int8 is unaffected
+//                                                 and stays ON unless
+//                                                 `_INT8=0` turns it off.
 //     * `_CUSTOM_KERNEL=1 && _CUSTOM_KERNEL_F16=1` → f16 CK on (default).
 //
 //   Even when ON, the f16 CK also needs `avx512f16_available()` true —
@@ -1093,10 +1250,78 @@ inline bool get_grp_matmul_custom_kernel_f16() {
     if (ovr >= 0) return ovr != 0;
     static const bool v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16");
-        if (e == nullptr || e[0] == '\0') return true; // default: ON
-        return e[0] != '0';
+        int parsed = 0;
+        // Strict parse AND domain check.  `e[0] != '0'` used to read
+        // "off" / "false" / "no" as ON, i.e. the opposite of what the
+        // operator wrote; `parse_env_int_strict` alone still accepted
+        // any integer, so `2` or `-1` would enable the kernel.  The
+        // documented domain is {0, 1} -- anything else is junk and
+        // resolves to the default.
+        if (!parse_env_int_strict(e, parsed)) return true;
+        if (parsed != 0 && parsed != 1) return true;
+        return parsed != 0;
     }();
     return v;
+}
+
+/// The EFFECTIVE per-call custom-kernel verdict: the dtype carve-out folded
+/// with the family sub-toggle and the per-group disqualifier.
+///
+/// This exists because `grp_matmul_custom_kernel_enabled` reads the master
+/// knob alone, while `engage_ntile_custom_kernel` additionally honours
+/// `..._INT8` / `..._F16`, and `flat_n_tile` additionally refuses a per-group
+/// `{G, N}` weight scale.  Any decision that has to AGREE with the kernel's
+/// real engagement must use this, not the master knob.
+///
+/// The fused-MoE arena choice is the case that matters.  Granting a tight
+/// arena on the master knob and then refusing the kernel on a sub-knob leaves
+/// a tight destination with no tight-aware writer, and the split-halves
+/// fallback collapses the whole call to the serial Sequential strategy -- so
+/// `..._INT8=0` was an order-of-magnitude decode regression rather than the
+/// "int8 on DLP, bf16 on CK" split it reads like.
+///
+/// A representative ACTIVE expert is used: slot 0 may be an inactive padding
+/// placeholder whose dtypes were never filled in.
+template <typename ParamsVec>
+inline bool grp_matmul_custom_kernel_effective(
+        const ParamsVec &params, const std::vector<int> &M) {
+    size_t rep = params.size();
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i < M.size() && M[i] <= 0) { continue; }
+        rep = i;
+        break;
+    }
+    if (rep >= params.size()) { return false; }
+
+    const auto &d = params[rep].dtypes;
+    if (!grp_matmul_custom_kernel_enabled(d.wei, d.dst, d.compute)) {
+        return false;
+    }
+    // Discriminate the DQ-INT8 family the same way the rest of the tree does
+    // (`int8_aocl_warm_candidate` / `ck_eligible_int8`): weight s8 with an
+    // s8/u8 compute.  Keying on `dynamic_quant` or on an s8 SOURCE misses the
+    // default production shape, because the `group_dynamic_quant` pre-pass
+    // produces the s8 source and CLEARS `dynamic_quant` before this runs --
+    // so the sub-toggle went unread, the arena came back tight, the kernel
+    // then refused, and the tight split-halves path demoted the layer to
+    // serial Sequential.  That is the exact cliff this helper exists to stop.
+    const bool is_int8_call = d.wei == data_type_t::s8
+            && (d.compute == data_type_t::s8 || d.compute == data_type_t::u8);
+    if (is_int8_call && !get_grp_matmul_custom_kernel_int8()) { return false; }
+    const bool is_f16_call
+            = (d.src == data_type_t::f16 && d.wei == data_type_t::f16);
+    if (is_f16_call && !get_grp_matmul_custom_kernel_f16()) { return false; }
+
+    // A per-group `{G, N}` weight scale on ANY active expert disqualifies the
+    // custom kernel for the whole call -- the CK tiler slices the source
+    // scale one scalar per row, i.e. per-token only.  Mirrors `ck_per_group`
+    // in `flat_n_tile`.
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i >= M.size() || M[i] <= 0) { continue; }
+        const auto &ws = params[i].quant_params.wei_scale;
+        if (ws.dims.size() == 2 && ws.dims[0] > 1) { return false; }
+    }
+    return true;
 }
 
 // ZENDNNL_GRP_MATMUL_CROSS_WARM = { "0", "1" } — cached, default ON.
@@ -1500,6 +1725,124 @@ inline int backend_n_align(matmul_algo_t algo) {
         case matmul_algo_t::native_gemm: return 64;
         default: return 1;
     }
+}
+
+/// The per-thread N-slice alignment an upcoming ALGO 3 decode will split
+/// on, resolved from a prompt-shaped call so `cross_warm` can warm
+/// per-tile AOCL DLP keys the decode will actually query.
+///
+/// The per-tile cache key embeds `n_tile = aligned_n_split(N, n_thr, ...,
+/// nr_align)`, so warming at a different alignment prefills keys the
+/// runtime never looks up and every tile misses on the first decode call.
+///
+/// This mirrors `flat_n_tile`'s own derivation and must keep mirroring it:
+///
+///   * the dispatcher hands ALGO 3 `a3_can_fuse_act(act, CK) ? act : none`,
+///     so silu / gelu with the custom kernel off arrive as `none` and the
+///     arena is wide;
+///   * a fused epilogue with `ldc[0] < N[0]` is the tight arena, whose OOP
+///     writer packs at `col_start / 2` and so needs an even `col_start` on
+///     every thread;
+///   * with the custom kernel engaged `pack_nr` (32 or 64) is already even,
+///     and that regime is warmed by the custom-kernel warmer instead, so
+///     only the CK-off case has to be right here.
+///
+/// Returns the `aocl_dlp_blocked` backend alignment (1), widened to 2 for
+/// the tight pair-aligned case.  This only selects which keys get warmed;
+/// a wrong answer costs a first-call reorder, never correctness.
+/// `ck_enabled` must be the EFFECTIVE per-call verdict, not the master env
+/// knob: the dtype-aware `grp_matmul_custom_kernel_enabled` folded with the
+/// family sub-toggle.  Passing the raw env mispredicts every family the
+/// custom kernel structurally cannot serve -- W4A8 always, and int8 or f16
+/// whenever their sub-knob is off -- because those reach decode with the
+/// custom kernel disabled and therefore split on the tight alignment.
+///
+/// `decode_arena_tight` is the arena the DECODE call will use, which is not
+/// observable from the prompt call's `ldc`.  Under AUTO the prompt resolves
+/// to ALGO 1, and `pick_fused_moe_want_tight` requires `resolved_algo == 3`,
+/// so a library-owned Op1 arena is ALWAYS wide on the prompt and always
+/// tight on the decode.  Reading `ldc[0] < N[0]` here would therefore invert
+/// the prediction on exactly the fused-MoE layers this exists to serve.
+/// Callers that know the decode arena (the fused-MoE entry) pass it; callers
+/// that own their own destination and keep one stride across both phases
+/// pass their observed tightness.
+inline int algo3_decode_nr_align(
+        grp_matmul_gated_act_t act, bool ck_enabled, bool decode_arena_tight) {
+    const int backend_nr = backend_n_align(matmul_algo_t::aocl_dlp_blocked);
+    // Mirrors `ntile_effective_nr_align`: the custom kernel widens to its
+    // own pack_nr and owns the pairing, so only the CK-off tight case needs
+    // the pair alignment.  When the custom kernel will run, the per-tile
+    // AOCL keys are not what decode queries at all -- the custom-kernel pack
+    // arena is -- so the value here is immaterial and `backend_nr` is right.
+    const bool tight_pair_align
+            = !ck_enabled && decode_arena_tight && a3_can_fuse_act(act, false);
+    return tight_pair_align ? std::max(backend_nr, 2) : backend_nr;
+}
+
+/// Decode-arena hint, published by the fused-MoE entry for the duration of
+/// one Op1 dispatch on the SAME thread.
+///
+/// The fused-MoE entry is the only place that can answer "will the decode
+/// call get a tight arena?", because it owns the arena and can evaluate
+/// `pick_fused_moe_want_tight(..., resolved_algo = 3)` regardless of what
+/// this particular call resolved to.  The prompt-side prepack lives several
+/// frames down inside the ALGO executors, and threading a parameter there
+/// would touch the dispatcher signature and every executor.  A scoped
+/// thread-local is the narrower change; the RAII guard means it cannot
+/// outlive the dispatch that set it, and nothing reads it off-thread.
+inline thread_local bool tls_decode_arena_tight = false;
+inline thread_local bool tls_decode_arena_known = false;
+
+class scoped_decode_arena_hint {
+public:
+    explicit scoped_decode_arena_hint(bool tight)
+        : prev_tight_(tls_decode_arena_tight)
+        , prev_known_(tls_decode_arena_known) {
+        tls_decode_arena_tight = tight;
+        tls_decode_arena_known = true;
+    }
+    ~scoped_decode_arena_hint() {
+        tls_decode_arena_tight = prev_tight_;
+        tls_decode_arena_known = prev_known_;
+    }
+    scoped_decode_arena_hint(const scoped_decode_arena_hint &) = delete;
+    scoped_decode_arena_hint &operator=(const scoped_decode_arena_hint &)
+            = delete;
+
+private:
+    bool prev_tight_;
+    bool prev_known_;
+};
+
+/// Convenience overload for the ALGO executors.  Uses the fused-MoE hint
+/// when one is published, and otherwise falls back to the caller's own
+/// observed stride -- correct for a caller that owns its destination and
+/// keeps one layout across prompt and decode.
+template <typename ParamsVec>
+inline int algo3_decode_nr_align(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &ldc,
+        grp_matmul_gated_act_t act, const ParamsVec &params) {
+    // Classify from the first ACTIVE expert, not slot 0.  An inactive slot
+    // carries arbitrary placeholder strides, and both the dispatcher and
+    // `flat_n_tile` pick their representative the same way -- reading slot 0
+    // here instead could call a wide arena tight, warm alignment-2 keys, and
+    // leave decode querying alignment-1 keys.  That reinstates the very
+    // first-call reorder this alignment agreement exists to remove.
+    size_t rep = M.size();
+    for (size_t i = 0; i < M.size(); ++i) {
+        if (M[i] > 0) {
+            rep = i;
+            break;
+        }
+    }
+    // All-inactive (or no metadata): nothing to classify from, so keep the
+    // backend default rather than inventing a verdict.
+    const bool have_rep = rep < M.size() && rep < N.size() && rep < ldc.size();
+    const bool observed_tight = have_rep && ldc[rep] < N[rep];
+    const bool tight
+            = tls_decode_arena_known ? tls_decode_arena_tight : observed_tight;
+    return algo3_decode_nr_align(
+            act, grp_matmul_custom_kernel_effective(params, M), tight);
 }
 
 /// Aligned column-slice partitioner for ALGO 3.  Returns {col_start,

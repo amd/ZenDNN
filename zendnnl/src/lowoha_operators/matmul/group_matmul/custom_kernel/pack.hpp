@@ -203,7 +203,8 @@ inline constexpr int kNRMax = 64;
 status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
         int ldb, int pack_nr, bool transB, bool interleave_split_halves,
         const bfloat16_t **out_packed, bool *was_hit_out = nullptr,
-        bool disable_cache = false, bool in_place = false);
+        bool disable_cache = false, bool in_place = false,
+        size_t wei_buffer_capacity_bytes = 0);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_bf16(..., disable_cache=true)`.  Safe with
@@ -346,7 +347,8 @@ void free_owned_packed_weight_f16(const float16_t *packed);
 status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
         int pack_nr, bool transB, bool interleave_split_halves,
         const int8_t **out_packed, bool *was_hit_out = nullptr,
-        bool disable_cache = false);
+        bool disable_cache = false, bool in_place = false,
+        size_t wei_buffer_capacity_bytes = 0);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_int8(..., disable_cache=true)`.  Safe with

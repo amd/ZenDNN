@@ -95,9 +95,11 @@ template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::set_capacity(uint32_t capacity) {
     std::lock_guard<std::mutex> lock(mutex_);
     capacity_ = capacity;
-    if (capacity_ < lru_cache_map_->size()) {
-        evict(lru_cache_map_->size() - capacity_);
-    }
+    // Shrink, not reserve: we want to be left with `capacity_` entries, so ask
+    // for zero spare slots.  Passing the overshoot (`size - capacity`) treats
+    // it as a reservation and asks to shrink to `capacity - overshoot`, which
+    // is both wrong and, being unsigned, liable to wrap.
+    if (capacity_ < lru_cache_map_->size()) { evict(/*n=*/0); }
 }
 
 template <typename KEY_T, typename VALUE_T>
@@ -161,8 +163,15 @@ lru_cache_t<KEY_T, VALUE_T>::timed_entry_t::timed_entry_t(
 
 template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
-    while (capacity_ < std::numeric_limits<uint32_t>::max()
-            && lru_cache_map_->size() > capacity_ - n) {
+    // RESERVE semantics: leave room for `n` more entries, i.e. shrink to
+    // `capacity_ - n`.  `capacity_` is uint32_t and `n` is size_t, so the
+    // subtraction must be clamped -- unsigned wraparound when `n > capacity_`
+    // produces a huge bound, the loop condition is false immediately, and the
+    // cache silently keeps every entry while believing it evicted.  That is
+    // the opposite of the intended failure direction for a bounded cache.
+    if (capacity_ == std::numeric_limits<uint32_t>::max()) { return; }
+    const size_t target = (n >= capacity_) ? 0u : (capacity_ - n);
+    while (lru_cache_map_->size() > target) {
         auto oldest = std::min_element(lru_cache_map_->begin(),
                 lru_cache_map_->end(), [](const auto &a, const auto &b) {
             return a.second.timestamp_ < b.second.timestamp_;

@@ -83,6 +83,7 @@
 #ifndef ZENDNNL_GROUP_MATMUL_PREPACK_HPP
 #define ZENDNNL_GROUP_MATMUL_PREPACK_HPP
 
+#include <algorithm> // std::min (per-expert capacity lower bound)
 #include <atomic>
 #include <vector>
 
@@ -292,6 +293,12 @@ struct PrepackParams {
     // skip avoids wasting CPU on misaligned reorders.  ALGOs 1, 2, 5,
     // 6 don't use this field — their warmer is full-weight by design
     // and runs unconditionally on the AOCL DLP path.
+    /// Bytes writable at EACH expert's weight pointer (0 = exactly the
+    /// logical extent).  Mirrored from `matmul_params`; lets the AOCL
+    /// full-weight warm reorder IN PLACE instead of materialising a second
+    /// copy the runtime would then hit and keep resident.
+    size_t wei_buffer_capacity_bytes = 0;
+
     int num_threads = 0;
 
     // Per-thread N-slice alignment that ALGO 3's `aligned_n_split`
@@ -406,6 +413,21 @@ inline PrepackParams build_prepack_params(
         p.wei_dtype = params[0].dtypes.wei;
         p.dst_dtype = params[0].dtypes.dst;
         p.bias_dtype = params[0].dtypes.bias;
+        // Capacity is declared PER weight pointer, but prepack warms every
+        // expert through one scalar, so take the MINIMUM rather than slot
+        // 0's value.  The common case -- per-expert weights carved out of
+        // one padded `[E, ...]` allocation -- reports the same number for
+        // every expert and is unaffected.  A caller that pads only some
+        // experts (the API permits it) would otherwise have slot 0's
+        // generous extent authorise an in-place blocked write past a later
+        // expert's allocation.  Any expert declaring 0 collapses this to 0,
+        // which is exactly "no declared capacity" and keeps the whole warm
+        // out-of-place.
+        size_t cap = params[0].wei_buffer_capacity_bytes;
+        for (size_t i = 1; i < params.size() && cap != 0; ++i) {
+            cap = std::min(cap, params[i].wei_buffer_capacity_bytes);
+        }
+        p.wei_buffer_capacity_bytes = cap;
     }
 
     // Mirror the dispatcher's active/total contract

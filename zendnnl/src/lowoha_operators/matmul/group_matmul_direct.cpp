@@ -492,6 +492,100 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
                         i);
                 return status_t::failure;
             }
+            // Per-group symmetric weight scale (`{G, N}` with G > 1) is
+            // served by the AOCL sym-quant reorder, which requires K to
+            // split evenly into G groups AND the resulting group size to
+            // be a multiple of 4.  W4A8 has always checked this
+            // (`validate_w4a8_inputs`); plain s8 `{G, N}` reached the same
+            // reorder unchecked, so an exotic G produced a truncated or
+            // misaligned group size and wrong numbers rather than a
+            // refusal.  The constraint is the reorder's, not the weight
+            // element type's, so validate both here.
+            const auto &ws = params[i].quant_params.wei_scale;
+            // Per-group along K is `{G, N}`: leading extent > 1 AND trailing
+            // extent equal to the output width.  Matching `dims[1]` against
+            // N is what separates it from a per-output-channel scale written
+            // as a column vector (`{N, 1}`), which several frameworks emit
+            // and which the full-N ALGOs serve correctly -- the AOCL post-op
+            // classifies scales by element count, so `{N, 1}` is per-channel.
+            // Testing `dims[1] > 1` instead would ALSO drop a genuine
+            // `{G, 1}` scale on an N == 1 output and let a bad K/G reach the
+            // sym-quant reorder unchecked.
+            const bool per_group_wei = ws.buff != nullptr && ws.dims.size() == 2
+                    && ws.dims[0] > 1
+                    && ws.dims[1] == static_cast<int64_t>(N[i]);
+            // Per-output-channel `{1, N}` reaches the SAME sym-quant reorder,
+            // at a single group spanning all of K (`sym_quant_group_size`
+            // returns `K / dims[0]`).  It is admitted by
+            // `src_scale_is_collapsed_per_token` once the src scale collapses
+            // to one element, which is every M == 1 decode expert, so the
+            // reorder's multiple-of-4 group size has to be checked for this
+            // shape too.  Keying the guard on `dims[0] > 1` alone left a
+            // `K % 4 != 0` per-channel call reaching the reorder unchecked and
+            // miscomputing instead of being refused.
+            const bool per_channel_wei = ws.buff != nullptr
+                    && ws.dims.size() == 2 && ws.dims[0] == 1
+                    && ws.dims[1] == static_cast<int64_t>(N[i]);
+            // A `{G, W}` whose width is neither N nor 1 is malformed: ALGO 3's
+            // per-tile repack trusts `dims[1]` as the row pitch when gathering
+            // a column slice, so a high-column tile would read past the end of
+            // the scale buffer.  `W == 1` is excluded because that is the
+            // per-channel column vector, not a broken per-group descriptor.
+            if (ws.buff != nullptr && ws.dims.size() == 2 && ws.dims[0] > 1
+                    && ws.dims[1] != static_cast<int64_t>(N[i])
+                    && ws.dims[1] != 1) {
+                log_error(
+                        "group_matmul parallel: per-group weight scale at "
+                        "operation ",
+                        i, " has width ", ws.dims[1], " but N=", N[i],
+                        "; a {G, N} scale must span the full output width");
+                return status_t::failure;
+            }
+            // Scope: the multiple-of-4 group size is the AOCL sym-quant
+            // REORDER's constraint, so it applies to s8 weights (and to W4A8,
+            // which `validate_w4a8_inputs` already checks).  Plain s4/u4 WOQ
+            // dequantises through `cvt_4bit_to_bf16` and reorders as bf16,
+            // which imposes no alignment -- gating on the scale shape alone
+            // refused valid WOQ calls at group sizes 1 and 2.
+            const bool sym_quant_reorder_path
+                    = params[i].dtypes.wei == data_type_t::s8;
+            if ((per_group_wei || per_channel_wei) && sym_quant_reorder_path
+                    && !is_w4a8_sym_quant_group_valid(K[i], ws.dims[0])) {
+                log_error(
+                        "group_matmul parallel: per-group symmetric quant at "
+                        "operation ",
+                        i,
+                        " requires K divisible by G and K/G a multiple of "
+                        "4 (K=",
+                        K[i], ", G=", ws.dims[0], ")");
+                return status_t::failure;
+            }
+            // `beta != 0` asks the GEMM to accumulate onto the destination.
+            // On the paths that matmul into a per-thread scratch first -- the
+            // ALGO 3 tight fused epilogue and Sequential's tight caller -- the
+            // accumulation lands on `grow_scratch` memory, which is malloc'd
+            // and never zeroed and is reused across tiles, experts and calls.
+            // The result is `beta * <previous tile's bytes> + A·B`: NaNs or
+            // plausible-looking garbage, varying run to run.
+            //
+            // The same applies to a library-owned Op1 arena in wide mode,
+            // where accumulating onto a buffer the caller never wrote is not
+            // a meaningful request in the first place.
+            //
+            // The code documents "accumulate semantics onto the tight dst are
+            // undefined" but nothing enforced it, and the custom kernel's own
+            // `beta != 0` refusal only pushes such a call onto exactly the
+            // non-custom tight branch that reads the uninitialised bytes.
+            if (beta[i] != 0.0f && (fused_op1_internal || ldc[i] < N[i])) {
+                log_error("group_matmul parallel: beta=", beta[i],
+                        " at operation ", i,
+                        " is not supported on this destination.  Accumulation "
+                        "requires a caller-owned destination the library has "
+                        "not staged through scratch; a tight dst (ldc<N) and "
+                        "the internally allocated fused-MoE arena both "
+                        "accumulate onto uninitialised memory.  Pass beta=0.");
+                return status_t::failure;
+            }
         }
     }
 
@@ -724,12 +818,22 @@ status_t validate_group_matmul_direct_inputs(const std::vector<char> &layout,
             }
         }
     }
-    // Validate moe_postop with the correct D: N_down[0] when fused, N[0]
-    // otherwise.  The helper accepts moe_postop == nullptr (returns
-    // success) so it is safe to call unconditionally.
+    // Validate moe_postop with the correct D: N_down[0] when fused,
+    // otherwise Op1's OUTPUT width -- which a gated activation halves.
+    //
+    // `dst[:, 0:N/2] = act(gate) * up` is the documented contract, and the
+    // upper half is explicitly garbage afterwards.  Using N[0] here made the
+    // weighted reduce sum N/2 activated columns followed by N/2 garbage ones,
+    // and it rejected the caller who sized `ldc_output = N/2` correctly (the
+    // post-op validator requires `ldc_output >= D`), pushing them to widen to
+    // N and get a contaminated result that looked plausible.
+    // `op2_k_for_act` is the same helper the fused path already uses to size
+    // Op2's K, so the two agree by construction.
     const int moe_D = (fused_moe != nullptr && !fused_moe->N_down.empty())
             ? fused_moe->N_down[0]
-            : N[0];
+            : op2_k_for_act(N[0],
+                      (gated_act != nullptr) ? gated_act->act
+                                             : grp_matmul_gated_act_t::none);
     if (validate_group_matmul_moe_postop(
                 moe_postop, moe_D, params[0].dtypes.dst)
             != status_t::success) {
@@ -1683,22 +1787,27 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                                   : grp_matmul_gated_act_t::none,
                     act_dtype);
 
-            // CK-only-or-fail: the N-tile/dispatch path signals an unservable
-            // caller-prepacked (mem_format_b='r') weight via this gemm_mode
-            // sentinel (the weight is VNNI-packed and only the custom kernel
-            // can consume it; no compute ran).  Surface it as a hard failure
-            // rather than letting the caller consume an unwritten dst.
-            if (gemm_mode != nullptr
-                    && std::strcmp(gemm_mode, "error_prepacked_no_ck") == 0) {
-                log_error(
-                        "group_matmul_direct: a pre-reordered weight "
-                        "(mem_format_b='r') could not be consumed by the "
-                        "custom "
-                        "kernel (CK disabled or unsupported shape/host). "
-                        "Such "
-                        "a "
-                        "weight is VNNI-packed and has no safe fallback "
-                        "path.");
+            // Abort-class sentinels: an executor that cannot leave the
+            // caller's dst in a defined state reports it through `gemm_mode`
+            // (see `gemm_mode_is_error`).  Fail the call rather than let the
+            // caller consume an unwritten or partly-written dst.
+            if (gemm_mode_is_error(gemm_mode)) {
+                if (std::strcmp(gemm_mode, kGrpMatmulErrPrepackedNoCk) == 0) {
+                    log_error(
+                            "group_matmul_direct: a pre-reordered weight "
+                            "(mem_format_b='r') could not be consumed by the "
+                            "custom "
+                            "kernel (CK disabled or unsupported shape/host). "
+                            "Such "
+                            "a "
+                            "weight is VNNI-packed and has no safe fallback "
+                            "path.");
+                } else {
+                    log_error(
+                            "group_matmul_direct: the executor could not "
+                            "produce a defined destination (gemm_mode=",
+                            gemm_mode, ").");
+                }
                 return status_t::failure;
             }
 
@@ -1709,8 +1818,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             }
 
             if (moe_postop != nullptr) {
-                status_t moe_st = group_matmul_moe_postop_execute(
-                        moe_postop, N[0], num_threads, params[0].dtypes.dst);
+                // Reduce over Op1's OUTPUT width, which a gated activation
+                // halves -- see the `moe_D` note in the validator.  The two
+                // must use the same expression or a call that validates will
+                // then reduce a different number of columns.
+                const int postop_d = op2_k_for_act(N[0],
+                        run_gated_act ? gated_act->act
+                                      : grp_matmul_gated_act_t::none);
+                status_t moe_st = group_matmul_moe_postop_execute(moe_postop,
+                        postop_d, num_threads, params[0].dtypes.dst);
                 if (moe_st != status_t::success) { return moe_st; }
             }
         }

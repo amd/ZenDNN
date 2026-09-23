@@ -160,6 +160,89 @@ inline void offset_quant_by_col(matmul_quantization_params_t::matmul_quant_t &q,
 // `std::vector<…> &` inputs by reference (impl-only, owned by one
 // `flat_n_tile()` invocation).
 
+// Reasons an N-tile worker can decide, from inside the OMP region, that
+// the call cannot produce a defined destination.  Raised through
+// `GroupNTileContext::signal_abort` and turned into a `gemm_mode`
+// sentinel after the region closes, which `group_matmul_direct` and the
+// fused-MoE dispatcher convert to `status_t::failure`.
+//
+// All of these were `assert`s.  The shipped build defines `NDEBUG`, so
+// each one compiled to nothing and the condition it guarded produced
+// silently-wrong output instead of an error.  They are cheap scalar
+// tests on paths that then run a GEMM, so checking them unconditionally
+// is not measurable.
+enum NTileAbort : int {
+    kNTileAbortNone = 0,
+    // Per-thread scratch grow failed; this thread's dst column range was
+    // never written.
+    kNTileAbortScratchAlloc = 1,
+    // do_tile's tight branch ran with a split-halves gated act.  Its
+    // per-thread scratch spans one contiguous logical column range, which
+    // for split-halves lies wholly in the gate half or wholly in the up
+    // half, so the pair-pack helper would pair gate-with-gate.
+    kNTileAbortTightNotSwiglu = 2,
+    // Tight branch needs an even n_tile: it packs (gate, up) pairs, and an
+    // odd tile would split a pair across two threads.
+    kNTileAbortTightOddNTile = 3,
+    // The activation row-split used more threads than the team, so some
+    // columns of dst would keep their un-activated GEMM output.
+    kNTileAbortActThreadOverflow = 4,
+    // swiglu_oai needs an even N (gate+up); an odd N leaves the trailing
+    // column un-compacted.
+    kNTileAbortActOddN = 5,
+    // The Rounds executor needed more rounds than its plan can hold, so
+    // it ran nothing at all.
+    kNTileAbortRoundOverflow = 6,
+    // OpenMP handed the executor a smaller team than the plan sized its
+    // expert->thread mapping for, so some experts had no thread and their
+    // dst was never written.
+    kNTileAbortShortTeam = 7,
+    // The deferred activation pass refused the call (unsupported dtype,
+    // odd N, or a tight dst), so no expert was activated and dst still
+    // holds raw (gate, up) GEMM output.
+    kNTileAbortActRefused = 8,
+};
+
+/// Human-readable reason for `apilog_error`, indexed by `NTileAbort`.
+inline const char *ntile_abort_reason(int code) {
+    switch (code) {
+        case kNTileAbortScratchAlloc:
+            return "per-thread scratch allocation failed in the "
+                   "tight-fused-epilogue path; some dst column ranges are "
+                   "undefined.  Consider disabling internal-alloc tight mode "
+                   "(ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT=0) if this recurs";
+        case kNTileAbortTightNotSwiglu:
+            return "the tight fused epilogue ran with a split-halves gated "
+                   "activation (silu_and_mul / gelu_and_mul), which it cannot "
+                   "pair correctly; such calls must route to the Sequential "
+                   "fallback";
+        case kNTileAbortTightOddNTile:
+            return "the tight fused epilogue requires an even n_tile "
+                   "(pair-aligned gate/up columns)";
+        case kNTileAbortActThreadOverflow:
+            return "the fused-activation row split asked for more threads than "
+                   "the team, which would leave dst rows un-activated";
+        case kNTileAbortActOddN:
+            return "swiglu_oai requires an even N (gate+up pair)";
+        case kNTileAbortRoundOverflow:
+            return "the Rounds executor needed more rounds than its plan can "
+                   "hold and ran no work at all";
+        case kNTileAbortShortTeam:
+            return "OpenMP returned a smaller team than the plan mapped "
+                   "experts onto, so some experts had no thread and their "
+                   "destination was never written.  A requested thread count "
+                   "is not a guarantee: check OMP_THREAD_LIMIT, OMP_DYNAMIC, "
+                   "and whether the caller dispatched from inside its own "
+                   "parallel region";
+        case kNTileAbortActRefused:
+            return "the deferred gated-activation pass refused the call, so "
+                   "no expert was activated and the destination still holds "
+                   "raw (gate, up) GEMM output; check N parity, the dst "
+                   "dtype, and that ldc >= N on every active expert";
+        default: return "unspecified N-tile abort";
+    }
+}
+
 // Hoisted source-side dynamic-quant state per expert.  Populated by
 // `flat_n_tile`'s pre-OMP hoist loop for every expert that has
 // `params[e].dynamic_quant == true`: a single-shot
@@ -485,13 +568,29 @@ struct GroupNTileContext {
     bool use_custom = false;
     const custom_kernel::CallContext *kctx = nullptr;
 
-    // Alloc-fail flag set by the tight-fused-epilogue branch of
-    // `do_tile()` when a per-thread scratch grow fails.  Checked after
-    // the OMP region exits so the failure propagates to the caller as
-    // an error instead of silently producing wrong output.  Pointer
-    // (not owned) so the ctx struct itself stays copyable-by-reference
-    // across the parallel region.
-    std::atomic<int> *alloc_fail = nullptr;
+    // Abort reason raised from inside the OMP region (see `NTileAbort`).
+    // Read once after the region exits so the failure propagates to the
+    // caller as an error instead of silently producing wrong output.
+    // Pointer (not owned) so the ctx struct itself stays
+    // copyable-by-reference across the parallel region.
+    //
+    // Every condition signalled here is one the caller cannot detect on
+    // its own: the dst it is handed looks like a result but part of it
+    // was never computed, or was computed with the wrong pairing.  These
+    // were `assert`s, which the shipped `-DNDEBUG` build strips, so the
+    // invariant they guarded held only in debug.
+    std::atomic<int> *abort_code = nullptr;
+
+    // Raise `code` unless an earlier one is already pending.  Relaxed is
+    // sufficient: the value is consumed after the region's closing
+    // barrier, which supplies the ordering, and any single reason is
+    // enough to fail the call.
+    void signal_abort(int code) const {
+        if (abort_code == nullptr) { return; }
+        int expected = 0;
+        abort_code->compare_exchange_strong(
+                expected, code, std::memory_order_relaxed);
+    }
 
     // Per-expert hoisted source dynamic-quant state.  Non-null when
     // `flat_n_tile` ran the pre-OMP hoist loop (i.e. at least one
@@ -589,9 +688,46 @@ struct GroupNTileContext {
                 && plan.stable_n_thr_per_expert[e] > 0) {
             const int nr_align_safe = std::max(1, plan.nr_align);
             const int align_cap = std::max(1, N[e] / nr_align_safe);
-            const int clamped = std::min(
-                    {static_cast<int>(plan.stable_n_thr_per_expert[e]),
-                            align_cap, team_size});
+            // `warmed` is the split the prepack warmer packed for: it applies
+            // this same `stable`/`align_cap` pair but has no live team to
+            // observe, so `team_size` is the one operand it cannot mirror
+            // (see warm_pack_all_aocl_dlp_experts_n_tile in
+            // prepack/prepack_aocl_dlp.cpp).
+            const int warmed = std::min(
+                    static_cast<int>(plan.stable_n_thr_per_expert[e]),
+                    align_cap);
+            const int clamped = std::min(warmed, team_size);
+            // A short team re-cuts the columns, so every AOCL reorder key
+            // this expert builds differs from the warmed one.  The result
+            // stays correct (each key re-derives from the raw weights) but
+            // the whole warmed set goes unread while a second set is packed
+            // on the fly, and at the default unlimited LRU capacity neither
+            // is ever evicted.  That reads as a memory regression with no
+            // error, so say it once.  Other causes of the same symptom that
+            // are not detectable from here: `nr_align` or `num_threads`
+            // differing between the prepack call and this one, both of
+            // which move the split without moving `team_size`.
+            if (clamped < warmed) {
+                static const bool s_log_split = apilog_warning_enabled();
+                static std::atomic<bool> s_split_warned {false};
+                bool expected = false;
+                if (s_log_split
+                        && s_split_warned.compare_exchange_strong(
+                                expected, true, std::memory_order_relaxed)) {
+                    apilog_warning("[GRP_MATMUL.N_TILE] OpenMP gave a team of ",
+                            team_size,
+                            " where the strict-stable plan asked "
+                            "for ",
+                            warmed,
+                            "; the AOCL per-tile reorder cache was warmed for "
+                            "the latter, so every tile key misses and is "
+                            "re-packed on the fly.  Expect higher resident "
+                            "weight-cache memory and a first-call latency "
+                            "spike.  Check OMP_DYNAMIC / nested parallelism, "
+                            "and that the prepack call saw the same "
+                            "num_threads as this one.");
+                }
+            }
             return std::max(1, clamped);
         }
         return std::max(1, std::min(team_size, N[e] / min_n_tile));
@@ -633,12 +769,17 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         int local_tid, int team_size, int min_n_tile) const {
     if (M[e] <= 0) return;
     const int n_thr = participating_n_thr(plan, e, team_size, min_n_tile);
-    // Coverage trip-wire: n_thr > team_size would mean aligned_n_split
-    // produces more slots than the executor has threads, leaving the
-    // surplus slots' dst columns uncomputed (silent corruption).
-    assert(n_thr <= team_size
-         && "do_tile: n_thr > team_size; aligned_n_split would "
-            "leave dst cols uncomputed");
+    // n_thr > team_size would mean aligned_n_split produced more slots
+    // than the executor has threads, leaving the surplus slots' dst
+    // columns uncomputed.  Runtime check rather than an assert for the
+    // same reason as its sibling in `apply_swiglu_oai`: the shipped build
+    // defines NDEBUG, and uncomputed columns are silent.  This is the
+    // copy that runs on EVERY call, including a non-fused decode that
+    // never reaches the activation pass.
+    if (n_thr > team_size) {
+        signal_abort(kNTileAbortActThreadOverflow);
+        return;
+    }
     if (local_tid >= n_thr) return;
 
     const bool native_s4_wei
@@ -797,6 +938,43 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     static thread_local matmul_params tile_params;
     tile_params = params[e];
 
+    // The declared capacity describes the WHOLE expert weight, and `w` above
+    // is a column slice of it — so, like every other field re-anchored to the
+    // slice below, it does not survive the slicing.  Carried over it would let
+    // the backend's in-place reorder write this tile's blocked image, which is
+    // `n_tile` int32 compensation entries LONGER than the tile's own columns,
+    // over the start of the next tile: those bytes are either raw weights a
+    // sibling thread has still to read or a blocked image it has already
+    // written.  The size gate cannot catch it — a tile's image fits the
+    // parent's capacity with room to spare — so the capacity has to stop here.
+    tile_params.wei_buffer_capacity_bytes = 0;
+    // And for the same reason a tile must not mutate the parent AT ALL.  The
+    // contiguity guard passes for a TRANSPOSED weight -- a column tile of an
+    // [N, K] weight is a contiguous ROW range, so `ldb == k` holds -- and for
+    // bf16 the blocked size equals the logical extent, so the size gate passes
+    // too, with no capacity declared.  Nothing then stops a per-tile reorder
+    // rewriting its rows of the caller's buffer and caching the nullptr
+    // sentinel against them.
+    //
+    // It would not overrun: the image is exactly the tile's own rows.  It
+    // would be a SECOND mutator, which is what mixed mode forbids -- the
+    // full-weight prompt reorder writes a different blocked layout over the
+    // same bytes, and whichever lands second leaves the other's cache entry
+    // describing a layout that is no longer there.  Whether a tile can reach
+    // this depends on `mixed_eligible`, which requires the custom-kernel pack,
+    // and on the `mixed_inplace_ck_refused` routing in `flat_n_tile`, which
+    // sends a per-call CK refusal to Sequential rather than tiling it.  The
+    // guard does not depend on either.
+    tile_params.weight_cache_type = 1;
+
+    // This slice is reordered and multiplied by this thread alone, so the
+    // call's `num_threads` does not describe the team its blocked image will
+    // be consumed by.  Tell the backend to leave the DLP gemm hints off: with
+    // them on, the reorder records the whole team in `nt_hint` and AOCL then
+    // refuses the single-threaded tile GEMM, and the hinted key would also
+    // differ from the one the per-tile warm-pack populated.
+    tile_params.wei_is_column_tile = true;
+
     // ── Hoisted dynamic-quant source substitution ──────────────────────
     // When `flat_n_tile` ran the pre-OMP hoist loop for this expert,
     // swap the bf16/f32 caller src for the shared S8 reorder result
@@ -921,21 +1099,25 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         // up-with-up (wrong).  flat_n_tile's entry routes silu/gelu +
         // tight + CK-refused to the Sequential strategy (which has a
         // per-expert wide scratch + `apply_gated_act_inplace` + memcpy
-        // fallback path) before this code is reached.  The assertion
-        // catches any future code change that bypasses that routing.
-        assert(fused_act == grp_matmul_gated_act_t::swiglu_oai_mul
-           && "do_tile's tight branch is swiglu-only; split-halves "
-              "gated acts (silu_and_mul, gelu_and_mul) MUST route "
-              "through the Sequential fallback in flat_n_tile when "
-              "CK does not engage.  See the "
-              "`TIGHT_SPLIT_HALVES_FALLBACK` block in flat_n_tile.");
-        assert((n_tile % 2) == 0
-                && "tight_fused_epilogue requires even n_tile (pair-aligned)");
+        // fallback path) before this code is reached.  The check catches
+        // any future code change that bypasses that routing.  It is a
+        // runtime check, not an assert: the shipped build strips asserts,
+        // and pairing gate-with-gate produces plausible-looking numbers
+        // rather than a crash, so a debug-only guard would never fire
+        // where it matters.
+        if (fused_act != grp_matmul_gated_act_t::swiglu_oai_mul) {
+            signal_abort(kNTileAbortTightNotSwiglu);
+            return;
+        }
+        if ((n_tile % 2) != 0) {
+            signal_abort(kNTileAbortTightOddNTile);
+            return;
+        }
 
         static thread_local PerThreadScratch scratch;
         const size_t need_bytes = static_cast<size_t>(M[e]) * n_tile * dst_elem;
         if (!grow_scratch(scratch, need_bytes)) {
-            if (alloc_fail) alloc_fail->store(1, std::memory_order_relaxed);
+            signal_abort(kNTileAbortScratchAlloc);
             return;
         }
 
@@ -1023,18 +1205,35 @@ inline void GroupNTileContext::apply_swiglu_oai(const GroupNTilePlan &plan,
     // Same `n_thr` as do_tile() — they MUST agree (see comment on
     // participating_n_thr()) so every matmul column has a row-reader.
     const int n_thr = participating_n_thr(plan, e, team_size, min_n_tile);
-    assert(n_thr <= team_size
-         && "apply_swiglu_oai: n_thr > team_size; row-split would "
-            "leave dst rows un-activated");
+    if (n_thr > team_size) {
+        signal_abort(kNTileAbortActThreadOverflow);
+        return;
+    }
     if (local_tid >= n_thr) return;
+
+    // This pass is swiglu-only: it pairs adjacent columns 2n / 2n+1.  The
+    // split-halves families pair n with n + I instead, so running them
+    // through here produces plausible-looking numbers from the wrong
+    // operands.  Nothing in this function reads `fused_act`, and all three
+    // barrier-taking executors call it purely on layout flags, so the only
+    // thing keeping it correct is that the dispatcher translates wide
+    // split-halves to `none` upstream.  Check it here too -- the tight
+    // sibling in `do_tile` already does (`kNTileAbortTightNotSwiglu`), and
+    // this is the copy with no guard at all.
+    if (fused_act != grp_matmul_gated_act_t::swiglu_oai_mul) {
+        signal_abort(kNTileAbortTightNotSwiglu);
+        return;
+    }
 
     // swiglu_oai requires even N (gate+up = 2 * intermediate_dim).
     // The dispatcher in group_matmul_dispatch.cpp enforces this for
-    // the fused path; assert defensively to catch any future caller
-    // that bypasses the dispatcher (otherwise we'd silently leave the
-    // odd trailing column un-compacted in the activation output).
-    assert(N[e] % 2 == 0
-            && "apply_swiglu_oai: N must be even for swiglu_oai_mul");
+    // the fused path; re-check here to catch any future caller that
+    // bypasses the dispatcher, since the alternative is silently
+    // leaving the odd trailing column un-compacted in the output.
+    if ((N[e] % 2) != 0) {
+        signal_abort(kNTileAbortActOddN);
+        return;
+    }
 
     // Row split: this thread owns rows [m_start, m_end) of expert e's
     // (M × N) output and applies the full-width compaction in place.
@@ -2983,6 +3182,12 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
 inline void execute_sequential(
         const GroupNTilePlan &plan, GroupNTileContext &ctx) {
     const int num_ops = static_cast<int>(ctx.M.size());
+    // Row counts for the experts whose activation is deferred to the single
+    // flattened pass after the loop; zero for every expert that handled its
+    // own (the tight-caller sub-cases) so the prefix sum skips them.
+    // Thread-local so the steady state reuses the allocation.
+    static thread_local std::vector<int> deferred_act_M;
+    deferred_act_M.assign(static_cast<size_t>(num_ops), 0);
     for (int e = 0; e < num_ops; ++e) {
         if (ctx.M[e] <= 0) continue;
         static thread_local matmul_params local_params;
@@ -3056,14 +3261,15 @@ inline void execute_sequential(
 
         const bool tight_caller = plan.fused_epilogue && ctx.ldc[e] < ctx.N[e];
         if (tight_caller) {
-            assert((ctx.N[e] % 2) == 0
-                    && "Sequential tight: N must be even (gate+up pair)");
+            if ((ctx.N[e] % 2) != 0) {
+                ctx.signal_abort(kNTileAbortActOddN);
+                return;
+            }
             static thread_local PerThreadScratch scratch;
             const size_t need_bytes
                     = static_cast<size_t>(ctx.M[e]) * ctx.N[e] * ctx.dst_elem;
             if (!grow_scratch(scratch, need_bytes)) {
-                if (ctx.alloc_fail)
-                    ctx.alloc_fail->store(1, std::memory_order_relaxed);
+                ctx.signal_abort(kNTileAbortScratchAlloc);
                 return;
             }
             execute_expert_slice(ctx.layout[e], ctx.transA[e], transB_for_call,
@@ -3082,21 +3288,38 @@ inline void execute_sequential(
                 // the wide scratch (writes activated cols [0, N/2) per row,
                 // leaves cols [N/2, N) as garbage by the public-API contract),
                 // then memcpy the activated I cols into the tight dst.
+                // `execute_sequential` runs in a serial context (the caller
+                // holds `scoped_active_levels(1)` and no region is open), so
+                // hand these the whole team -- the GEMM just above already
+                // used `plan.num_threads`.  Omitting it left the activation
+                // and the copy on one core while the rest of the team idled,
+                // which inflates the measured cost of every demotion to this
+                // strategy.  ALGO 1's equivalent call site passes its team for
+                // the same reason; ALGO 2/5/6's do not, correctly, because
+                // theirs are already inside a parallel region.
                 apply_gated_act_inplace(ctx.fused_act, scratch.buf,
                         /*row_start=*/0, ctx.M[e], ctx.N[e], /*ldc=*/ctx.N[e],
-                        ctx.act_dtype);
+                        ctx.act_dtype, plan.num_threads);
                 const int I = ctx.N[e] / 2;
                 const size_t row_bytes = static_cast<size_t>(I) * ctx.dst_elem;
                 const size_t scratch_stride
                         = static_cast<size_t>(ctx.N[e]) * ctx.dst_elem;
                 const size_t dst_stride
                         = static_cast<size_t>(ctx.ldc[e]) * ctx.dst_elem;
+                // Read the scratch pointer HERE, not inside the region.
+                // `scratch` is `static thread_local`, so naming it from a
+                // worker thread resolves to that worker's own (empty)
+                // instance rather than the one this GEMM just filled.
+                const char *const src_rows
+                        = static_cast<const char *>(scratch.buf);
+                char *const dst_rows = static_cast<char *>(ctx.dst[e]);
+                const int copy_thr
+                        = std::max(1, std::min(plan.num_threads, ctx.M[e]));
+#pragma omp parallel for if (copy_thr > 1) num_threads(copy_thr) \
+        schedule(static)
                 for (int m = 0; m < ctx.M[e]; ++m) {
-                    std::memcpy(
-                            static_cast<char *>(ctx.dst[e]) + m * dst_stride,
-                            static_cast<const char *>(scratch.buf)
-                                    + m * scratch_stride,
-                            row_bytes);
+                    std::memcpy(dst_rows + m * dst_stride,
+                            src_rows + m * scratch_stride, row_bytes);
                 }
             }
             continue;
@@ -3109,8 +3332,36 @@ inline void execute_sequential(
                 ctx.beta[e], ctx.dst[e], ctx.ldc[e], ctx.is_weights_const[e],
                 plan.num_threads, local_params, exec_algo);
         if (plan.fused_epilogue) {
-            apply_gated_act_inplace(ctx.fused_act, ctx.dst[e], 0, ctx.M[e],
-                    ctx.N[e], ctx.ldc[e], ctx.act_dtype);
+            // Deferred to one flattened pass below rather than applied here:
+            // `apply_gated_act_inplace` with no thread count runs SERIAL, so
+            // activating inside this loop costs one single-threaded pass over
+            // M[e] x N[e] per expert, ~46 of them per layer at decode.
+            deferred_act_M[e] = ctx.M[e];
+        }
+    }
+
+    // One region over the row space flattened across every wide-path expert,
+    // instead of a serial pass each. Tight-path experts kept their in-loop
+    // activation (their scratch is dead by the time the loop moves on) and
+    // are excluded by a zero row count, which the wrapper's prefix sum skips.
+    if (plan.fused_epilogue) {
+        bool any = false;
+        for (size_t i = 0; i < deferred_act_M.size() && !any; ++i) {
+            any = deferred_act_M[i] > 0;
+        }
+        if (any) {
+            grp_matmul_gated_act_params act_params {};
+            act_params.act = ctx.fused_act;
+            if (group_matmul_moe_act_execute(&act_params, ctx.dst,
+                        deferred_act_M, ctx.N, ctx.ldc, ctx.act_dtype,
+                        plan.num_threads)
+                    != status_t::success) {
+                // The wrapper validates every slot before activating any
+                // expert, so a refusal leaves the WHOLE call holding raw
+                // (gate, up) GEMM output.  Returning success on that is the
+                // fail-open this executor's abort channel exists to close.
+                ctx.signal_abort(kNTileAbortActRefused);
+            }
         }
     }
 }
@@ -3142,35 +3393,50 @@ inline void execute_decode_d(
 
 #pragma omp parallel num_threads(total_threads)
     {
-        const int tid = omp_get_thread_num();
-        const int local_expert = tid / thr_per_expert;
-        const int local_tid = tid % thr_per_expert;
-        const int e = sort_on ? plan.expert_order[local_expert] : local_expert;
+        // A requested team size is a request, not a guarantee -- OMP_DYNAMIC,
+        // OMP_THREAD_LIMIT, or an already-active outer level can all trim it.
+        // This mapping assigns expert `tid / thr_per_expert`, so a short team
+        // simply never reaches the high experts and leaves their dst holding
+        // whatever it held before, with the call still reporting success.
+        // DecodeDynamic re-derives its topology from the real team for this
+        // reason; this executor's mapping cannot, so fail closed instead.
+        if (omp_get_num_threads() < total_threads) {
+            ctx.signal_abort(kNTileAbortShortTeam);
+        } else {
+            const int tid = omp_get_thread_num();
+            const int local_expert = tid / thr_per_expert;
+            const int local_tid = tid % thr_per_expert;
+            const int e
+                    = sort_on ? plan.expert_order[local_expert] : local_expert;
 
-        ctx.do_tile(plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+            ctx.do_tile(plan, e, local_tid, thr_per_expert, plan.min_n_tile);
 
-        // Fused activation: barrier so every thread's matmul write is
-        // globally visible before any thread reads it back for its
-        // swiglu_oai epilogue.  Non-fused mode has no barrier here
-        // (matches legacy behaviour exactly).
-        //
-        // Skipped in two cases (activation is already fused into do_tile
-        // above — see its body):
-        //   * `ctx.use_custom` — the custom BF16 microkernel applies
-        //     swiglu in registers and writes activated I cols directly.
-        //   * `plan.tight_fused_epilogue` — the non-custom tight-dst
-        //     branch runs matmul → scratch → OOP swiglu → tight dst,
-        //     all per-thread with disjoint dst column ranges.
-        // A second activation pass would reinterpret already-activated
-        // bytes as raw (gate, up) pairs and corrupt the result.  Skipping
-        // the barrier is safe here: neither skipped path has cross-thread
-        // writes to the caller's dst, and the implicit end-of-parallel-
-        // region barrier synchronises everything before return.
-        if (plan.fused_epilogue && !ctx.use_custom
-                && !plan.tight_fused_epilogue) {
+            // Fused activation: barrier so every thread's matmul write is
+            // globally visible before any thread reads it back for its
+            // swiglu_oai epilogue.  Non-fused mode has no barrier here
+            // (matches legacy behaviour exactly).
+            //
+            // Skipped in two cases (activation is already fused into do_tile
+            // above — see its body):
+            //   * `ctx.use_custom` — the custom BF16 microkernel applies
+            //     swiglu in registers and writes activated I cols directly.
+            //   * `plan.tight_fused_epilogue` — the non-custom tight-dst
+            //     branch runs matmul → scratch → OOP swiglu → tight dst,
+            //     all per-thread with disjoint dst column ranges.
+            // A second activation pass would reinterpret already-activated
+            // bytes as raw (gate, up) pairs and corrupt the result.  Skipping
+            // the barrier is safe here: neither skipped path has cross-thread
+            // writes to the caller's dst, and the implicit end-of-parallel-
+            // region barrier synchronises everything before return.
+            // Every thread evaluated the same team-wide condition above, so
+            // the whole team is inside this branch and the barrier below
+            // cannot deadlock against a thread that took the abort arm.
+            if (plan.fused_epilogue && !ctx.use_custom
+                    && !plan.tight_fused_epilogue) {
 #pragma omp barrier
-            ctx.apply_swiglu_oai(
-                    plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+                ctx.apply_swiglu_oai(
+                        plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+            }
         }
     }
 }
@@ -3368,17 +3634,15 @@ inline void execute_rounds(const GroupNTilePlan &plan, GroupNTileContext &ctx) {
         // listening — a few cycles per refused dispatch in release
         // builds, but free and consistent with the other error-path
         // call sites we gate this commit.
-        static const bool s_err_log = apilog_error_enabled();
-        if (s_err_log) {
-            apilog_error("[execute_rounds] n_rounds=", n_rounds,
-                    " exceeds kMaxRounds=", kMaxRounds, " (num_ops=", num_ops,
-                    " batch_size=", batch_size,
-                    ")"
-                    " — refusing to run flat_n_tile rounds path; caller's dst"
-                    " is left untouched.  Increase kNTilePlanMaxExperts or "
-                    "route"
-                    " through a different ALGO 3 strategy.");
-        }
+        apilog_error("[execute_rounds] n_rounds=", n_rounds,
+                " exceeds kMaxRounds=", kMaxRounds, " (num_ops=", num_ops,
+                " batch_size=", batch_size,
+                ")"
+                " — refusing to run flat_n_tile rounds path; caller's dst"
+                " is left untouched.  Increase kNTilePlanMaxExperts or "
+                "route"
+                " through a different ALGO 3 strategy.");
+        ctx.signal_abort(kNTileAbortRoundOverflow);
         return;
     }
     assert(n_rounds <= kMaxRounds);
@@ -3432,9 +3696,17 @@ inline void execute_rounds(const GroupNTilePlan &plan, GroupNTileContext &ctx) {
 
 #pragma omp parallel num_threads(plan.num_threads)
     {
+        // Same contract as DecodeD: the round layout assigns experts by
+        // `tid < ri.round_threads`, so a team smaller than the plan asked for
+        // silently drops the experts owned by the missing tids.  Checked once
+        // per region; the condition is team-wide so the whole team agrees and
+        // the per-round barriers below stay balanced.
+        const bool short_team = omp_get_num_threads() < plan.num_threads;
+        if (short_team) { ctx.signal_abort(kNTileAbortShortTeam); }
+
         const int tid = omp_get_thread_num();
 
-        for (int r = 0; r < n_rounds; ++r) {
+        for (int r = 0; r < n_rounds && !short_team; ++r) {
             const RoundInfo &ri = rounds[r];
 
             int e = -1;
@@ -3690,13 +3962,30 @@ void flat_n_tile(const std::vector<char> &layout,
             || (fused_act == grp_matmul_gated_act_t::silu_and_mul)
             || (fused_act == grp_matmul_gated_act_t::gelu_and_mul);
 
+    // First ACTIVE expert.  Both the caller-layout inference below and the
+    // element widths that drive every pointer offset in `do_tile` must read
+    // from an expert that actually runs: an inactive slot is a padding
+    // placeholder whose stride is arbitrary and whose dtypes were never
+    // filled in (`size_of(none)` is 0).
+    size_t rep = 0;
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i < M.size() && M[i] > 0) {
+            rep = i;
+            break;
+        }
+    }
+
     // Tight-dst detection for the fused-epilogue path.  Caller's dst is
     // a tight [M, I]-layout buffer when ldc < N (the activation halves
-    // N, so I = N/2).  Inferred from expert 0's stride; the symmetric
-    // uniform-layout guard immediately below re-verifies that every
-    // OTHER active expert agrees with that inference.
-    const bool tight_fused_epilogue
-            = fused_epilogue && !M.empty() && ldc[0] < N[0];
+    // N, so I = N/2).  Inferred from the first ACTIVE expert, not slot 0:
+    // inactive slots are padding placeholders whose stride is arbitrary,
+    // and the caller-boundary uniformity check deliberately ignores them,
+    // so a placeholder could classify a uniformly wide active set as tight
+    // or the reverse.  `rep` is the same representative the element widths
+    // use.  The symmetric uniform-layout guard below re-verifies that every
+    // other ACTIVE expert agrees with this inference.
+    const bool tight_fused_epilogue = fused_epilogue && rep < ldc.size()
+            && rep < N.size() && ldc[rep] < N[rep];
     // Always-on SYMMETRIC uniform-layout guard (defense-in-depth).
     //
     // The caller boundary (`validate_group_matmul_direct_inputs`)
@@ -3725,37 +4014,34 @@ void flat_n_tile(const std::vector<char> &layout,
     // corruption downstream.  The gate is `fused_epilogue` (not the
     // narrower `tight_fused_epilogue`) so the wide-inferred case in
     // failure mode (2) is also caught.
-    // Single cached `apilog_error_enabled()` probe shared by both
-    // bail-out sites in this validator loop AND the alloc-fail apilog
-    // at end of function.  Gating directly on the err level (not on
-    // `apilog_warning_enabled()`) ensures ERROR-only runs
-    // (`ZENDNNL_API_LOG_LEVEL=error`) still emit these abort-class
-    // messages.  Skips the variadic argument evaluation when no
-    // sink is listening — these are abort-class paths so the cost is
-    // a one-time `mov+test` in the hot fused-MoE call.
-    static const bool s_flat_n_tile_err_log = apilog_error_enabled();
-
+    //
+    // These logs are unconditional.  They used to be gated on a cached
+    // `apilog_error_enabled()` probe to skip the variadic formatting, but
+    // an abort-class event that leaves the caller's dst untouched must
+    // not be silent at the default log level — the saved formatting is a
+    // few cycles on a path that then refuses to run at all.
     if (fused_epilogue) {
         for (int e = 0; e < num_ops; ++e) {
             if (M[e] <= 0) continue;
             const bool e_is_tight = (ldc[e] < N[e]);
             if (e_is_tight != tight_fused_epilogue) {
-                if (s_flat_n_tile_err_log) {
-                    apilog_error(
-                            "[flat_n_tile] mixed tight/wide ldc across experts "
-                            "at e=",
-                            e, " (ldc[e]=", ldc[e], ", N[e]=", N[e],
-                            ", local=", (e_is_tight ? "tight" : "wide"),
-                            ")"
-                            "; layout inferred ",
-                            (tight_fused_epilogue ? "tight" : "wide"),
-                            " from ldc[0]=", ldc[0], " vs N[0]=", N[0],
-                            ".  Refusing to run — the caller-boundary "
-                            "validator "
-                            "should have rejected this combination upstream.  "
-                            "The "
-                            "caller's dst buffer(s) are unmodified by this "
-                            "call.");
+                apilog_error(
+                        "[flat_n_tile] mixed tight/wide ldc across experts "
+                        "at e=",
+                        e, " (ldc[e]=", ldc[e], ", N[e]=", N[e],
+                        ", local=", (e_is_tight ? "tight" : "wide"),
+                        ")"
+                        "; layout inferred ",
+                        (tight_fused_epilogue ? "tight" : "wide"),
+                        " from ldc[0]=", ldc[0], " vs N[0]=", N[0],
+                        ".  Refusing to run — the caller-boundary "
+                        "validator "
+                        "should have rejected this combination upstream.  "
+                        "The "
+                        "caller's dst buffer(s) are unmodified by this "
+                        "call.");
+                if (gemm_mode_out != nullptr) {
+                    *gemm_mode_out = kGrpNTileErrUndefinedDst;
                 }
                 return;
             }
@@ -3765,13 +4051,13 @@ void flat_n_tile(const std::vector<char> &layout,
             // smaller would overrun).  Skipped on the wide path where ldc
             // simply needs to be >= N (validator-checked upstream).
             if (e_is_tight && (ldc[e] != N[e] / 2 || (N[e] % 2) != 0)) {
-                if (s_flat_n_tile_err_log) {
-                    apilog_error("[flat_n_tile] tight expert e=", e,
-                            " violates the "
-                            "tight-arena stride contract: ldc[e]=",
-                            ldc[e], " must equal N[e]/2=", (N[e] / 2),
-                            " and N[e]=", N[e],
-                            " must be even.  Refusing to run.");
+                apilog_error("[flat_n_tile] tight expert e=", e,
+                        " violates the "
+                        "tight-arena stride contract: ldc[e]=",
+                        ldc[e], " must equal N[e]/2=", (N[e] / 2),
+                        " and N[e]=", N[e], " must be even.  Refusing to run.");
+                if (gemm_mode_out != nullptr) {
+                    *gemm_mode_out = kGrpNTileErrUndefinedDst;
                 }
                 return;
             }
@@ -3781,8 +4067,8 @@ void flat_n_tile(const std::vector<char> &layout,
     const matmul_algo_t algo = resolve_kernel();
     int nr_align = backend_n_align(algo);
 
-    const size_t wei_elem = size_of(params[0].dtypes.wei);
-    const size_t dst_elem = size_of(params[0].dtypes.dst);
+    const size_t wei_elem = size_of(params[rep].dtypes.wei);
+    const size_t dst_elem = size_of(params[rep].dtypes.dst);
     // `bias_elem` is used by do_tile() to offset a non-null bias pointer
     // by col_start.  When the caller didn't declare a bias dtype
     // (`dtypes.bias == none`) the bias pointer is also null on every
@@ -3791,8 +4077,8 @@ void flat_n_tile(const std::vector<char> &layout,
     // keeps the arithmetic well-defined and doesn't produce a divide-
     // by-zero / shift-by-zero anywhere downstream.  A real bias dtype
     // overrides this with the correct element width.
-    const size_t bias_elem = (params[0].dtypes.bias != data_type_t::none)
-            ? size_of(params[0].dtypes.bias)
+    const size_t bias_elem = (params[rep].dtypes.bias != data_type_t::none)
+            ? size_of(params[rep].dtypes.bias)
             : sizeof(float);
 
     // ── Custom microkernel opt-in (ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL, master
@@ -3879,17 +4165,9 @@ void flat_n_tile(const std::vector<char> &layout,
     // the whole call to the wrong dtype / quant mode whenever expert 0
     // routed no tokens (common in MoE decode).  Classify from the FIRST
     // ACTIVE expert instead; fall back to 0 when every expert is inactive
-    // (no compute, so the classification is irrelevant).  Note the
-    // wei/dst/bias dtype reads above stay on `params[0]` — the caller sets
-    // those uniformly across active AND inactive experts, so index 0 is
-    // representative for them regardless of routing.
-    size_t rep = 0;
-    for (size_t i = 0; i < params.size(); ++i) {
-        if (i < M.size() && M[i] > 0) {
-            rep = i;
-            break;
-        }
-    }
+    // (no compute, so the classification is irrelevant).  `rep` is shared
+    // with the wei/dst/bias element widths above, so the dtype classification
+    // and the pointer arithmetic always describe the same expert.
     bool ck_dynamic_quant = false;
     data_type_t ck_compute_dtype = data_type_t::none;
     if (!params.empty() && params[rep].dynamic_quant) {
@@ -3931,12 +4209,20 @@ void flat_n_tile(const std::vector<char> &layout,
     }
 
     custom_kernel::CallContext kctx;
+    // All four dtypes come from `rep`, the first ACTIVE expert.  Mixing
+    // `params[rep]` for src with `params[0]` for wei/dst/bias let a padded
+    // call (`M[0] == 0`, placeholder dtypes in slot 0) hand the resolver a
+    // tuple that describes no real expert: CK then declines while the tile
+    // executor has already committed to the active expert's metadata, so the
+    // call drops to the AOCL fallback for no reason.  Slot 0 is only a valid
+    // source when it happens to be active, which is exactly what `rep`
+    // already encodes.
     engage_ntile_custom_kernel(custom_act,
             /*src_dtype=*/params[rep].dtypes.src,
-            /*wei_dtype=*/params[0].dtypes.wei,
-            /*dst_dtype=*/params[0].dtypes.dst, act_dtype,
-            /*bias_dtype=*/params[0].dtypes.bias, transA, transB, M, N, K, ldb,
-            alpha, beta, weight, is_weights_const, kctx, ck_dynamic_quant,
+            /*wei_dtype=*/params[rep].dtypes.wei,
+            /*dst_dtype=*/params[rep].dtypes.dst, act_dtype,
+            /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
+            ldb, alpha, beta, weight, is_weights_const, kctx, ck_dynamic_quant,
             ck_compute_dtype, weights_prepacked);
 
     // ── DQ-INT8 scale-path decision (uniform across experts) ──────────
@@ -4005,7 +4291,10 @@ void flat_n_tile(const std::vector<char> &layout,
     // byte-identical for them.
     bool ck_per_group = false;
     for (size_t i = 0; i < params.size(); ++i) {
-        if (i < M.size() && M[i] <= 0) continue; // skip inactive experts
+        // `i >= M.size()` is a prepack-extras tail slot that never fires; the
+        // old form fell through for those, so one tail entry carrying a
+        // `{G, N}` scale disqualified the custom kernel for the whole call.
+        if (i >= M.size() || M[i] <= 0) continue;
         const auto &ws = params[i].quant_params.wei_scale;
         if (ws.dims.size() == 2 && ws.dims[0] > 1) {
             ck_per_group = true;
@@ -4060,7 +4349,9 @@ void flat_n_tile(const std::vector<char> &layout,
                 "consumer. Failing the call. Enable the custom kernel "
                 "(ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1, ALGO 3, supported "
                 "shape) or pass the raw weight with mem_format_b='n'.");
-        if (gemm_mode_out != nullptr) *gemm_mode_out = "error_prepacked_no_ck";
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
+        }
         return;
     }
 
@@ -4077,8 +4368,8 @@ void flat_n_tile(const std::vector<char> &layout,
     // When the custom kernel is engaged, `kctx.pack_nr` (32 or 64) is
     // already even, so pair-alignment is implicit regardless of layout.
     const bool tight_pair_align = tight_fused_epilogue && !use_custom;
-    nr_align = ntile_effective_nr_align(
-            nr_align, kctx, /*pair_aligned=*/tight_pair_align);
+    nr_align = ntile_effective_nr_align(nr_align, kctx,
+            /*pair_aligned=*/tight_pair_align, /*ck_will_run=*/use_custom);
 
     // Generic ahead-of-time weight pre-pack for ALGO 3.  Warms both
     // the AOCL DLP reorder cache and (when BF16 + custom-kernel env
@@ -4133,13 +4424,14 @@ void flat_n_tile(const std::vector<char> &layout,
 
     scoped_active_levels guard(1);
 
-    // Per-thread scratch alloc-fail flag, set inside the tight-branch
-    // of do_tile on an unrecoverable `posix_memalign` failure.  Checked
-    // once after the OMP region exits so the caller gets a clear error
-    // instead of silently-wrong output.  Zero-initialised; allocated
-    // here (and passed into ctx by pointer) so the atomic lives at a
-    // stable address across the parallel region.
-    std::atomic<int> alloc_fail {0};
+    // Abort reason raised from inside the OMP region — a scratch alloc
+    // failure, or one of the layout invariants that used to be an
+    // assert and so was absent from the shipped build.  Read once after
+    // the region exits so the caller gets a clear error instead of
+    // silently-wrong output.  Zero-initialised; allocated here (and
+    // passed into ctx by pointer) so the atomic lives at a stable
+    // address across the parallel region.
+    std::atomic<int> abort_code {kNTileAbortNone};
 
     // ── Hoisted dynamic-quant source reorder (per-expert, pre-OMP) ─────
     // For every active expert with `params[e].dynamic_quant == true`,
@@ -4246,6 +4538,9 @@ void flat_n_tile(const std::vector<char> &layout,
                     " — aborting call; caller's dst is "
                     "untouched.  See preceding `reorder_quantization_wrapper` "
                     "error for the granularity / dtype mismatch.");
+            if (gemm_mode_out != nullptr) {
+                *gemm_mode_out = kGrpNTileErrUndefinedDst;
+            }
             return;
         }
 
@@ -4403,7 +4698,7 @@ void flat_n_tile(const std::vector<char> &layout,
     GroupNTileContext ctx {layout, transA, transB, M, N, K, alpha, src, lda,
             weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
             fused_act, act_dtype, wei_elem, dst_elem, bias_elem, use_custom,
-            use_custom ? &kctx : nullptr, &alloc_fail,
+            use_custom ? &kctx : nullptr, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};
 
@@ -4508,6 +4803,61 @@ void flat_n_tile(const std::vector<char> &layout,
                     "(likely silu/gelu + bias, or per-call gate mismatch); "
                     "routing to Sequential strategy with wide scratch + "
                     "apply_gated_act_inplace + tight memcpy.");
+        }
+    }
+
+    // ── Mixed-in-place: a CK refusal must not land on per-tile keys ──
+    //
+    // Under AUTO mixed in-place the prompt's full-weight reorder has already
+    // REWRITTEN the caller's weight buffer, and cross-warm packed the decode
+    // layout from the raw bytes before that happened.  WHICH layout it packed
+    // was decided by the same `custom_kernel_en` the dispatcher used to
+    // license the mutation, so under mixed mode the warmed decode layout is
+    // the CK pack.
+    //
+    // `use_custom` is re-derived PER CALL and is strictly narrower than that
+    // process-wide verdict: `ck_per_group`, the wide-swiglu guard and the
+    // fused DQ-INT8 hoist fallback can each clear it AFTER the mutation.  A
+    // non-custom plan then builds AOCL per-tile keys from the sliced weight
+    // pointer — keys nothing warmed — so the lookup misses and `run_dlp`
+    // reorders the already-blocked bytes.
+    //
+    // Sequential is the one non-custom strategy that keys on the WHOLE
+    // weight, which is exactly the entry the in-place mutation left behind
+    // (stored as `nullptr`, i.e. "the reordered bytes live in the caller's
+    // buffer"), so its lookup HITS and consumes the mutation instead of
+    // re-deriving from it.  It is already the sanctioned destination for a
+    // tight fused CK refusal — see the split-halves block above — so this
+    // reuses an established routing rather than inventing one, including its
+    // wide-scratch handling of a tight caller.
+    //
+    // If the buffer has NOT been mutated the whole-weight lookup misses and
+    // reorders from raw weights, which costs one reorder.
+    //
+    // Sequential gives up cross-expert parallelism for this call.
+    //
+    // `kctx.enabled` records that CK was expected for this call's dtype and
+    // env, which is what cross-warm keyed its choice of decode layout on — so
+    // `kctx.enabled && !use_custom` is "the warmed layout is the CK pack, and
+    // this call cannot use it".  With CK off altogether `kctx.enabled` is
+    // false, cross-warm packed the AOCL per-tile layout, and per-tile keys are
+    // the warmed ones, so Sequential is not forced there.
+    if (kctx.enabled && !use_custom && is_grp_auto_mixed_inplace_active()
+            && plan.strategy != GroupNTileStrategy::Sequential) {
+        plan.strategy = GroupNTileStrategy::Sequential;
+        // Sequential re-detects a tight caller from `ldc[e] < N[e]` and owns
+        // its own wide-scratch path, so the per-thread flag must not survive.
+        plan.tight_fused_epilogue = false;
+        static const bool s_mixed_seq_log = apilog_warning_enabled();
+        if (s_mixed_seq_log) {
+            apilog_warning(
+                    "[GRP_MATMUL.PLAN.FALLBACK] strategy=Sequential "
+                    "reason=mixed_inplace_ck_refused: AUTO mixed in-place has "
+                    "mutated the weight buffer and the warmed decode layout "
+                    "is the CK pack, but the custom kernel was refused for "
+                    "this call.  AOCL per-tile keys were never warmed and "
+                    "would re-reorder the mutated bytes as raw, so this call "
+                    "is routed to the whole-weight key instead.");
         }
     }
 
@@ -4706,22 +5056,23 @@ void flat_n_tile(const std::vector<char> &layout,
         case GroupNTileStrategy::ManyExperts: execute_rounds(plan, ctx); break;
     }
 
-    // Post-exec failure check for the tight-scratch path.  The
-    // OMP-region-internal alloc failure (rare: exhausted per-thread
-    // heap in posix_memalign) is benign for threads that did succeed —
-    // they wrote their own disjoint dst columns correctly — but the
-    // failing thread's columns are undefined.  Elevate to apilog_error
-    // so benchdnn / torch-side observers catch the incident; no
-    // exception because the surrounding group_matmul API is noexcept
-    // and partial-correct output is still safer than undefined behaviour
-    // on the caller's dst (which they own).
-    if (alloc_fail.load(std::memory_order_relaxed) != 0) {
-        if (s_flat_n_tile_err_log) {
-            apilog_error(
-                    "[flat_n_tile] per-thread scratch allocation failed in the "
-                    "tight-fused-epilogue path; some dst column ranges may be "
-                    "undefined.  Consider disabling internal-alloc tight mode "
-                    "(ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT=0) if this recurs.");
+    // Post-exec abort check.  A worker that raised one of these left part
+    // of dst never written, or written with the wrong gate/up pairing,
+    // while its peers wrote theirs correctly — so the caller would
+    // consume a buffer that is partly garbage with no way to tell.
+    //
+    // Fail the call closed via the `error_` gemm_mode sentinel, the same
+    // channel `error_prepacked_no_ck` uses: `group_matmul_direct` and the
+    // fused-MoE dispatcher translate it into `status_t::failure`, which
+    // keeps this executor void and the surrounding API noexcept.  The log
+    // is unconditional — a suppressible sink must not be the only trace
+    // of a wrong-output event.
+    const int abort_reason = abort_code.load(std::memory_order_relaxed);
+    if (abort_reason != kNTileAbortNone) {
+        apilog_error("[flat_n_tile] ", ntile_abort_reason(abort_reason),
+                ".  Failing the call.");
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpNTileErrUndefinedDst;
         }
     }
 }

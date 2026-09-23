@@ -79,6 +79,24 @@ void clear_aocl_matmul_weight_caches() {
     // No AOCL weight caches exist in this build; nothing to clear.
 }
 
+// In-place mutation registry: nothing in this build can reorder a weight
+// buffer, so no buffer is ever mutated and no reorder is ever refused.  The
+// symbols exist so callers (the group-matmul dispatcher's fail-closed check)
+// need no `#if ZENDNNL_DEPENDS_AOCLDLP` at the call site.
+void aocl_mark_weight_buffer_mutated(const void *) {}
+
+bool aocl_weight_buffer_is_mutated(const void *) {
+    return false;
+}
+
+uint64_t aocl_mutated_source_conflict_count() {
+    return 0;
+}
+
+bool aocl_refuse_reorder_from_mutated(const void *, const char *) {
+    return false;
+}
+
 template <typename T>
 bool reorderAndCacheWeights(Key_matmul, const void *, void *&, const int,
         const int, const int, const char, const char, char,

@@ -50,23 +50,32 @@ using zendnnl::error_handling::apilog_info_enabled;
 // ─────────────────────────────────────────────────────────────────────
 namespace {
 
-/// True when mixed in-place mode applies to THIS weight dtype.
+/// True when mixed in-place mode applies to THIS weight buffer.
 ///
-/// The in-place mutation is bf16-ONLY: `warm_pack_all_aocl_dlp_experts` is its
-/// sole owner and serves bf16 alone, while the int8 sym-quant and W4A8 warmers
-/// always pack out-of-place.
+/// Two families mutate: bf16, which qualifies on exact size equality, and a
+/// weight whose owner DECLARED a writable capacity — the opt-in that lets the
+/// int8 sym-quant warmer reorder into the caller's buffer instead of
+/// materialising a second copy (see `wei_inplace_fits`).  W4A8 and an
+/// undeclared int8 still always pack out-of-place.
 ///
-/// Deciding on the dtype HERE, rather than walking the mixed-mode prepack path
-/// and being forced back to out-of-place down in the backend, keeps every
-/// non-bf16 weight on the plain path — which is both cheaper (the thread-local
-/// warmed-fingerprint memo instead of the serialising warm latch) and simpler:
-/// nothing mutates the weight buffer, so the historical
-/// primary-then-`cross_warm` order needs no reordering.
+/// This predicate is what orders the prepack, so it MUST admit every family
+/// that can mutate.  A mutating family that answers false here takes the
+/// primary-then-`cross_warm` arm, where the full-weight reorder runs BEFORE
+/// the decode layout is snapshotted — leaving cross-warm to pack the decode
+/// arena from already-reordered bytes, which is silent bad output rather than
+/// a detectable failure.  It also skips the completeness test that downgrades
+/// the process to out-of-place when cross-warm did not fully populate.
 ///
-/// Safe to key on the dtype even though the process-wide verdict must stay
-/// derived from process-constant env: a weight BUFFER has one dtype for its
-/// lifetime, so this cannot flip mid-run the way a per-call configuration
-/// could.
+/// Deciding HERE, rather than walking the mixed-mode prepack path and being
+/// forced back to out-of-place down in the backend, keeps every non-mutating
+/// weight on the plain path — cheaper (the thread-local warmed-fingerprint
+/// memo instead of the serialising warm latch) and simpler: nothing mutates
+/// the buffer, so the historical primary-then-`cross_warm` order stands.
+///
+/// Safe to key on these inputs even though the process-wide verdict must stay
+/// derived from process-constant env: a weight BUFFER has one dtype and one
+/// allocation for its lifetime, so neither can flip mid-run the way a per-call
+/// configuration could.
 ///
 /// Scope is GROUPED MATMUL ONLY, and deliberately kept local to this file:
 /// `is_grp_auto_mixed_inplace_active()` already requires the
@@ -77,11 +86,14 @@ namespace {
 /// NOT a drop-in replacement for `is_grp_auto_mixed_inplace_active()` at every
 /// site.  The custom-kernel dispatcher uses that predicate NEGATED, to force
 /// its own pack out-of-place while the AOCL prompt reorder owns the single
-/// in-place mutation; narrowing it there by dtype would make the int8 CK pack
-/// a SECOND mutator of the same buffer.  Use this only where the question is
+/// in-place mutation; narrowing it there would make the CK pack a SECOND
+/// mutator of the same buffer.  Use this only where the question is
 /// "may I mutate this weight in place?".
-inline bool mixed_inplace_for_wei(data_type_t wei_dtype) {
-    return is_grp_auto_mixed_inplace_active() && wei_dtype == data_type_t::bf16;
+inline bool mixed_inplace_for_wei(
+        data_type_t wei_dtype, size_t wei_buffer_capacity_bytes) {
+    return is_grp_auto_mixed_inplace_active()
+            && (wei_dtype == data_type_t::bf16
+                    || wei_buffer_capacity_bytes > 0);
 }
 
 // Process-wide fingerprint cache (Fix A — see lines 97-126 below for
@@ -300,6 +312,18 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
     s = mix_hash(s,
             static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
                                         .get_weight_cache()));
+    // `should_warm_weight_cache` ANDs the WC value with the mixed-in-place
+    // flag, so the flag is an input to whether the warmers do anything at
+    // all -- but it is set by `group_matmul_run_parallel_dispatch`, which the
+    // fused vertical-fusion and ALGO 5 entries bypass. A first fused call
+    // therefore warms nothing, records the fingerprint, and every later call
+    // at the same WC short-circuits as "already warmed" against empty caches.
+    // Folding the flag in makes the two states distinct fingerprints.
+    s = mix_hash(s,
+            static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
+                                        .get_grp_auto_mixed_inplace()
+                            ? 1u
+                            : 0u));
     return s;
 }
 
@@ -594,11 +618,12 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     // regardless of whether the framework opted into the
     // `total_matmul > active_matmul` contract.  Set
     // `ZENDNNL_GRP_MATMUL_PREPACK=0` to restore the lazy-only path.
-    // Keyed on the WEIGHT DTYPE, not just the process mode: only a bf16 weight
-    // is ever mutated in place, so every other dtype takes the plain
-    // out-of-place path below and keeps its thread-local memo fast path
-    // instead of serialising on the warm latch.
-    const bool mixed_inplace = mixed_inplace_for_wei(p.wei_dtype);
+    // Keyed on the WEIGHT BUFFER, not just the process mode: only a buffer
+    // that can actually be mutated (bf16, or one whose owner declared a
+    // capacity) needs the warm latch; everything else takes the plain
+    // out-of-place path below and keeps its thread-local memo fast path.
+    const bool mixed_inplace
+            = mixed_inplace_for_wei(p.wei_dtype, p.wei_buffer_capacity_bytes);
 
     if (!mixed_inplace) {
         // Out-of-place fast path: insert-and-go.  A concurrent skipper may
@@ -685,10 +710,15 @@ inline const std::vector<bool> &warm_iwc(const PrepackParams &p) {
                                            : kEmptyIsConst;
 }
 
-inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(const PrepackParams &p) {
+/// `allow_inplace = false` refuses the in-place variant, which rewrites the
+/// caller's weight buffer.  Only safe once every other layout has been packed
+/// from the RAW weights.
+inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(
+        const PrepackParams &p, bool allow_inplace = true) {
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts(*p.weight, *p.K, *p.N, *p.ldb,
-            *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, st);
+            *p.transB, warm_iwc(p), p.num_ops_total, p.src_dtype, p.wei_dtype,
+            st, p.num_threads, allow_inplace);
     return st;
 }
 
@@ -708,8 +738,14 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_w4a8(
 // populating the dedicated sym-quant LRU so ALGO 3 decode -> ALGO 1
 // prompt cross-warm no longer leaves the first prompt call paying the
 // lazy sym-quant reorder.
+///
+/// `allow_inplace` carries the same contract as `warm_aocl`: it permits the
+/// reorder to rewrite the caller's weight buffer, which is only safe once
+/// every other layout has been packed from the RAW weights.  It takes effect
+/// only when the owner also declared a capacity, since the int8 blocked image
+/// cannot fit an undeclared buffer.
 inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_sym_quant(
-        const PrepackParams &p) {
+        const PrepackParams &p, bool allow_inplace = true) {
     aocl_dlp::AoclDlpPackProbeStats st;
     // `p.group_size` (0 = per-token; > 0 = per-group K/G) selects the
     // sym-quant reorder granularity so the warmed AOCL slot matches the
@@ -717,7 +753,7 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_sym_quant(
     // fallback a per-group layer routed to ALGO 1/2/5/6 will read).
     aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, st,
-            p.group_size);
+            p.group_size, p.wei_buffer_capacity_bytes, allow_inplace);
     return st;
 }
 
@@ -782,6 +818,54 @@ inline bool int8_aocl_warm_candidate(const PrepackParams &p) {
     return p.wei_dtype == data_type_t::s8
             && (p.compute_dtype == data_type_t::s8
                     || p.compute_dtype == data_type_t::u8);
+}
+
+// Predicate: will the RUNTIME actually read an AOCL sym-quant layout?
+// Mirrors `is_s8_sym_quant_scales` (aocl_kernel.cpp) so a warm never
+// populates a cache the runtime cannot query.  `int8_aocl_warm_candidate`
+// above answers the weaker "is this the int8 dtype family" question and
+// still owns the CK pack-arena selection in `warm_custom` (the int8
+// microkernel serves both the symmetric and asymmetric forms); only the
+// AOCL sym-quant warm sites take this stricter verdict.
+//
+// Two conjuncts the dtype-only predicate misses:
+//
+//   * `compute == u8` means an asymmetric call, i.e. `src_zp` is set
+//     (see the `compute_dtype` contract on `PrepackParams`).  The runtime
+//     predicate requires `!src_zp.buff`, so EVERY sym-quant entry warmed
+//     for an asymmetric call is dead — the call reorders into the plain
+//     s8 blocked LRU instead.  There is no standard-s8 warmer to redirect
+//     to (the six AOCL warmers cover bf16, s8 sym-quant and s4 only), so
+//     the right answer is to warm nothing and let the runtime pay one
+//     lazy reorder rather than hold a full unreachable copy resident.
+//
+//   * The runtime also requires `dst ∈ {bf16, f32}`.
+//
+// Deliberately NOT keyed on `M`: the runtime fires sym-quant on
+// `src_scale_nelems > 1`, which tracks the M of the call that READS the
+// entry, not the one that warms it.  Cross-warm sites warm the OTHER
+// phase's layout (decode warms prompt and vice versa), so the local M is
+// the wrong phase's value there and gating on it would skip a warm the
+// reader does need.  The per-channel `M == 1` case that used to fall out
+// of sym-quant is handled at the source instead — see
+// `src_scale_is_collapsed_per_token` in aocl_postop.hpp.
+inline bool int8_sym_quant_warm_candidate(const PrepackParams &p) {
+    return p.wei_dtype == data_type_t::s8 && p.compute_dtype == data_type_t::s8
+            && (p.dst_dtype == data_type_t::bf16
+                    || p.dst_dtype == data_type_t::f32);
+}
+
+// True for an s8 weight that no AOCL warmer can serve: the sym-quant
+// warmers early-return on `wei != s8` sibling dtypes and the bf16
+// warmers early-return on `wei != bf16`, so an s8 call that fails
+// `int8_sym_quant_warm_candidate` (the asymmetric form) reaches a
+// warmer that walks every expert only to count it `skipped_invalid`.
+// The counters feed the PROBE line and the `primary_complete` test that
+// guards the in-place full-weight mutation, so letting s8 fall into the
+// bf16 arm reports a warm that never happened and mislabels the
+// cross-warm regime.  Callers check this and skip instead.
+inline bool s8_without_aocl_warmer(const PrepackParams &p) {
+    return p.wei_dtype == data_type_t::s8 && !int8_sym_quant_warm_candidate(p);
 }
 
 inline bool w4a8_aocl_warm_candidate(const PrepackParams &p) {
@@ -878,6 +962,37 @@ inline const char *cross_warm_regime_name(CrossWarmRegime r) {
             return "aocl_per_tile_sym_quant";
     }
     return "?";
+}
+
+// May the prompt mutate the weight buffer in place behind this warmed decode
+// regime?
+//
+// This is the question an in-place mutation has to answer before it destroys
+// the raw weights, and it is NOT the one the `skipped_invalid` counters
+// answer — those only report whether the warm attempted and completed.
+//
+// A WHOLE-WEIGHT regime keys on `(weight_ptr, K, N, ldb, transB)`, so every
+// lookup the runtime can make is one the warm populated.  Safe unconditionally.
+//
+// A PER-TILE regime additionally keys on `n_tile`, so it covers the runtime
+// only as far as the runtime's split matches the warm's.  The strict-stable
+// plan pins `n_thr_fixed` to the same `aocl_stable_n_thr(num_threads)` the
+// warm used, but `nr_align` and a narrow-N escape evaluated over the ACTIVE
+// expert set both move independently of it, so a decode call can build keys
+// this warm never populated.  Once the raw weights are gone those cannot be
+// rebuilt, and the call ends at `kGrpMatmulErrMutatedWeightMiss`.
+//
+// A per-tile regime therefore does not license a mutation.
+inline bool cross_warm_regime_licenses_mutation(CrossWarmRegime r) {
+    switch (r) {
+        case CrossWarmRegime::aocl_full_weight:
+        case CrossWarmRegime::aocl_full_weight_sym_quant:
+        case CrossWarmRegime::custom_kernel_pack: return true;
+        case CrossWarmRegime::none:
+        case CrossWarmRegime::aocl_per_tile:
+        case CrossWarmRegime::aocl_per_tile_sym_quant: return false;
+    }
+    return false;
 }
 
 // Compose the `next_HIT_for=[...]` field describing which inverse-algo
@@ -1588,6 +1703,46 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
     // populates whatever it needs on demand.
     if (get_grp_matmul_algo() != 0) { return; }
 
+    // Same rationale one level finer.  The gate above only sees a GLOBAL
+    // pin; the per-phase knobs pin a phase while leaving the global
+    // selector on AUTO, so `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` in
+    // {1,2,5,6} routes decode away from ALGO 3 and this cross-warm would
+    // still pack the ALGO 3 arena nothing will read -- a full resident
+    // copy of every expert weight on an MoE.  Mirror case: both phases
+    // pinned to 3, where the ALGO 3 prepack warms a prompt full-weight
+    // layout that never gets consulted.
+    // Safe even under WC=2 mixed in-place, where the prompt reorder
+    // MUTATES the caller's buffer and this warm is what captures the
+    // decode layout from raw W beforehand.  That only holds because
+    // `grp_matmul_cross_warm_target_reachable` is provable rather than
+    // heuristic: it returns false only for phase pins that cannot reach
+    // ALGO 3 by ANY route including a declined fallback (see its
+    // doc-block).  A heuristic here would not be wrong-but-slow, it would
+    // leave decode reordering from mutated bytes -- silent bad output.
+    if (!grp_matmul_cross_warm_target_reachable(current_algo)) {
+        // One-shot: the verdict is derived from process-constant env, so
+        // every prepack call in the process would otherwise repeat it --
+        // once per layer per phase.  Matches the latching the short-team
+        // and int8-in-place warnings already use.
+        static const bool s_log_unreachable = apilog_info_enabled();
+        static std::atomic<bool> s_unreachable_logged {false};
+        if (s_log_unreachable
+                && !s_unreachable_logged.exchange(
+                        true, std::memory_order_relaxed)) {
+            apilog_info(
+                    "[GRP_MATMUL.PREPACK CROSS_WARM] regime=none "
+                    "skipped=target_algo_unreachable from_algo=",
+                    current_algo,
+                    " prompt_algo=", get_grp_matmul_auto_prompt_algo(),
+                    " decode_algo=", get_grp_matmul_auto_decode_algo(),
+                    " — the phase this warm targets does not route to the "
+                    "cross-warm ALGO, so the arena would be packed and never "
+                    "read.  A declined phase pin that falls back pays one "
+                    "lazy reorder instead.");
+        }
+        return;
+    }
+
     if (current_algo == 3) {
         // ALGO 3 → cross-warm the upcoming ALGO 1 prompt path's full-
         // weight AOCL reorder cache.  Family selection:
@@ -1605,6 +1760,52 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         //     first post-CK ALGO 1 prompt call hits the warmed slot
         //     instead of paying the lazy reorder.  This brings int8
         //     decode -> prompt cross-warm to bf16 parity (Gap B).
+        //
+        // Whether the full-weight warms below may take the IN-PLACE variant,
+        // which rewrites the caller's weight buffer.  `prepack_aocl_only_algo`
+        // guards its own mutation with a completeness test and downgrades the
+        // process to out-of-place when the other regime did not fully
+        // populate.  ALGO 3 has no equivalent, so a primary that skipped an
+        // expert would leave the runtime to re-derive that expert's layout
+        // lazily from an already-mutated buffer -- wrong numbers, no error.
+        // `st_*` still hold the PRIMARY's stats here (the ALGO-3 body fills
+        // them before calling us), so the same test applies.  Refuse the
+        // in-place variant rather than downgrading the whole process: this
+        // cross-warm is speculative work for a phase that may never run, and
+        // one out-of-place copy is the better trade.
+        //
+        // "No expert was skipped" is not enough: a primary that attempted
+        // NOTHING trivially satisfies it.  `warm_pack_all_custom_kernel_
+        // experts` returns success with all counters zero when the host lacks
+        // the CK ISA, which would mark the warm complete, let the in-place
+        // pass mutate the caller's weights, and leave the runtime to re-derive
+        // its layout from those mutated bytes on the per-tile AOCL fallback.
+        // Require real work before trusting the in-place variant.
+        //
+        // Shared by the int8 and bf16 arms alike: both reorder the full
+        // weight, so both can mutate it once a capacity is declared.
+        //
+        // Nor is "the primary skipped no expert" enough on its own, for a
+        // reason the counters cannot express: a PER-TILE primary warms the
+        // column tiles of ONE N-split, `stable = aocl_stable_n_thr(
+        // num_threads, max_N)` wide, while the runtime splits N with
+        // `plan_group_n_tile`.  The two are not the same number, and the
+        // per-tile cache key embeds `n_tile` — so the executor asks for keys
+        // the primary never warmed, reports no skip, and reorders each miss
+        // from whatever the buffer holds.  Before the mutation that is the raw
+        // weight and the miss is merely slow; after it, the miss is silently
+        // wrong.  Only a WHOLE-WEIGHT primary is provably complete: the CK
+        // pack and the narrow-N full-weight warm both key on the whole
+        // expert, independent of any split, so every lookup the executor makes
+        // is one they populated.
+        const bool primary_attempted
+                = (st_ck.total_attempted + st_aocl.total_attempted) > 0;
+        const bool primary_covers_whole_weight
+                = primary_did_custom || primary_did_aocl_fw;
+        const bool primary_complete = primary_attempted
+                && primary_covers_whole_weight && st_ck.skipped_invalid == 0
+                && st_aocl.skipped_invalid == 0;
+
         if (w4a8) {
             if (!primary_did_aocl_fw) {
                 // Cross-warm upcoming ALGO 1 prompt layout.
@@ -1618,9 +1819,14 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
             }
             return;
         }
-        if (ck_eligible_int8(p)) {
+        // `!primary_did_aocl_fw` for the same reason as the two branches
+        // below: the narrow-N escape may already have run this exact
+        // full-weight warm, and repeating it re-walks every expert through
+        // two cache mutexes and double-counts `packed_ok`, which is what the
+        // log-based footprint estimates read.
+        if (ck_eligible_int8(p) && !primary_did_aocl_fw) {
             out_regime = CrossWarmRegime::aocl_full_weight_sym_quant;
-            const auto st_extra = warm_aocl_sym_quant(p);
+            const auto st_extra = warm_aocl_sym_quant(p, primary_complete);
             st_aocl.total_attempted += st_extra.total_attempted;
             st_aocl.packed_ok += st_extra.packed_ok;
             st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -1643,9 +1849,9 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         // reorders the full weight through the AOCL DLP sym-quant path —
         // NOT the bf16 LRU.  Warm the sym-quant full-weight LRU (unless the
         // primary's narrow-N escape already did via M3).
-        if (int8_aocl_warm_candidate(p)) {
+        if (int8_sym_quant_warm_candidate(p)) {
             if (!primary_did_aocl_fw) {
-                const auto st_extra = warm_aocl_sym_quant(p);
+                const auto st_extra = warm_aocl_sym_quant(p, primary_complete);
                 st_aocl.total_attempted += st_extra.total_attempted;
                 st_aocl.packed_ok += st_extra.packed_ok;
                 st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -1653,10 +1859,15 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
             }
             return;
         }
+        // Asymmetric s8 (`compute == u8`, i.e. `src_zp` present): the
+        // runtime refuses sym-quant and reorders into the plain s8
+        // blocked LRU, which has no warmer.  Fall through to the bf16
+        // arm below and it would walk every expert to count it skipped.
+        if (s8_without_aocl_warmer(p)) { return; }
         // BF16 family — unchanged.  Skip if `prepack_for_algo_3`'s
         // narrow-N escape already ran the full-weight warmer.
         if (!primary_did_aocl_fw) {
-            const auto st_extra = warm_aocl(p);
+            const auto st_extra = warm_aocl(p, primary_complete);
             st_aocl.total_attempted += st_extra.total_attempted;
             st_aocl.packed_ok += st_extra.packed_ok;
             st_aocl.skipped_invalid += st_extra.skipped_invalid;
@@ -1676,14 +1887,24 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         return;
     }
 
-    // CK=0: decode will use per-tile AOCL DLP → warm regime 2 with
-    // nr_align=1 (covers the Op2 non-tight path; Op1 tight under
-    // CK=0 uses nr_align=2 and stays lazy on first decode call —
-    // option 2b would warm both variants at a much larger extra
-    // resident footprint, which we deliberately avoid).
+    // CK=0: decode will use per-tile AOCL DLP → warm regime 2 at the
+    // alignment decode will actually split on.
+    //
+    // This used to be hardcoded to 1, the `aocl_dlp_blocked` backend
+    // default, which is right for the wide arena but wrong for a tight
+    // fused swiglu: that path widens to 2 to keep each gate/up pair on
+    // one thread, so `n_tile` differs and every warmed key misses on the
+    // first decode call.  The caller resolves the runtime value from its
+    // own `ldc` / `N` (`algo3_decode_nr_align`), so honour it rather than
+    // warming a second variant — one alignment is warmed either way and
+    // the resident footprint is unchanged.  The clamp keeps a caller that
+    // supplies no alignment context on the previous behaviour.
+    //
+    // Asymmetric s8 has no per-tile warmer to pick (see
+    // `s8_without_aocl_warmer`), so skip rather than fall to the bf16 one.
+    if (s8_without_aocl_warmer(p)) { return; }
     if (p.num_threads > 0 && get_grp_matmul_aocl_stable_ntile()) {
-        constexpr int nr_align_cross
-                = 1; // backend default for aocl_dlp_blocked
+        const int nr_align_cross = std::max(1, p.nr_align);
         const int max_N = compute_max_n(p);
         const int stable = aocl_stable_n_thr(p.num_threads, max_N);
         const int max_align_slots = std::max(1, max_N / nr_align_cross);
@@ -1700,7 +1921,7 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
                 st_aocl.skipped_invalid += st_extra.skipped_invalid;
                 out_regime = CrossWarmRegime::aocl_per_tile_sym_quant;
             } else {
-                const bool int8_dlp = int8_aocl_warm_candidate(p);
+                const bool int8_dlp = int8_sym_quant_warm_candidate(p);
                 const auto st_extra = int8_dlp
                         ? warm_aocl_n_tile_sym_quant(p, stable, nr_align_cross)
                         : warm_aocl_n_tile(p, stable, nr_align_cross);
@@ -1752,16 +1973,18 @@ static void prepack_aocl_only_algo(
     // in-place full-weight primary LAST.  In normal (out-of-place) mode
     // nothing mutates W, so the historical primary-then-cross order stands.
     //
-    // Must use the SAME dtype-aware predicate as `prelude()`: it decides
-    // whether this call holds the warm latch, and the two would disagree if
-    // one keyed on the dtype and the other on the process mode alone.  A
-    // non-bf16 weight is never mutated, so it takes the primary-then-cross
+    // Must use the SAME predicate as `prelude()`: it decides whether this call
+    // holds the warm latch, and the two would disagree if one keyed on the
+    // buffer and the other on the process mode alone.  A weight that cannot be
+    // mutated (no declared capacity, not bf16) takes the primary-then-cross
     // branch and needs no reordering.
-    const bool mixed_inplace = mixed_inplace_for_wei(p.wei_dtype);
+    const bool mixed_inplace
+            = mixed_inplace_for_wei(p.wei_dtype, p.wei_buffer_capacity_bytes);
 
-    // The full-weight (prompt) primary warm.  bf16 takes the in-place path
-    // under mixed mode (via the flag inside `warm_pack_all_aocl_dlp_experts`);
-    // int8 sym-quant stays out-of-place (no in-place int8 path).
+    // The full-weight (prompt) primary warm.  Under mixed mode both bf16 and a
+    // capacity-declaring int8 sym-quant weight take the in-place path, decided
+    // inside the warmers by `warm_wct_for_full_weight` + `wei_inplace_fits`;
+    // W4A8 and an undeclared int8 stay out-of-place.
     auto warm_primary_full_weight = [&]() {
         const bool w4a8 = w4a8_aocl_warm_candidate(p);
         // W4A8 always resolves to a DLP backend through
@@ -1769,16 +1992,23 @@ static void prepack_aocl_only_algo(
         if (pre.inner_kernel != matmul_algo_t::aocl_dlp_blocked && !w4a8) {
             return;
         }
+        // Asymmetric s8 reorders into the plain s8 blocked LRU, which has
+        // no warmer; leave `primary_did_aocl_fw` false so cross_warm still
+        // gets its chance rather than being told a full weight was warmed.
+        if (s8_without_aocl_warmer(p)) { return; }
         if (w4a8) {
             st_aocl = warm_aocl_w4a8(p, p.w4a8_group_size,
                     w4a8_runtime_algo(scheduling_algo, pre.inner_kernel));
             primary_label = "aocl_full_weight_w4a8";
-        } else if (int8_aocl_warm_candidate(p)) {
+        } else if (int8_sym_quant_warm_candidate(p)) {
             // M1 — DQ-INT8 prompt reorders the full weight through the AOCL DLP
-            // sym-quant path (out-of-place), NOT the bf16 LRU.  CK is ALGO-3
-            // only, so the prompt phase always uses AOCL DLP.
+            // sym-quant path, NOT the bf16 LRU.  CK is ALGO-3 only, so the
+            // prompt phase always uses AOCL DLP.  In-place only under mixed
+            // mode, where the `mixed_inplace` arm below has already run
+            // cross_warm — the same ordering bf16 relies on.
             st_aocl = warm_aocl_sym_quant(p);
-            primary_label = "aocl_full_weight_sym_quant";
+            primary_label = mixed_inplace ? "aocl_full_weight_sym_quant_inplace"
+                                          : "aocl_full_weight_sym_quant";
         } else {
             st_aocl = warm_aocl(p);
             primary_label = mixed_inplace ? "aocl_full_weight_inplace"
@@ -1806,8 +2036,26 @@ static void prepack_aocl_only_algo(
         // all decode run out-of-place from the still-RAW weights.  Capture
         // completeness HERE — `warm_primary_full_weight()` overwrites `st_aocl`
         // with the prompt full-weight stats.
+        //
+        // "Nothing was skipped" is not enough, for the same reason the ALGO 3
+        // arm of `cross_warm` states above: a warm that attempted NOTHING
+        // satisfies it trivially.  `warm_pack_all_custom_kernel_experts`
+        // returns success with every counter zero when the host lacks the
+        // family's ISA, and a regime is recorded regardless — so without the
+        // attempt test an empty decode arena reads as fully warmed, the prompt
+        // mutates the weights, and decode re-derives its layout from the
+        // mutated bytes on the fallback the missing ISA forces it onto.
+        //
+        // A PER-TILE regime does not qualify: its keys embed `n_tile`, so a
+        // decode call on a different split asks for keys this warm never
+        // populated, and with the raw weights gone they cannot be rebuilt.
+        // See `cross_warm_regime_licenses_mutation`.
+        const bool cross_warm_attempted
+                = (st_ck.total_attempted + st_aocl.total_attempted) > 0;
         const bool cross_warm_complete = cwr != CrossWarmRegime::none
-                && st_ck.skipped_invalid == 0 && st_aocl.skipped_invalid == 0;
+                && cross_warm_regime_licenses_mutation(cwr)
+                && cross_warm_attempted && st_ck.skipped_invalid == 0
+                && st_aocl.skipped_invalid == 0;
         if (cross_warm_complete) {
             // ... then the in-place full-weight prompt mutation last.
             warm_primary_full_weight();
@@ -1825,6 +2073,8 @@ static void prepack_aocl_only_algo(
                         "cross-warm did not "
                         "fully populate the decode layout (regime=",
                         static_cast<int>(cwr),
+                        " ck_attempted=", st_ck.total_attempted,
+                        " aocl_attempted=", st_aocl.total_attempted,
                         " ck_skipped=", st_ck.skipped_invalid,
                         " aocl_skipped=", st_aocl.skipped_invalid,
                         "); skipping the in-place prompt mutation and "
@@ -1931,9 +2181,12 @@ void prepack_for_algo_3(const PrepackParams &p) {
     // DO hit fallback pay a small one-time per-call cost on first miss.
     // No correctness impact either way.
     // W4A8 per-tile warm follows its effective runtime backend.
+    // Asymmetric s8 is excluded outright — neither the per-tile nor the
+    // narrow-N full-weight arm below has a warmer for the plain s8
+    // blocked layout it reorders into (see `s8_without_aocl_warmer`).
     if ((pre.inner_kernel == matmul_algo_t::aocl_dlp_blocked || w4a8)
             && get_grp_matmul_aocl_stable_ntile() && p.num_threads > 0
-            && p.nr_align > 0 && !eligible_ck) {
+            && p.nr_align > 0 && !eligible_ck && !s8_without_aocl_warmer(p)) {
         const int max_N = compute_max_n(p);
         const int nr_align_eff = std::max(1, p.nr_align);
         const int stable = aocl_stable_n_thr(p.num_threads, max_N);
@@ -1946,7 +2199,7 @@ void prepack_for_algo_3(const PrepackParams &p) {
                         w4a8_runtime_algo(
                                 /*scheduling_algo=*/3, pre.inner_kernel));
                 primary_label = "aocl_per_tile_w4a8";
-            } else if (int8_aocl_warm_candidate(p)) {
+            } else if (int8_sym_quant_warm_candidate(p)) {
                 st_aocl = warm_aocl_n_tile_sym_quant(p, stable, nr_align_eff);
                 primary_label = "aocl_per_tile_sym_quant";
             } else {
@@ -1970,7 +2223,7 @@ void prepack_for_algo_3(const PrepackParams &p) {
                             p, /*stable=*/1, /*nr_align=*/1, a3_algo);
                     primary_label = "aocl_per_tile_w4a8";
                 }
-            } else if (int8_aocl_warm_candidate(p)) {
+            } else if (int8_sym_quant_warm_candidate(p)) {
                 st_aocl = warm_aocl_sym_quant(p);
                 primary_label = "aocl_full_weight_sym_quant";
             } else {

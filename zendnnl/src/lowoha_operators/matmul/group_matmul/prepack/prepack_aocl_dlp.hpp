@@ -115,11 +115,29 @@ struct AoclDlpPackProbeStats {
 /// call before an OMP parallel region; callers must NOT invoke
 /// this concurrently with any in-flight `run_dlp(...)` or
 /// `clear_aocl_matmul_weight_caches()` on other threads.
+/// `src_dtype` participates because the gemm-hint decision is made on the
+/// (src, wei) pair via `aocl_uses_unified_dlp_metadata` — the same predicate
+/// `run_dlp(...)` uses.  Hinting where the dispatcher does not, or the
+/// reverse, populates a key it never queries.
+///
+/// `num_threads` must be the value the dispatcher will run this weight under:
+/// with `ZENDNNL_DLP_M_HINT` live (default 32) the runtime keys on `m_hint`
+/// and `nt_hint` and reorders under them, and AOCL treats `nt_hint` as part of
+/// the reordered layout's identity.  Warming under a different count populates
+/// a key the dispatcher never queries.  `0` resolves it the same way
+/// `run_dlp(...)` does for a caller that passed no thread count.
+///
+/// `allow_inplace = false` forces the out-of-place reorder even under WC=2
+/// mixed mode.  The in-place variant REWRITES the caller's weight buffer, so
+/// a caller that cannot prove every other layout has already been packed from
+/// the raw weights must opt out.
 status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         const std::vector<int> &K, const std::vector<int> &N,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
-        data_type_t wei_dtype, AoclDlpPackProbeStats &stats);
+        data_type_t src_dtype, data_type_t wei_dtype,
+        AoclDlpPackProbeStats &stats, int32_t num_threads = 0,
+        bool allow_inplace = true);
 
 /// Per-tile variant of `warm_pack_all_aocl_dlp_experts`, sized for
 /// ALGO 3 flat_n_tile's strict-stable plan
@@ -200,13 +218,19 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
 ///     reorder — the exact key a per-group `{M,G}` src / `{G,N}` wei
 ///     call builds at runtime.  Warms the AOCL fallback a per-group layer
 ///     routed to ALGO 1/2/5/6 (or an ALGO-3 CK-refused expert) will read.
+///
+/// `wei_buffer_capacity_bytes` is what the caller GUARANTEES is writable at
+/// each expert's weight pointer; `allow_inplace = false` refuses the in-place
+/// reorder regardless, on the same contract as the bf16 sibling above — it
+/// rewrites the caller's weight buffer, so only a caller that can prove every
+/// other layout has already been packed from the raw weights may permit it.
 status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
-        data_type_t wei_dtype, AoclDlpPackProbeStats &stats,
-        int group_size = 0);
+        data_type_t wei_dtype, AoclDlpPackProbeStats &stats, int group_size = 0,
+        size_t wei_buffer_capacity_bytes = 0, bool allow_inplace = true);
 
 /// DQ-INT8 symmetric-quant PER-TILE warmer — per-tile sibling of
 /// `warm_pack_all_aocl_dlp_experts_sym_quant`, and the sym-quant

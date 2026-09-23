@@ -227,16 +227,16 @@ INST(6, 4) INST(1, 2) INST(2, 2) INST(3, 2) INST(4, 2) INST(6, 2) INST(8, 2)
         INST(1, 1) INST(2, 1) INST(3, 1) INST(4, 1) INST(6, 1) INST(8, 1)
                 INST(12, 1)
 #undef INST
-        // clang-format on
+// clang-format on
 
-        // ============================================================================
-        // Microkernel dispatch
-        //
-        // Selects the best kernel for given MR and NR, respecting register limits.
-        // For MR values without a matching NR=64 kernel, falls back to NR=32 or 16.
-        // ============================================================================
-        ZENDNNL_TARGET("avx512f,avx512bf16,fma") bf16_ukernel_fn_t
-        select_bf16_ukernel(int MR, int NR) {
+// ============================================================================
+// Microkernel dispatch
+//
+// Selects the best kernel for given MR and NR, respecting register limits.
+// For MR values without a matching NR=64 kernel, falls back to NR=32 or 16.
+// ============================================================================
+ZENDNNL_TARGET("avx512f,avx512bf16,fma")
+bf16_ukernel_fn_t select_bf16_ukernel(int MR, int NR) {
     switch (NR) {
         case 64:
             switch (MR) {

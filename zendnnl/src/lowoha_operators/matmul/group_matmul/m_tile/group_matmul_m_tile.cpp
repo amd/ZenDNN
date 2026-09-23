@@ -569,7 +569,8 @@ void flat_m_tile(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_2(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    get_grp_matmul_custom_kernel(), num_threads,
+                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
@@ -1336,24 +1337,36 @@ void flat_m_tile(const std::vector<char> &layout,
                 std::memory_order_relaxed);
     }
 
-// ── Execute: always use full num_threads OMP team ──
-// Threads without a slot assignment simply exit.  Using the full team
-// ensures consistent physical thread placement across CCDs regardless
-// of how many threads are actively doing work.  The tid → (expert,
-// local_tid, team_size) mapping was filled in by
-// `plan_m_tile_single_tier_assignment` above (Phase 2 fit + Phase 3
-// CCD-striped placement).
+    // ── Execute: always use full num_threads OMP team ──
+    // Threads without a slot assignment simply exit.  Using the full team
+    // ensures consistent physical thread placement across CCDs regardless
+    // of how many threads are actively doing work.  The tid → (expert,
+    // local_tid, team_size) mapping was filled in by
+    // `plan_m_tile_single_tier_assignment` above (Phase 2 fit + Phase 3
+    // CCD-striped placement).
+    bool mt_short_team = false;
 #pragma omp parallel num_threads(num_threads)
     {
-        const int tid = omp_get_thread_num();
-        const int e = plan.tid_to_expert[tid];
-        if (e >= 0) {
-            execute_m_tile_act(e, plan.tid_to_local[tid], plan.tid_to_team[tid],
-                    layout, transA, transB, M, N, K, alpha, src, lda, weight,
-                    ldb, bias, beta, dst, ldc, is_weights_const, params,
-                    src_elem, dst_elem, algo, fused_act, act_dtype);
+        // `plan.tid_to_expert` was sized for the REQUESTED team. A runtime
+        // that grants fewer threads (OMP_DYNAMIC / OMP_THREAD_LIMIT / an
+        // already-active outer level) leaves every expert mapped above the
+        // real team uncomputed, with the call still reporting success.
+        if (omp_get_num_threads() < num_threads) {
+#pragma omp single
+            { mt_short_team = true; }
+        } else {
+            const int tid = omp_get_thread_num();
+            const int e = plan.tid_to_expert[tid];
+            if (e >= 0) {
+                execute_m_tile_act(e, plan.tid_to_local[tid],
+                        plan.tid_to_team[tid], layout, transA, transB, M, N, K,
+                        alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                        is_weights_const, params, src_elem, dst_elem, algo,
+                        fused_act, act_dtype);
+            }
         }
     }
+    if (mt_short_team) { set_mtile_mode("error_m_tile_short_team"); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1613,7 +1626,9 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_2(
             group_matmul_prepack::build_prepack_params(weight_w13, K_in, N_w13,
                     ldb_w13, transB, is_weights_const, params_w13, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    get_grp_matmul_custom_kernel(), num_threads,
+                    algo3_decode_nr_align(
+                            M, N_w13, ldc_w13, fused_act, params_w13),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha_w13,
                     /*beta=*/&beta_w13));

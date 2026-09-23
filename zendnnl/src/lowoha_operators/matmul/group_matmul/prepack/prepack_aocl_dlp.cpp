@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <functional>
 
+#include "common/hash_utils.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
@@ -92,7 +93,8 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         const std::vector<int> &K, const std::vector<int> &N,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
-        data_type_t wei_dtype, AoclDlpPackProbeStats &stats) {
+        data_type_t src_dtype, data_type_t wei_dtype,
+        AoclDlpPackProbeStats &stats, int32_t num_threads, bool allow_inplace) {
 
     if (total_count <= 0) { return status_t::success; }
 
@@ -129,7 +131,8 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-    const int32_t warm_wct = warm_wct_for_full_weight_bf16(weight_cache_type);
+    const int32_t warm_wct
+            = allow_inplace ? warm_wct_for_full_weight(weight_cache_type) : 1;
 
     // Only BF16 wired today (matches the current target envelope and
     // our active bench config).  Other dtypes return success with every reachable
@@ -142,6 +145,42 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         stats.total_attempted += static_cast<int>(bound);
         stats.skipped_invalid += static_cast<int>(bound);
         return status_t::success;
+    }
+
+    // Mirror `run_dlp(...)`'s DLP gemm-hint wiring through the predicate they
+    // share, so both resolve the hint decision identically.  For a family that
+    // carries unified metadata the dispatcher folds `m_hint`/`nt_hint` into
+    // the cache key AND performs the reorder under those hints whenever
+    // `ZENDNNL_DLP_M_HINT` is live; it defaults to 32.  A warm that skipped
+    // either addresses a slot the dispatcher never queries: under WC=1 that
+    // costs an unread cache entry, and under WC=2 the mutation lands in one
+    // slot while the lookup misses in another and reorders the already-blocked
+    // bytes.  Hinting where the dispatcher does NOT has the same effect, so
+    // the decision keys on the src dtype as well as the wei dtype.
+    //
+    // `nt_hint` has to be resolved from the same `num_threads` the dispatcher
+    // will use, and cannot simply be left out of the key: AOCL treats it as
+    // part of the reordered layout's identity — the reorder "packed the panel
+    // to a width derived from" the thread count, and a GEMM over that buffer
+    // on a differently sized pool is refused with `DLP_CLSC_HINT_MISMATCH`.
+    // `m_hint` is deliberately not compared against the call's m, so one
+    // reorder serves every batch size.
+    //
+    // bf16 weights never carry sym-quant scales, hence the literal `false`.
+    dlp_gemm_hints_t dlp_hints {};
+    dlp_metadata_t dlp_fallback_md {};
+    dlp_metadata_t *reorder_md = nullptr;
+    size_t cache_extra_hash = 0;
+    if (aocl_uses_unified_dlp_metadata(
+                src_dtype, wei_dtype, /*is_s8_sym_quant_scales=*/false)) {
+        reorder_md = aocl_dlp_hints_metadata(
+                /*postop_md=*/nullptr, dlp_hints, dlp_fallback_md, num_threads);
+    }
+    if (reorder_md != nullptr) {
+        cache_extra_hash = zendnnl::common::hash_combine(
+                cache_extra_hash, dlp_hints.m_hint);
+        cache_extra_hash = zendnnl::common::hash_combine(
+                cache_extra_hash, dlp_hints.nt_hint);
     }
 
     for (size_t i = 0; i < bound; ++i) {
@@ -182,12 +221,12 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
             continue;
         }
 
-        // Cache key matches `run_dlp(...)` in aocl_kernel.cpp:1696 so
-        // the warmer's MISS populates the same slot a subsequent
-        // dispatcher will look up.
+        // Cache key matches the one `run_dlp(...)` builds for this weight,
+        // hints included, so the warmer's MISS populates the same slot a
+        // subsequent dispatcher will look up.
         Key_matmul key(transB[i], K[i], N[i], ldb[i], weight[i],
                 static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
-                /*extra_input_hash=*/0);
+                cache_extra_hash);
 
         void *reordered_unused = nullptr;
         // Honour the return.  The out-of-place (weight_cache_type=1) path
@@ -201,7 +240,7 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
                 /*trans=*/(transB[i] ? 't' : 'n'),
                 /*mem_format_b=*/'n', aocl_get_reorder_buf_size_bf16bf16f32of32,
                 aocl_reorder_bf16bf16f32of32,
-                /*weight_cache_type=*/warm_wct);
+                /*weight_cache_type=*/warm_wct, reorder_md);
         if (warmed) {
             ++stats.packed_ok;
         } else {
@@ -240,19 +279,29 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
-        data_type_t wei_dtype, AoclDlpPackProbeStats &stats, int group_size) {
+        data_type_t wei_dtype, AoclDlpPackProbeStats &stats, int group_size,
+        size_t wei_buffer_capacity_bytes, bool allow_inplace) {
 
     if (total_count <= 0) { return status_t::success; }
 
-    // Production-cache gate — same as the bf16 full-weight warmer.
+    // Production-cache gate — the SAME predicate as the bf16 full-weight
+    // warmer, which is the point: the runtime consults the LRU for WC==1, and
+    // for WC==2 only under AUTO mixed mode (where this layout is pre-warmed
+    // from the RAW weights before the full-weight in-place mutation).
+    //
+    // A PINNED ALGO leaves WC at 2 with the mixed flag clear, and warming
+    // there is worse than useless: cross-warm has already returned early, so
+    // there is exactly one layout, and a warm entry would be an OUT-OF-PLACE
+    // copy that the runtime then HITS -- costing a full extra copy of every
+    // expert and denying the lazy first-call in-place reorder that a pinned
+    // ALGO is otherwise entitled to.  Skipping is what `should_warm_weight_
+    // cache` already documents for this case, and what bf16 has always done;
+    // this warmer was testing `== 0` instead and so kept running.
     const int32_t weight_cache_type
             = matmul_config_t::instance().get_weight_cache();
-    // Out-of-place warmer: also run under WC==2 in the grouped AUTO
-    // mixed-in-place mode so this layout is pre-warmed from the RAW weights
-    // before the bf16 full-weight AOCL in-place mutation.  Stays
-    // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
-    // weight_cache_type=1); only the bf16 full-weight warmer mutates W.
-    if (weight_cache_type == 0) { return status_t::success; }
+    if (!should_warm_weight_cache(weight_cache_type)) {
+        return status_t::success;
+    }
 
     const size_t bound = std::min<size_t>({static_cast<size_t>(total_count),
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
@@ -317,11 +366,22 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         // warmed (cache miss → reorder+insert; or a cache hit, which under
         // `weight_cache_type=1` also falls through to `return true`).  It
         // only returns `false` on an `aligned_alloc` failure in the
-        // weight_cache_type 0/2 branches — paths this warmer does not take
-        // (it always passes `weight_cache_type=1`), so today this is always
-        // `true`.  Honour the return anyway so a transient reorder failure
-        // (or a future cache-mode change) is reported as `skipped_invalid`
-        // instead of being silently counted as a successful pack.
+        // weight_cache_type 0/2 branches.  Honour the return so a transient
+        // reorder failure is reported as `skipped_invalid` instead of being
+        // silently counted as a successful pack.
+        //
+        // Without an in-place warm the prepack materialises a second full
+        // copy that the runtime then HITS, so the in-place path is never
+        // reached and a declared capacity buys nothing.  But the in-place
+        // variant REWRITES the caller's weights, so it is only correct once
+        // every other layout has been packed from the raw bytes: exactly the
+        // contract `allow_inplace` carries, identical to the bf16 sibling.
+        // `warm_wct_for_full_weight` then honours an explicit WC=1, and
+        // `wei_inplace_fits` inside the reorder decides whether the declared
+        // capacity actually covers the blocked image.
+        const int32_t warm_wct = allow_inplace
+                ? warm_wct_for_full_weight(weight_cache_type)
+                : 1;
         const bool warmed = reorderAndCacheWeightsSymQuant<int8_t>(key,
                 weight[i], reordered_unused, K[i], N[i], ldb[i],
                 /*order=*/'r',
@@ -329,7 +389,7 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
                 /*mem_format_b=*/'n',
                 aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
                 aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
-                /*weight_cache_type=*/1);
+                /*weight_cache_type=*/warm_wct, wei_buffer_capacity_bytes);
         if (warmed) {
             ++stats.packed_ok;
         } else {
@@ -513,14 +573,21 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
             // (weight_cache_type=1) path this per-tile warmer always takes; the
             // dead `else ++skipped` branch was dropped — see file-level counter
             // semantics block.
-            (void)reorderAndCacheWeights<int16_t>(key, w_tile, reordered_unused,
-                    K[i], n_tile, ldb[i],
-                    /*order=*/'r',
-                    /*trans=*/(transB[i] ? 't' : 'n'),
-                    /*mem_format_b=*/'n',
-                    aocl_get_reorder_buf_size_bf16bf16f32of32,
-                    aocl_reorder_bf16bf16f32of32,
-                    /*weight_cache_type=*/1);
+            // Honour the return, as the three sibling warmers do. It is
+            // false on an allocation failure, and `skipped_invalid == 0` is
+            // what the mixed-in-place path tests before it decides the
+            // cross-warm was complete enough to mutate the caller's weights.
+            if (!reorderAndCacheWeights<int16_t>(key, w_tile, reordered_unused,
+                        K[i], n_tile, ldb[i],
+                        /*order=*/'r',
+                        /*trans=*/(transB[i] ? 't' : 'n'),
+                        /*mem_format_b=*/'n',
+                        aocl_get_reorder_buf_size_bf16bf16f32of32,
+                        aocl_reorder_bf16bf16f32of32,
+                        /*weight_cache_type=*/1)) {
+                ++stats.skipped_invalid;
+                continue;
+            }
             ++stats.packed_ok;
         }
     }
@@ -823,6 +890,13 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
 
         const int k = K[i], n = N[i];
 
+        // Same full-K fallback the full-weight warmer applies: `group_size`
+        // is 0 for a per-channel scale, but the runtime keys on
+        // `sym_quant_group_size`, which returns K in that case. Without this
+        // the warm wrote hash(0) and every runtime lookup missed on hash(K),
+        // leaving a full extra weight copy resident and never read.
+        // `group_size > 0` is guaranteed by the early return at the top of
+        // this function, so no full-K fallback is needed here.
         const int64_t src_grp = static_cast<int64_t>(group_size);
         const bool native = w4a8_uses_native_s4(algo);
         void *s8_buf = nullptr;

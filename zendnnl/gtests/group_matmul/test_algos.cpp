@@ -130,7 +130,7 @@ TEST_P(TestFusedMoEAlgos, Correctness) {
     // n_thr > 1 threads per expert.  That is the row-split path the
     // matmul?activation barrier + GroupNTileContext::apply_swiglu_oai
     // correctness fix exists to protect.
-    EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT", "1");
+    NTileFusedActOverride fused_act_guard(true);
 
     // Allocate: input-side may be bf16; output-side may differ (mixed_prec).
     TypedBuffers src, w1, d1, d1r, w2, d2, d2r;
@@ -414,8 +414,11 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
     // contaminate the later parameterised run.
     {
         AlgoEnvGuard algo_guard(1);
-        EnvVarGuard tight_guard("ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", "0");
-        EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "0");
+        FusedMoeTightOverride tight_guard(false);
+        // Override atom, not setenv: the getter latches in a `static const`
+        // on first read, so an EnvVarGuard here flips nothing and the
+        // reference pass silently ran the same config as the test pass.
+        CustomKernelOverride custom_guard(false);
 
         ASSERT_EQ(run_legacy_2call_ref(num_ops, M, K, N_gate_up, K_down, H,
                           is_bf16, act_type, srcs_ref, wei1, wei2, dst1_ref,
@@ -431,11 +434,9 @@ TEST_P(TestFusedMoEAlgoCustom, Correctness) {
     // separate-pass activation and we'd miss that code path).
     {
         AlgoEnvGuard algo_guard(p.algo);
-        EnvVarGuard tight_guard(
-                "ZENDNNL_GRP_MATMUL_FUSED_MOE_TIGHT", p.tight ? "1" : "0");
-        EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL",
-                p.custom_kernel ? "1" : "0");
-        EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT", "1");
+        FusedMoeTightOverride tight_guard(p.tight);
+        CustomKernelOverride custom_guard(p.custom_kernel);
+        NTileFusedActOverride fused_act_guard(true);
 
         auto fused = make_fused_moe_op2(num_ops, H, wei2, no_bias);
         // fused.dst_down / ldc_down intentionally empty - internal-alloc.
@@ -582,7 +583,10 @@ static void run_one_algo_custom_pass(const AlgoCustomParam &p,
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_params;
     using zendnnl::lowoha::matmul::grp_matmul_gated_act_t;
 
-    EnvVarGuard custom_guard("ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", custom_value);
+    // See the note at the parameterised site: setenv cannot move a latched
+    // `static const` getter, so this must use the override atom.
+    CustomKernelOverride custom_guard(
+            custom_value != nullptr && custom_value[0] != '0');
 
     // Zero the dst buffers so any untouched region (e.g. cols
     // [dim:2*dim] under the custom-kernel swiglu write) has a
@@ -646,8 +650,7 @@ TEST_P(TestGroupMatmulAlgoCustom, Correctness) {
     // still valuable because it regression-tests the fallback path.
 
     AlgoEnvGuard algo_guard(p.algo);
-    EnvVarGuard fused_act_guard("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT",
-            p.n_tile_fused_act ? "1" : "0");
+    NTileFusedActOverride fused_act_guard(p.n_tile_fused_act);
 
     // ?? Prepare shared src / wei / bias (both runs see identical inputs) ??
     std::vector<std::vector<bfloat16_t>> src(
@@ -992,6 +995,192 @@ TEST_P(TestGroupMatmulInt8AlgoCustom, Correctness) {
     }
 }
 
+// ===============================================================================
+// Large-shape DQ-INT8 differential (CK vs AOCL DLP), ALGO 3.
+//
+// `TestGroupMatmulInt8AlgoCustom` runs the same differential at dim=32/64 and
+// K=64.  Those shapes barely tile: with N_op1=64 and pack_nr=32 the planner
+// gets two column tiles, so the per-tile scale slicing, the per-tile weight
+// offsetting and the prepack key derivation are exercised only trivially.
+//
+// A deployment-scale MoE decode is nothing like that: a large K over tens of
+// active experts splits N across the whole team, and every per-tile path runs
+// for real.  Accuracy differences have been seen at that scale with no
+// library-level test reproducing them, so this closes the shape gap between
+// the unit coverage and a realistic configuration.
+TEST(TestGroupMatmulInt8LargeShape, CkVsDlpAtProductionDims) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    reset_grp_matmul_caches();
+
+    // Hidden 2048, intermediate 512, so gate|up gives N_op1 = 1024.  The
+    // expert count and per-expert row count are representative of a batched
+    // MoE decode, where most experts receive only a handful of tokens.
+    Int8AlgoCustomParam p {/*act_int=*/1 /*silu_and_mul*/, /*M=*/4,
+            /*num_ops=*/46, /*dim=*/512};
+    const int N_op1 = 2 * p.dim; // 1024
+    const int K = 2048;
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_dq_inputs(tf, p, N_op1, K, src, wei, bias, dst));
+
+    AlgoEnvGuard algo_guard(3);
+    const auto act_type = grp_matmul_gated_act_t::silu_and_mul;
+
+    std::vector<std::vector<bfloat16_t>> dst_dlp, dst_ck;
+    ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/false, src, wei, bias,
+            dst, act_type, dst_dlp, p.M, N_op1));
+    for (auto &d : dst) {
+        auto *raw = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+        std::fill(
+                raw, raw + static_cast<size_t>(p.M) * N_op1, bfloat16_t(0.0f));
+    }
+    ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei, bias,
+            dst, act_type, dst_ck, p.M, N_op1));
+
+    // Report the WORST deviation rather than aborting on the first, so a
+    // failure says how bad and where instead of just "not equal".
+    const auto tol = tol_act(/*is_bf16=*/true);
+    double worst_rel = 0.0;
+    int worst_e = -1, worst_m = -1, worst_n = -1;
+    size_t out_of_band = 0;
+    for (int e = 0; e < p.num_ops; ++e) {
+        for (int m = 0; m < p.M; ++m) {
+            for (int n = 0; n < p.dim; ++n) {
+                const size_t idx = static_cast<size_t>(m) * N_op1 + n;
+                const double a = static_cast<float>(dst_dlp[e][idx]);
+                const double b = static_cast<float>(dst_ck[e][idx]);
+                const double band = std::abs(a) * tol.rel + tol.abs;
+                if (std::abs(b - a) > band) { ++out_of_band; }
+                const double denom = std::max(std::abs(a), 1e-6);
+                const double rel = std::abs(b - a) / denom;
+                if (rel > worst_rel) {
+                    worst_rel = rel;
+                    worst_e = e;
+                    worst_m = m;
+                    worst_n = n;
+                }
+            }
+        }
+    }
+    const size_t total = static_cast<size_t>(p.num_ops) * p.M * p.dim;
+    EXPECT_EQ(out_of_band, 0u)
+            << out_of_band << " of " << total << " elements outside the bf16 "
+            << "band; worst rel=" << worst_rel << " at expert=" << worst_e
+            << " m=" << worst_m << " n=" << worst_n << " (K=" << K
+            << " N_op1=" << N_op1 << " experts=" << p.num_ops << ")";
+}
+
+// Independent oracle for the production DQ-INT8 shape.
+//
+// `CkVsDlpAtProductionDims` above is a differential: it only asserts the two
+// backends agree.  Both share the same quantization front-end and activation
+// definition, so an error in either is invisible to a comparison between
+// them -- agreement is not correctness.  This computes silu_and_mul over the
+// same inputs in scalar f64, independently of either kernel, so a result
+// they both get wrong has something to disagree with.
+//
+// The reference quantizes the source the same way the runtime hoist does
+// (symmetric per-token, `max|row| / 127`, round-to-nearest) so the comparison
+// isolates the GEMM and epilogue rather than re-measuring quantization noise.
+// The band is correspondingly a bf16-accumulation band, not a bit-match.
+TEST(TestGroupMatmulInt8LargeShape, ScalarOracleAtProductionDims) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    reset_grp_matmul_caches();
+
+    // Smaller expert count than the differential: the oracle is O(M*N*K) in
+    // scalar f64 per expert, and the property under test does not need 46.
+    Int8AlgoCustomParam p {/*act_int=*/1 /*silu_and_mul*/, /*M=*/4,
+            /*num_ops=*/4, /*dim=*/512};
+    const int N_op1 = 2 * p.dim;
+    const int K = 2048;
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_dq_inputs(tf, p, N_op1, K, src, wei, bias, dst));
+
+    AlgoEnvGuard algo_guard(3);
+    std::vector<std::vector<bfloat16_t>> got;
+    ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei, bias,
+            dst, grp_matmul_gated_act_t::silu_and_mul, got, p.M, N_op1));
+
+    double worst_rel = 0.0;
+    size_t out_of_band = 0;
+    for (int e = 0; e < p.num_ops; ++e) {
+        const auto *s = static_cast<const bfloat16_t *>(
+                src[e].get_raw_handle_unsafe());
+        const auto *w
+                = static_cast<const int8_t *>(wei[e].get_raw_handle_unsafe());
+        ASSERT_EQ(wei[e].get_quant_scale_data_type(), data_type_t::f32)
+                << "oracle reads the weight scale as f32";
+        const auto *wsc = static_cast<const float *>(
+                wei[e].get_quant_scale_raw_handle_const());
+
+        for (int m = 0; m < p.M; ++m) {
+            // Symmetric per-token source quantization, mirroring the hoist.
+            double amax = 0.0;
+            for (int k = 0; k < K; ++k) {
+                amax = std::max(amax,
+                        std::abs(static_cast<double>(s[(size_t)m * K + k])));
+            }
+            const double sscale = (amax > 0.0) ? amax / 127.0 : 1.0;
+
+            std::vector<int32_t> qs(K);
+            for (int k = 0; k < K; ++k) {
+                const double v
+                        = static_cast<double>(s[(size_t)m * K + k]) / sscale;
+                qs[k] = static_cast<int32_t>(std::lrint(v));
+            }
+
+            for (int n = 0; n < p.dim; ++n) {
+                auto col = [&](int c) {
+                    int64_t acc = 0;
+                    for (int k = 0; k < K; ++k) {
+                        acc += static_cast<int64_t>(qs[k])
+                                * static_cast<int64_t>(
+                                        w[(size_t)k * N_op1 + c]);
+                    }
+                    return static_cast<double>(acc) * sscale
+                            * static_cast<double>(wsc[c]);
+                };
+                const double gate = col(n);
+                const double up = col(n + p.dim);
+                const double ref = (gate / (1.0 + std::exp(-gate))) * up;
+
+                const double val
+                        = static_cast<double>(got[e][(size_t)m * N_op1 + n]);
+                // bf16 output carries ~3 decimal digits, and the reference
+                // accumulates in f64 where the kernel accumulates in s32 then
+                // converts, so an absolute floor is needed for near-zero
+                // products where a relative band is meaningless.
+                const double band = std::abs(ref) * 0.05 + 0.05;
+                if (std::abs(val - ref) > band) { ++out_of_band; }
+                const double rel
+                        = std::abs(val - ref) / std::max(std::abs(ref), 1e-6);
+                worst_rel = std::max(worst_rel, rel);
+            }
+        }
+    }
+    const size_t total = static_cast<size_t>(p.num_ops) * p.M * p.dim;
+    EXPECT_EQ(out_of_band, 0u)
+            << out_of_band << " of " << total
+            << " elements disagree with the scalar oracle; worst rel="
+            << worst_rel << " (K=" << K << " N_op1=" << N_op1
+            << " experts=" << p.num_ops << ")";
+}
+
 static std::vector<Int8AlgoCustomParam> make_int8_algo_custom_params() {
     std::vector<Int8AlgoCustomParam> out;
     // Four activations × two shapes.  We keep the grid tight — the
@@ -1184,6 +1373,57 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8PerGroupAlgos,
                 {/*M=*/1, /*num_ops=*/4, /*dim=*/768, /*G=*/2}, // decode wide-N
         }),
         Int8PerGroupAlgoName);
+
+// ===============================================================================
+// Per-group group-size validation (plain s8 {G,N})
+//
+// The AOCL sym-quant reorder that serves per-group symmetric quant needs K to
+// split evenly into G groups AND the resulting group size to be a multiple
+// of 4.  W4A8 has always enforced both (`validate_w4a8_inputs`); plain s8
+// `{G, N}` reached the same reorder unchecked, so a G that divides K but
+// leaves `K/G % 4 != 0` produced wrong numbers instead of a refusal.
+//
+// The parity suite above cannot catch this: every K/G it uses is a power of
+// two >= 4, so the constraint is satisfied by construction.  These cases pick
+// a G that divides K but yields a group size of 6, and a control G that
+// yields 12.
+// ===============================================================================
+TEST(GroupMatmulInt8PerGroupValidation, RejectsGroupSizeNotMultipleOfFour) {
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    constexpr int kK = 48; // 48 / 8 = 6, divides evenly but 6 % 4 != 0
+    const Int8PerGroupAlgoParam p {/*M=*/4, /*num_ops=*/2, /*dim=*/64, /*G=*/8};
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_pergroup_inputs(tf, p, p.dim, kK, src, wei, bias, dst));
+    ASSERT_EQ(kK % p.G, 0) << "the G under test must still divide K evenly, so "
+                              "the refusal is attributable to the group size";
+    EXPECT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                      matmul_algo_t::aocl_dlp_blocked,
+                      /*alpha=*/1.0f, /*beta=*/0.0f),
+            status_t::failure)
+            << "K/G = " << (kK / p.G)
+            << " is not a multiple of 4; the call must be refused rather than "
+               "run on a group size the sym-quant reorder cannot honour";
+}
+
+TEST(GroupMatmulInt8PerGroupValidation, AcceptsGroupSizeMultipleOfFour) {
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    constexpr int kK = 48; // 48 / 4 = 12, a multiple of 4
+    const Int8PerGroupAlgoParam p {/*M=*/4, /*num_ops=*/2, /*dim=*/64, /*G=*/4};
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_pergroup_inputs(tf, p, p.dim, kK, src, wei, bias, dst));
+    EXPECT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                      matmul_algo_t::aocl_dlp_blocked,
+                      /*alpha=*/1.0f, /*beta=*/0.0f),
+            status_t::success)
+            << "K/G = " << (kK / p.G)
+            << " satisfies the reorder's contract and must still run";
+}
 
 // ===============================================================================
 // [8c-bf16] TestGroupMatmulInt8AlgoCustomBf16Scale — DQ-INT8 with BF16 scales
@@ -3678,26 +3918,62 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
             << "mixed-in-place flag must be set when eligible";
 }
 
-// The mixed-in-place gate also requires the custom kernel ON.  With CK off,
-// decode falls to the AOCL per-tile path whose tight (nr_align=2) variant is
-// not cross-warmed, so a decode after the prompt's in-place mutation could
-// reorder from the already-mutated buffer.  AUTO + WC=2 + CK OFF must
-// therefore take the safe DOWNGRADE to out-of-place (1).
+// CK OFF downgrades to out-of-place.  The decode layout cross-warm packs with
+// the custom kernel off is the AOCL per-tile one, whose keys embed
+// `(col_start, n_tile)`.  That tracks `nr_align` and a narrow-N escape
+// evaluated over the ACTIVE expert set, so a later decode call can build keys
+// the warm never populated; once the prompt has rewritten the weight buffer
+// those cannot be rebuilt.  Only the shape-keyed custom-kernel pack licenses
+// the mutation, so WC falls back to 1 here and every in-place-eligible weight
+// keeps its out-of-place copy.
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0); // AUTO
-    CustomKernelOverride ck_off(false); // CK off -> mixed ineligible
+    CustomKernelOverride ck_off(false);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
     auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 1)
-            << "AUTO + WC=2 with custom kernel OFF must downgrade to "
-               "out-of-place "
-               "(the AOCL per-tile tight decode variant is not cross-warmed)";
+            << "AUTO + WC=2 with the custom kernel OFF must downgrade to "
+               "out-of-place: the AOCL per-tile decode layout is split-keyed "
+               "and cannot license the in-place prompt mutation";
     EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
-            << "mixed-in-place flag must be clear when CK is off";
+            << "mixed-in-place must not engage without the custom-kernel pack";
+}
+
+// Correctness companion: with CK OFF the WC=2 request is downgraded, so the
+// numbers must match the WC=1 reference exactly -- nothing mutated the weight
+// buffer on either leg.  Keeping the comparison guards the downgrade itself:
+// were the licence ever widened back, this is the test that would catch decode
+// reading an in-place-mutated buffer as raw.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2MatchesWc1) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    MinRunResult ref, downgraded;
+    {
+        reset_grp_matmul_caches();
+        CustomKernelOverride ck_off(false);
+        WeightCacheGuard wc(1);
+        ref = run_min_grp_matmul();
+    }
+    {
+        reset_grp_matmul_caches();
+        CustomKernelOverride ck_off(false);
+        WeightCacheGuard wc(2);
+        downgraded = run_min_grp_matmul();
+    }
+    EXPECT_FALSE(zendnnl::common::matmul_config_t::instance()
+                         .get_grp_auto_mixed_inplace())
+            << "mixed-in-place must not have engaged for a CK-off AUTO run";
+    const double d = max_abs_diff(ref.dst, downgraded.dst);
+    EXPECT_LT(d, 1e-2) << "CK-off WC=2 (downgraded) must match WC=1; "
+                          "max_abs_diff="
+                       << d;
 }
 
 // Correctness: AUTO + WC=2 mixed-in-place must produce the SAME result as

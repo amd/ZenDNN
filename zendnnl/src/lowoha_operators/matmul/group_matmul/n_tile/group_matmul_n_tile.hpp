@@ -204,7 +204,7 @@ struct PerThreadScratch {
 };
 
 // Grow a per-thread scratch to at least `need` bytes, 64-byte aligned.
-// Returns false on alloc failure (caller signals via alloc_fail atomic
+// Returns false on alloc failure (caller signals via the abort_code atomic
 // + post-OMP-region check).
 inline bool grow_scratch(PerThreadScratch &s, size_t need) {
     if (need <= s.cap) return true;
@@ -325,6 +325,9 @@ inline std::atomic<int> s_grp_matmul_decode_proportional_override {-1};
 //   default; the env is retained as an escape hatch.  Mid-process env
 //   changes have no effect (static const).
 inline bool get_grp_n_tile_fused_act() {
+    const int ovr = test_api::s_grp_n_tile_fused_act_override.load(
+            std::memory_order_relaxed);
+    if (ovr >= 0) return ovr != 0;
     static const bool v = []() {
         const char *e = std::getenv("ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT");
         if (e == nullptr || e[0] == '\0') return true; // default: ON
@@ -860,9 +863,10 @@ inline void sort_indices_by_m(
 /// on return.  Controlled by `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` (master,
 /// cached, default ON) AND `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` (int8
 /// sub-toggle, cached, default ON — only consulted for DQ-INT8 calls;
-/// bf16 calls ignore it).  Both default to ON when unset; set the env
-/// to "0" to opt out (master "0" disables CK for all dtypes; int8 "0"
-/// disables only the DQ-INT8 fast path, leaving bf16 CK active).
+/// bf16 calls ignore it).  So both bf16 and DQ-INT8 reach CK by default,
+/// and the master switch means the same thing for every dtype.  Set the
+/// int8 sub-toggle to "0" to route DQ-INT8 back to the AOCL DLP sym-quant
+/// path instead.  Master "0" disables CK for all dtypes.
 /// W4A8 forces CK OFF regardless of either environment setting.
 ///
 /// Even with the envs enabled, the dispatcher's per-call contract
@@ -921,14 +925,25 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
 }
 
 /// Effective N-column alignment for the per-thread split:
-///   max(backend_nr, kctx.pack_nr if enabled, 2 if pair_aligned).
+///   max(backend_nr, kctx.pack_nr if the custom kernel will RUN, 2 if
+///   pair_aligned).
 /// `backend_nr` from backend_n_align(algo); `pair_aligned`=true when
 /// activation requires even col boundaries (e.g. swiglu_oai_mul must
 /// keep gate+up pairs on the same thread).
+///
+/// `ck_will_run` is the resolved `use_custom`, NOT `kctx.enabled`.  The two
+/// differ whenever the context prepared successfully but the call was then
+/// disqualified -- a per-group `{G, N}` weight scale, or the wide fused
+/// swiglu guard.  Widening to `pack_nr` in those cases was wrong twice
+/// over: the tiles are handed to AOCL DLP, which has no pack_nr contract,
+/// and the coarser split produced a per-tile cache key set that no warmer
+/// builds, so every tile missed on the first decode call.  Keying on
+/// `use_custom` makes the split, the warm and the backend agree.
 inline int ntile_effective_nr_align(int backend_nr,
-        const custom_kernel::CallContext &kctx, bool pair_aligned) {
+        const custom_kernel::CallContext &kctx, bool pair_aligned,
+        bool ck_will_run) {
     int a = backend_nr;
-    if (kctx.enabled) { a = std::max(a, kctx.pack_nr); }
+    if (ck_will_run && kctx.enabled) { a = std::max(a, kctx.pack_nr); }
     if (pair_aligned) { a = std::max(a, 2); }
     return a;
 }

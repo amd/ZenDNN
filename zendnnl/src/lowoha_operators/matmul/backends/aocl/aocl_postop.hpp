@@ -52,12 +52,31 @@ inline size_t get_num_elements(const std::vector<int64_t> &dims) {
     return count;
 }
 
-// Collapsed per-token src at M==1; per-group wei scale disambiguates sym-quant.
+// Collapsed per-token src at M==1: a per-token src scale over a single
+// token has one element, so `src_scale_nelems > 1` cannot distinguish it
+// from a per-tensor scale.  The weight-scale shape disambiguates — either
+// 2-D form ({G>1, N} per-group or {1, N} per-channel) is a scale layout
+// the sym-quant reorder can consume, since `sym_quant_group_size` maps
+// both to `K / dims[0]`.
+//
+// Per-channel was previously excluded, which silently dropped every
+// single-token DA8W8 expert out of sym-quant: at M==1 the first disjunct
+// of the sym-quant predicate is false and the {1, N} weight scale failed
+// `has_per_group_wei_scale`'s `dims[0] > 1`.  Those calls reordered into
+// the plain s8 blocked LRU instead, holding a second copy of every weight
+// that no warm targets — the majority of experts at decode.
+//
+// Callers must stay in lockstep: this drives `is_s8_sym_quant_scales` in
+// aocl_kernel.cpp (which reorder/GEMM runs) AND `is_sym_quant` in
+// aocl_postop.cpp (whether the scales are consumed natively by the
+// sym-quant GEMM or wired as post-op scale slots).  Disagreement applies
+// the scales twice or not at all.
 inline bool src_scale_is_collapsed_per_token(
         const matmul_quantization_params_t &quant_params, int M, int N) {
     return quant_params.src_scale.buff != nullptr
             && get_num_elements(quant_params.src_scale.dims) == 1 && M == 1
-            && has_per_group_wei_scale(quant_params, N);
+            && (has_per_group_wei_scale(quant_params, N)
+                    || has_per_channel_wei_scale(quant_params, N));
 }
 
 /**

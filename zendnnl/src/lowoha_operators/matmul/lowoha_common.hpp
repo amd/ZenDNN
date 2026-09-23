@@ -184,6 +184,42 @@ struct pack_format {
     pack_format() : pack_format_b(0) {}
 };
 
+/// @brief Is a blocked reorder allowed to overwrite the caller's weight
+///        buffer in place?
+///
+/// @param req            Bytes the backend's reorder requires.
+/// @param reorder_size   @p req rounded up to the 64-byte SIMD-overscan
+///                       allowance; this is what actually gets written.
+/// @param plain_size     Logical weight extent, @c K*N*sizeof(elem).
+/// @param declared_cap   Bytes the caller GUARANTEES are writable at the
+///                       weight pointer, or 0 when undeclared.
+///
+/// With @p declared_cap == 0 this is exactly the historical rule (strict
+/// size equality), so no framework sees a behaviour change until it opts
+/// in.
+///
+/// WHY THE OPT-IN EXISTS.  The int8 blocked layouts -- AOCL's and the
+/// custom kernel's alike -- are `N*4` bytes larger than the logical
+/// weight, carrying a per-output-column int32 compensation row.  That row
+/// is NOT a zero-point artefact and cannot be dropped: `VPDPBUSD`
+/// multiplies unsigned x signed, so signed activations are shifted by
+/// +128 and the row subtracts the resulting `128 * sum_wei` bias (see
+/// int8_microkernel.hpp).  Strict equality therefore fails for every int8
+/// weight, which is duplicated out-of-place at EVERY ALGO, while bf16 --
+/// which needs no such row -- reorders in place for free.  A framework
+/// that over-allocates each weight by the reorder requirement can declare
+/// it here and reclaim that copy with no layout change on either side.
+inline bool wei_inplace_fits(size_t req, size_t reorder_size, size_t plain_size,
+        size_t declared_cap) {
+    // Historical rule, unchanged: the blocked layout is byte-for-byte the
+    // logical weight, so the mutation cannot overrun and needs no promise
+    // from the caller.  This is the bf16 case.
+    if (req == plain_size && reorder_size == plain_size) { return true; }
+    // Opt-in: the caller vouches for enough room for the OVERSCAN-rounded
+    // size, not merely `req` — the backend may touch up to `reorder_size`.
+    return declared_cap >= reorder_size;
+}
+
 /**
  * @brief Main parameter structure for LOWOHA matrix multiplication
  */
@@ -291,6 +327,28 @@ struct matmul_params {
         , total_matmul(0)
         , active_matmul(0)
         , weight_cache_type(2) {}
+
+    /// Bytes the caller guarantees are writable at each weight pointer.
+    /// 0 (default) means "exactly the logical extent", which is what
+    /// ZenDNN assumes today -- no framework currently reports its
+    /// allocation size, so the backends derive `K*N*sizeof(elem)`
+    /// themselves.  Set this to the real allocation to let int8 take the
+    /// in-place weight-cache path; see `wei_inplace_fits` above.
+    size_t wei_buffer_capacity_bytes = 0;
+
+    /// Set when the weight handed to this call is one COLUMN TILE of a larger
+    /// weight rather than the whole thing, as produced by ALGO 3's N-tile
+    /// executor.
+    ///
+    /// The AOCL DLP gemm hints describe the team a reordered B will be
+    /// consumed by: `nt_hint` records the thread count the reorder derived its
+    /// panel width from, and AOCL refuses a GEMM whose team differs.  A column
+    /// tile is reordered and multiplied by ONE thread while the call's
+    /// `num_threads` is the whole team, so the two can never agree and the
+    /// hints do not describe this call.  Backends therefore omit them for a
+    /// tile, which also keeps the tile's cache key equal to the one the
+    /// per-tile warm-pack builds.
+    bool wei_is_column_tile = false;
 };
 
 /** @brief K-axis B-side sym-quant group size.
@@ -326,6 +384,23 @@ inline bool has_per_group_wei_scale(
 }
 
 /**
+ * @brief True when wei scale dims are {1, N} (per-output-channel).
+ *
+ * The exact complement of `has_per_group_wei_scale` over 2-D weight
+ * scales: that helper requires `dims[0] > 1`, this one `dims[0] == 1`.
+ * This is the DA8W8 shape.  `sym_quant_group_size` maps it to a single
+ * quant group spanning all of K (`K / dims[0]` == `K`), which is what
+ * makes it representable by the same sym-quant reorder as the per-group
+ * form rather than a distinct layout.
+ */
+inline bool has_per_channel_wei_scale(
+        const matmul_quantization_params_t &quant_params, int N) {
+    const auto &wei_dims = quant_params.wei_scale.dims;
+    return quant_params.wei_scale.buff != nullptr && wei_dims.size() == 2
+            && wei_dims[0] == 1 && wei_dims[1] == static_cast<int64_t>(N);
+}
+
+/**
  * @brief Returns the cache mode allowed by both process and call settings.
  *
  * Reads the process-wide weight-cache setting LIVE on every call (not a
@@ -351,10 +426,13 @@ static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
  * @brief True when the grouped AUTO mixed in-place mode is active.
  *
  * Mixed mode keeps the process weight-cache at 2 while letting ONLY the
- * bf16 full-weight (prompt) AOCL reorder mutate the caller's weight buffer
- * in place; every decode layout (CK, AOCL per-tile) stays out-of-place.
+ * full-weight (prompt) AOCL reorder mutate the caller's weight buffer in
+ * place — bf16, or int8 sym-quant once the caller declares a buffer
+ * capacity; every decode layout (CK, AOCL per-tile) stays out-of-place.
  * The grouped dispatcher sets `grp_auto_mixed_inplace` when WC==2 + AUTO +
- * PREPACK + CROSS_WARM + unlimited LRU capacity all hold.
+ * PREPACK + CROSS_WARM + the custom-kernel decode pack + unlimited LRU
+ * capacity all hold.  The CK pack is required because it is the only decode
+ * layout that survives the mutation; AOCL per-tile keys embed the N split.
  */
 static inline bool is_grp_auto_mixed_inplace_active() {
     auto &cfg = zendnnl::common::matmul_config_t::instance();
@@ -379,12 +457,19 @@ static inline bool should_warm_weight_cache(int32_t weight_cache_type) {
 }
 
 /**
- * @brief Weight-cache type a warmer should pass for the bf16 full-weight
+ * @brief Weight-cache type a warmer should pass for the full-weight
  *        (prompt) AOCL reorder: in-place (2) only under mixed mode, else
  *        out-of-place (1).  Decode/per-tile warmers always pass 1.
  *        Callers must have already checked `should_warm_weight_cache()`.
+ *
+ * Serves bf16 and a capacity-declaring int8 alike.  Whether the declared
+ * capacity is actually sufficient is NOT decided here — `wei_inplace_fits`
+ * owns that, from each backend's own size query.  This is only the WC
+ * question, and it is the single place a warmer honours it: an explicit
+ * `ZENDNNL_MATMUL_WEIGHT_CACHE=1` must keep the caller's weights RAW no
+ * matter what capacity was declared.
  */
-static inline int32_t warm_wct_for_full_weight_bf16(int32_t weight_cache_type) {
+static inline int32_t warm_wct_for_full_weight(int32_t weight_cache_type) {
     return (weight_cache_type == 2
                    && zendnnl::common::matmul_config_t::instance()
                               .get_grp_auto_mixed_inplace())

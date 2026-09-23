@@ -95,6 +95,7 @@
 
 #include <omp.h>
 
+#include "custom_kernel/pack.hpp"
 #include "detect_internal_alloc.hpp"
 #include "expert_parallel/group_matmul_expert_parallel.hpp" // try_expert_parallel_pipeline
 #include "expert_parallel/group_matmul_expert_parallel_policy.hpp" // ALGO 5 fusion knob
@@ -105,7 +106,9 @@
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "m_tile/group_matmul_m_tile.hpp" // try_flat_m_tile_pipeline_bf16
+#include "n_tile/group_matmul_n_tile.hpp"
 #include "ntile_flat_parallel/ntile_flat_parallel.hpp"
+#include "prepack/prepack.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -121,15 +124,41 @@ using zendnnl::common::size_of;
 
 namespace {
 
-/// True when the dispatcher reported a caller-prepacked custom-kernel VNNI
-/// weight it could not route to the custom kernel.  The dispatcher writes this
-/// through `gemm_mode` and runs NO compute, so both fused-MoE passes must turn
-/// it into a hard failure rather than treating the untouched destination as a
-/// result.  Kept in one place so the sentinel string is not spelled out at
-/// each check.  Mirrors the plain-route conversion in `group_matmul_direct`.
-inline bool prepacked_no_ck_sentinel(const char *gemm_mode) {
-    return gemm_mode != nullptr
-            && std::strcmp(gemm_mode, "error_prepacked_no_ck") == 0;
+/// True when an executor reported that it could not leave the destination in a
+/// defined state — either a caller-prepacked custom-kernel VNNI weight it could
+/// not route to the custom kernel (no compute ran) or a per-thread scratch
+/// allocation failure that left some dst columns undefined.  Both arrive
+/// through `gemm_mode`, so both fused-MoE passes must turn them into a hard
+/// failure rather than treating the destination as a result.  Matches by
+/// `error_` prefix so a sentinel added in an executor fails closed here without
+/// a matching edit.  Mirrors the plain-route conversion in
+/// `group_matmul_direct`.
+inline bool gemm_mode_abort_sentinel(const char *gemm_mode) {
+    return gemm_mode_is_error(gemm_mode);
+}
+
+/// Log the abort-class `gemm_mode` reported by one fused-MoE pass, naming the
+/// pass so the two GEMMs are distinguishable in a caller's log.
+inline void log_abort_sentinel(const char *pass, const char *gemm_mode) {
+    if (std::strcmp(gemm_mode, kGrpMatmulErrPrepackedNoCk) == 0) {
+        log_error("group_matmul_fused_moe: fused_moe ", pass,
+                " received a pre-reordered weight (mem_format_b='r') that "
+                "only the custom kernel can consume, and the resolved ALGO is "
+                "not the custom-kernel path. Such a weight is VNNI-packed and "
+                "has no safe fallback.");
+        return;
+    }
+    if (std::strcmp(gemm_mode, kGrpNTileErrUndefinedDst) == 0) {
+        log_error("group_matmul_fused_moe: fused_moe ", pass,
+                " left part of its destination undefined (scratch allocation "
+                "failure or a violated fused-epilogue layout invariant); see "
+                "the [flat_n_tile] error above for the specific reason. "
+                "Failing the call.");
+        return;
+    }
+    log_error("group_matmul_fused_moe: fused_moe ", pass,
+            " could not produce a defined destination (gemm_mode=", gemm_mode,
+            ").");
 }
 
 // Per-thread persistent Op1 arena used by fused-MoE internal-alloc.
@@ -928,16 +957,31 @@ inline status_t setup_op1_arena_and_layout(FusedMoEArena &arena,
     size_t arena_bytes = arena_bytes_wide;
     if (want_tight) arena_bytes /= 2;
 
-    if (op1_internal && arena_bytes > arena.cap) {
-        zendnnl_aligned_free(arena.buf);
-        arena.buf = nullptr;
-        arena.cap = 0;
-        void *tmp = nullptr;
-        if (zendnnl_posix_memalign(&tmp, 64, arena_bytes) != 0
-                || tmp == nullptr)
-            return status_t::failure;
-        arena.buf = tmp;
-        arena.cap = arena_bytes;
+    // Grow, or shrink once the request has fallen far below the high-water
+    // mark. Without the shrink arm a single large prefill pinned its arena
+    // for the life of the process while every decode token needed a fraction
+    // of it. Same floor/ratio as `reorder_quant_buffers_t::ensure_buf`, and
+    // like that helper this allocates BEFORE freeing, so an OOM leaves the
+    // previous buffer intact instead of destroying a usable arena.
+    constexpr size_t kArenaRetainFloorBytes = 1u << 20; // 1 MiB
+    constexpr size_t kArenaShrinkRatio = 8;
+    if (op1_internal) {
+        const bool fits = arena_bytes <= arena.cap && arena.buf != nullptr;
+        const bool oversized = fits && arena.cap > kArenaRetainFloorBytes
+                && arena_bytes < arena.cap / kArenaShrinkRatio;
+        if (!fits || oversized) {
+            void *tmp = nullptr;
+            if (zendnnl_posix_memalign(&tmp, 64, arena_bytes) != 0
+                    || tmp == nullptr) {
+                // Keep an oversized block rather than failing: it still
+                // satisfies the request, and reclaiming is not worth an error.
+                if (!fits) { return status_t::failure; }
+            } else {
+                zendnnl_aligned_free(arena.buf);
+                arena.buf = tmp;
+                arena.cap = arena_bytes;
+            }
+        }
     }
 
     // Populate Op1 per-expert pointer / stride scratch.  Per-expert row
@@ -1097,6 +1141,11 @@ inline status_t setup_op2_dispatch_scratch(FusedMoEScratch &scratch,
         p.dtypes.bias = fused.bias_dt_down;
         p.num_threads = params[i].num_threads;
         p.weight_cache_type = params[i].weight_cache_type;
+        // NOT inherited from Op1: the two projections are separate
+        // allocations with different N, so their writable extents differ.
+        // Op2's comes from the fused-MoE struct because `down_weight[]`
+        // travels there rather than in `params[]`.
+        p.wei_buffer_capacity_bytes = fused.down_wei_buffer_capacity_bytes;
         // `dtypes.compute` carries over, but `dynamic_quant` is DERIVED:
         // Op2's source is always the float Op1 output, so it needs a source
         // quant pass exactly when its own compute dtype is int8.  Inheriting
@@ -1321,14 +1370,8 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     // every CK consumer fell through to a regular GEMM here and reported
     // success over bytes it had misread.  Fail closed on both passes, matching
     // the plain route's contract.
-    if (prepacked_no_ck_sentinel(pass1_mode)) {
-        log_error(
-                "group_matmul_fused_moe: fused_moe Op1 received a "
-                "pre-reordered "
-                "weight (mem_format_b='r') that only the custom kernel can "
-                "consume, and the resolved ALGO is not the custom-kernel "
-                "path. Such a weight is VNNI-packed and has no safe "
-                "fallback.");
+    if (gemm_mode_abort_sentinel(pass1_mode)) {
+        log_abort_sentinel("Op1", pass1_mode);
         return status_t::failure;
     }
 
@@ -1402,14 +1445,8 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
             scratch.beta_down, op2_dst, op2_ldc, is_weights_const,
             scratch.params_down, num_threads, &pass2_mode,
             grp_matmul_gated_act_t::none, act_dtype);
-    if (prepacked_no_ck_sentinel(pass2_mode)) {
-        log_error(
-                "group_matmul_fused_moe: fused_moe Op2 received a "
-                "pre-reordered "
-                "weight (mem_format_b='r') that only the custom kernel can "
-                "consume, and the resolved ALGO is not the custom-kernel "
-                "path. Such a weight is VNNI-packed and has no safe "
-                "fallback.");
+    if (gemm_mode_abort_sentinel(pass2_mode)) {
+        log_abort_sentinel("Op2", pass2_mode);
         return status_t::failure;
     }
     if (s_optime) {
@@ -1552,9 +1589,16 @@ status_t group_matmul_fused_moe_execute(
 
     // ── Step 3: pick wide-vs-tight Op1 arena layout ────────────────────
     const int env_algo_fused = get_grp_matmul_algo();
-    const bool custom_kernel_en = !params.empty()
-            && grp_matmul_custom_kernel_enabled(params[0].dtypes.wei,
-                    params[0].dtypes.dst, params[0].dtypes.compute);
+    // The EFFECTIVE verdict, not the master knob.  The arena choice must
+    // agree with whether the custom kernel will actually run: granting a
+    // tight arena and then having the kernel refuse on a family sub-toggle
+    // (`..._INT8=0`, `..._F16=0`) or on a per-group `{G, N}` weight scale
+    // leaves a tight destination with no tight-aware writer for the
+    // split-halves activations, and the fallback collapses the call to the
+    // serial Sequential strategy.  Asking the same question the kernel asks
+    // makes `..._INT8=0` mean what it reads like: int8 on N-tile + DLP with
+    // a separate activation pass in a wide arena, bf16 untouched on CK.
+    const bool custom_kernel_en = grp_matmul_custom_kernel_effective(params, M);
     // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
     // both the tight-arena decision below and the vertical-fusion gate at
     // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
@@ -1572,6 +1616,18 @@ status_t group_matmul_fused_moe_execute(
             layout, M, N, K, params, num_threads, &algo_trace);
     const bool want_tight = pick_fused_moe_want_tight(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
+
+    // Publish the arena the DECODE call will get, for the prompt-side
+    // cross-warm.  Under AUTO a prompt-shaped call resolves to ALGO 1, so
+    // `want_tight` above is false for it while the decode call -- same
+    // layer, same weights, same activation -- resolves to ALGO 3 and gets
+    // the tight arena.  A warmer that read this call's `ldc` would predict
+    // the wide split and warm per-tile keys the decode never queries.
+    // Asking the same predicate with `resolved_algo = 3` answers for the
+    // decode instead.  Scoped to this call on this thread.
+    const scoped_decode_arena_hint decode_arena_hint(
+            pick_fused_moe_want_tight(op1_internal, act, custom_kernel_en,
+                    env_algo_fused, /*resolved_algo=*/3));
 
     // EXEC APILOG — one line per fused_moe call summarising arena
     // layout, per-side internal-alloc state, act-fusion choice, and
@@ -1888,7 +1944,6 @@ void clear_fused_moe_scratch() {
     { reset_thread_local_fused_moe_state(); }
     ntile_flat_parallel::flush_packed_weight_cache();
 }
-
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

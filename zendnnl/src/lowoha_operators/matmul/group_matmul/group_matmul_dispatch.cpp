@@ -80,7 +80,8 @@ void sequential_experts(const std::vector<char> &layout,
         const std::vector<void *> &dst, const std::vector<int> &ldc,
         const std::vector<bool> &is_weights_const,
         std::vector<matmul_params> &params, int num_threads,
-        grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
+        grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
+        const char **gemm_mode_out) {
 
     const size_t num_ops = M.size();
     if (num_ops == 0 || num_threads <= 0) { return; }
@@ -97,17 +98,24 @@ void sequential_experts(const std::vector<char> &layout,
     //
     // `num_threads` is forwarded so `cross_warm` inside prepack.cpp can
     // compute `stable = aocl_stable_n_thr(num_threads, max_N)` and
-    // prefill regime 2 (per-tile AOCL with nr_align=1) for the
-    // upcoming ALGO 3 decode path when CUSTOM_KERNEL=0.  Without it,
-    // that branch silently drops to a no-op and decode pays a one-time
-    // first-call reorder cost.  `nr_align` is left at 0 because the
-    // primary warm here is the full-weight key (which is nr_align-
-    // independent); cross_warm uses its own internal nr_align for the
-    // regime-2 path.
+    // prefill regime 2 (per-tile AOCL) for the upcoming ALGO 3 decode
+    // path when CUSTOM_KERNEL=0.  Without it, that branch silently
+    // drops to a no-op and decode pays a one-time first-call reorder
+    // cost.
+    //
+    // `nr_align` must be the value decode will actually split on, not a
+    // constant: the per-tile cache key embeds `n_tile = aligned_n_split(
+    // N, n_thr, ..., nr_align)`, so warming with a different alignment
+    // prefills keys the runtime never queries and every tile misses on
+    // the first decode call.  Cross-warm used to hardcode 1, which is
+    // correct only for the wide arena; a tight fused swiglu splits on 2.
+    // The prompt call has `ldc` and `N` in hand, so resolve it here
+    // through the same helper decode uses.
     group_matmul_prepack::prepack_for_algo_1(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    get_grp_matmul_custom_kernel(), num_threads,
+                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
@@ -124,10 +132,35 @@ void sequential_experts(const std::vector<char> &layout,
                 alpha[i], src[i], lda[i], weight[i], ldb[i], bias[i], beta[i],
                 dst[i], ldc[i], is_weights_const[i], num_threads, params[i],
                 resolve_expert_kernel(1, algo, params[i]));
-        // Fused activation: dst[i] is hot in L3 from the GEMM that just finished.
-        if (fused_act != grp_matmul_gated_act_t::none) {
-            apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i], ldc[i],
-                    act_dtype, num_threads);
+    }
+    // Activation is deferred out of the expert loop rather than applied per
+    // expert while dst[i] is still hot.
+    //
+    // `apply_gated_act_inplace` parallelises over an expert's ROWS, and at
+    // decode an expert holds one to a few dozen of them, so a 32-thread
+    // region was being opened per expert to run a handful of iterations --
+    // once per expert, per layer, per token. The fork and barrier dominated
+    // work measured in microseconds, and most threads never got a row.
+    //
+    // `group_matmul_moe_act_execute` walks the row space flattened across
+    // every expert instead, so one region covers all of them and each thread
+    // gets a real share. The locality that deferring gives up is small: the
+    // whole activated region is num_active * M * N and stays L3-resident at
+    // decode sizes.
+    if (fused_act != grp_matmul_gated_act_t::none) {
+        grp_matmul_gated_act_params act_params {};
+        act_params.act = fused_act;
+        if (group_matmul_moe_act_execute(
+                    &act_params, dst, M, N, ldc, act_dtype, num_threads)
+                != status_t::success) {
+            // Validation is all-or-nothing across experts, so a refusal here
+            // means NOTHING was activated. `sequential_experts` is void, so
+            // signal through the gemm_mode sentinel the caller already
+            // matches by `error_` prefix.
+            if (gemm_mode_out != nullptr) {
+                *gemm_mode_out = "error_sequential_act_refused";
+            }
+            return;
         }
     }
     return;
@@ -180,7 +213,8 @@ void parallel_multilevel(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_6(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    get_grp_matmul_custom_kernel(), num_threads,
+                    algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
 
@@ -222,24 +256,45 @@ void parallel_multilevel(const std::vector<char> &layout,
         }
 
         scoped_active_levels guard(2);
+        bool short_team_a = false;
 #pragma omp parallel num_threads(num_ops)
         {
-            const int i = omp_get_thread_num();
-            // Inactive experts (M<=0) are padded placeholder slots that may carry
-            // null src/dst/weight pointers; skip them so the slice/activation
-            // calls never dereference null (matches the M==0 guards in the
-            // sequential / m-tile / n-tile executors).
-            if (i < num_ops && M[i] > 0) {
-                execute_expert_slice(layout[i], transA[i], transB[i], M[i],
-                        N[i], K[i], alpha[i], src[i], lda[i], weight[i], ldb[i],
-                        bias[i], beta[i], dst[i], ldc[i], is_weights_const[i],
-                        thr_per_op[i], params[i],
-                        resolve_expert_kernel(6, algo, params[i]));
-                if (fused_act != grp_matmul_gated_act_t::none) {
-                    apply_gated_act_inplace(fused_act, dst[i], 0, M[i], N[i],
-                            ldc[i], act_dtype);
+            // A requested team size is a request, not a guarantee: OMP_DYNAMIC,
+            // OMP_THREAD_LIMIT or an already-active outer level can all trim
+            // it.  This regime maps expert := tid, so a short team never
+            // reaches the high experts and leaves their dst holding whatever
+            // it held, with the call still reporting success.  ALGO 3's
+            // DecodeD/Rounds fail closed on exactly this; match them rather
+            // than letting one deployment get a hard error on decode-shaped
+            // calls and silent garbage on prompt-shaped ones.
+            if (omp_get_num_threads() < num_ops) {
+#pragma omp single
+                { short_team_a = true; }
+            } else {
+                const int i = omp_get_thread_num();
+                // Inactive experts (M<=0) are padded placeholder slots that may carry
+                // null src/dst/weight pointers; skip them so the slice/activation
+                // calls never dereference null (matches the M==0 guards in the
+                // sequential / m-tile / n-tile executors).
+                if (i < num_ops && M[i] > 0) {
+                    execute_expert_slice(layout[i], transA[i], transB[i], M[i],
+                            N[i], K[i], alpha[i], src[i], lda[i], weight[i],
+                            ldb[i], bias[i], beta[i], dst[i], ldc[i],
+                            is_weights_const[i], thr_per_op[i], params[i],
+                            resolve_expert_kernel(6, algo, params[i]));
+                    if (fused_act != grp_matmul_gated_act_t::none) {
+                        // The GEMM above ran on `thr_per_op[i]` nested threads;
+                        // leaving the activation at the single-thread default
+                        // idled that whole sub-team for the M[i] x N[i] pass.
+                        apply_gated_act_inplace(fused_act, dst[i], 0, M[i],
+                                N[i], ldc[i], act_dtype, thr_per_op[i]);
+                    }
                 }
             }
+        }
+        if (short_team_a) {
+            set_ml_mode("error_multilevel_short_team");
+            return;
         }
     } else {
         // (B) Round-based, 1 CCD per expert.
@@ -247,30 +302,44 @@ void parallel_multilevel(const std::vector<char> &layout,
         const int batch = std::min(num_ops, num_ccds);
 
         scoped_active_levels guard(2);
+        bool short_team_b = false;
         for (int round_start = 0; round_start < num_ops; round_start += batch) {
             const int round_end = std::min(num_ops, round_start + batch);
             const int round_size = round_end - round_start;
 
 #pragma omp parallel num_threads(round_size)
             {
-                const int slot = omp_get_thread_num();
-                // Inactive experts (M<=0) are padded placeholder slots that may carry
-                // null src/dst/weight pointers; skip them so the slice/activation
-                // calls never dereference null (matches the M==0 guards in the
-                // sequential / m-tile / n-tile executors).
-                if (slot < round_size && M[round_start + slot] > 0) {
-                    const int e = round_start + slot;
-                    execute_expert_slice(layout[e], transA[e], transB[e], M[e],
-                            N[e], K[e], alpha[e], src[e], lda[e], weight[e],
-                            ldb[e], bias[e], beta[e], dst[e], ldc[e],
-                            is_weights_const[e], ccd_size, params[e],
-                            resolve_expert_kernel(6, algo, params[e]));
-                    if (fused_act != grp_matmul_gated_act_t::none) {
-                        apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
-                                N[e], ldc[e], act_dtype);
+                // Same contract as regime A: expert := round_start + tid, so a
+                // trimmed team silently skips the tail of every round.
+                if (omp_get_num_threads() < round_size) {
+#pragma omp single
+                    { short_team_b = true; }
+                } else {
+                    const int slot = omp_get_thread_num();
+                    // Inactive experts (M<=0) are padded placeholder slots that may carry
+                    // null src/dst/weight pointers; skip them so the slice/activation
+                    // calls never dereference null (matches the M==0 guards in the
+                    // sequential / m-tile / n-tile executors).
+                    if (slot < round_size && M[round_start + slot] > 0) {
+                        const int e = round_start + slot;
+                        execute_expert_slice(layout[e], transA[e], transB[e],
+                                M[e], N[e], K[e], alpha[e], src[e], lda[e],
+                                weight[e], ldb[e], bias[e], beta[e], dst[e],
+                                ldc[e], is_weights_const[e], ccd_size,
+                                params[e],
+                                resolve_expert_kernel(6, algo, params[e]));
+                        if (fused_act != grp_matmul_gated_act_t::none) {
+                            apply_gated_act_inplace(fused_act, dst[e], 0, M[e],
+                                    N[e], ldc[e], act_dtype);
+                        }
                     }
                 }
             }
+            if (short_team_b) { break; }
+        }
+        if (short_team_b) {
+            set_ml_mode("error_multilevel_short_team");
+            return;
         }
     }
     return;
@@ -615,6 +684,23 @@ static bool check_n_tile_extra(const std::vector<int> &M,
         // and pass through.
         for (const auto &po : params[i].postop_) {
             if (po.buff != nullptr) { return false; }
+        }
+
+        // `do_tile` column-slices `wei_scale` and `wei_zp` for each tile but
+        // never touches `dst_scale` / `dst_zp`, and the AOCL post-op layer
+        // infers their granularity from the buffer length against the N it is
+        // handed -- which is `n_tile` on a tile call.  A per-channel `{N}`
+        // dst scale would therefore reach every tile pointing at element 0,
+        // so each tile would dequantise its own columns with the FIRST
+        // `n_tile` scales.  Per-tensor (a single element) is N-independent
+        // and safe; anything wider has no per-tile meaning here, so decline
+        // and let a full-N ALGO serve it.
+        const auto &dsc = params[i].quant_params.dst_scale;
+        const auto &dzp = params[i].quant_params.dst_zp;
+        if ((dsc.buff != nullptr && quant_param_num_elements(dsc.dims) > 1)
+                || (dzp.buff != nullptr
+                        && quant_param_num_elements(dzp.dims) > 1)) {
+            return false;
         }
     }
     return true;
@@ -1124,9 +1210,22 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const char **gemm_mode_out, grp_matmul_gated_act_t fused_act,
         data_type_t act_dtype) {
 
-    const bool custom_kernel_en = !params.empty()
-            && grp_matmul_custom_kernel_enabled(params[0].dtypes.wei,
-                    params[0].dtypes.dst, params[0].dtypes.compute);
+    // Must be the EFFECTIVE verdict, not the master knob: this feeds
+    // `a3_fuses`, which in turn decides whether the tight-dst guard runs.
+    // Reading the master knob (or `params[0]`, which in MoE decode is
+    // routinely an inactive padding slot whose dtypes are unset) says "CK
+    // will fuse" for calls the kernel then refuses -- and the tight
+    // split-halves path answers that refusal by demoting the layer to serial
+    // Sequential.  `grp_matmul_custom_kernel_effective` folds the dtype
+    // carve-out, the family sub-toggles and the per-group disqualifier, and
+    // picks its representative from the first ACTIVE expert.
+    // Must be the EFFECTIVE verdict, not the master knob: this feeds
+    // `a3_fuses`, which decides whether the tight-dst guard runs.  The master
+    // knob (and `params[0]`, routinely an inactive padding slot in MoE
+    // decode) says "CK will fuse" for calls the kernel then refuses, and the
+    // tight split-halves path answers that refusal by demoting the layer to
+    // serial Sequential.
+    const bool custom_kernel_en = grp_matmul_custom_kernel_effective(params, M);
 
     // ── WEIGHT_CACHE=2 (in-place) safety downgrade for grouped matmul ─────
     // In-place reorder/pack mutates the caller's weight buffer into a
@@ -1181,25 +1280,24 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             //          stub out and cross-warm is a no-op, so mixed-in-place is
             //          disabled at dispatch rather than enabled-then-failed in
             //          prepack;
-            //        * CUSTOM_KERNEL on — decode runs through the CK pack, which
-            //          cross-warm fully pre-warms (regime 3) from raw W.  With CK
-            //          OFF, decode falls to the AOCL per-tile path whose tight
-            //          (nr_align=2) variant cross-warm leaves lazy, so a decode
-            //          after the prompt mutation could reorder from the already-
-            //          mutated buffer and corrupt.  Requiring CK keeps the one
-            //          in-place-mutated layout class (bf16 even-K) on the warmed
-            //          CK decode path;
-            //        * tight fused-MoE layout (FUSED_MOE_TIGHT != 0) — a WIDE fused
-            //          layout makes `flat_n_tile` DISABLE the custom kernel even
-            //          with CK enabled, routing decode through the AOCL per-tile
-            //          path that would re-read the already-mutated buffer.  This is
-            //          required UNCONDITIONALLY (NOT gated on the per-call
-            //          fused_act): the WC=2 verdict is process-wide and sticky, so
-            //          it must derive only from process-constant env.  Keying it on
-            //          a per-call fused_act would let a non-fused call ENABLE
-            //          in-place mutation and a later wide-fused call flip the
-            //          verdict + downgrade 2->1 AFTER weights are mutated, so any
-            //          out-of-place reorder that then reads them as raw corrupts;
+            //        * the decode layout is fully pre-warmed AND SPLIT-
+            //          INDEPENDENT — the real invariant.  Decode must never be
+            //          left to reorder lazily after the prompt mutation,
+            //          because it would read the already-mutated buffer as raw
+            //          and corrupt.  Only the CK pack satisfies this: it is
+            //          shape-keyed on the full N and cross-warmed as regime 3
+            //          from raw W, so it stays valid across a team-size change.
+            //          AOCL per-tile is cross-warmed from raw W too (regime 2,
+            //          at the alignment decode splits on), but its keys embed
+            //          `(col_start, n_tile)`, so a later call on a different
+            //          split misses them and re-derives from the mutated
+            //          buffer — see the split-independence note below for why
+            //          that is unrecoverable.  Requiring the CK pack therefore
+            //          costs one extra out-of-place copy of every in-place-
+            //          eligible weight whenever CK is off for the call's dtype,
+            //          which for a W8A8 model means the int8 sub-toggle
+            //          (ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0) alone disables
+            //          mixed-in-place process-wide;
             //        * unlimited LRU capacity — the in-place sentinel can never
             //          be evicted and lazily re-derived from the mutated buffer.
             //      The grouped dispatcher sets `grp_auto_mixed_inplace`; the CK
@@ -1217,9 +1315,56 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
 #else
             const bool aocl_dlp_compiled = false;
 #endif
+            // The decode layout must be SPLIT-INDEPENDENT, not merely warmed.
+            //
+            // The in-place mutation is irreversible: once the prompt reorder
+            // has rewritten W, the raw bytes are gone and anything that still
+            // needs them is unrecoverable.  Cross-warm packs the decode layout
+            // out-of-place from raw W first, so the keys warmed at that moment
+            // are safe -- but the AOCL per-tile keys embed `(col_start,
+            // n_tile)`, which is derived from `num_threads` and `nr_align`.
+            // A later call on the same weight pool with a different team size
+            // builds different keys, misses, and `run_dlp` then reorders the
+            // already-blocked bytes as if they were raw.  That is silent
+            // corruption, and `weight_pool_fingerprint` deliberately omits the
+            // split (it keys the mutual-exclusion latch, which must be shared
+            // by every caller of one buffer), so the completion record cannot
+            // distinguish the two calls either.
+            //
+            // The CK pack is shape-keyed on the full N, so it survives any
+            // team-size change and is the one decode layout that stays valid
+            // after the mutation.  Requiring it costs an extra out-of-place
+            // copy whenever CK is off, which is a real memory regression --
+            // but correctness first, and the duplicate-layout waste that
+            // dominated the CK-off footprint is addressed separately by the
+            // sym-quant warm/runtime predicate agreement.
+            //
+            // A split-aware completion key alone does NOT fix this: re-running
+            // prepack for the new split would warm the per-tile keys from the
+            // mutated buffer.  Making the per-tile arm safe needs decode
+            // routed to the full-weight key once W has been mutated.
+            // Only the CK pack licenses the mutation.  It is shape-keyed on
+            // the full N, so every decode call builds the key cross-warm
+            // populated, however the team or the routed expert set moves.
+            //
+            // AOCL per-tile does not qualify.  Its keys embed `(col_start,
+            // n_tile)`, which tracks `nr_align` and a narrow-N escape
+            // evaluated over the ACTIVE expert set, so a decode call can ask
+            // for keys no warm populated; with the raw weights already
+            // rewritten those cannot be rebuilt and the call ends at
+            // `kGrpMatmulErrMutatedWeightMiss`.
+            //
+            // Keeping this term process-constant is what makes the writes
+            // below idempotent: `custom_kernel_en` is per-call-shaped, so it
+            // may only ever WIDEN the verdict and can never flip an eligible
+            // process to ineligible mid-run.  A per-call CK refusal is handled
+            // at the routing layer (`mixed_inplace_ck_refused` in
+            // `flat_n_tile`), not by revoking a licence the weights have
+            // already been rewritten under.
+            const bool decode_layout_prewarmed = custom_kernel_en;
             const bool mixed_eligible = aocl_dlp_compiled
                     && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
-                    && custom_kernel_en && get_grp_matmul_fused_moe_tight() != 0
+                    && decode_layout_prewarmed
                     && matmul_config_t::instance().get_lru_cache_capacity()
                             == std::numeric_limits<uint32_t>::max();
             if (mixed_eligible) {
@@ -1273,12 +1418,23 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                             "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
                             "(in-place) is "
                             "unsafe under AUTO scheduling (env_algo=0) without "
-                            "prepack+cross_warm+custom_kernel and unlimited "
-                            "LRU capacity.  "
-                            "Downgrading "
+                            "prepack+cross_warm, the custom-kernel decode pack "
+                            "and unlimited LRU capacity.  The CK pack is the "
+                            "only decode layout that survives the prompt's "
+                            "in-place mutation; AOCL per-tile keys embed the N "
+                            "split, so it does NOT qualify whatever "
+                            "AOCL_STABLE_NTILE is set to.  The CK pack must be "
+                            "EFFECTIVE for the call, which the env knobs are "
+                            "only one way to lose: on a W8A8 model "
+                            "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0 lands "
+                            "here, and so does a per-group {G,N} weight scale "
+                            "on any active expert, which refuses CK with the "
+                            "env untouched.  Downgrading "
                             "process-wide to out-of-place "
                             "(weight_cache_type=1) for the "
-                            "rest of the run; kernel selection unchanged.");
+                            "rest of the run; kernel selection unchanged.  "
+                            "This costs one extra copy of every "
+                            "in-place-eligible weight.");
 #endif
                 }
             }
@@ -1311,8 +1467,21 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //           avoid the separate-pass round-trip).
     //   - For any fused_act we cannot fuse, the caller runs a separate
     //     activation pass after this function returns.
-    const bool caller_layout_tight
-            = (use_algo == 3) && !ldc.empty() && !N.empty() && ldc[0] < N[0];
+    // Read the stride from the first ACTIVE expert, not slot 0: an inactive
+    // slot is a padding placeholder whose stride is arbitrary, and the
+    // caller-boundary uniformity check deliberately skips those, so slot 0
+    // could classify a uniformly wide active set as tight or the reverse.
+    // `flat_n_tile` infers the same property the same way; the two must agree
+    // or the executor plans a layout the dispatcher did not authorise.
+    size_t layout_rep = 0;
+    for (size_t i = 0; i < M.size(); ++i) {
+        if (M[i] > 0) {
+            layout_rep = i;
+            break;
+        }
+    }
+    const bool caller_layout_tight = (use_algo == 3) && layout_rep < ldc.size()
+            && layout_rep < N.size() && ldc[layout_rep] < N[layout_rep];
     // Wide-fused (caller's ldc ≥ N) routes through the standard
     // backend's `apply_swiglu_oai_tile_rows`; that helper handles
     // swiglu_oai_mul only.  silu_and_mul and gelu_and_mul have no
@@ -1554,8 +1723,50 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             }
         }
         if (has_prepacked_b && use_algo != 3) {
-            set_mode("error_prepacked_no_ck");
+            set_mode(kGrpMatmulErrPrepackedNoCk);
             return false;
+        }
+    }
+
+    // Tight-destination-without-a-tight-writer guard.
+    //
+    // A tight dst (`ldc < N`) has no room for the wide 2I result, so it is
+    // only safe when a writer that knows to compact 2I into I actually runs.
+    // That writer exists in exactly one place: ALGO 3's fused epilogue, i.e.
+    // `a3_fuses`.  Every other route -- ALGO 1/2/5/6, and ALGO 3 when it does
+    // not fuse -- applies the activation in place at the caller's stride via
+    // `apply_gated_act_inplace`, which walks `2 * (N/2)` columns across a row
+    // that physically holds only `ldc` of them.  That reads the following row
+    // as the up half and, on the last row, writes past the end of the buffer.
+    //
+    // The caller-boundary check in `group_matmul_direct` rejects only a MIXED
+    // tight/wide set, so a uniformly tight caller reaches here unscreened.
+    // Two ways in under the AUTO default:
+    //
+    //   * AUTO routes prompt-shaped calls to ALGO 1, so a tight caller that is
+    //     correct at decode (ALGO 3, fused) silently corrupts at prompt -- and
+    //     that happens for every activation family, custom kernel on or off.
+    //   * With the custom kernel off, `a3_can_fuse_act` declines silu/gelu, so
+    //     those lose the tight writer at decode as well.
+    //
+    // `use_algo` and `a3_fuses` are both resolved by this point, so this is
+    // the first place that can tell the safe case from the unsafe one.
+    if (fused_act != grp_matmul_gated_act_t::none && !a3_fuses) {
+        for (size_t i = 0; i < M.size() && i < ldc.size() && i < N.size();
+                ++i) {
+            if (M[i] > 0 && ldc[i] < N[i]) {
+                log_error("group_matmul: expert ", i,
+                        " has a tight destination (ldc=", ldc[i], " < N=", N[i],
+                        ") with a gated activation, but the resolved route "
+                        "(ALGO ",
+                        use_algo,
+                        ") applies the activation in place and would write "
+                        "past the end of that buffer.  Pass a destination with "
+                        "ldc >= N, or use the fused-MoE entry point, which "
+                        "owns the tight arena and guarantees ALGO 3.");
+                set_mode(kGrpMatmulErrTightNoFusedWriter);
+                return false;
+            }
         }
     }
     // ALGO 3/AUTO: materialize plain s8 only for ALGO 3's effective
@@ -1571,12 +1782,21 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                 dispatch_num_ops, w4a8_s8_ptrs, any_w4a8);
     }
 
+    // Fail-closed baseline for the in-place mutation registry.  A reorder that
+    // missed on an already-mutated weight buffer is refused inside the AOCL
+    // backend, which can only COUNT it: `run_dlp` returns void and the refusal
+    // can happen on any thread inside an executor's OMP region.  Snapshot the
+    // count here and compare after the executor, so a refusal anywhere in the
+    // call turns into a failed call rather than a dst nobody reordered for.
+    const uint64_t mutated_conflicts_before
+            = aocl_mutated_source_conflict_count();
+
     switch (use_algo) {
         case 1:
             set_mode("sequential_experts");
             sequential_experts(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
-                    num_threads, fused_act, act_dtype);
+                    num_threads, fused_act, act_dtype, gemm_mode_out);
             break;
         case 2:
             // flat_m_tile owns its gemm_mode — it writes the concrete branch it ran
@@ -1622,8 +1842,18 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             set_mode("sequential_experts");
             sequential_experts(layout, transA, transB, M, N, K, alpha, src, lda,
                     weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
-                    num_threads, fused_act, act_dtype);
+                    num_threads, fused_act, act_dtype, gemm_mode_out);
             break;
+    }
+
+    // Overwrites whatever path name the executor wrote: an error sentinel
+    // outranks the record of which strategy ran, and the `error_` prefix is
+    // what `group_matmul_direct` / `group_matmul_fused_moe` translate into
+    // `status_t::failure`.  Deliberately compares against the snapshot rather
+    // than testing for non-zero, so an unrelated earlier refusal in the
+    // process cannot fail an otherwise good call.
+    if (aocl_mutated_source_conflict_count() != mutated_conflicts_before) {
+        set_mode(kGrpMatmulErrMutatedWeightMiss);
     }
     return act_fused;
 }

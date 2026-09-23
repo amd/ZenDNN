@@ -24,7 +24,6 @@
 ///
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -796,6 +795,20 @@ status_t group_matmul_moe_act_execute(
                     " must be even for gated activation");
             return status_t::failure;
         }
+        // This pass reads the gate and up halves of a row that is `N`
+        // elements wide and writes the compacted result back into its
+        // first `N/2`, so a row must physically hold `N` elements.  A
+        // tight `ldc < N` destination belongs to the fused writer, not
+        // here; running anyway would read the next row as the up half and
+        // overrun the buffer on the last row.
+        if (dst[i] != nullptr && M[i] > 0 && ldc[i] < N[i]) {
+            log_error("group_matmul_moe_act: expert ", i, " has ldc=", ldc[i],
+                    " < N=", N[i],
+                    "; the separate activation pass needs a row wide enough "
+                    "for both halves.  A tight destination must be served by "
+                    "the fused epilogue instead.");
+            return status_t::failure;
+        }
     }
 
     // Prefix sums over active experts: O(num_ops) instead of O(total_rows).
@@ -822,12 +835,17 @@ status_t group_matmul_moe_act_execute(
     // the base AVX-512 package.  Xeon Phi (KNL/KNM) has F without
     // BW/VL but is not a supported platform.  This matches
     // the dispatch pattern in group_matmul_moe_postop.cpp.
+    // Clamp the team to the work.  `total_rows` is batch x top-k, so a
+    // batch-1 decode has a handful of rows; forking the full team for them
+    // pays a region entry for nothing.
+    const int act_threads = static_cast<int>(
+            std::min<int64_t>(std::max(1, num_threads), total_rows));
     if (avx512f_available())
         execute_act_rows_avx512(act, dst_dtype, dst, row_offsets, N, ldc,
-                total_rows, num_threads);
+                total_rows, act_threads);
     else
         execute_act_rows_scalar(act, dst_dtype, dst, row_offsets, N, ldc,
-                total_rows, num_threads);
+                total_rows, act_threads);
 
     return status_t::success;
 }
@@ -847,6 +865,19 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
     if (dst_dtype != data_type_t::f32 && dst_dtype != data_type_t::bf16
             && dst_dtype != data_type_t::f16)
         return;
+
+    // Each row kernel touches columns [0, 2*dim) = [0, N) of its row, so a
+    // row must physically hold N elements.  With a tight `ldc < N` the walk
+    // spills into the following row and, on the last row, past the end of
+    // the allocation.  Callers with a tight destination must route to the
+    // fused epilogue, which compacts out of place; refuse loudly rather than
+    // corrupt the heap.
+    if (ldc < N) {
+        log_error("apply_gated_act_inplace: ldc=", ldc, " < N=", N,
+                "; the in-place gated activation needs a row wide enough for "
+                "both halves.  No activation applied.");
+        return;
+    }
 
     const int dim = N / 2;
     const bool use_avx512 = avx512f_available();
@@ -962,22 +993,36 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
 
 void apply_swiglu_oai_tile_rows(void *dst_buf, int M, int col_start, int pairs,
         int ldc, data_type_t dtype) {
-    // Preconditions (documented in the header).  Silently no-op on misuse
-    // rather than reinterpreting the buffer or mis-halving columns, and
-    // assert in debug builds so tests catch contract violations early.
-    assert(dst_buf != nullptr && "apply_swiglu_oai_tile_rows: dst_buf is null");
-    assert((col_start & 1) == 0
-         && "apply_swiglu_oai_tile_rows: col_start must be even "
-            "(pair-aligned for interleaved gate/up layout)");
-    assert((dtype == data_type_t::f32 || dtype == data_type_t::bf16
-                   || dtype == data_type_t::f16)
-            && "apply_swiglu_oai_tile_rows: dtype must be f32, bf16, or f16");
-    if (pairs <= 0 || M <= 0 || dst_buf == nullptr) return;
-    if ((col_start & 1) != 0)
-        return; // pair-misaligned — refuse silently in release
-    if (dtype != data_type_t::f32 && dtype != data_type_t::bf16
-            && dtype != data_type_t::f16)
+    // Empty work is a legitimate no-op (a thread with no rows).
+    if (pairs <= 0 || M <= 0) return;
+
+    // Contract violations are NOT.  Returning quietly here leaves the
+    // caller's rows holding raw un-activated GEMM output that looks like a
+    // result, which is how a mis-paired tight path produced garbage rather
+    // than an error.  The helper is void and cannot fail the call itself,
+    // so log unconditionally: callers on the fused path additionally
+    // pre-check these and raise an abort code, and this message is what
+    // identifies which precondition broke.
+    if (dst_buf == nullptr) {
+        log_error(
+                "apply_swiglu_oai_tile_rows: dst_buf is null; no activation "
+                "applied.");
         return;
+    }
+    if ((col_start & 1) != 0) {
+        log_error("apply_swiglu_oai_tile_rows: col_start=", col_start,
+                " is odd, but the interleaved gate/up layout requires a "
+                "pair-aligned start; no activation applied and these rows "
+                "still hold un-activated GEMM output.");
+        return;
+    }
+    if (dtype != data_type_t::f32 && dtype != data_type_t::bf16
+            && dtype != data_type_t::f16) {
+        log_error(
+                "apply_swiglu_oai_tile_rows: unsupported dtype; expected "
+                "f32, bf16, or f16.  No activation applied.");
+        return;
+    }
 
     const bool use_avx512 = avx512f_available();
 
@@ -1032,22 +1077,32 @@ void apply_swiglu_oai_tile_rows_oop(const void *src_buf, int src_ldc,
     // [dst_col_start .. dst_col_start + pairs).  The fused MoE path
     // always passes distinct buffers (per-thread scratch vs tight arena),
     // so the alias case isn't exercised today.
-    assert(src_buf != nullptr
-            && "apply_swiglu_oai_tile_rows_oop: src_buf is null");
-    assert(dst_buf != nullptr
-            && "apply_swiglu_oai_tile_rows_oop: dst_buf is null");
-    assert((src_col_start & 1) == 0
-            && "apply_swiglu_oai_tile_rows_oop: src_col_start must be even");
-    assert((dtype == data_type_t::f32
-          || dtype == data_type_t::bf16
-          || dtype == data_type_t::f16)
-         && "apply_swiglu_oai_tile_rows_oop: dtype must be f32, bf16, or f16");
-    if (pairs <= 0 || M <= 0 || src_buf == nullptr || dst_buf == nullptr)
+    if (pairs <= 0 || M <= 0) return;
+
+    // As in the in-place sibling: a broken precondition leaves the caller's
+    // dst columns never written, so it must be audible rather than silent.
+    if (src_buf == nullptr || dst_buf == nullptr) {
+        log_error("apply_swiglu_oai_tile_rows_oop: ",
+                (src_buf == nullptr ? "src_buf" : "dst_buf"),
+                " is null; no activation applied and the destination columns "
+                "were never written.");
         return;
-    if ((src_col_start & 1) != 0) return;
+    }
+    if ((src_col_start & 1) != 0) {
+        log_error(
+                "apply_swiglu_oai_tile_rows_oop: src_col_start=", src_col_start,
+                " is odd, but the interleaved gate/up layout requires a "
+                "pair-aligned start; no activation applied and the "
+                "destination columns were never written.");
+        return;
+    }
     if (dtype != data_type_t::f32 && dtype != data_type_t::bf16
-            && dtype != data_type_t::f16)
+            && dtype != data_type_t::f16) {
+        log_error(
+                "apply_swiglu_oai_tile_rows_oop: unsupported dtype; expected "
+                "f32, bf16, or f16.  No activation applied.");
         return;
+    }
 
     const bool use_avx512 = avx512f_available();
 

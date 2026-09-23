@@ -185,3 +185,84 @@ TEST_F(TestWeightCacheInplace, HintFoldedKeyPacksSeparately) {
             << "hint-folded key reused the pack built without hints — a hint "
                "change must re-pack";
 }
+
+// Same shape as the test above, but with ZP-comp caching DISABLED — one of the
+// two paths the TODO next to the compensation code called out as unguarded.
+//
+// With caching off the 1D compensation is recomputed from the weight buffer on
+// every call, so it is no longer computed once from the pristine bytes. Under
+// WEIGHT_CACHE=2 an in-place reorder would leave iterations 2+ summing over
+// blocked bytes and silently returning wrong output. run_dlp now refuses
+// in-place for int8 whenever the compensation is not cacheable
+// (`wei_zp == 0 && is_weights_const && get_zp_comp_cache()`), which is what
+// keeps every iteration on the reference here.
+//
+// The sibling path — asymmetric weights with `wei_zp != 0` — takes the same
+// refusal branch but is not expressible through this harness:
+// `quant_params_compute` only emits a zero-point for a u8 destination, so s8
+// weights always come back symmetric.
+TEST_F(TestWeightCacheInplace, Uncached1D_ZpCompCacheOff_InPlaceRefused) {
+    const uint64_t m = 32, k = 256, n = 256;
+    const bool use_LOWOHA = true;
+    const auto algo = matmul_algo_t::aocl_dlp_blocked;
+    const std::vector<post_op_type_t> po_types {};
+    const std::vector<tensor_t> binary_tensors {};
+
+    auto wei_ref = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::bf16, 25.0, /*transB=*/false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, wei_scale,
+                      wei_zp, &weight_tensor),
+            status_t::success)
+            << "weight quantization failed";
+
+    // u8 activations -> nonzero src_zp -> a compensation term is required.
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {m, k}, data_type_t::bf16, 25.0, /*transA=*/false);
+    tensor_t input_tensor, src_scale, src_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, data_type_t::bf16,
+                      data_type_t::u8, {1, 1}, data_type_t::f32, src_scale,
+                      src_zp, &input_tensor),
+            status_t::success)
+            << "source quantization failed";
+
+    auto bias_tensor
+            = tensor_factory.uniform_dist_tensor({1, n}, data_type_t::f32, 2.0);
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+
+    // Reference first, on pristine weights (see the note in the test above).
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
+    ASSERT_EQ(ref_status, status_t::success) << "reference kernel failed";
+    clear_matmul_test_caches();
+
+    WeightCacheGuard wc_guard(2);
+    ZpCompCacheGuard zp_guard(false);
+
+    constexpr int kIterations = 3;
+    for (int iter = 0; iter < kIterations; ++iter) {
+        status_t status = matmul_kernel_test(input_tensor, weight_tensor,
+                bias_tensor, output_tensor, po_types, binary_tensors,
+                use_LOWOHA, algo, 1.0, 0.0);
+        if (status == status_t::isa_unsupported) {
+            GTEST_SKIP() << "AOCL-DLP blocked INT8 not supported on this ISA";
+        }
+        ASSERT_EQ(status, status_t::success)
+                << "matmul failed on iteration " << iter;
+
+        bool ok = true;
+        compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
+                rtol_bf16, epsilon_bf16, ok, false, 1.0f,
+                /*is_quant=*/true);
+        EXPECT_TRUE(ok)
+                << "output diverged from the reference on iteration " << iter
+                << " with ZENDNNL_ZP_COMP_CACHE=0 — in-place must be refused "
+                   "when the compensation is re-derived from the weights on "
+                   "every call";
+    }
+}

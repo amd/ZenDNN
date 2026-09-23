@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
+#include <atomic> // one-shot in-place-refused warning latch
+#include <cstdint>
 #include <cstdlib>
 #include <cstring> // std::memcpy (WC=2 in-place reorder write-back)
 #include <mutex>
@@ -24,6 +26,7 @@
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
+#include <unordered_set> // in-place mutation registry
 
 namespace zendnnl {
 namespace lowoha {
@@ -379,7 +382,87 @@ void clear_aocl_symquant_weight_cache_under_lock() {
     get_aocl_symquant_weight_cache().clear();
 }
 
+// ── In-place mutation registry ──────────────────────────────────────────
+//
+// A WC=2 reorder rewrites the caller's weight buffer and records `nullptr`
+// against the key it reordered under, meaning "the blocked bytes now live in
+// the caller's buffer".  Every later lookup of THAT key hits and is correct.
+// A lookup of any OTHER key misses, and a miss reorders FROM `weights` --
+// which no longer holds raw weights.  The reordered image has the same size as
+// the raw one, so no downstream check distinguishes them.
+//
+// Keys legitimately differ between the mutation and a later call on the same
+// buffer.  The AOCL per-tile keys embed the N split, and for the families
+// carrying unified DLP metadata the key embeds `nt_hint`, which moves with the
+// call's thread count.  Rather than enumerate every such divergence -- and
+// re-derive it whenever a field is added to the key -- record which buffers
+// have been mutated and REFUSE to reorder from one.
+//
+// The refusal is counted, not thrown: `run_dlp` returns void and sits inside
+// OMP regions.  The group-matmul layer snapshots the counter around a call and
+// raises an `error_` gemm_mode sentinel when it moved, which
+// `group_matmul_direct` turns into `status_t::failure` -- so the caller never
+// consumes a dst derived from a buffer we could not reorder.
+namespace {
+std::mutex &mutated_wei_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::unordered_set<const void *> &mutated_wei_set() {
+    static std::unordered_set<const void *> s;
+    return s;
+}
+std::atomic<uint64_t> g_mutated_source_conflicts {0};
+} // namespace
+
+void aocl_mark_weight_buffer_mutated(const void *weights) {
+    if (weights == nullptr) { return; }
+    // SCOPE: grouped AUTO mixed in-place only.  A refusal is actionable only
+    // where a caller converts it into a failed call, which today is the
+    // grouped dispatcher.  Registering a buffer from an entry point that does
+    // not compare the counter would refuse the reorder without failing the
+    // call, so the registry stays inside the regime that acts on it.
+    if (!is_grp_auto_mixed_inplace_active()) { return; }
+    std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+    mutated_wei_set().insert(weights);
+}
+
+bool aocl_weight_buffer_is_mutated(const void *weights) {
+    if (weights == nullptr) { return false; }
+    std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+    return mutated_wei_set().count(weights) != 0;
+}
+
+uint64_t aocl_mutated_source_conflict_count() {
+    return g_mutated_source_conflicts.load(std::memory_order_relaxed);
+}
+
+bool aocl_refuse_reorder_from_mutated(const void *weights, const char *site) {
+    if (!aocl_weight_buffer_is_mutated(weights)) { return false; }
+    g_mutated_source_conflicts.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<bool> s_warned {false};
+    if (!s_warned.exchange(true, std::memory_order_relaxed)) {
+        apilog_error("[AOCL.reorder REFUSED] ", site,
+                ": weight-cache miss on a buffer an earlier in-place (WC=2) "
+                "reorder already rewrote.  The raw weights are gone, so "
+                "reordering from it would silently produce a wrong layout.  "
+                "Refusing, and failing the call closed.  This means a key "
+                "diverged between the in-place mutation and this lookup -- an "
+                "N split or a thread-count (nt_hint) change on the same "
+                "weight buffer are the two ways that happens.");
+    }
+    return true;
+}
+
 void clear_aocl_matmul_weight_caches() {
+    // The registry tracks raw pointers, so it MUST be cleared with the caches
+    // it describes: once the caches are gone a later allocation can reuse an
+    // address and would otherwise inherit a stale "mutated" verdict.
+    {
+        std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+        mutated_wei_set().clear();
+    }
+    g_mutated_source_conflicts.store(0, std::memory_order_relaxed);
     // Lock only the mutex paired with each cache so clear does not interleave
     // reorderAndCacheWeights* between find_key() and get()/add(), without
     // blocking all dtypes for the entire teardown.
@@ -443,6 +526,14 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         void *cached_ptr = nullptr;
         bool found_obj = matmul_weight_cache.try_get(key, cached_ptr);
         if (!found_obj) {
+            // A miss here on an already-mutated buffer would reorder blocked
+            // bytes as if they were raw.  Refuse; the group-matmul layer
+            // turns the counted refusal into a failed call.
+            if (aocl_refuse_reorder_from_mutated(
+                        weights, "reorderAndCacheWeights WC=1")) {
+                reorder_weights = const_cast<void *>(weights);
+                return false;
+            }
             apilog_verbose(
                     "[AOCL.reorder MISS] weight cache miss — packing weights");
             size_t b_reorder_buf_siz_req = get_reorder_buf_size(
@@ -503,6 +594,15 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
             return true;
         }
 
+        // Missing on a buffer a previous in-place reorder already rewrote:
+        // every sub-path below reorders FROM `weights`, which no longer holds
+        // raw bytes.  Refuse rather than mutate or pack a second time.
+        if (aocl_refuse_reorder_from_mutated(
+                    weights, "reorderAndCacheWeights WC=2")) {
+            reorder_weights = const_cast<void *>(weights);
+            return false;
+        }
+
         size_t b_reorder_buf_siz_req
                 = get_reorder_buf_size(order, trans, 'B', k, n, reorder_meta);
         // Two-part gate for engaging the in-place path:
@@ -531,7 +631,18 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
 
-        if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
+        // Reduces to the historical strict equality while no caller
+        // declares a capacity; see `wei_inplace_fits` in lowoha_common.hpp
+        // for why int8 needs the opt-in and bf16 does not.
+        // Contiguity, as the custom-kernel pack requires for the same
+        // reason: the write-back below is a flat memcpy of the blocked
+        // image, so a strided view (ldb beyond the minor dim) would have
+        // its padding or its neighbouring rows overwritten.  `plain_size`
+        // is computed from the LOGICAL k*n and cannot see that.
+        const bool inplace_layout_ok = (ldb == ((trans == 't') ? k : n));
+        if (inplace_layout_ok
+                && wei_inplace_fits(b_reorder_buf_siz_req, reorder_size,
+                        plain_size, /*declared_cap=*/0)) {
             apilog_info("AOCL reorder weights WEIGHT_CACHE_IN_PLACE");
             T *interim = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!interim) {
@@ -557,6 +668,10 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
             // user's buffer. Caller contract: do not clear/evict this cache
             // while reusing the in-place-mutated weight buffer.
             matmul_weight_cache.add(key, nullptr);
+            // The raw weights are gone from here on.  Only THIS key can be
+            // served from the buffer; any other key must fail rather than
+            // reorder the blocked bytes again.
+            aocl_mark_weight_buffer_mutated(weights);
         } else {
             apilog_info(
                     "AOCL reorder weights WEIGHT_CACHE_IN_PLACE "
@@ -598,7 +713,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         const char order, const char trans, char mem_format_b,
         get_reorder_buf_size_sym_quant_func_ptr get_reorder_buf_size,
         reorder_sym_quant_func_ptr<T> reorder_func, dlp_metadata_t *symq_meta,
-        int weight_cache_type) {
+        int weight_cache_type, size_t wei_buffer_capacity_bytes) {
 
     lru_cache_t<Key_matmul, void *> &matmul_weight_cache
             = get_aocl_symquant_weight_cache();
@@ -632,6 +747,11 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         void *cached_ptr = nullptr;
         bool found_obj = matmul_weight_cache.try_get(key, cached_ptr);
         if (!found_obj) {
+            if (aocl_refuse_reorder_from_mutated(
+                        weights, "reorderAndCacheWeightsSymQuant WC=1")) {
+                reorder_weights = const_cast<void *>(weights);
+                return false;
+            }
             apilog_verbose(
                     "[AOCL.reorder symquant MISS] weight cache miss — packing");
             size_t b_reorder_buf_siz_req
@@ -683,6 +803,12 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
             return true;
         }
 
+        if (aocl_refuse_reorder_from_mutated(
+                    weights, "reorderAndCacheWeightsSymQuant WC=2")) {
+            reorder_weights = const_cast<void *>(weights);
+            return false;
+        }
+
         size_t b_reorder_buf_siz_req
                 = get_reorder_buf_size(order, trans, 'B', k, n, symq_meta);
         // See reorderAndCacheWeights for the rationale -- two-part gate:
@@ -697,7 +823,19 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         size_t reorder_size
                 = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
 
-        if (b_reorder_buf_siz_req == plain_size && reorder_size == plain_size) {
+        // The memcpy below writes the FULL blocked size, so a caller-declared
+        // capacity that covers it keeps the int8 compensation row at exactly
+        // the offset the sym-quant GEMM reads it from -- inside the caller's
+        // buffer.  Undeclared, this reduces to the historical equality.
+        // Contiguity, as the custom-kernel pack requires for the same
+        // reason: the write-back below is a flat memcpy of the blocked
+        // image, so a strided view (ldb beyond the minor dim) would have
+        // its padding or its neighbouring rows overwritten.  `plain_size`
+        // is computed from the LOGICAL k*n and cannot see that.
+        const bool inplace_layout_ok = (ldb == ((trans == 't') ? k : n));
+        if (inplace_layout_ok
+                && wei_inplace_fits(b_reorder_buf_siz_req, reorder_size,
+                        plain_size, wei_buffer_capacity_bytes)) {
             apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE");
             T *interim = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!interim) {
@@ -723,11 +861,29 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
             // the reordered bytes and must remain associated with this cache
             // entry while the buffer is reused.
             matmul_weight_cache.add(key, nullptr);
+            // Raw weights gone: only this key may be served from the buffer.
+            aocl_mark_weight_buffer_mutated(weights);
         } else {
+            // Name the failing precondition and show the numbers.  There are
+            // THREE ways to land here and the old text asserted one of them,
+            // which sent every investigation after the wrong quantity: a
+            // framework that has padded correctly and is still being refused
+            // needs to know whether its capacity never arrived, arrived too
+            // small, or was discarded because the weight is strided.
             apilog_info(
                     "AOCL sym_quant reorder weights WEIGHT_CACHE_IN_PLACE "
-                    "(blocked size != plain size, falling back to "
-                    "out-of-place)");
+                    "falling back to out-of-place: ",
+                    (!inplace_layout_ok ? "weight is STRIDED (in-place needs a "
+                                          "contiguous ldb)"
+                                    : (wei_buffer_capacity_bytes == 0)
+                                    ? "no capacity declared (assumed exactly "
+                                      "k*n)"
+                                    : "declared capacity is SHORT"),
+                    " k=", k, " n=", n, " ldb=", ldb, " trans=", trans,
+                    " plain=", plain_size,
+                    " blocked_req=", b_reorder_buf_siz_req,
+                    " needs=", reorder_size,
+                    " declared=", wei_buffer_capacity_bytes);
             reorder_weights
                     = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!reorder_weights) { return false; }
@@ -742,7 +898,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
 template bool reorderAndCacheWeightsSymQuant<int8_t>(Key_matmul, const void *,
         void *&, int, int, int, char, char, char,
         get_reorder_buf_size_sym_quant_func_ptr,
-        reorder_sym_quant_func_ptr<int8_t>, dlp_metadata_t *, int);
+        reorder_sym_quant_func_ptr<int8_t>, dlp_metadata_t *, int, size_t);
 
 void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
@@ -1022,29 +1178,78 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             = effective_weight_cache_type(lowoha_param.weight_cache_type);
 
     // Grouped AUTO mixed-in-place mode keeps the process WC at 2, but in that
-    // mode the ONLY layout allowed to mutate the weight buffer in place is the
-    // bf16 full-weight (prompt) AOCL reorder.  That is safe because it runs
-    // LAST: cross-warm first packs every decode layout (CK pack, AOCL per-tile)
+    // mode exactly ONE layout may mutate the weight buffer in place: the
+    // full-weight (prompt) AOCL reorder.  That is safe because it runs LAST —
+    // cross-warm first packs every decode layout (CK pack, AOCL per-tile)
     // OUT-OF-PLACE from the RAW weights, so by the time the full-weight reorder
     // mutates the buffer nothing else still needs the raw bytes.
     //
-    // Non-bf16 weights have no in-place-safe pre-warm (the full-weight in-place
-    // warmer is bf16-only).  f32 has no warmer at all, so leaving it at WC=2
-    // here would let this reorder mutate the buffer in place lazily at runtime,
-    // after which a later / concurrent out-of-place reorder of the SAME buffer
-    // would read corrupted bytes.  (int8 sym-quant is already warmed + served
-    // out-of-place -- its blocked layout carries a compensation row so it can
-    // never satisfy the in-place size gate -- but forcing it here keeps it
-    // unambiguously on the out-of-place branch.)  Force every non-bf16 dtype
-    // out-of-place under mixed mode so only bf16 ever mutates in place.
+    // Which dtypes may BE that mutator comes down to which have an
+    // in-place-safe pre-warm.  bf16 always does.  int8 does once the caller
+    // declares a writable extent: `wei_buffer_capacity_bytes` lifts the exact
+    // assumption ("a weight buffer is exactly K*N") that used to leave no room
+    // for its compensation row, and a declared weight then takes the same
+    // cross-warm-then-mutate ordering bf16 takes (`mixed_inplace_for_wei` in
+    // prepack.cpp).
+    //
+    // Everything else is forced out-of-place here.  f32, for one, has no warmer
+    // at all, so leaving it at WC=2 would let this reorder mutate the buffer
+    // lazily at runtime, after which a later / concurrent out-of-place reorder
+    // of the SAME buffer would read corrupted bytes.
     //
     // Gated on is_grp_auto_mixed_inplace_active() (process WC==2 AND the grouped
     // AUTO mixed flag, which only the grouped dispatcher sets), so this is INERT
     // for single matmul / BMM and for pinned WC=2 -- none of those set the mixed
     // flag, so the branch never fires for them.
     if (weight_cache_type == 2 && dtypes.wei != data_type_t::bf16
+            && lowoha_param.wei_buffer_capacity_bytes == 0
             && is_grp_auto_mixed_inplace_active()) {
         weight_cache_type = 1;
+    }
+
+    // The guard above is conditioned on the grouped-AUTO mixed flag, which the
+    // dispatcher clears WITHOUT downgrading WC on the pinned-ALGO branch.  A
+    // pinned ALGO at the default WC=2 therefore reaches here with int8 still
+    // eligible for in-place, leaving the generic reorder-size equality test as
+    // the only thing between it and a mutated weight buffer.  Sym-quant happens
+    // to fail that test (its blocked layout carries a compensation row, so it
+    // is larger than plain) but the plain s8 blocked layout carries no such
+    // guarantee, and that is the layout an asymmetric int8 call reorders into.
+    //
+    // Mutating B is only safe if nothing later re-derives from the raw bytes.
+    // Zero-point compensation does exactly that: it sums the weight columns of
+    // B, and it is only computed once and reused when it is cacheable, i.e.
+    // `wei_zp == 0 && is_weights_const && get_zp_comp_cache()` (see the
+    // `is_cacheable` test at the compensation site below).  When it is NOT
+    // cacheable it is recomputed from B on every call, so call 2+ would sum
+    // over reordered bytes and produce wrong output with no error raised.
+    //
+    // Keyed on buffer presence rather than the decoded values, which are read
+    // further down: refusing in-place for a zero-point buffer that holds zero
+    // is merely conservative, whereas reading the values this early would
+    // duplicate the decode.  Scoped to int8 so single-matmul and BMM callers
+    // keep in-place wherever it is provably safe.
+    if (weight_cache_type == 2 && dtypes.wei == data_type_t::s8) {
+        const auto &qp = lowoha_param.quant_params;
+        const bool zp_comp_needed
+                = (qp.src_zp.buff != nullptr || qp.wei_zp.buff != nullptr);
+        const bool zp_comp_cacheable = (qp.wei_zp.buff == nullptr)
+                && is_weights_const && matmul_config.get_zp_comp_cache();
+        if (zp_comp_needed && !zp_comp_cacheable) {
+            weight_cache_type = 1;
+            static std::atomic<bool> s_int8_inplace_refused {false};
+            if (!s_int8_inplace_refused.exchange(
+                        true, std::memory_order_relaxed)) {
+                apilog_warning(
+                        "[AOCL.WEIGHT_CACHE] int8 weight_cache_type=2 "
+                        "(in-place) refused: zero-point compensation must be "
+                        "re-derived from the raw weights on later calls "
+                        "(wei_zp set, non-const weights, or "
+                        "ZENDNNL_ZP_COMP_CACHE=0), which an in-place reorder "
+                        "would corrupt.  Using out-of-place for this call; "
+                        "kernel selection unchanged.");
+            }
+        }
     }
 
     size_t run_src_scale_nelems
@@ -1088,14 +1293,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // identical hints/post-op wiring on both calls:
     //   * bf16×bf16 and WOQ (bf16 src × s4/u4)
     //   * INT8 pure (u8/s8 src × s8 wei), excluding s8×s8 sym-quant
-    const bool uses_unified_dlp_metadata
-            = (dtypes.src == data_type_t::bf16
-                      && (dtypes.wei == data_type_t::bf16
-                              || dtypes.wei == data_type_t::s4
-                              || dtypes.wei == data_type_t::u4))
-            || ((dtypes.src == data_type_t::u8 || dtypes.src == data_type_t::s8)
-                    && dtypes.wei == data_type_t::s8
-                    && !is_s8_sym_quant_scales);
+    // A column tile opts out: the hints describe a whole-weight reorder
+    // feeding a full-team GEMM, and a tile is reordered and multiplied by one
+    // thread.  Gating the shared predicate covers the key, the reorder
+    // metadata and the GEMM metadata in one place, so a tile is unhinted on
+    // every side and matches what the per-tile warm-pack builds.
+    const bool uses_unified_dlp_metadata = !lowoha_param.wei_is_column_tile
+            && aocl_uses_unified_dlp_metadata(
+                    dtypes.src, dtypes.wei, is_s8_sym_quant_scales);
 
     // Storage the hints hang off; dlp_fallback_md is only used when
     // dlp_base_md is null and there is nothing else to attach them to.
@@ -1228,7 +1433,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             blocked_flag = reorderAndCacheWeights<float>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_f32f32f32of32,
-                    aocl_reorder_f32f32f32of32, weight_cache_type);
+                    aocl_reorder_f32f32f32of32, weight_cache_type,
+                    uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::bf16) {
             blocked_flag = reorderAndCacheWeights<int16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
@@ -1239,14 +1445,16 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
             blocked_flag = reorderAndCacheWeights<uint16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_f16f16f16of16,
-                    aocl_reorder_f16f16f16of16, weight_cache_type);
+                    aocl_reorder_f16f16f16of16, weight_cache_type,
+                    uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::s4
                 || lowoha_param.dtypes.wei == data_type_t::u4) {
             blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_bf16s4f32of32,
                     aocl_reorder_bf16s4f32of32,
-                    (weight_cache_type == 2) ? 1 : weight_cache_type);
+                    (weight_cache_type == 2) ? 1 : weight_cache_type,
+                    uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::s8) {
             if (is_s8_sym_quant_scales) {
                 // B-side K-group size from wei {G,N}, independent of src
@@ -1265,7 +1473,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         B, reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                         aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
                         aocl_reorder_s8s8s32os32_sym_quant, &symq_meta,
-                        weight_cache_type);
+                        weight_cache_type,
+                        lowoha_param.wei_buffer_capacity_bytes);
             } else if (lowoha_param.dtypes.src == data_type_t::s8
                     || lowoha_param.dtypes.src == data_type_t::bf16
                     || lowoha_param.dtypes.src == data_type_t::f32) {

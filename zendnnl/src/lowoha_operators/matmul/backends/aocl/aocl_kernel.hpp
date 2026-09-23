@@ -108,6 +108,30 @@ dlp_metadata_t *aocl_dlp_hints_metadata(dlp_metadata_t *postop_md,
         dlp_gemm_hints_t &hints_storage, dlp_metadata_t &fallback_md,
         int32_t requested_num_threads = 0);
 
+/// Families that share ONE metadata object across the reorder and the GEMM,
+/// and therefore take gemm_hints on both:
+///   * bf16 src x (bf16 | s4 | u4) wei   (bf16 and WOQ)
+///   * (u8 | s8) src x s8 wei            (INT8 pure), excluding sym-quant
+///
+/// Anything else reorders unhinted, because its GEMM does not take gemm_hints
+/// and a hinted pack would mismatch the runtime kernel.
+///
+/// Shared by `run_dlp(...)` and the group-matmul warm-pack so the two cannot
+/// disagree about whether `m_hint`/`nt_hint` belong in the reorder and in the
+/// weight-cache key.  They MUST agree: a warm that hints where the dispatcher
+/// does not (or the reverse) populates a key the dispatcher never queries, and
+/// under the WC=2 in-place path that means the mutation lands in one slot
+/// while the lookup misses in another and re-reorders already-blocked bytes.
+inline bool aocl_uses_unified_dlp_metadata(zendnnl::common::data_type_t src,
+        zendnnl::common::data_type_t wei, bool is_s8_sym_quant_scales) {
+    using zendnnl::common::data_type_t;
+    return (src == data_type_t::bf16
+                   && (wei == data_type_t::bf16 || wei == data_type_t::s4
+                           || wei == data_type_t::u4))
+            || ((src == data_type_t::u8 || src == data_type_t::s8)
+                    && wei == data_type_t::s8 && !is_s8_sym_quant_scales);
+}
+
 // The new AOCL DLP reorder API dropped the dedicated DLP_SYMM_STAT_QUANT
 // argument; the B-side quantization group size now travels inside the
 // dlp_metadata_t (via b_quant_op->group_size), which is the sole trailing
@@ -125,7 +149,7 @@ bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
         const char order, const char trans, char mem_format_b,
         get_reorder_buf_size_sym_quant_func_ptr get_reorder_buf_size,
         reorder_sym_quant_func_ptr<T> reorder_func, dlp_metadata_t *symq_meta,
-        int weight_cache_type);
+        int weight_cache_type, size_t wei_buffer_capacity_bytes = 0);
 #endif
 
 // Alignment (bytes) of the appended static-quant per-column weight-sum buffer.
@@ -188,6 +212,24 @@ void cvt_s4_to_s8(const int8_t *weights, int8_t *wei_s8, int k, int n, int ldb,
 
 /** Clear AOCL matmul weight caches and zero-point compensation LRU cache. */
 void clear_aocl_matmul_weight_caches();
+
+/// In-place mutation registry.  A WC=2 reorder rewrites the caller's weight
+/// buffer, so the raw weights are gone and any LATER cache miss on that buffer
+/// must not be served by reordering it again — the bytes are already blocked
+/// and a second reorder derives its layout from them.
+/// Keys can diverge between the mutation and a later call (the per-tile keys
+/// embed the N split; unified-metadata keys embed `nt_hint`), so the buffer is
+/// tracked rather than the key.
+///
+/// `aocl_refuse_reorder_from_mutated` returns true when the caller must NOT
+/// reorder; it counts the refusal and logs once.  `run_dlp` returns void and
+/// runs inside OMP regions, so the group-matmul layer snapshots
+/// `aocl_mutated_source_conflict_count()` around a call and fails it closed
+/// with an `error_` gemm_mode sentinel when the count moved.
+void aocl_mark_weight_buffer_mutated(const void *weights);
+bool aocl_weight_buffer_is_mutated(const void *weights);
+uint64_t aocl_mutated_source_conflict_count();
+bool aocl_refuse_reorder_from_mutated(const void *weights, const char *site);
 /// W4A8 s4→s8 expansion + cache (plain row-major, NO blocked reorder).
 /// Returns a pointer to a plain [k, n] s8 buffer stored in a dedicated
 /// process-lifetime LRU.  The pointer is stable across calls for the same

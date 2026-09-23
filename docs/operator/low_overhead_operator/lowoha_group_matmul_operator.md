@@ -244,9 +244,9 @@ DQ-INT8 follows the BF16-dst column for gated activations; `f32`-dst DQ-INT8 is 
 ```
 ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0          → all CK families off
 ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1
-  && _CUSTOM_KERNEL_INT8=0                  → BF16 + FP16 CK on, DQ-INT8 off
-  && _CUSTOM_KERNEL_F16=0                  → BF16 + DQ-INT8 CK on, FP16 off
-  && both sub-toggles = 1 (default)        → all three families on (subject to per-family ISA gates)
+  && _CUSTOM_KERNEL_INT8=1 (default)        → BF16 + FP16 + DQ-INT8 CK on
+  && _CUSTOM_KERNEL_F16=0                  → BF16 CK on, FP16 off (DQ-INT8 still on by default)
+  && both sub-toggles = 1                  → all three families on (subject to per-family ISA gates)
 ```
 
 See `custom_kernel/dispatch.hpp` for the full `resolve_variant()` truth table and `prepare_for_call()` gate cascade.  Direct-surface and e2e test coverage lives in [group_matmul gtests README](../../../zendnnl/gtests/group_matmul/README.md) (§4.6).

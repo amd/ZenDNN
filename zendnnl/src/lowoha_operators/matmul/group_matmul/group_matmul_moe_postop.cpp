@@ -109,7 +109,7 @@ void moe_weighted_reduce_scalar(const group_matmul_moe_postop_params *postop,
         for (int d = 0; d < D; ++d) {
             float acc = 0.f;
             for (int k = 0; k < postop->topk; ++k) {
-                const int slot = t * postop->topk + k;
+                const int64_t slot = static_cast<int64_t>(t) * postop->topk + k;
                 const auto *src_row = static_cast<const Elem *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
                 const float w = postop->skip_weighted
@@ -141,7 +141,7 @@ void moe_weighted_reduce_avx512_f32(
 
         // k=0: initialize output with w0 * src0 (no load of output needed).
         {
-            const int slot = t * topk;
+            const int64_t slot = static_cast<int64_t>(t) * topk;
             const auto *src_row = static_cast<const float *>(
                     postop->row_ptrs[static_cast<size_t>(slot)]);
             const float w = postop->skip_weighted
@@ -160,7 +160,7 @@ void moe_weighted_reduce_avx512_f32(
 
         // k=1..topk-1: accumulate with FMA.
         for (int k = 1; k < topk; ++k) {
-            const int slot = t * topk + k;
+            const int64_t slot = static_cast<int64_t>(t) * topk + k;
             const auto *src_row = static_cast<const float *>(
                     postop->row_ptrs[static_cast<size_t>(slot)]);
             const float w = postop->skip_weighted
@@ -207,7 +207,7 @@ void moe_weighted_reduce_avx512_bf16(
 
             // k=0: initialize FP32 accumulator with w0 * src0.
             {
-                const int slot = t * topk;
+                const int64_t slot = static_cast<int64_t>(t) * topk;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
                 const float w = postop->skip_weighted
@@ -230,7 +230,7 @@ void moe_weighted_reduce_avx512_bf16(
 
             // k=1..topk-1: FMA into FP32 accumulator (no BF16 truncation).
             for (int k = 1; k < topk; ++k) {
-                const int slot = t * topk + k;
+                const int64_t slot = static_cast<int64_t>(t) * topk + k;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
                 const float w = postop->skip_weighted
@@ -326,7 +326,7 @@ void moe_weighted_reduce_avx512_f16(
 
             // k=0: initialize FP32 accumulator with w0 * src0.
             {
-                const int slot = t * topk;
+                const int64_t slot = static_cast<int64_t>(t) * topk;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
                 const float w = postop->skip_weighted
@@ -349,7 +349,7 @@ void moe_weighted_reduce_avx512_f16(
             // k=1..topk-1: FMA into FP32 accumulator (no F16 truncation between
             // iterations).
             for (int k = 1; k < topk; ++k) {
-                const int slot = t * topk + k;
+                const int64_t slot = static_cast<int64_t>(t) * topk + k;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
                 const float w = postop->skip_weighted
@@ -402,9 +402,16 @@ void moe_weighted_reduce_avx512_f16(
 
 template <typename Elem, data_type_t Kind>
 void moe_weighted_reduce(const group_matmul_moe_postop_params *postop,
-        const int D, const int num_threads) {
+        const int D, const int requested_threads) {
 
     const auto &plat = zendnnl::common::zendnnl_platform_info();
+
+    // The reduce parallelises over `num_tokens` rows, which at batch-1 decode
+    // is a single row -- forking the full team for it costs more than the
+    // work.  Clamp once here rather than in each of the four kernels; the
+    // activation pass next door already does the same.
+    const int num_threads = std::max(
+            1, std::min(requested_threads, std::max(1, postop->num_tokens)));
 
     if constexpr (Kind == data_type_t::f32) {
         if (plat.get_avx512f_status()) {
