@@ -529,7 +529,11 @@ TEST_P(CkUkernelCorrectness, MatchesScalarRef) {
     // are explicitly garbage per the public-API contract, so the
     // comparison loop iterates [0, N_cmp).  Buffer indexing uses
     // `m * N_eff + n` (the full row stride) regardless.
-    const auto tol = mt::tol_act(/*is_bf16=*/c.dst_dt == data_type_t::bf16);
+    //
+    // VDPBF16PS accumulation is not FP32-accumulate-accurate, so f32
+    // dst is still compared with the BF16 band (same policy as the F16
+    // sibling, which uses `tol_act(data_type_t::f16)` for every dst).
+    const auto tol = mt::tol_act(/*is_bf16=*/true);
     for (int m = 0; m < c.M; ++m) {
         for (int n = 0; n < N_cmp; ++n) {
             const float ref = ref_gemm_act(m, n, c.K, N_ref, src_bufs[0].data(),
