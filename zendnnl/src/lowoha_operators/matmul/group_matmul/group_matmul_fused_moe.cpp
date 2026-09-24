@@ -1942,7 +1942,7 @@ void clear_fused_moe_scratch() {
     if (omp_in_parallel()) return;
 #pragma omp parallel
     { reset_thread_local_fused_moe_state(); }
-    ntile_flat_parallel::flush_packed_weight_cache();
+    group_matmul_routed_moe_flush_weight_cache();
 }
 } // namespace matmul
 } // namespace lowoha

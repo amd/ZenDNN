@@ -811,6 +811,59 @@ Set `ZENDNNL_API_LOG_LEVEL=3` to see the dispatch trail; the per-call summary wi
                     fused=[act=swiglu_oai_mul,down_proj=N_down[0]=32] sequential_chain=0 …
 ```
 
+## Routed fused-MoE direct API
+
+`routed_fused_moe_direct` accepts one dense token matrix plus expert-stacked
+projection and routing descriptors. The library gathers routed rows and owns
+fast-versus-generic dispatch:
+
+- eligible DA8W8 calls use the routed tiny-GEMM executor for both prefill and
+  decode;
+- valid configurations outside that fast envelope use the unchanged vector
+  `group_matmul_direct` implementation internally;
+- malformed pointers, dimensions, strides, quantization metadata, or routing
+  IDs return their normal error status instead of falling back.
+
+`ZENDNNL_ENABLE_ROUTED_MOE` defaults to `1`, so eligible calls use the fast
+executor. Set it to `0` to skip the fast executor and exercise the same
+internal vector fallback. This does not bypass common validation and does not
+select a grouped algorithm: `ZENDNNL_GRP_MATMUL_ALGO` remains authoritative for
+the fallback, so setting it to `4` requests the W8A8 ALGO 4 interceptor.
+
+The generic route preserves the vector API's performance-sensitive contracts,
+not just its numerical behavior. Per-projection `lowoha_algo`, thread count,
+weight-cache mode, packing format, and quantization metadata pass through
+unchanged. Weight vectors use the established active-prefix plus inactive-tail
+layout and advertise `active_matmul`/`total_matmul`, so eager prepack still
+warms every expert even when only a few receive tokens. Symmetric DA8W8
+fallbacks with a contiguous BF16 token source quantize each unique token once
+and scatter the S8 row plus scale to its selected experts, matching the
+framework's previous grouped call and avoiding top-k-repeated quantization.
+This is the path used by valid fast-ineligible configurations such as
+bias-bearing GPT-OSS with interleaved `swiglu_oai_mul`.
+
+The API supports primary-only, primary plus gated activation, two projections,
+and the normal W13 → gated activation → W2 pipeline. It can write either one
+router-weighted row per token or one row per routed slot. Projection
+`matmul_params` carry dtype, quantization, algorithm, packing, cache, and thread
+configuration; no separate top-level thread count is required.
+
+Because the API owns its projection scratch, both projection `beta` values
+must be zero. `skip_weighted` is valid only for `topk == 1`. Raw and GGML
+expert stacks are sliceable from their base pointer; backend-preordered
+`mem_format_b == 'r'` weights require an expert byte stride and are therefore
+not accepted by this no-stride contract. Non-reduced slot output is unweighted.
+
+```cpp
+status_t routed_fused_moe_direct(char layout_src, bool trans_src,
+        const void *token_src, int token_src_ld, int num_tokens,
+        int num_experts, int topk, void *moe_output, int moe_output_ld,
+        const group_matmul_projection_params &primary,
+        const group_matmul_routing_params &routing,
+        const group_matmul_projection_params *secondary = nullptr,
+        const grp_matmul_gated_act_params *gated_act = nullptr);
+```
+
 ## Notes and best practices
 
 1. **Vector lengths**: By default all per-op vectors must have length `num_ops = M.size()`; `src` length selects the mode.  When the [framework prepack-extras contract](#framework-prepack-extras-contract) is engaged (`params[0].active_matmul > 0`), the dispatcher accepts weight-side vectors of size `>= active_matmul` while input-side vectors stay at `M.size()`.

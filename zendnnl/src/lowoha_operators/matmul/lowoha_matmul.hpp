@@ -24,6 +24,7 @@
 #include "common/zendnnl_api.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/routed_moe/routed_moe.hpp"
 #include "operators/matmul/matmul_context.hpp"
 
 namespace zendnnl {
