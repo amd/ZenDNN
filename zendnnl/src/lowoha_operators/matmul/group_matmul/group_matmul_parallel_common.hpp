@@ -1107,9 +1107,6 @@ inline int get_grp_matmul_fused_moe_tight() {
 //   want to bypass CK entirely (e.g. parity bisection against
 //   AOCL DLP) can still set `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0`.
 //
-//   W4A8 forces the effective per-call value OFF regardless of this env;
-//   CK has no s4 microkernel.
-//
 //   The dispatcher refuses cleanly and falls back to the standard
 //   AOCL DLP path for any expert that violates the CK contract
 //   (non-bf16, transA, alpha≠1, β≠0, N % pack_nr ≠ 0, non-const
@@ -1134,20 +1131,6 @@ inline bool get_grp_matmul_custom_kernel() {
         return parsed != 0;
     }();
     return v;
-}
-
-/// W4A8 is always AOCL-DLP-only; CK has no s4 microkernel.  Keep this
-/// call-scoped so CK remains available for its BF16, INT8, and FP16 families.
-///
-/// NOTE: this reads the MASTER knob only.  It is the right predicate for a
-/// caller that just needs "is the custom kernel family available at all",
-/// but NOT for one that must agree with whether the kernel will actually
-/// run -- that is `grp_matmul_custom_kernel_effective` below.
-inline bool grp_matmul_custom_kernel_enabled(data_type_t wei_dtype,
-        data_type_t dst_dtype, data_type_t compute_dtype) {
-    return get_grp_matmul_custom_kernel()
-            && !(wei_dtype == data_type_t::s4 && dst_dtype == data_type_t::bf16
-                    && compute_dtype == data_type_t::s8);
 }
 
 // ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8 = { "0", "1" } — cached, default ON.
@@ -1264,10 +1247,10 @@ inline bool get_grp_matmul_custom_kernel_f16() {
     return v;
 }
 
-/// The EFFECTIVE per-call custom-kernel verdict: the dtype carve-out folded
+/// The EFFECTIVE per-call custom-kernel verdict: the master knob folded
 /// with the family sub-toggle and the per-group disqualifier.
 ///
-/// This exists because `grp_matmul_custom_kernel_enabled` reads the master
+/// This exists because `get_grp_matmul_custom_kernel` reads the master
 /// knob alone, while `engage_ntile_custom_kernel` additionally honours
 /// `..._INT8` / `..._F16`, and `flat_n_tile` additionally refuses a per-group
 /// `{G, N}` weight scale.  Any decision that has to AGREE with the kernel's
@@ -1294,9 +1277,7 @@ inline bool grp_matmul_custom_kernel_effective(
     if (rep >= params.size()) { return false; }
 
     const auto &d = params[rep].dtypes;
-    if (!grp_matmul_custom_kernel_enabled(d.wei, d.dst, d.compute)) {
-        return false;
-    }
+    if (!get_grp_matmul_custom_kernel()) { return false; }
     // Discriminate the DQ-INT8 family the same way the rest of the tree does
     // (`int8_aocl_warm_candidate` / `ck_eligible_int8`): weight s8 with an
     // s8/u8 compute.  Keying on `dynamic_quant` or on an s8 SOURCE misses the
@@ -1313,11 +1294,17 @@ inline bool grp_matmul_custom_kernel_effective(
     if (is_f16_call && !get_grp_matmul_custom_kernel_f16()) { return false; }
 
     // A per-group `{G, N}` weight scale on ANY active expert disqualifies the
-    // custom kernel for the whole call -- the CK tiler slices the source
-    // scale one scalar per row, i.e. per-token only.  Mirrors `ck_per_group`
-    // in `flat_n_tile`.
+    // int8 custom kernel for the whole call -- it consumes per-token source
+    // scales only.  W4A8 normally has `{G, N}` weights, so exempt that side,
+    // but still reject a per-group `{M, G}` SOURCE scale: the s4 microkernel
+    // also reads only one source scale per row.
     for (size_t i = 0; i < params.size(); ++i) {
         if (i >= M.size() || M[i] <= 0) { continue; }
+        if (is_w4a8_config(params[i])) {
+            const auto &ss = params[i].quant_params.src_scale;
+            if (ss.dims.size() == 2 && ss.dims[1] > 1) { return false; }
+            continue;
+        }
         const auto &ws = params[i].quant_params.wei_scale;
         if (ws.dims.size() == 2 && ws.dims[0] > 1) { return false; }
     }
@@ -1751,11 +1738,10 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// the tight pair-aligned case.  This only selects which keys get warmed;
 /// a wrong answer costs a first-call reorder, never correctness.
 /// `ck_enabled` must be the EFFECTIVE per-call verdict, not the master env
-/// knob: the dtype-aware `grp_matmul_custom_kernel_enabled` folded with the
-/// family sub-toggle.  Passing the raw env mispredicts every family the
-/// custom kernel structurally cannot serve -- W4A8 always, and int8 or f16
-/// whenever their sub-knob is off -- because those reach decode with the
-/// custom kernel disabled and therefore split on the tight alignment.
+/// knob: `grp_matmul_custom_kernel_effective`, which folds in the family
+/// sub-toggle.  Passing the raw env mispredicts int8 or f16 whenever their
+/// sub-knob is off, because those reach decode with the custom kernel
+/// disabled and therefore split on the tight alignment.
 ///
 /// `decode_arena_tight` is the arena the DECODE call will use, which is not
 /// observable from the prompt call's `ldc`.  Under AUTO the prompt resolves

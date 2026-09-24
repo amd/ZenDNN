@@ -149,6 +149,7 @@
 #include "ukernel/bf16_microkernel.hpp"
 #include "ukernel/f16_microkernel.hpp"
 #include "ukernel/int8_microkernel.hpp"
+#include "ukernel/s4_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -206,7 +207,15 @@ enum class KernelVariant : uint8_t {
     = 6, ///< DQ-INT8 asymmetric: src(hoisted u8) × wei(s8) → f32.
     kF16_F16_F16 = 7, ///< `f16:f16:f16` (native AVX-512-FP16).
     kF16_F16_F32 = 8, ///< `f16:f16:f32` (native AVX-512-FP16, act=none only).
+    kS8_S4_BF16_SYM
+    = 9, ///< W4A8: src(s8, per-token) × wei(s4, per-group) → bf16.
 };
+
+/// Is this variant in the W4A8 (s4) family?  One member today:
+/// `is_w4a8_config` pins compute to s8 and dst to bf16.
+inline bool is_s4_variant(KernelVariant v) noexcept {
+    return v == KernelVariant::kS8_S4_BF16_SYM;
+}
 
 /// Predicate: is this variant in the DQ-INT8 family?
 ///
@@ -233,6 +242,15 @@ inline bool is_int8_variant(KernelVariant v) noexcept {
 /// Kept `noexcept` so the optimiser folds it into a `cmp + or`.
 inline bool is_f16_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kF16_F16_F16 || v == KernelVariant::kF16_F16_F32;
+}
+
+/// Does this variant consume the per-token-quantised s8/u8 source the
+/// N-tile hoist produces?  True for DQ-INT8 and W4A8, which differ
+/// only on the weight side.  Sites that set up or validate that hoist
+/// MUST use this rather than `is_int8_variant`, or a W4A8 call reaches
+/// the kernel with an unconverted bf16 source and a null scale.
+inline bool needs_s8_src_hoist(KernelVariant v) noexcept {
+    return is_int8_variant(v) || is_s4_variant(v);
 }
 
 /// Map a (src, wei, dst, dynamic_quant, compute_dtype) tuple to a
@@ -381,6 +399,18 @@ struct CallContext {
     /// `kF16_F16_F16` / `kF16_F16_F32`; stays zero otherwise.
     /// `dispatch_tile()` reads it off `is_f16_variant(variant)`.
     f16_ukernel_fn_t kfn_table_f16[kMaxMR + 1] = {};
+    /// W4A8 per-MR table; zero for every other variant.  Valid MR
+    /// range is `1..max_mr_for_nv_s4(NV)`, tighter than the int8
+    /// table's.
+    s4_ukernel_fn_t kfn_table_s4[kMaxMR + 1] = {};
+
+    /// W4A8 K-group size, 0 for other variants.  `prepare_for_call()`
+    /// validates it as a positive multiple of `kS4Octet` dividing K.
+    int group_size = 0;
+    /// Group stride in the caller's `{G, N}` weight-scale buffer: the
+    /// expert's FULL N, not the tile width, because an N-tile slices
+    /// columns out of that buffer without repacking it.
+    int wei_scale_grp_stride = 0;
 
     /// Maximum experts per call we cache packed pointers for.  Must
     /// match (or exceed) each caller's own expert-count cap.
@@ -401,6 +431,9 @@ struct CallContext {
     /// pack.hpp).  `dispatch_tile()` passes the raw `float16_t *` to the
     /// FP16 microkernel.
     std::array<const float16_t *, kMaxExperts> packed_ptrs_f16 {};
+    /// W4A8 packed-weight pointers (nibble slab, layout in pack.hpp);
+    /// all-null for every other variant.
+    std::array<const int8_t *, kMaxExperts> packed_ptrs_s4 {};
 
     /// Per-expert L2-friendly N-chunk width (cols).  Sized individually
     /// so small-M experts (low A footprint) get a wider subtile with
@@ -447,6 +480,9 @@ struct CallContext {
     /// contract as the bf16 array; the destructor /
     /// `release_owned_buffers()` zero it on exit.
     std::array<const float16_t *, kMaxExperts> owned_packed_ptrs_f16 {};
+    /// W4A8 sibling of `owned_packed_ptrs`: cache-off branch only,
+    /// freed via `free_owned_packed_weight_s4()`.
+    std::array<const int8_t *, kMaxExperts> owned_packed_ptrs_s4 {};
 
     /// Free every caller-owned packed buffer this context holds and
     /// zero the `owned_packed_ptrs` array.  Idempotent and safe to
@@ -621,7 +657,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // aliased to the caller's buffer and the LRU cache is NOT touched
         // (caller owns the buffer lifetime).  Empty vector ⇒ no expert is
         // prepacked (the default — every weight is packed as before).
-        const std::vector<bool> &weights_prepacked = {});
+        const std::vector<bool> &weights_prepacked = {},
+        // W4A8 only.  Both default to 0, the "not an s4 call" signal;
+        // a `wei_dtype == s4` tuple with `group_size == 0` is refused.
+        int group_size = 0, int wei_scale_grp_stride = 0);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the

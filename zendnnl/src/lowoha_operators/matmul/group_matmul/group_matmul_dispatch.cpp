@@ -1216,9 +1216,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // routinely an inactive padding slot whose dtypes are unset) says "CK
     // will fuse" for calls the kernel then refuses -- and the tight
     // split-halves path answers that refusal by demoting the layer to serial
-    // Sequential.  `grp_matmul_custom_kernel_effective` folds the dtype
-    // carve-out, the family sub-toggles and the per-group disqualifier, and
-    // picks its representative from the first ACTIVE expert.
+    // Sequential.  `grp_matmul_custom_kernel_effective` folds the family
+    // sub-toggles and the per-group disqualifier, and picks its
+    // representative from the first ACTIVE expert.
     // Must be the EFFECTIVE verdict, not the master knob: this feeds
     // `a3_fuses`, which decides whether the tight-dst guard runs.  The master
     // knob (and `params[0]`, routinely an inactive padding slot in MoE
@@ -1582,8 +1582,6 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         // checks not visible here (`transA`, `alpha`, `beta`,
         // `is_weights_const`, `ldb` min-row-stride, fused-act/bias dtype
         // matrix).  Surface as a hint, not a guarantee.
-        // Report the call-scoped effective value (W4A8 forces CK off), not
-        // merely the process-wide environment setting.
         const int log_custom_kernel = custom_kernel_en;
         const int log_custom_kernel_int8 = get_grp_matmul_custom_kernel_int8();
         // BF16 family hint — same gate as before.
@@ -1630,12 +1628,23 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                         || (params[rep].dtypes.src == data_type_t::s8
                                 && params[rep].quant_params.src_scale.buff
                                         != nullptr));
-        const bool ck_hint = ck_hint_bf16 || ck_hint_int8 || ck_hint_f16;
+        const bool ck_hint_s4 = (use_algo == 3) && log_custom_kernel
+                && (params[rep].dtypes.wei == data_type_t::s4)
+                && (params[rep].dtypes.dst == data_type_t::bf16)
+                && (params[rep].dtypes.compute == data_type_t::s8)
+                && ((params[rep].dynamic_quant
+                            && params[rep].dtypes.src == data_type_t::bf16)
+                        || (params[rep].dtypes.src == data_type_t::s8
+                                && params[rep].quant_params.src_scale.buff
+                                        != nullptr));
+        const bool ck_hint
+                = ck_hint_bf16 || ck_hint_int8 || ck_hint_f16 || ck_hint_s4;
         const char *ck_family = ck_hint_bf16 ? "bf16"
                 : ck_hint_int8
                 ? (params[rep].dtypes.compute == data_type_t::u8 ? "int8_asym"
                                                                  : "int8_sym")
                 : ck_hint_f16 ? "f16"
+                : ck_hint_s4  ? "w4a8_s4"
                               : "none";
         // SELECTION record (emitted BEFORE the executor runs): `chosen=ALGO_X`
         // is the algo the selector picked, with `reason` explaining the gate.

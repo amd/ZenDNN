@@ -78,6 +78,15 @@ inline constexpr int kVNNIPair = 2;
 /// `int8_microkernel.{hpp,cpp}`).
 inline constexpr int kVNNIInt8Quad = 4;
 
+/// S4 unit of K: eight consecutive K-rows share one 4-byte packed
+/// column group, two K-elements per byte.  One 64-byte load of that
+/// group yields TWO VNNI quads via AND / shift+AND.
+inline constexpr int kS4Octet = 8;
+
+/// Packed bytes per column per K-octet.  Same byte shape as an INT8
+/// K-quad, so both packs share their o-block stride arithmetic.
+inline constexpr int kS4BytesPerOctetCol = 4;
+
 /// Supported pack widths.  Match the `bf16_brgemm_ukernel.cpp` set
 /// minus NR=16 (gated activation needs at least 32 cols for one
 /// (gate, up) pair to fit in a single (acc_lo, acc_hi) zmm pair).
@@ -355,6 +364,71 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
 /// `nullptr`.  Same lifetime contract as
 /// `free_owned_packed_weight` (the bf16 sibling).
 void free_owned_packed_weight_int8(const int8_t *packed);
+
+// ── W4A8 S4 pack ────────────────────────────────────────────────
+// Keeps the weight at FOUR bits end to end: the kernel expands
+// nibbles in registers, so no s8 copy is ever materialised.
+//
+// Layout, per o-block of `pack_nr` cols:
+//
+//     [O/pack_nr][
+//        [K/8][pack_nr][4]     ← biased-nibble bytes (2 K per byte)
+//        [G][pack_nr] int32_t  ← per-group per-column compensation
+//     ]
+//
+// Byte `(ko, n, q)` holds two K-elements of column `n`:
+//
+//     low  nibble  ←  W[k = ko*8 + q    ][n]
+//     high nibble  ←  W[k = ko*8 + 4 + q][n]
+//
+// That (k, k+4) pairing makes the low plane VNNI quad `2*ko` and the
+// high plane quad `2*ko + 1`, so one 64-byte load unpacks with AND
+// and shift+AND alone.  A (k, k+1) pairing would need a byte shuffle
+// per load; the pack absorbs the reordering once instead.
+//
+// Nibbles are stored BIASED by XOR 8, so the true value is `u' - 8`
+// and the kernel recovers the sign with one `_mm512_sub_epi8`.
+// Consequence: a stored nibble of 8, not 0, encodes zero.
+//
+// `comp[g][v_col] = sum_{k in group g} w_true[k, v_col]` undoes the
+// kernel's XOR-0x80 source recentering at each group flush.  Requires
+// `group_size % 8 == 0` and `K % group_size == 0`.
+//
+// The cache is a separate LRU singleton with its own key marker;
+// `group_size` is part of the key, so two group sizes over the same
+// weight pointer cannot alias.
+
+/// Look up the pre-packed S4 weight, packing on the first miss.
+/// Mirrors `get_or_pack_weight_int8` except:
+///   * `weight` is the caller's NIBBLE-PACKED s4 buffer, indexed by
+///     the LINEAR logical index (`n*ldb + k` when `transB`, else
+///     `k*ldb + n`) with the even index in the low nibble — the same
+///     convention `cvt_s4_to_s8` uses, so the AOCL and CK paths
+///     consume byte-identical caller buffers.
+///   * `group_size` is required: > 0, multiple of 8, and divides K.
+status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves, int group_size,
+        const int8_t **out_packed, bool *was_hit_out = nullptr,
+        bool disable_cache = false);
+
+/// Free a buffer from `get_or_pack_weight_s4(..., disable_cache=true)`.
+/// Safe with `nullptr`.
+void free_owned_packed_weight_s4(const int8_t *packed);
+
+/// 64-byte-aligned byte size of the S4 pack — nibble slab plus
+/// `G = K/group_size` int32 compensation rows per o-block.  Returns 0
+/// for invalid args.
+size_t packed_weight_size_s4(int K, int N, int pack_nr, int group_size);
+
+/// Pack into caller-provided `dst` (>= `packed_weight_size_s4`, ideally
+/// 64-byte aligned).  No allocation, no caching.
+status_t prepack_weight_into_s4(const int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves, int group_size,
+        void *dst);
+
+/// S4 counterpart of `clear_custom_kernel_pack_cache()`, with the same
+/// quiescence contract: no in-flight W4A8 CK dispatch on any thread.
+void clear_custom_kernel_pack_cache_s4();
 
 // ── Caller-owned prepack (memory-format change, no caching) ──────
 // Used by the reorder weight-prepack pipeline

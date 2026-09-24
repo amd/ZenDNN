@@ -58,6 +58,8 @@ target_sources(gtests
     # interleave + compensation row).
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_int8.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_int8.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_s4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_s4.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ntile_flat_parallel/test_ntile_flat_parallel.cpp

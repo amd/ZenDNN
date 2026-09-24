@@ -867,7 +867,8 @@ inline void sort_indices_by_m(
 /// and the master switch means the same thing for every dtype.  Set the
 /// int8 sub-toggle to "0" to route DQ-INT8 back to the AOCL DLP sym-quant
 /// path instead.  Master "0" disables CK for all dtypes.
-/// W4A8 forces CK OFF regardless of either environment setting.
+/// W4A8 (s4) has no sub-toggle of its own — the master switch governs
+/// it, as it does the FP16 family.
 ///
 /// Even with the envs enabled, the dispatcher's per-call contract
 /// check (dtype tuple, no transA, α=1, β=0, N % pack_nr, supported
@@ -892,24 +893,23 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
         // Per-expert "weight already CK-VNNI-packed" signal, forwarded to
         // `prepare_for_call` (built from the caller's per-expert
         // `mem_format_b == 'r'`).  Empty ⇒ no prepacked experts.
-        const std::vector<bool> &weights_prepacked = {}) {
-    if (!grp_matmul_custom_kernel_enabled(
-                wei_dtype, dst_dtype, compute_dtype)) {
-        return;
-    }
+        const std::vector<bool> &weights_prepacked = {},
+        // W4A8 only; 0 elsewhere, which is the "not an s4 call" signal.
+        int group_size = 0, int wei_scale_grp_stride = 0) {
+    if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
     // arrives two ways and BOTH must honour the sub-toggle:
-    //   * runtime hoist  — `dynamic_quant=true` (bf16 src quantized
-    //     per-tile);
+    //   * runtime hoist  — `dynamic_quant=true` with s8 weights
+    //     (bf16 src quantized per-tile);
     //   * grouped pre-quant — `group_dynamic_quant` already produced an
     //     s8 src and CLEARED `dynamic_quant`, so detect it via
     //     `src=s8 && wei=s8`.  Without this, a grouped-s8 call would
     //     engage CK even with the int8 sub-toggle OFF (inconsistent with
     //     `ck_eligible_int8` / prepack which honour the sub-toggle).
     // Bf16 calls (`src=bf16, wei=bf16`) never satisfy either clause.
-    const bool is_dq_int8_call = dynamic_quant
-            || (src_dtype == data_type_t::s8 && wei_dtype == data_type_t::s8);
+    const bool is_dq_int8_call = wei_dtype == data_type_t::s8
+            && (dynamic_quant || src_dtype == data_type_t::s8);
     if (is_dq_int8_call && !get_grp_matmul_custom_kernel_int8()) return;
     // FP16 CK sub-toggle — independent from the master + int8 knobs so
     // operators can A/B the native AVX-512-FP16 fast path without
@@ -921,7 +921,7 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
     custom_kernel::prepare_for_call(act, src_dtype, wei_dtype, dst_dtype,
             act_dtype, bias_dtype, transA, transB, M, N, K, ldb, alpha, beta,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
-            weights_prepacked);
+            weights_prepacked, group_size, wei_scale_grp_stride);
 }
 
 /// Effective N-column alignment for the per-thread split:

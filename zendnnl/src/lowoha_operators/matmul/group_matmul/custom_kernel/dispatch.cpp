@@ -34,6 +34,8 @@ namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
+using zendnnl::error_handling::apilog_info;
+using zendnnl::error_handling::apilog_info_enabled;
 using zendnnl::error_handling::apilog_verbose;
 using zendnnl::error_handling::apilog_verbose_enabled;
 
@@ -100,6 +102,12 @@ void CallContext::release_owned_buffers() {
             ptr = nullptr;
         }
     }
+    for (auto &ptr : owned_packed_ptrs_s4) {
+        if (ptr != nullptr) {
+            free_owned_packed_weight_s4(ptr);
+            ptr = nullptr;
+        }
+    }
 }
 
 void CallContext::reset() {
@@ -128,9 +136,16 @@ void CallContext::reset() {
         fn = nullptr;
     for (auto &fn : kfn_table_f16)
         fn = nullptr;
+    for (auto &fn : kfn_table_s4)
+        fn = nullptr;
+    // A stale `group_size` across a CallContext reuse would make the s4
+    // kernel walk the wrong number of compensation rows.
+    group_size = 0;
+    wei_scale_grp_stride = 0;
     packed_ptrs.fill(nullptr);
     packed_ptrs_int8.fill(nullptr);
     packed_ptrs_f16.fill(nullptr);
+    packed_ptrs_s4.fill(nullptr);
     subtile_cols_per_expert.fill(0);
 }
 
@@ -207,6 +222,15 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
         if (dst == data_type_t::f16) return KernelVariant::kF16_F16_F16;
         if (dst == data_type_t::f32) return KernelVariant::kF16_F16_F32;
     }
+    // W4A8 — one variant only: `is_w4a8_config` pins compute to s8
+    // (symmetric) and dst to bf16.  Matching here does not engage the
+    // kernel; `prepare_for_call` still applies the shape gates.
+    const bool s4_src = (dynamic_quant && src == data_type_t::bf16)
+            || (src == data_type_t::s8);
+    if (s4_src && wei == data_type_t::s4 && dst == data_type_t::bf16
+            && compute_dtype == data_type_t::s8) {
+        return KernelVariant::kS8_S4_BF16_SYM;
+    }
     return KernelVariant::kUnsupported;
 }
 
@@ -225,6 +249,7 @@ DstDt dst_dt_for_variant(KernelVariant v) noexcept {
         case KernelVariant::kU8_S8_F32_ASYM: return DstDt::kF32;
         case KernelVariant::kF16_F16_F16: return DstDt::kF16;
         case KernelVariant::kF16_F16_F32: return DstDt::kF32;
+        case KernelVariant::kS8_S4_BF16_SYM: return DstDt::kBf16;
         default: return DstDt::kBf16; // unreachable on the success path
     }
 }
@@ -318,6 +343,14 @@ inline SubtileBytes subtile_bytes_for_variant(KernelVariant v) {
         // Comp row is int32 per-column appended after each o-block.
         return {1, 1, 4};
     }
+    if (is_s4_variant(v)) {
+        // The true W4A8 footprint is `K/2 + (K/group_size)*4` bytes per
+        // column, which this bytes-per-element model cannot express and
+        // `group_size` is not visible here anyway.  Reusing the int8
+        // model over-estimates the nibble slab 2x, so the subtile comes
+        // out narrower than optimal — an L2 blocking heuristic only.
+        return {1, 1, 4};
+    }
     if (is_f16_variant(v)) {
         // FP16 family — src/wei are native f16 (2 bytes each), no
         // compensation row (non-quant, like bf16).  Numerically identical
@@ -373,6 +406,19 @@ status_t fill_kfn_table_f16(int NV, ActKind act_kind, DstDt dst_dt,
     return status_t::success;
 }
 
+// W4A8 sibling of `fill_kfn_table`: no Compute / DstDt axis, and a
+// tighter MR bound.  Slots above it stay null, so `dispatch_tile` must
+// clamp its MR chunking to `ctx.max_mr`.
+status_t fill_kfn_table_s4(
+        int NV, ActKind act_kind, s4_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
+    const int max_mr = max_mr_for_nv_s4(NV);
+    for (int mr = 1; mr <= max_mr; ++mr) {
+        kfn_table[mr] = select_s4_ukernel(mr, NV, act_kind);
+        if (kfn_table[mr] == nullptr) return status_t::failure;
+    }
+    return status_t::success;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────
@@ -388,7 +434,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<float> &beta, const std::vector<const void *> &weight,
         const std::vector<bool> &is_weights_const, CallContext &out,
         bool dynamic_quant, data_type_t compute_dtype,
-        const std::vector<bool> &weights_prepacked) {
+        const std::vector<bool> &weights_prepacked, int group_size,
+        int wei_scale_grp_stride) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -456,6 +503,20 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             } else {
                 apilog_verbose("[GRP_MATMUL.CK REFUSED] reason=", reason_tag);
             }
+        }
+        return status_t::failure;
+    };
+    // W4A8 refusals log at info, not verbose: for the other families a
+    // refusal is a performance footnote, here it silently removes the
+    // whole feature.
+    static const bool s_w4a8_log = apilog_info_enabled();
+    auto refuse_w4a8
+            = [&](const char *reason_tag, const char *detail) -> status_t {
+        if (s_w4a8_log) {
+            apilog_info(
+                    "[GRP_MATMUL.CK.W4A8 REFUSED] INT4 CK was not called; "
+                    "reason=",
+                    reason_tag, " (", detail, ") — falling back to AOCL DLP");
         }
         return status_t::failure;
     };
@@ -589,11 +650,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // at least ONE family's ISA exists).  bf16 variants require AVX-512
     // BF16; int8 variants require AVX-512 VNNI; fp16 variants require
     // AVX-512-FP16 (checked by its own gate below).  Splitting the gate
-    // here lets a VNNI-only host (no BF16) still serve DQ-INT8, and a
-    // FP16-only host (no BF16) still serve the FP16 variants — the bf16
-    // ISA requirement must therefore only apply to the bf16 variants.
+    // here lets a VNNI-only host (no BF16) still serve DQ-INT8 and W4A8
+    // (whose BF16 store is an integer RNE sequence, not VCVTNEPS2BF16),
+    // and a FP16-only host (no BF16) still serve the FP16 variants — the
+    // bf16 ISA requirement must therefore only apply to the bf16 variants.
     if (!is_int8_variant(variant) && !is_f16_variant(variant)
-            && !avx512bf16_available()) {
+            && !is_s4_variant(variant) && !avx512bf16_available()) {
         return refuse("avx512bf16_not_available",
                 "BF16 custom kernel requires AVX-512 BF16 (VDPBF16PS)"
                 " — runtime CPU detection failed");
@@ -603,6 +665,28 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 "DQ-INT8 custom kernel requires AVX-512 VNNI "
                 "(VPDPBUSD) — runtime CPU detection failed");
     }
+    if (is_s4_variant(variant) && !avx512vnni_available()) {
+        return refuse_w4a8("avx512vnni_not_available",
+                "W4A8 custom kernel requires AVX-512 VNNI "
+                "(VPDPBUSD) — runtime CPU detection failed");
+    }
+    // group_size == 0 means the caller was never ported to the s4 path;
+    // a non-multiple of the octet would leave the kernel a partial group.
+    if (is_s4_variant(variant)
+            && (group_size <= 0 || (group_size % kS4Octet) != 0)) {
+        return refuse_w4a8("s4_group_size_unsupported",
+                "W4A8 custom kernel requires a positive group_size that "
+                "is a multiple of 8; falling back to AOCL DLP");
+    }
+    if (is_s4_variant(variant) && wei_scale_grp_stride <= 0) {
+        return refuse_w4a8("s4_missing_wei_scale_stride",
+                "W4A8 custom kernel requires the caller's {G, N} weight "
+                "scale group stride (the expert's full N)");
+    }
+    // Split-halves gated acts: the pack re-permutes weight columns, so
+    // the `{G, N}` scale must be permuted on all G rows to match —
+    // see `materialise_f32_wei_scale_cached`'s `n_groups` in the N-tile
+    // hoist.  `swiglu_oai_mul` arrives already interleaved.
     // FP16 variants require native AVX-512-FP16 (VFMADD*PH).  On CPUs without that ISA
     // and other AVX-512 parts without FP16, `avx512f16_available()`
     // returns false (and on a toolchain without the intrinsics the
@@ -780,6 +864,13 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             return refuse("int8_K_not_multiple_of_4",
                     "DQ-INT8 custom kernel requires K divisible by 4 "
                     "(VNNI K-quad); falling back to AOCL DLP");
+        // With the `group_size % 8` check above, this also guarantees
+        // `K % 8 == 0`: no partial trailing octet in the pack, and no
+        // src over-read in the kernel's 4-byte broadcasts.
+        if (is_s4_variant(variant) && (K[i] % group_size) != 0)
+            return refuse_w4a8("s4_K_not_multiple_of_group_size",
+                    "W4A8 custom kernel requires K divisible by "
+                    "group_size; falling back to AOCL DLP");
         if (alpha[i] != 1.0f || beta[i] != 0.0f)
             return refuse("alpha_beta_not_supported",
                     "custom kernel requires alpha=1, beta=0 per expert");
@@ -818,7 +909,14 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // ── Build the run context ─────────────────────────────────────────
     out.pack_nr = pack_nr;
     out.NV = pack_nr / 16;
-    out.max_mr = max_mr_for_nv(out.NV);
+    // W4A8 caps MR lower: its per-group f32 accumulator lives alongside
+    // the s32 one.  The general bound would index null table slots.
+    out.max_mr = is_s4_variant(variant) ? max_mr_for_nv_s4(out.NV)
+                                        : max_mr_for_nv(out.NV);
+    if (is_s4_variant(variant)) {
+        out.group_size = group_size;
+        out.wei_scale_grp_stride = wei_scale_grp_stride;
+    }
     // AUTO deep-K K-blocking: engage for the single-expert (dense-FFN)
     // decode-class call only (see `is_dense_ffn_decode` — the single scope
     // predicate shared with Rule 0.45 routing and the adaptive N-tile
@@ -861,6 +959,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                     "no DQ-INT8 microkernel for this (NV, compute, "
                     "act_kind, dst_dt) tuple — note gated act + FP32-dst "
                     "is intentionally rejected (BF16 dst only)");
+        }
+    } else if (is_s4_variant(out.variant)) {
+        if (fill_kfn_table_s4(out.NV, out.act_kind, out.kfn_table_s4)
+                != status_t::success) {
+            return refuse_w4a8("kfn_table_s4_fill_failed",
+                    "no W4A8 microkernel for this (NV, act_kind) tuple");
         }
     } else if (is_f16_variant(out.variant)) {
         const DstDt dst_dt = dst_dt_for_variant(out.variant);
@@ -918,6 +1022,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // below stores into them.
     const bool variant_is_int8 = is_int8_variant(out.variant);
     const bool variant_is_f16 = is_f16_variant(out.variant);
+    const bool variant_is_s4 = is_s4_variant(out.variant);
     for (int i = 0; i < num_ops; ++i) {
         if (M[i] <= 0) continue;
         bool was_hit_unused = false;
@@ -931,6 +1036,16 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 && static_cast<size_t>(i) < weights_prepacked.size()
                 && weights_prepacked[i];
         if (prepacked_i) {
+            if (variant_is_s4) {
+                // The prepack API has no s4 family (`prepack_params_t`
+                // carries no `group_size`), so an 'r' s4 weight cannot
+                // have come from this library.  Aliasing it would feed
+                // the kernel raw nibbles in place of the octet layout.
+                return refuse_w4a8("s4_caller_prepack_unsupported",
+                        "W4A8 custom kernel has no caller-prepacked "
+                        "('r') weight format; pass raw packed s4 with "
+                        "mem_format_b = 'n'");
+            }
             if (variant_is_int8) {
                 out.packed_ptrs_int8[i]
                         = static_cast<const int8_t *>(weight[i]);
@@ -998,6 +1113,25 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             if (cache_off) {
                 out.owned_packed_ptrs_int8[i] = out.packed_ptrs_int8[i];
             }
+        } else if (variant_is_s4) {
+            // Caller's weight is the nibble-packed s4 buffer, same as
+            // the AOCL s4 path receives.
+            status_t pst = get_or_pack_weight_s4(
+                    static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
+                    pack_nr,
+                    /*transB=*/transB[i],
+                    /*interleave_split_halves=*/interleave_split_halves,
+                    /*group_size=*/group_size, &out.packed_ptrs_s4[i],
+                    /*was_hit_out=*/&was_hit_unused,
+                    /*disable_cache=*/cache_off);
+            if (pst != status_t::success) {
+                return refuse_w4a8("weight_pack_failed",
+                        "get_or_pack_weight_s4 returned failure — "
+                        "see preceding log_error for OOM/arg detail");
+            }
+            if (cache_off) {
+                out.owned_packed_ptrs_s4[i] = out.packed_ptrs_s4[i];
+            }
         } else {
             // BF16 path — unchanged.
             status_t pst = get_or_pack_weight_bf16(
@@ -1027,6 +1161,32 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     }
 
     out.enabled = true;
+
+    // Counterpart to the REFUSED lines above; once per call, so it
+    // cannot flood a hot loop.
+    if (is_s4_variant(out.variant) && s_w4a8_log) {
+        const int rep_K = (K.empty() ? 0 : K[0]);
+        const int groups = (out.group_size > 0) ? (rep_K / out.group_size) : 0;
+        apilog_info("[GRP_MATMUL.CK.W4A8 ENGAGED] Calling INT4 custom kernel:",
+                " group_size=", out.group_size, " G=", groups, " K=", rep_K,
+                " wei_scale_grp_stride=", out.wei_scale_grp_stride,
+                " pack_nr=", out.pack_nr, " NV=", out.NV,
+                " max_mr=", out.max_mr, " act=",
+                (out.act_kind == ActKind::swiglu_oai_mul ? "swiglu_oai_mul"
+                                : out.act_kind == ActKind::silu_and_mul
+                                ? "silu_and_mul"
+                                : out.act_kind == ActKind::gelu_and_mul
+                                ? "gelu_and_mul"
+                                : "none"),
+                " scale_kind=",
+                (out.scale_kind == ScaleKind::kBf16 ? "bf16" : "f32"), " bias=",
+                (out.bias_kind == BiasKind::none                  ? "none"
+                                : out.bias_kind == BiasKind::bf16 ? "bf16"
+                                : out.bias_kind == BiasKind::f16  ? "f16"
+                                                                  : "f32"),
+                " num_ops=", num_ops);
+    }
+
     if (s_refuse_log) {
         const char *variant_name
                 = (out.variant == KernelVariant::kBF16_BF16_BF16)
@@ -1043,8 +1203,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 ? "u8_s8_f32_asym"
                 : (out.variant == KernelVariant::kF16_F16_F16) ? "f16_f16_f16"
                 : (out.variant == KernelVariant::kF16_F16_F32) ? "f16_f16_f32"
-                                                               : "unsupported";
+                : (out.variant == KernelVariant::kS8_S4_BF16_SYM)
+                ? "s8_s4_bf16_sym"
+                : "unsupported";
         apilog_verbose("[GRP_MATMUL.CK ENGAGED] variant=", variant_name,
+                " group_size=", out.group_size, // 0 for non-W4A8 families
+                " wei_scale_grp_stride=", out.wei_scale_grp_stride,
                 " pack_nr=", out.pack_nr, " NV=", out.NV,
                 " max_mr=", out.max_mr, " subtile_cols=", out.subtile_cols,
                 " act_kind=",
@@ -1298,6 +1462,128 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                         wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
                         Wide_row, tight_ldc,
                         /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
+            }
+            m_off += mr_now;
+        }
+    }
+}
+
+// Sub-tile + per-MR loop for `kS8_S4_BF16_SYM`.  Shaped like
+// `dispatch_tile_int8`, minus `src_zp` (W4A8 is symmetric) and with a
+// constant BF16 dst.  The weight scale is sliced by COLUMN only; the
+// kernel adds `g * wei_scale_grp_stride` itself to walk the `{G, N}`
+// rows, so that stride is the expert's full N, not the tile width.
+inline void dispatch_tile_s4(const CallContext &ctx, int expert_idx, int M,
+        int K, int n_tile, int col_start, const void *src, int lda,
+        const void *bias, void *tight_dst, int tight_ldc,
+        const void *src_scale_full, const void *wei_scale_full) {
+
+    assert(src_scale_full != nullptr
+         && "dispatch_tile_s4: N-tile hoist must populate the per-token "
+            "src scale");
+    assert(wei_scale_full != nullptr
+            && "dispatch_tile_s4: caller must thread the {G, N} wei scale");
+    assert(ctx.group_size > 0
+            && "dispatch_tile_s4: prepare_for_call must record group_size");
+
+    const int8_t *Bpacked_full = ctx.packed_ptrs_s4[expert_idx];
+    const auto *A_bytes = static_cast<const uint8_t *>(src);
+    std::byte *Tight_bytes = static_cast<std::byte *>(tight_dst);
+    constexpr size_t dst_elem_bytes_s4 = sizeof(bfloat16_t);
+
+    // Must stay in lockstep with `bytes_per_oblock` in
+    // `pack_s4_vnni_impl`.  Both divisions are exact — `prepare_for_call`
+    // guarantees `K % 8 == 0` and `K % group_size == 0`.
+    const int K_oct = K / kS4Octet;
+    const int G = K / ctx.group_size;
+    const size_t o_blk_stride_bytes
+            = static_cast<size_t>(K_oct) * ctx.pack_nr * kS4BytesPerOctetCol
+            + static_cast<size_t>(G) * ctx.pack_nr * sizeof(int32_t);
+
+    const int subtile_cols = (ctx.subtile_cols_per_expert[expert_idx] > 0)
+            ? ctx.subtile_cols_per_expert[expert_idx]
+            : ctx.subtile_cols;
+
+    const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+
+    const size_t bias_elem_bytes = (ctx.bias_kind == BiasKind::fp32)
+            ? sizeof(float)
+            : sizeof(bfloat16_t); // bf16 or f16 (both 2B)
+    const size_t scale_elem_bytes = (ctx.scale_kind == ScaleKind::kBf16)
+            ? sizeof(bfloat16_t)
+            : sizeof(float);
+
+    const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
+            || (ctx.act_kind == ActKind::silu_and_mul)
+            || (ctx.act_kind == ActKind::gelu_and_mul);
+
+    for (int sub_off = 0; sub_off < n_tile; sub_off += subtile_cols) {
+        const int sub_n = std::min(subtile_cols, n_tile - sub_off);
+        const int sub_col_base = col_start + sub_off;
+        const int n_blocks = sub_n / ctx.pack_nr;
+
+        const int8_t *Bpacked_blk_base = Bpacked_full
+                + static_cast<size_t>(sub_col_base / ctx.pack_nr)
+                        * o_blk_stride_bytes;
+        const char *bias_blk_base = (bias != nullptr)
+                ? static_cast<const char *>(bias)
+                        + static_cast<size_t>(sub_col_base) * bias_elem_bytes
+                : nullptr;
+        const char *wei_scale_blk_base
+                = static_cast<const char *>(wei_scale_full)
+                + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
+
+        int m_off = 0;
+        for (int c = 0; c < n_calls; ++c) {
+            const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+            const s4_ukernel_fn_t kfn = ctx.kfn_table_s4[mr_now];
+
+            const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
+            const void *src_scale_chunk
+                    = static_cast<const char *>(src_scale_full)
+                    + static_cast<size_t>(m_off) * scale_elem_bytes;
+
+            // Gated acts write the halved [M, N/2] tight arena, so the
+            // column origin halves; act=none writes the wide [M, N].
+            std::byte *Row_base = Tight_bytes
+                    + (static_cast<size_t>(m_off) * tight_ldc
+                              + (is_gated_act ? (sub_col_base / 2)
+                                              : sub_col_base))
+                            * dst_elem_bytes_s4;
+
+            for (int b = 0; b < n_blocks; ++b) {
+                const int8_t *Bpacked_blk = Bpacked_blk_base
+                        + static_cast<size_t>(b) * o_blk_stride_bytes;
+                const void *bias_blk = (bias_blk_base != nullptr)
+                        ? static_cast<const void *>(bias_blk_base
+                                  + static_cast<size_t>(b) * ctx.pack_nr
+                                          * bias_elem_bytes)
+                        : nullptr;
+                const void *wei_scale_blk
+                        = static_cast<const void *>(wei_scale_blk_base
+                                + static_cast<size_t>(b) * ctx.pack_nr
+                                        * scale_elem_bytes);
+                std::byte *Row = Row_base
+                        + static_cast<size_t>(b)
+                                * (is_gated_act ? (ctx.pack_nr / 2)
+                                                : ctx.pack_nr)
+                                * dst_elem_bytes_s4;
+
+                if (is_gated_act) {
+                    kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk,
+                            wei_scale_blk, ctx.scale_kind, bias_blk,
+                            ctx.bias_kind, /*Cout=*/nullptr, /*ldc=*/0, Row,
+                            tight_ldc, K, ctx.group_size,
+                            ctx.wei_scale_grp_stride);
+                } else {
+                    kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk,
+                            wei_scale_blk, ctx.scale_kind, bias_blk,
+                            ctx.bias_kind, Row, tight_ldc,
+                            /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K,
+                            ctx.group_size, ctx.wei_scale_grp_stride);
+                }
             }
             m_off += mr_now;
         }
@@ -1669,6 +1955,11 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     if (is_int8_variant(ctx.variant)) {
         dispatch_tile_int8(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
                 bias, tight_dst, tight_ldc, src_scale, src_zp, wei_scale);
+        return;
+    }
+    if (is_s4_variant(ctx.variant)) {
+        dispatch_tile_s4(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
+                bias, tight_dst, tight_ldc, src_scale, wei_scale);
         return;
     }
     // FP16 fast path — native AVX-512-FP16.  Non-quant like the bf16

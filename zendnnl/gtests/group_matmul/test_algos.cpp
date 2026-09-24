@@ -4760,25 +4760,6 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
             << "non-W4A8 experts must preserve the selected inner kernel";
 }
 
-TEST(TestGroupMatmulW4A8RuntimeAlgo, CustomKernelIsForcedOff) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    CustomKernelOverride ck_on(true);
-
-    matmul_params p;
-    p.dtypes.wei = data_type_t::s4;
-    p.dtypes.dst = data_type_t::bf16;
-    p.dtypes.compute = data_type_t::s8;
-    EXPECT_FALSE(grp_matmul_custom_kernel_enabled(
-            p.dtypes.wei, p.dtypes.dst, p.dtypes.compute));
-
-    p.dtypes.wei = data_type_t::bf16;
-    p.dtypes.compute = data_type_t::f32;
-    EXPECT_TRUE(grp_matmul_custom_kernel_enabled(
-            p.dtypes.wei, p.dtypes.dst, p.dtypes.compute))
-            << "the W4A8 override must not disable CK for other families";
-}
-
 TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;

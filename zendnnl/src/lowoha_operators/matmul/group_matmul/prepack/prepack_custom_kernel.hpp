@@ -151,22 +151,31 @@ struct PackProbeStats {
 ///     plain, non-K-interleaved native-AVX-512-FP16 pack).  The caller
 ///     ensures `weight[i]` points to f16 bytes; the warmer casts
 ///     unconditionally.
-/// The three families pack into DISJOINT LRU singletons (see
+///   * `kS4`             — warm via `get_or_pack_weight_s4`.  The
+///     caller must point `weight[i]` at the nibble-packed s4 buffer
+///     and pass a valid `group_size`; the warmer casts unconditionally
+///     and skips every expert when `group_size <= 0`.
+/// The four families pack into DISJOINT LRU singletons (see
 /// pack.cpp), so a process that warms more than one for the same
 /// model pays one warm per family.
 enum class WarmDtypeFamily : uint8_t {
     kBF16 = 0,
     kINT8 = 1,
     kF16 = 2,
+    kS4 = 3,
 };
 
+/// `group_size` is consumed ONLY by `kS4` and is part of its pack
+/// cache key, so a wrong value warms a slab the runtime never looks
+/// up — and of the wrong SIZE, since the slab length depends on it.
 status_t warm_pack_all_custom_kernel_experts(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves = false,
-        WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16);
+        WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16,
+        int group_size = 0);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

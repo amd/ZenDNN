@@ -927,15 +927,22 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
     // discriminator (rather than `ck_eligible_*`) keeps this branch
     // forward-reference-free and robust — `warm_custom` is only reached
     // for CK-eligible calls, so the dtype alone determines the arena.
-    const custom_kernel::WarmDtypeFamily family = int8_aocl_warm_candidate(p)
+    // s4 first, so it can never land in the int8 arena (whose slab
+    // layout and length differ).
+    const custom_kernel::WarmDtypeFamily family
+            = (p.wei_dtype == data_type_t::s4)
+            ? custom_kernel::WarmDtypeFamily::kS4
+            : int8_aocl_warm_candidate(p)
             ? custom_kernel::WarmDtypeFamily::kINT8
             : (p.src_dtype == data_type_t::f16
                       && p.wei_dtype == data_type_t::f16)
             ? custom_kernel::WarmDtypeFamily::kF16
             : custom_kernel::WarmDtypeFamily::kBF16;
+    // `group_size` is in the s4 pack cache key, so it must match what
+    // `flat_n_tile` derives at runtime (K / wei_scale.dims[0]).
     custom_kernel::warm_pack_all_custom_kernel_experts(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, iwc, p.num_ops_total, st,
-            interleave_split_halves, family);
+            interleave_split_halves, family, p.group_size);
     return st;
 }
 
@@ -1619,18 +1626,105 @@ inline bool ck_eligible_f16(const PrepackParams &p) {
     return true;
 }
 
-// Outer `ck_eligible` — true when the BF16, DQ-INT8, or FP16 family
-// is eligible.  Callers continue to consult this single predicate;
-// the family choice is implicit in the fingerprint (folded via dtype
-// + `dynamic_quant` + `compute_dtype`) and in the downstream warmer's
-// per-call dtype switch (see `warm_pack_all_custom_kernel_experts` in
-// prepack_custom_kernel.cpp).
-inline bool ck_eligible(const PrepackParams &p) {
-    if (!grp_matmul_custom_kernel_enabled(
-                p.wei_dtype, p.dst_dtype, p.compute_dtype)) {
+// W4A8 family.  Must mirror `prepare_for_call`: if the two drift, the
+// prepack either warms a slab the runtime refuses (and Fix-B then
+// skips the AOCL warm it does need) or skips one the runtime wants.
+//
+// Unlike `ck_eligible_int8`, per-group is the NORMAL case here.
+inline bool ck_eligible_s4(const PrepackParams &p) {
+    if (!p.custom_kernel_on) return false;
+    // One variant: `is_w4a8_config` pins compute to s8 and dst to bf16.
+    if (p.wei_dtype != data_type_t::s4) return false;
+    if (p.dst_dtype != data_type_t::bf16) return false;
+    if (p.compute_dtype != data_type_t::s8) return false;
+    // Src arrives as a bf16 hoist or already-s8, as in `resolve_variant`.
+    const bool s4_src_form
+            = (p.dynamic_quant && p.src_dtype == data_type_t::bf16)
+            || (p.src_dtype == data_type_t::s8);
+    if (!s4_src_form) return false;
+    // Mirrors the `s4_group_size_unsupported` and
+    // `s4_K_not_multiple_of_group_size` refusals.
+    namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
+    if (p.group_size <= 0 || (p.group_size % ck::kS4Octet) != 0) return false;
+    // `none` and `swiglu_oai_mul` may carry bias; split-halves
+    // silu/gelu may not, because the pack permutes weight columns and
+    // there is no matching bias permutation yet.  Runtime refuses that
+    // tuple via `split_halves_act_with_bias_not_fused`; diverging here
+    // would warm an arena the runtime cannot consume and leave the
+    // AOCL fallback cold.
+    const bool split_halves_no_bias
+            = (p.act == grp_matmul_gated_act_t::silu_and_mul
+                      || p.act == grp_matmul_gated_act_t::gelu_and_mul)
+            && p.bias_dtype == data_type_t::none;
+    if (p.act != grp_matmul_gated_act_t::none
+            && p.act != grp_matmul_gated_act_t::swiglu_oai_mul
+            && !split_halves_no_bias) {
         return false;
     }
-    return ck_eligible_bf16(p) || ck_eligible_int8(p) || ck_eligible_f16(p);
+    // Fused activation must be bf16, and dst is already pinned to it.
+    if (p.act != grp_matmul_gated_act_t::none
+            && p.act_dtype != data_type_t::bf16) {
+        return false;
+    }
+    if (p.bias_dtype != data_type_t::none && p.bias_dtype != data_type_t::bf16
+            && p.bias_dtype != data_type_t::f32
+            && p.bias_dtype != data_type_t::f16) {
+        return false;
+    }
+    // As in the bf16 / f16 siblings, plus the per-expert
+    // `K % group_size` check.
+    const int n_active = p.num_ops_active;
+    for (int i = 0; i < n_active; ++i) {
+        if (p.transA != nullptr && i < static_cast<int>(p.transA->size())
+                && (*p.transA)[i]) {
+            return false;
+        }
+        if (p.alpha != nullptr && i < static_cast<int>(p.alpha->size())
+                && (*p.alpha)[i] != 1.0f) {
+            return false;
+        }
+        if (p.beta != nullptr && i < static_cast<int>(p.beta->size())
+                && (*p.beta)[i] != 0.0f) {
+            return false;
+        }
+        if (p.is_weights_const != nullptr && !p.is_weights_const->empty()
+                && i < static_cast<int>(p.is_weights_const->size())
+                && !(*p.is_weights_const)[i]) {
+            return false;
+        }
+        if (p.K != nullptr && i < static_cast<int>(p.K->size())
+                && ((*p.K)[i] % p.group_size) != 0) {
+            return false;
+        }
+    }
+    // `plan_pack_nr` is the same source of truth the runtime uses.
+    if (p.K == nullptr || p.K->empty()) return false;
+    if (p.N == nullptr || p.N->empty()) return false;
+    int rep_K = (*p.K)[0];
+    int rep_N = (*p.N)[0];
+    if (p.M != nullptr) {
+        const int sweep = std::min<int>(p.num_ops_active,
+                static_cast<int>(
+                        std::min({p.K->size(), p.N->size(), p.M->size()})));
+        for (int i = 0; i < sweep; ++i) {
+            if ((*p.M)[i] > 0) {
+                rep_K = (*p.K)[i];
+                rep_N = (*p.N)[i];
+                break;
+            }
+        }
+    }
+    const int pack_nr = ck::plan_pack_nr(rep_K, rep_N);
+    if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) return false;
+    return true;
+}
+
+// True when any CK family is eligible.  The family choice stays
+// implicit in the fingerprint and in the warmer's dtype switch.
+inline bool ck_eligible(const PrepackParams &p) {
+    if (!get_grp_matmul_custom_kernel()) { return false; }
+    return ck_eligible_bf16(p) || ck_eligible_int8(p) || ck_eligible_f16(p)
+            || ck_eligible_s4(p);
 }
 
 // ──────────────────────────────────────────────────────────────────────

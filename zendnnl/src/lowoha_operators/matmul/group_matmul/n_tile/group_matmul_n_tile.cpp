@@ -346,19 +346,30 @@ static const float *materialise_f32_scale(const void *buff, data_type_t dt,
 //   col_canon(c) = (c & 1) ? (N/2 + c/2) : (c/2)
 // `swiglu_oai_mul` / `none` keep `interleave == false` (caller-side
 // interleaved or non-gated), where this reduces to a plain f32 view.
+//
+// `n_groups` is 1 for a per-channel `{N}` scale and G for a W4A8
+// per-group `{G, N}` one, whose permutation applies independently to
+// each row because the pack permutes columns identically at every
+// K-group.  Shape and stride are preserved; only column order changes.
 static const float *materialise_f32_wei_scale(const void *buff, data_type_t dt,
-        int N, bool interleave, std::vector<float> &owned) {
-    if (!interleave) { return materialise_f32_scale(buff, dt, N, owned); }
+        int N, bool interleave, std::vector<float> &owned, int n_groups = 1) {
+    if (n_groups <= 0) return nullptr;
+    if (!interleave) {
+        return materialise_f32_scale(buff, dt, N * n_groups, owned);
+    }
     if (buff == nullptr || N <= 0) return nullptr;
     if (dt != data_type_t::f32 && dt != data_type_t::bf16) return nullptr;
     const int half = N / 2;
-    owned.resize(static_cast<size_t>(N));
-    for (int c = 0; c < N; ++c) {
-        const int canon = (c & 1) ? (half + (c >> 1)) : (c >> 1);
-        owned[static_cast<size_t>(c)] = (dt == data_type_t::f32)
-                ? static_cast<const float *>(buff)[canon]
-                : static_cast<float>(
-                          static_cast<const bfloat16_t *>(buff)[canon]);
+    owned.resize(static_cast<size_t>(N) * static_cast<size_t>(n_groups));
+    for (int g = 0; g < n_groups; ++g) {
+        const size_t row = static_cast<size_t>(g) * static_cast<size_t>(N);
+        for (int c = 0; c < N; ++c) {
+            const int canon = (c & 1) ? (half + (c >> 1)) : (c >> 1);
+            owned[row + static_cast<size_t>(c)] = (dt == data_type_t::f32)
+                    ? static_cast<const float *>(buff)[row + canon]
+                    : static_cast<float>(static_cast<const bfloat16_t *>(
+                              buff)[row + canon]);
+        }
     }
     return owned.data();
 }
@@ -375,16 +386,20 @@ static const float *materialise_f32_wei_scale(const void *buff, data_type_t dt,
 // scale key of `buff` alone would pair them with the FIRST weight's
 // converted/permuted scales.  Keying on the weight too keeps the two
 // caches in agreement on which weight is being served.
+// `n_groups` is in the key for the same reason `N` is: `{G, N}` and
+// `{N}` views of one scale buffer have different LENGTHS.
 struct wei_scale_key_t {
     const void *wei;
     const void *buff;
     int N;
+    int n_groups;
     bool interleave;
     data_type_t dt;
 
     bool operator==(const wei_scale_key_t &o) const {
         return wei == o.wei && buff == o.buff && N == o.N
-                && interleave == o.interleave && dt == o.dt;
+                && n_groups == o.n_groups && interleave == o.interleave
+                && dt == o.dt;
     }
 };
 
@@ -394,6 +409,7 @@ struct wei_scale_key_hash_t {
         h = h * 1000003u
                 + static_cast<size_t>(reinterpret_cast<uintptr_t>(k.buff));
         h = h * 1000003u + static_cast<size_t>(k.N);
+        h = h * 1000003u + static_cast<size_t>(k.n_groups);
         h = h * 1000003u + static_cast<size_t>(k.interleave);
         h = h * 1000003u + static_cast<size_t>(k.dt);
         return h;
@@ -450,7 +466,7 @@ std::mutex g_wei_scale_f32_cache_mutex;
 
 static const float *materialise_f32_wei_scale_cached(const void *wei,
         const void *buff, data_type_t dt, int N, bool interleave,
-        bool weights_const, std::vector<float> &owned) {
+        bool weights_const, std::vector<float> &owned, int n_groups = 1) {
     // `ZENDNNL_MATMUL_WEIGHT_CACHE=0` is the process-wide contract for "do
     // NOT cache weight-derived buffers keyed on a raw pointer", which
     // exists because frameworks like the PyTorch CPU allocator recycle
@@ -462,8 +478,10 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     const bool cache_off
             = (zendnnl::common::matmul_config_t::instance().get_weight_cache()
                     == 0);
-    if (cache_off || !weights_const || buff == nullptr || N <= 0) {
-        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+    if (cache_off || !weights_const || buff == nullptr || N <= 0
+            || n_groups <= 0) {
+        return materialise_f32_wei_scale(
+                buff, dt, N, interleave, owned, n_groups);
     }
 
     auto &cache = g_wei_scale_f32_cache;
@@ -472,11 +490,13 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     // Only the dtypes `materialise_f32_wei_scale` actually reads are
     // fingerprintable; anything else returns nullptr below anyway.
     if (dt != data_type_t::f32 && dt != data_type_t::bf16) {
-        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+        return materialise_f32_wei_scale(
+                buff, dt, N, interleave, owned, n_groups);
     }
-    const size_t bytes = static_cast<size_t>(N) * size_of(dt);
+    const size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(n_groups)
+            * size_of(dt);
 
-    const wei_scale_key_t key {wei, buff, N, interleave, dt};
+    const wei_scale_key_t key {wei, buff, N, n_groups, interleave, dt};
     std::lock_guard<std::mutex> guard(cache_mutex);
 
     const auto it = cache.find(key);
@@ -491,12 +511,13 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
         // allocation.  Serve this call from the uncached path and leave
         // the entry untouched: overwriting it would invalidate a
         // `data()` pointer a concurrent stream may still be reading.
-        return materialise_f32_wei_scale(buff, dt, N, interleave, owned);
+        return materialise_f32_wei_scale(
+                buff, dt, N, interleave, owned, n_groups);
     }
 
     wei_scale_entry_t entry;
     const float *view = materialise_f32_wei_scale(
-            buff, dt, N, interleave, entry.converted);
+            buff, dt, N, interleave, entry.converted, n_groups);
     // Either an unsupported dtype (nullptr, caller routes back to AOCL) or
     // a zero-copy view of the caller's own f32 buffer (`view` aliases
     // `buff`, not `entry.converted`).  Neither is ours to own, and caching
@@ -844,7 +865,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         // re-quant via execute_expert_slice's wrapper invocation, so
         // correctness is preserved even when the pre-OMP hoist failed.
         bool int8_hoist_ok = true;
-        if (custom_kernel::is_int8_variant(kctx->variant)) {
+        if (custom_kernel::needs_s8_src_hoist(kctx->variant)) {
             // The hoist sets the src/wei scale VIEWS — either the caller's raw
             // bf16/f32 buffers (kernel converts on load) or owned f32 copies
             // (silu/gelu interleave / dtype-mismatch path).  A null view
@@ -4208,6 +4229,31 @@ void flat_n_tile(const std::vector<char> &layout,
         }
     }
 
+    // One probe is enough: `check_n_tile_extra` has already verified
+    // every active expert presents a `{G, N}` scale.  Left at 0 for
+    // non-s4 calls, which `prepare_for_call` reads as "not s4".
+    int ck_s4_group_size = 0;
+    int ck_s4_wei_scale_grp_stride = 0;
+    bool ck_s4_src_per_group = false;
+    if (params[rep].dtypes.wei == data_type_t::s4) {
+        const auto &ws = params[rep].quant_params.wei_scale;
+        if (ws.dims.size() == 2 && ws.dims[0] > 0 && K[rep] > 0) {
+            const int64_t groups = ws.dims[0];
+            if (K[rep] % groups == 0) {
+                ck_s4_group_size = static_cast<int>(K[rep] / groups);
+            }
+            ck_s4_wei_scale_grp_stride = static_cast<int>(ws.dims[1]);
+        }
+        for (int i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0) continue;
+            const auto &ss = params[i].quant_params.src_scale;
+            if (ss.dims.size() == 2 && ss.dims[1] > 1) {
+                ck_s4_src_per_group = true;
+                break;
+            }
+        }
+    }
+
     custom_kernel::CallContext kctx;
     // All four dtypes come from `rep`, the first ACTIVE expert.  Mixing
     // `params[rep]` for src with `params[0]` for wei/dst/bias let a padded
@@ -4217,13 +4263,16 @@ void flat_n_tile(const std::vector<char> &layout,
     // call drops to the AOCL fallback for no reason.  Slot 0 is only a valid
     // source when it happens to be active, which is exactly what `rep`
     // already encodes.
-    engage_ntile_custom_kernel(custom_act,
-            /*src_dtype=*/params[rep].dtypes.src,
-            /*wei_dtype=*/params[rep].dtypes.wei,
-            /*dst_dtype=*/params[rep].dtypes.dst, act_dtype,
-            /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
-            ldb, alpha, beta, weight, is_weights_const, kctx, ck_dynamic_quant,
-            ck_compute_dtype, weights_prepacked);
+    if (!ck_s4_src_per_group) {
+        engage_ntile_custom_kernel(custom_act,
+                /*src_dtype=*/params[rep].dtypes.src,
+                /*wei_dtype=*/params[rep].dtypes.wei,
+                /*dst_dtype=*/params[rep].dtypes.dst, act_dtype,
+                /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
+                ldb, alpha, beta, weight, is_weights_const, kctx,
+                ck_dynamic_quant, ck_compute_dtype, weights_prepacked,
+                ck_s4_group_size, ck_s4_wei_scale_grp_stride);
+    }
 
     // ── DQ-INT8 scale-path decision (uniform across experts) ──────────
     // The microkernel reads src/wei scales as bf16 or f32 (converting on
@@ -4238,7 +4287,10 @@ void flat_n_tile(const std::vector<char> &layout,
     //     single `scale_kind` can't express.  `scale_kind` = kF32.
     bool ck_scales_raw = false; // pass caller buffers straight through
     bool ck_scales_interleave = false; // silu/gelu split-halves permute
-    if (custom_kernel::is_int8_variant(kctx.variant)) {
+    // W4A8 shares the DQ-INT8 `scale_kind` contract; only the cost
+    // differs, since its `{G, N}` scale permutes G rows, not one.
+    if (custom_kernel::is_int8_variant(kctx.variant)
+            || custom_kernel::is_s4_variant(kctx.variant)) {
         ck_scales_interleave
                 = (kctx.act_kind == custom_kernel::ActKind::silu_and_mul)
                 || (kctx.act_kind == custom_kernel::ActKind::gelu_and_mul);
@@ -4280,23 +4332,25 @@ void flat_n_tile(const std::vector<char> &layout,
     //
     // Tight layout is detected at the flat_n_tile entry point via
     // `tight_fused_epilogue = fused_epilogue && ldc[0] < N[0]`.
-    // Per-group quant (src `{M, G}` / wei `{G, N}`) MUST run on the AOCL
-    // do_tile path, never the custom INT8 microkernel: the microkernel
-    // slices the source scale as one scalar per row (per-token only) and
-    // would silently corrupt per-group output.  Detect it from the weight
-    // scale (per-group wei is `{G, N}` with G > 1) on any firing expert and
-    // force the standard path — do_tile's `{G, n_tile}` weight-scale repack
-    // then feeds the AOCL sym-quant GEMM.  Per-channel / per-token calls are
-    // unaffected (this flag stays false), so the custom-kernel path is
-    // byte-identical for them.
-    bool ck_per_group = false;
-    for (size_t i = 0; i < params.size(); ++i) {
+    // Per-group source quant (`{M, G}`) MUST run on the AOCL do_tile path:
+    // both int8 and s4 custom kernels read one source scale per row
+    // (per-token only), so engaging either would silently corrupt output.
+    // For int8, detect per-group quant from its `{G, N}` weight scale.  W4A8
+    // weights are always `{G, N}` and are supported by the s4 kernel, so for
+    // that family inspect the SOURCE scale and reject only when G > 1.
+    const bool ck_s4_variant = custom_kernel::is_s4_variant(kctx.variant);
+    bool ck_per_group = ck_s4_src_per_group;
+    for (size_t i = 0; i < params.size() && !ck_per_group; ++i) {
         // `i >= M.size()` is a prepack-extras tail slot that never fires; the
         // old form fell through for those, so one tail entry carrying a
         // `{G, N}` scale disqualified the custom kernel for the whole call.
         if (i >= M.size() || M[i] <= 0) continue;
-        const auto &ws = params[i].quant_params.wei_scale;
-        if (ws.dims.size() == 2 && ws.dims[0] > 1) {
+        const auto &scale = ck_s4_variant ? params[i].quant_params.src_scale
+                                          : params[i].quant_params.wei_scale;
+        const bool per_group = ck_s4_variant
+                ? (scale.dims.size() == 2 && scale.dims[1] > 1)
+                : (scale.dims.size() == 2 && scale.dims[0] > 1);
+        if (per_group) {
             ck_per_group = true;
             break;
         }
@@ -4311,15 +4365,17 @@ void flat_n_tile(const std::vector<char> &layout,
     // the operator shows the downgrade root cause.  A silent kernel=
     // standard line would leave debuggers guessing whether the env is
     // off, the dispatcher refused, or the wide-swiglu guard fired.
-    if (kctx.enabled && !use_custom) {
+    if ((kctx.enabled
+                || (ck_s4_src_per_group && get_grp_matmul_custom_kernel()))
+            && !use_custom) {
         static const bool s_skip_log = apilog_info_enabled();
         if (s_skip_log) {
             apilog_info("[GRP_MATMUL.PLAN.SKIP_CUSTOM] reason=",
                     (ck_per_group ? "per_group_quant_excluded"
                                   : "wide_swiglu_correctness_guard"),
                     ck_per_group
-                            ? " (per-group source scale cannot be sliced "
-                              "per-column by the CK tiler; CK is "
+                            ? " (custom kernel consumes one source scale "
+                              "per row, not one per K-group; CK is "
                               "disqualified for this call)."
                             : " (fused_epilogue=1 tight=0: custom writes "
                               "compacted [M,I] into caller's [M,2I] buffer,"
@@ -4462,6 +4518,15 @@ void flat_n_tile(const std::vector<char> &layout,
     // per-column, per-channel-on-src, and per-group `{M[i], G}` on K
     // (which `check_m_tile_safe` would accept but `check_n_tile_extra`
     // rejects) all route to ALGO 1 instead.
+    // Rows in the weight-scale view: G for W4A8, 1 elsewhere.  Read
+    // per-expert, since an inactive expert may carry no scale at all.
+    const auto ck_wei_scale_groups = [&](int e) -> int {
+        if (!custom_kernel::is_s4_variant(kctx.variant)) return 1;
+        const auto &ws = params[e].quant_params.wei_scale;
+        if (ws.dims.size() != 2 || ws.dims[0] <= 1) return 1;
+        return static_cast<int>(ws.dims[0]);
+    };
+
     std::vector<reorder_quant_buffers_t> hoist_buffers(num_ops);
     std::vector<HoistedSrcQuant> hoisted(num_ops);
     bool any_hoist = false;
@@ -4477,7 +4542,7 @@ void flat_n_tile(const std::vector<char> &layout,
         // having resolved (set below from the same s8-src + compute dtype).
         if (!params[e].dynamic_quant && params[e].dtypes.src == data_type_t::s8
                 && params[e].quant_params.src_scale.buff != nullptr
-                && custom_kernel::is_int8_variant(kctx.variant)) {
+                && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
             hoisted[e].valid = true;
             hoisted[e].src_ptr = src[e]; // already s8
             hoisted[e].lda = lda[e];
@@ -4497,7 +4562,7 @@ void flat_n_tile(const std::vector<char> &layout,
                         weight[e], params[e].quant_params.wei_scale.buff,
                         params[e].quant_params.wei_scale.dt, N[e],
                         ck_scales_interleave, is_weights_const[e],
-                        hoisted[e].wei_scale_f32_owned);
+                        hoisted[e].wei_scale_f32_owned, ck_wei_scale_groups(e));
             }
             continue;
         }
@@ -4566,7 +4631,7 @@ void flat_n_tile(const std::vector<char> &layout,
             // silu/gelu interleave permutation to wei_scale) since the kernel
             // can't gather the permuted columns / express a mixed dtype.  A
             // null view routes the expert back to AOCL in `do_tile`.
-            if (custom_kernel::is_int8_variant(kctx.variant)) {
+            if (custom_kernel::needs_s8_src_hoist(kctx.variant)) {
                 if (ck_scales_raw) {
                     hoisted[e].src_scale_view = hoisted[e].src_scale.buff;
                     hoisted[e].wei_scale_view
@@ -4580,7 +4645,8 @@ void flat_n_tile(const std::vector<char> &layout,
                                     params[e].quant_params.wei_scale.buff,
                                     params[e].quant_params.wei_scale.dt, N[e],
                                     ck_scales_interleave, is_weights_const[e],
-                                    hoisted[e].wei_scale_f32_owned);
+                                    hoisted[e].wei_scale_f32_owned,
+                                    ck_wei_scale_groups(e));
                 }
             }
         }
@@ -4594,7 +4660,7 @@ void flat_n_tile(const std::vector<char> &layout,
     // single per-call apilog warn so the operator can see why the
     // CK did not run on these experts; the OMP region itself stays
     // log-silent in the hot path.
-    if (use_custom && custom_kernel::is_int8_variant(kctx.variant)) {
+    if (use_custom && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
         static const bool s_int8_bad_hoist_warn = apilog_info_enabled();
         if (s_int8_bad_hoist_warn) {
             int n_bad_hoist = 0;
@@ -4660,7 +4726,7 @@ void flat_n_tile(const std::vector<char> &layout,
     // below the planner, or narrowing it to a subset of experts, silently
     // removes DecodeDynamic's correctness precondition.
     if (use_custom && fused_epilogue
-            && custom_kernel::is_int8_variant(kctx.variant)) {
+            && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
         bool any_tile_falls_back = false;
         for (int e = 0; e < num_ops; ++e) {
             if (M[e] <= 0) continue;

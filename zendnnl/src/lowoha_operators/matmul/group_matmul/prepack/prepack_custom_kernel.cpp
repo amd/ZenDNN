@@ -81,9 +81,32 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
-        WarmDtypeFamily dtype_family) {
+        WarmDtypeFamily dtype_family, int group_size) {
 
-    if (total_count <= 0) return status_t::success;
+    // Every exit reports: a silent bail is indistinguishable from
+    // "warmed nothing" in the PREPACK summary, which is how a missing
+    // s4 warm once hid.
+    const bool is_s4 = (dtype_family == WarmDtypeFamily::kS4);
+    static const bool s_w4a8_warm_log
+            = zendnnl::error_handling::apilog_info_enabled();
+    auto bail = [&](const char *why) -> status_t {
+        if (is_s4 && s_w4a8_warm_log) {
+            zendnnl::error_handling::apilog_info(
+                    "[GRP_MATMUL.PREPACK.W4A8 WARM] Skipping INT4 CK "
+                    "prepack: reason=",
+                    why, " group_size=", group_size,
+                    " total_count=", total_count,
+                    " — first call will pack lazily in prepare_for_call");
+        }
+        return status_t::success;
+    };
+
+    if (total_count <= 0) return bail("total_count<=0");
+    // Mirrors `prepare_for_call`'s `s4_group_size_unsupported`: without
+    // a group size there is no correctly-sized slab to warm.
+    if (is_s4 && (group_size <= 0 || (group_size % ck::kS4Octet) != 0)) {
+        return bail("invalid_group_size");
+    }
     // Per-family ISA gate — mirrors the split gate in
     // `custom_kernel/dispatch.cpp::prepare_for_call`.  bf16 pack warming
     // needs AVX-512 BF16 (VDPBF16PS); the DQ-INT8 family needs AVX-512
@@ -95,8 +118,10 @@ status_t warm_pack_all_custom_kernel_experts(
     // Refuse the whole warm only when the family's own ISA is absent —
     // warming an arena the runtime cannot consume is pure waste, and the
     // runtime would refuse the matching call identically.
-    if (dtype_family == WarmDtypeFamily::kINT8) {
-        if (!ck::avx512vnni_available()) return status_t::success;
+    if (dtype_family == WarmDtypeFamily::kINT8
+            || dtype_family == WarmDtypeFamily::kS4) {
+        // W4A8 widens nibbles to s8 and runs the same VPDPBUSD loop.
+        if (!ck::avx512vnni_available()) return bail("no_avx512vnni");
     } else if (dtype_family == WarmDtypeFamily::kF16) {
         // FP16 family needs native AVX-512-FP16 (and a toolchain that
         // compiled the intrinsics, folded into avx512f16_available()).
@@ -147,11 +172,14 @@ status_t warm_pack_all_custom_kernel_experts(
     // CK pack here is unconditionally out-of-place (no `in_place` arg to
     // get_or_pack_weight_*), so it never mutates the weight.
     if (!should_warm_weight_cache(weight_cache_type)) {
-        return status_t::success;
+        return bail("weight_cache_disabled");
     }
 
     const size_t bound = std::min<size_t>({static_cast<size_t>(total_count),
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
+    // A short/empty per-expert vector silently collapses the loop to
+    // zero iterations, which reads as "warmed nothing" downstream.
+    if (bound == 0) { return bail("empty_per_expert_vectors"); }
 
     for (size_t i = 0; i < bound; ++i) {
         ++stats.total_attempted;
@@ -206,6 +234,17 @@ status_t warm_pack_all_custom_kernel_experts(
                     pack_nr, transB[i],
                     /*interleave_split_halves=*/interleave_split_halves,
                     &packed_ignored, &was_hit);
+        } else if (dtype_family == WarmDtypeFamily::kS4) {
+            // `group_size` is in the cache key, so this warms exactly
+            // the slab `prepare_for_call` later looks up.  An expert
+            // whose K is not a multiple of it is refused by the pack
+            // and counted in `skipped_invalid` below.
+            const int8_t *packed_ignored = nullptr;
+            pst = ck::get_or_pack_weight_s4(
+                    static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
+                    pack_nr, transB[i],
+                    /*interleave_split_halves=*/interleave_split_halves,
+                    /*group_size=*/group_size, &packed_ignored, &was_hit);
         } else if (dtype_family == WarmDtypeFamily::kF16) {
             const float16_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_f16(
@@ -230,6 +269,23 @@ status_t warm_pack_all_custom_kernel_experts(
                 ++stats.cache_misses;
         } else {
             ++stats.skipped_invalid;
+        }
+    }
+
+    // Pairs with `[GRP_MATMUL.CK.W4A8 ENGAGED]`: engage without this
+    // line means every first call packs inline instead of at warmup.
+    if (dtype_family == WarmDtypeFamily::kS4) {
+        static const bool s_w4a8_warm_log
+                = zendnnl::error_handling::apilog_info_enabled();
+        if (s_w4a8_warm_log) {
+            zendnnl::error_handling::apilog_info(
+                    "[GRP_MATMUL.PREPACK.W4A8 WARM] Prepacking INT4 CK "
+                    "weights:",
+                    " group_size=", group_size,
+                    " attempted=", stats.total_attempted,
+                    " packed=", stats.packed_ok, " hits=", stats.cache_hits,
+                    " misses=", stats.cache_misses,
+                    " skipped=", stats.skipped_invalid);
         }
     }
 

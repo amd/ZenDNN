@@ -426,6 +426,121 @@ void pack_int8_vnni(const int8_t *weight, int K, int N, int ldb, int pack_nr,
     }
 }
 
+// ── W4A8 S4 nibble pack ───────────────────────────────────────────
+// Writes the layout documented in pack.hpp, reading the caller's
+// buffer through the same linear-index convention `cvt_s4_to_s8` uses
+// (`transB ? n*ldb + k : k*ldb + n`, even index → low nibble).
+//
+// This is the only place that understands the caller's nibble order;
+// everything downstream sees the canonical (k, k+4)-paired, XOR-8
+// biased layout, which is why the microkernel needs no `transB`.
+
+// Raw nibble bits (0..15) of logical element (k, n).
+inline uint8_t s4_raw_nibble(
+        const int8_t *weight, int k, int n, size_t ldb, bool transB) {
+    const size_t nib_idx = transB
+            ? static_cast<size_t>(n) * ldb + static_cast<size_t>(k)
+            : static_cast<size_t>(k) * ldb + static_cast<size_t>(n);
+    const uint8_t byte = static_cast<uint8_t>(weight[nib_idx >> 1]);
+    return ((nib_idx & 1u) == 0u) ? (byte & 0x0Fu) : ((byte >> 4) & 0x0Fu);
+}
+
+// Sign-recovered value in [-8, 7].  Same result as the AOCL backend's
+// `extract_4bit_nibble(.., s4)`, as arithmetic so it folds inline.
+inline int32_t s4_true_value(uint8_t raw) {
+    return (raw & 0x08u) ? (static_cast<int32_t>(raw) - 16)
+                         : static_cast<int32_t>(raw);
+}
+
+// `Interleave` is the gate/up split-halves semantic of the bf16 and
+// int8 packs: output column `2i+0` reads canonical `i`, `2i+1` reads
+// `N/2 + i`.  Compensation accumulates AFTER the permutation so
+// `comp[g][v_col]` matches the weight stream at the same slot.
+template <bool Interleave>
+inline void pack_s4_vnni_impl(const int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, int group_size, int8_t *packed) {
+    const int K_oct = K / kS4Octet;
+    const int G = K / group_size;
+    const int n_blocks = N / pack_nr;
+    const size_t ldb_z = static_cast<size_t>(ldb);
+    const int I = N / 2;
+    if constexpr (!Interleave) (void)I;
+
+    const size_t oct_stride_bytes
+            = static_cast<size_t>(pack_nr) * kS4BytesPerOctetCol;
+    const size_t weight_bytes_in_oblock
+            = static_cast<size_t>(K_oct) * oct_stride_bytes;
+    const size_t comp_bytes_in_oblock
+            = static_cast<size_t>(G) * pack_nr * sizeof(int32_t);
+    const size_t bytes_per_oblock
+            = weight_bytes_in_oblock + comp_bytes_in_oblock;
+
+    for (int o_blk = 0; o_blk < n_blocks; ++o_blk) {
+        int8_t *blk_base
+                = packed + static_cast<size_t>(o_blk) * bytes_per_oblock;
+        const int n_base = o_blk * pack_nr;
+        int32_t *comp_base = reinterpret_cast<int32_t *>(
+                blk_base + weight_bytes_in_oblock);
+        // Accumulated across a group's octets, so must start at zero.
+        std::memset(comp_base, 0, comp_bytes_in_oblock);
+
+        for (int ko = 0; ko < K_oct; ++ko) {
+            const int k_base = ko * kS4Octet;
+            // Exact: an octet never straddles a group boundary.
+            const int g = k_base / group_size;
+            int8_t *oct_base
+                    = blk_base + static_cast<size_t>(ko) * oct_stride_bytes;
+            int32_t *comp_row = comp_base + static_cast<size_t>(g) * pack_nr;
+
+            for (int n = 0; n < pack_nr; ++n) {
+                const int col_pack = n_base + n;
+                const int col_canon = Interleave
+                        ? ((col_pack & 1) ? (I + (col_pack >> 1))
+                                          : (col_pack >> 1))
+                        : col_pack;
+                int8_t *oct_dst = oct_base
+                        + static_cast<size_t>(n) * kS4BytesPerOctetCol;
+                int32_t csum = 0;
+                for (int q = 0; q < kS4BytesPerOctetCol; ++q) {
+                    // The (k, k+4) pairing the kernel's AND /
+                    // shift+AND unpack relies on.
+                    const uint8_t lo_raw = s4_raw_nibble(
+                            weight, k_base + q, col_canon, ldb_z, transB);
+                    const uint8_t hi_raw
+                            = s4_raw_nibble(weight, k_base + kVNNIInt8Quad + q,
+                                    col_canon, ldb_z, transB);
+                    // Biased by XOR 8 so the kernel recovers the sign
+                    // with one `_mm512_sub_epi8`.
+                    oct_dst[q] = static_cast<int8_t>((lo_raw ^ 0x08u)
+                            | static_cast<uint8_t>((hi_raw ^ 0x08u) << 4));
+                    csum += s4_true_value(lo_raw) + s4_true_value(hi_raw);
+                }
+                comp_row[n] += csum;
+            }
+        }
+    }
+}
+
+void pack_s4_vnni(const int8_t *weight, int K, int N, int ldb, int pack_nr,
+        bool transB, bool interleave_split_halves, int group_size,
+        int8_t *packed) {
+    if (interleave_split_halves) {
+        pack_s4_vnni_impl<true>(
+                weight, K, N, ldb, pack_nr, transB, group_size, packed);
+    } else {
+        pack_s4_vnni_impl<false>(
+                weight, K, N, ldb, pack_nr, transB, group_size, packed);
+    }
+}
+
+// Shape gate shared by every S4 entry point.  The extra requirement
+// over the common pack checks is a positive `group_size` that is a
+// multiple of the octet and divides K.
+inline bool s4_group_valid(int K, int group_size) {
+    return group_size > 0 && (group_size % kS4Octet) == 0
+            && (K % group_size) == 0;
+}
+
 // Separate singleton from the BF16 pack — different LRU instance
 // so int8 entries cannot drift into a bf16 lookup and vice-versa
 // even if the cache-key marker logic ever regressed.  Type stays
@@ -452,6 +567,19 @@ lru_cache_t<Key_matmul, void *> &pack_cache_singleton_f16() {
     return pack_cache;
 }
 std::mutex &pack_mutex_singleton_f16() {
+    static std::mutex pack_mutex;
+    return pack_mutex;
+}
+
+// Separate singleton from the other packs: for the same
+// (K, N, pack_nr) the S4 slab has a different length, so an aliased
+// lookup would hand the kernel a buffer of the wrong size.
+lru_cache_t<Key_matmul, void *> &pack_cache_singleton_s4() {
+    static lru_cache_t<Key_matmul, void *> pack_cache(
+            std::numeric_limits<uint32_t>::max());
+    return pack_cache;
+}
+std::mutex &pack_mutex_singleton_s4() {
     static std::mutex pack_mutex;
     return pack_mutex;
 }
@@ -1226,6 +1354,169 @@ void clear_custom_kernel_pack_cache_int8() {
     }
 }
 
+status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves, int group_size,
+        const int8_t **out_packed, bool *was_hit_out, bool disable_cache) {
+
+    if (was_hit_out != nullptr) *was_hit_out = false;
+
+    if (weight == nullptr || K <= 0 || N <= 0
+            || (pack_nr != kNRMin && pack_nr != kNRMax) || (N % pack_nr) != 0
+            || ldb <= 0 || out_packed == nullptr) {
+        log_error(
+                "custom_kernel pack s4: invalid arg "
+                "(weight, K, N, ldb must be valid; pack_nr in {",
+                kNRMin, ",", kNRMax, "}; N %% pack_nr == 0)");
+        return status_t::failure;
+    }
+    if (!s4_group_valid(K, group_size)) {
+        log_error("custom_kernel pack s4: group_size=", group_size,
+                " must be positive, a multiple of ", kS4Octet,
+                ", and divide K=", K);
+        return status_t::failure;
+    }
+    if (interleave_split_halves && (N & 1)) {
+        log_error(
+                "custom_kernel pack s4: interleave_split_halves "
+                "requires even N (got N=",
+                N, ")");
+        return status_t::failure;
+    }
+    const int min_ldb = transB ? K : N;
+    if (ldb < min_ldb) {
+        log_error("custom_kernel pack s4: ldb=", ldb,
+                " smaller than minimum row stride (",
+                transB ? "K=" : "N=", min_ldb,
+                " for transB=", (transB ? "true" : "false"), ")");
+        return status_t::failure;
+    }
+
+    // Nibble slab + G compensation rows per o-block.
+    const int K_oct = K / kS4Octet;
+    const int G = K / group_size;
+    const int n_blocks = N / pack_nr;
+    const size_t weight_bytes_per_oblock
+            = static_cast<size_t>(K_oct) * pack_nr * kS4BytesPerOctetCol;
+    const size_t comp_bytes_per_oblock
+            = static_cast<size_t>(G) * pack_nr * sizeof(int32_t);
+    const size_t bytes = static_cast<size_t>(n_blocks)
+            * (weight_bytes_per_oblock + comp_bytes_per_oblock);
+    const size_t alignment = 64;
+    const size_t bytes_aligned = (bytes + alignment - 1) & ~(alignment - 1);
+
+    static const bool s_pack_log = apilog_verbose_enabled();
+
+    if (disable_cache) {
+        if (s_pack_log) {
+            apilog_verbose("[GRP_MATMUL.PACK NOCACHE S4] weight=",
+                    static_cast<const void *>(weight), " K=", K, " N=", N,
+                    " ldb=", ldb, " transB=", (transB ? 1 : 0),
+                    " interleave=", (interleave_split_halves ? 1 : 0),
+                    " pack_nr=", pack_nr, " group_size=", group_size);
+        }
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error(
+                    "custom_kernel pack s4 (disable_cache): "
+                    "aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+        pack_s4_vnni(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, group_size,
+                static_cast<int8_t *>(raw));
+        *out_packed = static_cast<const int8_t *>(raw);
+        return status_t::success;
+    }
+
+    auto &pack_cache = pack_cache_singleton_s4();
+
+    // bf16 marker with bits 14 and 15 both set, so it is distinct from
+    // bf16 (0xC0DE0000), f16 (bit 14) and int8 (bit 15) while leaving
+    // the variant bits (pack_nr, transB 16, interleave 24) clear.
+    static constexpr uint32_t kCustomKernelS4Marker = 0xC0DEC000U;
+    static constexpr uint32_t kTransBMarker = 0x00010000U;
+    static constexpr uint32_t kInterleaveSplitMarker = 0x01000000U;
+    static_assert((kCustomKernelS4Marker & kTransBMarker) == 0u,
+            "kTransBMarker collides with kCustomKernelS4Marker — pick "
+            "a clear bit (positions 0-13, 16, 21, or 24-29).");
+    static_assert((kCustomKernelS4Marker & kInterleaveSplitMarker) == 0u,
+            "kInterleaveSplitMarker collides with kCustomKernelS4Marker "
+            "— pick a clear bit (positions 0-13, 16, 21, or 24-29).");
+    static_assert(kCustomKernelS4Marker != 0xC0DE0000U
+                    && kCustomKernelS4Marker != 0xC0DE4000U
+                    && kCustomKernelS4Marker != 0xC0DE8000U,
+            "S4 cache-key marker must differ from the BF16 / F16 / INT8 "
+            "markers so the pack families never alias.");
+    // `group_size` must be in the key: one weight pointer at the same
+    // (K, N, ldb, pack_nr) packs to a different slab LENGTH per group
+    // size, so serving the wrong one would read past the buffer.  Upper
+    // half, clear of the marker / variant zone.
+    static_assert(sizeof(size_t) >= 8,
+            "S4 pack cache key packs group_size into the upper 32 bits "
+            "of extra_hash and needs a 64-bit size_t.");
+    const uint32_t variant_bits = static_cast<uint32_t>(pack_nr)
+            | (transB ? kTransBMarker : 0u)
+            | (interleave_split_halves ? kInterleaveSplitMarker : 0u);
+    const size_t extra_hash
+            = static_cast<size_t>(kCustomKernelS4Marker | variant_bits)
+            | (static_cast<size_t>(static_cast<uint32_t>(group_size)) << 32);
+    Key_matmul key(weight, static_cast<unsigned>(N), static_cast<unsigned>(K),
+            extra_hash);
+    key.ldb = static_cast<unsigned>(ldb);
+
+    std::lock_guard<std::mutex> lock(pack_mutex_singleton_s4());
+
+    if (pack_cache.find_key(key)) {
+        *out_packed = static_cast<const int8_t *>(pack_cache.get(key));
+        if (was_hit_out != nullptr) *was_hit_out = true;
+        if (s_pack_log) {
+            apilog_verbose("[GRP_MATMUL.PACK HIT S4] weight=",
+                    static_cast<const void *>(weight), " K=", K, " N=", N,
+                    " ldb=", ldb, " transB=", (transB ? 1 : 0),
+                    " interleave=", (interleave_split_halves ? 1 : 0),
+                    " pack_nr=", pack_nr, " group_size=", group_size);
+        }
+        return status_t::success;
+    }
+
+    if (s_pack_log) {
+        apilog_verbose("[GRP_MATMUL.PACK MISS S4] weight=",
+                static_cast<const void *>(weight), " K=", K, " N=", N,
+                " ldb=", ldb, " transB=", (transB ? 1 : 0),
+                " interleave=", (interleave_split_halves ? 1 : 0),
+                " pack_nr=", pack_nr, " group_size=", group_size);
+    }
+    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+    if (raw == nullptr) {
+        log_error("custom_kernel pack s4: aligned_alloc failed for ",
+                bytes_aligned, " bytes");
+        return status_t::failure;
+    }
+
+    pack_s4_vnni(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
+            group_size, static_cast<int8_t *>(raw));
+    pack_cache.add(key, raw);
+
+    *out_packed = static_cast<const int8_t *>(raw);
+    return status_t::success;
+}
+
+void free_owned_packed_weight_s4(const int8_t *packed) {
+    if (packed == nullptr) return;
+    zendnnl_aligned_free(const_cast<int8_t *>(packed));
+}
+
+void clear_custom_kernel_pack_cache_s4() {
+    std::lock_guard<std::mutex> lock(pack_mutex_singleton_s4());
+    auto &pack_cache = pack_cache_singleton_s4();
+    pack_cache.clear();
+    static const bool s_pack_log = apilog_verbose_enabled();
+    if (s_pack_log) {
+        apilog_verbose("[GRP_MATMUL.PACK cleared S4] Pack cache cleared");
+    }
+}
+
 // ── Caller-owned prepack (memory-format change, no caching) ──────
 // Reuse the SAME size formulas and `pack_*_vnni` writers as the cache
 // path, but write into the caller's `dst` and never touch the LRU.
@@ -1352,6 +1643,55 @@ status_t prepack_weight_into_f16(const float16_t *weight, int K, int N, int ldb,
     }
     pack_f16_simple(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
             static_cast<float16_t *>(dst));
+    return status_t::success;
+}
+
+size_t packed_weight_size_s4(int K, int N, int pack_nr, int group_size) {
+    if (!prepack_shape_valid(K, N, pack_nr)) return 0;
+    if (!s4_group_valid(K, group_size)) return 0;
+    const int K_oct = K / kS4Octet;
+    const int G = K / group_size;
+    const size_t weight_bytes_per_oblock
+            = static_cast<size_t>(K_oct) * pack_nr * kS4BytesPerOctetCol;
+    const size_t comp_bytes_per_oblock
+            = static_cast<size_t>(G) * pack_nr * sizeof(int32_t);
+    const size_t bytes = static_cast<size_t>(N / pack_nr)
+            * (weight_bytes_per_oblock + comp_bytes_per_oblock);
+    return align_up_dst(bytes);
+}
+
+status_t prepack_weight_into_s4(const int8_t *weight, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave_split_halves, int group_size,
+        void *dst) {
+    if (weight == nullptr || dst == nullptr
+            || !prepack_shape_valid(K, N, pack_nr) || ldb <= 0) {
+        log_error(
+                "prepack_weight_into_s4: invalid arg "
+                "(weight/dst non-null; pack_nr in {",
+                kNRMin, ",", kNRMax, "}; N %% pack_nr == 0; ldb > 0)");
+        return status_t::failure;
+    }
+    if (!s4_group_valid(K, group_size)) {
+        log_error("prepack_weight_into_s4: group_size=", group_size,
+                " must be positive, a multiple of ", kS4Octet,
+                ", and divide K=", K);
+        return status_t::failure;
+    }
+    if (interleave_split_halves && (N & 1)) {
+        log_error(
+                "prepack_weight_into_s4: interleave_split_halves "
+                "requires even N (got N=",
+                N, ")");
+        return status_t::failure;
+    }
+    const int min_ldb = transB ? K : N;
+    if (ldb < min_ldb) {
+        log_error("prepack_weight_into_s4: ldb=", ldb,
+                " smaller than minimum row stride (", min_ldb, ")");
+        return status_t::failure;
+    }
+    pack_s4_vnni(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
+            group_size, static_cast<int8_t *>(dst));
     return status_t::success;
 }
 
