@@ -49,6 +49,9 @@ if(ZENDNNL_BUILD_GTEST)
     list(APPEND gtests_sources test_weight_cache_inplace.cpp)
     list(APPEND gtests_sources test_static_quant_prepack.cpp)
   endif()
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    list(APPEND gtests_sources test_onednn_weight_cache_inplace.cpp)
+  endif()
   # Group-matmul-specific gtest artifacts (5 test files + 2 helper TUs +
   # moe_test_utils.hpp + README) live in the `group_matmul/` subdirectory.
   # Reorder gtest artifacts (5 behavior-focused test files + shared

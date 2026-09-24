@@ -19,6 +19,7 @@
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #if ZENDNNL_DEPENDS_ONEDNN
+#include <cstdint>
 #include "lowoha_operators/matmul/backends/onednn/onednn_execute.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_utils.hpp"
 using namespace dnnl;
@@ -59,12 +60,17 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
 /**
  * @brief Gets or creates blocked weights with thread-safe caching
  *
- * This function handles the weight blocking and caching logic for oneDNN matmul.
- * It uses a two-level caching strategy:
- * 1. hash_values: Maps full key to blocking format hash
- * 2. matmul_weight_cache: LRU cache for actual blocked weight memory
- *
  * Thread safety is ensured by a mutex protecting all cache operations.
+ *
+ * Cache mode (`weight_cache_type`):
+ * - WC=1: out-of-place reorder. Two-level lookup: full key (includes M) to a
+ *   blocking hash, then LRU. Different M can reuse the same packed buffer.
+ *   Insert on miss.
+ * - WC=2: identity LRU on B pointer + transB/K/N/ldb/layout (M omitted) so
+ *   prompt and decode share one pack. On miss, memcpy into the user buffer
+ *   when blocked size (and 64-byte pad) equals the plain buffer (BF16/F16/S8);
+ *   otherwise keep an out-of-place buffer (F32 always; INT8 when sizes differ).
+ * - WC=0: same out-of-place pack path as WC=1, but do not insert into the LRU.
  *
  * @param transA Whether input A is transposed
  * @param transB Whether input B (weights) is transposed
@@ -76,7 +82,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N, int K,
  * @param dnnl_params OneDNN parameters (weights.mem will be set)
  * @param eng OneDNN engine
  * @param matmul_attr Primitive attributes
- * @param weight_cache_type 0 = disabled, otherwise enabled
+ * @param weight_cache_type 0 = disabled, 1 = out-of-place, 2 = in-place
  */
 void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
         int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
