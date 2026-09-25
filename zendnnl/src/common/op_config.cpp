@@ -30,6 +30,7 @@ void matmul_config_t::set_default_config() {
     set_algo(matmul_algo);
     set_bmm_algo(bmm_algo);
     set_weight_cache(2);
+    set_custom_kernel_route(false);
     set_otf_bpack(0);
     set_zp_comp_cache(true); // Enable ZP compensation caching by default
     set_accum_type(data_type_t::f32); // Default to F32 accumulation
@@ -46,6 +47,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     int32_t matmul_weight_cache = 2;
     int32_t matmul_otf_bpack_json = 0;
     bool zp_comp_cache_enabled = true; // Default enabled
+    bool custom_kernel_route = false;
     uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
     int64_t dlp_m_hint = 32;
     auto matmul_json = runtime_variables_json["matmul"];
@@ -132,6 +134,27 @@ status_t matmul_config_t::set_user_config(json config_json) {
                 }
             }
         }
+        if (matmul_json.contains("custom_kernel")) {
+            const auto &custom_kernel_json = matmul_json["custom_kernel"];
+            bool valid = false;
+            if (custom_kernel_json.is_boolean()) {
+                custom_kernel_route = custom_kernel_json.template get<bool>();
+                valid = true;
+            } else if (custom_kernel_json.is_string()) {
+                const std::string value
+                        = custom_kernel_json.template get<std::string>();
+                if (value == "0" || value == "1") {
+                    custom_kernel_route = value == "1";
+                    valid = true;
+                }
+            }
+            if (!valid) {
+                apilog_warning("Unrecognized matmul custom_kernel JSON value ",
+                        custom_kernel_json.dump(),
+                        "; expected false/true or \"0\"/\"1\". "
+                        "Defaulting to disabled.");
+            }
+        }
         auto otf_bpack_json = matmul_json["otf_bpack"];
         if (!otf_bpack_json.empty()) {
             auto otf_bpack_str = otf_bpack_json.template get<std::string>();
@@ -162,6 +185,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     set_algo(matmul_algo);
     set_bmm_algo(bmm_algo);
     set_weight_cache(matmul_weight_cache);
+    set_custom_kernel_route(custom_kernel_route);
     set_otf_bpack(matmul_otf_bpack_json);
     set_zp_comp_cache(zp_comp_cache_enabled);
     set_lru_cache_capacity(lru_cache_capacity);
@@ -263,6 +287,19 @@ void matmul_config_t::set_env_config() {
         }
     }
     set_weight_cache(matmul_weight_cache);
+
+    const char *custom_kernel_env = std::getenv("ZENDNNL_MATMUL_CUSTOM_KERNEL");
+    bool custom_kernel_route = false;
+    if (custom_kernel_env != nullptr) {
+        if (std::strcmp(custom_kernel_env, "1") == 0) {
+            custom_kernel_route = true;
+        } else if (std::strcmp(custom_kernel_env, "0") != 0) {
+            apilog_warning("Unrecognized ZENDNNL_MATMUL_CUSTOM_KERNEL value '",
+                    custom_kernel_env,
+                    "'; expected 0 or 1. Defaulting to disabled.");
+        }
+    }
+    set_custom_kernel_route(custom_kernel_route);
 
     char *otf_bpack_env = std::getenv("ZENDNNL_MATMUL_NATIVE_OTF_BPACK");
     int32_t matmul_otf_bpack = 0;
@@ -392,6 +429,14 @@ void matmul_config_t::set_grp_auto_mixed_inplace(bool enable) {
 
 bool matmul_config_t::get_grp_auto_mixed_inplace() {
     return grp_auto_mixed_inplace.load(std::memory_order_relaxed);
+}
+
+void matmul_config_t::set_custom_kernel_route(bool enable) {
+    custom_kernel_route = enable;
+}
+
+bool matmul_config_t::get_custom_kernel_route() {
+    return custom_kernel_route;
 }
 
 void matmul_config_t::set_otf_bpack(int32_t enable) {

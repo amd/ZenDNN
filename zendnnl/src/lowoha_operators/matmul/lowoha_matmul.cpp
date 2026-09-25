@@ -26,6 +26,8 @@
 #include "lowoha_operators/matmul/backends/libxsmm/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
+#include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
 #include "matmul_native/native_matmul.hpp"
@@ -339,6 +341,54 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
+
+    // Wide-N projection: run it as a one-op group so it reaches the
+    // single-expert custom-kernel path.  Safe to sit ahead of the
+    // reorder-quant and GGML-unpack blocks below because the predicate
+    // already excludes dynamic_quant and GGML-packed weights, so neither
+    // block would have rewritten `src` / `weight` for a routable call.
+    // A declined grouped call falls through to the standard dispatch.
+    if (custom_kernel_routable(layout, M, N, K, batch_count, transA, transB,
+                alpha, beta, bias, ldb, is_weights_const, exec_params)) {
+        matmul_params grp_param = exec_params;
+        grp_param.num_threads = num_threads;
+
+        const std::vector<char> grp_layout {layout};
+        const std::vector<bool> grp_trans_a {transA};
+        const std::vector<bool> grp_trans_b {transB};
+        const std::vector<int> grp_m {M};
+        const std::vector<int> grp_n {N};
+        const std::vector<int> grp_k {K};
+        const std::vector<float> grp_alpha {alpha};
+        const std::vector<const void *> grp_src {src};
+        const std::vector<int> grp_lda {lda};
+        const std::vector<const void *> grp_weight {weight};
+        const std::vector<int> grp_ldb {ldb};
+        const std::vector<const void *> grp_bias {bias};
+        const std::vector<float> grp_beta {beta};
+        const std::vector<void *> grp_dst {dst};
+        const std::vector<int> grp_ldc {ldc};
+        const std::vector<bool> grp_weights_const {is_weights_const};
+        const std::vector<matmul_params> grp_params {grp_param};
+
+        const status_t grp_status = group_matmul_direct(grp_layout, grp_trans_a,
+                grp_trans_b, grp_m, grp_n, grp_k, grp_alpha, grp_src, grp_lda,
+                grp_weight, grp_ldb, grp_bias, grp_beta, grp_dst, grp_ldc,
+                grp_weights_const, grp_params,
+                /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
+                /*fused_moe=*/nullptr);
+        if (grp_status == status_t::success) {
+            if (is_profile) { profiler.tbp_stop(); }
+            apilog_info(
+                    "LOWOHA matmul_direct: routed to group_matmul_direct "
+                    "(num_ops=1, act=none), M=",
+                    M, ", K=", K, ", N=", N);
+            return status_t::success;
+        }
+        log_info(
+                "group_matmul_direct route declined; continuing on the "
+                "standard single-matmul path");
+    }
 
     status_t ggml_val_status
             = zendnnl::common::op_instrumentation::validate([&]() {

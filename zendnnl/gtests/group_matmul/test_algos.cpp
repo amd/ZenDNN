@@ -61,6 +61,36 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
+// The balanced remainder split is a dense single-expert optimization. Its
+// default must remain the legacy split so multi-expert callers are unchanged.
+TEST(TestAlignedNSplitSingleExpertScope, DefaultKeepsLegacyTailRemainder) {
+    using zendnnl::lowoha::matmul::aligned_n_split;
+    EXPECT_EQ(aligned_n_split(3584, 24, 0, 32), std::make_pair(0, 128));
+    EXPECT_EQ(aligned_n_split(3584, 24, 23, 32), std::make_pair(2944, 3584));
+}
+
+TEST(TestAlignedNSplitSingleExpertScope, OptInBalancesAlignedBlocks) {
+    using zendnnl::lowoha::matmul::aligned_n_split;
+    EXPECT_EQ(aligned_n_split(3584, 24, 0, 32, true), std::make_pair(0, 160));
+    EXPECT_EQ(aligned_n_split(3584, 24, 15, 32, true),
+            std::make_pair(2400, 2560));
+    EXPECT_EQ(aligned_n_split(3584, 24, 16, 32, true),
+            std::make_pair(2560, 2688));
+    EXPECT_EQ(aligned_n_split(3584, 24, 23, 32, true),
+            std::make_pair(3456, 3584));
+}
+
+TEST(TestAlignedNSplitSingleExpertScope, SurplusThreadsReceiveEmptyRanges) {
+    using zendnnl::lowoha::matmul::aligned_n_split;
+    EXPECT_EQ(aligned_n_split(2048, 64, 0, 64, true), std::make_pair(0, 64));
+    EXPECT_EQ(aligned_n_split(2048, 64, 31, 64, true),
+            std::make_pair(1984, 2048));
+    EXPECT_EQ(aligned_n_split(2048, 64, 32, 64, true),
+            std::make_pair(2048, 2048));
+    EXPECT_EQ(aligned_n_split(2048, 64, 63, 64, true),
+            std::make_pair(2048, 2048));
+}
+
 // ???????????????????????????????????????????????????????????????????????????????
 // [7] TestFusedMoEAlgos: fused path ? ALGO 1/2/3 ? mixed precision ? bias
 // ???????????????????????????????????????????????????????????????????????????????

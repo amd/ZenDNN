@@ -563,6 +563,10 @@ struct GroupNTileContext {
     size_t dst_elem;
     size_t bias_elem;
 
+    // The balanced aligned split added for dense QKV is intentionally scoped
+    // to a true one-op call. Multi-expert groups retain the legacy splitter.
+    bool single_expert = false;
+
     // Custom BF16 microkernel hook.  `use_custom` is the sticky decision
     // taken at `flat_n_tile` entry (single-threaded) — non-null + enabled
     // means every `do_tile()` dispatches through
@@ -806,7 +810,9 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
     const bool native_s4_wei
             = w4a8_native && params[e].dtypes.wei == data_type_t::s4;
     const auto split = n_split_for_tile(N[e], n_thr, local_tid, plan.nr_align,
-            /*even_boundaries=*/native_s4_wei);
+            /*even_boundaries=*/native_s4_wei,
+            /*balance_remainder=*/
+            single_expert && use_custom && !native_s4_wei);
     const int col_start = split.first;
     const int col_end = split.second;
     const int n_tile = col_end - col_start;
@@ -4763,7 +4769,8 @@ void flat_n_tile(const std::vector<char> &layout,
 
     GroupNTileContext ctx {layout, transA, transB, M, N, K, alpha, src, lda,
             weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
-            fused_act, act_dtype, wei_elem, dst_elem, bias_elem, use_custom,
+            fused_act, act_dtype, wei_elem, dst_elem, bias_elem,
+            is_single_dense_expert(num_ops), use_custom,
             use_custom ? &kctx : nullptr, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};

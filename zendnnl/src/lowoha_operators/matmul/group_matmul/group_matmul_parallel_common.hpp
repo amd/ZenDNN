@@ -1834,18 +1834,21 @@ inline int algo3_decode_nr_align(const std::vector<int> &M,
 /// Aligned column-slice partitioner for ALGO 3.  Returns {col_start,
 /// col_end} for `tid` of `n_thr` over [0, N).
 ///
-/// Aligned branch: per-thread = aligned_per_thr (a multiple of `align`),
-/// last thread takes the remainder.  Engaged only when last ≥
-/// aligned_per_thr/2 (BLIS-style 2× imbalance bound).  Search walks
-/// DOWN in `align` quanta from ceil(N/n_thr) rounded up to align,
-/// so feasible alignments aren't rejected just because the first
-/// candidate over-sized the last slice (e.g. N=2880, n_thr=11,
-/// align=64 → 256 cols/thread fits, 320 doesn't).
+/// Legacy mode gives `n_thr - 1` threads one aligned slice and the last
+/// thread the remainder, searching downward in alignment quanta until the
+/// last slice is at least half the common width. It falls back to an
+/// unaligned even split when no such width exists.
+///
+/// `balance_remainder` is the single-expert custom-kernel mode. It distributes
+/// complete `align` blocks as evenly as possible, gives any sub-block tail to
+/// the last active thread, and returns an empty [N,N) range for surplus
+/// threads when there are fewer aligned blocks than requested workers.
+/// Multi-expert and standard-backend callers retain legacy partitioning.
 ///
 /// Falls back to even split (N*tid/n_thr) when n_thr<=1 or align<=1
 /// or no aligned slice meets the 2× bound.
 inline std::pair<int, int> aligned_n_split(
-        int N, int n_thr, int tid, int align) {
+        int N, int n_thr, int tid, int align, bool balance_remainder = false) {
     // Hardened against pathological inputs: n_thr<=0 used to hit
     // even_split's divide-by-zero (`N * tid / n_thr`).
     if (n_thr <= 0 || N <= 0) { return std::make_pair(0, 0); }
@@ -1859,15 +1862,28 @@ inline std::pair<int, int> aligned_n_split(
 
     if (align <= 1 || n_thr <= 1) { return even_split(); }
 
-    // Walk slice size down in `align` quanta from ceil(N/n_thr) until
-    // the imbalance bound holds.  Cost is at most a handful of
-    // iterations in practice (slice sizes converge in 1-2 steps for
-    // realistic N / n_thr / align triples).
-    //
-    // Intermediates promoted to int64_t to keep the products
-    // aligned_per_thr * (n_thr - 1) and aligned_per_thr * tid free of
-    // signed overflow (UB) for any (N, n_thr) combination representable
-    // as int.
+    // Spread the remainder only for the explicitly opted-in single-expert CK
+    // route. Capping the active workers by the aligned-block count keeps every
+    // non-empty range pack-aligned; extra workers return [N,N) and no-op.
+    if (balance_remainder) {
+        const int64_t blocks = static_cast<int64_t>(N) / align;
+        if (blocks > 0) {
+            const int64_t active_thr = std::min<int64_t>(n_thr, blocks);
+            if (tid >= active_thr) return std::make_pair(N, N);
+            const int64_t base = blocks / active_thr;
+            const int64_t n_big = blocks % active_thr;
+            const int64_t start_blk = base * tid + (tid < n_big ? tid : n_big);
+            const int64_t cnt = base + (tid < n_big ? 1 : 0);
+            const int64_t s = start_blk * align;
+            const int64_t e = (tid == active_thr - 1)
+                    ? static_cast<int64_t>(N)
+                    : (start_blk + cnt) * align;
+            return std::make_pair(static_cast<int>(s), static_cast<int>(e));
+        }
+    }
+
+    // Legacy aligned split. Intermediates are int64_t so products remain free
+    // of signed overflow for every int-representable input.
     const int64_t even_per_thr = (static_cast<int64_t>(N) + n_thr - 1) / n_thr;
     for (int64_t aligned_per_thr = ((even_per_thr + align - 1) / align) * align;
             aligned_per_thr >= align; aligned_per_thr -= align) {
@@ -1885,9 +1901,9 @@ inline std::pair<int, int> aligned_n_split(
 
 /// Wrapper around aligned_n_split with optional even boundary snapping for
 /// packed-s4 N-tile slices.
-inline std::pair<int, int> n_split_for_tile(
-        int N, int n_thr, int tid, int align, bool even_boundaries) {
-    auto s = aligned_n_split(N, n_thr, tid, align);
+inline std::pair<int, int> n_split_for_tile(int N, int n_thr, int tid,
+        int align, bool even_boundaries, bool balance_remainder = false) {
+    auto s = aligned_n_split(N, n_thr, tid, align, balance_remainder);
     if (!even_boundaries) { return s; }
     s.first &= ~1;
     s.second = (tid == n_thr - 1) ? N : (s.second & ~1);

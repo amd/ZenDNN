@@ -178,6 +178,12 @@ public:
     /** @brief Get the grouped-matmul AUTO mixed-in-place mode flag. */
     bool get_grp_auto_mixed_inplace();
 
+    /** @brief Enable eligible single MatMul calls to use grouped AUTO. */
+    void set_custom_kernel_route(bool enable);
+
+    /** @brief Get the single MatMul to grouped AUTO routing flag. */
+    bool get_custom_kernel_route();
+
     /** @brief Sets on-the-fly B packing flag for Native kernels.
   *
   * @param enable 0 = disabled (default), 1 = enabled.
@@ -314,6 +320,7 @@ private:
     /// the CK runtime and the prepack warmers.  Atomic for the same
     /// concurrent read/write reason as `matmul_weight_cache`.
     std::atomic<bool> grp_auto_mixed_inplace {false};
+    bool custom_kernel_route {false};
     int32_t matmul_otf_bpack; /**< On-the-fly B packing for Native kernels. */
     bool zp_comp_cache; /**< Enable zero-point compensation caching. */
     uint32_t lru_cache_capacity; /**< LRU cache capacity. */
