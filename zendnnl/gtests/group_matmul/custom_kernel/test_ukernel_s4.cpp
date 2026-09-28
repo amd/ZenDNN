@@ -34,11 +34,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
 #include "common/bfloat16.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/s4_microkernel.hpp"
 
@@ -82,10 +82,10 @@ float gelu_erf(float x) {
 
 struct Slab {
     void *p = nullptr;
-    explicit Slab(size_t b) : p(std::aligned_alloc(64, b)) {
+    explicit Slab(size_t b) : p(zendnnl_aligned_alloc(64, b)) {
         if (p) std::memset(p, 0, b);
     }
-    ~Slab() { std::free(p); }
+    ~Slab() { zendnnl_aligned_free(p); }
     Slab(const Slab &) = delete;
     Slab &operator=(const Slab &) = delete;
 };

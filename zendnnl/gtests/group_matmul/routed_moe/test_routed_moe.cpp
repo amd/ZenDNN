@@ -54,6 +54,18 @@
 // ambiguous.
 void reset_grp_matmul_caches();
 
+// The CRT has no POSIX setenv/unsetenv. _putenv_s(name, "") removes the
+// variable, matching unsetenv. Linux keeps the real functions.
+#if defined(_MSC_VER)
+static inline int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && std::getenv(name) != nullptr) { return 0; }
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char *name) {
+    return _putenv_s(name, "");
+}
+#endif
+
 namespace {
 
 using zendnnl::lowoha::matmul::group_matmul_projection_params;
@@ -989,9 +1001,7 @@ TEST_F(RoutedMoEPack, MatchesReferenceLayoutByteForByte) {
     struct {
         int64_t E, OC, IC;
     } cases[] = {
-            {1, 32, 32},
-            {2, 64, 128},
-            {3, 96, 256},
+            {1, 32, 32}, {2, 64, 128}, {3, 96, 256},
             {8, 896, 256}, // mixtral-like gate/up block
             {4, 128, 96}, // IC not a power of two
     };

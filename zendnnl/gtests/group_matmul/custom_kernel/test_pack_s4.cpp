@@ -24,10 +24,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
+#include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 
 namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
@@ -104,10 +104,10 @@ struct PackedView {
 // Owns an aligned prepack destination so a failing EXPECT cannot leak.
 struct OwnedSlab {
     void *p = nullptr;
-    explicit OwnedSlab(size_t bytes) : p(std::aligned_alloc(64, bytes)) {
+    explicit OwnedSlab(size_t bytes) : p(zendnnl_aligned_alloc(64, bytes)) {
         if (p != nullptr) std::memset(p, 0, bytes);
     }
-    ~OwnedSlab() { std::free(p); }
+    ~OwnedSlab() { zendnnl_aligned_free(p); }
     OwnedSlab(const OwnedSlab &) = delete;
     OwnedSlab &operator=(const OwnedSlab &) = delete;
 };
