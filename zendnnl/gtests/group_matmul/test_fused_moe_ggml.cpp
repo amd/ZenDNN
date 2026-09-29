@@ -269,11 +269,17 @@ void run_fused_ggml_scenario(const std::string &label,
         std::unique_ptr<moe_test_utils::MoEPipelineScratchKbOverride>
                 scratch_guard;
         std::unique_ptr<moe_test_utils::LastInvocationCaptureGuard> prepack_cap;
+        std::unique_ptr<WeightCacheGuard> ntile_wc;
         if (ntile_algo_pin >= 0) {
             // N-tile mode: pin ALGO 3 (or AUTO=0, which routes this decode-class
             // shape to ALGO 3) so the fused two-pass N-tiles each op's per-group
             // weight via do_tile's per-tile repack.  Capture the prepack stats to
             // assert engagement (+ cross-warm under AUTO).
+            //
+            // Out-of-place (WC=1): in-place skips warmers so aocl.total_attempted
+            // is 0. Pinned ALGO never clears WC=2 the way AUTO does. See
+            // OutOfPlaceCacheFixture in test_prepack.cpp.
+            ntile_wc = std::make_unique<WeightCacheGuard>(1);
             fused_algo = std::make_unique<AlgoEnvGuard>(ntile_algo_pin);
             prepack_cap = std::make_unique<
                     moe_test_utils::LastInvocationCaptureGuard>();

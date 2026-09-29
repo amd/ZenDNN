@@ -323,6 +323,19 @@ MatmulType::MatmulType(const MatmulInput &matmul_input, uint32_t test_index,
                 po_types[i] = post_op_type_t::none;
             }
         }
+        // Extra gelu_erf dropped due to accuracy issue.
+        bool kept_gelu_erf = false;
+        for (uint32_t i = 0; i < po_types.size(); ++i) {
+            if (po_types[i] != post_op_type_t::gelu_erf) { continue; }
+            if (kept_gelu_erf) {
+                log_info(
+                        "Dropping extra gelu_erf for LIBXSMM: only one "
+                        "gelu_erf post-op is supported.");
+                po_types[i] = post_op_type_t::none;
+            } else {
+                kept_gelu_erf = true;
+            }
+        }
     }
 
     // mish is not implemented in the native (gemm/brgemm) post-op
