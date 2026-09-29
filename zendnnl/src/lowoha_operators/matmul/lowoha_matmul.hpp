@@ -271,9 +271,15 @@ ZENDNNL_API void clear_matmul_native_weight_caches();
  * the other clears — not between inferences that still rely on an
  * in-place pack already written into the buffer.
  *
- * Does not clear the prepack fingerprint cache, routed-MoE packed
- * weights (@ref group_matmul_routed_moe_flush_weight_cache), or
- * LibXSMM blocked weights.
+ * Also drops the prepack fingerprint and AUTO mixed-in-place warm
+ * latches, so the next @ref group_matmul_direct repacks instead of
+ * treating the cleared arenas as already warm. SwiGLU-OAI depends on
+ * that re-warm: its ALGO 3 path records a fingerprint for both the
+ * custom-kernel pack and the AOCL per-tile reorder.
+ *
+ * Does not clear routed-MoE packed weights
+ * (@ref group_matmul_routed_moe_flush_weight_cache) or LibXSMM
+ * blocked weights.
  *
  * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
  */
@@ -293,9 +299,10 @@ ZENDNNL_API void clear_grp_matmul_weight_caches();
  * sentinels. Call only after replacing or releasing those weights; reusing
  * an already-packed buffer after this call would repack the packed bytes.
  *
- * Does not clear the prepack fingerprint cache, routed-MoE packed
- * weights (@ref group_matmul_routed_moe_flush_weight_cache), or
- * LibXSMM blocked weights.
+ * Also drops the prepack fingerprint via
+ * @ref clear_grp_matmul_weight_caches. Does not clear routed-MoE
+ * packed weights (@ref group_matmul_routed_moe_flush_weight_cache)
+ * or LibXSMM blocked weights.
  *
  * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
  */

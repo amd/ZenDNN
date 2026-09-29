@@ -919,10 +919,12 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
  *
  *  Forwards to `zendnnl::lowoha::matmul::clear_matmul_weight_caches()`
  *  (AOCL, oneDNN, native, custom-kernel packs and the N-tile f32
- *  weight-scale memo, plus the calling thread's AOCL post-op metadata).
+ *  weight-scale memo, the prepack fingerprint, plus the calling thread's
+ *  AOCL post-op metadata).
  *  Intended for fixture TearDown() to avoid stale pointer-keyed entries from
- *  freed tensors affecting subsequent tests. Does not clear the prepack
- *  fingerprint cache; use `reset_grp_matmul_caches()` for that.
+ *  freed tensors affecting subsequent tests. `reset_grp_matmul_caches()`
+ *  still clears the fingerprint first, then the GGML unpack cache, which
+ *  this wrapper does not.
  */
 void clear_matmul_test_caches();
 

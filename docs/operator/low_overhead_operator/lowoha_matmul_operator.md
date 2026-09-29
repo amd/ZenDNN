@@ -1094,9 +1094,9 @@ These APIs flush weight caches for the **AOCL-DLP, oneDNN, native, and grp_matmu
 | `clear_matmul_aocl_postop_metadata_cache()` | Calling thread's AOCL post-op metadata LRU only. No-op without AOCL-DLP |
 | `clear_matmul_onednn_weight_caches()` | oneDNN blocked weight cache. No-op when built without oneDNN (`ZENDNNL_DEPENDS_ONEDNN=0`) |
 | `clear_matmul_native_weight_caches()` | Native FP32/BF16/INT8 prepacked weight caches |
-| `clear_grp_matmul_weight_caches()` | grp_matmul pack arenas (BF16, DQ-INT8, FP16, W4A8/S4) and the N-tile f32 weight-scale memo. Under `ZENDNNL_MATMUL_WEIGHT_CACHE=2` this also drops in-place pack sentinels so the next call repacks |
+| `clear_grp_matmul_weight_caches()` | grp_matmul pack arenas (BF16, DQ-INT8, FP16, W4A8/S4), the N-tile f32 weight-scale memo, and the prepack fingerprint (including AUTO mixed-in-place warm latches). Under `ZENDNNL_MATMUL_WEIGHT_CACHE=2` this also drops in-place pack sentinels so the next call repacks |
 
-They do **not** clear the prepack fingerprint cache (its clear hook is test-only), routed-MoE packed weights (`group_matmul_routed_moe_flush_weight_cache()`), or LibXSMM blocked weights. AOCL/oneDNN/native LRUs are process-wide, so a call can also drop entries that `group_matmul_direct` warmed on those same backends.
+They do **not** clear routed-MoE packed weights (`group_matmul_routed_moe_flush_weight_cache()`) or LibXSMM blocked weights. AOCL/oneDNN/native LRUs are process-wide, so a call can also drop entries that `group_matmul_direct` warmed on those same backends. The prepack fingerprint is cleared with the grp_matmul arenas so a later call, including SwiGLU-OAI on ALGO 3, re-warms instead of skipping on a stale "already warmed" record.
 
 Declarations: `zendnnl::lowoha::matmul` in `lowoha_operators/matmul/lowoha_matmul.hpp`.
 

@@ -1523,6 +1523,46 @@ TEST_F(TestPrepackClearCacheDirect, FingerprintClearEnablesPrepackReFire) {
                "to isolate from prior tests' fingerprint state.";
 }
 
+// Public umbrella clear must drop the prepack fingerprint, not only the
+// pack arenas. SwiGLU-OAI records that fingerprint for ALGO 3 (custom-kernel
+// pack plus AOCL per-tile warm) and shares the non-interleaved pack key
+// with act=none. If the fingerprint survives, the next prepack short-circuits
+// and the probe below stays cold.
+TEST_F(TestPrepackClearCacheDirect, UmbrellaClearRefiresSwigluPrepack) {
+    using namespace zendnnl::lowoha::matmul;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    reset_grp_matmul_caches();
+
+    auto h = make_harness(/*total=*/4, /*active=*/2,
+            /*K=*/32, /*N=*/64, /*fill=*/0.25f);
+    h.pp.act = grp_matmul_gated_act_t::swiglu_oai_mul;
+    h.pp.act_dtype = data_type_t::bf16;
+
+    prepack::prepack_for_algo_3(h.pp);
+
+    prepack::custom_kernel::PackProbeStats st_warm;
+    prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
+            h.N, h.ldb, h.transB, h.is_weights_const,
+            /*total_count=*/4, st_warm);
+    EXPECT_EQ(st_warm.cache_hits, 4);
+
+    clear_matmul_weight_caches();
+
+    // Do not probe here: the probe packs on a miss and would hide a
+    // fingerprint that still short-circuits prepack_for_algo_3.
+    prepack::prepack_for_algo_3(h.pp);
+
+    prepack::custom_kernel::PackProbeStats st_rewarm;
+    prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
+            h.N, h.ldb, h.transB, h.is_weights_const,
+            /*total_count=*/4, st_rewarm);
+    EXPECT_EQ(st_rewarm.cache_hits, 4)
+            << "after clear_matmul_weight_caches(), SwiGLU-OAI prepack must "
+               "re-fire. A surviving fingerprint short-circuits the warm and "
+               "leaves cache_misses=4.";
+}
+
 // ===============================================================================
 // [23] TestPrepackAoclDlpFullWeightConstGate - mirrors the existing
 //      per-tile `AoclDlpNTileSkipsNonConstExperts` test for the
