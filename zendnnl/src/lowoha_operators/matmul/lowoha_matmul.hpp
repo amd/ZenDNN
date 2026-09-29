@@ -256,14 +256,46 @@ ZENDNNL_API void clear_matmul_onednn_weight_caches();
 ZENDNNL_API void clear_matmul_native_weight_caches();
 
 /**
- * @brief Clear AOCL, oneDNN, and native weight caches used by
- *        @ref matmul_direct, plus the calling thread's AOCL post-op
- *        metadata cache.
+ * @brief Clear grp_matmul packed weight caches.
  *
- * Preferred entry point when releasing cached reordered weights for
- * @ref matmul_direct on those three backends. Does not clear
- * group_matmul-only caches (custom-kernel packs, n-tile packs, scale
- * memo, prepack fingerprints) or LibXSMM blocked weights.
+ * Drops the process-wide, pointer-keyed pack arenas used by
+ * @c matmul_algo_t::moe_custom_kernel: BF16, DQ-INT8, FP16, and W4A8
+ * (S4). Also drops the N-tile f32 weight-scale memo that the INT8
+ * custom-kernel path keys by scale-buffer pointer.
+ *
+ * Under @c ZENDNNL_MATMUL_WEIGHT_CACHE=2, eligible BF16 and INT8
+ * calls store an in-place sentinel so a later call reuses the caller's buffer
+ * as the packed weight. Clearing removes that sentinel, so the next call
+ * repacks from the bytes currently in the buffer. Call this after
+ * replacing or freeing those weights, in the same quiescent window as
+ * the other clears — not between inferences that still rely on an
+ * in-place pack already written into the buffer.
+ *
+ * Does not clear the prepack fingerprint cache, routed-MoE packed
+ * weights (@ref group_matmul_routed_moe_flush_weight_cache), or
+ * LibXSMM blocked weights.
+ *
+ * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
+ */
+ZENDNNL_API void clear_grp_matmul_weight_caches();
+
+/**
+ * @brief Clear AOCL, oneDNN, native, and grp_matmul weight caches,
+ *        plus the calling thread's AOCL post-op metadata cache.
+ *
+ * Preferred entry point when releasing cached reordered weights on
+ * model unload, swap, or heap-address reuse. Covers the caches used by
+ * @ref matmul_direct and the custom-kernel packs used by
+ * @ref group_matmul_direct (including fused FFN / MoE paths that
+ * dispatch @c matmul_algo_t::moe_custom_kernel).
+ *
+ * Under @c ZENDNNL_MATMUL_WEIGHT_CACHE=2 this also removes in-place
+ * sentinels. Call only after replacing or releasing those weights; reusing
+ * an already-packed buffer after this call would repack the packed bytes.
+ *
+ * Does not clear the prepack fingerprint cache, routed-MoE packed
+ * weights (@ref group_matmul_routed_moe_flush_weight_cache), or
+ * LibXSMM blocked weights.
  *
  * @note Same quiescent-window contract as @ref clear_matmul_aocl_weight_caches.
  */

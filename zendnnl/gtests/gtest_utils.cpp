@@ -72,7 +72,8 @@ uint16_t gtest_fp32_to_fp16(float f) {
 } // anonymous namespace
 
 void clear_matmul_test_caches() {
-    // Public umbrella: AOCL + calling-thread postop + oneDNN + native.
+    // Public umbrella: AOCL + calling-thread postop + oneDNN + native
+    // + custom-kernel packs (BF16/INT8/FP16/S4) and the N-tile scale memo.
     // Each gtest case is a fresh "model" with new weight buffers, so
     // pointer-keyed entries would otherwise outlive freed test memory.
     zendnnl::lowoha::matmul::clear_matmul_weight_caches();

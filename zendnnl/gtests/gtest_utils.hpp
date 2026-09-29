@@ -918,10 +918,11 @@ void compare_norm_tensors(tensor_t &output, tensor_t &output_ref,
  *  @brief Clear matmul_direct weight caches used by gtests.
  *
  *  Forwards to `zendnnl::lowoha::matmul::clear_matmul_weight_caches()`
- *  (AOCL, oneDNN, native, plus the calling thread's AOCL post-op metadata).
+ *  (AOCL, oneDNN, native, custom-kernel packs and the N-tile f32
+ *  weight-scale memo, plus the calling thread's AOCL post-op metadata).
  *  Intended for fixture TearDown() to avoid stale pointer-keyed entries from
- *  freed tensors affecting subsequent tests. Does not clear group-matmul-only
- *  caches; use `reset_grp_matmul_caches()` for those.
+ *  freed tensors affecting subsequent tests. Does not clear the prepack
+ *  fingerprint cache; use `reset_grp_matmul_caches()` for that.
  */
 void clear_matmul_test_caches();
 
@@ -934,8 +935,10 @@ void clear_matmul_test_caches();
  *       (`clear_custom_kernel_pack_cache_f16()`), and W4A8
  *       (`clear_custom_kernel_pack_cache_s4()`); each is a disjoint singleton.
  *    2. Prepack-module fingerprint cache (`clear_fingerprint_cache_for_test()`)
- *    3. `matmul_direct` AOCL / oneDNN / native caches (and calling-thread
- *       AOCL post-op metadata) via `clear_matmul_test_caches()` →
+ *    3. GGML unpack cache and the N-tile f32 weight-scale memo
+ *    4. `matmul_direct` AOCL / oneDNN / native caches, custom-kernel packs
+ *       (again), the N-tile scale memo (again), and calling-thread AOCL
+ *       post-op metadata via `clear_matmul_test_caches()` →
  *       `clear_matmul_weight_caches()`
  *
  *  Required for any `group_matmul` test running in the same process as

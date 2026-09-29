@@ -1085,17 +1085,18 @@ One of the key features of LowOHA MatMul is **automatic weight reordering and ca
 
 ### Clearing Weight Caches
 
-These APIs flush **`matmul_direct`** weight caches for the **AOCL-DLP, oneDNN, and native** backends. Call them only in a quiescent window: no in-flight `matmul_direct` (or `group_matmul_direct`) and no thread holding cached weight pointers. They are not safe inside an OpenMP parallel region.
+These APIs flush weight caches for the **AOCL-DLP, oneDNN, native, and grp_matmul** backends. Call them only in a quiescent window: no in-flight `matmul_direct` (or `group_matmul_direct`) and no thread holding cached weight pointers. They are not safe inside an OpenMP parallel region.
 
 | API | What it clears |
 |-----|----------------|
-| `clear_matmul_weight_caches()` | Preferred entry: AOCL, oneDNN, and native caches used by `matmul_direct`, plus the **calling thread's** AOCL post-op metadata |
+| `clear_matmul_weight_caches()` | Preferred entry: AOCL, oneDNN, native, and grp_matmul caches, plus the **calling thread's** AOCL post-op metadata |
 | `clear_matmul_aocl_weight_caches()` | AOCL-DLP typed LRUs, symquant, WOQ, W4A8, GGML unpack, and zero-point compensation. No-op when built without AOCL-DLP (`ZENDNNL_DEPENDS_AOCLDLP=0`); GGML unpack is not dropped in that stub |
 | `clear_matmul_aocl_postop_metadata_cache()` | Calling thread's AOCL post-op metadata LRU only. No-op without AOCL-DLP |
 | `clear_matmul_onednn_weight_caches()` | oneDNN blocked weight cache. No-op when built without oneDNN (`ZENDNNL_DEPENDS_ONEDNN=0`) |
 | `clear_matmul_native_weight_caches()` | Native FP32/BF16/INT8 prepacked weight caches |
+| `clear_grp_matmul_weight_caches()` | grp_matmul pack arenas (BF16, DQ-INT8, FP16, W4A8/S4) and the N-tile f32 weight-scale memo. Under `ZENDNNL_MATMUL_WEIGHT_CACHE=2` this also drops in-place pack sentinels so the next call repacks |
 
-They do **not** clear group-matmul-only caches (custom-kernel packs, n-tile packs, scale memo, prepack fingerprints) or LibXSMM blocked weights. AOCL/oneDNN/native LRUs are process-wide, so a call can also drop entries that `group_matmul_direct` warmed on those same backends; that is shared storage, not a group-matmul flush API.
+They do **not** clear the prepack fingerprint cache (its clear hook is test-only), routed-MoE packed weights (`group_matmul_routed_moe_flush_weight_cache()`), or LibXSMM blocked weights. AOCL/oneDNN/native LRUs are process-wide, so a call can also drop entries that `group_matmul_direct` warmed on those same backends.
 
 Declarations: `zendnnl::lowoha::matmul` in `lowoha_operators/matmul/lowoha_matmul.hpp`.
 

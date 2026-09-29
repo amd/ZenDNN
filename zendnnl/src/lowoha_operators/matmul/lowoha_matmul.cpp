@@ -27,6 +27,7 @@
 #include "lowoha_operators/matmul/backends/onednn/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/backends/reference/reference_kernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
@@ -527,11 +528,20 @@ ZENDNNL_API void clear_matmul_onednn_weight_caches() {
 #endif
 }
 
+ZENDNNL_API void clear_grp_matmul_weight_caches() {
+    custom_kernel::clear_custom_kernel_pack_cache();
+    custom_kernel::clear_custom_kernel_pack_cache_int8();
+    custom_kernel::clear_custom_kernel_pack_cache_f16();
+    custom_kernel::clear_custom_kernel_pack_cache_s4();
+    clear_grp_wei_scale_f32_cache();
+}
+
 ZENDNNL_API void clear_matmul_weight_caches() {
     clear_matmul_aocl_weight_caches();
     clear_matmul_aocl_postop_metadata_cache();
     clear_matmul_onednn_weight_caches();
     clear_matmul_native_weight_caches();
+    clear_grp_matmul_weight_caches();
 }
 
 } // namespace matmul
