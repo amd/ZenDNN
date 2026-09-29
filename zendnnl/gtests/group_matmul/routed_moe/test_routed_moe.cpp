@@ -577,6 +577,19 @@ TEST_F(RoutedMoECapability, RejectsNull) {
     EXPECT_EQ(group_matmul_routed_moe_query(nullptr), status_t::op_bad_io);
 }
 
+TEST(RoutedMoEApi, ProjectionWeightCapacityIsIndependentMetadata) {
+    group_matmul_projection_params primary;
+    group_matmul_projection_params secondary;
+
+    EXPECT_EQ(primary.wei_buffer_capacity_bytes, 0u);
+    EXPECT_EQ(secondary.wei_buffer_capacity_bytes, 0u);
+
+    primary.wei_buffer_capacity_bytes = 4096;
+    secondary.wei_buffer_capacity_bytes = 8192;
+    EXPECT_EQ(primary.wei_buffer_capacity_bytes, 4096u);
+    EXPECT_EQ(secondary.wei_buffer_capacity_bytes, 8192u);
+}
+
 // ===========================================================================
 // Epilogue activation
 // ===========================================================================
@@ -893,6 +906,16 @@ TEST_F(RoutedMoEValidate, RejectsBadStrides) {
     EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::memory_bad_stride);
 }
 
+TEST_F(RoutedMoEValidate, AcceptsTrailingExpertWeightPadding) {
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 3u);
+
+    auto p = pb.params();
+    p.gate_up_stride_expert = 2 * pb.N * pb.K + 64;
+    p.down_stride_expert = pb.K * pb.N + 64;
+    EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::success);
+}
+
 TEST_F(RoutedMoEValidate, RejectsDerivedCountAndAddressOverflows) {
     moe_problem pb;
     pb.build(8, 128, 64, 8, 2, 3u);
@@ -924,6 +947,10 @@ TEST_F(RoutedMoEValidate, RejectsDerivedCountAndAddressOverflows) {
     p = pb.params();
     p.num_tokens = 2;
     p.src_stride = std::numeric_limits<int64_t>::max();
+    expect_size_rejection(p);
+
+    p = pb.params();
+    p.gate_up_stride_expert = std::numeric_limits<int64_t>::max();
     expect_size_rejection(p);
 
     p = pb.params();
@@ -1689,6 +1716,37 @@ TEST_F(RoutedMoESuperset, DA8W8PromptUsesRoutedExecutor) {
     EXPECT_EQ(pb.dst, routed_output);
 }
 
+TEST_F(RoutedMoESuperset, PaddedExpertWeightsUseRoutedExecutor) {
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 0xc4bu);
+    const auto expected = reference_moe(pb);
+    da8w8_call call(pb);
+
+    const size_t experts = static_cast<size_t>(pb.E);
+    const size_t w13_logical = pb.w13.size() / experts;
+    const size_t w2_logical = pb.w2.size() / experts;
+    const size_t w13_stride = w13_logical + 64;
+    const size_t w2_stride = w2_logical + 64;
+    std::vector<int8_t> padded_w13(experts * w13_stride, int8_t {0x5a});
+    std::vector<int8_t> padded_w2(experts * w2_stride, int8_t {0x5a});
+    for (size_t e = 0; e < experts; ++e) {
+        std::memcpy(padded_w13.data() + e * w13_stride,
+                pb.w13.data() + e * w13_logical, w13_logical);
+        std::memcpy(padded_w2.data() + e * w2_stride,
+                pb.w2.data() + e * w2_logical, w2_logical);
+    }
+
+    call.primary.weight = padded_w13.data();
+    call.primary.wei_buffer_capacity_bytes = w13_stride;
+    call.secondary.weight = padded_w2.data();
+    call.secondary.wei_buffer_capacity_bytes = w2_stride;
+
+    grouped_call_probe probe;
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected), 3e-3);
+}
+
 // The explicit DA8W8 superset call with gelu_and_mul must take the routed
 // executor (bit-identical to calling it directly, and never entering the
 // grouped surface) and agree with the forced grouped path.  The grouped path
@@ -1727,6 +1785,38 @@ TEST_F(RoutedMoESuperset, DA8W8GeluDecodeAndPromptUseRoutedExecutor) {
         EXPECT_LT(rel_mae(generic, want), 2e-2) << "M=" << M;
         EXPECT_LT(rel_mae(pb.dst, generic), 2e-2) << "M=" << M;
     }
+}
+
+TEST_F(RoutedMoESuperset, CapacityMetadataKeepsGroupedFallbackCorrect) {
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 0xc4au);
+    const auto expected = reference_moe(pb);
+    da8w8_call call(pb);
+
+    const size_t experts = static_cast<size_t>(pb.E);
+    const size_t w13_logical = pb.w13.size() / experts;
+    const size_t w2_logical = pb.w2.size() / experts;
+    const size_t w13_stride = w13_logical + 64;
+    const size_t w2_stride = w2_logical + 64;
+    std::vector<int8_t> padded_w13(experts * w13_stride, int8_t {0x5a});
+    std::vector<int8_t> padded_w2(experts * w2_stride, int8_t {0x5a});
+    for (size_t e = 0; e < experts; ++e) {
+        std::memcpy(padded_w13.data() + e * w13_stride,
+                pb.w13.data() + e * w13_logical, w13_logical);
+        std::memcpy(padded_w2.data() + e * w2_stride,
+                pb.w2.data() + e * w2_logical, w2_logical);
+    }
+
+    call.primary.weight = padded_w13.data();
+    call.primary.wei_buffer_capacity_bytes = w13_stride;
+    call.secondary.weight = padded_w2.data();
+    call.secondary.wei_buffer_capacity_bytes = w2_stride;
+
+    disable_routed_guard disable;
+    grouped_call_probe probe;
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_TRUE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected), 2e-2);
 }
 
 // bf16 weight scales (the checkpoint dtype, when a host forwards it without

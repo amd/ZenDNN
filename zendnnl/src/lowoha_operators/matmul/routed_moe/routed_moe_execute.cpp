@@ -67,6 +67,10 @@ namespace lowoha {
 namespace matmul {
 namespace routed_moe {
 
+static status_t pack_weights_strided(const int8_t *src, int8_t *dst,
+        int64_t num_experts, int64_t out_channels, int64_t in_channels,
+        int64_t expert_stride, int64_t num_threads);
+
 namespace {
 
 // A routed execution holds a shared lock from validation through its final
@@ -84,8 +88,9 @@ std::shared_mutex &execution_lifecycle_mutex() {
 //
 // Identity alone is insufficient: frameworks may deliberately use one
 // explicit model key for multiple tensors or reload a different geometry
-// under it.  Role, complete geometry, dtype and packed-layout version are part
-// of equality, and an entry verifies all metadata and byte size on every hit.
+// under it.  Role, complete geometry, source expert stride, dtype and
+// packed-layout version are part of equality, and an entry verifies all
+// metadata and byte size on every hit.
 // ---------------------------------------------------------------------------
 enum class packed_tensor_role_t : uint8_t { gate_up = 0, down = 1 };
 
@@ -95,6 +100,7 @@ struct packed_cache_key_t {
     int64_t num_experts = 0;
     int64_t out_channels = 0;
     int64_t in_channels = 0;
+    int64_t expert_stride = 0;
     data_type_t dtype = data_type_t::none;
     uint32_t layout_version = 0;
 
@@ -102,7 +108,8 @@ struct packed_cache_key_t {
         return identity == other.identity && role == other.role
                 && num_experts == other.num_experts
                 && out_channels == other.out_channels
-                && in_channels == other.in_channels && dtype == other.dtype
+                && in_channels == other.in_channels
+                && expert_stride == other.expert_stride && dtype == other.dtype
                 && layout_version == other.layout_version;
     }
 };
@@ -118,6 +125,7 @@ struct packed_cache_key_hash_t {
         combine(std::hash<int64_t> {}(key.num_experts));
         combine(std::hash<int64_t> {}(key.out_channels));
         combine(std::hash<int64_t> {}(key.in_channels));
+        combine(std::hash<int64_t> {}(key.expert_stride));
         combine(std::hash<int32_t> {}(static_cast<int32_t>(key.dtype)));
         combine(std::hash<uint32_t> {}(key.layout_version));
         return hash;
@@ -157,8 +165,8 @@ cache_store() {
 
 status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
         const int8_t *weight, int64_t num_experts, int64_t out_channels,
-        int64_t in_channels, data_type_t dtype, int num_threads,
-        std::shared_ptr<const packed_weight_t> &result) {
+        int64_t in_channels, int64_t expert_stride, data_type_t dtype,
+        int num_threads, std::shared_ptr<const packed_weight_t> &result) {
     size_t src_bytes = 0;
     size_t packed_bytes = 0;
     int64_t blocks_per_expert = 0;
@@ -172,7 +180,7 @@ status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
     (void)packed_bytes_per_oc;
 
     const packed_cache_key_t key {identity, role, num_experts, out_channels,
-            in_channels, dtype, packed_layout_version};
+            in_channels, expert_stride, dtype, packed_layout_version};
 
     std::lock_guard<std::mutex> guard(cache_mutex());
     auto &store = cache_store();
@@ -192,8 +200,8 @@ status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
     entry->data = static_cast<int8_t *>(raw);
     entry->bytes = packed_bytes;
     entry->key = key;
-    const status_t pack_status = pack_weights(weight, entry->data, num_experts,
-            out_channels, in_channels, num_threads);
+    const status_t pack_status = pack_weights_strided(weight, entry->data,
+            num_experts, out_channels, in_channels, expert_stride, num_threads);
     if (pack_status != status_t::success) { return pack_status; }
 
     store.emplace(key, entry);
@@ -417,8 +425,9 @@ bool checked_scratch_elements(int64_t a, int64_t b, int64_t c, size_t &result) {
 
 } // namespace
 
-status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
-        int64_t out_channels, int64_t in_channels, int64_t num_threads) {
+static status_t pack_weights_strided(const int8_t *src, int8_t *dst,
+        int64_t num_experts, int64_t out_channels, int64_t in_channels,
+        int64_t expert_stride, int64_t num_threads) {
     if (src == nullptr || dst == nullptr) { return status_t::op_bad_io; }
 
     size_t src_bytes = 0;
@@ -428,7 +437,18 @@ status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
     const status_t size_status = checked_pack_sizes(num_experts, out_channels,
             in_channels, src_bytes, dst_bytes, blocks_per_expert, row);
     if (size_status != status_t::success) { return size_status; }
-    (void)src_bytes;
+    const size_t logical_expert_bytes
+            = src_bytes / static_cast<size_t>(num_experts);
+    if (expert_stride < 0
+            || static_cast<uint64_t>(expert_stride)
+                    < static_cast<uint64_t>(logical_expert_bytes)
+            || (num_experts > 1
+                    && expert_stride > (std::numeric_limits<int64_t>::max()
+                                               - static_cast<int64_t>(
+                                                       logical_expert_bytes))
+                                    / (num_experts - 1))) {
+        return status_t::memory_bad_stride;
+    }
     (void)dst_bytes;
     if (!isa_supported()) { return status_t::isa_unsupported; }
 
@@ -446,8 +466,7 @@ status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
         const int64_t e = i / blocks_per_expert;
         const int64_t nb = i % blocks_per_expert;
         pack_weight_block(dst + e * out_channels * row + nb * block_n * row,
-                src + e * out_channels * in_channels
-                        + nb * block_n * in_channels,
+                src + e * expert_stride + nb * block_n * in_channels,
                 in_channels);
     }
     return status_t::success;
@@ -455,6 +474,19 @@ status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
     (void)num_threads;
     return status_t::isa_unsupported;
 #endif
+}
+
+status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
+        int64_t out_channels, int64_t in_channels, int64_t num_threads) {
+    int64_t expert_stride = 0;
+    if (out_channels <= 0 || in_channels <= 0
+            || out_channels
+                    > std::numeric_limits<int64_t>::max() / in_channels) {
+        return status_t::memory_bad_size;
+    }
+    expert_stride = out_channels * in_channels;
+    return pack_weights_strided(src, dst, num_experts, out_channels,
+            in_channels, expert_stride, num_threads);
 }
 
 status_t execute(const routed_moe_params &p) {
@@ -489,18 +521,24 @@ status_t execute(const routed_moe_params &p) {
                 : p.gate_up_weight;
         const void *down_key = p.down_cache_key != nullptr ? p.down_cache_key
                                                            : p.down_weight;
+        const int64_t gate_up_expert_stride = p.gate_up_stride_expert != 0
+                ? p.gate_up_stride_expert
+                : gate_up_oc * K;
+        const int64_t down_expert_stride
+                = p.down_stride_expert != 0 ? p.down_stride_expert : K * N;
 
         std::shared_ptr<const packed_weight_t> pw_gate_up;
         std::shared_ptr<const packed_weight_t> pw_down;
         status_t cache_status = lookup_packed_weight(gate_up_key,
                 packed_tensor_role_t::gate_up,
                 static_cast<const int8_t *>(p.gate_up_weight),
-                p.num_local_experts, gate_up_oc, K, p.wei_dt, nth, pw_gate_up);
+                p.num_local_experts, gate_up_oc, K, gate_up_expert_stride,
+                p.wei_dt, nth, pw_gate_up);
         if (cache_status != status_t::success) { return cache_status; }
-        cache_status
-                = lookup_packed_weight(down_key, packed_tensor_role_t::down,
-                        static_cast<const int8_t *>(p.down_weight),
-                        p.num_local_experts, K, N, p.wei_dt, nth, pw_down);
+        cache_status = lookup_packed_weight(down_key,
+                packed_tensor_role_t::down,
+                static_cast<const int8_t *>(p.down_weight), p.num_local_experts,
+                K, N, down_expert_stride, p.wei_dt, nth, pw_down);
         if (cache_status != status_t::success) { return cache_status; }
         const int8_t *packed_gate_up = pw_gate_up->data;
         const int8_t *packed_down = pw_down->data;

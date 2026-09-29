@@ -60,6 +60,13 @@ struct group_matmul_projection_params {
     int input_size = 0;
     bool trans_weight = true;
     const void *weight = nullptr;
+    /// Bytes the caller guarantees are writable at each expert weight slice.
+    /// 0 (default) means exactly that expert's logical weight extent.  The
+    /// generic fallback forwards this to group Matmul.  The routed fast
+    /// executor uses a larger value as the source stride between experts while
+    /// producing its normal contiguous out-of-place pack; it does not yet
+    /// reorder into the caller's buffer.
+    size_t wei_buffer_capacity_bytes = 0;
     int ldb = 0;
     const void *bias = nullptr;
     float alpha = 1.0f;
@@ -206,11 +213,13 @@ struct routed_moe_capability {
  *     @c src_stride / @c dst_stride (in elements, >= hidden_size).
  *   - @c gate_up_weight : [num_local_experts, 2 * intermediate_size,
  *     hidden_size] int8, row-major and tightly packed within an expert.
+ *     `gate_up_stride_expert` may add trailing padding between experts.
  *     The output-channel axis is split halves: rows
  *     [0, intermediate_size) are the gate projection and rows
  *     [intermediate_size, 2 * intermediate_size) the up projection.
  *   - @c down_weight : [num_local_experts, hidden_size,
- *     intermediate_size] int8, same packing rule.
+ *     intermediate_size] int8, same packing rule;
+ *     `down_stride_expert` may add trailing padding between experts.
  *   - @c gate_up_scale : [num_local_experts, 2 * intermediate_size] f32,
  *     @c down_scale : [num_local_experts, hidden_size] f32 — one scale
  *     per weight output channel (symmetric, no zero point).
@@ -257,7 +266,8 @@ struct routed_moe_params {
     const void *gate_up_weight = nullptr;
     const void *down_weight = nullptr;
     data_type_t wei_dt = data_type_t::none;
-    /// Elements between experts.  0 selects the tight default:
+    /// Elements between experts.  0 selects the tight default; a larger value
+    /// adds trailing padding after each expert:
     /// 2 * intermediate_size * hidden_size for gate/up and
     /// hidden_size * intermediate_size for down.
     int64_t gate_up_stride_expert = 0;

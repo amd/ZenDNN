@@ -253,10 +253,14 @@ status_t checked_problem_sizes(
                     p.hidden_size, p.intermediate_size, down_expert_stride)) {
         return status_t::memory_bad_size;
     }
-    if ((p.gate_up_stride_expert != 0
-                && p.gate_up_stride_expert != gate_up_expert_stride)
-            || (p.down_stride_expert != 0
-                    && p.down_stride_expert != down_expert_stride)
+    const int64_t effective_gate_up_expert_stride = p.gate_up_stride_expert != 0
+            ? p.gate_up_stride_expert
+            : gate_up_expert_stride;
+    const int64_t effective_down_expert_stride = p.down_stride_expert != 0
+            ? p.down_stride_expert
+            : down_expert_stride;
+    if (effective_gate_up_expert_stride < gate_up_expert_stride
+            || effective_down_expert_stride < down_expert_stride
             || (p.gate_up_scale_stride_expert != 0
                     && p.gate_up_scale_stride_expert != sizes.gate_up_oc)
             || (p.down_scale_stride_expert != 0
@@ -265,10 +269,11 @@ status_t checked_problem_sizes(
     }
 
     size_t ignored = 0;
-    if (!checked_elements_3(p.num_local_experts, sizes.gate_up_oc,
-                p.hidden_size, sizeof(int8_t), ignored)
-            || !checked_elements_3(p.num_local_experts, p.hidden_size,
-                    p.intermediate_size, sizeof(int8_t), ignored)
+    if (!checked_extent(p.num_local_experts, effective_gate_up_expert_stride,
+                gate_up_expert_stride, sizeof(int8_t))
+            || !checked_extent(p.num_local_experts,
+                    effective_down_expert_stride, down_expert_stride,
+                    sizeof(int8_t))
             || !checked_elements_2(p.num_local_experts, sizes.gate_up_oc,
                     sizeof(float), ignored)
             || !checked_elements_2(p.num_local_experts, p.hidden_size,
@@ -358,12 +363,13 @@ status_t validate_static(const routed_moe_params &p) {
         return status_t::memory_bad_stride;
     }
 
-    // ── weight strides: tight within an expert ──────────────────────
+    // ── weight strides: tight rows, optional trailing expert padding ─
     //
     // The packer walks 32 consecutive output-channel rows of a expert as
     // one block, so a padded output-channel stride would interleave
-    // foreign bytes into the pack.  A caller with padded weights should
-    // use the descriptor-based entry point.
+    // foreign bytes into the pack.  The expert stride may be larger than
+    // the logical matrix so a descriptor caller can place trailing padding
+    // after each expert; the packer skips that padding on its one-time read.
     if (p.gate_up_stride_oc != 0 && p.gate_up_stride_oc != p.hidden_size) {
         return status_t::memory_bad_stride;
     }

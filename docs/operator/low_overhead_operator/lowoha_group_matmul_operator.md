@@ -848,6 +848,19 @@ router-weighted row per token or one row per routed slot. Projection
 `matmul_params` carry dtype, quantization, algorithm, packing, cache, and thread
 configuration; no separate top-level thread count is required.
 
+Each `group_matmul_projection_params` may also declare
+`wei_buffer_capacity_bytes`: the writable byte capacity at each expert's weight
+slice. A value of `0` means only that expert's logical extent is guaranteed.
+For the routed fast executor, a larger capacity is also the source stride
+between experts: the one-time pack reads only each expert's logical rows,
+skips the trailing padding, and writes the existing contiguous routed layout.
+The routed pack remains out-of-place. When a call enters the generic fallback,
+ZenDNN forwards the primary value through
+`matmul_params::wei_buffer_capacity_bytes` and the secondary value through
+`grp_matmul_fused_moe_params::down_wei_buffer_capacity_bytes`, allowing the
+existing group-Matmul cache policy to make its normal in-place eligibility
+decision.
+
 Because the API owns its projection scratch, both projection `beta` values
 must be zero. `skip_weighted` is valid only for `topk == 1`. Raw and GGML
 expert stacks are sliceable from their base pointer; backend-preordered

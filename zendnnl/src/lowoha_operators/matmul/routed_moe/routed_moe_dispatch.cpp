@@ -533,6 +533,7 @@ status_t expert_weight_offset(const group_matmul_projection_params &projection,
     const size_t rows = static_cast<size_t>(projection.trans_weight
                     ? projection.output_size
                     : projection.input_size);
+    size_t expert_bytes = 0;
     if (projection.params.packing.pack_format_b == 1) {
         constexpr size_t ggml_group_size = 32;
         if (projection.ldb % static_cast<int>(ggml_group_size) != 0) {
@@ -547,26 +548,27 @@ status_t expert_weight_offset(const group_matmul_projection_params &projection,
             return status_t::unimplemented;
         }
         size_t blocks = 0;
-        size_t bytes = 0;
         if (!checked_mul_size(rows,
                     static_cast<size_t>(projection.ldb) / ggml_group_size,
                     blocks)
-                || !checked_mul_size(blocks, block_bytes, bytes)
-                || !checked_mul_size(
-                        bytes, static_cast<size_t>(expert), offset)) {
+                || !checked_mul_size(blocks, block_bytes, expert_bytes)) {
             return status_t::memory_bad_size;
         }
-        return status_t::success;
+    } else {
+        size_t elements = 0;
+        if (!checked_mul_size(
+                    rows, static_cast<size_t>(projection.ldb), elements)) {
+            return status_t::memory_bad_size;
+        }
+        expert_bytes
+                = packed_elements_bytes(elements, projection.params.dtypes.wei);
+        if (expert_bytes == 0) { return status_t::memory_bad_size; }
     }
-    size_t elements = 0;
-    if (!checked_mul_size(
-                rows, static_cast<size_t>(projection.ldb), elements)) {
-        return status_t::memory_bad_size;
-    }
-    const size_t bytes
-            = packed_elements_bytes(elements, projection.params.dtypes.wei);
-    if (bytes == 0
-            || !checked_mul_size(bytes, static_cast<size_t>(expert), offset)) {
+    const size_t expert_stride = projection.wei_buffer_capacity_bytes != 0
+            ? projection.wei_buffer_capacity_bytes
+            : expert_bytes;
+    if (expert_stride < expert_bytes) { return status_t::memory_bad_stride; }
+    if (!checked_mul_size(expert_stride, static_cast<size_t>(expert), offset)) {
         return status_t::memory_bad_size;
     }
     return status_t::success;
@@ -727,7 +729,10 @@ status_t build_projection_params(
         quant_scratch_t &scratch) {
     // `assign`, not `resize`: the vector is reused across calls, so a shorter
     // request must still re-seed every surviving element from `projection`.
-    params.assign(grouped.active_experts.size(), projection.params);
+    matmul_params grouped_params = projection.params;
+    grouped_params.wei_buffer_capacity_bytes
+            = projection.wei_buffer_capacity_bytes;
+    params.assign(grouped.active_experts.size(), grouped_params);
     const size_t live_rows = grouped.row_base.back();
     status_t status = gather_source_quant(
             projection.params.quant_params.src_scale, grouped.token_rows,
@@ -937,6 +942,7 @@ status_t run_fused_grouped(const group_matmul_projection_params &primary,
     fused.down_weight.resize(total);
     fused.N_down.assign(total, secondary.output_size);
     fused.ldb_down.assign(total, secondary.ldb);
+    fused.down_wei_buffer_capacity_bytes = secondary.wei_buffer_capacity_bytes;
     fused.bias_down.assign(active, nullptr);
     fused.bias_dt_down = secondary.params.dtypes.bias;
     // The optional vectors are read as "present when non-empty", so a reused
@@ -1073,6 +1079,26 @@ bool tight_expert_scale(const matmul_quantization_params_t::matmul_quant_t &q,
                             && q.dims[1] == 1 && q.dims[2] == output_size));
 }
 
+bool fast_weight_capacity_is_valid(
+        const group_matmul_projection_params &projection) {
+    if (projection.wei_buffer_capacity_bytes == 0) { return true; }
+    const size_t element_size
+            = static_cast<size_t>(size_of(projection.params.dtypes.wei));
+    size_t rows = static_cast<size_t>(projection.trans_weight
+                    ? projection.output_size
+                    : projection.input_size);
+    size_t logical_elements = 0;
+    size_t logical_bytes = 0;
+    return element_size != 0
+            && checked_mul_size(
+                    rows, static_cast<size_t>(projection.ldb), logical_elements)
+            && checked_mul_size(logical_elements, element_size, logical_bytes)
+            && projection.wei_buffer_capacity_bytes >= logical_bytes
+            && projection.wei_buffer_capacity_bytes % element_size == 0
+            && projection.wei_buffer_capacity_bytes / element_size
+            <= static_cast<size_t>(std::numeric_limits<int64_t>::max());
+}
+
 bool fast_format_candidate(const char layout_src, const bool trans_src,
         const int num_experts, const group_matmul_projection_params &primary,
         const group_matmul_routing_params &routing,
@@ -1100,7 +1126,9 @@ bool fast_format_candidate(const char layout_src, const bool trans_src,
             || primary.params.packing.pack_format_b != 0
             || secondary->params.packing.pack_format_b != 0
             || !primary.params.postop_.empty()
-            || !secondary->params.postop_.empty()) {
+            || !secondary->params.postop_.empty()
+            || !fast_weight_capacity_is_valid(primary)
+            || !fast_weight_capacity_is_valid(*secondary)) {
         return false;
     }
     const auto &p1 = primary.params;
@@ -1150,6 +1178,14 @@ routed_moe_params make_fast_params(const void *token_src,
     p.gate_up_weight = primary.weight;
     p.down_weight = secondary.weight;
     p.wei_dt = data_type_t::s8;
+    if (primary.wei_buffer_capacity_bytes != 0) {
+        p.gate_up_stride_expert = static_cast<int64_t>(
+                primary.wei_buffer_capacity_bytes / sizeof(int8_t));
+    }
+    if (secondary.wei_buffer_capacity_bytes != 0) {
+        p.down_stride_expert = static_cast<int64_t>(
+                secondary.wei_buffer_capacity_bytes / sizeof(int8_t));
+    }
     p.gate_up_scale = primary.params.quant_params.wei_scale.buff;
     p.down_scale = secondary.params.quant_params.wei_scale.buff;
     p.scale_dt = data_type_t::f32;
