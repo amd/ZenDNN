@@ -1177,7 +1177,7 @@ TEST(W8A8MoEDispatch, AutoDecodePhase4ClassifiesActivePrefixBeforeFallback) {
     clear_fused_moe_scratch();
 }
 
-TEST(W8A8MoEDispatch, GlobalGenericPinSuppressesPhase4) {
+TEST(W8A8MoEDispatch, Phase4OverridesGlobalGenericPin) {
     SKIP_IF_NO_ISA();
     using namespace zendnnl::lowoha::matmul;
     clear_fused_moe_scratch();
@@ -1185,21 +1185,18 @@ TEST(W8A8MoEDispatch, GlobalGenericPinSuppressesPhase4) {
 
     const auto p = make_problem(/*E=*/4, /*H=*/64, /*I=*/32, /*T=*/4,
             /*topk=*/2, /*seed=*/83);
-    auto generic_baseline = build_call(p);
-    ASSERT_EQ(generic_baseline->run(/*algo=*/1), status_t::success);
-
     auto call = build_call(p);
     moe_test_utils::AutoDecodeAlgoOverride decode_w8a8(4);
     moe_test_utils::GemmModeCaptureGuard capture;
     ASSERT_EQ(call->run(/*algo=*/1), status_t::success);
-    EXPECT_EQ(w8a8::packed_weight_cache_size(), 0u)
-            << "global generic ALGO 1 must suppress the phase W8A8 hook";
+    EXPECT_EQ(w8a8::packed_weight_cache_size(), 2u)
+            << "the phase-specific W8A8 request must override global ALGO 1";
     const char *mode = test_api::s_last_group_matmul_direct_gemm_mode.load(
             std::memory_order_relaxed);
     ASSERT_NE(mode, nullptr);
-    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 1) << "mode=" << mode;
-    EXPECT_EQ(call->output, generic_baseline->output)
-            << "phase 4 must not perturb a global generic ALGO 1 call";
+    EXPECT_EQ(executed_algo_from_gemm_mode(mode), 4) << "mode=" << mode;
+    expect_close(call->output, reference_moe(p), kRtol,
+            "phase-specific ALGO 4 over global ALGO 1");
 
     clear_fused_moe_scratch();
 }

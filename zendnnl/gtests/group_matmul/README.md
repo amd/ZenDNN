@@ -348,9 +348,9 @@ the first read for the process lifetime.
 
 | Env var | Default | Cached? | What it gates |
 |---|---|---|---|
-| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception in both phases; a global generic pin suppresses phase-local 4 |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | 2 | yes (test override available) | AUTO prompt setting. Value 4 requests W8A8 only for `max active M > 32`; on decline, generic dispatch inherits the complete prompt default policy. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception for phases whose knob is unset. An explicit phase `4` outranks a global generic pin. |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | Decode setting; outranks the global when set. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | 2 | yes (test override available) | Prompt setting; outranks the global when set. Value 4 requests W8A8 only for `max active M > 32`; on decline, generic dispatch inherits the complete prompt default policy. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | ON | yes | Master prepack switch (PR-443) |
 | `ZENDNNL_GRP_MATMUL_CROSS_WARM` | ON | yes | Opportunistic CK-aware cross-regime warm in `prepack/prepack.cpp::cross_warm` (eliminates decode-first-call spike when prompt-only warmup runs) |
 | `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | ON | yes | Pin n_thr to a num_threads-only formula -> AOCL cache key stability |

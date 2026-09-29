@@ -2941,10 +2941,21 @@ TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
 
                 std::vector<const void *> srcs(num_ops), wei1_p(num_ops),
                         wei2_p(num_ops);
+                std::vector<std::vector<char>> w1_plain(num_ops),
+                        w2_plain(num_ops);
                 for (int i = 0; i < num_ops; ++i) {
                     srcs[i] = src_t[i].get_raw_handle_unsafe();
                     wei1_p[i] = w1_t[i].get_raw_handle_unsafe();
                     wei2_p[i] = w2_t[i].get_raw_handle_unsafe();
+                    const size_t w1_bytes = static_cast<size_t>(K_in)
+                            * N_gate_up
+                            * zendnnl::common::size_of(w1_t[i].get_data_type());
+                    const size_t w2_bytes = static_cast<size_t>(K_down_eff) * H
+                            * zendnnl::common::size_of(w2_t[i].get_data_type());
+                    w1_plain[i].assign(static_cast<const char *>(wei1_p[i]),
+                            static_cast<const char *>(wei1_p[i]) + w1_bytes);
+                    w2_plain[i].assign(static_cast<const char *>(wei2_p[i]),
+                            static_cast<const char *>(wei2_p[i]) + w2_bytes);
                 }
 
                 auto gv_op1
@@ -2957,9 +2968,18 @@ TEST(TestFusedMoEExpertParallelPipeline, FusedMatchesTwoPass) {
                 // One leg of the A/B.  Params are rebuilt per leg because the
                 // executors mutate them (a grouped pre-pass rewrites `dtypes.src`
                 // to s8 and clears `dynamic_quant`), so sharing them across legs
-                // would let the first leg decide the second's path.
+                // would let the first leg decide the second's path.  Weight
+                // bytes are restored the same way: default WEIGHT_CACHE=2 may
+                // pack in place, and reset_grp_matmul_caches() does not put
+                // the plain matrix back.
                 auto run_leg = [&](int vf, TypedBuffers &d1, TypedBuffers &d2,
                                        std::string &mode_out) {
+                    for (int i = 0; i < num_ops; ++i) {
+                        std::memcpy(const_cast<void *>(wei1_p[i]),
+                                w1_plain[i].data(), w1_plain[i].size());
+                        std::memcpy(const_cast<void *>(wei2_p[i]),
+                                w2_plain[i].data(), w2_plain[i].size());
+                    }
                     reset_grp_matmul_caches();
                     AlgoEnvGuard algo_guard(5);
                     Algo5VerticalFusionOverride vf_guard(vf);
