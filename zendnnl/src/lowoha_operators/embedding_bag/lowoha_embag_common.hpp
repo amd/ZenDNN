@@ -19,10 +19,11 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 #include "common/op_config.hpp"
+#include "common/zendnnl_global.hpp"
 #include "memory/memory_utils.hpp"
-#include "operators/embag/embag_context.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -115,16 +116,20 @@ struct embag_params_t {
  * @return embag_kernel_t The selected kernel
  */
 inline static embag_kernel_t kernel_select(embag_params_t &params) {
-    using namespace zendnnl::ops;
+    using namespace zendnnl::common;
 
-    // Get config instance and initialize from environment
-    embag_config_t &embag_config = embag_config_t::instance();
-    embag_config.set_env_config();
-
-    // Check if kernel is already specified in params
-    int32_t algo = params.kernel == embag_kernel_t::none
-            ? embag_config.get_kernel()
-            : static_cast<int32_t>(params.kernel);
+    // Read ZENDNNL_EMBAG_ALGO only when the caller has not already chosen a
+    // kernel. set_env_config() writes the process-wide embag_config_t
+    // (kernel, thread algorithm, and accum_type). group_embedding_bag_direct
+    // resolves every table on the calling thread, then re-enters this
+    // function from dispatch_avx512_kernel inside an OpenMP region; that
+    // re-entry must not write the singleton.
+    int32_t algo = static_cast<int32_t>(params.kernel);
+    if (params.kernel == embag_kernel_t::none) {
+        embag_config_t &embag_config = embag_config_t::instance();
+        embag_config.set_env_config();
+        algo = embag_config.get_kernel();
+    }
 
     // Default to fbgemm kernel if none specified
     embag_kernel_t kernel = (algo == static_cast<int32_t>(embag_kernel_t::none))
@@ -153,7 +158,7 @@ inline static embag_kernel_t kernel_select(embag_params_t &params) {
  * @return eb_thread_algo_t The selected thread algorithm
  */
 inline static eb_thread_algo_t thread_algo_select() {
-    using namespace zendnnl::ops;
+    using namespace zendnnl::common;
 
     // Get config instance and initialize from environment
     embag_config_t &embag_config = embag_config_t::instance();
@@ -288,6 +293,21 @@ inline static const char *thread_algo_to_string(eb_thread_algo_t algo) {
 }
 
 /**
+ * @brief Whether the native F16 FMA kernels may be used
+ *
+ * Local copy of the probe the reorder and normalization LOWOHA operators
+ * keep in their own common headers. Callers guard the call site with
+ * __GNUC__ >= 12 because the F16 intrinsics need GCC 12 or newer.
+ */
+inline bool can_use_f16_fma_kernel() {
+#if !defined(ZENDNNL_NATIVE_F32_ACCUM)
+    return zendnnl::common::zendnnl_platform_info().get_avx512_f16_status();
+#else
+    return false;
+#endif
+}
+
+/**
  * @brief Integer division rounding up
  * @param x Dividend
  * @param y Divisor
@@ -295,6 +315,41 @@ inline static const char *thread_algo_to_string(eb_thread_algo_t algo) {
  */
 inline int64_t divup(int64_t x, int64_t y) {
     return (x + y - 1) / y;
+}
+
+/** Convert float16 (stored as uint16_t) to float32. */
+inline float half_to_float(uint16_t h) {
+    uint32_t sign = (h >> 15) & 0x1;
+    uint32_t exponent = (h >> 10) & 0x1F;
+    uint32_t mantissa = h & 0x3FF;
+    uint32_t f_bits;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            f_bits = sign << 31; // Zero
+        } else {
+            int32_t exp_signed = 1;
+
+            while ((mantissa & 0x400) == 0) {
+                mantissa <<= 1;
+                exp_signed--;
+            }
+            mantissa &= 0x3FF;
+            exp_signed += 127 - 15; // Add bias
+
+            exponent = static_cast<uint32_t>(exp_signed);
+            f_bits = (sign << 31) | (exponent << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 0x1F) {
+        f_bits = (sign << 31) | (0xFF << 23) | (mantissa << 13);
+    } else {
+        exponent += 127 - 15;
+        f_bits = (sign << 31) | (exponent << 23) | (mantissa << 13);
+    }
+
+    float result;
+    std::memcpy(&result, &f_bits, sizeof(result));
+    return result;
 }
 
 } // namespace embag

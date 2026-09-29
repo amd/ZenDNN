@@ -342,11 +342,10 @@ status_t embag_f16_avx512_kernel_t::execute(const context_type &context_,
     LOG_DEBUG_INFO("Executing embag_f16_avx512_kernel_t");
     log_info("Executing embag_f16_avx512 kernel");
 
-    // TODO(embag-accum-singleton): the set_accum_type calls below duplicate
-    // the F16-FMA-vs-F32 selection performed by dispatch_avx512_kernel() in
-    // lowoha_operators/embedding_bag/dispatch_kernel.hpp. Keep both paths in
-    // sync until a shared helper is introduced. See common/op_config.hpp
-    // set_accum_type doc for the full plan.
+    // Record the accumulation precision ops::embag_ref_kernel reads on this
+    // thread. LOWOHA dispatch does not publish embag_config_t::accum_type.
+    // F16 only when the F16 FMA kernel actually runs. The same rule is
+    // repeated on the other operator execute paths; see set_accum_type.
 
     const auto table_param = context_.get_param("table");
     const auto &table_tensor = table_param.value();

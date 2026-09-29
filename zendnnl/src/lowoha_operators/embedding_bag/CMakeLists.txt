@@ -1,5 +1,5 @@
 #*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -14,13 +14,17 @@
 # * limitations under the License.
 # ******************************************************************************
 
+add_subdirectory(native_kernels)
+
 set(lowoha_embag_sources
   lowoha_embedding_bag.cpp
   lowoha_embag_ref_kernel.cpp)
 
 set(lowoha_embag_public_headers
   lowoha_embag_common.hpp
-  lowoha_embedding_bag.hpp
+  lowoha_embedding_bag.hpp)
+
+set(lowoha_embag_private_headers
   fbgemm_kernel.hpp
   dispatch_kernel.hpp
   lowoha_embag_ref_kernel.hpp)
@@ -29,14 +33,18 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
     PRIVATE ${lowoha_embag_sources}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${lowoha_embag_public_headers})
+            TYPE HEADERS FILES ${lowoha_embag_public_headers}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${lowoha_embag_private_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
     PRIVATE ${lowoha_embag_sources}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${lowoha_embag_public_headers})
+            TYPE HEADERS FILES ${lowoha_embag_public_headers}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${lowoha_embag_private_headers})
 endif()
 
 # append header files to top level include file

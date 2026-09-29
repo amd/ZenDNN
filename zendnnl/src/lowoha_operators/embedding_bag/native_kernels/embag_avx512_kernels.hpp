@@ -13,27 +13,11 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
+#ifndef _LOWOHA_EMBAG_AVX512_KERNELS_HPP_
+#define _LOWOHA_EMBAG_AVX512_KERNELS_HPP_
 
-#ifndef _LOWOHA_EMBAG_REF_KERNEL_HPP_
-#define _LOWOHA_EMBAG_REF_KERNEL_HPP_
+#include "embag_avx512_f16_utils.hpp"
+#include "embag_avx512_fp32_bf16_utils.hpp"
+#include "embag_avx512_int8_int4_utils.hpp"
 
-#include "common/op_config.hpp"
-#include "common/zendnnl_global.hpp"
-#include "lowoha_embag_common.hpp"
-
-namespace zendnnl {
-namespace lowoha {
-namespace embag {
-
-status_t embedding_bag_ref_direct(const void *table, const void *indices,
-        const void *offsets, const void *weights, void *dst,
-        embag_params_t params);
-
-status_t embedding_ref_direct(const void *table, const void *indices,
-        const void *weights, void *dst, embag_params_t params);
-
-} // namespace embag
-} // namespace lowoha
-} // namespace zendnnl
-
-#endif // _LOWOHA_EMBAG_REF_KERNEL_HPP_
+#endif

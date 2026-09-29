@@ -20,6 +20,7 @@
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <sstream>
 #include <vector>
@@ -41,6 +42,9 @@ status_t embedding_bag_direct(const void *table, const void *indices,
 
     status_t status = status_t::success;
     int32_t num_threads = params.num_threads;
+    // Apply params.kernel or ZENDNNL_EMBAG_ALGO before dispatch so the
+    // reference, FBGEMM, and native paths all see the resolved backend.
+    kernel_select(params);
     // Reference kernel implementation
     if (params.kernel == embag_kernel_t::reference) {
         if (params.algo != embag_algo_t::none && offsets == nullptr) {
@@ -78,7 +82,8 @@ status_t embedding_bag_direct(const void *table, const void *indices,
         thread_guard tg(num_threads, omp_mt);
 
         // Dispatch to the appropriate kernel
-        dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
+        status = dispatch_avx512_kernel(
+                table, indices, offsets, weights, dst, params);
     }
 
     if (is_profile) { profiler.tbp_stop(); }
@@ -112,6 +117,15 @@ status_t embedding_direct(const void *table, const void *indices,
     return embedding_bag_direct(table, indices, nullptr, weights, dst, params);
 }
 
+// Success does not touch the atomic. The first failure to arrive is kept.
+static void record_first_failure(
+        std::atomic<int32_t> &combined, status_t op_status) {
+    if (op_status == status_t::success) { return; }
+    int32_t expected = static_cast<int32_t>(status_t::success);
+    combined.compare_exchange_strong(expected, static_cast<int32_t>(op_status),
+            std::memory_order_relaxed);
+}
+
 // Group embedding bag direct implementation
 status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
         const std::vector<const void *> &indices,
@@ -139,11 +153,17 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
         return status_t::failure;
     }
 
+    // Resolve each table before the ISA preflight. The scalar reference
+    // kernel does not use AVX512-FP16 (embedding_bag_direct already skips
+    // this gate for it). FBGEMM and native F16 do.
+    std::vector<embag_params_t> mutable_params = params;
     const bool has_f16_isa = zendnnl_platform_info().get_avx512_f16_status();
     for (int i = 0; i < num_tables; ++i) {
-        const bool is_f16 = (params[i].dtypes.table == data_type_t::f16
-                || params[i].dtypes.output == data_type_t::f16);
-        if (is_f16 && !has_f16_isa) {
+        kernel_select(mutable_params[i]);
+        const bool is_f16 = (mutable_params[i].dtypes.table == data_type_t::f16
+                || mutable_params[i].dtypes.output == data_type_t::f16);
+        if (is_f16 && !has_f16_isa
+                && mutable_params[i].kernel != embag_kernel_t::reference) {
             log_error(
                     "group_embedding_bag_direct: F16 data type is not "
                     "supported "
@@ -155,7 +175,7 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
     }
 
     // Read environment configuration
-    using namespace zendnnl::ops;
+    using namespace zendnnl::common;
     embag_config_t &embag_config = embag_config_t::instance();
     embag_config.set_env_config();
 
@@ -166,8 +186,8 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
     eb_thread_algo_t thread_algo = thread_algo_select();
     const char *thread_type = thread_algo_to_string(thread_algo);
 
-    // Make a mutable copy of params for dispatch
-    std::vector<embag_params_t> mutable_params = params;
+    // Touched only when an operation fails, so the success path stays local.
+    std::atomic<int32_t> group_status {static_cast<int32_t>(status_t::success)};
 
     // Thread algorithm dispatch
     if (thread_algo == eb_thread_algo_t::ccd_threaded) {
@@ -196,10 +216,11 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                 if (threadOffset >= num_tables) { break; }
 
                 thread_guard inner_guard(inner_threads, task_max);
-                dispatch_avx512_kernel(tables[threadOffset],
-                        indices[threadOffset], offsets[threadOffset],
-                        weights[threadOffset], dsts[threadOffset],
-                        mutable_params[threadOffset]);
+                record_first_failure(group_status,
+                        dispatch_avx512_kernel(tables[threadOffset],
+                                indices[threadOffset], offsets[threadOffset],
+                                weights[threadOffset], dsts[threadOffset],
+                                mutable_params[threadOffset]));
             }
         }
     } else if (num_tables < eb_thread_qty
@@ -215,9 +236,11 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
             if (threadOffset < rem) { inner_threads++; }
 
             thread_guard inner_guard(inner_threads);
-            dispatch_avx512_kernel(tables[threadOffset], indices[threadOffset],
-                    offsets[threadOffset], weights[threadOffset],
-                    dsts[threadOffset], mutable_params[threadOffset]);
+            record_first_failure(group_status,
+                    dispatch_avx512_kernel(tables[threadOffset],
+                            indices[threadOffset], offsets[threadOffset],
+                            weights[threadOffset], dsts[threadOffset],
+                            mutable_params[threadOffset]));
         }
     } else if (thread_algo == eb_thread_algo_t::table_threaded) {
         // Thread-per-table parallelism
@@ -232,10 +255,11 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
                         = omp_get_thread_num() + (i * eb_thread_qty);
                 if (threadOffset >= num_tables) { break; }
 
-                dispatch_avx512_kernel(tables[threadOffset],
-                        indices[threadOffset], offsets[threadOffset],
-                        weights[threadOffset], dsts[threadOffset],
-                        mutable_params[threadOffset]);
+                record_first_failure(group_status,
+                        dispatch_avx512_kernel(tables[threadOffset],
+                                indices[threadOffset], offsets[threadOffset],
+                                weights[threadOffset], dsts[threadOffset],
+                                mutable_params[threadOffset]));
             }
         }
     }
@@ -243,8 +267,9 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
     else {
         // Default: batch_threaded - Sequential tables with batch-level threading
         for (int32_t i = 0; i < num_tables; i++) {
-            dispatch_avx512_kernel(tables[i], indices[i], offsets[i],
-                    weights[i], dsts[i], mutable_params[i]);
+            record_first_failure(group_status,
+                    dispatch_avx512_kernel(tables[i], indices[i], offsets[i],
+                            weights[i], dsts[i], mutable_params[i]));
         }
     }
 
@@ -262,7 +287,7 @@ status_t group_embedding_bag_direct(const std::vector<const void *> &tables,
         }
     }
 
-    return status_t::success;
+    return static_cast<status_t>(group_status.load(std::memory_order_relaxed));
 }
 
 } // namespace embag

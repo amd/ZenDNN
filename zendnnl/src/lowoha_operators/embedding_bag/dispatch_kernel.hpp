@@ -19,42 +19,29 @@
 
 #include "common/op_config.hpp"
 #include "lowoha_embag_common.hpp"
-#include "operators/embag/native_kernels/embag_avx512_kernels.hpp"
+#include "lowoha_embag_ref_kernel.hpp"
+#include "native_kernels/embag_avx2_kernels.hpp"
+#include "native_kernels/embag_avx512_kernels.hpp"
 #if ZENDNNL_DEPENDS_FBGEMM
 #include "fbgemm_kernel.hpp"
 #endif
-
-// can_use_f16_fma_kernel() is provided by embag_avx512_kernels.hpp
-using zendnnl::ops::can_use_f16_fma_kernel;
-
-// Forward declarations for AVX2 kernel template instantiations
-// These are defined in embag_avx2_kernels.cpp and already compiled
-namespace zendnnl {
-namespace ops {
-template <typename InType, typename IndexType, typename OffsetType,
-        typename OutType>
-void embag_avx2_kernel(const InType *input, const float *weights,
-        const IndexType *indices, const OffsetType *offsets, OutType *dst,
-        int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
-        bool is_weights, embag_algo_t algo, int64_t dst_stride,
-        bool include_last_offset);
-} // namespace ops
-} // namespace zendnnl
 
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
 
 using zendnnl::common::float16_t;
-using zendnnl::ops::can_use_f16_fma_kernel;
 
 /**
  * @brief Dispatch to native AVX512 embedding bag kernel
  *
  * Dispatches to the appropriate native AVX512 kernel instantiation based on
  * indices, offsets, table, and output data types.
+ *
+ * @return status_t::success when a kernel runs, or status_t::unimplemented
+ *         when the table/output or indices/offsets combination is unsupported.
  */
-static void embag_native_kernel(const void *table, const void *indices,
+static status_t embag_native_kernel(const void *table, const void *indices,
         const void *offsets, const float *weights, void *dst,
         const embag_params_t &params) {
 
@@ -80,7 +67,7 @@ static void embag_native_kernel(const void *table, const void *indices,
             && (!is_offsets || params.dtypes.offsets == data_type_t::s64)) {
         if (params.dtypes.table == data_type_t::f32
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_kernel<float, int64_t, int64_t, float>(
+            embag_avx512_kernel<float, int64_t, int64_t, float>(
                     static_cast<const float *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
@@ -90,16 +77,16 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if (params.dtypes.table == data_type_t::bf16
                 && params.dtypes.output == data_type_t::bf16) {
 #if __GNUC__ >= 12
-            zendnnl::ops::embag_avx512_kernel<uint16_t, int64_t, int64_t,
-                    uint16_t>(static_cast<const uint16_t *>(table), weights,
+            embag_avx512_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset);
 #else
-            zendnnl::ops::embag_avx2_kernel<uint16_t, int64_t, int64_t,
-                    uint16_t>(static_cast<const uint16_t *>(table), weights,
+            embag_avx2_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
@@ -109,15 +96,15 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if (params.dtypes.table == data_type_t::bf16
                 && params.dtypes.output == data_type_t::f32) {
 #if __GNUC__ >= 12
-            zendnnl::ops::embag_avx512_kernel<uint16_t, int64_t, int64_t,
-                    float>(static_cast<const uint16_t *>(table), weights,
+            embag_avx512_kernel<uint16_t, int64_t, int64_t, float>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset);
 #else
-            zendnnl::ops::embag_avx2_kernel<uint16_t, int64_t, int64_t, float>(
+            embag_avx2_kernel<uint16_t, int64_t, int64_t, float>(
                     static_cast<const uint16_t *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
@@ -127,8 +114,8 @@ static void embag_native_kernel(const void *table, const void *indices,
 #endif
         } else if (params.dtypes.table == data_type_t::f32
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_kernel<float, int64_t, int64_t,
-                    uint16_t>(static_cast<const float *>(table), weights,
+            embag_avx512_kernel<float, int64_t, int64_t, uint16_t>(
+                    static_cast<const float *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
@@ -138,10 +125,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f16) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float16_t, int64_t,
-                        int64_t, float16_t>(
-                        static_cast<const float16_t *>(table), weights,
-                        static_cast<const int64_t *>(indices),
+                embag_avx512_f16_fma_kernel<float16_t, int64_t, int64_t,
+                        float16_t>(static_cast<const float16_t *>(table),
+                        weights, static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -149,9 +135,9 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float16_t, int64_t, int64_t,
-                        float16_t>(static_cast<const float16_t *>(table),
-                        weights, static_cast<const int64_t *>(indices),
+                embag_avx512_kernel<float16_t, int64_t, int64_t, float16_t>(
+                        static_cast<const float16_t *>(table), weights,
+                        static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -161,9 +147,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f32) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float16_t, int64_t,
-                        int64_t, float>(static_cast<const float16_t *>(table),
-                        weights, static_cast<const int64_t *>(indices),
+                embag_avx512_f16_fma_kernel<float16_t, int64_t, int64_t, float>(
+                        static_cast<const float16_t *>(table), weights,
+                        static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float *>(dst), embedding_dim, num_indices,
                         num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -171,8 +157,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float16_t, int64_t, int64_t,
-                        float>(static_cast<const float16_t *>(table), weights,
+                embag_avx512_kernel<float16_t, int64_t, int64_t, float>(
+                        static_cast<const float16_t *>(table), weights,
                         static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float *>(dst), embedding_dim, num_indices,
@@ -183,9 +169,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f16) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float, int64_t,
-                        int64_t, float16_t>(static_cast<const float *>(table),
-                        weights, static_cast<const int64_t *>(indices),
+                embag_avx512_f16_fma_kernel<float, int64_t, int64_t, float16_t>(
+                        static_cast<const float *>(table), weights,
+                        static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -193,8 +179,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float, int64_t, int64_t,
-                        float16_t>(static_cast<const float *>(table), weights,
+                embag_avx512_kernel<float, int64_t, int64_t, float16_t>(
+                        static_cast<const float *>(table), weights,
                         static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -203,8 +189,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             }
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int64_t,
-                    int64_t, float>(static_cast<const int8_t *>(table), weights,
+            embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t,
+                    float>(static_cast<const int8_t *>(table), weights,
                     static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
@@ -212,9 +198,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                     include_last_offset, table_dtype, fp16_scale_bias);
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int64_t,
-                    int64_t, uint16_t>(static_cast<const int8_t *>(table),
-                    weights, static_cast<const int64_t *>(indices),
+            embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t,
+                    uint16_t>(static_cast<const int8_t *>(table), weights,
+                    static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -222,9 +208,9 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int64_t,
-                    int64_t, float>(static_cast<const uint8_t *>(table),
-                    weights, static_cast<const int64_t *>(indices),
+            embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t,
+                    float>(static_cast<const uint8_t *>(table), weights,
+                    static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -232,22 +218,20 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int64_t,
-                    int64_t, uint16_t>(static_cast<const uint8_t *>(table),
-                    weights, static_cast<const int64_t *>(indices),
+            embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t,
+                    uint16_t>(static_cast<const uint8_t *>(table), weights,
+                    static_cast<const int64_t *>(indices),
                     static_cast<const int64_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset, table_dtype, fp16_scale_bias);
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::f16) {
-            using zendnnl::common::float16_t;
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<false,
-                        int8_t, int64_t, int64_t, float16_t>(
-                        static_cast<const int8_t *>(table), weights,
-                        static_cast<const int64_t *>(indices),
+                embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int64_t,
+                        int64_t, float16_t>(static_cast<const int8_t *>(table),
+                        weights, static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -256,9 +240,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t,
-                        int64_t, int64_t, float16_t>(
-                        static_cast<const int8_t *>(table), weights,
+                embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t,
+                        float16_t>(static_cast<const int8_t *>(table), weights,
                         static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -269,13 +252,11 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::f16) {
-            using zendnnl::common::float16_t;
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<true,
-                        uint8_t, int64_t, int64_t, float16_t>(
-                        static_cast<const uint8_t *>(table), weights,
-                        static_cast<const int64_t *>(indices),
+                embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int64_t,
+                        int64_t, float16_t>(static_cast<const uint8_t *>(table),
+                        weights, static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -284,9 +265,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t,
-                        int64_t, int64_t, float16_t>(
-                        static_cast<const uint8_t *>(table), weights,
+                embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t,
+                        float16_t>(static_cast<const uint8_t *>(table), weights,
                         static_cast<const int64_t *>(indices),
                         static_cast<const int64_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -298,12 +278,13 @@ static void embag_native_kernel(const void *table, const void *indices,
             log_error(
                     "embedding_bag_direct: unsupported table and output data "
                     "types");
+            return status_t::unimplemented;
         }
     } else if (params.dtypes.indices == data_type_t::s32
             && (!is_offsets || params.dtypes.offsets == data_type_t::s32)) {
         if (params.dtypes.table == data_type_t::f32
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_kernel<float, int32_t, int32_t, float>(
+            embag_avx512_kernel<float, int32_t, int32_t, float>(
                     static_cast<const float *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
@@ -313,16 +294,16 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if (params.dtypes.table == data_type_t::bf16
                 && params.dtypes.output == data_type_t::bf16) {
 #if __GNUC__ >= 12
-            zendnnl::ops::embag_avx512_kernel<uint16_t, int32_t, int32_t,
-                    uint16_t>(static_cast<const uint16_t *>(table), weights,
+            embag_avx512_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset);
 #else
-            zendnnl::ops::embag_avx2_kernel<uint16_t, int32_t, int32_t,
-                    uint16_t>(static_cast<const uint16_t *>(table), weights,
+            embag_avx2_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
@@ -332,15 +313,15 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if (params.dtypes.table == data_type_t::bf16
                 && params.dtypes.output == data_type_t::f32) {
 #if __GNUC__ >= 12
-            zendnnl::ops::embag_avx512_kernel<uint16_t, int32_t, int32_t,
-                    float>(static_cast<const uint16_t *>(table), weights,
+            embag_avx512_kernel<uint16_t, int32_t, int32_t, float>(
+                    static_cast<const uint16_t *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset);
 #else
-            zendnnl::ops::embag_avx2_kernel<uint16_t, int32_t, int32_t, float>(
+            embag_avx2_kernel<uint16_t, int32_t, int32_t, float>(
                     static_cast<const uint16_t *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
@@ -350,8 +331,8 @@ static void embag_native_kernel(const void *table, const void *indices,
 #endif
         } else if (params.dtypes.table == data_type_t::f32
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_kernel<float, int32_t, int32_t,
-                    uint16_t>(static_cast<const float *>(table), weights,
+            embag_avx512_kernel<float, int32_t, int32_t, uint16_t>(
+                    static_cast<const float *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
@@ -361,10 +342,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f16) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float16_t, int32_t,
-                        int32_t, float16_t>(
-                        static_cast<const float16_t *>(table), weights,
-                        static_cast<const int32_t *>(indices),
+                embag_avx512_f16_fma_kernel<float16_t, int32_t, int32_t,
+                        float16_t>(static_cast<const float16_t *>(table),
+                        weights, static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -372,9 +352,9 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float16_t, int32_t, int32_t,
-                        float16_t>(static_cast<const float16_t *>(table),
-                        weights, static_cast<const int32_t *>(indices),
+                embag_avx512_kernel<float16_t, int32_t, int32_t, float16_t>(
+                        static_cast<const float16_t *>(table), weights,
+                        static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -384,9 +364,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f32) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float16_t, int32_t,
-                        int32_t, float>(static_cast<const float16_t *>(table),
-                        weights, static_cast<const int32_t *>(indices),
+                embag_avx512_f16_fma_kernel<float16_t, int32_t, int32_t, float>(
+                        static_cast<const float16_t *>(table), weights,
+                        static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float *>(dst), embedding_dim, num_indices,
                         num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -394,8 +374,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float16_t, int32_t, int32_t,
-                        float>(static_cast<const float16_t *>(table), weights,
+                embag_avx512_kernel<float16_t, int32_t, int32_t, float>(
+                        static_cast<const float16_t *>(table), weights,
                         static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float *>(dst), embedding_dim, num_indices,
@@ -406,9 +386,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                 && params.dtypes.output == data_type_t::f16) {
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_f16_fma_kernel<float, int32_t,
-                        int32_t, float16_t>(static_cast<const float *>(table),
-                        weights, static_cast<const int32_t *>(indices),
+                embag_avx512_f16_fma_kernel<float, int32_t, int32_t, float16_t>(
+                        static_cast<const float *>(table), weights,
+                        static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -416,8 +396,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_kernel<float, int32_t, int32_t,
-                        float16_t>(static_cast<const float *>(table), weights,
+                embag_avx512_kernel<float, int32_t, int32_t, float16_t>(
+                        static_cast<const float *>(table), weights,
                         static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -426,8 +406,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             }
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int32_t,
-                    int32_t, float>(static_cast<const int8_t *>(table), weights,
+            embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t,
+                    float>(static_cast<const int8_t *>(table), weights,
                     static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
@@ -435,9 +415,9 @@ static void embag_native_kernel(const void *table, const void *indices,
                     include_last_offset, table_dtype, fp16_scale_bias);
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int32_t,
-                    int32_t, uint16_t>(static_cast<const int8_t *>(table),
-                    weights, static_cast<const int32_t *>(indices),
+            embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t,
+                    uint16_t>(static_cast<const int8_t *>(table), weights,
+                    static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -445,9 +425,9 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::f32) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int32_t,
-                    int32_t, float>(static_cast<const uint8_t *>(table),
-                    weights, static_cast<const int32_t *>(indices),
+            embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t,
+                    float>(static_cast<const uint8_t *>(table), weights,
+                    static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<float *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
@@ -455,22 +435,20 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::bf16) {
-            zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int32_t,
-                    int32_t, uint16_t>(static_cast<const uint8_t *>(table),
-                    weights, static_cast<const int32_t *>(indices),
+            embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t,
+                    uint16_t>(static_cast<const uint8_t *>(table), weights,
+                    static_cast<const int32_t *>(indices),
                     static_cast<const int32_t *>(offsets),
                     static_cast<uint16_t *>(dst), embedding_dim, num_indices,
                     num_bags, padding_idx, is_weights, algo, dst_stride,
                     include_last_offset, table_dtype, fp16_scale_bias);
         } else if (params.dtypes.table == data_type_t::s8
                 && params.dtypes.output == data_type_t::f16) {
-            using zendnnl::common::float16_t;
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<false,
-                        int8_t, int32_t, int32_t, float16_t>(
-                        static_cast<const int8_t *>(table), weights,
-                        static_cast<const int32_t *>(indices),
+                embag_avx512_int8_int4_f16_fma_kernel<false, int8_t, int32_t,
+                        int32_t, float16_t>(static_cast<const int8_t *>(table),
+                        weights, static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -479,9 +457,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t,
-                        int32_t, int32_t, float16_t>(
-                        static_cast<const int8_t *>(table), weights,
+                embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t,
+                        float16_t>(static_cast<const int8_t *>(table), weights,
                         static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -492,13 +469,11 @@ static void embag_native_kernel(const void *table, const void *indices,
         } else if ((params.dtypes.table == data_type_t::s4
                            || params.dtypes.table == data_type_t::u4)
                 && params.dtypes.output == data_type_t::f16) {
-            using zendnnl::common::float16_t;
 #if __GNUC__ >= 12
             if (can_use_f16_fma_kernel()) {
-                zendnnl::ops::embag_avx512_int8_int4_f16_fma_kernel<true,
-                        uint8_t, int32_t, int32_t, float16_t>(
-                        static_cast<const uint8_t *>(table), weights,
-                        static_cast<const int32_t *>(indices),
+                embag_avx512_int8_int4_f16_fma_kernel<true, uint8_t, int32_t,
+                        int32_t, float16_t>(static_cast<const uint8_t *>(table),
+                        weights, static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
                         num_indices, num_bags, padding_idx, is_weights, algo,
@@ -507,9 +482,8 @@ static void embag_native_kernel(const void *table, const void *indices,
             } else
 #endif
             {
-                zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t,
-                        int32_t, int32_t, float16_t>(
-                        static_cast<const uint8_t *>(table), weights,
+                embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t,
+                        float16_t>(static_cast<const uint8_t *>(table), weights,
                         static_cast<const int32_t *>(indices),
                         static_cast<const int32_t *>(offsets),
                         static_cast<float16_t *>(dst), embedding_dim,
@@ -521,11 +495,14 @@ static void embag_native_kernel(const void *table, const void *indices,
             log_error(
                     "embedding_bag_direct: unsupported table and output data "
                     "types");
+            return status_t::unimplemented;
         }
     } else {
         log_error(
                 "embedding_bag_direct: unsupported indices/offsets data types");
+        return status_t::unimplemented;
     }
+    return status_t::success;
 }
 
 #if ZENDNNL_DEPENDS_FBGEMM
@@ -534,8 +511,11 @@ static void embag_native_kernel(const void *table, const void *indices,
  *
  * Dispatches to the appropriate FBGEMM kernel instantiation based on
  * indices, offsets, table, and output data types.
+ *
+ * @return status_t::success when a kernel runs, or status_t::unimplemented
+ *         when the table/output or indices/offsets combination is unsupported.
  */
-static void embag_fbgemm_kernel(const void *table, const void *indices,
+static status_t embag_fbgemm_kernel(const void *table, const void *indices,
         const void *offsets, const float *weights, void *dst,
         const embag_params_t &params) {
 
@@ -608,6 +588,7 @@ static void embag_fbgemm_kernel(const void *table, const void *indices,
             log_error(
                     "embedding_bag_direct: unsupported table/output data types "
                     "for FBGEMM backend");
+            return status_t::unimplemented;
         }
     } else if (params.dtypes.indices == data_type_t::s32
             && params.dtypes.offsets == data_type_t::s32) {
@@ -671,12 +652,15 @@ static void embag_fbgemm_kernel(const void *table, const void *indices,
             log_error(
                     "embedding_bag_direct: unsupported table/output data types "
                     "for FBGEMM backend");
+            return status_t::unimplemented;
         }
     } else {
         log_error(
                 "embedding_bag_direct: unsupported indices/offsets data types "
                 "for FBGEMM backend");
+        return status_t::unimplemented;
     }
+    return status_t::success;
 }
 #endif
 
@@ -686,52 +670,52 @@ static void embag_fbgemm_kernel(const void *table, const void *indices,
  * Dispatches to the appropriate AVX512 kernel instantiation based on
  * indices, offsets, table, and output data types.
  */
-static void dispatch_avx512_kernel(const void *table, const void *indices,
+static status_t dispatch_avx512_kernel(const void *table, const void *indices,
         const void *offsets, const float *weights, void *dst,
         embag_params_t &params) {
 
     kernel_select(params);
 
-    // Update singleton accum_type so the reference kernel can later read which
-    // accumulation precision to use to bit-match the chosen backend.
-    // - FBGEMM accumulates in F32 internally regardless of dtypes.
-    // - Native AVX512 uses F16 FMA only on F16-touching dtype combinations
-    //   (f16/f16, f16/f32, f32/f16) when can_use_f16_fma_kernel() is true.
-    //
-    // TODO(embag-accum-singleton): this set_accum_type write races with
-    // sibling threads when dispatch_avx512_kernel is called from
-    // group_embedding_bag_direct's #pragma omp parallel region with
-    // mixed-dtype groups. See common/op_config.hpp set_accum_type doc.
-    // Likely fix: make embag_accum_type thread_local.
-    zendnnl::common::embag_config_t &embag_config
-            = zendnnl::common::embag_config_t::instance();
+    // Reference backend. group_embedding_bag_direct resolves each table
+    // with kernel_select before its AVX512-FP16 preflight and applies that
+    // gate only to FBGEMM and native, so an F16 reference table reaches
+    // this branch on hosts without that ISA. embedding_bag_direct skips
+    // the same gate for reference. embedding_bag_ref_direct passes F16 vs
+    // F32 accumulation into its templates per call and does not read or
+    // write embag_config_t::accum_type, so mixed-dtype groups can run it
+    // concurrently.
+    if (params.kernel == embag_kernel_t::reference) {
+        log_info("Using reference kernel");
+        return embedding_bag_ref_direct(
+                table, indices, offsets, weights, dst, params);
+    }
+
+    // Native and FBGEMM also run from that OpenMP region. They do not
+    // publish accumulation precision on embag_config_t: a process-wide
+    // write races even when every table stores the same value, and the
+    // LOWOHA reference path does not read the field. FBGEMM accumulates
+    // in F32. Native AVX512 uses F16 FMA only for F16-touching dtypes when
+    // can_use_f16_fma_kernel() is true; that choice stays inside the
+    // kernel. ops::embag_ref_kernel still reads the value published by the
+    // operator execute path on the calling thread.
 
 #if ZENDNNL_DEPENDS_FBGEMM
     if (params.kernel == embag_kernel_t::fbgemm && can_use_fbgemm(params)) {
-        embag_config.set_accum_type(data_type_t::f32);
         log_info("Using FBGEMM kernel");
-        embag_fbgemm_kernel(table, indices, offsets, weights, dst, params);
-        return;
+        return embag_fbgemm_kernel(
+                table, indices, offsets, weights, dst, params);
     }
 #endif
 
-    // Native ZenDNN path: F16 accumulation only when at least one of
-    // table/output is F16 AND the F16 FMA kernel is actually available
-    // (GCC >= 12 for intrinsics, and can_use_f16_fma_kernel() for HW +
-    // ZENDNNL_NATIVE_F32_ACCUM). Otherwise the kernel accumulates in F32.
-    [[maybe_unused]] bool is_f16_path = (params.dtypes.table == data_type_t::f16
-            || params.dtypes.output == data_type_t::f16);
-#if __GNUC__ >= 12
-    bool native_uses_f16_fma = is_f16_path && can_use_f16_fma_kernel();
-#else
-    bool native_uses_f16_fma = false;
-#endif
-    embag_config.set_accum_type(
-            native_uses_f16_fma ? data_type_t::f16 : data_type_t::f32);
+    // Everything that reaches this point runs the native kernel, including an
+    // fbgemm request that can_use_fbgemm() rejected (non-sum algo, s8/s4 table,
+    // fp32 scale/bias) or that this build has no FBGEMM for. Record the backend
+    // that actually runs so the apilog line and the caller's params agree with
+    // it instead of still reporting fbgemm.
+    params.kernel = embag_kernel_t::native;
 
     log_info("Using ZenDNN kernel");
-    embag_native_kernel(table, indices, offsets, weights, dst, params);
-    return;
+    return embag_native_kernel(table, indices, offsets, weights, dst, params);
 }
 
 } // namespace embag

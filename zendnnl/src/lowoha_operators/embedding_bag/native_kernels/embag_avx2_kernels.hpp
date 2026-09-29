@@ -13,27 +13,29 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-
-#ifndef _LOWOHA_EMBAG_REF_KERNEL_HPP_
-#define _LOWOHA_EMBAG_REF_KERNEL_HPP_
+#ifndef _LOWOHA_EMBAG_AVX2_KERNELS_HPP_
+#define _LOWOHA_EMBAG_AVX2_KERNELS_HPP_
 
 #include "common/op_config.hpp"
-#include "common/zendnnl_global.hpp"
-#include "lowoha_embag_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
 
-status_t embedding_bag_ref_direct(const void *table, const void *indices,
-        const void *offsets, const void *weights, void *dst,
-        embag_params_t params);
+using namespace zendnnl::common;
 
-status_t embedding_ref_direct(const void *table, const void *indices,
-        const void *weights, void *dst, embag_params_t params);
+// Defined in embag_avx2_fp32_bf16_utils.hpp, explicitly instantiated in
+// embag_avx2_kernels.cpp.
+template <typename InType, typename IndexType, typename OffsetType,
+        typename OutType>
+void embag_avx2_kernel(const InType *input, const float *weights,
+        const IndexType *indices, const OffsetType *offsets, OutType *dst,
+        int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
+        bool is_weights, embag_algo_t algo, int64_t dst_stride,
+        bool include_last_offset);
 
-} // namespace embag
-} // namespace lowoha
-} // namespace zendnnl
+} //namespace embag
+} //namespace lowoha
+} //namespace zendnnl
 
-#endif // _LOWOHA_EMBAG_REF_KERNEL_HPP_
+#endif

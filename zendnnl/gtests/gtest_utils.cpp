@@ -3466,9 +3466,11 @@ status_t embag_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
 
                 // Use algo directly (embag_algo_t is aliased to common::embag_algo_t)
                 params.algo = algo;
-                if (kernel == embag_kernel_t::reference) {
-                    params.kernel = kernel;
-                }
+                // Forward the requested kernel (none → kernel_select /
+                // ZENDNNL_EMBAG_ALGO; native / reference pin DUT; fbgemm
+                // requests FBGEMM and falls back to native when it is not
+                // built or can_use_fbgemm() rejects the case).
+                params.kernel = kernel;
 
                 // Set dimensions
                 params.num_embeddings = table_tensor.get_size(0);
@@ -3630,9 +3632,11 @@ status_t embedding_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
                 params.num_threads = 0; // Use default (omp_get_max_threads)
                 params.fp16_scale_bias = fp16_scale_bias;
                 params.dst_stride = output_tensor.get_stride()[0];
-                if (kernel == embag_kernel_t::reference) {
-                    params.kernel = kernel;
-                }
+                // Forward the requested kernel (none → kernel_select /
+                // ZENDNNL_EMBAG_ALGO; native / reference pin DUT; fbgemm
+                // requests FBGEMM and falls back to native when it is not
+                // built or can_use_fbgemm() rejects the case).
+                params.kernel = kernel;
 
                 log_info(
                         "LOWOHA embedding: Calling embedding_direct with "

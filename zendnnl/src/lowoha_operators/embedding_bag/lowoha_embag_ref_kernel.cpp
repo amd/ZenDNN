@@ -16,15 +16,10 @@
 
 #include "lowoha_embag_ref_kernel.hpp"
 #include <cmath>
-#include "operators/embag/native_kernels/embag_avx512_kernels.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
-
-using zendnnl::common::embag_config_t;
-using zendnnl::ops::can_use_f16_fma_kernel;
-using zendnnl::ops::half_to_float;
 
 template <typename InType, typename IndexType, typename OffsetType,
         typename OutType>
@@ -41,7 +36,8 @@ void embag_ref_kernel(
         bool is_weights, // whether weights are used
         embag_algo_t algo, // REDUCE_SUM, REDUCE_MEAN, REDUCE_MAX
         int64_t dst_stride, // stride between output rows
-        bool include_last_offset // whether to include the last offset
+        bool include_last_offset, // whether to include the last offset
+        bool requested_f16_accum // F16 FMA accumulation for this call
 ) {
 
     // Determine if we need type conversions
@@ -50,23 +46,12 @@ void embag_ref_kernel(
     constexpr bool output_is_bf16 = std::is_same_v<OutType, bfloat16_t>;
     constexpr bool output_is_f16 = std::is_same_v<OutType, float16_t>;
 
-    // Read accumulation precision the actual backend used (FBGEMM, native
-    // AVX512 F16 FMA, native AVX512 F32, AVX2, etc.). The actual kernel
-    // writes this on the embag_config_t singleton just before invoking its
-    // compute path; the reference kernel reads it here to bit-match. This
-    // mirrors the matmul reference kernel's pattern.
-    //
-    // The producers already gate F16 on __GNUC__ >= 12 and
-    // can_use_f16_fma_kernel() (which itself returns false when
-    // ZENDNNL_NATIVE_F32_ACCUM is defined), so the singleton can only
-    // ever hold f16 when the F16 FMA path was actually used - no extra
-    // build-time check is needed here. The (input_is_f16 || output_is_f16)
-    // guard ensures non-F16-touching dtypes are unaffected by any stale
-    // f16 value left in the singleton by a prior invocation.
-    const data_type_t reported_accum
-            = embag_config_t::instance().get_accum_type();
-    const bool use_f16_accum = (reported_accum == data_type_t::f16)
-            && (input_is_f16 || output_is_f16);
+    // Accumulation mode is an argument of this call. group_embedding_bag_direct
+    // runs mixed F16/F32 reference kernels from an OpenMP parallel region, so
+    // reading embag_config_t::accum_type here would race. The dtype guard keeps
+    // non-F16 combinations on the F32 path.
+    const bool use_f16_accum
+            = requested_f16_accum && (input_is_f16 || output_is_f16);
 
     // Temporary buffers for type conversion
     std::vector<float> temp_input_row;
@@ -315,29 +300,16 @@ void embag_int8_int4_ref_kernel(const InType *input, const float *weights,
         const IndexType *indices, const OffsetType *offsets, OutType *dst,
         int64_t width, int64_t indsz, int64_t offsz, int64_t padidx,
         bool is_weights, embag_algo_t algo, int64_t dst_stride,
-        bool include_last_offset, data_type_t table_dtype,
-        bool fp16_scale_bias) {
+        bool include_last_offset, data_type_t table_dtype, bool fp16_scale_bias,
+        bool requested_f16_accum) {
 
     // Determine if we need type conversions
     constexpr bool output_is_bf16 = std::is_same_v<OutType, bfloat16_t>;
     constexpr bool output_is_f16 = std::is_same_v<OutType, float16_t>;
 
-    // Read accumulation precision the actual backend used (FBGEMM, native
-    // AVX512 F16 FMA, native AVX512 F32, AVX2, etc.). The actual kernel writes
-    // this on the embag_config_t singleton just before invoking its compute
-    // path; the reference kernel reads it here to bit-match.
-    //
-    // The producers already gate F16 on __GNUC__ >= 12 and
-    // can_use_f16_fma_kernel() (which itself returns false when
-    // ZENDNNL_NATIVE_F32_ACCUM is defined), so the singleton can only
-    // ever hold f16 when the F16 FMA path was actually used - no extra
-    // build-time check is needed here. For quantized inputs, F16 accumulation
-    // only makes sense when the output is F16, so we additionally guard on
-    // output_is_f16.
-    const data_type_t reported_accum
-            = embag_config_t::instance().get_accum_type();
-    const bool use_f16_accum
-            = (reported_accum == data_type_t::f16) && output_is_f16;
+    // Accumulation mode is an argument of this call. See embag_ref_kernel.
+    // Quantized inputs accumulate in F16 only when the output is F16.
+    const bool use_f16_accum = requested_f16_accum && output_is_f16;
 
     std::vector<float> temp_output_row;
     std::vector<float16_t> f16_accum_row;
@@ -589,9 +561,10 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
     auto offsets_data_type
             = is_offsets ? params.dtypes.offsets : data_type_t::none;
 
-    // Set accumulation type deterministically so embag_ref_kernel() does not
-    // read a stale singleton value left by a prior backend invocation.
-    // Mirrors dispatch_avx512_kernel()'s native-path selection rule.
+    // Pass accumulation mode into the reference templates. Do not publish it
+    // on embag_config_t::accum_type: group_embedding_bag_direct calls this
+    // from an OpenMP parallel region. Same F16-FMA gate as the native
+    // AVX512 kernels: F16 table or output, and can_use_f16_fma_kernel().
     [[maybe_unused]] bool is_f16_path = (table_dtype == data_type_t::f16
             || dst_dtype == data_type_t::f16);
 #if __GNUC__ >= 12
@@ -599,8 +572,6 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
 #else
     bool ref_uses_f16_fma = false;
 #endif
-    embag_config_t::instance().set_accum_type(
-            ref_uses_f16_fma ? data_type_t::f16 : data_type_t::f32);
 
     if (is_weights) { weights_ = reinterpret_cast<const float *>(weights); }
 
@@ -621,7 +592,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int64_t, int64_t, float>(input_f32,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -630,7 +602,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int32_t, int32_t, float>(input_f32,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -648,7 +621,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int64_t, int64_t, bfloat16_t>(input_f32,
                     weights_, indices_, offsets_, dst_bf16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -657,7 +631,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int32_t, int32_t, bfloat16_t>(input_f32,
                     weights_, indices_, offsets_, dst_bf16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -675,7 +650,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<uint16_t, int64_t, int64_t, float>(input_bf16,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -684,7 +660,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<uint16_t, int32_t, int32_t, float>(input_bf16,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -702,7 +679,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<uint16_t, int64_t, int64_t, bfloat16_t>(input_bf16,
                     weights_, indices_, offsets_, dst_bf16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -711,7 +689,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<uint16_t, int32_t, int32_t, bfloat16_t>(input_bf16,
                     weights_, indices_, offsets_, dst_bf16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -729,7 +708,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float16_t, int64_t, int64_t, float>(input_f16,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -738,7 +718,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float16_t, int32_t, int32_t, float>(input_f16,
                     weights_, indices_, offsets_, dst_f32, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -756,7 +737,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float16_t, int64_t, int64_t, float16_t>(input_f16,
                     weights_, indices_, offsets_, dst_f16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -765,7 +747,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float16_t, int32_t, int32_t, float16_t>(input_f16,
                     weights_, indices_, offsets_, dst_f16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -783,7 +766,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int64_t, int64_t, float16_t>(input_f32,
                     weights_, indices_, offsets_, dst_f16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -792,7 +776,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             }
             embag_ref_kernel<float, int32_t, int32_t, float16_t>(input_f32,
                     weights_, indices_, offsets_, dst_f16, width, indsz, offsz,
-                    padidx, is_weights, algo, stride, include_last_offset);
+                    padidx, is_weights, algo, stride, include_last_offset,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -811,7 +796,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, float>(
                     input_s8, weights_, indices_, offsets_, dst_f32, width,
                     indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -821,7 +807,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float>(
                     input_s8, weights_, indices_, offsets_, dst_f32, width,
                     indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -840,7 +827,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t,
                     bfloat16_t>(input_s8, weights_, indices_, offsets_,
                     dst_bf16, width, indsz, offsz, padidx, is_weights, algo,
-                    stride, include_last_offset, table_dtype, fp16_scale_bias);
+                    stride, include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -850,7 +838,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t,
                     bfloat16_t>(input_s8, weights_, indices_, offsets_,
                     dst_bf16, width, indsz, offsz, padidx, is_weights, algo,
-                    stride, include_last_offset, table_dtype, fp16_scale_bias);
+                    stride, include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -869,7 +858,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t,
                     float16_t>(input_s8, weights_, indices_, offsets_, dst_f16,
                     width, indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -879,7 +869,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t,
                     float16_t>(input_s8, weights_, indices_, offsets_, dst_f16,
                     width, indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -899,7 +890,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, float>(
                     input_s4, weights_, indices_, offsets_, dst_f32, width,
                     indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -909,7 +901,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float>(
                     input_s4, weights_, indices_, offsets_, dst_f32, width,
                     indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -929,7 +922,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t,
                     bfloat16_t>(input_s4, weights_, indices_, offsets_,
                     dst_bf16, width, indsz, offsz, padidx, is_weights, algo,
-                    stride, include_last_offset, table_dtype, fp16_scale_bias);
+                    stride, include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -939,7 +933,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t,
                     bfloat16_t>(input_s4, weights_, indices_, offsets_,
                     dst_bf16, width, indsz, offsz, padidx, is_weights, algo,
-                    stride, include_last_offset, table_dtype, fp16_scale_bias);
+                    stride, include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;
@@ -959,7 +954,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t,
                     float16_t>(input_s4, weights_, indices_, offsets_, dst_f16,
                     width, indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else if (indices_data_type == data_type_t::s32) {
             int32_t *indices_ = (int32_t *)indices;
             int32_t *offsets_ = nullptr;
@@ -969,7 +965,8 @@ status_t embedding_bag_ref_direct(const void *table, const void *indices,
             embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t,
                     float16_t>(input_s4, weights_, indices_, offsets_, dst_f16,
                     width, indsz, offsz, padidx, is_weights, algo, stride,
-                    include_last_offset, table_dtype, fp16_scale_bias);
+                    include_last_offset, table_dtype, fp16_scale_bias,
+                    ref_uses_f16_fma);
         } else {
             apilog_error("Unsupported data type for indices and offsets");
             return status_t::unimplemented;

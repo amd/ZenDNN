@@ -38,6 +38,24 @@ protected:
         fp16_scale_bias = params.fp16_scale_bias;
         strided = params.strided;
         use_LOWOHA = params.use_LOWOHA;
+        // DUT kernel is a function of this case's already-seeded params so
+        // `--seed` replays the same kernel without consuming extra rand()
+        // (isolated --gtest_filter=.../N stays consistent). Reference stays
+        // the oracle path in each TEST_P. ZENDNNL_EMBAG_ALGO, when set, wins
+        // over the hash: leave kernel as none so kernel_select reads the env.
+        const char *embag_algo_env = std::getenv("ZENDNNL_EMBAG_ALGO");
+        if (embag_algo_env && embag_algo_env[0] != '\0') {
+            kernel = embag_kernel_t::none;
+        } else {
+            switch ((params.num_embeddings + params.embedding_dim
+                            + params.num_indices + params.is_weights
+                            + params.strided)
+                    % 3) {
+                case 0: kernel = embag_kernel_t::none; break;
+                case 1: kernel = embag_kernel_t::native; break;
+                default: kernel = embag_kernel_t::fbgemm; break;
+            }
+        }
         // LOWOHA-only mode: tests are masked when the user explicitly selects the
         // regular (non-LOWOHA) API. Skip with a message asking the user to use the
         // LOA (LOWOHA) API. Run this guard *before* any global side effects
@@ -56,7 +74,8 @@ protected:
                 " num_indices: ", num_indices,
                 " padding_index: ", padding_index, " is_weights: ", is_weights,
                 " fp16_scale_bias: ", fp16_scale_bias, " strided: ", strided,
-                " use_LOWOHA: ", use_LOWOHA, " num_threads: ", num_threads);
+                " use_LOWOHA: ", use_LOWOHA, " num_threads: ", num_threads,
+                " kernel: ", kernel_to_string(kernel));
     }
 
     /** @brief TearDown is used to free resource used in test */
@@ -68,6 +87,7 @@ protected:
     data_type_t indices_dtype;
     bool use_LOWOHA, strided;
     int32_t num_threads;
+    embag_kernel_t kernel;
     tensor_factory_t tensor_factory {};
 };
 
@@ -95,7 +115,7 @@ TEST_P(TestEmbedding, F32_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -133,7 +153,7 @@ TEST_P(TestEmbedding, F32_BF16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -170,7 +190,7 @@ TEST_P(TestEmbedding, BF16_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -208,7 +228,7 @@ TEST_P(TestEmbedding, BF16_BF16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -246,7 +266,7 @@ TEST_P(TestEmbedding, F32_F16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -287,7 +307,7 @@ TEST_P(TestEmbedding, F16_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -328,7 +348,7 @@ TEST_P(TestEmbedding, F16_F16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -370,7 +390,7 @@ TEST_P(TestEmbedding, INT8_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -411,7 +431,7 @@ TEST_P(TestEmbedding, INT8_BF16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -452,7 +472,7 @@ TEST_P(TestEmbedding, INT8_F16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -496,7 +516,7 @@ TEST_P(TestEmbedding, S4_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -537,7 +557,7 @@ TEST_P(TestEmbedding, S4_BF16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -578,7 +598,7 @@ TEST_P(TestEmbedding, S4_F16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }
@@ -622,7 +642,7 @@ TEST_P(TestEmbedding, U4_F32) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -663,7 +683,7 @@ TEST_P(TestEmbedding, U4_BF16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     status_t ref_status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor_ref, padding_index, is_weights,
             fp16_scale_bias, embag_kernel_t::reference, use_LOWOHA);
@@ -704,7 +724,7 @@ TEST_P(TestEmbedding, U4_F16) {
 
     status_t status = embedding_kernel_test(table_tensor, indices_tensor,
             weights_tensor, output_tensor, padding_index, is_weights,
-            fp16_scale_bias, embag_kernel_t::none, use_LOWOHA);
+            fp16_scale_bias, kernel, use_LOWOHA);
     if (status == status_t::isa_unsupported) {
         GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
     }

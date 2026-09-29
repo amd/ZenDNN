@@ -740,9 +740,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 /** @fn embag_kernel_test
  *  @brief Test function for embag kernel
  *
- * @param kernel Selects the LOWOHA kernel (`embag_kernel_t::none` for default
- *        dispatch, `embag_kernel_t::reference` for the reference kernel).
- *        Ignored when @p use_LOWOHA is false (operator API path).
+ * @param kernel Selects the LOWOHA kernel. Forwarded into `params.kernel`
+ *        (`embag_kernel_t::none` for default dispatch via kernel_select /
+ *        `ZENDNNL_EMBAG_ALGO`, `native` to pin the native TUs, `reference`
+ *        for the reference kernel, `fbgemm` to request FBGEMM). `fbgemm` does
+ *        not pin FBGEMM: `dispatch_avx512_kernel()` falls back to native when
+ *        FBGEMM is not built or `can_use_fbgemm()` rejects the case (non-sum
+ *        algo, s8/s4 table, or fp32 scale/bias). Passing `fbgemm` therefore
+ *        does not guarantee FBGEMM coverage. Ignored when @p use_LOWOHA is
+ *        false (operator API path).
  *
  * @return status_t Success or failure status
  */
@@ -755,9 +761,15 @@ status_t embag_kernel_test(tensor_t &table_tensor, tensor_t &indices_tensor,
 /** @fn embedding_kernel_test
  *  @brief Test function for embedding kernel
  *
- * @param kernel Selects the LOWOHA kernel (`embag_kernel_t::none` for default
- *        dispatch, `embag_kernel_t::reference` for the reference kernel).
- *        Ignored when @p use_LOWOHA is false (operator API path).
+ * @param kernel Selects the LOWOHA kernel. Forwarded into `params.kernel`
+ *        (`embag_kernel_t::none` for default dispatch via kernel_select /
+ *        `ZENDNNL_EMBAG_ALGO`, `native` to pin the native TUs, `reference`
+ *        for the reference kernel, `fbgemm` to request FBGEMM). `fbgemm` does
+ *        not pin FBGEMM: `dispatch_avx512_kernel()` falls back to native when
+ *        FBGEMM is not built or `can_use_fbgemm()` rejects the case (non-sum
+ *        algo, s8/s4 table, or fp32 scale/bias). Passing `fbgemm` therefore
+ *        does not guarantee FBGEMM coverage. Ignored when @p use_LOWOHA is
+ *        false (operator API path).
  *
  * @return status_t Success or failure status
  */

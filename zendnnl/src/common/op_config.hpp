@@ -412,32 +412,30 @@ public:
 
     /** @brief Sets the accumulation type for the reference kernel.
    *
-   * Communicates which accumulation precision the reference kernel should
-   * use when validating the output of a given embedding-bag backend. The
-   * actual kernel (FBGEMM, native AVX512 F16-FMA, native AVX512 F32, AVX2,
-   * etc.) writes this value immediately before invoking its compute path,
-   * and the reference kernel reads it to produce a bit-exact match.
+   * Communicates which accumulation precision the operator reference kernel
+   * should use when validating an operator execute path. Those execute
+   * paths write this value immediately before compute, and
+   * ops::embag_ref_kernel reads it to produce a bit-exact match. The
+   * LOWOHA direct path does not publish here.
    *
    * Note: this mirrors the matmul_config_t::set_accum_type pattern. It is
-   * a process-wide singleton; callers running the reference kernel
-   * concurrently with multiple actual kernels should serialize those flows.
+   * a process-wide singleton. Callers that validate with
+   * ops::embag_ref_kernel concurrently with another actual kernel should
+   * serialize those flows.
    *
-   * TODO(embag-accum-singleton): this field is process-wide and
-   * unsynchronized. Two known issues:
-   *   1. Duplicated write logic - dispatch_avx512_kernel() and the
-   *      embag_{f16,f32}_avx512_kernel_t::execute() paths each call
-   *      set_accum_type() with the same F16-FMA-vs-F32 selection rule,
-   *      so any change must be kept in sync in both places.
-   *   2. Data race - lowoha::group_embedding_bag_direct() invokes
-   *      dispatch_avx512_kernel() from inside #pragma omp parallel, so
-   *      mixed-dtype groups concurrently write this field (UB per the
-   *      C++ memory model). Today this is benign because only the
-   *      reference kernel reads accum_type and the lowoha path does
-   *      not run it, but a future ref-validation hookup would observe
-   *      a torn / last-writer-wins value.
-   * Likely fix: make embag_accum_type thread_local (matches the
-   * producer -> ref-kernel same-thread contract) and route the operator
-   * execute paths through a shared helper to remove the duplication.
+   * The LOWOHA reference path (embedding_bag_ref_direct) does not use this
+   * field. It passes the accumulation mode into its templates per
+   * invocation, so group_embedding_bag_direct can run mixed F16/F32
+   * reference kernels from an OpenMP parallel region.
+   * lowoha::dispatch_avx512_kernel does not publish it either: that
+   * function runs native and FBGEMM kernels from the same parallel region,
+   * and a process-wide write would race. kernel_select refreshes this
+   * singleton only while params.kernel is still none, which the group
+   * path does on the calling thread before entering that region.
+   *
+   * The operator execute paths (embag_*_avx512_kernel_t::execute) each
+   * call set_accum_type() with the same F16-FMA-vs-F32 rule. Keep those
+   * writers in sync until they share one helper.
    *
    * @param type The accumulation data type (data_type_t::f32 or data_type_t::f16).
    */
