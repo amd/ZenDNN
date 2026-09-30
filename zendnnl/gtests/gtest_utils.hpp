@@ -1004,12 +1004,16 @@ status_t build_sdpa_params_from_tensors(tensor_t &query_tensor,
  *                       @c sdpa_kernel_t::reference)
  *  @param is_qk_quant Enable dynamic-INT8 QK
  *  @param is_pv_quant Enable dynamic-INT8 PV
+ *  @param sliding_window      If true, restrict each query to a band of width
+ *                             @p sliding_window_size (default: disabled)
+ *  @param sliding_window_size Window width W (L = R = W-1)
  *  @return status_t::success or status_t::failure
  */
 status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
         tensor_t &value_tensor, tensor_t &mask_tensor, tensor_t &output_tensor,
         float scale, bool is_causal, bool has_mask, sdpa_kernel_t kernel,
-        bool is_qk_quant = false, bool is_pv_quant = false);
+        bool is_qk_quant = false, bool is_pv_quant = false,
+        bool sliding_window = false, int64_t sliding_window_size = 0);
 
 /** @fn compare_tensor_4D_sdpa
  *  @brief Compare two 4D SDPA output tensors element-by-element.

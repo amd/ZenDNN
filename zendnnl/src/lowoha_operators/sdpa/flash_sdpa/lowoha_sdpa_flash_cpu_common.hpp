@@ -430,7 +430,8 @@ status_t sdpa_flash_cpu_run_int8(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_tensor_view &query,
         const sdpa_flash_cpu_tensor_view &key,
         const sdpa_flash_cpu_tensor_view &value, double dropout_p,
-        bool is_causal, std::optional<sdpa_flash_cpu_mask_view> attn_mask,
+        bool is_causal, bool sliding_window, int64_t sliding_window_size,
+        std::optional<sdpa_flash_cpu_mask_view> attn_mask,
         std::optional<double> scale, data_type_t qkv_dt, data_type_t mask_dtype,
         bool is_qk_quant, bool is_pv_quant, bool use_avx512, int num_threads);
 

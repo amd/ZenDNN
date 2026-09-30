@@ -173,6 +173,14 @@ status_t validate_flash_sdpa_inputs(const void *query, const void *key,
         return status_t::failure;
     }
 
+    // --- sliding window ---
+    if (params.sliding_window && params.sliding_window_size <= 0) {
+        log_error(
+                "sdpa_flash_cpu: sliding_window_size must be > 0 when "
+                "sliding_window is enabled");
+        return status_t::failure;
+    }
+
     // --- mask checks ---
     if (params.mask_ndims != 0 && params.mask_ndims != 2
             && params.mask_ndims != 4) {

@@ -84,6 +84,8 @@ struct sdpa_params {
   // Computation parameters
   double scale;            // Attention scale (0 = auto: 1/sqrt(head_dim))
   bool is_causal;          // Enable causal (upper-triangular) masking
+  bool sliding_window;          // Enable sliding-window attention (default false)
+  int64_t sliding_window_size;  // Window width W; required when sliding_window
   double dropout_p;        // Dropout probability (must be 0)
   bool is_qk_quant;        // BF16 Q/K dynamic-INT8 Q×K^T compute (default false)
   bool is_pv_quant;        // BF16 V / u8 probability INT8 P×V compute (default false)
@@ -108,6 +110,8 @@ struct sdpa_params {
 | `mask_dt` | `data_type_t` | Mask data type (see [Supported data types](#supported-data-types)) |
 | `scale` | `double` | Attention scale; `0` = auto (`1/sqrt(head_dim)`) |
 | `is_causal` | `bool` | Enable causal (upper-triangular) masking |
+| `sliding_window` | `bool` | Enable sliding-window attention; defaults to `false` |
+| `sliding_window_size` | `int64_t` | Window width W, must be `> 0` when `sliding_window` is `true` |
 | `dropout_p` | `double` | Dropout probability (must be `0`) |
 | `is_qk_quant` | `bool` | Quantize BF16 Q/K per token and run Q×K^T in INT8; requires AOCL-DLP and AVX512-VNNI |
 | `is_pv_quant` | `bool` | Quantize BF16 V per channel and the softmax tile to u8, and run probability×V in INT8; requires AOCL-DLP and AVX512-VNNI |
@@ -217,6 +221,20 @@ The attention mask is an optional additive mask applied before the softmax. It s
 
 The last dimension (`S_kv`) must have stride 1 (contiguous). When `is_causal = true`, future positions are filled with `-inf` regardless of the mask.
 
+#### Sliding window
+
+Sliding-window attention (Gemma 3 / EmbeddingGemma SWA layers, vLLM's `sliding_window`) is off by default. Set `sliding_window = true` and `sliding_window_size = W` to restrict query position *i* to key positions
+
+$$
+i - (W - 1) \le j \le i + (W - 1)
+$$
+
+matching vLLM's `(W-1, W-1)` left/right convention for bidirectional encoder attention. Combining it with `is_causal = true` drops the right half of the band, leaving `i - (W-1) <= j <= i`.
+
+The band is applied inside the kernel, so no `[S_q, S_kv]` mask tensor has to be built. The flash backend (floating-point and dynamic-INT8) skips whole KV tiles that fall outside the band and shrinks the remaining GEMM to the live `[band_lo, band_hi)` keys inside a visited tile, making the cost O(S·W) instead of O(S²). A window can still be combined with an additive `attn_mask` (e.g. a padding mask); the band is applied first, then the mask is added.
+
+`sliding_window = true` with `sliding_window_size <= 0` is rejected with `status_t::failure`. The BMM backend does not support sliding window.
+
 ### Return value
 
 - `status_t::success` — attention computed and written to `output`
@@ -246,10 +264,10 @@ sdpa_flash_cpu_run_internal()
   │       if (AVX-512 available) → SimdOps<avx512_tag>  (16-lane __m512)
   │       else                   → SimdOps<scalar_tag>   (1-lane scalar)
   │  4. if (is_qk_quant || is_pv_quant) → sdpa_flash_cpu_run_int8()
-  │       returns here; does not enter the floating-point dispatch below
+  │       same KV loop as below; does not enter the FP dispatch
   │
   ▼
-flash_attention_kernel_sa_dispatch<SimdTag>()
+flash_attention_kernel_sa_dispatch<SimdTag>()   (floating point only)
   │  Select tile sizes based on Q sequence length (seq_len):
   │    seq_len >= 768  → q_split=256, kv_split=512
   │    seq_len >= 192  → q_split=64,  kv_split=512
@@ -257,19 +275,33 @@ flash_attention_kernel_sa_dispatch<SimdTag>()
   │    batch > 4       → q_split=512  (override)
   │
   ▼
-cpu_flash_attention_sa<SimdTag, scalar_t, mask_t, q_split, kv_split>()
+cpu_flash_attention_sa / INT8 kernel
   │  OpenMP parallel loop over batch × heads × q_tiles
+  │  Query block starts at m. KV tile start is n; GEMM start is n_gemm.
   │
-  │  For each (batch_i, head_j, q_tile_k):
-  │    ┌─ for each kv_tile:
-  │    │    1. GEMM: Q_tile × K_tile^T          (via AOCL BLAS)
-  │    │    2. Causal masking (fill future with -inf)
-  │    │    3. Scale + mask fusion               (SIMD fused FMA)
+  │  For each (batch_i, head_j, q_tile at m):
+  │    if sliding_window:
+  │      win_left = W-1; win_right = 0 if causal else W-1
+  │      num_keys = min(kvSize, m + qBlock + win_right)
+  │      n_start  = tile-align max(0, m - win_left)
+  │    else:
+  │      n_start = 0
+  │      num_keys = m + qBlock if causal, else kvSize
+  │    ┌─ for n = n_start; n < num_keys; n += kv_split:
+  │    │    if sliding_window:
+  │    │      shrink to live keys [band_lo, band_hi) inside the tile
+  │    │      skip the tile when that span is empty
+  │    │    1. GEMM: Q_tile × K[n_gemm:]^T       (via AOCL BLAS)
+  │    │    2. if window: fill keys outside the row band with -inf
+  │    │       else if causal on the last KV span: fill future with -inf
+  │    │    3. Scale + additive mask fusion at column n_gemm
   │    │    4. Row-wise max + exp + sum           (SIMD fused reductions)
-  │    │    5. Rescale running output accumulator (SIMD)
-  │    │    6. GEMM: softmax_tile × V_tile       (via AOCL BLAS)
+  │    │    5. Rescale the accumulator only after the first live tile
+  │    │    6. GEMM: softmax_tile × V[n_gemm:]
+  │    │       beta = 0 on the first live tile, else 1
   │    └─
-  │    7. Write final output = accumulator / sum (SIMD scaled store)
+  │    if no live KV tile: write zeros
+  │    else: output = accumulator / sum          (SIMD scaled store)
 ```
 
 ## Flash Attention Algorithm

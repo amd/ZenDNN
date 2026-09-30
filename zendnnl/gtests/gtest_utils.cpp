@@ -4303,7 +4303,8 @@ status_t build_sdpa_params_from_tensors(tensor_t &query_tensor,
 status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
         tensor_t &value_tensor, tensor_t &mask_tensor, tensor_t &output_tensor,
         float scale, bool is_causal, bool has_mask, sdpa_kernel_t kernel,
-        bool is_qk_quant, bool is_pv_quant) {
+        bool is_qk_quant, bool is_pv_quant, bool sliding_window,
+        int64_t sliding_window_size) {
     try {
         sdpa_params params {};
         void *q_data = nullptr;
@@ -4321,6 +4322,8 @@ status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
         params.kernel = kernel;
         params.is_qk_quant = is_qk_quant;
         params.is_pv_quant = is_pv_quant;
+        params.sliding_window = sliding_window;
+        params.sliding_window_size = sliding_window_size;
 
         log_info("SDPA LOWOHA: Calling sdpa_direct with batch=", params.batch,
                 ", num_heads=", params.num_heads, ", seq_len=", params.seq_len,
@@ -4329,6 +4332,8 @@ status_t sdpa_kernel_test(tensor_t &query_tensor, tensor_t &key_tensor,
                 ", is_causal=", params.is_causal, ", has_mask=", has_mask,
                 ", is_qk_quant=", params.is_qk_quant,
                 ", is_pv_quant=", params.is_pv_quant,
+                ", sliding_window=", params.sliding_window,
+                ", sliding_window_size=", params.sliding_window_size,
                 ", kernel=", kernel_to_string(params.kernel));
 
         status_t status

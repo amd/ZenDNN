@@ -152,6 +152,11 @@ status_t bmm_based_sdpa(const void *query, const void *key, const void *value,
     // =========================================================================
     // Step 1.6: Apply causal mask separately (after Q @ K^T)
     // =========================================================================
+    if (params.sliding_window) {
+        log_error("SDPA: sliding window is not supported by the BMM backend");
+        return status_t::failure;
+    }
+
     if (params.is_causal) {
         if (params.qkv_dt != data_type_t::f32) {
             log_error("SDPA: Causal mask currently supports only f32 scores");

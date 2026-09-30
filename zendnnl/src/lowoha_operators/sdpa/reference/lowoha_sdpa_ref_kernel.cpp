@@ -182,6 +182,15 @@ inline void softmax(float *scores, int64_t seq_len_q, int64_t seq_len_kv) {
                 max_val = scores[i * seq_len_kv + j];
             }
         }
+        // A row with no reachable key (empty sliding window on a short K/V)
+        // is all -inf; exp(-inf - -inf) would be NaN. Zero probabilities make
+        // the row contribute nothing, matching the flash backend.
+        if (max_val == -std::numeric_limits<float>::infinity()) {
+            for (int64_t j = 0; j < seq_len_kv; j++) {
+                scores[i * seq_len_kv + j] = 0.0f;
+            }
+            continue;
+        }
         float sum = 0.0f;
         for (int64_t j = 0; j < seq_len_kv; j++) {
             scores[i * seq_len_kv + j]
@@ -206,6 +215,32 @@ inline void apply_causal_mask(
     constexpr float neg_inf = -std::numeric_limits<float>::infinity();
     for (int64_t i = 0; i < seq_len_q; i++) {
         for (int64_t j = i + 1; j < seq_len_kv; j++) {
+            attention_scores[i * seq_len_kv + j] = neg_inf;
+        }
+    }
+}
+
+/**
+ * @brief Apply a bidirectional sliding-window band in place.
+ *
+ * Query i attends to keys j in [i-(W-1), i+(W-1)] (vLLM/Gemma: L = R = W-1).
+ * When @p is_causal is also true the right radius is 0.
+ */
+inline void apply_sliding_window_mask(float *attention_scores,
+        int64_t seq_len_q, int64_t seq_len_kv, int64_t window_size,
+        bool is_causal) {
+    constexpr float neg_inf = -std::numeric_limits<float>::infinity();
+    const int64_t left = window_size - 1;
+    const int64_t right = is_causal ? 0 : (window_size - 1);
+    for (int64_t i = 0; i < seq_len_q; i++) {
+        // j_lo is clamped to seq_len_kv: on cross-attention the band can start
+        // past the last key, in which case the whole row is masked.
+        const int64_t j_lo = std::min(seq_len_kv, (i > left) ? (i - left) : 0);
+        const int64_t j_hi = std::min(seq_len_kv - 1, i + right);
+        for (int64_t j = 0; j < j_lo; j++) {
+            attention_scores[i * seq_len_kv + j] = neg_inf;
+        }
+        for (int64_t j = j_hi + 1; j < seq_len_kv; j++) {
             attention_scores[i * seq_len_kv + j] = neg_inf;
         }
     }
@@ -279,13 +314,18 @@ inline void apply_attention_mask(float *attention_scores,
  * @param scale         Scaling factor applied to QK^T.
  * @param is_causal     If true, apply causal mask before softmax.
  * @param has_mask      If true and mask_ptr != nullptr, add mask before softmax.
+ * @param sliding_window      If true, restrict each query to a band of width
+ *                            @p sliding_window_size instead of the full row.
+ * @param sliding_window_size Window width W (L = R = W-1); the band is ignored
+ *                            when @p sliding_window is false or W <= 0.
  */
 template <typename qkv_t, typename mask_t>
 inline void compute_sdpa_per_head(const qkv_t *q_new, const qkv_t *k_new,
         const qkv_t *v_new, qkv_t *out_new, const mask_t *mask_ptr,
         int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
         int64_t q_seq_stride, int64_t k_seq_stride, int64_t v_seq_stride,
-        int64_t o_seq_stride, float scale, bool is_causal, bool has_mask) {
+        int64_t o_seq_stride, float scale, bool is_causal, bool has_mask,
+        bool sliding_window, int64_t sliding_window_size) {
     // FP32 score buffer keeps softmax numerically stable for low-precision QKV.
     std::vector<float> attention_scores(
             static_cast<size_t>(seq_len_q * seq_len_kv), 0.0f);
@@ -293,7 +333,10 @@ inline void compute_sdpa_per_head(const qkv_t *q_new, const qkv_t *k_new,
     matmul_qk<qkv_t>(q_new, k_new, attention_scores.data(), seq_len_q,
             seq_len_kv, head_dim, q_seq_stride, k_seq_stride, scale);
 
-    if (is_causal) {
+    if (sliding_window && sliding_window_size > 0) {
+        apply_sliding_window_mask(attention_scores.data(), seq_len_q,
+                seq_len_kv, sliding_window_size, is_causal);
+    } else if (is_causal) {
         apply_causal_mask(attention_scores.data(), seq_len_q, seq_len_kv);
     }
     if (has_mask && mask_ptr != nullptr) {
@@ -347,6 +390,8 @@ status_t execute_typed(const void *query, const void *key, const void *value,
             = (params.kv_seq_len > 0) ? params.kv_seq_len : params.seq_len;
     const int64_t head_dim = params.head_dim;
     const bool is_causal = params.is_causal;
+    const bool sliding_window = params.sliding_window;
+    const int64_t sliding_window_size = params.sliding_window_size;
     // Match flash_sdpa: scale == 0 means use 1/sqrt(head_dim).
     const float scale = (params.scale != 0.0)
             ? static_cast<float>(params.scale)
@@ -410,7 +455,8 @@ status_t execute_typed(const void *query, const void *key, const void *value,
                         : nullptr;
                 compute_sdpa_per_head<qkv_t, mask_t>(q_bh, k_bh, v_bh, o_bh,
                         mask_for_bh, seq_len_q, seq_len_kv, head_dim, q_ss,
-                        k_ss, v_ss, o_ss, scale, is_causal, has_mask);
+                        k_ss, v_ss, o_ss, scale, is_causal, has_mask,
+                        sliding_window, sliding_window_size);
             }
         }
         return status_t::success;

@@ -46,9 +46,10 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_tensor_view &query,
         const sdpa_flash_cpu_tensor_view &key,
         const sdpa_flash_cpu_tensor_view &value, double dropout_p,
-        bool is_causal, const sdpa_flash_cpu_mask_view *mask,
-        const double *scale_opt, data_type_t qkv_dt, data_type_t mask_dtype,
-        bool is_qk_quant, bool is_pv_quant, int num_threads = 0);
+        bool is_causal, bool sliding_window, int64_t sliding_window_size,
+        const sdpa_flash_cpu_mask_view *mask, const double *scale_opt,
+        data_type_t qkv_dt, data_type_t mask_dtype, bool is_qk_quant,
+        bool is_pv_quant, int num_threads = 0);
 
 } // namespace sdpa
 } // namespace lowoha

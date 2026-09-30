@@ -107,6 +107,11 @@ struct sdpa_params {
     // Computation parameters
     double scale;
     bool is_causal;
+    // Off by default. When true and sliding_window_size > 0, query i attends
+    // only to keys j with |i - j| <= sliding_window_size - 1 (L = R = W-1).
+    // Combined with is_causal the right radius is 0 (j <= i).
+    bool sliding_window;
+    int64_t sliding_window_size;
     double dropout_p;
     // Dynamically quantize BF16 Q/K per token for an INT8 QK matmul.
     bool is_qk_quant;
@@ -155,6 +160,8 @@ struct sdpa_params {
         , mask_dt(data_type_t::none)
         , scale(0.0)
         , is_causal(false)
+        , sliding_window(false)
+        , sliding_window_size(0)
         , dropout_p(0.0)
         , is_qk_quant(false)
         , is_pv_quant(false)

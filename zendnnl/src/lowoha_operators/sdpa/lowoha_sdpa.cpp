@@ -147,6 +147,8 @@ status_t sdpa_direct(const void *query, const void *key, const void *value,
            << ", seq_len=" << params.seq_len << ", kv_seq_len=" << eff_kv
            << ", head_dim=" << params.head_dim << ", scale=" << params.scale
            << ", is_causal=" << (params.is_causal ? "true" : "false")
+           << ", sliding_window=" << (params.sliding_window ? "true" : "false")
+           << ", sliding_window_size=" << params.sliding_window_size
            << ", is_qk_quant=" << (params.is_qk_quant ? "true" : "false")
            << ", is_pv_quant=" << (params.is_pv_quant ? "true" : "false")
            << ", has_mask="

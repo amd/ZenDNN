@@ -168,7 +168,8 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_tensor_view &query_bh,
         const sdpa_flash_cpu_tensor_view &key_bh,
         const sdpa_flash_cpu_tensor_view &value_bh, double dropout_p,
-        bool is_causal, std::optional<sdpa_flash_cpu_mask_view> attn_mask,
+        bool is_causal, bool sliding_window, int64_t sliding_window_size,
+        std::optional<sdpa_flash_cpu_mask_view> attn_mask,
         std::optional<double> scale, int num_threads_hint) {
     (void)dropout_p;
     SDPA_SA_CHECK(!dropout_p, "dropout must be 0");
@@ -197,6 +198,14 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
     SDPA_SA_CHECK(num_head % kv_num_head == 0,
             "Q heads must be divisible by K/V heads");
     int64_t repeat_factor = num_head / kv_num_head;
+
+    // Sliding-window band: query i attends only to keys in
+    // [i - win_left, i + win_right]. Disabled by default; when combined with
+    // is_causal the band keeps only its left half (j <= i).
+    const bool use_window = sliding_window && sliding_window_size > 0;
+    const int64_t win_left = use_window ? sliding_window_size - 1 : 0;
+    const int64_t win_right
+            = (use_window && !is_causal) ? sliding_window_size - 1 : 0;
 
     NormalizedMask nmask {};
     const void *mask_data_void = nullptr;
@@ -297,9 +306,31 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
                 qk_sum_data, static_cast<accum_t>(0), qBlockSize);
         int64_t num_keys
                 = is_causal ? std::min(m + qBlockSize, kvSize) : kvSize;
+        // Skipping the kv tiles outside the band is what keeps sliding window
+        // O(S*W) instead of O(S^2); n_start is snapped down to a tile boundary.
+        int64_t n_start = 0;
+        if (use_window) {
+            num_keys = std::min(kvSize, m + qBlockSize + win_right);
+            n_start = std::max<int64_t>(0, m - win_left) / kvSplitSize
+                    * kvSplitSize;
+        }
 
-        for (int64_t n = 0; n < num_keys; n += kvSplitSize) {
+        bool have_kv = false;
+        for (int64_t n = n_start; n < num_keys; n += kvSplitSize) {
             int64_t kvBlockSize = std::min(kvSplitSize, kvSize - n);
+            int64_t n_gemm = n;
+            // Whole-tile skip still misses S=1024 / W=257: every Q tile
+            // overlaps both 512-wide KV tiles. Shrink the GEMM to the union
+            // of this Q block's band inside the tile (prefix or suffix).
+            // Per-row tails stay -inf-filled below.
+            if (use_window) {
+                const int64_t band_lo = std::max(n, m - win_left);
+                const int64_t band_hi
+                        = std::min(n + kvBlockSize, m + qBlockSize + win_right);
+                if (band_lo >= band_hi) { continue; }
+                n_gemm = band_lo;
+                kvBlockSize = band_hi - band_lo;
+            }
             // GEMM: Q_block @ K_block^T -> qk_data (FP32 accumulator).
             //   alpha=1: softmax scale (1/sqrt(d) or user scale) is fused into
             //            mul_reduce_max_fusion / scale_attn_mask_fusion below.
@@ -307,10 +338,33 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
             zendnn_gemm<scalar_t>(qBlockSize, kvBlockSize, headSize, 1.0f,
                     q_data + i * qStrideB + j * qStrideH + m * qStrideM,
                     qStrideM,
-                    k_data + i * kStrideB + kv_j * kStrideH + n * kStrideN,
+                    k_data + i * kStrideB + kv_j * kStrideH + n_gemm * kStrideN,
                     kStrideN, 0.0f, qk_data, kvBlockSize, false, true);
 
-            if (is_causal && num_keys - n <= kvSplitSize) {
+            // The window fill below already enforces the causal right edge
+            // (win_right == 0 when is_causal), so the two never both run.
+            if (use_window) {
+                constexpr accum_t neg_inf
+                        = -std::numeric_limits<accum_t>::infinity();
+                for (int64_t row = 0; row < qBlockSize; ++row) {
+                    const int64_t lo
+                            = std::max<int64_t>(0, m + row - win_left - n_gemm);
+                    const int64_t hi = std::min(
+                            kvBlockSize - 1, m + row + win_right - n_gemm);
+                    accum_t *row_ptr = qk_data + row * kvBlockSize;
+                    if (hi < lo) {
+                        fill_stub_f32<SimdTag>(row_ptr, neg_inf, kvBlockSize);
+                        continue;
+                    }
+                    if (lo > 0) {
+                        fill_stub_f32<SimdTag>(row_ptr, neg_inf, lo);
+                    }
+                    if (hi + 1 < kvBlockSize) {
+                        fill_stub_f32<SimdTag>(row_ptr + hi + 1, neg_inf,
+                                kvBlockSize - hi - 1);
+                    }
+                }
+            } else if (is_causal && num_keys - n <= kvSplitSize) {
                 for (int64_t row = 0; row < qBlockSize; ++row) {
                     int64_t last_col = m + row - n;
                     accum_t *row_ptr = qk_data + row * kvBlockSize;
@@ -330,7 +384,7 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
                 for (int64_t row = 0; row < qBlockSize; ++row) {
                     scale_attn_mask_fusion<SimdTag>(qk_data + row * kvBlockSize,
                             mask_data + i * mStrideB + j * mStrideH
-                                    + (m + row) * mStrideM + n,
+                                    + (m + row) * mStrideM + n_gemm,
                             static_cast<int>(kvBlockSize),
                             qk_data + row * kvBlockSize, scaling_factor);
                 }
@@ -371,7 +425,7 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
                 exp_tmp = std::exp(qk_max_data[row] - tmp_max);
                 qk_sum_data[row] = tmp_sum + exp_tmp * qk_sum_data[row];
                 qk_max_data[row] = tmp_max;
-                if (n > 0) {
+                if (have_kv) {
                     scale_dst_row<SimdTag>(
                             dst_data + row * headSize, headSize, exp_tmp);
                 }
@@ -379,13 +433,21 @@ void cpu_flash_attention_sa(const sdpa_flash_cpu_tensor_view &output,
             // GEMM: softmax_block @ V_block -> dst_data (online-softmax accumulator).
             //   alpha=1: prior dst rows already rescaled by exp(prev_max - new_max)
             //            via scale_dst_row above.
-            //   beta = n==0 ? 0 : 1 lets the GEMM accumulate into the FP32
-            //            dst_data scratch directly.
+            //   beta = 0 on the first live tile; 1 accumulates later tiles into
+            //            the FP32 dst_data scratch directly.
             zendnn_gemm<scalar_t>(qBlockSize, headSize, kvBlockSize, 1.0f,
                     conditional_data_ptr(qk_data, qk_reduced_data), kvBlockSize,
-                    v_data + i * vStrideB + kv_j * vStrideH + n * vStrideN,
-                    vStrideN, n == 0 ? 0.0f : 1.0f, dst_data, headSize, false,
+                    v_data + i * vStrideB + kv_j * vStrideH + n_gemm * vStrideN,
+                    vStrideN, have_kv ? 1.0f : 0.0f, dst_data, headSize, false,
                     false);
+            have_kv = true;
+        }
+
+        // A q block whose window lies entirely outside [0, kvSize) runs no kv
+        // tile at all, so the P*V GEMM never initialised the accumulator.
+        if (!have_kv) {
+            fill_stub_f32<SimdTag>(
+                    dst_data, static_cast<accum_t>(0), qBlockSize * headSize);
         }
 
         for (int64_t row = 0; row < qBlockSize; ++row) {
@@ -411,21 +473,22 @@ void flash_attention_kernel_sa_dispatch(
         const sdpa_flash_cpu_tensor_view &query,
         const sdpa_flash_cpu_tensor_view &key,
         const sdpa_flash_cpu_tensor_view &value, double dropout_p,
-        bool is_causal, std::optional<sdpa_flash_cpu_mask_view> attn_mask,
+        bool is_causal, bool sliding_window, int64_t sliding_window_size,
+        std::optional<sdpa_flash_cpu_mask_view> attn_mask,
         std::optional<double> scale, int num_threads) {
     int64_t q_seq_len = query.size_s;
     if (q_seq_len >= 768) {
         cpu_flash_attention_sa<SimdTag, input_type, attention_mask, 256, 512>(
-                output, query, key, value, dropout_p, is_causal, attn_mask,
-                scale, num_threads);
+                output, query, key, value, dropout_p, is_causal, sliding_window,
+                sliding_window_size, attn_mask, scale, num_threads);
     } else if (q_seq_len >= 192) {
         cpu_flash_attention_sa<SimdTag, input_type, attention_mask, 64, 512>(
-                output, query, key, value, dropout_p, is_causal, attn_mask,
-                scale, num_threads);
+                output, query, key, value, dropout_p, is_causal, sliding_window,
+                sliding_window_size, attn_mask, scale, num_threads);
     } else {
         cpu_flash_attention_sa<SimdTag, input_type, attention_mask, 32, 512>(
-                output, query, key, value, dropout_p, is_causal, attn_mask,
-                scale, num_threads);
+                output, query, key, value, dropout_p, is_causal, sliding_window,
+                sliding_window_size, attn_mask, scale, num_threads);
     }
 }
 
@@ -450,9 +513,10 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
         const sdpa_flash_cpu_tensor_view &query,
         const sdpa_flash_cpu_tensor_view &key,
         const sdpa_flash_cpu_tensor_view &value, double dropout_p,
-        bool is_causal, const sdpa_flash_cpu_mask_view *mask,
-        const double *scale_opt, data_type_t qkv_dt, data_type_t mask_dtype,
-        bool is_qk_quant, bool is_pv_quant, int num_threads) {
+        bool is_causal, bool sliding_window, int64_t sliding_window_size,
+        const sdpa_flash_cpu_mask_view *mask, const double *scale_opt,
+        data_type_t qkv_dt, data_type_t mask_dtype, bool is_qk_quant,
+        bool is_pv_quant, int num_threads) {
     try {
         std::optional<sdpa_flash_cpu_mask_view> mopt;
         if (mask != nullptr && mask->data != nullptr) { mopt = *mask; }
@@ -497,8 +561,9 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
 
         if (any_int8_quant) {
             return sdpa_flash_cpu_run_int8(output, query, key, value, dropout_p,
-                    is_causal, mopt, scale, qkv_dt, mask_dtype, is_qk_quant,
-                    is_pv_quant, use_avx512, num_threads);
+                    is_causal, sliding_window, sliding_window_size, mopt, scale,
+                    qkv_dt, mask_dtype, is_qk_quant, is_pv_quant, use_avx512,
+                    num_threads);
         }
 
         auto run = [&](auto simd_tag) -> status_t {
@@ -508,27 +573,31 @@ status_t sdpa_flash_cpu_run_internal(const sdpa_flash_cpu_tensor_view &output,
             // present.
             if (qkv_dt == data_type_t::f32) {
                 flash_attention_kernel_sa_dispatch<Tag, float, float>(output,
-                        query, key, value, dropout_p, is_causal, mopt, scale,
-                        num_threads);
+                        query, key, value, dropout_p, is_causal, sliding_window,
+                        sliding_window_size, mopt, scale, num_threads);
             } else if (qkv_dt == data_type_t::bf16) {
                 if (!mopt.has_value() || mask_dtype == data_type_t::f32) {
                     flash_attention_kernel_sa_dispatch<Tag, bfloat16_t, float>(
                             output, query, key, value, dropout_p, is_causal,
-                            mopt, scale, num_threads);
+                            sliding_window, sliding_window_size, mopt, scale,
+                            num_threads);
                 } else {
                     flash_attention_kernel_sa_dispatch<Tag, bfloat16_t,
                             bfloat16_t>(output, query, key, value, dropout_p,
-                            is_causal, mopt, scale, num_threads);
+                            is_causal, sliding_window, sliding_window_size,
+                            mopt, scale, num_threads);
                 }
             } else if (qkv_dt == data_type_t::f16) {
                 if (!mopt.has_value() || mask_dtype == data_type_t::f32) {
                     flash_attention_kernel_sa_dispatch<Tag, float16_t, float>(
                             output, query, key, value, dropout_p, is_causal,
-                            mopt, scale, num_threads);
+                            sliding_window, sliding_window_size, mopt, scale,
+                            num_threads);
                 } else {
                     flash_attention_kernel_sa_dispatch<Tag, float16_t,
                             float16_t>(output, query, key, value, dropout_p,
-                            is_causal, mopt, scale, num_threads);
+                            is_causal, sliding_window, sliding_window_size,
+                            mopt, scale, num_threads);
                 }
             } else {
                 log_error("sdpa_flash_cpu: unsupported Q/K/V dtype");

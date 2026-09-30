@@ -90,9 +90,9 @@ status_t flash_sdpa(const void *query, const void *key, const void *value,
     const double *scale_opt = (scale_val != 0.0) ? &scale_val : nullptr;
 
     return sdpa_flash_cpu_run_internal(ov, qv, kv, vv, params.dropout_p,
-            params.is_causal, mask_ptr, scale_opt, params.qkv_dt,
-            params.mask_dt, params.is_qk_quant, params.is_pv_quant,
-            params.num_threads);
+            params.is_causal, params.sliding_window, params.sliding_window_size,
+            mask_ptr, scale_opt, params.qkv_dt, params.mask_dt,
+            params.is_qk_quant, params.is_pv_quant, params.num_threads);
 }
 
 } // namespace sdpa

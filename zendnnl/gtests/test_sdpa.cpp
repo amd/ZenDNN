@@ -123,7 +123,8 @@ void run_bf16_int8_dynamic_quant_test(tensor_factory_t &tensor_factory,
         uint64_t batch, uint64_t num_heads, uint64_t kv_num_heads,
         uint64_t seq_len_q, uint64_t seq_len_kv, uint64_t head_dim,
         bool is_causal, bool has_mask, const std::string &qkv_order,
-        bool is_qk_quant = true, bool is_pv_quant = true) {
+        bool is_qk_quant = true, bool is_pv_quant = true,
+        bool sliding_window = false, int64_t sliding_window_size = 0) {
     auto query_tensor = make_uniform_tensor(tensor_factory,
             {batch, num_heads, seq_len_q, head_dim}, data_type_t::bf16, 1.0f,
             qkv_order);
@@ -147,14 +148,16 @@ void run_bf16_int8_dynamic_quant_test(tensor_factory_t &tensor_factory,
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     status_t status = sdpa_kernel_test(query_tensor, key_tensor, value_tensor,
             mask_tensor, output_tensor, scale, is_causal, has_mask,
-            sdpa_kernel_t::flash, is_qk_quant, is_pv_quant);
+            sdpa_kernel_t::flash, is_qk_quant, is_pv_quant, sliding_window,
+            sliding_window_size);
     if (status == status_t::unimplemented
             || status == status_t::isa_unsupported) {
         GTEST_SKIP() << "Dynamic INT8 SDPA requires AOCL-DLP and AVX512-VNNI";
     }
     status_t ref_status = sdpa_kernel_test(query_tensor, key_tensor,
             value_tensor, mask_tensor, output_tensor_ref, scale, is_causal,
-            has_mask, sdpa_kernel_t::reference);
+            has_mask, sdpa_kernel_t::reference, /*is_qk_quant=*/false,
+            /*is_pv_quant=*/false, sliding_window, sliding_window_size);
 
     bool ok = status == status_t::success && ref_status == status_t::success;
     float worst_actual = 0.0f;
@@ -245,6 +248,48 @@ TEST(SdpaInt8DynamicQuantTest, BF16_INT8_PV_ONLY_MASKED_GQA_BSHD) {
             /*seq_len_q=*/5, /*seq_len_kv=*/5, /*head_dim=*/16,
             /*is_causal=*/true, /*has_mask=*/true, kBshdOrder,
             /*is_qk_quant=*/false, /*is_pv_quant=*/true);
+}
+
+// Same Q/K/V path as the other INT8 tests. S=1100 / W=257 crosses a 512 KV
+// tile so skip and shrink both run. Reference applies the same band.
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_SLIDING_WINDOW) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/2, /*kv_num_heads=*/2,
+            /*seq_len_q=*/1100, /*seq_len_kv=*/1100, /*head_dim=*/32,
+            /*is_causal=*/false, /*has_mask=*/false, kBhsdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true,
+            /*sliding_window=*/true, /*sliding_window_size=*/257);
+}
+
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_CAUSAL_SLIDING_WINDOW) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/2, /*kv_num_heads=*/2,
+            /*seq_len_q=*/900, /*seq_len_kv=*/900, /*head_dim=*/32,
+            /*is_causal=*/true, /*has_mask=*/false, kBhsdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/true,
+            /*sliding_window=*/true, /*sliding_window_size=*/129);
+}
+
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_QK_ONLY_SLIDING_WINDOW) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/1, /*kv_num_heads=*/1,
+            /*seq_len_q=*/1100, /*seq_len_kv=*/1100, /*head_dim=*/32,
+            /*is_causal=*/false, /*has_mask=*/false, kBhsdOrder,
+            /*is_qk_quant=*/true, /*is_pv_quant=*/false,
+            /*sliding_window=*/true, /*sliding_window_size=*/257);
+}
+
+TEST(SdpaInt8DynamicQuantTest, BF16_INT8_PV_ONLY_SLIDING_WINDOW) {
+    tensor_factory_t tensor_factory;
+    run_bf16_int8_dynamic_quant_test(tensor_factory,
+            /*batch=*/1, /*num_heads=*/1, /*kv_num_heads=*/1,
+            /*seq_len_q=*/1100, /*seq_len_kv=*/1100, /*head_dim=*/32,
+            /*is_causal=*/false, /*has_mask=*/false, kBhsdOrder,
+            /*is_qk_quant=*/false, /*is_pv_quant=*/true,
+            /*sliding_window=*/true, /*sliding_window_size=*/257);
 }
 
 /**
@@ -477,6 +522,47 @@ void expand_gqa_kv_tensor(tensor_t &compact_tensor, tensor_t &expanded_tensor,
             }
         }
     }
+}
+
+// Flash vs reference on the same Q/K/V. No dense [S, S] mask: the reference
+// kernel applies the same band. Long sequences cross a 512-wide KV tile.
+void run_f32_sliding_window_vs_reference(tensor_factory_t &tensor_factory,
+        uint64_t batch, uint64_t num_heads, uint64_t seq_len_q,
+        uint64_t seq_len_kv, uint64_t head_dim, int64_t window,
+        bool is_causal) {
+    auto query_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    auto key_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len_kv, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    auto value_tensor = make_uniform_tensor(tensor_factory,
+            {batch, num_heads, seq_len_kv, head_dim}, data_type_t::f32, 1.0,
+            kBhsdOrder);
+    tensor_t mask_tensor;
+    auto output_tensor = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::f32,
+            kBhsdOrder);
+    auto output_tensor_ref = make_zero_tensor(tensor_factory,
+            {batch, num_heads, seq_len_q, head_dim}, data_type_t::f32,
+            kBhsdOrder);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    status_t status = sdpa_kernel_test(query_tensor, key_tensor, value_tensor,
+            mask_tensor, output_tensor, scale, is_causal, /*has_mask=*/false,
+            sdpa_kernel_t::flash, /*is_qk_quant=*/false,
+            /*is_pv_quant=*/false, /*sliding_window=*/true, window);
+    status_t ref_status = sdpa_kernel_test(query_tensor, key_tensor,
+            value_tensor, mask_tensor, output_tensor_ref, scale, is_causal,
+            /*has_mask=*/false, sdpa_kernel_t::reference,
+            /*is_qk_quant=*/false, /*is_pv_quant=*/false,
+            /*sliding_window=*/true, window);
+    bool ok = status == status_t::success && ref_status == status_t::success;
+    if (ok) {
+        compare_tensor_4D_sdpa(output_tensor, output_tensor_ref, batch,
+                num_heads, seq_len_q, seq_len_kv, head_dim, rtol_f32,
+                epsilon_f32, ok);
+    }
+    EXPECT_TRUE(ok);
 }
 
 } // namespace
@@ -906,6 +992,31 @@ TEST(SdpaGqaTest, BF16_GQA_LONG_MASKED_TILES_STAY_FINITE) {
                     static_cast<float>(output[delayed_valid_offset])));
         }
     }
+}
+
+TEST(SdpaSlidingWindowTest, F32_LONG_SEQ) {
+    tensor_factory_t tensor_factory;
+    run_f32_sliding_window_vs_reference(tensor_factory,
+            /*batch=*/1, /*num_heads=*/2, /*seq_len_q=*/1100,
+            /*seq_len_kv=*/1100, /*head_dim=*/32, /*window=*/257,
+            /*is_causal=*/false);
+}
+
+TEST(SdpaSlidingWindowTest, F32_CAUSAL) {
+    tensor_factory_t tensor_factory;
+    run_f32_sliding_window_vs_reference(tensor_factory,
+            /*batch=*/1, /*num_heads=*/2, /*seq_len_q=*/900,
+            /*seq_len_kv=*/900, /*head_dim=*/32, /*window=*/129,
+            /*is_causal=*/true);
+}
+
+TEST(SdpaSlidingWindowTest, F32_EMPTY_ROWS) {
+    tensor_factory_t tensor_factory;
+    // Queries past kv_len + (W-1) have an empty band.
+    run_f32_sliding_window_vs_reference(tensor_factory,
+            /*batch=*/1, /*num_heads=*/2, /*seq_len_q=*/1100,
+            /*seq_len_kv=*/8, /*head_dim=*/32, /*window=*/4,
+            /*is_causal=*/false);
 }
 
 /** @fn TEST_P
