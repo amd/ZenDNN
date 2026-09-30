@@ -320,7 +320,7 @@ private:
     /// the CK runtime and the prepack warmers.  Atomic for the same
     /// concurrent read/write reason as `matmul_weight_cache`.
     std::atomic<bool> grp_auto_mixed_inplace {false};
-    bool custom_kernel_route {false};
+    bool custom_kernel_route {true};
     int32_t matmul_otf_bpack; /**< On-the-fly B packing for Native kernels. */
     bool zp_comp_cache; /**< Enable zero-point compensation caching. */
     uint32_t lru_cache_capacity

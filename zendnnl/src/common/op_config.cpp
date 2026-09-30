@@ -30,7 +30,7 @@ void matmul_config_t::set_default_config() {
     set_algo(matmul_algo);
     set_bmm_algo(bmm_algo);
     set_weight_cache(2);
-    set_custom_kernel_route(false);
+    set_custom_kernel_route(true);
     set_otf_bpack(0);
     set_zp_comp_cache(true); // Enable ZP compensation caching by default
     set_accum_type(data_type_t::f32); // Default to F32 accumulation
@@ -47,7 +47,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     int32_t matmul_weight_cache = 2;
     int32_t matmul_otf_bpack_json = 0;
     bool zp_comp_cache_enabled = true; // Default enabled
-    bool custom_kernel_route = false;
+    bool custom_kernel_route = true;
     uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
     int64_t dlp_m_hint = 32;
     auto matmul_json = runtime_variables_json["matmul"];
@@ -152,7 +152,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
                 apilog_warning("Unrecognized matmul custom_kernel JSON value ",
                         custom_kernel_json.dump(),
                         "; expected false/true or \"0\"/\"1\". "
-                        "Defaulting to disabled.");
+                        "Defaulting to enabled.");
             }
         }
         auto otf_bpack_json = matmul_json["otf_bpack"];
@@ -289,14 +289,16 @@ void matmul_config_t::set_env_config() {
     set_weight_cache(matmul_weight_cache);
 
     const char *custom_kernel_env = std::getenv("ZENDNNL_MATMUL_CUSTOM_KERNEL");
-    bool custom_kernel_route = false;
+    bool custom_kernel_route = true;
     if (custom_kernel_env != nullptr) {
         if (std::strcmp(custom_kernel_env, "1") == 0) {
             custom_kernel_route = true;
-        } else if (std::strcmp(custom_kernel_env, "0") != 0) {
+        } else if (std::strcmp(custom_kernel_env, "0") == 0) {
+            custom_kernel_route = false;
+        } else {
             apilog_warning("Unrecognized ZENDNNL_MATMUL_CUSTOM_KERNEL value '",
                     custom_kernel_env,
-                    "'; expected 0 or 1. Defaulting to disabled.");
+                    "'; expected 0 or 1. Defaulting to enabled.");
         }
     }
     set_custom_kernel_route(custom_kernel_route);

@@ -63,9 +63,12 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (params.mem_format_a != 'n') return false;
     if (omp_in_parallel() || omp_get_dynamic()) return false;
 
+    // Preserve a per-operation algorithm chosen through the API.  The
+    // process-wide algorithm, however, is the fallback backend when CK is
+    // disabled, ineligible, or declined and must not veto an enabled CK
+    // attempt.  Layout-specific prepacked inputs remain excluded below by the
+    // mem_format_b == 'n' contract.
     if (params.lowoha_algo != matmul_algo_t::none) return false;
-    if (config.get_algo() != static_cast<int32_t>(matmul_algo_t::none))
-        return false;
 
     const int32_t effective_cache
             = effective_weight_cache_type(params.weight_cache_type);

@@ -42,6 +42,8 @@
 #include <vector>
 
 #include "ck_test_helpers.hpp"
+#include "common/op_config.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
 #include "moe_test_utils.hpp"
 
 namespace {
@@ -53,6 +55,60 @@ using mt::data_type_t;
 using mt::group_matmul_direct;
 using mt::matmul_params;
 using mt::status_t;
+
+struct ScalarRouteConfigGuard {
+    zendnnl::common::matmul_config_t &config
+            = zendnnl::common::matmul_config_t::instance();
+    int32_t old_algo = config.get_algo();
+    int32_t old_cache = config.get_weight_cache();
+    bool old_route = config.get_custom_kernel_route();
+    int old_dynamic = omp_get_dynamic();
+
+    ~ScalarRouteConfigGuard() {
+        config.set_algo(old_algo);
+        config.set_weight_cache(old_cache);
+        config.set_custom_kernel_route(old_route);
+        omp_set_dynamic(old_dynamic);
+    }
+};
+
+TEST(CkDispatchRouting, ScalarRouteUsesGlobalAlgoAsFallback) {
+    CK_SKIP_IF_NO_BF16_ISA();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+
+    // The process-wide AOCL selection is the fallback; an enabled scalar CK
+    // route still gets the first opportunity for an eligible raw BF16 call.
+    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+            /*M=*/8, /*N=*/2048, /*K=*/256, /*batch_count=*/1,
+            /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f, /*beta=*/0.0f,
+            /*bias=*/nullptr, /*ldb=*/256, /*is_weights_const=*/true, params));
+
+    // A per-operation API selection remains stronger than the process-wide
+    // CK policy because grouped fallback cannot preserve that local choice.
+    params.lowoha_algo = zendnnl::common::matmul_algo_t::onednn;
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 8, 2048,
+            256, 1, false, true, 1.0f, 0.0f, nullptr, 256, true, params));
+
+    // Disabling the scalar CK knob restores the configured AOCL path.
+    params.lowoha_algo = zendnnl::common::matmul_algo_t::none;
+    guard.config.set_custom_kernel_route(false);
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 8, 2048,
+            256, 1, false, true, 1.0f, 0.0f, nullptr, 256, true, params));
+}
 
 // ──────────────────────────────────────────────────────────────────
 // `is_weights_const = false` → CK refuses → DLP path runs.  The
