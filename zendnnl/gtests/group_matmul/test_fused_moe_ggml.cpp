@@ -334,18 +334,20 @@ void run_fused_ggml_scenario(const std::string &label,
             ASSERT_TRUE(stats.valid)
                     << label
                     << ": prepack must run for the fused GGML N-tile call";
-            // Both modes AOT-warm the per-tile sym-quant layout
-            // (num_experts * stable), far exceeding a one-per-expert full-weight warm.
-            EXPECT_GT(stats.aocl.total_attempted, E)
-                    << label << ": per-tile AOCL sym-quant warm did not run";
             if (ntile_algo_pin == 3) {
                 // Pinned ALGO 3: the fused two-pass N-tiles each op's per-group weight.
-                // The LAST prepack captured is Op2 (act=none), a clean ALGO-3 warm.
+                // The LAST prepack captured is Op2 (act=none).  Its resolved
+                // inner kernel may need no AOCL or custom-kernel weight warm.
                 EXPECT_EQ(stats.scheduling_algo, 3)
                         << label
                         << ": fused GGML two-pass did NOT route to ALGO 3 "
                            "(N-tile)";
             } else { // ntile_algo_pin == 0 (AUTO)
+                // AUTO cross-warm prepares the AOCL per-N-tile layout
+                // (num_experts * stable), exceeding full-weight warm count.
+                EXPECT_GT(stats.aocl.total_attempted, E)
+                        << label
+                        << ": per-tile AOCL sym-quant warm did not run";
                 // AUTO fused-MoE GGML: the per-group DYNAMIC quant trips the auto
                 // n_tile gate, so the EXECUTED algo clamps to ALGO 1 — but cross-warm
                 // (AUTO-only) still AOT-warms the ALGO-3 per-tile layout for a later

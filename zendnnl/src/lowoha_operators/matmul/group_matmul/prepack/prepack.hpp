@@ -279,20 +279,17 @@ struct PrepackParams {
     // W4A8 sym-quant group_size (=K/G); 0 means not W4A8 or use full-K default.
     int w4a8_group_size = 0;
 
-    // Per-call OMP team size — taken straight from the dispatcher's
-    // entry-API `num_threads` argument.  Only consumed by
-    // `prepack_for_algo_3` to compute
-    // `aocl_stable_n_thr(num_threads)` at warm time so per-tile cache
-    // keys match what `do_tile()` will build at run time under the
-    // strict-stable plan (`ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE=1`).
+    // Per-call OMP team size — taken straight from the dispatcher's entry-API
+    // `num_threads` argument.  ALGO 3 uses it to compute
+    // `aocl_stable_n_thr(num_threads)` so per-tile warm keys match runtime.
+    // The full-weight AOCL warmer also carries it into DLP's `nt_hint`;
+    // `prepack_aocl_only_algo` therefore overrides only the ALGO 2/5 primary
+    // warm to 1 (their inner GEMMs are serial) while preserving this outer-team
+    // value for ALGO 3 cross-warm.
+    //
     // Zero (default) means "no thread context" — `prepack_for_algo_3`
-    // intentionally SKIPS the AOCL DLP warm-pack in this case.  A
-    // full-weight fallback would prefill cache entries the runtime
-    // never queries (the runtime's per-tile keys depend on
-    // num_threads + nr_align, which we don't know here), so the
-    // skip avoids wasting CPU on misaligned reorders.  ALGOs 1, 2, 5,
-    // 6 don't use this field — their warmer is full-weight by design
-    // and runs unconditionally on the AOCL DLP path.
+    // intentionally skips AOCL DLP per-tile warm-pack because its keys depend
+    // on both num_threads and nr_align.
     /// Bytes writable at EACH expert's weight pointer (0 = exactly the
     /// logical extent).  Mirrored from `matmul_params`; lets the AOCL
     /// full-weight warm reorder IN PLACE instead of materialising a second

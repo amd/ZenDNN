@@ -2075,6 +2075,19 @@ static void prepack_aocl_only_algo(
     const bool mixed_inplace
             = mixed_inplace_for_wei(p.wei_dtype, p.wei_buffer_capacity_bytes);
 
+    // ALGOs 2 and 5 parallelise outside the GEMM (over M-slices and experts,
+    // respectively), so each full-weight GEMM runs with one inner thread.
+    // Keep `p.num_threads` for cross-warming ALGO 3: its N-tile layout depends
+    // on the full dispatcher team.  The primary full-weight reorder, however,
+    // must carry the same nt_hint=1 as the runtime GEMM.  Under mixed in-place
+    // caching this is correctness-critical: warming with the outer-team hint
+    // mutates the raw weight into a layout the serial GEMM refuses, leaving no
+    // raw bytes from which to build the correct layout on a cache miss.
+    PrepackParams primary_p = p;
+    if (scheduling_algo == 2 || scheduling_algo == 5) {
+        primary_p.num_threads = 1;
+    }
+
     // The full-weight (prompt) primary warm.  Under mixed mode both bf16 and a
     // capacity-declaring int8 sym-quant weight take the in-place path, decided
     // inside the warmers by `warm_wct_for_full_weight` + `wei_inplace_fits`;
@@ -2091,7 +2104,7 @@ static void prepack_aocl_only_algo(
         // gets its chance rather than being told a full weight was warmed.
         if (s8_without_aocl_warmer(p)) { return; }
         if (w4a8) {
-            st_aocl = warm_aocl_w4a8(p, p.w4a8_group_size,
+            st_aocl = warm_aocl_w4a8(primary_p, p.w4a8_group_size,
                     w4a8_runtime_algo(scheduling_algo, pre.inner_kernel));
             primary_label = "aocl_full_weight_w4a8";
         } else if (int8_sym_quant_warm_candidate(p)) {
@@ -2100,11 +2113,11 @@ static void prepack_aocl_only_algo(
             // prompt phase always uses AOCL DLP.  In-place only under mixed
             // mode, where the `mixed_inplace` arm below has already run
             // cross_warm — the same ordering bf16 relies on.
-            st_aocl = warm_aocl_sym_quant(p);
+            st_aocl = warm_aocl_sym_quant(primary_p);
             primary_label = mixed_inplace ? "aocl_full_weight_sym_quant_inplace"
                                           : "aocl_full_weight_sym_quant";
         } else {
-            st_aocl = warm_aocl(p);
+            st_aocl = warm_aocl(primary_p);
             primary_label = mixed_inplace ? "aocl_full_weight_inplace"
                                           : "aocl_full_weight";
         }

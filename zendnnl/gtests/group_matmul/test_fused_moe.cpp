@@ -578,7 +578,11 @@ TEST_P(TestGroupMatmulCombined, AllCombinations) {
         fused_ptr = &fused;
     }
 
-    const int D_final = p.use_fused ? H : N_op1;
+    // Gated activation compacts the logical Op1 output into its first N/2
+    // columns.  The expert rows retain their physical N_op1 stride, but the
+    // MoE reduction must consume only the compacted width; the upper half is
+    // scratch/garbage by contract.
+    const int D_final = p.use_fused ? H : (p.use_act ? dim : N_op1);
     const int num_slots = M * topk;
     std::vector<float> moe_weights(num_slots, 1.0f / topk);
     std::vector<char> moe_out((size_t)M * D_final * elem_sz, 0);

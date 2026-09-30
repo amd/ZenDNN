@@ -203,6 +203,9 @@ inline void execute_m_tile(int e, int local_tid, int team_size,
             + static_cast<size_t>(row_start) * ldc[e] * dst_elem;
     static thread_local matmul_params slice_params;
     slice_params = params[e];
+    // Each M-slice GEMM is serial even though the enclosing ALGO 2 call owns
+    // the outer team.  Match the runtime DLP hint to the primary prepack.
+    slice_params.num_threads = 1;
 
     // Row-offset binary post-op buffers.  Determine broadcast-vs-2D from
     // po.dims (not leading_dim, which can be -1 for "unset" 2D tensors).
@@ -311,6 +314,7 @@ inline void execute_light_expert(int e, const std::vector<char> &layout,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype) {
     static thread_local matmul_params local_params;
     local_params = params[e];
+    local_params.num_threads = 1;
     execute_expert_slice(layout[e], transA[e], transB[e], M[e], N[e], K[e],
             alpha[e], src[e], lda[e], weight[e], ldb[e], bias[e], beta[e],
             dst[e], ldc[e], is_weights_const[e], 1, local_params,
@@ -2050,6 +2054,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // the OMP region so each worker has its own instance.
             static thread_local matmul_params w13_local;
             w13_local = params_w13[e];
+            w13_local.num_threads = 1;
 
             // Row-offset binary post-op buffers (mirrors execute_m_tile).
             // 1D broadcast and {1,N} row-broadcast are unchanged; 2D/3D
@@ -2237,6 +2242,7 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
             // for the weight side.
             static thread_local matmul_params w2_local;
             w2_local = params_w2[e];
+            w2_local.num_threads = 1;
 
             // Row-offset binary post-op buffers on Op2's params (no-op
             // for vanilla MoE since the dispatcher leaves Op2's postops

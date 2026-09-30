@@ -123,6 +123,11 @@ void parallel_per_expert(const std::vector<char> &layout,
     const int *active = act.idx;
     if (num_active == 0) { return; }
 
+    // Prepack above needs the outer team for ALGO 3 cross-warm.  Runtime
+    // expert GEMMs are serial, so publish nt_hint=1 only after prepack.
+    for (int a = 0; a < num_active; ++a)
+        params[active[a]].num_threads = 1;
+
     matmul_algo_t algo = resolve_kernel();
     scoped_active_levels guard(1);
 
@@ -441,6 +446,14 @@ expert_parallel_result try_expert_parallel_pipeline(
                     /*fused_act=*/grp_matmul_gated_act_t::none,
                     /*act_dtype=*/data_type_t::none, /*transA=*/&w2.transA,
                     /*alpha=*/&w2.alpha, /*beta=*/&w2.beta));
+
+    // Both halves execute one expert per outer worker, with serial inner
+    // GEMMs.  Keep the outer team only for the completed prepack/cross-warm.
+    for (int a = 0; a < num_active; ++a) {
+        const int i = active[a];
+        w13.params[i].num_threads = 1;
+        w2.params[i].num_threads = 1;
+    }
 
     const matmul_algo_t algo = resolve_kernel();
     scoped_active_levels guard(1);
