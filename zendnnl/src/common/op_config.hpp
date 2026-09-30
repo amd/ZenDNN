@@ -323,7 +323,8 @@ private:
     bool custom_kernel_route {false};
     int32_t matmul_otf_bpack; /**< On-the-fly B packing for Native kernels. */
     bool zp_comp_cache; /**< Enable zero-point compensation caching. */
-    uint32_t lru_cache_capacity; /**< LRU cache capacity. */
+    uint32_t lru_cache_capacity
+            = std::numeric_limits<uint32_t>::max(); /**< LRU cache capacity. */
     bool mm_partitioner_enabled; /**< Enable MM partitioner. */
     int32_t tile_m; /**< Tile size for M dimension. */
     int32_t tile_n; /**< Tile size for N dimension. */
