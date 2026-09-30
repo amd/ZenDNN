@@ -724,8 +724,11 @@ private:
                 for (size_t i = 0; i < params.post_op_config.post_ops.size();
                         ++i) {
                     auto post_op_type = params.post_op_config.post_ops[i];
+                    // gelu_erf: LIBXSMM UNARY_GELU misses the erf reference
+                    // tolerance (same accuracy gate as gelu_tanh).
                     if (mask_libxsmm_postops_
                             && (post_op_type == post_op_type_t::gelu_tanh
+                                    || post_op_type == post_op_type_t::gelu_erf
                                     || post_op_type
                                             == post_op_type_t::binary_mul
                                     || post_op_type

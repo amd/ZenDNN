@@ -1375,6 +1375,7 @@ status_t AITestUtils::run_reference_matmul(tensor_t &input, tensor_t &weights,
         for (const auto &post_op_type : post_op_config.post_ops) {
             if (mask_libxsmm_postops
                     && (post_op_type == post_op_type_t::gelu_tanh
+                            || post_op_type == post_op_type_t::gelu_erf
                             || post_op_type == post_op_type_t::binary_mul
                             || post_op_type == post_op_type_t::binary_add
                             || post_op_type == post_op_type_t::swish
@@ -1393,6 +1394,7 @@ status_t AITestUtils::run_reference_matmul(tensor_t &input, tensor_t &weights,
             auto post_op_type = post_op_config.post_ops[i];
             if (mask_libxsmm_postops
                     && (post_op_type == post_op_type_t::gelu_tanh
+                            || post_op_type == post_op_type_t::gelu_erf
                             || post_op_type == post_op_type_t::binary_mul
                             || post_op_type == post_op_type_t::binary_add
                             || post_op_type == post_op_type_t::swish
