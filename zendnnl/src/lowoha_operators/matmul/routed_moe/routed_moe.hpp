@@ -220,9 +220,9 @@ struct routed_moe_capability {
  *   - @c down_weight : [num_local_experts, hidden_size,
  *     intermediate_size] int8, same packing rule;
  *     `down_stride_expert` may add trailing padding between experts.
- *   - @c gate_up_scale : [num_local_experts, 2 * intermediate_size] f32,
- *     @c down_scale : [num_local_experts, hidden_size] f32 — one scale
- *     per weight output channel (symmetric, no zero point).
+ *   - @c gate_up_scale : [num_local_experts, 2 * intermediate_size],
+ *     @c down_scale : [num_local_experts, hidden_size], both f32 or bf16 —
+ *     one scale per weight output channel (symmetric, no zero point).
  *   - @c topk_ids : [num_tokens, topk] int32 expert ids, row stride
  *     @c topk_ids_stride.  Ids index the LOCAL expert range
  *     [0, num_local_experts) unless @c expert_map is supplied.

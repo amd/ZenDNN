@@ -1072,11 +1072,17 @@ bool no_quant_buffer(const matmul_quantization_params_t::matmul_quant_t &q) {
 
 bool tight_expert_scale(const matmul_quantization_params_t::matmul_quant_t &q,
         const int num_experts, const int output_size) {
-    return q.buff != nullptr && q.dt == data_type_t::f32
+    return q.buff != nullptr
+            && (q.dt == data_type_t::f32 || q.dt == data_type_t::bf16)
             && ((q.dims.size() == 2 && q.dims[0] == num_experts
                         && q.dims[1] == output_size)
                     || (q.dims.size() == 3 && q.dims[0] == num_experts
                             && q.dims[1] == 1 && q.dims[2] == output_size));
+}
+
+bool fast_reduction_extent_is_valid(const int extent) {
+    return extent > 0 && extent % routed_moe::block_n == 0
+            && extent <= routed_moe::max_gemm_reduction;
 }
 
 bool fast_weight_capacity_is_valid(
@@ -1119,6 +1125,8 @@ bool fast_format_candidate(const char layout_src, const bool trans_src,
     if (primary.output_size % 2 != 0
             || secondary->input_size != primary.output_size / 2
             || secondary->output_size != primary.input_size
+            || !fast_reduction_extent_is_valid(primary.input_size)
+            || !fast_reduction_extent_is_valid(secondary->input_size)
             || primary.ldb != primary.input_size
             || secondary->ldb != secondary->input_size
             || primary.params.mem_format_b != 'n'
@@ -1145,6 +1153,7 @@ bool fast_format_candidate(const char layout_src, const bool trans_src,
                     p1.quant_params.wei_scale, num_experts, primary.output_size)
             || !tight_expert_scale(p2.quant_params.wei_scale, num_experts,
                     secondary->output_size)
+            || p1.quant_params.wei_scale.dt != p2.quant_params.wei_scale.dt
             || !no_quant_buffer(p1.quant_params.wei_zp)
             || !no_quant_buffer(p2.quant_params.wei_zp)
             || effective_weight_cache_type(p1.weight_cache_type) == 0
@@ -1188,7 +1197,7 @@ routed_moe_params make_fast_params(const void *token_src,
     }
     p.gate_up_scale = primary.params.quant_params.wei_scale.buff;
     p.down_scale = secondary.params.quant_params.wei_scale.buff;
-    p.scale_dt = data_type_t::f32;
+    p.scale_dt = primary.params.quant_params.wei_scale.dt;
     p.topk_ids = routing.topk_ids;
     p.topk_ids_stride = routing.topk_ids_stride;
     p.topk_weights = routing.topk_weights;

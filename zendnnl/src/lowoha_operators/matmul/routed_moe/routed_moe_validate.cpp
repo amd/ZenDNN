@@ -268,16 +268,18 @@ status_t checked_problem_sizes(
         return status_t::memory_bad_stride;
     }
 
+    const size_t scale_bytes = static_cast<size_t>(size_of(p.scale_dt));
+    if (scale_bytes == 0) { return status_t::memory_bad_quant; }
     size_t ignored = 0;
     if (!checked_extent(p.num_local_experts, effective_gate_up_expert_stride,
                 gate_up_expert_stride, sizeof(int8_t))
             || !checked_extent(p.num_local_experts,
                     effective_down_expert_stride, down_expert_stride,
                     sizeof(int8_t))
-            || !checked_elements_2(p.num_local_experts, sizes.gate_up_oc,
-                    sizeof(float), ignored)
-            || !checked_elements_2(p.num_local_experts, p.hidden_size,
-                    sizeof(float), ignored)) {
+            || !checked_elements_2(
+                    p.num_local_experts, sizes.gate_up_oc, scale_bytes, ignored)
+            || !checked_elements_2(
+                    p.num_local_experts, p.hidden_size, scale_bytes, ignored)) {
         return status_t::memory_bad_size;
     }
 
@@ -337,7 +339,9 @@ status_t validate_static(const routed_moe_params &p) {
     if (p.src_dt != data_type_t::bf16 || p.dst_dt != data_type_t::bf16) {
         return status_t::unimplemented;
     }
-    if (p.scale_dt != data_type_t::f32) { return status_t::unimplemented; }
+    if (p.scale_dt != data_type_t::f32 && p.scale_dt != data_type_t::bf16) {
+        return status_t::unimplemented;
+    }
     // The scheme says 8-bit symmetric weights; anything else here is an
     // inconsistent request rather than a missing feature.
     if (p.wei_dt != data_type_t::s8) { return status_t::memory_bad_quant; }
@@ -448,7 +452,8 @@ status_t group_matmul_routed_moe_query(routed_moe_capability *cap) {
             routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token);
     cap->src_dtype_mask = routed_moe::dt_bit(data_type_t::bf16);
     cap->wei_dtype_mask = routed_moe::dt_bit(data_type_t::s8);
-    cap->scale_dtype_mask = routed_moe::dt_bit(data_type_t::f32);
+    cap->scale_dtype_mask = routed_moe::dt_bit(data_type_t::f32)
+            | routed_moe::dt_bit(data_type_t::bf16);
 
     cap->supports_expert_map = 1;
     cap->supports_bias = 0;

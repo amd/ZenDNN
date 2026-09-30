@@ -411,8 +411,8 @@ routed_epilogue_act(
 #endif
 
 /// DA8W8 descriptors for the explicit routed superset overload, built from a
-/// moe_problem.  `bf16_scales` hands the weight scales over in bf16, which the
-/// routed executor does not accept and the grouped path does.
+/// moe_problem. `bf16_scales` exercises the routed executor's one-time
+/// bf16-to-f32 scale conversion and cache.
 struct da8w8_call {
     group_matmul_projection_params primary;
     group_matmul_projection_params secondary;
@@ -544,7 +544,7 @@ TEST_F(RoutedMoECapability, ReportsTheImplementedEnvelope) {
     EXPECT_EQ(cap.block_m, 32);
     EXPECT_EQ(cap.block_n, 32);
     EXPECT_EQ(cap.vnni_step, 4);
-    EXPECT_EQ(cap.max_kernel_rows, 4);
+    EXPECT_EQ(cap.max_kernel_rows, 8);
     EXPECT_EQ(cap.hidden_size_align, 32);
     EXPECT_EQ(cap.intermediate_size_align, 32);
 
@@ -564,7 +564,8 @@ TEST_F(RoutedMoECapability, ReportsTheImplementedEnvelope) {
             cap.src_dtype_mask, 1u << static_cast<uint32_t>(data_type_t::bf16));
     EXPECT_EQ(cap.wei_dtype_mask, 1u << static_cast<uint32_t>(data_type_t::s8));
     EXPECT_EQ(cap.scale_dtype_mask,
-            1u << static_cast<uint32_t>(data_type_t::f32));
+            (1u << static_cast<uint32_t>(data_type_t::f32))
+                    | (1u << static_cast<uint32_t>(data_type_t::bf16)));
 
     EXPECT_EQ(cap.supports_expert_map, 1);
     EXPECT_EQ(cap.supports_bias, 0);
@@ -776,10 +777,6 @@ TEST_F(RoutedMoEValidate, GeluKeepsEveryNonActivationRejection) {
     EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::unimplemented);
 
     p = pb.params();
-    p.scale_dt = data_type_t::bf16;
-    EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::unimplemented);
-
-    p = pb.params();
     p.gate_up_scale_stride_expert = 2 * pb.N + 1;
     EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::memory_bad_stride);
 
@@ -853,7 +850,7 @@ TEST_F(RoutedMoEValidate, RejectsUnsupportedDataTypes) {
     EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::unimplemented);
 
     p = pb.params();
-    p.scale_dt = data_type_t::bf16;
+    p.scale_dt = data_type_t::f16;
     EXPECT_EQ(group_matmul_routed_moe_validate(p), status_t::unimplemented);
 }
 
@@ -1819,10 +1816,9 @@ TEST_F(RoutedMoESuperset, CapacityMetadataKeepsGroupedFallbackCorrect) {
     EXPECT_LT(rel_mae(pb.dst, expected), 2e-2);
 }
 
-// bf16 weight scales (the checkpoint dtype, when a host forwards it without
-// converting) are outside the routed contract: the call must still succeed,
-// on the grouped path, with the same numerics.
-TEST_F(RoutedMoESuperset, GeluBf16ScalesUseGroupedFallback) {
+// bf16 checkpoint scales are accepted by the routed fast path, converted once
+// to f32 and cached for subsequent calls.
+TEST_F(RoutedMoESuperset, GeluBf16ScalesUseRoutedFastPath) {
     moe_problem pb;
     pb.build(9, 128, 64, 8, 2, 0xb16u);
     pb.act = routed_moe_activation_t::gelu_and_mul;
@@ -1831,8 +1827,55 @@ TEST_F(RoutedMoESuperset, GeluBf16ScalesUseGroupedFallback) {
 
     grouped_call_probe probe;
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
-    EXPECT_TRUE(probe.grouped_ran());
+    EXPECT_FALSE(probe.grouped_ran());
     EXPECT_LT(rel_mae(pb.dst, reference_moe(pb)), 2e-2);
+}
+
+TEST_F(RoutedMoESuperset, Bf16ScaleCacheFollowsPackedWeightIdentity) {
+    moe_problem pb;
+    pb.build(9, 128, 64, 8, 2, 0xb17u);
+    da8w8_call call(pb, /*bf16_scales=*/true);
+
+    grouped_call_probe probe;
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    const auto first = pb.dst;
+
+    // A scale tensor may be rematerialized at another address while the
+    // immutable model weight keeps the same cache identity. The converted
+    // scales remain attached to that weight until the explicit model-lifetime
+    // cache flush.
+    std::vector<uint16_t> alternate_down_scale = call.s2_bf16;
+    for (auto &value : alternate_down_scale) {
+        value = f32_to_bf16(2.0f * bf16_to_f32(value));
+    }
+    call.secondary.params.quant_params.wei_scale.buff
+            = alternate_down_scale.data();
+
+    std::fill(pb.dst.begin(), pb.dst.end(), uint16_t {0});
+    probe.arm();
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_EQ(pb.dst, first);
+
+    group_matmul_routed_moe_flush_weight_cache();
+    std::fill(pb.dst.begin(), pb.dst.end(), uint16_t {0});
+    probe.arm();
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_GT(rel_mae(pb.dst, first), 0.1);
+}
+
+TEST_F(RoutedMoESuperset, Bf16ScalesOutsideFastGeometryUseGroupedFallback) {
+    moe_problem pb;
+    pb.build(4, 128, 48, 8, 2, 0xbf16u);
+    const auto expected = reference_moe(pb);
+    da8w8_call call(pb, /*bf16_scales=*/true);
+
+    grouped_call_probe probe;
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_TRUE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected), 2e-2);
 }
 
 TEST_F(RoutedMoESuperset, GeluWithBiasUsesGroupedFallback) {

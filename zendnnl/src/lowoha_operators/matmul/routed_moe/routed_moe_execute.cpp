@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -163,6 +164,98 @@ cache_store() {
     return store;
 }
 
+struct scale_cache_key_t {
+    // The packed-weight entry is the model-lifetime identity. Quantization
+    // scales are immutable metadata owned by that weight and share its flush
+    // lifecycle, so a transient scale tensor address must not create a second
+    // conversion.
+    const void *identity = nullptr;
+    packed_tensor_role_t role = packed_tensor_role_t::gate_up;
+    size_t elements = 0;
+    data_type_t dtype = data_type_t::none;
+
+    bool operator==(const scale_cache_key_t &other) const {
+        return identity == other.identity && role == other.role
+                && elements == other.elements && dtype == other.dtype;
+    }
+};
+
+struct scale_cache_key_hash_t {
+    size_t operator()(const scale_cache_key_t &key) const {
+        size_t hash = std::hash<const void *> {}(key.identity);
+        const auto combine = [&](size_t value) {
+            hash ^= value + static_cast<size_t>(0x9e3779b9u) + (hash << 6)
+                    + (hash >> 2);
+        };
+        combine(std::hash<unsigned> {}(static_cast<unsigned>(key.role)));
+        combine(std::hash<size_t> {}(key.elements));
+        combine(std::hash<int32_t> {}(static_cast<int32_t>(key.dtype)));
+        return hash;
+    }
+};
+
+struct converted_scale_t {
+    float *data = nullptr;
+    size_t elements = 0;
+    scale_cache_key_t key {};
+
+    ~converted_scale_t() { zendnnl_aligned_free(data); }
+
+    converted_scale_t() = default;
+    converted_scale_t(const converted_scale_t &) = delete;
+    converted_scale_t &operator=(const converted_scale_t &) = delete;
+};
+
+std::unordered_map<scale_cache_key_t, std::shared_ptr<converted_scale_t>,
+        scale_cache_key_hash_t> &
+scale_cache_store() {
+    static std::unordered_map<scale_cache_key_t,
+            std::shared_ptr<converted_scale_t>, scale_cache_key_hash_t>
+            store;
+    return store;
+}
+
+status_t lookup_converted_scale(const void *identity, const void *scale,
+        packed_tensor_role_t role, size_t elements, data_type_t dtype,
+        int num_threads, std::shared_ptr<const converted_scale_t> &result) {
+    if (identity == nullptr || scale == nullptr || elements == 0
+            || dtype != data_type_t::bf16) {
+        return status_t::memory_bad_quant;
+    }
+    if (elements > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        return status_t::memory_bad_size;
+    }
+    const scale_cache_key_t key {identity, role, elements, dtype};
+    std::lock_guard<std::mutex> guard(cache_mutex());
+    auto &store = scale_cache_store();
+    const auto found = store.find(key);
+    if (found != store.end()) {
+        if (found->second == nullptr || found->second->data == nullptr
+                || found->second->elements != elements
+                || !(found->second->key == key)) {
+            return status_t::memory_bad_size;
+        }
+        result = found->second;
+        return status_t::success;
+    }
+
+    auto entry = std::make_shared<converted_scale_t>();
+    void *raw = zendnnl_aligned_alloc(64, elements * sizeof(float));
+    if (raw == nullptr) { return status_t::memory_bad_storage; }
+    entry->data = static_cast<float *>(raw);
+    entry->elements = elements;
+    entry->key = key;
+    const auto *src = static_cast<const uint16_t *>(scale);
+#pragma omp parallel for num_threads(num_threads) schedule(static)
+    for (long long i = 0; i < static_cast<long long>(elements); ++i) {
+        const uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+        std::memcpy(entry->data + i, &bits, sizeof(bits));
+    }
+    store.emplace(key, entry);
+    result = std::move(entry);
+    return status_t::success;
+}
+
 status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
         const int8_t *weight, int64_t num_experts, int64_t out_channels,
         int64_t in_channels, int64_t expert_stride, data_type_t dtype,
@@ -226,6 +319,7 @@ struct scratch_t {
     std::vector<float> c_tile;
     std::vector<uint16_t> gate_up_out;
     std::vector<uint16_t> down_out;
+    std::vector<int64_t> tile_cost_prefix;
 
     template <typename T>
     static T *reserve(std::vector<T> &v, size_t n) {
@@ -387,6 +481,54 @@ inline void loop_2d(int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1,
     }
 }
 
+bool decode_balance_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("ZENDNNL_ROUTED_MOE_DECODE_BALANCE");
+        return value == nullptr || *value == '\0'
+                || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+bool decode_columns_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("ZENDNNL_ROUTED_MOE_DECODE_COLUMNS");
+        return value == nullptr || *value == '\0'
+                || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+// Relative cost of one gate/up tile of an M block with `rows` live rows, in
+// 1/16ths of the tile's weight stream: the micro-kernel streams the block from
+// DRAM with its first row group and re-runs it from L2 for every further one,
+// which costs about 1/16 of the stream each.
+inline int64_t decode_tile_cost(int64_t rows) {
+    return 15 + div_up(rows, gate_up_kernel_rows);
+}
+
+/// Contiguous M-block-major tile range [t0, t1) holding thread `tid`'s equal
+/// share of a stage's cost.  `prefix[mb]` is the summed per-tile cost of
+/// blocks [0, mb); every block has `nb_per_block` tiles.
+inline void decode_tile_range(const int64_t *prefix, int64_t num_blocks,
+        int64_t nb_per_block, int tid, int nthr, int64_t &t0, int64_t &t1) {
+    const int64_t total = prefix[num_blocks] * nb_per_block;
+    // First tile whose cost span starts at or after `cost`; num_blocks is a
+    // few hundred at most, so a linear scan is cheaper than bookkeeping.
+    const auto tile_at = [&](int64_t cost) {
+        int64_t mb = 0;
+        while (mb < num_blocks && prefix[mb + 1] * nb_per_block <= cost) {
+            ++mb;
+        }
+        if (mb == num_blocks) { return num_blocks * nb_per_block; }
+        const int64_t per_tile = prefix[mb + 1] - prefix[mb];
+        return mb * nb_per_block
+                + div_up(cost - prefix[mb] * nb_per_block, per_tile);
+    };
+    t0 = tile_at(total * tid / nthr);
+    t1 = tile_at(total * (tid + 1) / nthr);
+}
+
 /// Near-square factorisation of `nthr` into (rows, cols) biased by the
 /// aspect ratio of the (MB, NB) iteration space.
 inline void thread_grid(int64_t MB, int64_t NB, int nthr, int &gm, int &gn) {
@@ -542,8 +684,43 @@ status_t execute(const routed_moe_params &p) {
         if (cache_status != status_t::success) { return cache_status; }
         const int8_t *packed_gate_up = pw_gate_up->data;
         const int8_t *packed_down = pw_down->data;
-        const auto *gate_up_scale = static_cast<const float *>(p.gate_up_scale);
-        const auto *down_scale = static_cast<const float *>(p.down_scale);
+        const float *gate_up_scale = nullptr;
+        const float *down_scale = nullptr;
+        std::shared_ptr<const converted_scale_t> converted_gate_up;
+        std::shared_ptr<const converted_scale_t> converted_down;
+        if (p.scale_dt == data_type_t::f32) {
+            gate_up_scale = static_cast<const float *>(p.gate_up_scale);
+            down_scale = static_cast<const float *>(p.down_scale);
+        } else {
+            const auto scale_elements
+                    = [](int64_t a, int64_t b, size_t &value) {
+                if (a <= 0 || b <= 0
+                        || static_cast<uint64_t>(a)
+                                > std::numeric_limits<size_t>::max()
+                                        / static_cast<uint64_t>(b)) {
+                    return false;
+                }
+                value = static_cast<size_t>(a) * static_cast<size_t>(b);
+                return true;
+            };
+            size_t gate_up_elements = 0;
+            size_t down_elements = 0;
+            if (!scale_elements(
+                        p.num_local_experts, gate_up_oc, gate_up_elements)
+                    || !scale_elements(p.num_local_experts, K, down_elements)) {
+                return status_t::memory_bad_size;
+            }
+            status_t scale_status = lookup_converted_scale(pw_gate_up.get(),
+                    p.gate_up_scale, packed_tensor_role_t::gate_up,
+                    gate_up_elements, p.scale_dt, nth, converted_gate_up);
+            if (scale_status != status_t::success) { return scale_status; }
+            scale_status = lookup_converted_scale(pw_down.get(), p.down_scale,
+                    packed_tensor_role_t::down, down_elements, p.scale_dt, nth,
+                    converted_down);
+            if (scale_status != status_t::success) { return scale_status; }
+            gate_up_scale = converted_gate_up->data;
+            down_scale = converted_down->data;
+        }
 
         // ── routing ─────────────────────────────────────────────────────────
         routing_t r;
@@ -623,83 +800,137 @@ status_t execute(const routed_moe_params &p) {
             quantize_row_u8(Aq + m * K, As[m], src + m * p.src_stride, K);
         }
 
+        const bool gelu = p.activation == routed_moe_activation_t::gelu_and_mul;
+
+        // Gate/up tile (mb, nb) with the activation folded in.  `gather`
+        // reloads the block's rows into the thread's A buffer; callers reuse
+        // them across consecutive N blocks of the same M block.
+        const auto gate_up_tile
+                = [&](uint8_t *ZENDNNL_ROUTED_RESTRICT A, float *As_tile,
+                          int64_t mb, int64_t nb, bool gather) {
+            const int64_t m_size = r.offsets[mb + 1] - r.offsets[mb];
+            const int32_t expert_id = r.expert_ids[mb];
+            const int32_t *A_ids = r.sorted_ids + mb * block_m;
+
+            if (gather) {
+                for (int64_t m = 0; m < m_size; ++m) {
+                    const int64_t index = A_ids[m] / topk;
+                    std::memcpy(
+                            A + m * K, Aq + index * K, static_cast<size_t>(K));
+                    As_tile[m] = As[index];
+                }
+            }
+
+            const int8_t *B0 = packed_gate_up + expert_id * stride_gate_up
+                    + nb * block_n * packed_K;
+            const int8_t *B1 = packed_gate_up + expert_id * stride_gate_up
+                    + (nb + NB1) * block_n * packed_K;
+            const float *Bs0
+                    = gate_up_scale + expert_id * gate_up_oc + nb * block_n;
+            const float *Bs1 = gate_up_scale + expert_id * gate_up_oc
+                    + (nb + NB1) * block_n;
+            const int32_t *Bcomp0
+                    = reinterpret_cast<const int32_t *>(B0 + block_n * K);
+            const int32_t *Bcomp1
+                    = reinterpret_cast<const int32_t *>(B1 + block_n * K);
+
+            uint16_t *C = gate_up_out + r.offsets[mb] * N + nb * block_n;
+            if (gelu) {
+                tinygemm_gate_up<routed_moe_activation_t::gelu_and_mul>(A, B0,
+                        B1, C, As_tile, Bs0, Bs1, Bcomp0, Bcomp1, m_size, K, K,
+                        block_n, N);
+            } else {
+                tinygemm_gate_up<routed_moe_activation_t::silu_and_mul>(A, B0,
+                        B1, C, As_tile, Bs0, Bs1, Bcomp0, Bcomp1, m_size, K, K,
+                        block_n, N);
+            }
+        };
+
+        // Down tile (mb, nb), scaled by the router weight and scattered back
+        // to (token, slot) order.  A is already contiguous in sorted order.
+        const auto down_tile = [&](float *ZENDNNL_ROUTED_RESTRICT C, int64_t mb,
+                                       int64_t nb) {
+            const int64_t m_size = r.offsets[mb + 1] - r.offsets[mb];
+            const int32_t expert_id = r.expert_ids[mb];
+            const int32_t *A_ids = r.sorted_ids + mb * block_m;
+            const uint8_t *A = Aq + r.offsets[mb] * N;
+            const float *As_blk = As + r.offsets[mb];
+
+            const int8_t *B = packed_down + expert_id * stride_down
+                    + nb * block_n * packed_N;
+            const float *Bs = down_scale + expert_id * K + nb * block_n;
+            const int32_t *Bcomp
+                    = reinterpret_cast<const int32_t *>(B + block_n * N);
+
+            tinygemm_down(
+                    A, B, C, As_blk, Bs, Bcomp, m_size, N, N, block_n, block_n);
+
+            for (int64_t m = 0; m < m_size; ++m) {
+                const int32_t index = A_ids[m];
+                copy_mul_bf16(down_out + index * K + nb * block_n,
+                        C + m * block_n, router_weights[index], block_n);
+            }
+        };
+
+        // At M <= block_m every routed expert owns exactly one M block, so the
+        // grid's L2 reuse across M blocks cannot apply and both GEMM stages
+        // are weight streaming.  Each thread then takes a contiguous,
+        // M-block-major tile range carrying an equal share of the stage's
+        // cost, so hot experts' tiles spread over several threads and no
+        // thread holds the stage open while the others idle.
+        const bool decode_balance = M <= block_m && decode_balance_enabled();
+        int64_t *cost_prefix = nullptr;
+        if (decode_balance) {
+            cost_prefix = scratch_t::reserve(
+                    sc.tile_cost_prefix, static_cast<size_t>(MB + 1));
+            cost_prefix[0] = 0;
+            for (int64_t mb = 0; mb < MB; ++mb) {
+                cost_prefix[mb + 1] = cost_prefix[mb]
+                        + decode_tile_cost(r.offsets[mb + 1] - r.offsets[mb]);
+            }
+        }
+
         // ---- stage 1: gate/up + fused activation ----------------------------
         {
             const int64_t chunk_bytes = block_n * K * 2;
-            const bool gelu
-                    = p.activation == routed_moe_activation_t::gelu_and_mul;
 #pragma omp parallel num_threads(nth)
             {
                 const int tid = omp_get_thread_num();
                 const int nthr = omp_get_num_threads();
+                uint8_t *ZENDNNL_ROUTED_RESTRICT A = A_tile + tid * block_m * K;
+                alignas(64) float As_tile[block_m];
 
-                int gm = 1;
-                int gn = 1;
-                thread_grid(MB, NB1, nthr, gm, gn);
-                const int im = tid / gn;
-                const int in = tid % gn;
+                if (decode_balance) {
+                    int64_t t0 = 0;
+                    int64_t t1 = 0;
+                    decode_tile_range(cost_prefix, MB, NB1, tid, nthr, t0, t1);
+                    for (int64_t t = t0; t < t1; ++t) {
+                        const int64_t nb = t % NB1;
+                        gate_up_tile(
+                                A, As_tile, t / NB1, nb, t == t0 || nb == 0);
+                    }
+                } else {
+                    int gm = 1;
+                    int gn = 1;
+                    thread_grid(MB, NB1, nthr, gm, gn);
+                    const int im = tid / gn;
+                    const int in = tid % gn;
 
-                const int64_t bm = div_up(MB, gm);
-                const int64_t bn = div_up(NB1, gn);
-                const int64_t mb0 = im * bm;
-                const int64_t mb1 = std::min(MB, mb0 + bm);
-                const int64_t nb0 = in * bn;
-                const int64_t nb1 = std::min(NB1, nb0 + bn);
+                    const int64_t bm = div_up(MB, gm);
+                    const int64_t bn = div_up(NB1, gn);
+                    const int64_t mb0 = im * bm;
+                    const int64_t mb1 = std::min(MB, mb0 + bm);
+                    const int64_t nb0 = in * bn;
+                    const int64_t nb1 = std::min(NB1, nb0 + bn);
 
-                if (mb0 < mb1 && nb0 < nb1) {
-                    uint8_t *ZENDNNL_ROUTED_RESTRICT A
-                            = A_tile + tid * block_m * K;
-                    alignas(64) float As_tile[block_m];
-
-                    loop_2d(mb0, mb1, nb0, nb1, chunk_bytes,
-                            [&](int64_t mb, int64_t nb, int64_t nb_offset) {
-                        const int64_t m_size
-                                = r.offsets[mb + 1] - r.offsets[mb];
-                        const int32_t expert_id = r.expert_ids[mb];
-                        const int32_t *A_ids = r.sorted_ids + mb * block_m;
-
-                        // Gather this block's rows once per N chunk, then
-                        // reuse them across every N block in the chunk.
-                        if (nb_offset == 0) {
-                            for (int64_t m = 0; m < m_size; ++m) {
-                                const int64_t index = A_ids[m] / topk;
-                                std::memcpy(A + m * K, Aq + index * K,
-                                        static_cast<size_t>(K));
-                                As_tile[m] = As[index];
-                            }
-                        }
-
-                        const int8_t *B0 = packed_gate_up
-                                + expert_id * stride_gate_up
-                                + nb * block_n * packed_K;
-                        const int8_t *B1 = packed_gate_up
-                                + expert_id * stride_gate_up
-                                + (nb + NB1) * block_n * packed_K;
-                        const float *Bs0 = gate_up_scale
-                                + expert_id * gate_up_oc + nb * block_n;
-                        const float *Bs1 = gate_up_scale
-                                + expert_id * gate_up_oc + (nb + NB1) * block_n;
-                        const int32_t *Bcomp0
-                                = reinterpret_cast<const int32_t *>(
-                                        B0 + block_n * K);
-                        const int32_t *Bcomp1
-                                = reinterpret_cast<const int32_t *>(
-                                        B1 + block_n * K);
-
-                        uint16_t *C = gate_up_out + r.offsets[mb] * N
-                                + nb * block_n;
-                        if (gelu) {
-                            tinygemm_gate_up<
-                                    routed_moe_activation_t::gelu_and_mul>(A,
-                                    B0, B1, C, As_tile, Bs0, Bs1, Bcomp0,
-                                    Bcomp1, m_size, K, K, block_n, N);
-                        } else {
-                            tinygemm_gate_up<
-                                    routed_moe_activation_t::silu_and_mul>(A,
-                                    B0, B1, C, As_tile, Bs0, Bs1, Bcomp0,
-                                    Bcomp1, m_size, K, K, block_n, N);
-                        }
-                    });
+                    // Gather each block's rows once per N chunk, then reuse
+                    // them across every N block in the chunk.
+                    if (mb0 < mb1 && nb0 < nb1) {
+                        loop_2d(mb0, mb1, nb0, nb1, chunk_bytes,
+                                [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+                            gate_up_tile(A, As_tile, mb, nb, nb_offset == 0);
+                        });
+                    }
                 }
             }
         }
@@ -713,43 +944,38 @@ status_t execute(const routed_moe_params &p) {
             }
         }
 
-        // ---- stage 2: down projection + weighted scatter --------------------
-        {
-            const int64_t chunk_bytes = block_n * N;
+        // At decode, when every slot has a resident expert and there is at
+        // least one output column block per thread, each thread owns a fixed
+        // range of down-projection output columns for all experts.  Every
+        // thread then streams the same bytes, and because no other thread
+        // writes its columns it also reduces over topk itself: no scatter
+        // through a shared buffer and no separate reduction stage.  Each
+        // (token, slot) contribution is still rounded to bf16 and the slots
+        // summed in order, exactly as stages 2 and 3 do.
+        if (decode_balance && decode_columns_enabled() && r.num_inactive == 0
+                && NB2 >= nth) {
+            // ---- stages 2 and 3 at decode: column-owned down + reduce -------
 #pragma omp parallel num_threads(nth)
             {
                 const int tid = omp_get_thread_num();
                 const int nthr = omp_get_num_threads();
+                const int64_t nb0 = NB2 * tid / nthr;
+                const int64_t nb1 = NB2 * (tid + 1) / nthr;
+                const int64_t cols = (nb1 - nb0) * block_n;
+                float *ZENDNNL_ROUTED_RESTRICT C
+                        = C_tile + tid * 2 * block_m * block_n;
+                // Columns [nb0, nb1) of every (token, slot) row, row stride
+                // `cols`; the threads' regions tile down_out exactly.
+                uint16_t *ZENDNNL_ROUTED_RESTRICT own
+                        = down_out + numel * nb0 * block_n;
 
-                int gm = 1;
-                int gn = 1;
-                thread_grid(MB, NB2, nthr, gm, gn);
-                const int im = tid / gn;
-                const int in = tid % gn;
-
-                const int64_t bm = div_up(MB, gm);
-                const int64_t bn = div_up(NB2, gn);
-                const int64_t mb0 = im * bm;
-                const int64_t mb1 = std::min(MB, mb0 + bm);
-                const int64_t nb0 = in * bn;
-                const int64_t nb1 = std::min(NB2, nb0 + bn);
-
-                if (mb0 < mb1 && nb0 < nb1) {
-                    float *ZENDNNL_ROUTED_RESTRICT C
-                            = C_tile + tid * 2 * block_m * block_n;
-
-                    loop_2d(mb0, mb1, nb0, nb1, chunk_bytes,
-                            [&](int64_t mb, int64_t nb, int64_t nb_offset) {
-                        (void)nb_offset;
-                        const int64_t m_size
-                                = r.offsets[mb + 1] - r.offsets[mb];
-                        const int32_t expert_id = r.expert_ids[mb];
-                        const int32_t *A_ids = r.sorted_ids + mb * block_m;
-
-                        // A is already contiguous in sorted order.
-                        const uint8_t *A = Aq + r.offsets[mb] * N;
-                        const float *As_blk = As + r.offsets[mb];
-
+                for (int64_t mb = 0; cols > 0 && mb < MB; ++mb) {
+                    const int64_t m_size = r.offsets[mb + 1] - r.offsets[mb];
+                    const int32_t expert_id = r.expert_ids[mb];
+                    const int32_t *A_ids = r.sorted_ids + mb * block_m;
+                    const uint8_t *A = Aq + r.offsets[mb] * N;
+                    const float *As_blk = As + r.offsets[mb];
+                    for (int64_t nb = nb0; nb < nb1; ++nb) {
                         const int8_t *B = packed_down + expert_id * stride_down
                                 + nb * block_n * packed_N;
                         const float *Bs
@@ -757,17 +983,64 @@ status_t execute(const routed_moe_params &p) {
                         const int32_t *Bcomp
                                 = reinterpret_cast<const int32_t *>(
                                         B + block_n * N);
-
                         tinygemm_down(A, B, C, As_blk, Bs, Bcomp, m_size, N, N,
                                 block_n, block_n);
-
                         for (int64_t m = 0; m < m_size; ++m) {
                             const int32_t index = A_ids[m];
-                            copy_mul_bf16(down_out + index * K + nb * block_n,
+                            copy_mul_bf16(
+                                    own + index * cols + (nb - nb0) * block_n,
                                     C + m * block_n, router_weights[index],
                                     block_n);
                         }
-                    });
+                    }
+                }
+
+                for (int64_t m = 0; cols > 0 && m < M; ++m) {
+                    sum_rows_bf16(dst + m * p.dst_stride + nb0 * block_n,
+                            own + m * topk * cols, topk, cols);
+                }
+            }
+            return status_t::success;
+        }
+
+        // ---- stage 2: down projection + weighted scatter --------------------
+        {
+            const int64_t chunk_bytes = block_n * N;
+#pragma omp parallel num_threads(nth)
+            {
+                const int tid = omp_get_thread_num();
+                const int nthr = omp_get_num_threads();
+                float *ZENDNNL_ROUTED_RESTRICT C
+                        = C_tile + tid * 2 * block_m * block_n;
+
+                if (decode_balance) {
+                    int64_t t0 = 0;
+                    int64_t t1 = 0;
+                    decode_tile_range(cost_prefix, MB, NB2, tid, nthr, t0, t1);
+                    for (int64_t t = t0; t < t1; ++t) {
+                        down_tile(C, t / NB2, t % NB2);
+                    }
+                } else {
+                    int gm = 1;
+                    int gn = 1;
+                    thread_grid(MB, NB2, nthr, gm, gn);
+                    const int im = tid / gn;
+                    const int in = tid % gn;
+
+                    const int64_t bm = div_up(MB, gm);
+                    const int64_t bn = div_up(NB2, gn);
+                    const int64_t mb0 = im * bm;
+                    const int64_t mb1 = std::min(MB, mb0 + bm);
+                    const int64_t nb0 = in * bn;
+                    const int64_t nb1 = std::min(NB2, nb0 + bn);
+
+                    if (mb0 < mb1 && nb0 < nb1) {
+                        loop_2d(mb0, mb1, nb0, nb1, chunk_bytes,
+                                [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+                            (void)nb_offset;
+                            down_tile(C, mb, nb);
+                        });
+                    }
                 }
             }
         }
@@ -794,6 +1067,7 @@ void flush_weight_cache() {
 #if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
     std::lock_guard<std::mutex> guard(cache_mutex());
     cache_store().clear();
+    scale_cache_store().clear();
 #endif
 }
 

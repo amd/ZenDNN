@@ -62,7 +62,13 @@ namespace routed_moe {
 constexpr int64_t block_m = 32;
 constexpr int64_t block_n = 32;
 constexpr int64_t vnni_step = 4;
-constexpr int64_t max_kernel_rows = 4;
+// Rows per micro-kernel pass.  Gate/up holds 2 streams x rows x 2 zmm
+// accumulators plus 4 B vectors and the A broadcast (6 rows: 29 of 32 zmm);
+// down holds rows x 2 accumulators, and 8 rows give enough independent chains
+// to cover the vpdpbusd latency.
+constexpr int64_t gate_up_kernel_rows = 6;
+constexpr int64_t down_kernel_rows = 8;
+constexpr int64_t max_kernel_rows = down_kernel_rows;
 constexpr uint32_t packed_layout_version = 1;
 
 // vpdpbusd accumulates an unsigned activation (at most 255) times a signed

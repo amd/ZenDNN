@@ -67,7 +67,8 @@ namespace routed_moe {
 // block_n = 32 is the width the epilogue is written for: two 16-lane f32
 // vectors combine into one 32-lane bf16 store, and the compensation / scale
 // loads are two full zmm each.  block_m = 32 is the routing padding quantum;
-// the micro-kernel itself is instantiated for 1..4 rows and iterates.
+// the micro-kernels are instantiated for up to gate_up_kernel_rows /
+// down_kernel_rows rows and iterate over row groups.
 // ---------------------------------------------------------------------------
 inline int64_t div_up(int64_t a, int64_t b) {
     return (a + b - 1) / b;
@@ -314,6 +315,122 @@ inline void pack_weight_block(int8_t *ZENDNNL_ROUTED_RESTRICT dst,
 }
 
 // ---------------------------------------------------------------------------
+// K loops of the micro-kernels, for 32 output columns (two zmm per row).
+//
+// The loop-carried accumulators are named scalars, each pinned by an empty asm
+// after its update: GCC otherwise keeps every accumulator in a second register
+// and copies it around each vpdpbusd (or, for a pinned array element, stores
+// it back to the stack), which leaves the compute-bound (prefill) loop front-
+// end bound.  One broadcast of 4 packed activation bytes per row and one
+// 64-byte B load per stream per column feed the vpdpbusd; the int32 sums over
+// k are exact, so the results match any other loop schedule.
+// ---------------------------------------------------------------------------
+template <int ROWS>
+ZENDNNL_ALWAYS_INLINE inline void gate_up_k_loop(
+        const int32_t *ZENDNNL_ROUTED_RESTRICT a_ptr,
+        const int32_t *ZENDNNL_ROUTED_RESTRICT b0_ptr,
+        const int32_t *ZENDNNL_ROUTED_RESTRICT b1_ptr, int64_t K4, int64_t lda4,
+        int64_t ldb4, __m512i *vc0, __m512i *vc1) {
+    static_assert(ROWS >= 1 && ROWS <= 6, "gate/up K loop covers 1..6 rows");
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i g00 = zero, g01 = zero, g10 = zero, g11 = zero, g20 = zero,
+            g21 = zero, g30 = zero, g31 = zero, g40 = zero, g41 = zero,
+            g50 = zero, g51 = zero;
+    __m512i u00 = zero, u01 = zero, u10 = zero, u11 = zero, u20 = zero,
+            u21 = zero, u30 = zero, u31 = zero, u40 = zero, u41 = zero,
+            u50 = zero, u51 = zero;
+    for (int64_t k = 0; k < K4; ++k) {
+        const __m512i x0 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b0_ptr + k * ldb4));
+        const __m512i x1 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b0_ptr + k * ldb4 + 16));
+        const __m512i y0 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b1_ptr + k * ldb4));
+        const __m512i y1 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b1_ptr + k * ldb4 + 16));
+#define ZENDNNL_RMOE_ROW(r) \
+    if constexpr (ROWS > r) { \
+        const __m512i va = _mm512_set1_epi32(a_ptr[r * lda4 + k]); \
+        g##r##0 = _mm512_dpbusd_epi32(g##r##0, va, x0); \
+        g##r##1 = _mm512_dpbusd_epi32(g##r##1, va, x1); \
+        u##r##0 = _mm512_dpbusd_epi32(u##r##0, va, y0); \
+        u##r##1 = _mm512_dpbusd_epi32(u##r##1, va, y1); \
+        asm("" : "+v"(g##r##0), "+v"(g##r##1), "+v"(u##r##0), "+v"(u##r##1)); \
+    }
+        ZENDNNL_RMOE_ROW(0)
+        ZENDNNL_RMOE_ROW(1)
+        ZENDNNL_RMOE_ROW(2)
+        ZENDNNL_RMOE_ROW(3)
+        ZENDNNL_RMOE_ROW(4)
+        ZENDNNL_RMOE_ROW(5)
+#undef ZENDNNL_RMOE_ROW
+    }
+#define ZENDNNL_RMOE_OUT(r) \
+    if constexpr (ROWS > r) { \
+        vc0[2 * r] = g##r##0; \
+        vc0[2 * r + 1] = g##r##1; \
+        vc1[2 * r] = u##r##0; \
+        vc1[2 * r + 1] = u##r##1; \
+    }
+    ZENDNNL_RMOE_OUT(0)
+    ZENDNNL_RMOE_OUT(1)
+    ZENDNNL_RMOE_OUT(2)
+    ZENDNNL_RMOE_OUT(3)
+    ZENDNNL_RMOE_OUT(4)
+    ZENDNNL_RMOE_OUT(5)
+#undef ZENDNNL_RMOE_OUT
+}
+
+template <int ROWS>
+ZENDNNL_ALWAYS_INLINE inline void down_k_loop(
+        const int32_t *ZENDNNL_ROUTED_RESTRICT a_ptr,
+        const int32_t *ZENDNNL_ROUTED_RESTRICT b_ptr, int64_t K4, int64_t lda4,
+        int64_t ldb4, __m512i *vc) {
+    static_assert(ROWS >= 1 && ROWS <= 8, "down K loop covers 1..8 rows");
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i c00 = zero, c01 = zero, c10 = zero, c11 = zero, c20 = zero,
+            c21 = zero, c30 = zero, c31 = zero, c40 = zero, c41 = zero,
+            c50 = zero, c51 = zero, c60 = zero, c61 = zero, c70 = zero,
+            c71 = zero;
+    for (int64_t k = 0; k < K4; ++k) {
+        const __m512i b0 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b_ptr + k * ldb4));
+        const __m512i b1 = _mm512_loadu_si512(
+                reinterpret_cast<const void *>(b_ptr + k * ldb4 + 16));
+#define ZENDNNL_RMOE_ROW(r) \
+    if constexpr (ROWS > r) { \
+        const __m512i va = _mm512_set1_epi32(a_ptr[r * lda4 + k]); \
+        c##r##0 = _mm512_dpbusd_epi32(c##r##0, va, b0); \
+        c##r##1 = _mm512_dpbusd_epi32(c##r##1, va, b1); \
+        asm("" : "+v"(c##r##0), "+v"(c##r##1)); \
+    }
+        ZENDNNL_RMOE_ROW(0)
+        ZENDNNL_RMOE_ROW(1)
+        ZENDNNL_RMOE_ROW(2)
+        ZENDNNL_RMOE_ROW(3)
+        ZENDNNL_RMOE_ROW(4)
+        ZENDNNL_RMOE_ROW(5)
+        ZENDNNL_RMOE_ROW(6)
+        ZENDNNL_RMOE_ROW(7)
+#undef ZENDNNL_RMOE_ROW
+    }
+#define ZENDNNL_RMOE_OUT(r) \
+    if constexpr (ROWS > r) { \
+        vc[2 * r] = c##r##0; \
+        vc[2 * r + 1] = c##r##1; \
+    }
+    ZENDNNL_RMOE_OUT(0)
+    ZENDNNL_RMOE_OUT(1)
+    ZENDNNL_RMOE_OUT(2)
+    ZENDNNL_RMOE_OUT(3)
+    ZENDNNL_RMOE_OUT(4)
+    ZENDNNL_RMOE_OUT(5)
+    ZENDNNL_RMOE_OUT(6)
+    ZENDNNL_RMOE_OUT(7)
+#undef ZENDNNL_RMOE_OUT
+}
+
+// ---------------------------------------------------------------------------
 // Gate/up micro-kernel: two independent int32 accumulator sets over a shared A
 // operand, with act(gate) * up folded into the epilogue so the intermediate
 // never reaches memory as int32.
@@ -336,11 +453,8 @@ struct tiny_gemm_gate_up {
             int64_t lda, int64_t ldb, int64_t ldc) {
         constexpr int ROWS = BLOCK_M;
         constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
+        static_assert(COLS == 2, "gate_up_k_loop is written for BLOCK_N == 32");
 
-        __m512i va;
-        alignas(64) __m512i vb0[COLS];
-        alignas(64) __m512i vb1[COLS];
         alignas(64) __m512i vc0[ROWS * COLS];
         alignas(64) __m512i vc1[ROWS * COLS];
         alignas(64) __m512i vcomp0[COLS];
@@ -349,40 +463,10 @@ struct tiny_gemm_gate_up {
         alignas(64) __m512 vbs0[COLS];
         alignas(64) __m512 vbs1[COLS];
 
-        auto loadc = [&](auto i) {
-            vc0[i] = _mm512_set1_epi32(0);
-            vc1[i] = _mm512_set1_epi32(0);
-        };
-        unroll_t<ROWS * COLS> {}(loadc);
-
-        const int64_t K4 = K >> 2;
-        const int64_t lda4 = lda >> 2;
-        const int64_t ldb4 = ldb;
-        const int32_t *a_ptr = reinterpret_cast<const int32_t *>(A);
-        const int32_t *b0_ptr = reinterpret_cast<const int32_t *>(B0);
-        const int32_t *b1_ptr = reinterpret_cast<const int32_t *>(B1);
-
-        // One broadcast of 4 packed activation bytes per row, one 64-byte B load
-        // per stream per column, then ROWS * COLS * 2 vpdpbusd.
-        auto compute = [&](auto i, int64_t k) {
-            constexpr int row = i / COLS;
-            constexpr int col = i % COLS;
-
-            if constexpr (col == 0) {
-                va = _mm512_set1_epi32(a_ptr[row * lda4 + k]);
-            }
-            if constexpr (row == 0) {
-                vb0[col] = _mm512_loadu_si512(reinterpret_cast<const void *>(
-                        b0_ptr + k * ldb4 + col * 16));
-                vb1[col] = _mm512_loadu_si512(reinterpret_cast<const void *>(
-                        b1_ptr + k * ldb4 + col * 16));
-            }
-            vc0[i] = _mm512_dpbusd_epi32(vc0[i], va, vb0[col]);
-            vc1[i] = _mm512_dpbusd_epi32(vc1[i], va, vb1[col]);
-        };
-        for (int64_t k = 0; k < K4; ++k) {
-            unroll_t<ROWS * COLS> {}(compute, k);
-        }
+        gate_up_k_loop<ROWS>(reinterpret_cast<const int32_t *>(A),
+                reinterpret_cast<const int32_t *>(B0),
+                reinterpret_cast<const int32_t *>(B1), K >> 2, lda >> 2, ldb,
+                vc0, vc1);
 
         // x = As * (acc0 - comp0) * Bs0 ; y = As * (acc1 - comp1) * Bs1
         auto scalec = [&](auto i) {
@@ -446,40 +530,16 @@ struct tiny_gemm_down {
             int64_t lda, int64_t ldb, int64_t ldc) {
         constexpr int ROWS = BLOCK_M;
         constexpr int COLS = BLOCK_N / 16;
-        static_assert(COLS % 2 == 0, "BLOCK_N must be a multiple of 32");
+        static_assert(COLS == 2, "down_k_loop is written for BLOCK_N == 32");
 
-        __m512i va;
-        alignas(64) __m512i vb[COLS];
         alignas(64) __m512i vc[ROWS * COLS];
         alignas(64) __m512i vcomp[COLS];
         __m512 vas;
         alignas(64) __m512 vbs[COLS];
 
-        auto loadc = [&](auto i) { vc[i] = _mm512_set1_epi32(0); };
-        unroll_t<ROWS * COLS> {}(loadc);
-
-        const int64_t K4 = K >> 2;
-        const int64_t lda4 = lda >> 2;
-        const int64_t ldb4 = ldb;
-        const int32_t *a_ptr = reinterpret_cast<const int32_t *>(A);
-        const int32_t *b_ptr = reinterpret_cast<const int32_t *>(B);
-
-        auto compute = [&](auto i, int64_t k) {
-            constexpr int row = i / COLS;
-            constexpr int col = i % COLS;
-
-            if constexpr (col == 0) {
-                va = _mm512_set1_epi32(a_ptr[row * lda4 + k]);
-            }
-            if constexpr (row == 0) {
-                vb[col] = _mm512_loadu_si512(reinterpret_cast<const void *>(
-                        b_ptr + k * ldb4 + col * 16));
-            }
-            vc[i] = _mm512_dpbusd_epi32(vc[i], va, vb[col]);
-        };
-        for (int64_t k = 0; k < K4; ++k) {
-            unroll_t<ROWS * COLS> {}(compute, k);
-        }
+        down_k_loop<ROWS>(reinterpret_cast<const int32_t *>(A),
+                reinterpret_cast<const int32_t *>(B), K >> 2, lda >> 2, ldb,
+                vc);
 
         auto storec = [&](auto i) {
             constexpr int row = i / COLS;
@@ -499,6 +559,22 @@ struct tiny_gemm_down {
     }
 };
 
+// Splits M rows into the fewest passes of at most MAX_ROWS rows, sized as
+// evenly as possible, so no pass is left with a row or two and too few
+// accumulator chains.  Each row accumulates independently, so the split never
+// changes a result.
+template <int64_t MAX_ROWS, typename Launch>
+ZENDNNL_ALWAYS_INLINE inline void for_row_groups(
+        int64_t M, const Launch &launch) {
+    const int64_t groups = div_up(M, MAX_ROWS);
+    int64_t start = 0;
+    for (int64_t g = 0; g < groups; ++g) {
+        const int64_t rows = div_up(M - start, groups - g);
+        launch(start, rows);
+        start += rows;
+    }
+}
+
 // Row-count dispatch.  BLOCK_N is fixed at 32 by the caller, so only the row
 // count varies and each instantiation keeps its accumulators in registers.
 template <routed_moe_activation_t ACT>
@@ -512,22 +588,22 @@ inline void tinygemm_gate_up(const uint8_t *ZENDNNL_ROUTED_RESTRICT A,
         const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp0,
         const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp1, int64_t M, int64_t K,
         int64_t lda, int64_t ldb, int64_t ldc) {
-    const int64_t MB = div_up(M, max_kernel_rows);
-    for (int64_t mb = 0; mb < MB; ++mb) {
-        const int64_t mb_start = mb * max_kernel_rows;
-        const int64_t mb_size = std::min(max_kernel_rows, M - mb_start);
+    static_assert(gate_up_kernel_rows == 6, "update the dispatch below");
+    for_row_groups<gate_up_kernel_rows>(M, [&](int64_t start, int64_t rows) {
 #define ZENDNNL_RMOE_GATE_UP(MS) \
-    tiny_gemm_gate_up<MS, 32, ACT>::apply(A + mb_start * lda, B0, B1, \
-            C + mb_start * ldc, As + mb_start, Bs0, Bs1, Bcomp0, Bcomp1, K, \
-            lda, ldb, ldc)
-        switch (mb_size) {
+    tiny_gemm_gate_up<MS, 32, ACT>::apply(A + start * lda, B0, B1, \
+            C + start * ldc, As + start, Bs0, Bs1, Bcomp0, Bcomp1, K, lda, \
+            ldb, ldc)
+        switch (rows) {
             case 1: ZENDNNL_RMOE_GATE_UP(1); break;
             case 2: ZENDNNL_RMOE_GATE_UP(2); break;
             case 3: ZENDNNL_RMOE_GATE_UP(3); break;
-            default: ZENDNNL_RMOE_GATE_UP(4); break;
+            case 4: ZENDNNL_RMOE_GATE_UP(4); break;
+            case 5: ZENDNNL_RMOE_GATE_UP(5); break;
+            default: ZENDNNL_RMOE_GATE_UP(6); break;
         }
 #undef ZENDNNL_RMOE_GATE_UP
-    }
+    });
 }
 
 inline void tinygemm_down(const uint8_t *ZENDNNL_ROUTED_RESTRICT A,
@@ -537,21 +613,23 @@ inline void tinygemm_down(const uint8_t *ZENDNNL_ROUTED_RESTRICT A,
         const float *ZENDNNL_ROUTED_RESTRICT Bs,
         const int32_t *ZENDNNL_ROUTED_RESTRICT Bcomp, int64_t M, int64_t K,
         int64_t lda, int64_t ldb, int64_t ldc) {
-    const int64_t MB = div_up(M, max_kernel_rows);
-    for (int64_t mb = 0; mb < MB; ++mb) {
-        const int64_t mb_start = mb * max_kernel_rows;
-        const int64_t mb_size = std::min(max_kernel_rows, M - mb_start);
+    static_assert(down_kernel_rows == 8, "update the dispatch below");
+    for_row_groups<down_kernel_rows>(M, [&](int64_t start, int64_t rows) {
 #define ZENDNNL_RMOE_DOWN(MS) \
-    tiny_gemm_down<MS, 32>::apply(A + mb_start * lda, B, C + mb_start * ldc, \
-            As + mb_start, Bs, Bcomp, K, lda, ldb, ldc)
-        switch (mb_size) {
+    tiny_gemm_down<MS, 32>::apply(A + start * lda, B, C + start * ldc, \
+            As + start, Bs, Bcomp, K, lda, ldb, ldc)
+        switch (rows) {
             case 1: ZENDNNL_RMOE_DOWN(1); break;
             case 2: ZENDNNL_RMOE_DOWN(2); break;
             case 3: ZENDNNL_RMOE_DOWN(3); break;
-            default: ZENDNNL_RMOE_DOWN(4); break;
+            case 4: ZENDNNL_RMOE_DOWN(4); break;
+            case 5: ZENDNNL_RMOE_DOWN(5); break;
+            case 6: ZENDNNL_RMOE_DOWN(6); break;
+            case 7: ZENDNNL_RMOE_DOWN(7); break;
+            default: ZENDNNL_RMOE_DOWN(8); break;
         }
 #undef ZENDNNL_RMOE_DOWN
-    }
+    });
 }
 
 /// out[0:size] = bf16(in[0:size] * weight), size a multiple of 32.
