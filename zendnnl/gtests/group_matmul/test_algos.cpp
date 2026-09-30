@@ -4604,13 +4604,11 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
     }
 }
 
-// Invariant guard for `no-auto-2`: sweep the shape space AUTO can see and
-// assert ALGO 2 never comes back without an explicit env pin.  A new rule
-// that answers 2 fails here rather than silently changing production routing.
-// The sweep deliberately spans both phases and the expert-count / max_M
-// thresholds the rules key on (kDecodeMaxM=32,
-// kFewExpertsDecodeThreshold=8).
-TEST(TestGroupMatmulAutoPhaseEnv, AutoNeverSelectsAlgo2AcrossShapeSweep) {
+// Non-W4A8 invariant guard: sweep the BF16 shape space AUTO can see and
+// assert ALGO 2 never comes back without an explicit env pin.  Rule 0.7's
+// measured W4A8 prompt exception is covered separately below.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        NonW4A8AutoNeverSelectsAlgo2AcrossShapeSweep) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
 
@@ -4627,7 +4625,7 @@ TEST(TestGroupMatmulAutoPhaseEnv, AutoNeverSelectsAlgo2AcrossShapeSweep) {
                         << "AUTO selected ALGO 2 without an env pin at "
                            "num_ops="
                         << num_ops << " M=" << M << " num_threads=" << nthr
-                        << " — ALGO 2 must be opt-in only";
+                        << " — ALGO 2 must remain opt-in for non-W4A8";
             }
         }
     }
@@ -4790,20 +4788,43 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
             << "non-W4A8 experts must preserve the selected inner kernel";
 }
 
-TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo1) {
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo2) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // Default prompt Rule 0.7 selects ALGO 1 independently of dtype.
+    // Rule 0.7's measured W4A8 exception selects row-disjoint M-tiling.
     auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/32);
     apply_w4a8_auto_probe(s);
+    auto_algo_trace trace;
     EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            2)
+            << "structurally-safe W4A8 prompt must take the measured ALGO 2 "
+               "route";
+    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_w4a8_mtile");
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptUnsafeMTileClampsToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/512, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/32);
+    apply_w4a8_auto_probe(s);
+    for (auto &c : s.layout)
+        c = 'c';
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
             1)
-            << "W4A8 prompt must follow generic Rule 0.7 and take ALGO 1";
+            << "W4A8 prompt with an M-tile-unsafe layout must retain the "
+               "sequential fallback";
+    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_w4a8_mtile");
 }
 
 TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursExplicitPin) {

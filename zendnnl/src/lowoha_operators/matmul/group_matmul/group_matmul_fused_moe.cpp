@@ -808,17 +808,17 @@ inline status_t validate_fused_moe_inputs(
         //     WOQ (s4/u4 weight) and library-side dynamic-quant INT8 both
         //     live here too: their source stays float and equals dst; only
         //     `dtypes.wei` / `dtypes.compute` differ.
-        //   * pre-quantized s8 — s8 src + s8 wei with a float dst, the
-        //     configuration this change adds.  Op1 consumes the caller's s8
-        //     rows plus `src_scale.buff` directly, so src != dst is
-        //     intended rather than an unsupported mix.
+        //   * pre-quantized s8 — s8 src + s8/s4 wei with a float dst.  Op1
+        //     consumes the caller's s8 rows plus `src_scale.buff` directly,
+        //     so src != dst is intended rather than an unsupported mix.
         //
         // Scoped to `op1_internal` because that is the mode whose gate was
         // relaxed; a fully caller-allocated call keeps its prior behaviour.
         if (op1_internal && M[i] > 0
                 && params[i].dtypes.src != params[i].dtypes.dst) {
             const bool prequant_s8_op1 = params[i].dtypes.src == data_type_t::s8
-                    && params[i].dtypes.wei == data_type_t::s8
+                    && (params[i].dtypes.wei == data_type_t::s8
+                            || params[i].dtypes.wei == data_type_t::s4)
                     && (params[i].dtypes.dst == data_type_t::bf16
                             || params[i].dtypes.dst == data_type_t::f32)
                     && params[i].quant_params.src_scale.buff != nullptr;
@@ -828,7 +828,7 @@ inline status_t validate_fused_moe_inputs(
                         "dtypes.src == dtypes.dst on params[",
                         i,
                         "] unless the call is the pre-quantized s8 form "
-                        "(src=s8, wei=s8, dst=bf16/f32, non-null "
+                        "(src=s8, wei=s8/s4, dst=bf16/f32, non-null "
                         "quant_params.src_scale.buff).  Got src=",
                         static_cast<int>(params[i].dtypes.src),
                         ", wei=", static_cast<int>(params[i].dtypes.wei),
@@ -1715,9 +1715,9 @@ status_t group_matmul_fused_moe_execute(
     // ALGO — it slots into the M-tile branch.  Only engage it when the
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
     // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0)
-    // the resolved algo is 1 for prompt (Rule 0.7 — unconditional ALGO 1
-    // when AUTO_PROMPT_ALGO is not explicitly set) or 3 for decode by
-    // default, so ALGO 2 vertical fusion is an M-tile-path only.  This keeps vertical fusion inside the ALGO-2 decision
+    // the resolved prompt algo is 2 for structurally-safe W4A8 and 1 for
+    // other dtypes (Rule 0.7), while decode defaults to 3.  Vertical fusion
+    // therefore remains an M-tile-path only.  This keeps vertical fusion inside the ALGO-2 decision
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an
     // ALGO-3 N-tile decode run, where it previously still *attempted*
     // before falling through to legacy two-pass).  Uses the same

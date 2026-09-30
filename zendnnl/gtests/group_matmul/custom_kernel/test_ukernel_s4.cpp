@@ -305,6 +305,80 @@ INSTANTIATE_TEST_SUITE_P(Shapes, CkUkernelS4Gated,
                 ::testing::Values(32, 64), // pack_nr
                 ::testing::Values(0, 1))); // silu / gelu
 
+TEST(CkUkernelS4, RoutedU8ModeMatchesS8AndStoresF32) {
+    if (!ck::avx512vnni_available()) GTEST_SKIP() << "no AVX-512 VNNI";
+    constexpr int K = 128;
+    constexpr int N = 32;
+    constexpr int group_size = 32;
+    constexpr int G = K / group_size;
+    constexpr int NV = 2;
+    const auto wsrc = build_packed(K, N, K, /*transB=*/true);
+    Slab slab(ck::packed_weight_size_s4(K, N, N, group_size));
+    ASSERT_NE(slab.p, nullptr);
+    ASSERT_EQ(ck::prepack_weight_into_s4(wsrc.data(), K, N, K, N, true,
+                      /*interleave_split_halves=*/false, group_size, slab.p),
+            status_t::success);
+
+    std::vector<float> scales(static_cast<size_t>(G) * N);
+    for (int g = 0; g < G; ++g)
+        for (int n = 0; n < N; ++n)
+            scales[static_cast<size_t>(g) * N + n] = wscale_at(g, n);
+
+    for (int MR = 1; MR <= ck::max_mr_for_nv_s4(NV); ++MR) {
+        std::vector<uint8_t> s8(static_cast<size_t>(MR) * K);
+        std::vector<uint8_t> u8(s8.size());
+        std::vector<float> src_scales(static_cast<size_t>(MR));
+        for (int m = 0; m < MR; ++m) {
+            src_scales[static_cast<size_t>(m)] = sscale_at(m);
+            for (int k = 0; k < K; ++k) {
+                const uint8_t q = static_cast<uint8_t>(a_at(m, k));
+                s8[static_cast<size_t>(m) * K + k] = q;
+                u8[static_cast<size_t>(m) * K + k]
+                        = static_cast<uint8_t>(q ^ 0x80u);
+            }
+        }
+
+        const auto s8_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none);
+        const auto u8_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none,
+                ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kBf16);
+        const auto f32_fn = ck::select_s4_ukernel(MR, NV, ck::ActKind::none,
+                ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32);
+        ASSERT_NE(s8_fn, nullptr);
+        ASSERT_NE(u8_fn, nullptr);
+        ASSERT_NE(f32_fn, nullptr);
+
+        std::vector<bfloat16_t> from_s8(static_cast<size_t>(MR) * N);
+        std::vector<bfloat16_t> from_u8(static_cast<size_t>(MR) * N);
+        std::vector<float> from_u8_f32(static_cast<size_t>(MR) * N);
+        const auto invoke
+                = [&](ck::s4_ukernel_fn_t fn, const uint8_t *a, void *out) {
+            fn(a, K, static_cast<const int8_t *>(slab.p), src_scales.data(),
+                    scales.data(), ck::ScaleKind::kF32, nullptr,
+                    ck::BiasKind::none, out, N, nullptr, 0, K, group_size, N);
+        };
+        invoke(s8_fn, s8.data(), from_s8.data());
+        invoke(u8_fn, u8.data(), from_u8.data());
+        invoke(f32_fn, u8.data(), from_u8_f32.data());
+        EXPECT_EQ(std::memcmp(from_u8.data(), from_s8.data(),
+                          from_u8.size() * sizeof(bfloat16_t)),
+                0)
+                << "MR=" << MR;
+
+        for (int m = 0; m < MR; ++m)
+            for (int n = 0; n < N; ++n) {
+                const double want
+                        = ref_dot(m, n, K, group_size, /*bf16_scales=*/false);
+                EXPECT_NEAR(from_u8_f32[static_cast<size_t>(m) * N + n], want,
+                        2e-5 * std::max(1.0, std::fabs(want)))
+                        << "MR=" << MR << " m=" << m << " n=" << n;
+            }
+    }
+
+    EXPECT_EQ(ck::select_s4_ukernel(1, NV, ck::ActKind::silu_and_mul,
+                      ck::S4SourceKind::kU8Zp128, ck::S4OutputKind::kF32),
+            nullptr);
+}
+
 // Selector bounds — the s4 MR ceiling is tighter than the other
 // families'; an over-budget specialisation would spill.
 TEST(CkUkernelS4, SelectorRefusesOutOfRange) {

@@ -18,7 +18,7 @@ consume, and which bug class does each test lock down".
 
 | Question | Answer |
 |---|---|
-| What gets tested? | The public `group_matmul_direct(...)` dispatcher and everything reachable from it: generic scheduling ALGOs `{1,2,3,5,6}`, global and phase-aware AUTO ALGO 4 W8A8 fused-MoE interception (including direct S8), the custom microkernels (BF16 / FP16 / DQ-INT8 — direct-surface + e2e, see §4.6), F16 basic correctness (see §4.1), fused-MoE (Op1 + activation + Op2), gated activations, MoE post-op (weighted reduce), per-expert active/total contract, internal-alloc patterns, prepack module, quantization (WOQ + INT8 + dynamic). |
+| What gets tested? | `group_matmul_direct(...)` plus the routed-MoE W8/W4 APIs: scheduler ALGOs `{1,2,3,5,6}`, phase-aware W8A8 interception, native routed execution, custom microkernels, fused-MoE, gated activations, weighted reduction, prepack, and quantization. |
 | What isn't tested here? | Operator-agnostic infrastructure tests (`test_matmul.cpp`, `test_batchmatmul.cpp`, etc.) live at the parent `zendnnl/gtests/` level. The AI-gtests framework (`ai_gtests/`) is its own subsystem. |
 | Single binary? | Yes. All test files in this folder compile into the same `gtests` executable produced by the parent CMakeLists. Filter via `--gtest_filter=*Prepack*`, `--gtest_filter=*FusedMoE*`, etc. |
 | Helpers reuse policy? | One sibling header (`moe_test_utils.hpp`) for cross-file helpers; one helper TU (`group_matmul_test_helpers.{hpp,cpp}`) for the dispatch shim + quant fixture. File-local helpers stay in anonymous namespaces inside their owning `.cpp`. |
@@ -102,6 +102,9 @@ zendnnl/gtests/group_matmul/
     test_ukernel_int8.cpp           DQ-INT8 microkernel direct-surface correctness
     test_ukernel_f16.cpp            FP16 microkernel e2e vs inline scalar FP32 reference
                                     (CkF16UkernelCorrectness matrix + Engages/Fallback gates)
+  routed_moe/
+    test_routed_moe.cpp             routed W8, validation, cache, and generic fallback
+    test_routed_moe_s4.cpp          routed W4 scalar-oracle and branch coverage
 ```
 
 LOC summary (current tree, `wc -l`):
@@ -134,8 +137,8 @@ zendnnl::lowoha::matmul::group_matmul_direct(
     fused_moe           /* optional */)
 ```
 
-This is the single public entry point that every test eventually calls.
-Lives in `zendnnl/src/lowoha_operators/matmul/group_matmul/group_matmul_direct.hpp`.
+Most suites use this entry point; `routed_moe/` also tests
+`routed_fused_moe_direct` and the normalized routed executor API.
 
 ### 3.2 Param structs
 
@@ -348,9 +351,9 @@ the first read for the process lifetime.
 
 | Env var | Default | Cached? | What it gates |
 |---|---|---|---|
-| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception for phases whose knob is unset. An explicit phase `4` outranks a global generic pin. |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | Decode setting; outranks the global when set. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | 2 | yes (test override available) | Prompt setting; outranks the global when set. Value 4 requests W8A8 only for `max active M > 32`; on decline, generic dispatch inherits the complete prompt default policy. |
+| `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception when the active phase knob is unset |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (Rule 0.7) | yes (test override available) | AUTO prompt setting. Unpinned safe all-active W4A8 uses ALGO 2; other prompts use ALGO 1. Value 4 requests W8A8, then inherits Rule 0.7 on decline. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | ON | yes | Master prepack switch (PR-443) |
 | `ZENDNNL_GRP_MATMUL_CROSS_WARM` | ON | yes | Opportunistic CK-aware cross-regime warm in `prepack/prepack.cpp::cross_warm` (eliminates decode-first-call spike when prompt-only warmup runs) |
 | `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | ON | yes | Pin n_thr to a num_threads-only formula -> AOCL cache key stability |

@@ -390,9 +390,11 @@ void free_owned_packed_weight_int8(const int8_t *packed);
 // and the kernel recovers the sign with one `_mm512_sub_epi8`.
 // Consequence: a stored nibble of 8, not 0, encodes zero.
 //
-// `comp[g][v_col] = sum_{k in group g} w_true[k, v_col]` undoes the
-// kernel's XOR-0x80 source recentering at each group flush.  Requires
-// `group_size % 8 == 0` and `K % group_size == 0`.
+// `comp[g][v_col] = -128 * sum_{k in group g} w_true[k, v_col]` is the
+// complete correction for the kernel's XOR-0x80 source recentering.
+// Storing it pre-scaled and signed lets the kernel seed its s32
+// accumulators directly.  Requires `group_size % 8 == 0` and
+// `K % group_size == 0`.
 //
 // The cache is a separate LRU singleton with its own key marker;
 // `group_size` is part of the key, so two group sizes over the same

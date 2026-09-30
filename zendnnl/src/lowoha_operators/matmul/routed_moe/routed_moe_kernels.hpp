@@ -644,6 +644,27 @@ inline void copy_mul_bf16(uint16_t *ZENDNNL_ROUTED_RESTRICT out,
     }
 }
 
+/// acc[0:size] += in[0:size] * weight in f32, size a multiple of 16.
+inline void add_mul_f32(float *ZENDNNL_ROUTED_RESTRICT acc,
+        const float *ZENDNNL_ROUTED_RESTRICT in, float weight, int64_t size) {
+    const __m512 vw = _mm512_set1_ps(weight);
+    for (int64_t d = 0; d < size; d += 16) {
+        _mm512_storeu_ps(acc + d,
+                _mm512_fmadd_ps(
+                        _mm512_loadu_ps(in + d), vw, _mm512_loadu_ps(acc + d)));
+    }
+}
+
+/// out[0:size] = bf16(in[0:size]), size a multiple of 32.
+inline void f32_to_bf16_row(uint16_t *ZENDNNL_ROUTED_RESTRICT out,
+        const float *ZENDNNL_ROUTED_RESTRICT in, int64_t size) {
+    for (int64_t d = 0; d < size; d += 32) {
+        _mm512_storeu_si512(reinterpret_cast<void *>(out + d),
+                (__m512i)(_mm512_cvtne2ps_pbh(_mm512_loadu_ps(in + d + 16),
+                        _mm512_loadu_ps(in + d))));
+    }
+}
+
 /// out[0:K] = bf16(sum_t in[t * K + 0:K]), accumulating in f32.
 inline void sum_rows_bf16(uint16_t *ZENDNNL_ROUTED_RESTRICT out,
         const uint16_t *ZENDNNL_ROUTED_RESTRICT in, int64_t topk, int64_t K) {

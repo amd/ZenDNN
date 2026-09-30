@@ -17,8 +17,8 @@
 /// CK pack module — W4A8 (s4) sibling of `test_pack_int8.cpp`.
 ///
 /// Covers the pack half of the contract in `pack.hpp`: (k, k+4) nibble
-/// placement, XOR-8 bias, per-group compensation over sign-recovered
-/// values, both caller layouts, the `group_size` shape refusals, and
+/// placement, XOR-8 bias, pre-scaled per-group compensation over
+/// sign-recovered values, both caller layouts, the `group_size` shape refusals, and
 /// cache-key independence across group sizes.
 
 #include <gtest/gtest.h>
@@ -146,13 +146,14 @@ TEST_P(CkPackS4Layout, MatchesDocumentedLayout) {
         }
     }
 
-    // Per-group compensation over SIGN-RECOVERED values.
+    // Complete per-group correction over SIGN-RECOVERED values.
     for (int col = 0; col < N; ++col) {
         for (int g = 0; g < G; ++g) {
             int32_t want = 0;
             for (int k = g * group_size; k < (g + 1) * group_size; ++k) {
                 want += s4_true(nib_at(k, col));
             }
+            want *= -128;
             ASSERT_EQ(v.comp(col, g), want)
                     << "comp mismatch at col=" << col << " g=" << g;
         }
@@ -194,6 +195,27 @@ TEST(CkPackS4, ZeroEncodesAsBiasedEight) {
         }
         for (int g = 0; g < K / gs; ++g) {
             ASSERT_EQ(v.comp(col, g), 0);
+        }
+    }
+}
+
+TEST(CkPackS4, CompensationIsPreScaledNegative) {
+    const int K = 64, N = 32, gs = 32, nr = 32, ldb = K;
+    // Every logical S4 value is +1, so each group sums to 32 and the
+    // accumulator seed must be -128 * 32.
+    const std::vector<int8_t> src(
+            (static_cast<size_t>(N) * K + 1) / 2, static_cast<int8_t>(0x11));
+    OwnedSlab slab(ck::packed_weight_size_s4(K, N, nr, gs));
+    ASSERT_NE(slab.p, nullptr);
+    ASSERT_EQ(ck::prepack_weight_into_s4(src.data(), K, N, ldb, nr,
+                      /*transB=*/true, /*interleave_split_halves=*/false, gs,
+                      slab.p),
+            status_t::success);
+
+    PackedView v {static_cast<const int8_t *>(slab.p), K, N, nr, gs};
+    for (int col = 0; col < N; ++col) {
+        for (int g = 0; g < K / gs; ++g) {
+            EXPECT_EQ(v.comp(col, g), -128 * gs);
         }
     }
 }

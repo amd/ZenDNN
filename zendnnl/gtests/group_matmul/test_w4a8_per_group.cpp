@@ -119,7 +119,7 @@ void run_w4a8_per_group_scenario(const std::string &label,
 
 void run_w4a8_cross_algo_scenario(const std::string &label,
         const std::vector<int> &rows, uint64_t K, uint64_t N,
-        uint64_t group_size) {
+        uint64_t group_size, bool expect_auto_mtile = false) {
     ASSERT_EQ(K % group_size, 0u)
             << label << ": K must be a multiple of group_size";
     const uint64_t G = K / group_size;
@@ -168,13 +168,24 @@ void run_w4a8_cross_algo_scenario(const std::string &label,
     }
     ASSERT_EQ(st, status_t::success) << label << ": ALGO 1 failed";
 
+    const char *auto_mode = nullptr;
     {
         moe_test_utils::AlgoEnvGuard g(0);
+        moe_test_utils::GemmModeCaptureGuard capture;
         reset_grp_matmul_caches();
         st = group_matmul_kernel_test(inp, wt, bias, out_a0, algo, 1.0f, 0.0f,
                 nullptr, nullptr, {}, active);
+        auto_mode = zendnnl::lowoha::matmul::test_api ::
+                            s_last_group_matmul_direct_gemm_mode.load(
+                                    std::memory_order_relaxed);
     }
     ASSERT_EQ(st, status_t::success) << label << ": ALGO 0 failed";
+    if (expect_auto_mtile) {
+        ASSERT_NE(auto_mode, nullptr);
+        EXPECT_NE(std::strstr(auto_mode, "flat_m_tile"), nullptr)
+                << label << ": AUTO must execute the W4A8 M-tile path; mode="
+                << auto_mode;
+    }
 
     {
         moe_test_utils::AlgoEnvGuard g(2);
@@ -356,7 +367,8 @@ TEST(GroupMatmulW4A8PerGroup, CrossAlgoSmallDecodeBF16) {
 }
 
 TEST(GroupMatmulW4A8PerGroup, CrossAlgoMidRangeBF16) {
-    run_w4a8_cross_algo_scenario("mid", std::vector<int>(10, 128), 128, 64, 32);
+    run_w4a8_cross_algo_scenario("mid", std::vector<int>(10, 128), 128, 64, 32,
+            /*expect_auto_mtile=*/true);
 }
 
 TEST(GroupMatmulW4A8PerGroup, CrossAlgoSingleTokenBF16) {

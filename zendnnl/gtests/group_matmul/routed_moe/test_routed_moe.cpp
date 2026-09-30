@@ -545,6 +545,8 @@ TEST_F(RoutedMoECapability, ReportsTheImplementedEnvelope) {
     EXPECT_EQ(cap.block_n, 32);
     EXPECT_EQ(cap.vnni_step, 4);
     EXPECT_EQ(cap.max_kernel_rows, 8);
+    EXPECT_EQ(cap.max_s4_kernel_rows, 6);
+    EXPECT_EQ(cap.s4_group_size_align, 8);
     EXPECT_EQ(cap.hidden_size_align, 32);
     EXPECT_EQ(cap.intermediate_size_align, 32);
 
@@ -557,12 +559,15 @@ TEST_F(RoutedMoECapability, ReportsTheImplementedEnvelope) {
                     & (1u << static_cast<uint32_t>(
                                routed_moe_activation_t::swiglu_oai_mul)),
             0u);
-    EXPECT_EQ(cap.quant_mask,
-            1u << static_cast<uint32_t>(
-                    routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token));
+    EXPECT_NE(cap.quant_mask
+                    & (1u << static_cast<uint32_t>(routed_moe_quant_t::
+                                       sym_per_oc_w8a8_dynamic_per_token)),
+            0u);
     EXPECT_EQ(
             cap.src_dtype_mask, 1u << static_cast<uint32_t>(data_type_t::bf16));
-    EXPECT_EQ(cap.wei_dtype_mask, 1u << static_cast<uint32_t>(data_type_t::s8));
+    EXPECT_NE(
+            cap.wei_dtype_mask & (1u << static_cast<uint32_t>(data_type_t::s8)),
+            0u);
     EXPECT_EQ(cap.scale_dtype_mask,
             (1u << static_cast<uint32_t>(data_type_t::f32))
                     | (1u << static_cast<uint32_t>(data_type_t::bf16)));

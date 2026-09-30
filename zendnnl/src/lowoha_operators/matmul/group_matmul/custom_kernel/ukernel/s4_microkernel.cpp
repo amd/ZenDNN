@@ -35,7 +35,8 @@
 ///
 /// At each group boundary (`group_size / 8` octets):
 ///
-///   facc[m][v] += f32(sacc[m][v] - 128*comp[g][v]) * wei_scale[g][v]
+///   sacc[m][v] starts at comp[g][v] = -128*Σ_k W_s4[k,v]
+///   facc[m][v] += f32(sacc[m][v]) * wei_scale[g][v]
 ///
 /// and finally:
 ///
@@ -50,6 +51,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 #include <immintrin.h>
 
@@ -156,7 +158,7 @@ static inline __m512 load_bias_f32_s4(
 // Templated microkernel — MR ∈ 1..max_mr_for_nv_s4(NV), NV ∈ {2, 4},
 // Act ∈ {none, swiglu_oai_mul, silu_and_mul, gelu_and_mul}.  `noinline`
 // keeps each specialization reachable through a function pointer.
-template <int MR, int NV, ActKind Act>
+template <int MR, int NV, ActKind Act, S4SourceKind Source, S4OutputKind Output>
 ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
@@ -168,6 +170,8 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
     static_assert(Act == ActKind::none || (NV % 2 == 0),
             "gated-activation epilogue requires even NV");
+    static_assert(Act == ActKind::none || Output == S4OutputKind::kBf16,
+            "gated S4 epilogues store BF16");
 
     static const bool s_log = zendnnl::error_handling::apilog_info_enabled();
     if (s_log && !s_s4_ukernel_announced.load(std::memory_order_relaxed)) {
@@ -212,12 +216,12 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
     const int32_t *__restrict comp_base = reinterpret_cast<const int32_t *>(
             Bpacked + weight_bytes_in_oblock);
 
-    // Nibble-plane extraction constants and the s8→u8 recentering XOR.
+    // Nibble-plane extraction constants and the optional s8→u8 recentering
+    // XOR. Routed MoE quantizes directly to U8+zp128 and skips this operation.
     const __m512i mask_0f = _mm512_set1_epi8(0x0F);
     const __m512i bias_8 = _mm512_set1_epi8(8);
     const __m512i s8_to_u8_bias_vec
             = _mm512_set1_epi32(static_cast<int32_t>(0x80808080U));
-    const __m512i k_sym = _mm512_set1_epi32(128);
 
     // Persistent f32 accumulator, summed across groups.
     __m512 facc[MR][NV];
@@ -230,13 +234,21 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
     }
 
     for (int g = 0; g < G; ++g) {
-        // s32 accumulator for this group only.
+        // Seed each row with the pack-time -128*sum(W) correction, so
+        // the K loop accumulates directly to the signed dot product.
+        __m512i seed_v[NV];
+#pragma GCC unroll 4
+        for (int v = 0; v < NV; ++v) {
+            seed_v[v] = _mm512_load_si512(reinterpret_cast<const __m512i *>(
+                    comp_base + static_cast<size_t>(g) * comp_row_stride
+                    + v * 16));
+        }
         __m512i sacc[MR][NV];
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
-                sacc[m][v] = _mm512_setzero_si512();
+                sacc[m][v] = seed_v[v];
             }
         }
 
@@ -269,30 +281,21 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                     uint32_t a_q0, a_q1;
                     std::memcpy(&a_q0, arow, sizeof(a_q0));
                     std::memcpy(&a_q1, arow + kVNNIInt8Quad, sizeof(a_q1));
-                    const __m512i a0 = _mm512_xor_si512(
-                            _mm512_set1_epi32(static_cast<int32_t>(a_q0)),
-                            s8_to_u8_bias_vec);
-                    const __m512i a1 = _mm512_xor_si512(
-                            _mm512_set1_epi32(static_cast<int32_t>(a_q1)),
-                            s8_to_u8_bias_vec);
+                    __m512i a0 = _mm512_set1_epi32(static_cast<int32_t>(a_q0));
+                    __m512i a1 = _mm512_set1_epi32(static_cast<int32_t>(a_q1));
+                    if constexpr (Source == S4SourceKind::kS8) {
+                        a0 = _mm512_xor_si512(a0, s8_to_u8_bias_vec);
+                        a1 = _mm512_xor_si512(a1, s8_to_u8_bias_vec);
+                    }
                     sacc[m][v] = _mm512_dpbusd_epi32(sacc[m][v], a0, blo);
                     sacc[m][v] = _mm512_dpbusd_epi32(sacc[m][v], a1, bhi);
                 }
             }
         }
 
-        // `128 * comp[g][v]` undoes the XOR-0x80 source recentering.
-        // The multiplier is constant because W4A8 is symmetric, so it
-        // hoists out of the m-loop.
-        __m512i corr_v[NV];
         __m512 wscale_v[NV];
 #pragma GCC unroll 4
         for (int v = 0; v < NV; ++v) {
-            const __m512i comp_gv
-                    = _mm512_load_si512(reinterpret_cast<const __m512i *>(
-                            comp_base + static_cast<size_t>(g) * comp_row_stride
-                            + v * 16));
-            corr_v[v] = _mm512_mullo_epi32(k_sym, comp_gv);
             wscale_v[v] = load_scale16_s4(wei_scale,
                     static_cast<size_t>(g) * wei_scale_grp_stride
                             + static_cast<size_t>(v) * 16,
@@ -303,8 +306,7 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
         for (int m = 0; m < MR; ++m) {
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
-                const __m512 f = _mm512_cvtepi32_ps(
-                        _mm512_sub_epi32(sacc[m][v], corr_v[v]));
+                const __m512 f = _mm512_cvtepi32_ps(sacc[m][v]);
                 facc[m][v] = _mm512_fmadd_ps(f, wscale_v[v], facc[m][v]);
             }
         }
@@ -355,7 +357,9 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
     } else {
         static_assert(Act == ActKind::none,
                 "s4 ukernel supports {none, swiglu, silu, gelu}");
-        bfloat16_t *__restrict Cout = static_cast<bfloat16_t *>(Cout_void);
+        using output_t = typename std::conditional<Output == S4OutputKind::kF32,
+                float, bfloat16_t>::type;
+        output_t *__restrict Cout = static_cast<output_t *>(Cout_void);
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
             const __m512 ssc = _mm512_set1_ps(src_scale_at(m));
@@ -365,9 +369,13 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
                 if (has_bias) {
                     f = _mm512_add_ps(f, _mm512_loadu_ps(bias_f32 + v * 16));
                 }
-                bfloat16_t *dst = Cout + static_cast<size_t>(m) * ldc + v * 16;
-                _mm256_storeu_si256(
-                        reinterpret_cast<__m256i *>(dst), f32_to_bf16x16(f));
+                output_t *dst = Cout + static_cast<size_t>(m) * ldc + v * 16;
+                if constexpr (Output == S4OutputKind::kF32) {
+                    _mm512_storeu_ps(dst, f);
+                } else {
+                    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
+                            f32_to_bf16x16(f));
+                }
             }
         }
     }
@@ -375,57 +383,84 @@ static void ukernel_impl_s4(const uint8_t *__restrict A, int lda,
 
 } // namespace
 
-// Instantiation set: NV=2 (NR=32) MR ∈ {1..6}, NV=4 (NR=64) MR ∈
-// {1..3}, each × 4 acts = 36 specializations.
+// Grouped MatMul retains every S8/BF16 activation specialization. Routed MoE
+// adds the U8/BF16 set plus U8/F32 for act=none; gated F32 is never emitted.
 
-template <ActKind Act>
+template <ActKind Act, S4SourceKind Source, S4OutputKind Output>
 static s4_ukernel_fn_t select_s4_nv2(int MR) {
     switch (MR) {
-        case 1: return ukernel_impl_s4<1, 2, Act>;
-        case 2: return ukernel_impl_s4<2, 2, Act>;
-        case 3: return ukernel_impl_s4<3, 2, Act>;
-        case 4: return ukernel_impl_s4<4, 2, Act>;
-        case 5: return ukernel_impl_s4<5, 2, Act>;
-        case 6: return ukernel_impl_s4<6, 2, Act>;
+        case 1: return ukernel_impl_s4<1, 2, Act, Source, Output>;
+        case 2: return ukernel_impl_s4<2, 2, Act, Source, Output>;
+        case 3: return ukernel_impl_s4<3, 2, Act, Source, Output>;
+        case 4: return ukernel_impl_s4<4, 2, Act, Source, Output>;
+        case 5: return ukernel_impl_s4<5, 2, Act, Source, Output>;
+        case 6: return ukernel_impl_s4<6, 2, Act, Source, Output>;
         default: return nullptr;
     }
 }
 
-template <ActKind Act>
+template <ActKind Act, S4SourceKind Source, S4OutputKind Output>
 static s4_ukernel_fn_t select_s4_nv4(int MR) {
     switch (MR) {
-        case 1: return ukernel_impl_s4<1, 4, Act>;
-        case 2: return ukernel_impl_s4<2, 4, Act>;
-        case 3: return ukernel_impl_s4<3, 4, Act>;
+        case 1: return ukernel_impl_s4<1, 4, Act, Source, Output>;
+        case 2: return ukernel_impl_s4<2, 4, Act, Source, Output>;
+        case 3: return ukernel_impl_s4<3, 4, Act, Source, Output>;
         default: return nullptr;
     }
 }
 
-s4_ukernel_fn_t select_s4_ukernel(int MR, int NV, ActKind act) {
+template <S4SourceKind Source, S4OutputKind Output>
+static s4_ukernel_fn_t select_s4_for_mode(int MR, int NV, ActKind act) {
     if (NV != 2 && NV != 4) { return nullptr; }
     if (MR < 1 || MR > max_mr_for_nv_s4(NV)) { return nullptr; }
-    if (NV == 2) {
+    if constexpr (Output == S4OutputKind::kF32) {
+        if (act != ActKind::none) { return nullptr; }
+        return NV == 2 ? select_s4_nv2<ActKind::none, Source, Output>(MR)
+                       : select_s4_nv4<ActKind::none, Source, Output>(MR);
+    } else if (NV == 2) {
         switch (act) {
-            case ActKind::none: return select_s4_nv2<ActKind::none>(MR);
+            case ActKind::none:
+                return select_s4_nv2<ActKind::none, Source, Output>(MR);
             case ActKind::swiglu_oai_mul:
-                return select_s4_nv2<ActKind::swiglu_oai_mul>(MR);
+                return select_s4_nv2<ActKind::swiglu_oai_mul, Source, Output>(
+                        MR);
             case ActKind::silu_and_mul:
-                return select_s4_nv2<ActKind::silu_and_mul>(MR);
+                return select_s4_nv2<ActKind::silu_and_mul, Source, Output>(MR);
             case ActKind::gelu_and_mul:
-                return select_s4_nv2<ActKind::gelu_and_mul>(MR);
+                return select_s4_nv2<ActKind::gelu_and_mul, Source, Output>(MR);
+            default: return nullptr;
+        }
+    } else {
+        switch (act) {
+            case ActKind::none:
+                return select_s4_nv4<ActKind::none, Source, Output>(MR);
+            case ActKind::swiglu_oai_mul:
+                return select_s4_nv4<ActKind::swiglu_oai_mul, Source, Output>(
+                        MR);
+            case ActKind::silu_and_mul:
+                return select_s4_nv4<ActKind::silu_and_mul, Source, Output>(MR);
+            case ActKind::gelu_and_mul:
+                return select_s4_nv4<ActKind::gelu_and_mul, Source, Output>(MR);
             default: return nullptr;
         }
     }
-    switch (act) {
-        case ActKind::none: return select_s4_nv4<ActKind::none>(MR);
-        case ActKind::swiglu_oai_mul:
-            return select_s4_nv4<ActKind::swiglu_oai_mul>(MR);
-        case ActKind::silu_and_mul:
-            return select_s4_nv4<ActKind::silu_and_mul>(MR);
-        case ActKind::gelu_and_mul:
-            return select_s4_nv4<ActKind::gelu_and_mul>(MR);
-        default: return nullptr;
+}
+
+s4_ukernel_fn_t select_s4_ukernel(
+        int MR, int NV, ActKind act, S4SourceKind source, S4OutputKind output) {
+    if (source == S4SourceKind::kS8 && output == S4OutputKind::kBf16) {
+        return select_s4_for_mode<S4SourceKind::kS8, S4OutputKind::kBf16>(
+                MR, NV, act);
     }
+    if (source == S4SourceKind::kU8Zp128 && output == S4OutputKind::kBf16) {
+        return select_s4_for_mode<S4SourceKind::kU8Zp128, S4OutputKind::kBf16>(
+                MR, NV, act);
+    }
+    if (source == S4SourceKind::kU8Zp128 && output == S4OutputKind::kF32) {
+        return select_s4_for_mode<S4SourceKind::kU8Zp128, S4OutputKind::kF32>(
+                MR, NV, act);
+    }
+    return nullptr;
 }
 
 } // namespace custom_kernel

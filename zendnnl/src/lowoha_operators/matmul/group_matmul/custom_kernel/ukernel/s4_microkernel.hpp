@@ -20,14 +20,16 @@
 ///
 /// Dequant math:
 ///
-///   facc[m][v] = Σ_g ( Σ_{k∈g} A_s8[m,k]·W_s4[k,v]
-///                      − 128 · comp[g][v] ) · wei_scale[g][v]
+///   comp[g][v] = −128 · Σ_{k∈g} W_s4[k,v]
+///   facc[m][v] = Σ_g ( comp[g][v]
+///                      + Σ_{k∈g} A_u8[m,k]·W_s4[k,v] )
+///                    · wei_scale[g][v]
 ///   C[m][v]    = facc[m][v] · src_scale[m] + bias[v]
 ///
-/// The `128 · comp[g][v]` term undoes the `XOR 0x80808080` applied to
-/// each source broadcast, which is what makes VPDPBUSD's
-/// `unsigned × signed` ordering valid for an s8 source.  `comp` is
-/// summed over sign-recovered weights at pack time (see `pack.hpp`).
+/// The pre-scaled `comp[g][v]` term removes the +128 activation zero point.
+/// Grouped MatMul supplies signed bytes and the kernel applies
+/// `XOR 0x80808080`; routed MoE can supply the already-biased U8 bytes
+/// directly.  Both modes therefore consume the same packed compensation.
 ///
 /// Dispatcher-enforced shape contract: `group_size % 8 == 0` and
 /// `K % group_size == 0`, so every group is a whole number of K-octets
@@ -48,6 +50,17 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
+
+/// Encoding of the activation bytes consumed by the S4 dot-product loop.
+enum class S4SourceKind : uint8_t {
+    /// Signed symmetric quants; recenter each broadcast with XOR 0x80.
+    kS8 = 0,
+    /// Unsigned bytes already equal to signed_quant + 128.
+    kU8Zp128 = 1
+};
+
+/// Storage selected for the non-gated epilogue.
+enum class S4OutputKind : uint8_t { kBf16 = 0, kF32 = 1 };
 
 /// Function-pointer type for one (MR, NV, Act) s4 specialization.
 ///
@@ -73,8 +86,11 @@ inline int max_mr_for_nv_s4(int NV) {
 }
 
 /// Returns the specialization for `(MR ∈ 1..max_mr_for_nv_s4(NV),
-/// NV ∈ {2, 4}, Act)`, or nullptr when not instantiated.
-s4_ukernel_fn_t select_s4_ukernel(int MR, int NV, ActKind act);
+/// NV ∈ {2, 4}, Act, source, output)`, or nullptr when not instantiated.
+/// Gated activations intentionally support BF16 output only.
+s4_ukernel_fn_t select_s4_ukernel(int MR, int NV, ActKind act,
+        S4SourceKind source = S4SourceKind::kS8,
+        S4OutputKind output = S4OutputKind::kBf16);
 
 } // namespace custom_kernel
 } // namespace matmul

@@ -515,7 +515,10 @@ inline void pack_s4_vnni_impl(const int8_t *weight, int K, int N, int ldb,
                             | static_cast<uint8_t>((hi_raw ^ 0x08u) << 4));
                     csum += s4_true_value(lo_raw) + s4_true_value(hi_raw);
                 }
-                comp_row[n] += csum;
+                // Store the complete source-recentering correction, with
+                // its sign, so the microkernel can seed each accumulator
+                // directly instead of shifting and subtracting per row.
+                comp_row[n] -= csum * 128;
             }
         }
     }
@@ -1465,10 +1468,9 @@ status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
             extra_hash);
     key.ldb = static_cast<unsigned>(ldb);
 
-    std::lock_guard<std::mutex> lock(pack_mutex_singleton_s4());
-
-    if (pack_cache.find_key(key)) {
-        *out_packed = static_cast<const int8_t *>(pack_cache.get(key));
+    void *cached = nullptr;
+    if (pack_cache.try_get(key, cached)) {
+        *out_packed = static_cast<const int8_t *>(cached);
         if (was_hit_out != nullptr) *was_hit_out = true;
         if (s_pack_log) {
             apilog_verbose("[GRP_MATMUL.PACK HIT S4] weight=",
@@ -1496,9 +1498,15 @@ status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
 
     pack_s4_vnni(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
             group_size, static_cast<int8_t *>(raw));
-    pack_cache.add(key, raw);
+    // Pack outside the cache lock. The loser of a duplicate-miss race
+    // frees its buffer; get_or_add keeps the first insert.
+    void *winner = pack_cache.get_or_add(key, raw);
+    if (winner != raw) {
+        zendnnl_aligned_free(raw);
+        if (was_hit_out != nullptr) *was_hit_out = true;
+    }
 
-    *out_packed = static_cast<const int8_t *>(raw);
+    *out_packed = static_cast<const int8_t *>(winner);
     return status_t::success;
 }
 

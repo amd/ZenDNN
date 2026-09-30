@@ -416,9 +416,8 @@ struct wei_scale_key_hash_t {
     }
 };
 
-// A memoized view plus the exact scale bytes it was built from.  A hit
-// has to prove the caller's buffer still holds those bytes before the
-// converted view can be reused — see `materialise_f32_wei_scale_cached`.
+// A memoized converted scale view plus source bytes for the legacy
+// per-channel (G=1) mutation check.
 struct wei_scale_entry_t {
     std::vector<float> converted;
     std::vector<unsigned char> src_bytes;
@@ -435,18 +434,17 @@ struct wei_scale_entry_t {
 // the per-channel weight scale is a property of the weights and cannot
 // change between calls while `is_weights_const` holds.
 //
-// Keyed on (weight, scale buffer, shape, interleave, dtype) AND
-// validated against the scale bytes themselves.  The key alone is not a
-// safe identity: the scale buffer is caller-managed, so the same address
-// can be refilled for a different weight, and a heap address of either
-// kind can be recycled after a free.  So a hit additionally `memcmp`s
-// the caller's buffer against the bytes the entry was built from, which
-// is exact rather than probabilistic and cheap next to what it guards —
-// a linear compare of N scale elements, no allocation and no permuted
-// scatter, against the malloc + gather + permute it skips.  On a content
-// mismatch this falls back to the uncached path rather than refreshing
-// the entry in place, because another inference stream may still be
-// holding the `data()` pointer from an earlier hit (see below).
+// Keyed on (weight, scale buffer, shape, interleave, dtype).  The weight
+// pointer is load-bearing: callers may refill one scale workspace for a
+// different weight, and those entries must stay distinct.
+//
+// Per-channel INT8 (n_groups=1) keeps the historical exact byte check.
+// W4A8's per-group `{G,N}` metadata (G>1) is much larger and is part of a
+// constant quantized weight: with `weights_const=true`, mutating those scales
+// in place is a contract violation, so a key hit can reuse the converted view
+// without serially rescanning G*N elements on every decode.  A model that
+// frees/recycles storage must use the quiescent cache-clear API first, which
+// is already required by the packed weight cache keyed on the same pointer.
 //
 // Entries are never evicted or mutated, matching the INT8 pack cache's
 // effectively-unbounded capacity; the live set is bounded by
@@ -472,9 +470,9 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     // exists because frameworks like the PyTorch CPU allocator recycle
     // weight addresses between calls.  This scale view is weight-derived
     // and pointer-keyed, so it must honour the knob exactly as the CK pack
-    // arena does (custom_kernel/dispatch.cpp).  `weights_const` does not
-    // cover it: it says the bytes behind a LIVE pointer are stable, not
-    // that the address will not be recycled for different weights.
+    // arena does (custom_kernel/dispatch.cpp).  `weights_const` covers the
+    // bytes behind a LIVE weight and its metadata; it does not promise that
+    // their addresses will never be recycled after the model is released.
     const bool cache_off
             = (zendnnl::common::matmul_config_t::instance().get_weight_cache()
                     == 0);
@@ -495,22 +493,18 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     }
     const size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(n_groups)
             * size_of(dt);
-
     const wei_scale_key_t key {wei, buff, N, n_groups, interleave, dt};
     std::lock_guard<std::mutex> guard(cache_mutex);
 
     const auto it = cache.find(key);
     if (it != cache.end()) {
         const wei_scale_entry_t &entry = it->second;
-        if (entry.src_bytes.size() == bytes
-                && std::memcmp(entry.src_bytes.data(), buff, bytes) == 0) {
+        if (n_groups > 1
+                || (entry.src_bytes.size() == bytes
+                        && std::memcmp(entry.src_bytes.data(), buff, bytes)
+                                == 0)) {
             return entry.converted.data();
         }
-        // Same weight and same scale address, but the bytes behind that
-        // address changed — a refilled workspace, or a recycled
-        // allocation.  Serve this call from the uncached path and leave
-        // the entry untouched: overwriting it would invalidate a
-        // `data()` pointer a concurrent stream may still be reading.
         return materialise_f32_wei_scale(
                 buff, dt, N, interleave, owned, n_groups);
     }

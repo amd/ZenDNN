@@ -110,6 +110,39 @@ bool checked_extent(
             && checked_size(extent, element_size, bytes);
 }
 
+bool is_w4(const routed_moe_params &p) {
+    return p.quant_scheme
+            == routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token;
+}
+
+bool checked_s4_storage(int64_t num_experts, int64_t out_channels,
+        int64_t in_channels, int64_t group_size, size_t &raw_bytes,
+        size_t &packed_bytes) {
+    if (group_size <= 0 || in_channels % group_size != 0 || in_channels % 2 != 0
+            || out_channels % block_n != 0) {
+        return false;
+    }
+    int64_t logical_elements = 0;
+    int64_t groups = in_channels / group_size;
+    int64_t comp_bytes_per_oc = 0;
+    int64_t packed_bytes_per_oc = 0;
+    int64_t packed_elements = 0;
+    if (!checked_mul_i64(num_experts, out_channels, logical_elements)
+            || !checked_mul_i64(logical_elements, in_channels, logical_elements)
+            || !checked_size(logical_elements / 2, 1, raw_bytes)
+            || !checked_mul_i64(groups, static_cast<int64_t>(sizeof(int32_t)),
+                    comp_bytes_per_oc)
+            || !checked_add_i64(
+                    in_channels / 2, comp_bytes_per_oc, packed_bytes_per_oc)
+            || !checked_mul_i64(num_experts, out_channels, packed_elements)
+            || !checked_mul_i64(
+                    packed_elements, packed_bytes_per_oc, packed_elements)
+            || !checked_size(packed_elements, 1, packed_bytes)) {
+        return false;
+    }
+    return packed_bytes <= std::numeric_limits<size_t>::max() - 63;
+}
+
 } // namespace
 
 int effective_num_threads(int32_t requested) {
@@ -260,16 +293,64 @@ status_t checked_problem_sizes(
             ? p.down_stride_expert
             : down_expert_stride;
     if (effective_gate_up_expert_stride < gate_up_expert_stride
-            || effective_down_expert_stride < down_expert_stride
-            || (p.gate_up_scale_stride_expert != 0
-                    && p.gate_up_scale_stride_expert != sizes.gate_up_oc)
-            || (p.down_scale_stride_expert != 0
-                    && p.down_scale_stride_expert != p.hidden_size)) {
+            || effective_down_expert_stride < down_expert_stride) {
         return status_t::memory_bad_stride;
     }
 
     const size_t scale_bytes = static_cast<size_t>(size_of(p.scale_dt));
     if (scale_bytes == 0) { return status_t::memory_bad_quant; }
+
+    if (is_w4(p)) {
+        // Native S4 packing currently assumes tightly stacked experts.
+        if (effective_gate_up_expert_stride != gate_up_expert_stride
+                || effective_down_expert_stride != down_expert_stride) {
+            return status_t::memory_bad_stride;
+        }
+        const int64_t gate_groups = p.hidden_size / p.gate_up_group_size;
+        const int64_t down_groups = p.intermediate_size / p.down_group_size;
+        int64_t gate_scale_expert_stride = 0;
+        int64_t down_scale_expert_stride = 0;
+        if (!checked_mul_i64(
+                    gate_groups, sizes.gate_up_oc, gate_scale_expert_stride)
+                || !checked_mul_i64(
+                        down_groups, p.hidden_size, down_scale_expert_stride)) {
+            return status_t::memory_bad_size;
+        }
+        if ((p.gate_up_scale_stride_expert != 0
+                    && p.gate_up_scale_stride_expert
+                            != gate_scale_expert_stride)
+                || (p.down_scale_stride_expert != 0
+                        && p.down_scale_stride_expert
+                                != down_scale_expert_stride)) {
+            return status_t::memory_bad_stride;
+        }
+        size_t ignored = 0;
+        if (!checked_elements_3(p.num_local_experts, gate_groups,
+                    sizes.gate_up_oc, scale_bytes, ignored)
+                || !checked_elements_3(p.num_local_experts, down_groups,
+                        p.hidden_size, scale_bytes, ignored)) {
+            return status_t::memory_bad_size;
+        }
+
+        size_t raw_bytes = 0;
+        if (!checked_s4_storage(p.num_local_experts, sizes.gate_up_oc,
+                    p.hidden_size, p.gate_up_group_size, raw_bytes,
+                    sizes.gate_up_packed_bytes)
+                || !checked_s4_storage(p.num_local_experts, p.hidden_size,
+                        p.intermediate_size, p.down_group_size, raw_bytes,
+                        sizes.down_packed_bytes)) {
+            return status_t::memory_bad_size;
+        }
+        return status_t::success;
+    }
+
+    if ((p.gate_up_scale_stride_expert != 0
+                && p.gate_up_scale_stride_expert != sizes.gate_up_oc)
+            || (p.down_scale_stride_expert != 0
+                    && p.down_scale_stride_expert != p.hidden_size)) {
+        return status_t::memory_bad_stride;
+    }
+
     size_t ignored = 0;
     if (!checked_extent(p.num_local_experts, effective_gate_up_expert_stride,
                 gate_up_expert_stride, sizeof(int8_t))
@@ -290,10 +371,9 @@ status_t checked_problem_sizes(
             p.hidden_size, src_pack_bytes, sizes.gate_up_packed_bytes, blocks,
             packed_per_oc);
     if (status != status_t::success) { return status; }
-    status = checked_pack_sizes(p.num_local_experts, p.hidden_size,
+    return checked_pack_sizes(p.num_local_experts, p.hidden_size,
             p.intermediate_size, src_pack_bytes, sizes.down_packed_bytes,
             blocks, packed_per_oc);
-    return status;
 }
 
 status_t validate_static(const routed_moe_params &p) {
@@ -325,10 +405,10 @@ status_t validate_static(const routed_moe_params &p) {
             && p.activation != routed_moe_activation_t::gelu_and_mul) {
         return status_t::unimplemented;
     }
-    if (p.quant_scheme
-            != routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token) {
-        return status_t::unimplemented;
-    }
+    const bool w8 = p.quant_scheme
+            == routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
+    const bool w4 = is_w4(p);
+    if (!w8 && !w4) { return status_t::unimplemented; }
     if (p.apply_router_weight_on_input != 0) { return status_t::unimplemented; }
     if (p.gate_up_bias != nullptr || p.down_bias != nullptr
             || p.bias_dt != data_type_t::none) {
@@ -342,9 +422,23 @@ status_t validate_static(const routed_moe_params &p) {
     if (p.scale_dt != data_type_t::f32 && p.scale_dt != data_type_t::bf16) {
         return status_t::unimplemented;
     }
-    // The scheme says 8-bit symmetric weights; anything else here is an
-    // inconsistent request rather than a missing feature.
-    if (p.wei_dt != data_type_t::s8) { return status_t::memory_bad_quant; }
+    // A dtype inconsistent with the selected implemented scheme is malformed,
+    // not a request for another implementation.
+    if ((w8 && p.wei_dt != data_type_t::s8)
+            || (w4 && p.wei_dt != data_type_t::s4)) {
+        return status_t::memory_bad_quant;
+    }
+    if (w4) {
+        if (p.gate_up_group_size <= 0 || p.down_group_size <= 0
+                || p.gate_up_group_size % s4_group_size_align != 0
+                || p.down_group_size % s4_group_size_align != 0
+                || p.hidden_size % p.gate_up_group_size != 0
+                || p.intermediate_size % p.down_group_size != 0) {
+            return status_t::memory_bad_quant;
+        }
+    } else if (p.gate_up_group_size != 0 || p.down_group_size != 0) {
+        return status_t::memory_bad_quant;
+    }
 
     // ── alignment ───────────────────────────────────────────────────
     //
@@ -448,10 +542,14 @@ status_t group_matmul_routed_moe_query(routed_moe_capability *cap) {
     cap->activation_mask
             = routed_moe::act_bit(routed_moe_activation_t::silu_and_mul)
             | routed_moe::act_bit(routed_moe_activation_t::gelu_and_mul);
-    cap->quant_mask = routed_moe::quant_bit(
-            routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token);
+    cap->quant_mask
+            = routed_moe::quant_bit(
+                      routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token)
+            | routed_moe::quant_bit(
+                    routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token);
     cap->src_dtype_mask = routed_moe::dt_bit(data_type_t::bf16);
-    cap->wei_dtype_mask = routed_moe::dt_bit(data_type_t::s8);
+    cap->wei_dtype_mask = routed_moe::dt_bit(data_type_t::s8)
+            | routed_moe::dt_bit(data_type_t::s4);
     cap->scale_dtype_mask = routed_moe::dt_bit(data_type_t::f32)
             | routed_moe::dt_bit(data_type_t::bf16);
 
@@ -461,6 +559,9 @@ status_t group_matmul_routed_moe_query(routed_moe_capability *cap) {
 
     cap->max_topk = routed_moe::max_topk;
     cap->max_local_experts = routed_moe::max_local_experts;
+    cap->max_s4_kernel_rows
+            = static_cast<int32_t>(routed_moe::max_s4_kernel_rows);
+    cap->s4_group_size_align = routed_moe::s4_group_size_align;
 
     return status_t::success;
 }

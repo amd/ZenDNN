@@ -17,6 +17,7 @@
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
@@ -1105,7 +1106,22 @@ bool fast_weight_capacity_is_valid(
             <= static_cast<size_t>(std::numeric_limits<int64_t>::max());
 }
 
-bool fast_format_candidate(const char layout_src, const bool trans_src,
+bool tight_expert_group_scale(
+        const matmul_quantization_params_t::matmul_quant_t &q,
+        const int num_experts, const int input_size, const int output_size,
+        int64_t &group_size) {
+    if (q.buff == nullptr
+            || (q.dt != data_type_t::f32 && q.dt != data_type_t::bf16)
+            || q.dims.size() != 3 || q.dims[0] != num_experts || q.dims[1] <= 0
+            || q.dims[2] != output_size
+            || input_size % static_cast<int>(q.dims[1]) != 0) {
+        return false;
+    }
+    group_size = input_size / q.dims[1];
+    return group_size > 0 && group_size % custom_kernel::kS4Octet == 0;
+}
+
+bool fast_common_candidate(const char layout_src, const bool trans_src,
         const int num_experts, const group_matmul_projection_params &primary,
         const group_matmul_routing_params &routing,
         const group_matmul_projection_params *secondary,
@@ -1139,6 +1155,20 @@ bool fast_format_candidate(const char layout_src, const bool trans_src,
             || !fast_weight_capacity_is_valid(*secondary)) {
         return false;
     }
+    return routed_moe::effective_num_threads(primary.params.num_threads)
+            == routed_moe::effective_num_threads(secondary->params.num_threads)
+            && num_experts > 0;
+}
+
+bool fast_w8_candidate(const char layout_src, const bool trans_src,
+        const int num_experts, const group_matmul_projection_params &primary,
+        const group_matmul_routing_params &routing,
+        const group_matmul_projection_params *secondary,
+        const grp_matmul_gated_act_params *gated_act) {
+    if (!fast_common_candidate(layout_src, trans_src, num_experts, primary,
+                routing, secondary, gated_act)) {
+        return false;
+    }
     const auto &p1 = primary.params;
     const auto &p2 = secondary->params;
     if (p1.dtypes.src != data_type_t::bf16 || p1.dtypes.wei != data_type_t::s8
@@ -1160,9 +1190,55 @@ bool fast_format_candidate(const char layout_src, const bool trans_src,
             || effective_weight_cache_type(p2.weight_cache_type) == 0) {
         return false;
     }
-    return routed_moe::effective_num_threads(p1.num_threads)
-            == routed_moe::effective_num_threads(p2.num_threads)
-            && num_experts > 0;
+    return true;
+}
+
+bool fast_w4_candidate(const char layout_src, const bool trans_src,
+        const int num_tokens, const int num_experts,
+        const group_matmul_projection_params &primary,
+        const group_matmul_routing_params &routing,
+        const group_matmul_projection_params *secondary,
+        const grp_matmul_gated_act_params *gated_act, int64_t &gate_group_size,
+        int64_t &down_group_size) {
+    if (!fast_common_candidate(layout_src, trans_src, num_experts, primary,
+                routing, secondary, gated_act)
+            || primary.wei_buffer_capacity_bytes != 0
+            || secondary->wei_buffer_capacity_bytes != 0
+            || primary.input_size % routed_moe::block_n != 0
+            || secondary->input_size % routed_moe::block_n != 0
+            || primary.input_size > routed_moe::max_gemm_reduction
+            || secondary->input_size > routed_moe::max_gemm_reduction) {
+        return false;
+    }
+    const auto &p1 = primary.params;
+    const auto &p2 = secondary->params;
+    const auto per_token_scale
+            = [num_tokens](
+                      const matmul_quantization_params_t::matmul_quant_t &q) {
+        return q.dt == data_type_t::f32 && q.dims.size() == 2
+                && q.dims[0] == num_tokens && q.dims[1] == 1;
+    };
+    return p1.dtypes.src == data_type_t::bf16
+            && p1.dtypes.wei == data_type_t::s4
+            && p1.dtypes.dst == data_type_t::bf16
+            && p1.dtypes.compute == data_type_t::s8
+            && p2.dtypes.src == data_type_t::bf16
+            && p2.dtypes.wei == data_type_t::s4
+            && p2.dtypes.dst == data_type_t::bf16
+            && p2.dtypes.compute == data_type_t::s8 && p1.dynamic_quant
+            && p2.dynamic_quant && per_token_scale(p1.quant_params.src_scale)
+            && tight_expert_group_scale(p1.quant_params.wei_scale, num_experts,
+                    primary.input_size, primary.output_size, gate_group_size)
+            && tight_expert_group_scale(p2.quant_params.wei_scale, num_experts,
+                    secondary->input_size, secondary->output_size,
+                    down_group_size)
+            && p1.quant_params.wei_scale.dt == p2.quant_params.wei_scale.dt
+            && no_quant_buffer(p1.quant_params.wei_zp)
+            && no_quant_buffer(p2.quant_params.wei_zp)
+            && no_quant_buffer(p1.quant_params.src_zp)
+            && no_quant_buffer(p2.quant_params.src_zp)
+            && effective_weight_cache_type(p1.weight_cache_type) != 0
+            && effective_weight_cache_type(p2.weight_cache_type) != 0;
 }
 
 routed_moe_params make_fast_params(const void *token_src,
@@ -1171,7 +1247,8 @@ routed_moe_params make_fast_params(const void *token_src,
         const group_matmul_projection_params &primary,
         const group_matmul_routing_params &routing,
         const group_matmul_projection_params &secondary,
-        const grp_matmul_gated_act_t act) {
+        const grp_matmul_gated_act_t act, const bool w4,
+        const int64_t gate_group_size = 0, const int64_t down_group_size = 0) {
     routed_moe_params p;
     p.num_tokens = num_tokens;
     p.hidden_size = primary.input_size;
@@ -1186,18 +1263,22 @@ routed_moe_params make_fast_params(const void *token_src,
     p.dst_dt = data_type_t::bf16;
     p.gate_up_weight = primary.weight;
     p.down_weight = secondary.weight;
-    p.wei_dt = data_type_t::s8;
-    if (primary.wei_buffer_capacity_bytes != 0) {
+    p.wei_dt = w4 ? data_type_t::s4 : data_type_t::s8;
+    if (!w4 && primary.wei_buffer_capacity_bytes != 0) {
         p.gate_up_stride_expert = static_cast<int64_t>(
                 primary.wei_buffer_capacity_bytes / sizeof(int8_t));
     }
-    if (secondary.wei_buffer_capacity_bytes != 0) {
+    if (!w4 && secondary.wei_buffer_capacity_bytes != 0) {
         p.down_stride_expert = static_cast<int64_t>(
                 secondary.wei_buffer_capacity_bytes / sizeof(int8_t));
     }
     p.gate_up_scale = primary.params.quant_params.wei_scale.buff;
     p.down_scale = secondary.params.quant_params.wei_scale.buff;
     p.scale_dt = primary.params.quant_params.wei_scale.dt;
+    if (w4) {
+        p.gate_up_group_size = gate_group_size;
+        p.down_group_size = down_group_size;
+    }
     p.topk_ids = routing.topk_ids;
     p.topk_ids_stride = routing.topk_ids_stride;
     p.topk_weights = routing.topk_weights;
@@ -1207,7 +1288,9 @@ routed_moe_params make_fast_params(const void *token_src,
     p.activation = act == grp_matmul_gated_act_t::gelu_and_mul
             ? routed_moe_activation_t::gelu_and_mul
             : routed_moe_activation_t::silu_and_mul;
-    p.quant_scheme = routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
+    p.quant_scheme = w4
+            ? routed_moe_quant_t::sym_per_group_w4a8_dynamic_per_token
+            : routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
     p.num_threads = primary.params.num_threads;
     return p;
 }
@@ -1308,17 +1391,20 @@ status_t run_generic(const char layout_src, const bool trans_src,
     int effective_token_src_ld = token_src_ld;
     data_type_t backing_dtype = primary.params.dtypes.src;
 
-    // Match the legacy ZenTorch DA8W8 fallback: quantize each unique token
-    // once, then duplicate compact S8 rows and their scales into expert
-    // groups. This avoids quantizing the same token top-k times in the old
-    // grouped-Matmul implementation while retaining its exact fused call.
+    // Match the legacy ZenTorch DA8W8/W4A8 fallback: quantize each unique
+    // token once, then duplicate compact S8 rows and their scales into expert
+    // groups.  Besides avoiding top-k duplicate quantization, this normalizes
+    // the source-scale dtype to the weight-scale dtype.  AOCL's symmetric
+    // quantized GEMM requires those two scale-factor types to match (notably
+    // for W4A8 with BF16 weight scales).
     const auto &p1 = primary.params;
     const bool can_prequantize_source = secondary != nullptr
             && (layout_src == 'r' || layout_src == 'R') && !trans_src
             && token_src_ld == primary.input_size
             && primary.input_size >= secondary->output_size
             && p1.dtypes.src == data_type_t::bf16
-            && p1.dtypes.wei == data_type_t::s8
+            && (p1.dtypes.wei == data_type_t::s8
+                    || p1.dtypes.wei == data_type_t::s4)
             && p1.dtypes.dst == data_type_t::bf16
             && p1.dtypes.compute == data_type_t::s8 && p1.dynamic_quant
             && p1.packing.pack_format_b == 0
@@ -1331,7 +1417,7 @@ status_t run_generic(const char layout_src, const bool trans_src,
             && (p1.quant_params.wei_scale.dt == data_type_t::f32
                     || p1.quant_params.wei_scale.dt == data_type_t::bf16)
             && secondary->params.dtypes.src == data_type_t::bf16
-            && secondary->params.dtypes.wei == data_type_t::s8
+            && secondary->params.dtypes.wei == p1.dtypes.wei
             && secondary->params.dtypes.dst == data_type_t::bf16
             && secondary->params.dtypes.compute == data_type_t::s8
             && secondary->params.dynamic_quant
@@ -1477,18 +1563,32 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
     const char *generic_reason = "disabled";
     if (routed_moe_enabled()) {
         generic_reason = "format";
-        if (fast_format_candidate(layout_src, trans_src, num_experts, primary,
-                    routing, secondary, gated_act)) {
+        int64_t gate_group_size = 0;
+        int64_t down_group_size = 0;
+        const bool w8 = fast_w8_candidate(layout_src, trans_src, num_experts,
+                primary, routing, secondary, gated_act);
+        const bool w4 = !w8
+                && fast_w4_candidate(layout_src, trans_src, num_tokens,
+                        num_experts, primary, routing, secondary, gated_act,
+                        gate_group_size, down_group_size);
+        if (w8 || w4) {
             const auto fast_params = make_fast_params(token_src, token_src_ld,
                     num_tokens, num_experts, topk, moe_output, moe_output_ld,
-                    primary, routing, *secondary, gated_act->act);
+                    primary, routing, *secondary, gated_act->act, w4,
+                    gate_group_size, down_group_size);
             status = routed_moe::execute(fast_params);
             if (status == status_t::success) {
                 if (s_route_log) {
-                    error_handling::apilog_info(
-                            "[ROUTED_MOE] path=fast act=", act_name(),
-                            " tokens=", num_tokens, " experts=", num_experts,
-                            " topk=", topk, " hidden=", fast_params.hidden_size,
+                    const bool w4_decode = w4
+                            && *std::max_element(counts.begin(), counts.end())
+                                    <= routed_moe::max_decode_expert_rows;
+                    error_handling::apilog_info("[ROUTED_MOE] path=",
+                            w4 ? (w4_decode ? "native_w4_decode"
+                                            : "native_w4_prefill")
+                               : "fast",
+                            " act=", act_name(), " tokens=", num_tokens,
+                            " experts=", num_experts, " topk=", topk,
+                            " hidden=", fast_params.hidden_size,
                             " intermediate=", fast_params.intermediate_size);
                 }
                 return status;

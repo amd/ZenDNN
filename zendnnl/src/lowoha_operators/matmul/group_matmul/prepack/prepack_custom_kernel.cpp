@@ -17,6 +17,11 @@
 #include "prepack_custom_kernel.hpp"
 
 #include <algorithm>
+#include <vector>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
@@ -181,23 +186,43 @@ status_t warm_pack_all_custom_kernel_experts(
     // zero iterations, which reads as "warmed nothing" downstream.
     if (bound == 0) { return bail("empty_per_expert_vectors"); }
 
+    // Snapshot vector<bool> before the parallel loop so workers consume
+    // stable byte values rather than proxy references into packed bits.
+    std::vector<char> transB_c(bound, 0);
+    std::vector<char> constW(bound, 1);
     for (size_t i = 0; i < bound; ++i) {
-        ++stats.total_attempted;
+        transB_c[i] = transB[i] ? 1 : 0;
+        if (!is_weights_const.empty() && i < is_weights_const.size()
+                && !is_weights_const[i]) {
+            constW[i] = 0;
+        }
+    }
+
+    int att = 0, ok = 0, hits = 0, misses = 0, skip = 0;
+#if defined(_OPENMP)
+    const int pack_threads = static_cast<int>(
+            std::min(bound, static_cast<size_t>(omp_get_max_threads())));
+#pragma omp parallel for if (is_s4 && !omp_in_parallel() && pack_threads > 1) \
+        num_threads(pack_threads) schedule(dynamic) \
+        reduction(+ : att, ok, hits, misses, skip)
+#endif
+    for (size_t i = 0; i < bound; ++i) {
+        ++att;
 
         if (weight[i] == nullptr || K[i] <= 0 || N[i] <= 0 || ldb[i] <= 0) {
-            ++stats.skipped_invalid;
+            ++skip;
             continue;
         }
 
         const int pack_nr = ck::plan_pack_nr(K[i], N[i]);
         if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) {
-            ++stats.skipped_invalid;
+            ++skip;
             continue;
         }
 
-        const int min_ldb = transB[i] ? K[i] : N[i];
+        const int min_ldb = transB_c[i] ? K[i] : N[i];
         if (ldb[i] < min_ldb) {
-            ++stats.skipped_invalid;
+            ++skip;
             continue;
         }
 
@@ -210,9 +235,8 @@ status_t warm_pack_all_custom_kernel_experts(
         // refusal logic were ever relaxed).  An empty is_weights_const
         // vector means "treat every entry as const" (legacy behaviour
         // for callers that don't pass the field).
-        if (!is_weights_const.empty() && i < is_weights_const.size()
-                && !is_weights_const[i]) {
-            ++stats.skipped_invalid;
+        if (!constW[i]) {
+            ++skip;
             continue;
         }
 
@@ -231,7 +255,7 @@ status_t warm_pack_all_custom_kernel_experts(
             const int8_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_int8(
                     static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
-                    pack_nr, transB[i],
+                    pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
                     &packed_ignored, &was_hit);
         } else if (dtype_family == WarmDtypeFamily::kS4) {
@@ -242,41 +266,44 @@ status_t warm_pack_all_custom_kernel_experts(
             const int8_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_s4(
                     static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
-                    pack_nr, transB[i],
+                    pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
                     /*group_size=*/group_size, &packed_ignored, &was_hit);
         } else if (dtype_family == WarmDtypeFamily::kF16) {
             const float16_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_f16(
                     static_cast<const float16_t *>(weight[i]), K[i], N[i],
-                    ldb[i], pack_nr, transB[i],
+                    ldb[i], pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
                     &packed_ignored, &was_hit);
         } else {
             const bfloat16_t *packed_ignored = nullptr;
             pst = ck::get_or_pack_weight_bf16(
                     static_cast<const bfloat16_t *>(weight[i]), K[i], N[i],
-                    ldb[i], pack_nr, transB[i],
+                    ldb[i], pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
                     &packed_ignored, &was_hit);
         }
 
         if (pst == status_t::success) {
-            ++stats.packed_ok;
-            if (was_hit)
-                ++stats.cache_hits;
-            else
-                ++stats.cache_misses;
+            ++ok;
+            if (was_hit) {
+                ++hits;
+            } else {
+                ++misses;
+            }
         } else {
-            ++stats.skipped_invalid;
+            ++skip;
         }
     }
 
-    // Pairs with `[GRP_MATMUL.CK.W4A8 ENGAGED]`: engage without this
-    // line means every first call packs inline instead of at warmup.
+    stats.total_attempted = att;
+    stats.packed_ok = ok;
+    stats.cache_hits = hits;
+    stats.cache_misses = misses;
+    stats.skipped_invalid = skip;
+
     if (dtype_family == WarmDtypeFamily::kS4) {
-        static const bool s_w4a8_warm_log
-                = zendnnl::error_handling::apilog_info_enabled();
         if (s_w4a8_warm_log) {
             zendnnl::error_handling::apilog_info(
                     "[GRP_MATMUL.PREPACK.W4A8 WARM] Prepacking INT4 CK "

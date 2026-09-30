@@ -479,9 +479,9 @@ inline void dqint8_compact_and_requant_slice(
 // The former internal "round-based" (per-expert) and "wide-N" (sequential
 // full-team) PERF fallbacks were removed: `auto_select_algo` (Rules 0.5 /
 // 0.6 / 0.7) now peels those regimes off at selection time, so ALGO 2 stays
-// a pure M-tile executor.  Note AUTO no longer selects ALGO 2 at all (the
-// `no-auto-2` invariant in `auto_select_algo`): reaching this executor
-// requires an explicit `ZENDNNL_GRP_MATMUL_ALGO=2` or
+// a pure M-tile executor.  AUTO selects it only for Rule 0.7's measured,
+// structurally-safe W4A8 prompt route; other dtype families require an
+// explicit `ZENDNNL_GRP_MATMUL_ALGO=2` or
 // `AUTO_{DECODE,PROMPT}_ALGO=2`.
 //
 // ═══════════════════════════════════════════════════════════════════════
@@ -1318,8 +1318,8 @@ void flat_m_tile(const std::vector<char> &layout,
     // to a sequential-full-team loop (an ALGO-1 equivalent).  That decision
     // now lives in `auto_select_algo`, whose few-expert decode arrow
     // (Rule 0.5) routes low-occupancy frames to ALGO 1 directly, so ALGO 2
-    // stays a PURE M-tile executor.  AUTO never selects ALGO 2 now; this
-    // executor is reached only through an explicit env pin.
+    // stays a PURE M-tile executor. AUTO selects ALGO 2 only for Rule 0.7's
+    // safe W4A8 prompt case; every other call requires an explicit pin.
     //
     // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
     // the single-tier M-tile plan below: this is CORRECT (the regime is

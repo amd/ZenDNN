@@ -94,8 +94,9 @@ struct group_matmul_routing_params {
  *
  * The source is a single logical [num_tokens, primary.input_size] matrix.
  * Routing duplicates its rows into expert groups internally. Eligible DA8W8
- * calls use the routed executor for both prefill and decode; otherwise-valid
- * unsupported configurations use the vector group-matmul implementation.
+ * and symmetric per-group W4A8 calls use the routed executor for both prefill
+ * and decode; unsupported configurations use the vector group-matmul
+ * implementation.
  *
  * `primary.params.num_threads` controls routing and the fast executor.
  * Projection weights and optional biases are tightly stacked by expert.
@@ -150,7 +151,13 @@ enum class routed_moe_quant_t : int32_t {
     /// Reserved: asymmetric int8 weights (weight zero points).
     asym_per_oc_w8a8_dynamic_per_token = 3,
     /// Reserved: 4-bit weights with int8 activations.
-    sym_per_oc_w4a8_dynamic_per_token = 4
+    sym_per_oc_w4a8_dynamic_per_token = 4,
+    /// Symmetric signed-4-bit weights with one scale per K group and output
+    /// channel, plus dynamically quantized per-token activations.  This is a
+    /// distinct value from the historical per-output-channel W4 spelling
+    /// above: callers compiled against that documented meaning must never be
+    /// silently reinterpreted as per-group quantization.
+    sym_per_group_w4a8_dynamic_per_token = 5
 };
 
 /**
@@ -169,7 +176,7 @@ struct routed_moe_capability {
     int32_t block_n = 0;
     /// VNNI k-grouping of the packed weight layout.
     int32_t vnni_step = 0;
-    /// Largest row count a single micro-kernel instantiation handles.
+    /// Largest row count a single W8 micro-kernel instantiation handles.
     int32_t max_kernel_rows = 0;
 
     /// @c hidden_size must be a positive multiple of this.
@@ -191,6 +198,10 @@ struct routed_moe_capability {
     /// coupled limit (for example, num_tokens * topk must also fit int32).
     int64_t max_topk = 0;
     int64_t max_local_experts = 0;
+
+    // Append-only W4 capability details.
+    int32_t max_s4_kernel_rows = 0;
+    int64_t s4_group_size_align = 0;
 };
 
 /**
@@ -212,17 +223,23 @@ struct routed_moe_capability {
  *   - @c src / @c dst : [num_tokens, hidden_size], row strides
  *     @c src_stride / @c dst_stride (in elements, >= hidden_size).
  *   - @c gate_up_weight : [num_local_experts, 2 * intermediate_size,
- *     hidden_size] int8, row-major and tightly packed within an expert.
+ *     hidden_size], row-major and tightly packed within an expert.
  *     `gate_up_stride_expert` may add trailing padding between experts.
  *     The output-channel axis is split halves: rows
  *     [0, intermediate_size) are the gate projection and rows
  *     [intermediate_size, 2 * intermediate_size) the up projection.
  *   - @c down_weight : [num_local_experts, hidden_size,
- *     intermediate_size] int8, same packing rule;
- *     `down_stride_expert` may add trailing padding between experts.
- *   - @c gate_up_scale : [num_local_experts, 2 * intermediate_size],
- *     @c down_scale : [num_local_experts, hidden_size], both f32 or bf16 —
- *     one scale per weight output channel (symmetric, no zero point).
+ *     intermediate_size], same packing rule; `down_stride_expert` may add
+ *     trailing padding between experts. S8 weights occupy one byte per
+ *     logical element.  S4 weights use the library's canonical packed-nibble
+ *     convention (even logical index in the low nibble).
+ *   - For per-output-channel W8, @c gate_up_scale is
+ *     [num_local_experts, 2 * intermediate_size] and @c down_scale is
+ *     [num_local_experts, hidden_size].  For per-group W4 they are
+ *     [num_local_experts, hidden_size / gate_up_group_size,
+ *     2 * intermediate_size] and
+ *     [num_local_experts, intermediate_size / down_group_size, hidden_size].
+ *     Scale tensors may be f32 or bf16 and must be tightly contiguous.
  *   - @c topk_ids : [num_tokens, topk] int32 expert ids, row stride
  *     @c topk_ids_stride.  Ids index the LOCAL expert range
  *     [0, num_local_experts) unless @c expert_map is supplied.
@@ -310,6 +327,15 @@ struct routed_moe_params {
     // ── packed-weight cache identity ────────────────────────────────
     const void *gate_up_cache_key = nullptr;
     const void *down_cache_key = nullptr;
+
+    // ── append-only W4 per-group contract ───────────────────────────
+    //
+    // These fields were appended rather than changing the meaning of any
+    // existing enum value or member.  They are consumed only when
+    // quant_scheme == sym_per_group_w4a8_dynamic_per_token and must otherwise
+    // remain zero.
+    int64_t gate_up_group_size = 0; ///< K elements per W13 scale group
+    int64_t down_group_size = 0; ///< K elements per W2 scale group
 };
 
 static_assert(sizeof(routed_moe_activation_t) == sizeof(int32_t),
@@ -339,10 +365,9 @@ ZENDNNL_API status_t group_matmul_routed_moe_query(routed_moe_capability *cap);
 /**
  * @brief Decide whether the routed-MoE executor can run @p params.
  *
- * Pure predicate: allocates nothing and writes nothing.  The only
- * caller data it reads is the routing id array, which it bound-checks
- * in O(num_tokens * topk). The fast executor invokes these same checks before
- * touching caller buffers or packed-cache state.
+ * Writes nothing.  The only caller data it reads is the routing id array,
+ * which it bound-checks in O(num_tokens * topk). The fast executor invokes
+ * these same checks before touching caller buffers or packed-cache state.
  *
  * @return @c status_t::success when the routed executor will execute
  *         this call.  Otherwise a specific rejection:

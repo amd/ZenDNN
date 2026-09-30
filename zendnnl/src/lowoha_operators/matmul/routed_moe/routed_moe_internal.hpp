@@ -26,6 +26,7 @@
 
 #include <omp.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -69,7 +70,14 @@ constexpr int64_t vnni_step = 4;
 constexpr int64_t gate_up_kernel_rows = 6;
 constexpr int64_t down_kernel_rows = 8;
 constexpr int64_t max_kernel_rows = down_kernel_rows;
+constexpr int64_t max_s4_kernel_rows = 6;
+constexpr int64_t s4_group_size_align = 8;
 constexpr uint32_t packed_layout_version = 1;
+constexpr uint32_t packed_s4_layout_version = 1;
+/// Decode is defined by the largest live row count of any routed expert, not
+/// by num_tokens or num_tokens * topk.  Only the [ROUTED_MOE] path name
+/// depends on it; the W4 executor accepts any row count by default.
+constexpr int64_t max_decode_expert_rows = 32;
 
 // vpdpbusd accumulates an unsigned activation (at most 255) times a signed
 // weight (magnitude at most 128) in int32.  This aligned ceiling prevents the
@@ -149,6 +157,27 @@ status_t execute(const routed_moe_params &p);
 /// quants followed by their 32 int32 compensation values.
 status_t pack_weights(const int8_t *src, int8_t *dst, int64_t num_experts,
         int64_t out_channels, int64_t in_channels, int64_t num_threads);
+
+namespace test_api {
+
+enum class w4_reduction_path_t : uint8_t {
+    none = 0,
+    fused_f32,
+    scatter_bf16,
+    all_inactive
+};
+
+/// Dormant test-only capture.  The completion counter advances only after a
+/// native routed-W4 call has run W13, requantization, W2, and reduction; cache
+/// activity or merely entering the public API cannot satisfy it.  The path is
+/// written only while capture is armed; an all-inactive call deliberately
+/// records its early return without advancing the completion counter.
+inline std::atomic<bool> s_capture_native_w4 {false};
+inline std::atomic<uint64_t> s_native_w4_completed {0};
+inline std::atomic<w4_reduction_path_t> s_last_w4_reduction_path {
+        w4_reduction_path_t::none};
+
+} // namespace test_api
 
 } // namespace routed_moe
 } // namespace matmul
