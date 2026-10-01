@@ -147,7 +147,7 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
-| `ZENDNNL_EMBAG_ALGO` | Selects the Embedding Bag kernel to use | `none` (auto-select) | `1` (native kernel), `2`  (FBGEMM)
+| `ZENDNNL_EMBAG_ALGO` | Selects the Embedding Bag kernel to use | `none` (auto-select) | `1` (native kernel), `2`  (FBGEMM; requires a build with `-DZENDNNL_DEPENDS_FBGEMM=ON`, otherwise runs native)
 ---
 
 ## Embedding Bag Threading Algorithm Configuration

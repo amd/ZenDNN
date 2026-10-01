@@ -62,6 +62,10 @@ function parse_args() {
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
                 ;;
+            --enable-fbgemm )
+                ZENDNNL_DEPENDS_FBGEMM=1
+                shift
+                ;;
             --no-aocldlp )
                 ZENDNNL_DEPENDS_AOCLDLP=0
                 shift
@@ -207,6 +211,7 @@ function parse_args() {
                 echo " dependency options :"
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
                 echo " --enable-parlooper : enable parlooper."
+                echo " --enable-fbgemm    : enable fbgemm (off by default, not enabled by --all)."
                 echo " --no-aocldlp       : build without the aocl-dlp dependency (aocl-dlp kernels unavailable at runtime)."
                 echo
                 echo " local dependency options (builds from local source) :"
@@ -248,6 +253,9 @@ function parse_args() {
                 echo
                 echo "   # build all targets with parallel jobs"
                 echo "   source zendnnl_build.sh --all --nproc 8"
+                echo
+                echo "   # build all targets with fbgemm enabled"
+                echo "   source zendnnl_build.sh --all --enable-fbgemm"
                 echo
                 echo "   # build library only"
                 echo "   source zendnnl_build.sh --zendnnl"
@@ -292,6 +300,7 @@ ZENDNNL_DOXYGEN=0
 # configure options
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_PARLOOPER=0
+ZENDNNL_DEPENDS_FBGEMM=0
 ZENDNNL_DEPENDS_AOCLDLP=1
 ZENDNNL_LOCAL_AOCLDLP=0
 ZENDNNL_LOCAL_AOCLUTILS=0
@@ -511,6 +520,12 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=OFF"
     fi
 
+    if [ ${ZENDNNL_DEPENDS_FBGEMM} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=OFF"
+    fi
+
     # optional dependency toggles
     if [ ${ZENDNNL_DEPENDS_AOCLDLP} -eq 0 ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF"
@@ -576,7 +591,7 @@ else
     fi
 
     if [ ${ZENDNNL_LOCAL_FBGEMM} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_FBGEMM=ON"
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=ON -DZENDNNL_LOCAL_FBGEMM=ON"
         if [ -n "${ZENDNNL_LOCAL_FBGEMM_DIR}" ];then
             CMAKE_OPTIONS="${CMAKE_OPTIONS} -DFBGEMM_ROOT_DIR=${ZENDNNL_LOCAL_FBGEMM_DIR}"
         fi

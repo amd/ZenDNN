@@ -226,7 +226,7 @@ enum class embag_kernel_t {
 };
 ```
 
-Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16, native AVX-512 for FP16/INT4/INT8). Override at runtime with the environment variable `ZENDNNL_EMBAG_ALGO`.
+Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16, native AVX-512 for FP16/INT4/INT8). Override at runtime with the environment variable `ZENDNNL_EMBAG_ALGO`. The FBGEMM kernel is compiled in only when ZenDNN is built with `-DZENDNNL_DEPENDS_FBGEMM=ON` (off by default); in other builds, `fbgemm` requests run the native kernel.
 
 
 ## Usage Examples
@@ -603,7 +603,7 @@ On AMD hardware, every Zen 4+ CPU supports AVX-512F + AVX-512_BF16, so the FP32 
 
 ## Performance Considerations
 
-- **Algorithm Selection:** Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16; native AVX-512 for FP16/INT4/INT8). Override at runtime with `ZENDNNL_EMBAG_ALGO`.
+- **Algorithm Selection:** Leave `params.kernel = embag_kernel_t::none` for auto-selection (`fbgemm` for FP32/BF16 in builds with FBGEMM, otherwise native; native AVX-512 for FP16/INT4/INT8). Override at runtime with `ZENDNNL_EMBAG_ALGO`.
 - **Threading:** `params.num_threads` controls intra-op parallelism (`0` = auto, honors `OMP_NUM_THREADS`). The kernel splits work across **table rows**, **bags**, or **CCDs** depending on the selected thread algorithm (overridable via `ZENDNNL_EMBAG_THREAD_ALGO`).
 - **Memory Layout:** Embedding tables are **contiguous row-major** `[R, D]`. For quantized INT8 / INT4 tables, each row layout is: `D` data values, then `scale`, then `zero_point` (FP16 or FP32 each, controlled by `fp16_scale_bias`).
 - **Output Stride:** `params.dst_stride` defaults to `embedding_dim`; override only when writing into a wider, padded buffer.

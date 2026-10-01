@@ -57,7 +57,8 @@ ZenDNN
   controlled by `ZENDNNL_DEPENDS_*` flags defined in
   `cmake/ZenDnnlDependenciesDefaults.cmake`. The five toggles are `AOCLDLP`,
   `ONEDNN`, `LIBXSMM`, `PARLOOPER` and `FBGEMM`; **defaults vary** (`PARLOOPER`
-  is OFF, the rest ON), so pass each one explicitly rather than assuming.
+  and `FBGEMM` are OFF, the rest ON), so pass each one explicitly rather than
+  assuming.
   `AOCLDLP` is a toggle but not a *choice*: `zendnnl` links AOCL DLP directly,
   so a build with it OFF is broken rather than lean. `AOCLUTILS` and `JSON` are
   forced ON by the cmake and are not user-controllable. There is no `AMDBLIS`

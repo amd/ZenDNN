@@ -134,8 +134,8 @@ tree and record the source hash for provenance.
 - Always `rm -rf build` first — a stale cmake cache silently keeps old
   dependency flags, defeating the zendnn-only intent.
 - The `ZENDNNL_DEPENDS_*` **defaults vary** in
-  `cmake/ZenDnnlDependenciesDefaults.cmake`: `AOCLDLP`, `ONEDNN`, `LIBXSMM` and
-  `FBGEMM` default **ON**, `PARLOOPER` defaults **OFF**. Pass the four
+  `cmake/ZenDnnlDependenciesDefaults.cmake`: `AOCLDLP`, `ONEDNN` and `LIBXSMM`
+  default **ON**, `PARLOOPER` and `FBGEMM` default **OFF**. Pass the four
   alternate backends OFF explicitly rather than relying on the defaults, so the
   result does not drift if a default changes.
 - "zendnn-only" means *no oneDNN / libxsmm / parlooper / fbgemm*. It does **not**
