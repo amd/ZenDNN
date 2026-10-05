@@ -396,20 +396,17 @@ TEST_F(TestPrepackPerAlgoFunctions, Algo3CustomKernelBranchSkippedOnNonBF16) {
     // cache from previous tests in this binary.
     auto h = make_harness(/*total=*/4, /*active=*/2,
             /*K=*/32, /*N=*/64, /*fill=*/0.125f);
-    // Flip src dtype to F32 — the eligibility predicate now demands
-    // ALL of (custom_kernel_on, src=BF16, wei=BF16, dst=BF16); failing
-    // any one disables the custom-kernel branch.  AOCL is also gated
-    // on BF16-only in `prepack_aocl_dlp.cpp`, so neither warmer fires.
+    // Flip src dtype to F32 — the BF16 custom-kernel eligibility predicate
+    // demands ALL of (custom_kernel_on, src=BF16, wei=BF16, dst=BF16);
+    // failing any one disables the custom-kernel branch.  The AOCL per-tile
+    // warm below is also intentionally keyed to the call metadata, so this
+    // non-BF16 source case must not prefill the BF16 custom-kernel cache.
     h.pp.src_dtype = data_type_t::f32;
 
     prepack::prepack_for_algo_3(h.pp);
 
-    // Cache should be UNTOUCHED — both the custom-kernel and AOCL DLP
-    // backends gate on BF16 weight dtype, and the dispatcher's
-    // `resolve_kernel()` returns aocl_dlp_blocked but the AOCL warmer
-    // would skip these BF16 weights anyway because the wei_dtype
-    // metadata signals non-BF16 to the helper.  Verify by re-warming
-    // and asserting all-misses.
+    // Custom-kernel cache should be UNTOUCHED.  Verify by re-warming and
+    // asserting all-misses.
     prepack::custom_kernel::PackProbeStats probe;
     prepack::custom_kernel::warm_pack_all_custom_kernel_experts(h.weight, h.K,
             h.N, h.ldb, h.transB, h.is_weights_const,
@@ -1653,6 +1650,221 @@ TEST_F(TestPrepackAoclDlpFullWeight, EmptyIsConstTreatsAllAsConst) {
     EXPECT_EQ(st.packed_ok, 0);
     EXPECT_EQ(st.skipped_invalid, 4);
 #endif
+}
+
+TEST(TestPrepackAoclDlpFullWeightF16, MixedModeAllowsInPlaceWhenPermitted) {
+    using namespace zendnnl::lowoha::matmul;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+
+    struct Guard {
+        int32_t wc = matmul_config_t::instance().get_weight_cache();
+        bool mixed = matmul_config_t::instance().get_grp_auto_mixed_inplace();
+        ~Guard() {
+            matmul_config_t::instance().set_weight_cache(wc);
+            matmul_config_t::instance().set_grp_auto_mixed_inplace(mixed);
+            reset_grp_matmul_caches();
+        }
+    } guard;
+
+    reset_grp_matmul_caches();
+    matmul_config_t::instance().set_weight_cache(2);
+    matmul_config_t::instance().set_grp_auto_mixed_inplace(true);
+
+    // K/N must be a shape whose BLOCKED f16 layout is exactly the plain
+    // K*N*sizeof(f16) image, because that strict size equality is what
+    // `wei_inplace_fits` requires before the reorder is allowed to rewrite the
+    // caller's buffer.  256x256 meets that equality (as does 64x128 on the
+    // current AOCL DLP reorder).  256x256 is the same shape the end-to-end
+    // FP16 mixed-in-place test in test_algos.cpp mutates successfully.
+    constexpr int E = 4;
+    constexpr int K = 256;
+    constexpr int N = 256;
+    std::vector<std::vector<float16_t>> banks(E), pristine(E);
+    std::vector<const void *> weights(E);
+    for (int e = 0; e < E; ++e) {
+        banks[e].resize(static_cast<size_t>(K) * N);
+        for (size_t i = 0; i < banks[e].size(); ++i) {
+            banks[e][i] = float16_t(0.001f * static_cast<float>(i + 17 * e));
+        }
+        pristine[e] = banks[e];
+        weights[e] = banks[e].data();
+    }
+    std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
+    std::vector<bool> transBs(E, false), is_const(E, true);
+
+    prepack::aocl_dlp::AoclDlpPackProbeStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(weights, Ks, Ns,
+                      ldbs, transBs, is_const, /*total_count=*/E,
+                      /*src_dtype=*/data_type_t::f16,
+                      /*wei_dtype=*/data_type_t::f16, st,
+                      /*num_threads=*/32, /*allow_inplace=*/true),
+            status_t::success);
+
+    if (st.packed_ok == 0) {
+        GTEST_SKIP() << "AOCL DLP F16 full-weight reorder unavailable";
+    }
+    EXPECT_EQ(st.total_attempted, E);
+    EXPECT_EQ(st.skipped_invalid, 0);
+
+    bool any_mutated = false;
+    for (int e = 0; e < E; ++e) {
+        any_mutated |= std::memcmp(banks[e].data(), pristine[e].data(),
+                               banks[e].size() * sizeof(float16_t))
+                != 0;
+    }
+    EXPECT_TRUE(any_mutated)
+            << "FP16 must follow BF16 in AUTO mixed-in-place: once CK decode "
+               "has been warmed out-of-place, the AOCL prompt full-weight "
+               "warm is allowed to rewrite the caller's FP16 weight buffer.";
+}
+
+TEST(TestPrepackAoclDlpFullWeightF16, MixedModeHonorsInPlaceRefusal) {
+    using namespace zendnnl::lowoha::matmul;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    // Must come BEFORE the ISA check: in a ZENDNNL_DEPENDS_AOCLDLP=OFF build
+    // the warmer's #else path still counts every reachable entry, reporting
+    // total_attempted == E with packed_ok == 0, so the probe assertions below
+    // would fail deterministically on an AVX-512-FP16 host.  Skipping here
+    // keeps them strict for AOCL-enabled builds.
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+
+    struct Guard {
+        int32_t wc = matmul_config_t::instance().get_weight_cache();
+        bool mixed = matmul_config_t::instance().get_grp_auto_mixed_inplace();
+        ~Guard() {
+            matmul_config_t::instance().set_weight_cache(wc);
+            matmul_config_t::instance().set_grp_auto_mixed_inplace(mixed);
+            reset_grp_matmul_caches();
+        }
+    } guard;
+
+    reset_grp_matmul_caches();
+    matmul_config_t::instance().set_weight_cache(2);
+    matmul_config_t::instance().set_grp_auto_mixed_inplace(true);
+
+    constexpr int E = 3;
+    constexpr int K = 64;
+    constexpr int N = 128;
+    std::vector<std::vector<float16_t>> banks(E), pristine(E);
+    std::vector<const void *> weights(E);
+    for (int e = 0; e < E; ++e) {
+        banks[e].resize(static_cast<size_t>(K) * N);
+        for (size_t i = 0; i < banks[e].size(); ++i) {
+            banks[e][i] = float16_t(0.002f * static_cast<float>(i + 11 * e));
+        }
+        pristine[e] = banks[e];
+        weights[e] = banks[e].data();
+    }
+    std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
+    std::vector<bool> transBs(E, false), is_const(E, true);
+
+    prepack::aocl_dlp::AoclDlpPackProbeStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(weights, Ks, Ns,
+                      ldbs, transBs, is_const, /*total_count=*/E,
+                      /*src_dtype=*/data_type_t::f16,
+                      /*wei_dtype=*/data_type_t::f16, st,
+                      /*num_threads=*/32, /*allow_inplace=*/false),
+            status_t::success);
+
+    // Assert the warmer actually reordered every expert BEFORE trusting the
+    // byte comparison below.  Unchanged bytes are also what a warmer that
+    // silently skipped every entry would produce, so without these counters
+    // the test would pass without proving an out-of-place reorder happened.
+    EXPECT_EQ(st.total_attempted, E);
+    EXPECT_EQ(st.packed_ok, E);
+    EXPECT_EQ(st.skipped_invalid, 0);
+
+    for (int e = 0; e < E; ++e) {
+        EXPECT_EQ(std::memcmp(banks[e].data(), pristine[e].data(),
+                          banks[e].size() * sizeof(float16_t)),
+                0)
+                << "allow_inplace=false must keep FP16 weights raw until "
+                   "cross-warm has proven the decode layout is populated";
+    }
+}
+
+// Per-tile FP16 reorder coverage.  The two tests above drive the FULL-WEIGHT
+// warmer, which leaves the ALGO 3 per-tile decomposition unexercised for f16
+// (the existing `..._n_tile` cases are bf16/f32 only).  This mirrors
+// `AoclDlpNTileTotalAttemptedCount` on the f16 dtype and additionally pins the
+// contract the per-tile warmer must keep: every decode layout is packed
+// OUT-OF-PLACE from the RAW weights, so the caller's buffer has to come back
+// byte-identical.  That ordering is what licenses the later in-place prompt
+// mutation, so a per-tile warm that ever mutated would break mixed mode.
+// Uses the same `OutOfPlaceCacheFixture` as the bf16 sibling: the per-tile
+// warmer is gated on `should_warm_weight_cache()`, which only admits WC=1 (or
+// WC=2 with mixed-in-place already active).  Without that fixture the warmer
+// returns before counting anything and the test would assert against zero.
+TEST_F(TestPrepackPerAlgoFunctions, AoclDlpNTileF16CountsAndLeavesWeightsRaw) {
+    using namespace zendnnl::lowoha::matmul;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+
+    reset_grp_matmul_caches();
+
+    // E=4, K=64, N=128, num_threads=64 -> stable = 4; nr_align = 1 gives
+    // align_cap = 128 >= stable, so n_thr_e = 4 per expert and
+    // total_attempted = 4 experts x 4 tiles = 16.  Same arithmetic as the
+    // bf16 sibling so the two stay comparable.
+    constexpr int E = 4;
+    constexpr int K = 64;
+    constexpr int N = 128;
+    std::vector<std::vector<float16_t>> banks(E), pristine(E);
+    std::vector<const void *> weights(E);
+    for (int e = 0; e < E; ++e) {
+        banks[e].resize(static_cast<size_t>(K) * N);
+        for (size_t i = 0; i < banks[e].size(); ++i) {
+            banks[e][i] = float16_t(0.003f * static_cast<float>(i + 13 * e));
+        }
+        pristine[e] = banks[e];
+        weights[e] = banks[e].data();
+    }
+    std::vector<int> Ks(E, K), Ns(E, N), ldbs(E, N);
+    std::vector<bool> transBs(E, false), is_const(E, true);
+
+    prepack::aocl_dlp::AoclDlpPackProbeStats st;
+    ASSERT_EQ(prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(weights,
+                      Ks, Ns, ldbs, transBs, is_const, /*total_count=*/E,
+                      /*wei_dtype=*/data_type_t::f16,
+                      /*num_threads=*/64, /*stable=*/4,
+                      /*nr_align=*/1, st),
+            status_t::success);
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+    EXPECT_EQ(st.total_attempted, 16);
+    EXPECT_EQ(st.packed_ok + st.skipped_invalid, st.total_attempted);
+    // Unchanged bytes are also what a warmer that skipped every tile leaves
+    // behind.  Require a real pack before trusting the memcmp, matching the
+    // BF16 sibling `AoclDlpNTileTotalAttemptedCount`.
+    EXPECT_GT(st.packed_ok, 0)
+            << "the FP16 per-tile warm must pack at least one tile "
+               "out-of-place; a total skip does not prove the contract";
+#else
+    EXPECT_EQ(st.total_attempted, E);
+    EXPECT_EQ(st.skipped_invalid, E);
+    EXPECT_EQ(st.packed_ok, 0);
+#endif
+
+    for (int e = 0; e < E; ++e) {
+        EXPECT_EQ(std::memcmp(banks[e].data(), pristine[e].data(),
+                          banks[e].size() * sizeof(float16_t)),
+                0)
+                << "the FP16 per-tile warm must pack out-of-place and leave "
+                   "expert "
+                << e << "'s weight buffer raw";
+    }
 }
 
 // ===============================================================================
@@ -4434,7 +4646,14 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, ClearInt8CacheDoesNotEvictBf16) {
 // VNNI/BF16 gates — the f16 pack path is only reachable when the host
 // can actually run the f16 microkernel.
 // ===============================================================================
-class TestPrepackF16WarmDtypeFamily : public ::testing::Test {
+// The CK pack LRU is consulted for WC==1, and for WC==2 only while mixed
+// mode is on.  The process default is WC==2 with mixed mode off, so a
+// direct warm bails and leaves the probe counters at zero.  These tests
+// passed only when an earlier AUTO WC=2 case had left the mixed flag set.
+// Pin WC==1 for the fixture, the same way TestPrepackInt8WarmDtypeFamily
+// does, so the family dispatch is reached in isolation.
+class TestPrepackF16WarmDtypeFamily : public ::testing::Test,
+                                      private OutOfPlaceCacheFixture {
 protected:
     void SetUp() override {
         if (!ck::avx512f16_available()) {

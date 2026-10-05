@@ -44,9 +44,9 @@ using zendnnl::error_handling::status_t;
 //   * Build a `Key_matmul` matching exactly what the production
 //     `run_dlp(...)` uses (transB, K, N, ldb, weight ptr, algo
 //     marker = `aocl_dlp_blocked`, extra_input_hash = 0).
-//   * Call `reorderAndCacheWeights<int16_t>(...)` with the BF16
-//     reorder primitives — the same call the fused-MoE Op1 / Op2
-//     dispatch path makes when `dtypes.wei == bf16`.
+//   * Call `reorderAndCacheWeights<...>(...)` with the BF16/F16 reorder
+//     primitives — the same call the fused-MoE Op1 / Op2 dispatch path makes
+//     when `dtypes.wei == bf16/f16`.
 //   * `weight_cache_type = 1` selects out-of-place reorder + LRU
 //     cache (the production setting); the function fast-paths on a
 //     cache hit so re-warming a previously seen expert is free.
@@ -66,7 +66,7 @@ using zendnnl::error_handling::status_t;
 //     for the per-tile warmer).
 //   * `skipped_invalid` — items the warmer chose not to pack.  The
 //     pre-pack reasons today are:
-//        1) wei_dtype != bf16          (no BF16 reorder wired yet)
+//        1) wei_dtype not in {bf16,f16}
 //        2) weight ptr null / K|N|ldb non-positive
 //        3) ldb below minimum row stride (transB ? K : N) — mirrors
 //           the runtime dispatch + CK warm-pack rule; prevents the
@@ -74,15 +74,15 @@ using zendnnl::error_handling::status_t;
 //           undersized tail-slot stride
 //        4) is_weights_const flag says "variable weight"
 //        5) per-tile aligned_n_split returns n_tile <= 0
-//     `reorderAndCacheWeights<int16_t>` returns `true` for the
+//     `reorderAndCacheWeights<BF16/F16 storage type>` returns `true` for the
 //     out-of-place path this warmer takes (see aocl_kernel.cpp
 //     `reorderAndCacheWeights`), so a
 //     post-pack "return false" branch is unreachable — we used to
 //     have a dead `else ++stats.skipped_invalid;` after the call,
 //     dropped to keep the wiring honest.
-//   * `packed_ok` — items where `reorderAndCacheWeights<int16_t>`
-//     was actually invoked (cache miss → reorder + insert, or
-//     cache hit → no-op return).
+//   * `packed_ok` — items where `reorderAndCacheWeights<int16_t>` (BF16) or
+//     `reorderAndCacheWeights<uint16_t>` (F16) was actually invoked
+//     (cache miss → reorder + insert, or cache hit → no-op return).
 //
 // Skipped entries are ignored — a transient validity-check failure
 // on a non-fired slot must not break the inference call.  The
@@ -134,14 +134,12 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
     const int32_t warm_wct
             = allow_inplace ? warm_wct_for_full_weight(weight_cache_type) : 1;
 
-    // Only BF16 wired today (matches the current target envelope and
-    // our active bench config).  Other dtypes return success with every reachable
-    // entry counted as `skipped_invalid` so the caller's PROBE line
-    // still surfaces accurate counts, and we can extend in-place with
-    // one `else if` per dtype when a workload needs it.  Mirrors the
-    // normal path's `total_attempted` accounting so the two regimes
-    // are comparable across runs.
-    if (wei_dtype != data_type_t::bf16) {
+    // BF16 and F16 are exact-size full-weight AOCL layouts, so both can take
+    // the same in-place warm contract.  Other dtypes return success with every
+    // reachable entry counted as `skipped_invalid` so the caller's PROBE line
+    // still surfaces accurate counts.  Mirrors the normal path's
+    // `total_attempted` accounting so the two regimes are comparable.
+    if (wei_dtype != data_type_t::bf16 && wei_dtype != data_type_t::f16) {
         stats.total_attempted += static_cast<int>(bound);
         stats.skipped_invalid += static_cast<int>(bound);
         return status_t::success;
@@ -166,7 +164,7 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
     // `m_hint` is deliberately not compared against the call's m, so one
     // reorder serves every batch size.
     //
-    // bf16 weights never carry sym-quant scales, hence the literal `false`.
+    // bf16/f16 weights never carry sym-quant scales, hence the literal `false`.
     dlp_gemm_hints_t dlp_hints {};
     dlp_metadata_t dlp_fallback_md {};
     dlp_metadata_t *reorder_md = nullptr;
@@ -234,13 +232,23 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         // return false (e.g. interim + fallback aligned_alloc both OOM).  Count
         // a failed reorder as skipped_invalid — matching the sym-quant warmers
         // and the prepack counter contract — instead of silently as packed_ok.
-        const bool warmed = reorderAndCacheWeights<int16_t>(key, weight[i],
-                reordered_unused, K[i], N[i], ldb[i],
-                /*order=*/'r',
-                /*trans=*/(transB[i] ? 't' : 'n'),
-                /*mem_format_b=*/'n', aocl_get_reorder_buf_size_bf16bf16f32of32,
-                aocl_reorder_bf16bf16f32of32,
-                /*weight_cache_type=*/warm_wct, reorder_md);
+        const bool warmed = (wei_dtype == data_type_t::f16)
+                ? reorderAndCacheWeights<uint16_t>(key, weight[i],
+                          reordered_unused, K[i], N[i], ldb[i],
+                          /*order=*/'r',
+                          /*trans=*/(transB[i] ? 't' : 'n'),
+                          /*mem_format_b=*/'n',
+                          aocl_get_reorder_buf_size_f16f16f16of16,
+                          aocl_reorder_f16f16f16of16,
+                          /*weight_cache_type=*/warm_wct, reorder_md)
+                : reorderAndCacheWeights<int16_t>(key, weight[i],
+                          reordered_unused, K[i], N[i], ldb[i],
+                          /*order=*/'r',
+                          /*trans=*/(transB[i] ? 't' : 'n'),
+                          /*mem_format_b=*/'n',
+                          aocl_get_reorder_buf_size_bf16bf16f32of32,
+                          aocl_reorder_bf16bf16f32of32,
+                          /*weight_cache_type=*/warm_wct, reorder_md);
         if (warmed) {
             ++stats.packed_ok;
         } else {
@@ -458,9 +466,9 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
             = matmul_config_t::instance().get_weight_cache();
     // Out-of-place warmer: also run under WC==2 in the grouped AUTO
     // mixed-in-place mode so this layout is pre-warmed from the RAW weights
-    // before the bf16 full-weight AOCL in-place mutation.  Stays
+    // before the bf16/f16 full-weight AOCL in-place mutation.  Stays
     // OUT-OF-PLACE (the reorderAndCacheWeights call below keeps
-    // weight_cache_type=1); only the bf16 full-weight warmer mutates W.
+    // weight_cache_type=1); only the full-weight warmer mutates W.
     if (!should_warm_weight_cache(weight_cache_type)) {
         return status_t::success;
     }
@@ -476,24 +484,22 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
             weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-    // BF16 only today (the production envelope); other dtypes count
-    // every reachable entry as `skipped_invalid` so the PROBE line still
-    // surfaces accurate counts.  Note this counts at the EXPERT level
-    // (not per tile) since we never enter the per-thread loop on the
-    // skip path — `total_attempted` matches the same per-expert
-    // granularity to keep the dtype-skip branch comparable to a
-    // hypothetical extended (non-BF16) path.  Same rationale as the
-    // full-weight warmer.
-    if (wei_dtype != data_type_t::bf16) {
+    // BF16/F16 full-precision families share the same sliced-key contract.
+    // Other dtypes count every reachable entry as `skipped_invalid` so the
+    // PROBE line still surfaces accurate counts.  Note this counts at the
+    // EXPERT level (not per tile) since we never enter the per-thread loop on
+    // the skip path — `total_attempted` matches the same per-expert
+    // granularity to keep the dtype-skip branch comparable to a hypothetical
+    // extended path.  Same rationale as the full-weight warmer.
+    if (wei_dtype != data_type_t::bf16 && wei_dtype != data_type_t::f16) {
         stats.total_attempted += static_cast<int>(bound);
         stats.skipped_invalid += static_cast<int>(bound);
         return status_t::success;
     }
 
-    // Element size for slice pointer arithmetic.  BF16 is the only
-    // dtype that reaches the per-tile loop today (early-return above);
-    // 2 bytes per element regardless of transB.
-    const size_t wei_elem = sizeof(int16_t);
+    // Element size for slice pointer arithmetic.  BF16 and F16 are both
+    // 2-byte storage types regardless of transB.
+    const size_t wei_elem = sizeof(uint16_t);
 
     for (size_t i = 0; i < bound; ++i) {
         if (weight[i] == nullptr || K[i] <= 0 || N[i] <= 0 || ldb[i] <= 0) {
@@ -505,9 +511,9 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
         // Minimum-row-stride gate — same rationale as the full-weight
         // warmer above.  The per-tile path slices the weight pointer by
         // `col_start * ldb * elem` (transB) or `col_start * elem`
-        // (non-transposed) and then calls `aocl_reorder_bf16bf16f32of32`
-        // with the original `ldb`; an undersized `ldb[i]` would make the
-        // reorder read past the row stride and alias neighbouring rows.
+        // (non-transposed) and then calls the dtype's AOCL reorder with the
+        // original `ldb`; an undersized `ldb[i]` would make the reorder read
+        // past the row stride and alias neighbouring rows.
         // Counted as `skipped_invalid` at the expert level (no per-tile
         // total_attempted increments here), matching how the basic
         // validity skip above accounts for the same class of failure.
@@ -563,28 +569,38 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
             // (aocl_kernel.cpp:1696) when called from `do_tile()` with
             // sliced (M, n_tile, K, w_tile, ldb).  Symmetric-quant
             // `extra_input_hash` is 0 because the strict-stable plan is
-            // BF16/BF16/BF16 (no symmetric-quant code path engaged).
+            // BF16/F16 full-precision (no symmetric-quant code path engaged).
             Key_matmul key(transB[i], K[i], n_tile, ldb[i], w_tile,
                     static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
                     /*extra_input_hash=*/0);
 
             void *reordered_unused = nullptr;
-            // `reorderAndCacheWeights<int16_t>` returns `true` on the out-of-place
-            // (weight_cache_type=1) path this per-tile warmer always takes; the
-            // dead `else ++skipped` branch was dropped — see file-level counter
-            // semantics block.
+            // `reorderAndCacheWeights<BF16/F16 storage type>` returns `true`
+            // on the out-of-place (weight_cache_type=1) path this per-tile
+            // warmer always takes; the dead `else ++skipped` branch was
+            // dropped — see file-level counter semantics block.
             // Honour the return, as the three sibling warmers do. It is
             // false on an allocation failure, and `skipped_invalid == 0` is
             // what the mixed-in-place path tests before it decides the
             // cross-warm was complete enough to mutate the caller's weights.
-            if (!reorderAndCacheWeights<int16_t>(key, w_tile, reordered_unused,
-                        K[i], n_tile, ldb[i],
-                        /*order=*/'r',
-                        /*trans=*/(transB[i] ? 't' : 'n'),
-                        /*mem_format_b=*/'n',
-                        aocl_get_reorder_buf_size_bf16bf16f32of32,
-                        aocl_reorder_bf16bf16f32of32,
-                        /*weight_cache_type=*/1)) {
+            const bool warmed = (wei_dtype == data_type_t::f16)
+                    ? reorderAndCacheWeights<uint16_t>(key, w_tile,
+                              reordered_unused, K[i], n_tile, ldb[i],
+                              /*order=*/'r',
+                              /*trans=*/(transB[i] ? 't' : 'n'),
+                              /*mem_format_b=*/'n',
+                              aocl_get_reorder_buf_size_f16f16f16of16,
+                              aocl_reorder_f16f16f16of16,
+                              /*weight_cache_type=*/1)
+                    : reorderAndCacheWeights<int16_t>(key, w_tile,
+                              reordered_unused, K[i], n_tile, ldb[i],
+                              /*order=*/'r',
+                              /*trans=*/(transB[i] ? 't' : 'n'),
+                              /*mem_format_b=*/'n',
+                              aocl_get_reorder_buf_size_bf16bf16f32of32,
+                              aocl_reorder_bf16bf16f32of32,
+                              /*weight_cache_type=*/1);
+            if (!warmed) {
                 ++stats.skipped_invalid;
                 continue;
             }

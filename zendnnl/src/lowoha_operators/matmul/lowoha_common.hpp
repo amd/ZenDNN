@@ -427,7 +427,7 @@ static inline int32_t effective_weight_cache_type(int32_t weight_cache_type) {
  *
  * Mixed mode keeps the process weight-cache at 2 while letting ONLY the
  * full-weight (prompt) AOCL reorder mutate the caller's weight buffer in
- * place — bf16, or int8 sym-quant once the caller declares a buffer
+ * place — bf16/f16, or int8 sym-quant once the caller declares a buffer
  * capacity; every decode layout (CK, AOCL per-tile) stays out-of-place.
  * The grouped dispatcher sets `grp_auto_mixed_inplace` when WC==2 + AUTO +
  * PREPACK + CROSS_WARM + the custom-kernel decode pack + unlimited LRU

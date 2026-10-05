@@ -1192,6 +1192,20 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // cross-warm-then-mutate ordering bf16 takes (`mixed_inplace_for_wei` in
     // prepack.cpp).
     //
+    // f16 is deliberately NOT exempted here even though it IS an in-place
+    // family under mixed mode.  Its mutation is performed by the PREPACK
+    // warmer, which calls the reorder directly with
+    // `warm_wct_for_full_weight(...)` and never comes through here, and mixed
+    // mode requires PREPACK.  A runtime lookup downgraded to WC=1 still serves
+    // that warmed entry correctly -- the WC=1 hit branch reuses the caller's
+    // buffer on the `nullptr` sentinel -- and a miss on an already-mutated
+    // buffer fails closed in `aocl_refuse_reorder_from_mutated`.  Exempting
+    // f16 by dtype alone would instead admit a CK-REFUSED f16, which prepack
+    // deliberately left on the unlocked out-of-place path: a concurrent caller
+    // that skipped the in-flight warm via `already_warmed()` could then
+    // rewrite the buffer in place here while the first caller is still
+    // reading it as raw.
+    //
     // Everything else is forced out-of-place here.  f32, for one, has no warmer
     // at all, so leaving it at WC=2 would let this reorder mutate the buffer
     // lazily at runtime, after which a later / concurrent out-of-place reorder
@@ -1201,9 +1215,19 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
     // AUTO mixed flag, which only the grouped dispatcher sets), so this is INERT
     // for single matmul / BMM and for pinned WC=2 -- none of those set the mixed
     // flag, so the branch never fires for them.
+    // A DECLARED writable capacity is what licenses int8 to mutate, so it
+    // exempts a weight from this downgrade -- but it must NOT exempt f16.
+    // Whether an f16 weight may be mutated is decided per call by
+    // `ck_eligible_f16` in prepack, and a CK-REFUSED f16 is deliberately left
+    // on the unlocked out-of-place path.  Letting a declared capacity keep
+    // WC=2 here would hand that refused call the lazy in-place rewrite anyway,
+    // which is the same race the dtype exemption had.  f16's mutation is
+    // performed by the prepack warmer, never here, so forcing WC=1 costs
+    // nothing: the warmed entry is still served through the WC=1 hit branch.
+    const bool capacity_may_license = lowoha_param.wei_buffer_capacity_bytes > 0
+            && dtypes.wei != data_type_t::f16;
     if (weight_cache_type == 2 && dtypes.wei != data_type_t::bf16
-            && lowoha_param.wei_buffer_capacity_bytes == 0
-            && is_grp_auto_mixed_inplace_active()) {
+            && !capacity_may_license && is_grp_auto_mixed_inplace_active()) {
         weight_cache_type = 1;
     }
 

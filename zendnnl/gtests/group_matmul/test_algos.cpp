@@ -61,6 +61,11 @@
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 
+// `custom_kernel::avx512f16_available()` — the FP16 weight-cache tests
+// skip on hosts/toolchains without native AVX-512-FP16, where
+// `group_matmul_direct` refuses an f16 call outright.
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/f16_microkernel.hpp"
+
 // The balanced remainder split is a dense single-expert optimization. Its
 // default must remain the legacy split so multi-expert callers are unchanged.
 TEST(TestAlignedNSplitSingleExpertScope, DefaultKeepsLegacyTailRemainder) {
@@ -3830,12 +3835,27 @@ struct MinRunResultT {
     bool weights_mutated = false;
 };
 
+// `N_dim` lets a caller pick an N that no CK `pack_nr` (32 or 64) divides,
+// which is a PER-CALL custom-kernel refusal: it leaves
+// `grp_matmul_custom_kernel_effective()` (master + family sub-knobs + weight
+// scales) untouched, so AUTO mixed mode stays ELIGIBLE process-wide while
+// `ck_eligible_*` declines this particular weight.  That is the only way to
+// reach the local refusal handling; turning a family sub-knob off instead
+// downgrades the whole process to WC=1 and bypasses it.
+//
+// `M_dim` selects the phase.  M <= kDecodeMaxM (32) is decode and, for a
+// few experts, Rule 0.5 may select ALGO 3, which never consults
+// `mixed_inplace_for_wei`.  M > 32 is prompt and Rule 0.7 selects ALGO 1,
+// the path that does.  `num_threads` and `num_ops` are likewise overridable
+// so a decode call can be forced onto ALGO 3's narrow-N full-weight arm.
 template <typename T>
-inline MinRunResultT<T> run_min_grp_matmul_typed(
-        data_type_t dt, int K_dim = 256, int weight_offset_elems = 0) {
+inline MinRunResultT<T> run_min_grp_matmul_typed(data_type_t dt,
+        int K_dim = 256, int weight_offset_elems = 0, int N_dim = 256,
+        int M_dim = 8, int num_threads = 8, int num_ops = 4) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
-    const int num_ops = 4, M = 8, N = 256;
+    const int M = M_dim;
+    const int N = N_dim;
     const int K = K_dim;
     const size_t wei_elems = static_cast<size_t>(K) * N;
     std::vector<std::vector<T>> src(num_ops), wei(num_ops), dst(num_ops);
@@ -3863,7 +3883,7 @@ inline MinRunResultT<T> run_min_grp_matmul_typed(
     auto gv = GemmVecs::uniform(num_ops, M, N, K);
     auto params = make_uniform_params(num_ops, dt);
     for (int e = 0; e < num_ops; ++e)
-        params[e].num_threads = 8;
+        params[e].num_threads = num_threads;
     EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
@@ -4032,6 +4052,191 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceMatchesWc1) {
     const double d = max_abs_diff(ref.dst, mixed.dst);
     EXPECT_LT(d, 1e-2)
             << "AUTO mixed-in-place (WC=2) must match WC=1; max_abs_diff=" << d;
+}
+
+// ── FP16 AUTO + WC=2, end to end ─────────────────────────────────────
+//
+// The FP16 warm tests in test_prepack.cpp drive the full-weight warmer
+// directly, which leaves `mixed_inplace_for_wei`, the cross-warm ordering and
+// the AUTO runtime path uncovered for f16.  These two go through
+// `group_matmul_direct` and pin the two halves of the FP16 licence.
+//
+// CK-ELIGIBLE: f16 follows bf16.  WC stays 2, the prompt full-weight reorder
+// rewrites the caller's buffer, and the result still matches the out-of-place
+// reference because decode is served from the pack warmed from RAW weights
+// BEFORE the mutation.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2MixedInplaceMatchesWc1) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+    using f16_t = zendnnl::common::float16_t;
+    AlgoEnvGuard reset_algo(0);
+    MinRunResultT<f16_t> ref, mixed;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1); // out-of-place reference
+        ref = run_min_grp_matmul_typed<f16_t>(data_type_t::f16);
+    }
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(2); // AUTO + WC=2 -> mixed in-place
+        mixed = run_min_grp_matmul_typed<f16_t>(data_type_t::f16);
+    }
+    EXPECT_TRUE(zendnnl::common::matmul_config_t::instance()
+                        .get_grp_auto_mixed_inplace())
+            << "FP16 AUTO + WC=2 with the CK decode pack on must engage "
+               "mixed-in-place";
+    EXPECT_TRUE(mixed.weights_mutated)
+            << "the FP16 prompt full-weight reorder must rewrite the caller's "
+               "buffer in place once the decode pack has been warmed";
+    EXPECT_FALSE(ref.weights_mutated)
+            << "WC=1 must leave the FP16 weight buffers RAW";
+    const double d = max_abs_diff_t<f16_t>(ref.dst, mixed.dst);
+    EXPECT_LT(d, 1e-2) << "FP16 mixed-in-place must match WC=1; max_abs_diff="
+                       << d;
+}
+
+// CK-REFUSED: this weight is ineligible for the in-place licence while the
+// process still considers mixed mode VIABLE.  Prepack deliberately leaves such
+// a weight on the unlocked out-of-place path, so NOTHING may mutate it.  This
+// is exactly the call a dtype-only (or capacity-only) runtime exemption would
+// wrongly admit: a lazy cache miss could rewrite the buffer in place while a
+// concurrent caller that skipped the in-flight warm still reads it as raw.
+//
+// The refusal is driven by an N that no CK `pack_nr` divides, NOT by the FP16
+// sub-knob.  Turning the sub-knob off would make
+// `grp_matmul_custom_kernel_effective()` false, which downgrades the whole
+// process to WC=1 -- the test would then pass through the global downgrade and
+// would keep passing even if `mixed_inplace_for_wei()` or the `allow_inplace`
+// arm regressed.  The mixed-mode assertion below is what pins that
+// distinction.
+//
+// M must be prompt.  The helper's default M=8 is decode, and Rule 0.5 sends
+// 4 experts x 8 threads to ALGO 3, which never consults
+// `mixed_inplace_for_wei`.  64 is above kDecodeMaxM (32), so Rule 0.7
+// selects ALGO 1.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2CkRefusedKeepsWeightsRaw) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+    using f16_t = zendnnl::common::float16_t;
+    // 200 is divisible by neither pack_nr (32 nor 64), so `ck_eligible_f16`
+    // declines this call while every knob stays ON.
+    constexpr int kCkRefusedN = 200;
+    constexpr int kPromptM = 64;
+    AlgoEnvGuard reset_algo(0);
+    MinRunResultT<f16_t> ref, refused;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        ref = run_min_grp_matmul_typed<f16_t>(data_type_t::f16, /*K_dim=*/256,
+                /*weight_offset_elems=*/0, /*N_dim=*/kCkRefusedN,
+                /*M_dim=*/kPromptM);
+    }
+    group_matmul_prepack::test_api::LastInvocationStats refused_stats;
+    {
+        LastInvocationCaptureGuard capture;
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(2);
+        refused = run_min_grp_matmul_typed<f16_t>(data_type_t::f16,
+                /*K_dim=*/256, /*weight_offset_elems=*/0,
+                /*N_dim=*/kCkRefusedN, /*M_dim=*/kPromptM);
+        refused_stats
+                = group_matmul_prepack::test_api::get_last_invocation_stats();
+    }
+    EXPECT_TRUE(refused_stats.valid);
+    EXPECT_EQ(refused_stats.scheduling_algo, 1)
+            << "prompt M must take ALGO 1 (Rule 0.7).  Decode ALGO 3 never "
+               "consults mixed_inplace_for_wei, so this test would pass "
+               "without exercising the refusal";
+    EXPECT_TRUE(zendnnl::common::matmul_config_t::instance()
+                        .get_grp_auto_mixed_inplace())
+            << "this must exercise the PER-CALL refusal: mixed mode has to "
+               "stay active process-wide, otherwise the run passes through the "
+               "global WC=1 downgrade and proves nothing about the local path";
+    EXPECT_FALSE(refused.weights_mutated)
+            << "a CK-REFUSED FP16 weight must never be mutated in place: "
+               "prepack left it on the out-of-place path, so an in-place "
+               "rewrite can race a caller still reading the raw bytes";
+    const double d = max_abs_diff_t<f16_t>(ref.dst, refused.dst);
+    EXPECT_LT(d, 1e-2) << "CK-refused FP16 WC=2 must match WC=1; max_abs_diff="
+                       << d;
+}
+
+// ALGO 3 narrow-N.  N=1 is CK-refused (`plan_pack_nr` returns 0) and the
+// blocked f16 image fits the plain allocation, so the full-weight warm
+// used to rewrite the buffer under `warm_aocl`'s default
+// `allow_inplace=true`.  A prompt M takes ALGO 1 and misses that arm.
+// 8 experts at M=8 with 32 threads stays on decode Rule 0.5
+// (8 * kDecodeNTileThreadFactor >= 32) and `stable = 32/16 = 2` exceeds
+// `N/nr_align = 1`, which is the narrow-N full-weight arm.  The
+// cross-warm skips that arm (`primary_did_aocl_fw`), so regime stays
+// `none` and `packed_ok` is exactly the expert count — a per-tile
+// primary would cross-warm the full weight and count both.
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        AutoF16Wc2NarrowNCkRefusedKeepsWeightsRaw) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::avx512f16_available()) {
+        GTEST_SKIP() << "AVX-512-FP16 not available on this host/toolchain";
+    }
+    using f16_t = zendnnl::common::float16_t;
+    constexpr int kNarrowN = 1;
+    constexpr int kDecodeM = 8;
+    constexpr int kExperts = 8;
+    constexpr int kThreads = 32;
+    AlgoEnvGuard reset_algo(0);
+    MinRunResultT<f16_t> ref, narrow;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        ref = run_min_grp_matmul_typed<f16_t>(data_type_t::f16, /*K_dim=*/256,
+                /*weight_offset_elems=*/0, /*N_dim=*/kNarrowN,
+                /*M_dim=*/kDecodeM, /*num_threads=*/kThreads,
+                /*num_ops=*/kExperts);
+    }
+    group_matmul_prepack::test_api::LastInvocationStats narrow_stats;
+    {
+        LastInvocationCaptureGuard capture;
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(2);
+        narrow = run_min_grp_matmul_typed<f16_t>(data_type_t::f16,
+                /*K_dim=*/256, /*weight_offset_elems=*/0, /*N_dim=*/kNarrowN,
+                /*M_dim=*/kDecodeM, /*num_threads=*/kThreads,
+                /*num_ops=*/kExperts);
+        narrow_stats
+                = group_matmul_prepack::test_api::get_last_invocation_stats();
+    }
+    EXPECT_TRUE(narrow_stats.valid);
+    EXPECT_EQ(narrow_stats.scheduling_algo, 3)
+            << "this regression is the ALGO 3 narrow-N full-weight warm; "
+               "ALGO 1 does not take that arm";
+    EXPECT_EQ(narrow_stats.cross_warm_regime,
+            group_matmul_prepack::CrossWarmRegime::none)
+            << "narrow-N already warmed the full weight, so cross-warm "
+               "must skip it.  A per-tile primary would report "
+               "aocl_full_weight";
+    EXPECT_EQ(narrow_stats.aocl.packed_ok, kExperts)
+            << "the narrow-N warm must pack every expert out-of-place";
+    EXPECT_EQ(narrow_stats.aocl.total_attempted, kExperts);
+    EXPECT_TRUE(zendnnl::common::matmul_config_t::instance()
+                        .get_grp_auto_mixed_inplace())
+            << "mixed mode has to stay active, otherwise the run passes "
+               "through the global WC=1 downgrade";
+    EXPECT_FALSE(narrow.weights_mutated)
+            << "a CK-refused FP16 weight on the ALGO 3 narrow-N arm must "
+               "stay raw";
+    const double d = max_abs_diff_t<f16_t>(ref.dst, narrow.dst);
+    EXPECT_LT(d, 1e-2)
+            << "narrow-N CK-refused FP16 WC=2 must match WC=1; max_abs_diff="
+            << d;
 }
 
 // Concurrency: N threads issue the SAME grouped call on SHARED weight

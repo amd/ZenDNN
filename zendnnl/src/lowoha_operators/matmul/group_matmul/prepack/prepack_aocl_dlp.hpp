@@ -75,12 +75,10 @@ struct AoclDlpPackProbeStats {
 /// first time mid-inference.  Idempotent; cached entries fast-path
 /// inside `reorderAndCacheWeights<int16_t>(...)`.
 ///
-/// Currently supports `wei_dtype = data_type_t::bf16` (matches the
-/// current target envelope and the only dtype the bench actually
-/// exercises); any other dtype causes the helper to count every
-/// entry as `skipped_invalid` and return success without touching
-/// the cache.  Adding f32/f16/int8 is a one-`else if` branch
-/// extension when a workload demands it.
+/// Currently supports `wei_dtype in {data_type_t::bf16, data_type_t::f16}`;
+/// any other dtype causes the helper to count every entry as `skipped_invalid`
+/// and return success without touching the cache.  Adding f32/int8 is a
+/// one-branch extension when a workload demands it.
 ///
 /// Defensive `min()` against every metadata-vector size so a
 /// framework that passes `weight[]` at total_matmul but
@@ -155,9 +153,9 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
 /// full-weight `warm_pack_all_aocl_dlp_experts` populates a key the
 /// runtime never queries (silent miss / wasted reorders).
 ///
-/// This warmer mirrors the runtime decomposition so every key the
-/// runtime builds at ALGO 3 dispatch time has a populated entry in
-/// the AOCL LRU after warm-up.
+/// This warmer mirrors the runtime decomposition so every BF16/F16 key the
+/// runtime builds at ALGO 3 dispatch time has a populated entry in the AOCL
+/// LRU after warm-up.
 ///
 /// Callers (today: `prepack_for_algo_3` only) should fall back to
 /// the full-weight `warm_pack_all_aocl_dlp_experts` when:

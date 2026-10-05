@@ -50,13 +50,15 @@ using zendnnl::error_handling::apilog_info_enabled;
 // ─────────────────────────────────────────────────────────────────────
 namespace {
 
+inline bool ck_eligible_f16(const PrepackParams &p);
+
 /// True when mixed in-place mode applies to THIS weight buffer.
 ///
-/// Two families mutate: bf16, which qualifies on exact size equality, and a
+/// Three families mutate: bf16, f16 whose decode CK layout is warmable, and a
 /// weight whose owner DECLARED a writable capacity — the opt-in that lets the
 /// int8 sym-quant warmer reorder into the caller's buffer instead of
-/// materialising a second copy (see `wei_inplace_fits`).  W4A8 and an
-/// undeclared int8 still always pack out-of-place.
+/// materialising a second copy (see `wei_inplace_fits`).  W4A8, CK-refused f16
+/// and an undeclared int8 still always pack out-of-place.
 ///
 /// This predicate is what orders the prepack, so it MUST admit every family
 /// that can mutate.  A mutating family that answers false here takes the
@@ -89,11 +91,11 @@ namespace {
 /// in-place mutation; narrowing it there would make the CK pack a SECOND
 /// mutator of the same buffer.  Use this only where the question is
 /// "may I mutate this weight in place?".
-inline bool mixed_inplace_for_wei(
-        data_type_t wei_dtype, size_t wei_buffer_capacity_bytes) {
-    return is_grp_auto_mixed_inplace_active()
-            && (wei_dtype == data_type_t::bf16
-                    || wei_buffer_capacity_bytes > 0);
+inline bool mixed_inplace_for_wei(const PrepackParams &p) {
+    if (!is_grp_auto_mixed_inplace_active()) { return false; }
+    if (p.wei_dtype == data_type_t::bf16) { return true; }
+    if (p.wei_dtype == data_type_t::f16) { return ck_eligible_f16(p); }
+    return p.wei_buffer_capacity_bytes > 0;
 }
 
 // Process-wide fingerprint cache (Fix A — see lines 97-126 below for
@@ -619,11 +621,10 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     // `total_matmul > active_matmul` contract.  Set
     // `ZENDNNL_GRP_MATMUL_PREPACK=0` to restore the lazy-only path.
     // Keyed on the WEIGHT BUFFER, not just the process mode: only a buffer
-    // that can actually be mutated (bf16, or one whose owner declared a
-    // capacity) needs the warm latch; everything else takes the plain
+    // that can actually be mutated (bf16, CK-warmable f16, or one whose owner
+    // declared a capacity) needs the warm latch; everything else takes the plain
     // out-of-place path below and keeps its thread-local memo fast path.
-    const bool mixed_inplace
-            = mixed_inplace_for_wei(p.wei_dtype, p.wei_buffer_capacity_bytes);
+    const bool mixed_inplace = mixed_inplace_for_wei(p);
 
     if (!mixed_inplace) {
         // Out-of-place fast path: insert-and-go.  A concurrent skipper may
@@ -2072,8 +2073,7 @@ static void prepack_aocl_only_algo(
     // buffer and the other on the process mode alone.  A weight that cannot be
     // mutated (no declared capacity, not bf16) takes the primary-then-cross
     // branch and needs no reordering.
-    const bool mixed_inplace
-            = mixed_inplace_for_wei(p.wei_dtype, p.wei_buffer_capacity_bytes);
+    const bool mixed_inplace = mixed_inplace_for_wei(p);
 
     // ALGOs 2 and 5 parallelise outside the GEMM (over M-slices and experts,
     // respectively), so each full-weight GEMM runs with one inner thread.
@@ -2088,11 +2088,11 @@ static void prepack_aocl_only_algo(
         primary_p.num_threads = 1;
     }
 
-    // The full-weight (prompt) primary warm.  Under mixed mode both bf16 and a
+    // The full-weight (prompt) primary warm.  Under mixed mode bf16/f16 and a
     // capacity-declaring int8 sym-quant weight take the in-place path, decided
     // inside the warmers by `warm_wct_for_full_weight` + `wei_inplace_fits`;
     // W4A8 and an undeclared int8 stay out-of-place.
-    auto warm_primary_full_weight = [&]() {
+    auto warm_primary_full_weight = [&](bool allow_inplace) {
         const bool w4a8 = w4a8_aocl_warm_candidate(p);
         // W4A8 always resolves to a DLP backend through
         // w4a8_runtime_algo; other families need a blocked-DLP inner kernel.
@@ -2113,11 +2113,11 @@ static void prepack_aocl_only_algo(
             // prompt phase always uses AOCL DLP.  In-place only under mixed
             // mode, where the `mixed_inplace` arm below has already run
             // cross_warm — the same ordering bf16 relies on.
-            st_aocl = warm_aocl_sym_quant(primary_p);
+            st_aocl = warm_aocl_sym_quant(primary_p, allow_inplace);
             primary_label = mixed_inplace ? "aocl_full_weight_sym_quant_inplace"
                                           : "aocl_full_weight_sym_quant";
         } else {
-            st_aocl = warm_aocl(primary_p);
+            st_aocl = warm_aocl(primary_p, allow_inplace);
             primary_label = mixed_inplace ? "aocl_full_weight_inplace"
                                           : "aocl_full_weight";
         }
@@ -2165,7 +2165,7 @@ static void prepack_aocl_only_algo(
                 && st_aocl.skipped_invalid == 0;
         if (cross_warm_complete) {
             // ... then the in-place full-weight prompt mutation last.
-            warm_primary_full_weight();
+            warm_primary_full_weight(/*allow_inplace=*/true);
         } else {
             // Publish WC=1 before clearing the mixed flag (WC==2 is what gates every
             // in-place path; mirrors the dispatch downgrade order).  Leave W RAW.
@@ -2193,7 +2193,18 @@ static void prepack_aocl_only_algo(
             }
         }
     } else {
-        warm_primary_full_weight();
+        // `mixed_inplace` is false on this arm by construction, so passing it
+        // through would refuse in-place for every PINNED ALGO 1/2/5/6 call as
+        // well: the dispatcher clears the mixed flag for pinned algos, which
+        // leaves WC=2 with a single layout per buffer -- the case the backends'
+        // own in-place path already covers.  Warming out-of-place there would
+        // publish an entry the runtime then reuses, silently dropping the
+        // documented single-layout in-place policy.  Refuse in-place only when
+        // mixed mode is ACTIVE and this weight was found ineligible for it
+        // (a CK-refused f16, an undeclared int8, W4A8).
+        const bool allow_inplace
+                = mixed_inplace || !is_grp_auto_mixed_inplace_active();
+        warm_primary_full_weight(allow_inplace);
         cross_warm(p, pre.inner_kernel, scheduling_algo, primary_did_aocl_fw,
                 /*primary_did_custom=*/false, st_aocl, st_ck, cwr);
     }
@@ -2334,7 +2345,18 @@ void prepack_for_algo_3(const PrepackParams &p) {
                 st_aocl = warm_aocl_sym_quant(p);
                 primary_label = "aocl_full_weight_sym_quant";
             } else {
-                st_aocl = warm_aocl(p);
+                // This arm is `!eligible_ck`, so an f16 weight here was
+                // refused by `ck_eligible_f16`.  `warm_aocl`'s default
+                // `allow_inplace=true` would still rewrite that buffer when
+                // the blocked image fits the plain allocation (N=1 does).
+                // Same rule as `prepack_aocl_only_algo`: in-place only when
+                // this weight is mixed-eligible, or mixed mode is inactive
+                // so a pinned single-layout WC=2 call keeps its own in-place
+                // path.  A CK-refused f16 under an active mixed flag stays
+                // out-of-place.
+                const bool allow_inplace = mixed_inplace_for_wei(p)
+                        || !is_grp_auto_mixed_inplace_active();
+                st_aocl = warm_aocl(p, allow_inplace);
                 primary_label = "aocl_full_weight";
             }
             primary_did_aocl_fw = true;
