@@ -104,6 +104,9 @@ struct prepack_params_t {
     int64_t ldb; ///< Physical leading dimension
     bool transposed; ///< true => 't', false => 'n'
     int sym_group_size; ///< AOCL: >0 selects s8 sym-quant variant
+    ///< Unreorder only. True (default): forward @c ZENDNNL_DLP_M_HINT for
+    ///< bf16 and s8 with src s8/u8. Must match the pack. False omits it.
+    bool consider_m_hint;
     ///< @brief CK pack width (32 or 64). 0 => auto via plan_pack_nr(K,N).
     ///< Used only when @c algo == matmul_algo_t::moe_custom_kernel.
     int pack_nr;
@@ -135,6 +138,7 @@ struct prepack_params_t {
         , ldb(0)
         , transposed(false)
         , sym_group_size(0)
+        , consider_m_hint(true)
         , pack_nr(0)
         , interleave_split_halves(false)
         , cached_size(0) {}
@@ -239,6 +243,94 @@ size_t weight_prepack_size(const reorder_params_t &params);
  */
 status_t weight_prepack_into(
         const void *weights, const reorder_params_t &params, void *dst);
+
+// =====================================================================
+// Public API: caller-managed two-step unreorder (inverse of prepack)
+//
+// Unreorder converts an AOCL-DLP blocked weight buffer back into the
+// plain K×N (or transposed) layout it was packed from, same dtype,
+// into caller-owned storage. It is the exact inverse of the
+// aocl_dlp_blocked prepack above and reuses the same
+// reorder_params_t::prepack sub-struct.
+//
+// Step 1 - weight_unreorder_size(reorder_params_t&) : query the plain
+//                                                     output size in
+//                                                     bytes (rows*ldb*elem;
+//                                                     rows is K, or N when
+//                                                     transposed).
+// Step 2 - reorder_direct(packed, dst, reorder_params_t&) : fill the
+//                                                     caller-provided
+//                                                     buffer (unreorder
+//                                                     mode is selected
+//                                                     by rp.is_unreorder).
+//
+// Only matmul_algo_t::aocl_dlp_blocked is supported, and only for the
+// dtypes AOCL exposes an unreorder API for:
+//   wei_dtype = f32  -> aocl_unreorder_f32f32f32of32_reference
+//                       (DLP has no tuned f32 unreorder)
+//   wei_dtype = bf16 -> aocl_unreorder_bf16bf16f32of32
+//                       (needs AVX512-BF16)
+//   wei_dtype = f16  -> aocl_unreorder_f16f16f16of16 if AVX512-FP16,
+//                       else aocl_unreorder_f16f16f16of16_reference
+//   wei_dtype = s8 + src_dtype = s8/bf16/f32
+//                    -> aocl_unreorder_s8s8s32os32_reference
+//   wei_dtype = s8 + src_dtype = u8
+//                    -> aocl_unreorder_u8s8s32os32_reference
+//                       (blocked s8 prefix only; u8s8 column-sum tail
+//                        is ignored)
+//
+// `ldb` is the destination leading dimension (AOCL: >= N when not
+// transposed, >= K when transposed). The output size is rows*ldb*elem.
+//
+// NOT supported (return status_t::unimplemented / size 0):
+//   - matmul_algo_t::moe_custom_kernel / onednn_blocked / libxsmm_blocked
+//   - wei_dtype s4 / u4 (AOCL exposes no unreorder for the 4-bit packs)
+//   - sym_group_size > 0 (no aocl_unreorder_*_sym_quant)
+//
+// consider_m_hint: see prepack_params_t. Pack and unpack must agree.
+// =====================================================================
+
+/**
+ * @brief Query the byte size of the plain (unreordered) output buffer.
+ *
+ * Inspects @c params.prepack. The returned value is the destination
+ * buffer size @c rows * ldb * sizeof(element), where @c rows is @c K
+ * (or @c N when transposed) and @c ldb is the destination leading
+ * dimension — NOT the AOCL pack size and no u8s8 column-sum tail. A
+ * buffer allocated to exactly this many bytes is the correct
+ * destination for @ref reorder_direct in unreorder mode.
+ *
+ * @param params  Reorder parameters with @c params.prepack populated.
+ * @return Plain output size in bytes on success; @c 0 on validation
+ *         error, unsupported algo/dtype, or a build without AOCL-DLP
+ *         (the underlying cause is logged via apilog_error).
+ */
+size_t weight_unreorder_size(const reorder_params_t &params);
+
+/**
+ * @internal
+ * @brief Unreorder (unpack) an AOCL-DLP blocked weight buffer into a
+ *        caller-provided plain buffer.
+ *
+ * NOT a user-facing entry point. User code should call @c reorder_direct,
+ * which delegates here when @c params.is_unreorder is true. Inspects
+ * @c params.prepack for the actual request.
+ *
+ * The caller MUST have allocated at least @c weight_unreorder_size(params)
+ * bytes at @p dst; no capacity recheck is performed here. @p packed is
+ * left untouched (the AOCL LRU / weight caches are never consulted).
+ *
+ * @param packed   Pointer to the AOCL-DLP blocked (packed) weight buffer.
+ * @param params   Reorder parameters with @c params.prepack populated.
+ * @param dst      Destination buffer for the plain layout.
+ * @return @c status_t::success on success;
+ *         @c status_t::unimplemented for unsupported algos / dtypes, a
+ *         build without AOCL-DLP, or an AOCL @c NOT_SUPPORTED result;
+ *         @c status_t::failure on validation errors (bad dims / null
+ *         pointers) or any other AOCL error.
+ */
+status_t weight_unreorder_into(
+        const void *packed, const reorder_params_t &params, void *dst);
 
 } // namespace reorder
 } // namespace lowoha

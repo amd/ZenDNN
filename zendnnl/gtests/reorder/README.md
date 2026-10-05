@@ -37,6 +37,11 @@ zendnnl/gtests/reorder/
   test_dynamic_quant.cpp          LOWOHA dynamic-quant round-trips
   test_strided_cases.cpp          LOWOHA strided quant/conversion round-trips
   test_conversion.cpp             LOWOHA float<->float type-conversion round-trips
+  test_group_reorder.cpp          group_reorder wrapper (plain TEST(), not the
+                                  TestReorder fixture)
+  test_lowoha_unreorder_aocl.cpp  LOWOHA weight prepack <-> unreorder round-trips
+                                  (inverse of the aocl_dlp_blocked prepack);
+                                  TestReorder TEST_P cases, no matmul
 ```
 
 ---
@@ -96,6 +101,32 @@ Round-trip between floating-point dtypes (no INT8), with and without scale/zp. T
 | `FP32_BF16_CVT` / `FP32_BF16_CVT_SCALED` | FP32 ↔ BF16 | no / yes |
 | `FP32_F16_CVT` / `FP32_F16_CVT_SCALED` | FP32 ↔ F16 | no / yes |
 | `BF16_F16_CVT` / `BF16_F16_CVT_SCALED` | BF16 ↔ F16 | no / yes |
+
+### 3.6 `test_lowoha_unreorder_aocl.cpp` — LOWOHA weight prepack ⟷ unreorder
+
+Plain weight packed to the AOCL blocked layout and unpacked back, compared within `REORDER_TOL`. Numerical cases are `TEST_P(TestReorder)` on the fixture K/N and skip without AOCL-DLP. Guards are plain `TEST(AoclUnreorderGuard)` with a fixed 8×16 shape.
+
+| Test | What it covers |
+|---|---|
+| `AOCL_UNREORDER_F32` / `_BF16` / `_S8` | dense round-trip per weight dtype |
+| `AOCL_UNREORDER_F16` | same; prepack skips without AVX512-FP16. Unreorder uses the tuned kernel when that ISA is present, otherwise the reference |
+| `AOCL_UNREORDER_U8SRC` | `wei=s8` + `src=u8`: recovers the plain s8 weights, ignoring the appended column-sum tail |
+| `AOCL_UNREORDER_F32_TRANSPOSED` / `_S8_TRANSPOSED` | column-major weight, recovered as `[N, K]` |
+| `AOCL_UNREORDER_F32_STRIDED` / `_S8_STRIDED` | `ldb > N` on both the source and the recovered destination |
+| `AOCL_UNREORDER_BF16_M_HINT` / `_S8_M_HINT` / `_U8SRC_M_HINT` | `m_hint=32` on the fixture N. Pack and unpack both forward `gemm_hints`; AOCL derives the same NR |
+| `AOCL_UNREORDER_M_HINT_OPT_OUT` | `consider_m_hint=false` unpacks a buffer packed with the hint off |
+
+Validation is a separate `TEST(AoclUnreorderGuard, …)` suite with a fixed `8×16` shape, so `--test` does not repeat it:
+
+| Test | What it covers |
+|---|---|
+| `BothFlagsFail` | `is_prepack && is_unreorder` → `failure` |
+| `UnsupportedAlgoSizeZero` | custom-kernel / onednn / libxsmm → `weight_unreorder_size == 0` |
+| `UnsupportedDtypeSizeZero` | s4 and the s8 sym-quant variant → size `0` |
+| `BadParamsFail` | `ldb < N`, `K`/`N` ≤ 0, null `packed` or `dst` → `failure` |
+
+The round-trip cases self-skip when AOCL-DLP is not built (size `0` /
+`unimplemented`); the guard cases are pure validation and run once on every build.
 
 ---
 
@@ -166,6 +197,9 @@ Is the source strided / row-padded?
 
 Is it a float<->float type conversion (no INT8)?
   yes -> test_conversion.cpp
+
+Is it a weight prepack <-> unreorder round-trip (inverse of aocl_dlp_blocked)?
+  yes -> test_lowoha_unreorder_aocl.cpp   (TestReorder TEST_P; guards are TEST)
 ```
 
 ### Rules

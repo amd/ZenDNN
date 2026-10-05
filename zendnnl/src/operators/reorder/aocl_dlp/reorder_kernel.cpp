@@ -182,13 +182,25 @@ status_t reorder_kernel_t::execute(const context_type &context_,
         }
 #endif
         else if (input_dtype == data_type_t::s8) {
-            aocl_unreorder_s8s8s32os32_reference(order, trans, reorder_param0,
-                    (int8_t *)input, (int8_t *)interim_output,
+            if (source_dtype == data_type_t::u8) {
+                aocl_unreorder_u8s8s32os32_reference(order, trans,
+                        reorder_param0, (int8_t *)input,
+                        (int8_t *)interim_output,
 #if (ZENDNNL_DEPENDS_AOCLDLP)
-                    K, N, ldb, nullptr);
+                        K, N, ldb, nullptr);
 #else
-                    K, N, ldb);
+                        K, N, ldb);
 #endif
+            } else {
+                aocl_unreorder_s8s8s32os32_reference(order, trans,
+                        reorder_param0, (int8_t *)input,
+                        (int8_t *)interim_output,
+#if (ZENDNNL_DEPENDS_AOCLDLP)
+                        K, N, ldb, nullptr);
+#else
+                        K, N, ldb);
+#endif
+            }
             data_copy<int8_t>(output, interim_output, output_buff_size);
         }
     }

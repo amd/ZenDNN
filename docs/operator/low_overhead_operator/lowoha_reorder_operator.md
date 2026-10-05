@@ -16,6 +16,7 @@ Unlike the standard Reorder operator which uses the operator factory pattern, Lo
 - Per-tensor, per-channel (row and column), and per-group (row and column) quantization granularities
 - Strided (non-contiguous) source memory support
 - Weight prepack (`is_prepack = true`) — produce a backend-blocked weight buffer once at model load and reuse it across matmul calls; for static-INT8 with a `u8` source it also precomputes the per-column weight sums the matmul needs for zero-point compensation (see *Weight Prepack Mode*)
+- Weight unreorder (`is_unreorder = true`) — the inverse of weight prepack: recover a plain `K×N` weight from an AOCL-DLP blocked buffer, for debug, export, or feeding another backend (see *Weight Unreorder Mode*)
 - For per-tensor FP16 source/destination, the optimal AVX-512 path has two backends — F32-FMA (AVX-512F + F16C convert) and FP16-FMA (`__m512h`-native, AVX512-FP16 ISA) — auto-selected at dispatch time via `can_use_f16_fma_kernel()`. Build with `-DZENDNNL_NATIVE_F32_ACCUM=ON` to pin reorder to the F32-FMA path. No runtime env var.
 
 
@@ -179,7 +180,8 @@ status_t reorder_direct(
 | Value | Description |
 |-------|-------------|
 | `status_t::success` | Operation completed successfully |
-| `status_t::failure` | Operation failed (invalid parameters, null pointers, etc.) |
+| `status_t::unimplemented` | Mode/dtype/layout not available (e.g. unreorder of a non-AOCL pack, s8 sym-quant, or a build without AOCL-DLP) |
+| `status_t::failure` | Invalid parameters, both `is_prepack` and `is_unreorder`, null pointers, an AOCL unreorder error, etc. |
 
 **Note:** When `dynamic_quant = true` and `dst = nullptr`, the function computes and fills the scale/zero-point output buffers without performing quantization. This is useful for pre-computing quantization parameters.
 
@@ -203,7 +205,8 @@ struct reorder_params_t {
   std::vector<int64_t> dst_strides;       // Destination strides (reserved for future, not currently supported)
   bool dynamic_quant;                     // Enable dynamic quantization (default: false)
   bool is_prepack;                        // Weight-prepack mode (see "Weight Prepack Mode" below)
-  prepack_params_t prepack;               // Prepack request (used only when is_prepack = true)
+  bool is_unreorder;                      // Weight-unreorder mode (see "Weight Unreorder Mode" below)
+  prepack_params_t prepack;               // Prepack/unreorder request (used when is_prepack or is_unreorder)
 };
 ```
 
@@ -489,6 +492,9 @@ struct prepack_params_t {
   int64_t       ldb;            // Physical leading dimension of the input weights
   bool          transposed;     // true => weights are column-major ('ba')
   int           sym_group_size; // AOCL: >0 selects s8 sym-quant variant
+  bool          consider_m_hint; // Unreorder only. True (default): forward
+                                // ZENDNNL_DLP_M_HINT for bf16 and s8x{s8,u8}.
+                                // Must match the pack. False omits it.
 
   // --- group_matmul custom-kernel (CK) prepack: used only when
   //     algo == matmul_algo_t::moe_custom_kernel (see "Custom-Kernel
@@ -496,7 +502,7 @@ struct prepack_params_t {
   int           pack_nr;                  // CK pack width; 0 = auto (plan_pack_nr)
   bool          interleave_split_halves;  // silu/gelu [gate|up] -> interleaved (even N)
 
-  size_t        cached_size;    // (out, internal) — populated by weight_prepack_size
+  size_t        cached_size;    // (out, internal) — last successful weight_prepack_size; unreorder does not write this
 };
 ```
 
@@ -759,9 +765,93 @@ Constraints (mirror the CK runtime gate in `prepare_for_call`): `pack_nr ∈ {32
 A single CK prepack op covers one weight; prepacking a **group** of experts is done with `group_reorder` (below).
 
 
+## Weight Unreorder Mode
+
+Weight unreorder is the **inverse** of the AOCL-DLP weight prepack: it takes a blocked weight buffer and recovers the plain `K×N` weight it was packed from, same dtype, into a caller-owned buffer. Use it for debug, export, or to feed the weights to another backend. It is **not** part of the GEMM path — matmul never unpacks a `mem_format_b = 'r'` weight; that stays blocked and is consumed directly.
+
+The mode is selected by setting `reorder_params_t::is_unreorder = true` on the same `reorder_params_t` you hand to `reorder_direct`, reusing the embedded `prepack` sub-struct (algo / wei_dtype / src_dtype / K / N / ldb / transposed). `is_prepack` and `is_unreorder` are **mutually exclusive** — setting both makes `reorder_direct` return `status_t::failure`.
+
+### Supported Layouts and dtypes
+
+Only `matmul_algo_t::aocl_dlp_blocked` is invertible, and only for the dtypes AOCL exposes an unreorder API for:
+
+| `prepack.wei_dtype` | AOCL unreorder kernel |
+|---------------------|-----------------------|
+| `f32`  | `aocl_unreorder_f32f32f32of32_reference` |
+| `bf16` | `aocl_unreorder_bf16bf16f32of32` (needs AVX512-BF16) |
+| `f16`  | `aocl_unreorder_f16f16f16of16` when AVX512-FP16 is present, otherwise `aocl_unreorder_f16f16f16of16_reference` |
+| `s8` (`src_dtype` s8/bf16/f32) | `aocl_unreorder_s8s8s32os32_reference` |
+| `s8` (`src_dtype` u8) | `aocl_unreorder_u8s8s32os32_reference` |
+
+Everything else is rejected — `weight_unreorder_size` returns `0` and `reorder_direct` returns `status_t::unimplemented`:
+
+- `matmul_algo_t::moe_custom_kernel` / `onednn_blocked` / `libxsmm_blocked` (no AOCL unreorder API)
+- `wei_dtype` `s4` / `u4` (the 4-bit packs have no unreorder API)
+- `sym_group_size > 0` (AOCL has `aocl_reorder_s8s8s32os32_sym_quant` and `aocl_gemm_*_sym_quant`, but no `aocl_unreorder_*_sym_quant`)
+
+`prepack.consider_m_hint` defaults to true and, for bf16 and s8 with `src_dtype` s8 or u8, forwards `ZENDNNL_DLP_M_HINT` and `num_threads` as `nt_hint` on both the pack and the unreorder. AOCL derives the panel width from those hints, so the unpack must see the same values the pack used. False omits them and only matches a buffer packed with the hint off. f32, f16, and mixed s8 do not attach hints.
+
+For a `u8` source (`wei_dtype = s8` + `src_dtype = u8`), the prepacked buffer carries an appended column-sum tail; unreorder unpacks **only** the blocked s8 prefix (recovering the original s8 weights) and ignores the tail.
+
+### Two-Step Caller Workflow
+
+Mirrors prepack: **query the size, allocate, then call `reorder_direct`.** Here `src` is the packed (blocked) buffer and `dst` is the plain output.
+
+1. **Query the size** with `weight_unreorder_size(rp)`. Returns the destination size in bytes — `rows * ldb * sizeof(element)`, where `rows` is `K` (or `N` when transposed) and `ldb` is `prepack.ldb`. This is **not** the AOCL pack size and does not include a column-sum tail. `0` on validation/dispatch failure or a build without AOCL-DLP.
+2. **Allocate a buffer of at least that size.**
+3. **Call `reorder_direct(packed, dst, rp)`** with the same `rp` (`is_unreorder = true`). The library writes the plain layout into `dst` and never mutates `packed` or touches the AOCL weight/LRU caches.
+
+> **`prepack.ldb` is the destination leading dimension.** AOCL requires `ldb >= N` when not transposed and `ldb >= K` when transposed. A larger `ldb` is legal padding: element `(i, j)` is written at `i * ldb + j`. It does not have to equal the `ldb` used to pack. A dense buffer is the `ldb == N` (or `ldb == K` when transposed) case, which is `K * N * sizeof(element)`.
+
+### `transposed`
+
+`transposed` has the same meaning as on the pack path and selects the plain output orientation:
+
+- `transposed = false` → row-major `[K, N]` with leading dimension `ldb` (`>= N`).
+- `transposed = true`  → column-major `K×N` stored as `[N, K]` row-major with leading dimension `ldb` (`>= K`).
+
+Packing with `transposed = true` and then unreordering with `transposed = true` round-trips the original column-major weight.
+
+### Example: Prepack then Unreorder (round-trip)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+// Prepack a plain [K, N] weight into the AOCL DLP blocked layout.
+reorder_params_t rp;
+rp.is_prepack         = true;
+rp.prepack.algo       = matmul_algo_t::aocl_dlp_blocked;
+rp.prepack.wei_dtype  = data_type_t::f32;
+rp.prepack.src_dtype  = data_type_t::f32;
+rp.prepack.K          = K;
+rp.prepack.N          = N;
+rp.prepack.ldb        = N;      // row-major leading dim
+rp.prepack.transposed = false;
+
+std::vector<uint8_t> packed(weight_prepack_size(rp));
+reorder_direct(plain_weight, packed.data(), rp);
+
+// Recover the plain weight (reuse rp: flip the flags).
+rp.is_prepack   = false;
+rp.is_unreorder = true;
+
+const size_t plain_bytes = weight_unreorder_size(rp);   // == K * N * sizeof(float)
+if (plain_bytes == 0) { /* unsupported / no AOCL-DLP -- check apilog_error */ }
+
+std::vector<uint8_t> recovered(plain_bytes);
+status_t st = reorder_direct(packed.data(), recovered.data(), rp);
+if (st != status_t::success) { /* unimplemented / failure */ }
+// recovered now holds the dense [K, N] weight, byte-identical to the original.
+```
+
+### Buffer Lifetime
+
+The library never allocates the plain output buffer; the caller owns it end-to-end. `packed` must stay valid for the duration of the call and is not modified.
+
+
 ## Group Reorder
 
-`group_reorder` applies `reorder_direct` to a **batch of independent reorder ops** in one call — the grouped counterpart to the single-op `reorder_direct`. It is a thin sequential wrapper: each op carries its own `reorder_params_t`, so a single group may freely mix standard reorder, dynamic-quant, and weight-prepack (including custom-kernel) ops.
+`group_reorder` applies `reorder_direct` to a **batch of independent reorder ops** in one call — the grouped counterpart to the single-op `reorder_direct`. It is a thin sequential wrapper: each op carries its own `reorder_params_t`, so a single group may freely mix standard reorder, dynamic-quant, weight-prepack (including custom-kernel), and weight-unreorder ops.
 
 Its primary use case is **MoE model load**: build one custom-kernel prepack `reorder_params_t` per expert and reorder every expert's weight into a caller-owned VNNI buffer ahead of the first decode step, so inference (`group_matmul` with `mem_format_b='r'`) consumes the pre-packed weights directly with no first-iteration pack latency.
 
@@ -781,9 +871,9 @@ status_t group_reorder(
 |--------|----------|
 | Loop | Sequential `reorder_direct(src[i], dst[i], params[i])` for `i` in `[0, params.size())` |
 | Why sequential | `reorder_direct` parallelises internally (vector kernels / dynamic-quant dispatchers); an OMP outer loop would nest regions |
-| Per-op mode | Selected by each `params[i]` (`is_prepack` / `dynamic_quant` / standard) — modes may be mixed in one group |
+| Per-op mode | Selected by each `params[i]` (`is_prepack` / `is_unreorder` / `dynamic_quant` / standard) — modes may be mixed in one group |
 | Vector sizes | `src.size() == dst.size() == params.size()`; an empty group or a mismatch returns `status_t::failure` |
-| `dst[i]` | May be null only where that op's mode permits (e.g. compute-only dynamic quant). Weight prepack (AOCL or custom-kernel) requires a non-null caller `dst`. |
+| `dst[i]` | May be null only where that op's mode permits (e.g. compute-only dynamic quant). Weight prepack and weight unreorder both require a non-null caller `dst`. |
 | Failure | Aborts on the **first** failing op and returns its status; ops already completed keep their finished output (no rollback) |
 | Return | `status_t::success` when every op succeeded |
 
@@ -2049,11 +2139,23 @@ The operator performs the following validations:
 27. **Interleave:** `interleave_split_halves = true` requires even N
 28. **Alignment (caller):** `dst` should be 64-byte aligned so the CK microkernel's aligned AVX-512 loads succeed at inference (`weight_prepack_size` already rounds the byte size up to 64)
 
+### Weight Unreorder Validation (when `is_unreorder = true`)
+
+Unreorder validation runs **unconditionally** (not diagnostic-gated), because it is a load-time / debug entry point and the rejections must hold for both the size query and the data-movement call. The status is specific so callers can act on it: `weight_unreorder_size` maps any non-success to `0`, and `weight_unreorder_into` returns it directly.
+
+29. **Mutual exclusion:** `is_prepack` and `is_unreorder` must not both be set — `reorder_direct` returns `status_t::failure`
+30. **Dimensions / leading dimension:** `prepack.K > 0`, `prepack.N > 0`, and `prepack.ldb` ≥ `prepack.K` (transposed) or ≥ `prepack.N` (non-transposed) → else `status_t::failure`
+31. **Algo:** `prepack.algo` must be `matmul_algo_t::aocl_dlp_blocked` (custom-kernel / onednn / libxsmm have no unreorder API) → else `status_t::unimplemented` / size `0`
+32. **dtype:** `prepack.wei_dtype` must be `f32` / `bf16` / `f16` / `s8`, and `prepack.sym_group_size` must be `0` (s4/u4 and the s8 sym-quant variant have no unreorder API) → else `status_t::unimplemented` / size `0`
+33. **m_hint:** default `consider_m_hint` forwards `ZENDNNL_DLP_M_HINT` and `num_threads` for bf16 and s8 with `src_dtype` s8 or u8. AOCL derives NR from those hints, so pack and unreorder must see the same values. False omits them and only matches an unhinted pack. f32, f16, and mixed s8 do not attach hints.
+34. **Null pointers:** `packed` and `dst` must be non-null in `weight_unreorder_into` → else `status_t::failure`
+35. **Buffer size:** the caller is responsible — `dst` must hold at least `weight_unreorder_size(params)` bytes (`= rows * ldb * sizeof(element)`). The library does **not** verify this. AOCL failures are returned as `status_t::failure` (or `unimplemented` for `NOT_SUPPORTED`) and `dst` is not treated as valid.
+
 ### Group Reorder Validation (`group_reorder`)
 
-29. **Non-empty group:** `params` must not be empty
-30. **Vector sizes:** `src.size() == dst.size() == params.size()`
-31. **Per-op:** each op is validated by `reorder_direct` under its own mode; the first per-op failure aborts the group and returns that status
+36. **Non-empty group:** `params` must not be empty
+37. **Vector sizes:** `src.size() == dst.size() == params.size()`
+38. **Per-op:** each op is validated by `reorder_direct` under its own mode; the first per-op failure aborts the group and returns that status
 
 
 ## Implementation Support Matrix

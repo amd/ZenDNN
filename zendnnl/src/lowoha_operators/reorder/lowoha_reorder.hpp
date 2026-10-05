@@ -51,6 +51,16 @@ using zendnnl::memory::status_t;
  *       @c weight_prepack_size(params) and allocated at least that
  *       many bytes at @p dst.
  *
+ *   - Weight unreorder
+ *       Selected when @c params.is_unreorder is true (the inverse of
+ *       weight prepack). Unpacks an AOCL-DLP blocked weight buffer
+ *       (@p src) back into a plain (or transposed) buffer
+ *       (@p dst), same dtype, reusing the @c params.prepack fields.
+ *       The caller must have queried the destination size via
+ *       @c weight_unreorder_size(params) and allocated at least that
+ *       many bytes at @p dst. @c is_prepack and @c is_unreorder are
+ *       mutually exclusive; setting both returns @c status_t::failure.
+ *
  *   - Dynamic quantization
  *       Selected when @c params.dynamic_quant is true. Computes
  *       scale / zero-point from the source data and (optionally)
@@ -96,7 +106,13 @@ using zendnnl::memory::status_t;
  * @param params Reorder parameters. The fields consulted depend on the
  *               selected mode (see per-mode descriptions above).
  *
- * @return status_t::success on success, status_t::failure otherwise.
+ * @return @c status_t::success on success;
+ *         @c status_t::unimplemented when the selected mode is not
+ *         available (e.g. unreorder of a non-AOCL layout or dtype, a
+ *         build without AOCL-DLP, or s8 sym-quant);
+ *         @c status_t::failure otherwise (invalid parameters, both
+ *         @c is_prepack and @c is_unreorder, null pointers, an AOCL
+ *         unreorder error, ...).
  *
  * @note Mode-specific contracts (mandatory shape, alignment, capacity,
  *       etc.) are documented with each mode above.
@@ -171,6 +187,7 @@ status_t group_dynamic_quant(const std::vector<const void *> &src,
  * mode @ref reorder_direct supports is available per-op, selected by that
  * op's own @ref reorder_params_t, so a single group may freely mix:
  *   - Weight prepack            (@c params[i].is_prepack == true)
+ *   - Weight unreorder          (@c params[i].is_unreorder == true)
  *   - Dynamic quantization      (@c params[i].dynamic_quant == true)
  *   - Standard reorder / (de)quant / type conversion (default)
  *

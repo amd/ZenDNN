@@ -557,6 +557,22 @@ int run_lowoha_weight_prepack_bf16_test();
 /** @brief Two-step weight prepack with an S8 (int8) weight. */
 int run_lowoha_weight_prepack_s8_test();
 
+//==============================================================================
+// Weight Unreorder Examples (inverse of weight prepack)
+//
+// Pack a plain KxN weight, recover it, and compare. Returns OK when
+// AOCL-DLP or AVX512-FP16 is unavailable.
+//==============================================================================
+
+/** @brief Two-step weight unreorder round-trip with an F32 weight. */
+int run_lowoha_weight_unreorder_f32_test();
+
+/** @brief Two-step weight unreorder round-trip with a BF16 weight. */
+int run_lowoha_weight_unreorder_bf16_test();
+
+/** @brief Two-step weight unreorder round-trip with an S8 (int8) weight. */
+int run_lowoha_weight_unreorder_s8_test();
+
 } // namespace examples
 } // namespace zendnnl
 

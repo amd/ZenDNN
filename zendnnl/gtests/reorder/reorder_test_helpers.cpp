@@ -481,6 +481,79 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor, tensor_t &dst_tensor,
     }
 }
 
+status_t lowoha_prepack_weight_test(tensor_t &weight, const ReorderType &params,
+        data_type_t wei_dtype, data_type_t src_dtype, bool transposed,
+        int64_t K, int64_t N, int64_t ldb, void **packed, size_t *packed_size) {
+    try {
+        // is_prepack: plain weight -> AOCL blocked.
+        reorder_params_t reorder_params;
+        reorder_params.is_prepack = true;
+        reorder_params.num_threads = params.num_threads;
+        reorder_params.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+        reorder_params.prepack.wei_dtype = wei_dtype;
+        reorder_params.prepack.src_dtype = src_dtype;
+        reorder_params.prepack.K = K;
+        reorder_params.prepack.N = N;
+        reorder_params.prepack.ldb = ldb;
+        reorder_params.prepack.transposed = transposed;
+
+        const size_t size = weight_prepack_size(reorder_params);
+        if (size == 0) {
+            // f16 without AVX512-FP16 is a skip. Any other size 0 is unimplemented.
+            if (wei_dtype == data_type_t::f16
+                    && !zendnnl::common::zendnnl_platform_info()
+                                .get_avx512_f16_status()) {
+                return status_t::isa_unsupported;
+            }
+            return status_t::unimplemented;
+        }
+
+        const size_t alignment = 64;
+        *packed = zendnnl_aligned_alloc(
+                alignment, get_aligned_size(alignment, size));
+        if (*packed == nullptr) {
+            log_error("lowoha_prepack_weight_test: aligned allocation failed");
+            return status_t::failure;
+        }
+        *packed_size = size;
+
+        return reorder_direct(
+                weight.get_raw_handle_unsafe(), *packed, reorder_params);
+    } catch (const exception_t &ex) {
+        log_error("lowoha_prepack_weight_test exception: ", ex.what());
+        return status_t::failure;
+    }
+}
+
+status_t lowoha_unreorder_weight_test(const void *packed, tensor_t &plain_out,
+        const ReorderType &params, data_type_t wei_dtype, data_type_t src_dtype,
+        bool transposed, int64_t K, int64_t N, int64_t ldb,
+        bool consider_m_hint) {
+    try {
+        // is_unreorder: blocked -> plain. ldb is the destination stride.
+        reorder_params_t reorder_params;
+        reorder_params.is_unreorder = true;
+        reorder_params.num_threads = params.num_threads;
+        reorder_params.prepack.algo = matmul_algo_t::aocl_dlp_blocked;
+        reorder_params.prepack.wei_dtype = wei_dtype;
+        reorder_params.prepack.src_dtype = src_dtype;
+        reorder_params.prepack.K = K;
+        reorder_params.prepack.N = N;
+        reorder_params.prepack.ldb = ldb;
+        reorder_params.prepack.transposed = transposed;
+        reorder_params.prepack.consider_m_hint = consider_m_hint;
+
+        const size_t size = weight_unreorder_size(reorder_params);
+        if (size == 0) { return status_t::unimplemented; }
+
+        return reorder_direct(
+                packed, plain_out.get_raw_handle_unsafe(), reorder_params);
+    } catch (const exception_t &ex) {
+        log_error("lowoha_unreorder_weight_test exception: ", ex.what());
+        return status_t::failure;
+    }
+}
+
 void compare_lowoha_reorder_output(tensor_t &output_tensor,
         tensor_t &ref_tensor, const ReorderType &params,
         bool &is_comparison_successful) {

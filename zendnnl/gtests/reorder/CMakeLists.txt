@@ -33,4 +33,6 @@ target_sources(gtests
     # group_reorder — grouped wrapper that loops reorder_direct; plain
     # TEST() cases (not the TestReorder round-trip fixture).
     ${CMAKE_CURRENT_SOURCE_DIR}/test_group_reorder.cpp
+    # Weight unreorder. Round-trips are TEST_P; guards are plain TEST().
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_lowoha_unreorder_aocl.cpp
 )

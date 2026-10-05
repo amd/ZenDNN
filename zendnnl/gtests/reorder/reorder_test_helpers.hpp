@@ -134,6 +134,43 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor, tensor_t &dst_tensor,
         tensor_t &scale_tensor, tensor_t &zp_tensor, const ReorderType &params,
         bool dynamic_quant = false);
 
+/** @fn lowoha_prepack_weight_test
+ *  @brief Pack a plain weight into the AOCL blocked layout.
+ *
+ *  Allocates a 64-byte-aligned buffer in @p packed. The caller frees it
+ *  with @c zendnnl_aligned_free.
+ *
+ *  @param weight       Plain source (physical [K,N], or [N,K] if transposed).
+ *  @param params       Only @c num_threads is used.
+ *  @param wei_dtype    Weight dtype (f32 / bf16 / f16 / s8).
+ *  @param src_dtype    Activation dtype. u8 selects the u8s8 pack.
+ *  @param transposed   true => column-major source.
+ *  @param K,N          Logical weight dimensions.
+ *  @param ldb          Leading dimension of @p weight.
+ *  @param[out] packed  64-byte-aligned blocked buffer.
+ *  @param[out] packed_size @c weight_prepack_size result.
+ *  @return @c isa_unsupported for f16 without AVX512-FP16;
+ *          @c unimplemented when the size query returns 0;
+ *          otherwise the @c reorder_direct status.
+ */
+status_t lowoha_prepack_weight_test(tensor_t &weight, const ReorderType &params,
+        data_type_t wei_dtype, data_type_t src_dtype, bool transposed,
+        int64_t K, int64_t N, int64_t ldb, void **packed, size_t *packed_size);
+
+/** @fn lowoha_unreorder_weight_test
+ *  @brief Unpack an AOCL blocked buffer back into a plain weight.
+ *
+ *  Same arguments as @ref lowoha_prepack_weight_test. @p ldb is the
+ *  destination leading dimension. @p packed is not modified.
+ *
+ *  @param consider_m_hint  Forwarded to @c prepack.consider_m_hint.
+ *  @return the @c reorder_direct status (@c unimplemented without AOCL-DLP).
+ */
+status_t lowoha_unreorder_weight_test(const void *packed, tensor_t &plain_out,
+        const ReorderType &params, data_type_t wei_dtype, data_type_t src_dtype,
+        bool transposed, int64_t K, int64_t N, int64_t ldb,
+        bool consider_m_hint = true);
+
 /** @fn compare_lowoha_reorder_output
  *  @brief Compare LOWOHA reorder output with reference
  *

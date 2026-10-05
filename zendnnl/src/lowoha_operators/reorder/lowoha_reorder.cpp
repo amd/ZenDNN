@@ -41,12 +41,17 @@ using zendnnl::common::op_instrumentation;
 using zendnnl::lowoha::matmul::zendnnl_parallel_for;
 
 status_t reorder_direct(const void *src, void *dst, reorder_params_t &params) {
-    //============================================================================
-    // Check if this is a weight-prepack request
-    // When params.is_prepack is true, delegate to the prepack pipeline
-    // (the prepack-specific fields live in params.prepack).
-    //============================================================================
+    // is_prepack and is_unreorder are mutually exclusive. Both use prepack.
+    // is_prepack: plain -> blocked (src = weights).
+    // is_unreorder: blocked -> plain (src = packed).
+    if (params.is_prepack && params.is_unreorder) {
+        log_error(
+                "reorder_direct: is_prepack and is_unreorder are mutually "
+                "exclusive; set at most one");
+        return status_t::failure;
+    }
     if (params.is_prepack) { return weight_prepack_into(src, params, dst); }
+    if (params.is_unreorder) { return weight_unreorder_into(src, params, dst); }
 
     // Compute nelems from shape
     const size_t nelems = static_cast<size_t>(params.nelems());

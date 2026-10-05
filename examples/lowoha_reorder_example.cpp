@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_reorder_example.hpp"
+#include "common/op_config.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -6808,6 +6809,150 @@ int run_lowoha_weight_prepack_s8_test() {
         return NOT_OK;
     }
     return OK;
+}
+
+//==============================================================================
+// Weight Unreorder Examples
+//
+// Inverse of the prepack examples. Pack a plain KxN weight, recover it
+// with weight_unreorder_size + reorder_direct (is_unreorder), and compare.
+// Skips when AOCL-DLP is not built. bf16 and s8 keep the process m_hint
+// (default 32) so pack and unpack share gemm_hints.
+//==============================================================================
+
+// Shared prepack -> unreorder -> verify round-trip for one weight dtype.
+static int run_lowoha_weight_unreorder_demo(data_type_t wei_dtype,
+        data_type_t src_dtype, int64_t K, int64_t N, const char *label) {
+    using zendnnl::common::size_of;
+    using zendnnl::lowoha::matmul::kernel_to_string;
+    using zendnnl::ops::matmul_algo_t;
+
+    const matmul_algo_t algo = matmul_algo_t::aocl_dlp_blocked;
+
+    try {
+        log_info("========================================");
+        log_info("LOWOHA Weight Unreorder (round-trip): ", label,
+                ", algo=", kernel_to_string(algo));
+        log_info("========================================");
+
+        const uint32_t elem_size = size_of(wei_dtype);
+        if (elem_size == 0) {
+            log_error("unsupported wei_dtype (size_of returned 0)");
+            return NOT_OK;
+        }
+        const size_t plain_bytes = static_cast<size_t>(K * N) * elem_size;
+
+        std::vector<uint8_t> weight_buf(plain_bytes);
+        for (size_t i = 0; i < weight_buf.size(); ++i) {
+            weight_buf[i] = static_cast<uint8_t>((i * 7 + 1) & 0xff);
+        }
+        log_info("Input weight: K=", K, ", N=", N, ", elem_size=", elem_size,
+                " bytes (row-major)");
+
+        // is_prepack packs; the same rp is flipped to is_unreorder below.
+        reorder_params_t rp;
+        rp.is_prepack = true;
+        rp.prepack.algo = algo;
+        rp.prepack.wei_dtype = wei_dtype;
+        rp.prepack.src_dtype = src_dtype;
+        rp.prepack.K = K;
+        rp.prepack.N = N;
+        rp.prepack.ldb = N;
+        rp.prepack.transposed = false;
+
+        const size_t prepack_size = weight_prepack_size(rp);
+        if (prepack_size == 0) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+            if (wei_dtype == data_type_t::f16
+                    && !zendnnl::common::zendnnl_platform_info()
+                                .get_avx512_f16_status()) {
+                log_info(
+                        "AVX512-FP16 unavailable; skipping unreorder demo "
+                        "for ",
+                        label);
+                return OK;
+            }
+            log_error("weight_prepack_size failed for ", label, "!");
+            return NOT_OK;
+#else
+            log_info("AOCL-DLP not built; skipping unreorder demo for ", label);
+            return OK;
+#endif
+        }
+        std::vector<uint8_t> packed(prepack_size);
+        if (reorder_direct(weight_buf.data(), packed.data(), rp)
+                != status_t::success) {
+            log_error("reorder_direct (prepack) failed for ", label, "!");
+            return NOT_OK;
+        }
+
+        rp.is_prepack = false;
+        rp.is_unreorder = true;
+        const size_t unreorder_size = weight_unreorder_size(rp);
+        if (unreorder_size == 0) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+            if (wei_dtype == data_type_t::f16
+                    && !zendnnl::common::zendnnl_platform_info()
+                                .get_avx512_f16_status()) {
+                log_info(
+                        "AVX512-FP16 unavailable; skipping unreorder demo "
+                        "for ",
+                        label);
+                return OK;
+            }
+#endif
+            log_error(
+                    "weight_unreorder_size failed after a successful "
+                    "prepack for ",
+                    label, "!");
+            return NOT_OK;
+        }
+        log_info("weight_unreorder_size: required=", unreorder_size,
+                " bytes (plain K*N)");
+
+        std::vector<uint8_t> plain_out(unreorder_size);
+        const status_t st = reorder_direct(packed.data(), plain_out.data(), rp);
+        if (st == status_t::isa_unsupported) {
+            log_info("AVX512-FP16 unavailable; skipping unreorder demo for ",
+                    label);
+            return OK;
+        }
+        if (st != status_t::success) {
+            log_error("reorder_direct (unreorder) failed for ", label, "!");
+            return NOT_OK;
+        }
+
+        if (unreorder_size != plain_bytes
+                || std::memcmp(plain_out.data(), weight_buf.data(), plain_bytes)
+                        != 0) {
+            log_error("Unreorder round-trip mismatch for ", label, "!");
+            return NOT_OK;
+        }
+        log_info("Unreorder round-trip PASSED for ", label, " (recovered ",
+                plain_bytes, " plain bytes)");
+    } catch (const exception_t &ex) {
+        std::cout << ex.what() << std::endl;
+        return NOT_OK;
+    }
+    return OK;
+}
+
+int run_lowoha_weight_unreorder_f32_test() {
+    return run_lowoha_weight_unreorder_demo(
+            data_type_t::f32, data_type_t::f32, 8, 16, "f32");
+}
+
+int run_lowoha_weight_unreorder_bf16_test() {
+    // Wide N so a non-zero m_hint can change NR.
+    return run_lowoha_weight_unreorder_demo(
+            data_type_t::bf16, data_type_t::bf16, 512, 2048, "bf16");
+}
+
+int run_lowoha_weight_unreorder_s8_test() {
+    // u8 source appends a column-sum tail; unreorder returns the s8 weights.
+    // Wide N so a non-zero m_hint can change NR.
+    return run_lowoha_weight_unreorder_demo(
+            data_type_t::s8, data_type_t::u8, 512, 2048, "s8 (u8 src, colsum)");
 }
 
 } // namespace examples

@@ -212,6 +212,11 @@ int main() {
         run_lowoha_weight_prepack_bf16_test(); // BF16 weight prepack
         run_lowoha_weight_prepack_s8_test(); // S8 weight prepack
 
+        // Weight unreorder. bf16 and s8 keep the process m_hint (default 32).
+        run_lowoha_weight_unreorder_f32_test(); // F32 weight unreorder
+        run_lowoha_weight_unreorder_bf16_test(); // BF16 weight unreorder
+        run_lowoha_weight_unreorder_s8_test(); // S8 weight unreorder
+
         /** LOWOHA Softmax operator functionality examples.
      *  Demonstrates softmax, log-softmax, and softmin operations using the
      *  low-overhead LOWOHA API with support for multi-dimensional tensors.

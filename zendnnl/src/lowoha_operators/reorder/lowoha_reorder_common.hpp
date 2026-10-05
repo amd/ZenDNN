@@ -160,9 +160,11 @@ struct reorder_params_t {
             dst_strides; ///< Destination strides (reserved for future, not currently supported)
     bool dynamic_quant; ///< Enable dynamic quantization (compute scale/zp from source data)
     bool is_prepack; ///< True when this call is a weight-prepack request.
+    bool is_unreorder; ///< True when this call is a weight-unreorder request.
 
     /**
-   * @brief Weight-prepack request piggy-backed on reorder_direct.
+   * @brief Weight-prepack / weight-unreorder request piggy-backed on
+   *        reorder_direct.
    *
    * When @c is_prepack is true, @ref reorder_direct dispatches to the
    * weight-prepack pipeline using the fields in @c prepack (algo,
@@ -171,15 +173,22 @@ struct reorder_params_t {
    * constructed @c is_prepack is false, so existing reorder_direct
    * callers are unaffected.
    *
-   * Workflow:
+   * When @c is_unreorder is true, @ref reorder_direct unpacks an
+   * AOCL-DLP blocked buffer back to a plain layout, using the same
+   * @c prepack fields. @c src is packed and @c dst is plain. Setting
+   * both flags returns @c status_t::failure.
+   *
+   * Prepack workflow:
    *   1. Fill @c reorder_params_t::prepack fields (algo / wei_dtype /
    *      K / N / ldb / transposed / ...) and set @c is_prepack = true.
    *   2. @c size_t size = weight_prepack_size(rp); — returns 0 on error.
    *   3. Allocate a buffer of that size.
    *   4. @c reorder_direct(weights, dst, rp);
    *
-   * Note: the same @c rp is reused for both calls — there is no need
-   * to keep a separate prepack_params_t variable around.
+   * Unreorder workflow (same steps, @c is_unreorder = true):
+   *   @c weight_unreorder_size returns @c rows*ldb*sizeof(element)
+   *   (0 on error), then @c reorder_direct(packed, dst, rp).
+   * The same @c rp is reused. There is no separate params object.
    */
     prepack_params_t prepack;
 
@@ -198,6 +207,7 @@ struct reorder_params_t {
         , dst_strides()
         , dynamic_quant(false)
         , is_prepack(false)
+        , is_unreorder(false)
         , prepack() {}
 
     /**

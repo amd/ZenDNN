@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/reorder/prepack/lowoha_prepack.hpp"
+#include "common/zendnnl_compat.hpp"
 #include "common/zendnnl_global.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
@@ -262,6 +263,66 @@ status_t validate_prepack_inputs(const char *caller, const void *weights,
         return status_t::failure;
     }
     return validate_prepack_params(caller, params);
+}
+
+// True when prepack attaches gemm_hints: bf16, or s8 with an s8/u8 source.
+bool aocl_pack_uses_m_hint(const prepack_params_t &params) {
+    if (params.wei_dtype == data_type_t::bf16) { return true; }
+    return params.wei_dtype == data_type_t::s8
+            && (params.src_dtype == data_type_t::s8
+                    || params.src_dtype == data_type_t::u8);
+}
+
+// Not diagnostic-gated. failure: bad K/N/ldb.
+// unimplemented: unsupported algo, dtype, or sym-quant.
+status_t validate_unreorder_params(
+        const char *caller, const prepack_params_t &params) {
+    if (params.K <= 0 || params.N <= 0) {
+        apilog_error(caller, ": invalid K or N (K=", params.K, ", N=", params.N,
+                ")");
+        return status_t::failure;
+    }
+    if (params.ldb <= 0) {
+        apilog_error(caller, ": invalid ldb (", params.ldb, ")");
+        return status_t::failure;
+    }
+    const int64_t required_ldb = params.transposed ? params.K : params.N;
+    if (params.ldb < required_ldb) {
+        apilog_error(caller, ": invalid ldb (", params.ldb,
+                "), expected at least ", required_ldb, " for ",
+                (params.transposed ? "transposed" : "non-transposed"),
+                " weights");
+        return status_t::failure;
+    }
+
+    if (params.algo != matmul_algo_t::aocl_dlp_blocked) {
+        apilog_error(caller, ": unreorder.algo must be aocl_dlp_blocked (got ",
+                kernel_to_string(params.algo),
+                "); custom-kernel / onednn / libxsmm layouts have no "
+                "unreorder API");
+        return status_t::unimplemented;
+    }
+
+    if (params.sym_group_size > 0) {
+        apilog_error(caller,
+                ": sym_group_size > 0 (s8 sym-quant) has no AOCL unreorder "
+                "API (reorder and GEMM sym-quant symbols exist; unreorder "
+                "does not)");
+        return status_t::unimplemented;
+    }
+
+    switch (params.wei_dtype) {
+        case data_type_t::f32:
+        case data_type_t::bf16:
+        case data_type_t::f16:
+        case data_type_t::s8: break;
+        default:
+            apilog_error(caller,
+                    ": unsupported wei_dtype=", dtype_info(params.wei_dtype),
+                    " for unreorder (supported: f32 / bf16 / f16 / s8)");
+            return status_t::unimplemented;
+    }
+    return status_t::success;
 }
 
 // ===========================================================================
@@ -516,6 +577,119 @@ status_t aocl_prepack(const void *weights, const prepack_params_t &params,
 #endif
 }
 
+// Unpack an AOCL blocked weight into dst. Size is rows * ldb * elem.
+size_t aocl_unreorder_compute_size(const prepack_params_t &params) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    (void)params;
+    apilog_error(
+            "weight_unreorder(aocl_dlp): ZenDNNL was built without AOCL-DLP "
+            "support (ZENDNNL_DEPENDS_AOCLDLP=0); unreorder is unavailable.");
+    return 0;
+#else
+    const size_t elem = zendnnl::common::size_of(params.wei_dtype);
+    if (elem == 0) {
+        apilog_error("weight_unreorder(aocl_dlp): unsupported wei_dtype=",
+                dtype_info(params.wei_dtype));
+        return 0;
+    }
+    const uint64_t rows
+            = static_cast<uint64_t>(params.transposed ? params.N : params.K);
+    const uint64_t ldb = static_cast<uint64_t>(params.ldb);
+    if (ldb != 0 && rows > std::numeric_limits<uint64_t>::max() / ldb) {
+        apilog_error("weight_unreorder(aocl_dlp): rows*ldb overflows");
+        return 0;
+    }
+    const uint64_t n_elem = rows * ldb;
+    if (n_elem > std::numeric_limits<uint64_t>::max() / elem) {
+        apilog_error("weight_unreorder(aocl_dlp): output byte size overflows");
+        return 0;
+    }
+    return static_cast<size_t>(n_elem * elem);
+#endif
+}
+
+status_t aocl_unreorder(const void *packed, const prepack_params_t &params,
+        void *dst, int32_t num_threads = 0) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    (void)packed;
+    (void)params;
+    (void)dst;
+    (void)num_threads;
+    apilog_error(
+            "weight_unreorder(aocl_dlp): ZenDNNL was built without AOCL-DLP "
+            "support (ZENDNNL_DEPENDS_AOCLDLP=0); unreorder is unavailable.");
+    return status_t::unimplemented;
+#else
+    using namespace zendnnl::lowoha::matmul;
+
+    // 0 means an unsupported dtype or an overflow. Validation already ran.
+    if (aocl_unreorder_compute_size(params) == 0) {
+        return status_t::unimplemented;
+    }
+
+    // AOCL reports failure only through metadata.
+    const char order = 'r';
+    const char trans = params.transposed ? 't' : 'n';
+    const char mat_type = 'B';
+    const md_t k = static_cast<md_t>(params.K);
+    const md_t n = static_cast<md_t>(params.N);
+    const md_t ldb = static_cast<md_t>(params.ldb);
+    dlp_gemm_hints_t hints {};
+    dlp_metadata_t md {};
+    // Same gemm_hints as prepack. AOCL derives NR from them.
+    dlp_metadata_t *unreorder_meta = &md;
+    if (params.consider_m_hint && aocl_pack_uses_m_hint(params)) {
+        unreorder_meta
+                = matmul::aocl_dlp_hints_metadata(&md, hints, md, num_threads);
+    }
+
+    if (params.wei_dtype == data_type_t::f32) {
+        aocl_unreorder_f32f32f32of32_reference(order, trans, mat_type,
+                static_cast<const float *>(packed), static_cast<float *>(dst),
+                k, n, ldb, unreorder_meta);
+    } else if (params.wei_dtype == data_type_t::bf16) {
+        aocl_unreorder_bf16bf16f32of32(order, trans, mat_type,
+                static_cast<const int16_t *>(packed),
+                static_cast<int16_t *>(dst), k, n, ldb, unreorder_meta);
+    } else if (params.wei_dtype == data_type_t::f16) {
+        // Tuned kernel needs AVX512-FP16. Reference is portable C.
+        if (zendnnl::common::zendnnl_platform_info().get_avx512_f16_status()) {
+            aocl_unreorder_f16f16f16of16(order, trans, mat_type,
+                    static_cast<const uint16_t *>(packed),
+                    static_cast<uint16_t *>(dst), k, n, ldb, unreorder_meta);
+        } else {
+            aocl_unreorder_f16f16f16of16_reference(order, trans, mat_type,
+                    static_cast<const uint16_t *>(packed),
+                    static_cast<uint16_t *>(dst), k, n, ldb, unreorder_meta);
+        }
+    } else if (params.wei_dtype == data_type_t::s8) {
+        // u8 source: recover the s8 weights. The column-sum tail is not written.
+        if (params.src_dtype == data_type_t::u8) {
+            aocl_unreorder_u8s8s32os32_reference(order, trans, mat_type,
+                    static_cast<const int8_t *>(packed),
+                    static_cast<int8_t *>(dst), k, n, ldb, unreorder_meta);
+        } else {
+            aocl_unreorder_s8s8s32os32_reference(order, trans, mat_type,
+                    static_cast<const int8_t *>(packed),
+                    static_cast<int8_t *>(dst), k, n, ldb, unreorder_meta);
+        }
+    } else {
+        apilog_error("weight_unreorder(aocl_dlp): unsupported wei_dtype=",
+                dtype_info(params.wei_dtype));
+        return status_t::unimplemented;
+    }
+
+    if (md.error_hndl.error_code != DLP_CLSC_SUCCESS) {
+        apilog_error("weight_unreorder(aocl_dlp): AOCL error_code=",
+                static_cast<int>(md.error_hndl.error_code));
+        return md.error_hndl.error_code == DLP_CLSC_NOT_SUPPORTED
+                ? status_t::unimplemented
+                : status_t::failure;
+    }
+    return status_t::success;
+#endif
+}
+
 // =====================================================================
 // Custom-kernel (group_matmul) prepack — MEMORY-FORMAT CHANGE ONLY.
 // Packs the weight into the caller's `dst` buffer in the VNNI layout
@@ -650,10 +824,7 @@ status_t weight_prepack_into(
         const void *weights, const reorder_params_t &params, void *dst) {
     const prepack_params_t &pp = params.prepack;
 
-    // Thread control: inherited from reorder_direct's thread_guard
-    // (which is set up from reorder_params_t::num_threads before
-    //  this function is reached). The prepack pipeline does not expose
-    //  its own num_threads knob.
+    // Forwarded as nt_hint, not used as the OpenMP team size.
 
     // Diagnostic-gated input validation.
     status_t val_status = op_instrumentation::validate([&]() {
@@ -690,6 +861,74 @@ status_t weight_prepack_into(
 
     const status_t st
             = backend_prepack_by_algo(weights, pp, dst, params.num_threads);
+
+    if (is_profile) {
+        profiler.tbp_stop();
+        profilelog_verbose(log_str, ", time=", profiler.tbp_elapsedtime(),
+                profiler.get_res_str());
+    }
+
+    return st;
+}
+
+// ===========================================================================
+// Public API: weight_unreorder_size / weight_unreorder_into.
+// ===========================================================================
+
+size_t weight_unreorder_size(const reorder_params_t &params) {
+    const prepack_params_t &pp = params.prepack;
+
+    // Leave cached_size alone: it stores the last prepack size.
+    if (validate_unreorder_params("weight_unreorder_size", pp)
+            != status_t::success) {
+        return 0;
+    }
+
+    if (apilog_info_enabled()) {
+        std::ostringstream ss;
+        ss << "LOWOHA weight_unreorder_size: algo=" << kernel_to_string(pp.algo)
+           << ", K=" << pp.K << ", N=" << pp.N
+           << ", wei_dtype=" << dtype_info(pp.wei_dtype);
+        apilog_info(ss.str());
+    }
+
+    return aocl_unreorder_compute_size(pp);
+}
+
+status_t weight_unreorder_into(
+        const void *packed, const reorder_params_t &params, void *dst) {
+    const prepack_params_t &pp = params.prepack;
+
+    if (!packed) {
+        apilog_error("weight_unreorder_into: packed pointer is null");
+        return status_t::failure;
+    }
+    if (!dst) {
+        apilog_error("weight_unreorder_into: dst pointer is null");
+        return status_t::failure;
+    }
+
+    const status_t val_status
+            = validate_unreorder_params("weight_unreorder_into", pp);
+    if (val_status != status_t::success) { return val_status; }
+
+    profiler_t profiler;
+    const bool is_profile = is_profile_enabled();
+
+    [[maybe_unused]] std::string log_str;
+    if (apilog_info_enabled() || is_profile) {
+        std::ostringstream ss;
+        ss << "LOWOHA weight_unreorder_into: algo=" << kernel_to_string(pp.algo)
+           << ", K=" << pp.K << ", N=" << pp.N << ", ldb=" << pp.ldb
+           << ", trans=" << (pp.transposed ? 't' : 'n')
+           << ", wei_dtype=" << dtype_info(pp.wei_dtype);
+        log_str = ss.str();
+        if (apilog_info_enabled()) { apilog_info(log_str); }
+    }
+
+    if (is_profile) { profiler.tbp_start(); }
+
+    const status_t st = aocl_unreorder(packed, pp, dst, params.num_threads);
 
     if (is_profile) {
         profiler.tbp_stop();

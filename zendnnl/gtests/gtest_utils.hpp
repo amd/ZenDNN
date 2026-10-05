@@ -126,6 +126,22 @@ private:
     bool prev_;
 };
 
+// RAII guard for ZENDNNL_DLP_M_HINT: saves/sets on construction, restores
+// on scope exit. 0 turns gemm_hints off.
+class DlpMHintGuard {
+public:
+    explicit DlpMHintGuard(int64_t hint)
+        : prev_(matmul_config_t::instance().get_dlp_m_hint()) {
+        matmul_config_t::instance().set_dlp_m_hint(hint);
+    }
+    ~DlpMHintGuard() { matmul_config_t::instance().set_dlp_m_hint(prev_); }
+    DlpMHintGuard(const DlpMHintGuard &) = delete;
+    DlpMHintGuard &operator=(const DlpMHintGuard &) = delete;
+
+private:
+    int64_t prev_;
+};
+
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
 struct MatmulInput {
