@@ -18,23 +18,6 @@ include_guard(GLOBAL)
 # required packages
 macro(zendnnl_required_packages)
   message(DEBUG "finding required packages...")
-  # On MSVC, request the LLVM OpenMP runtime (/openmp:llvm, OpenMP 3.1) instead
-  # of the default /openmp (vcomp, OpenMP 2.0). Reasons: (1) ZenDNN uses OpenMP
-  # 3.0+ APIs (omp_get/set_max_active_levels) and unsigned parallel-for counters
-  # that vcomp rejects; (2) AOCL-DLP is built with /openmp:llvm, so ZenDNN must
-  # use the same OpenMP runtime to avoid two runtimes in one process. This
-  # variable requires CMake >= 3.30. No effect on non-MSVC toolchains.
-  if(MSVC)
-    if(CMAKE_VERSION VERSION_LESS "3.30")
-      message(FATAL_ERROR
-        "ZenDNN MSVC builds require CMake >= 3.30: OpenMP_RUNTIME_MSVC (which "
-        "selects the LLVM OpenMP runtime /openmp:llvm) is only honored by CMake "
-        ">= 3.30. On older CMake it is silently ignored and MSVC falls back to "
-        "/openmp (vcomp), which breaks OpenMP 3.x linking and mixes two OpenMP "
-        "runtimes with AOCL-DLP. Use CMake >= 3.30.")
-    endif()
-    set(OpenMP_RUNTIME_MSVC "llvm")
-  endif()
   # find openmp
   find_package(OpenMP REQUIRED GLOBAL)
   # pthreads

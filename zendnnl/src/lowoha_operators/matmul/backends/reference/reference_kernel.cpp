@@ -405,9 +405,10 @@ void store_output(int BS, int M, int N, int ldc, unsigned int offset_out,
     } else {
         auto *out_f32 = static_cast<float *>(output);
         if (BS == 1 && ldc == N) {
-            const size_t total_elements = static_cast<size_t>(M) * N;
+            const long long total_elements
+                    = static_cast<long long>(M) * static_cast<long long>(N);
 #pragma omp parallel for if (total_elements > 10000)
-            for (size_t idx = 0; idx < total_elements; ++idx) {
+            for (long long idx = 0; idx < total_elements; ++idx) {
                 out_f32[idx] = accum_buff_f32[idx];
             }
         } else {

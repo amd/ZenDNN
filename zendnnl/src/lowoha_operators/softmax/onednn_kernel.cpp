@@ -86,7 +86,8 @@ status_t softmax_onednn_wrapper(
                 softmin_scratch_f32.resize(total_elems);
                 const float *in = static_cast<const float *>(input);
 #pragma omp parallel for
-                for (uint64_t i = 0; i < total_elems; ++i) {
+                for (int64_t i = 0; i < static_cast<int64_t>(total_elems);
+                        ++i) {
                     softmin_scratch_f32[i] = -in[i];
                 }
                 effective_input = softmin_scratch_f32.data();
@@ -94,7 +95,8 @@ status_t softmax_onednn_wrapper(
                 softmin_scratch_16.resize(total_elems);
                 const bfloat16_t *in = static_cast<const bfloat16_t *>(input);
 #pragma omp parallel for
-                for (uint64_t i = 0; i < total_elems; ++i) {
+                for (int64_t i = 0; i < static_cast<int64_t>(total_elems);
+                        ++i) {
                     softmin_scratch_16[i]
                             = static_cast<uint16_t>(bfloat16_t::f32_to_bf16_val(
                                     -static_cast<float>(in[i])));
@@ -104,7 +106,8 @@ status_t softmax_onednn_wrapper(
                 softmin_scratch_16.resize(total_elems);
                 const float16_t *in = static_cast<const float16_t *>(input);
 #pragma omp parallel for
-                for (uint64_t i = 0; i < total_elems; ++i) {
+                for (int64_t i = 0; i < static_cast<int64_t>(total_elems);
+                        ++i) {
                     softmin_scratch_16[i] = float16_t::f32_to_f16_val(
                             -static_cast<float>(in[i]));
                 }

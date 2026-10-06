@@ -154,8 +154,8 @@ static void layer_norm_impl(const void *input, void *output, const void *gamma,
     const uint64_t vec128 = simd_vec128(norm_size);
 
 #pragma omp parallel for num_threads(num_threads)
-    for (uint64_t b = 0; b < batch; ++b) {
-        const uint64_t off = b * norm_size;
+    for (int64_t b = 0; b < static_cast<int64_t>(batch); ++b) {
+        const uint64_t off = static_cast<uint64_t>(b) * norm_size;
 
         // Pass 1: compute mean and variance.
         //
@@ -289,9 +289,11 @@ static void batch_norm_impl(const void *input, void *output, const void *gamma,
     const data_type_t beta_dt = params.beta_dt;
 
 #pragma omp parallel for collapse(2) num_threads(num_threads)
-    for (uint64_t n = 0; n < N; ++n) {
-        for (uint64_t c = 0; c < C; ++c) {
-            const uint64_t off = (n * C + c) * spatial_size;
+    for (int64_t n = 0; n < static_cast<int64_t>(N); ++n) {
+        for (int64_t c = 0; c < static_cast<int64_t>(C); ++c) {
+            const uint64_t off
+                    = (static_cast<uint64_t>(n) * C + static_cast<uint64_t>(c))
+                    * spatial_size;
             float inv_std = 1.0f / std::sqrt(running_var[c] + eps);
             float m = running_mean[c];
             float g = params.use_scale ? load_scalar(gamma, gamma_dt, c) : 0.0f;
@@ -334,8 +336,8 @@ static void rms_norm_impl(const void *input, void *output, const void *gamma,
     const uint64_t vec128 = simd_vec128(norm_size);
 
 #pragma omp parallel for num_threads(num_threads)
-    for (uint64_t b = 0; b < batch; ++b) {
-        const uint64_t off = b * norm_size;
+    for (int64_t b = 0; b < static_cast<int64_t>(batch); ++b) {
+        const uint64_t off = static_cast<uint64_t>(b) * norm_size;
 
         float sum_sq = 0.0f;
         if (use_f16_accum) {
@@ -412,8 +414,8 @@ static void fused_add_rms_norm_impl(const void *input, void *output,
     const uint64_t vec128 = simd_vec128(norm_size);
 
 #pragma omp parallel for num_threads(num_threads)
-    for (uint64_t b = 0; b < batch; ++b) {
-        const uint64_t off = b * norm_size;
+    for (int64_t b = 0; b < static_cast<int64_t>(batch); ++b) {
+        const uint64_t off = static_cast<uint64_t>(b) * norm_size;
 
         // Pass 1: residual[i] += input[i] and accumulate sum-of-squares.
         // In F16-accum mode the in-place add is rounded to FP16 (residual is
@@ -506,8 +508,8 @@ static void fused_layer_norm_add_impl(const void *input, void *output,
     const uint64_t vec128 = simd_vec128(norm_size);
 
 #pragma omp parallel for num_threads(num_threads)
-    for (uint64_t b = 0; b < batch; ++b) {
-        const uint64_t off = b * norm_size;
+    for (int64_t b = 0; b < static_cast<int64_t>(batch); ++b) {
+        const uint64_t off = static_cast<uint64_t>(b) * norm_size;
 
         // Pass 1: mean and variance (see layer_norm_impl for the FP32 vs. f16-accum
         // formula rationale).

@@ -47,9 +47,9 @@ void max_pooling_reference_impl(const T *input, T *output,
 // NHWC format: [batch, height, width, channels]
 // Parallelize over batch, output height, and output width dimensions
 #pragma omp parallel for collapse(3) num_threads(num_threads)
-    for (uint64_t n = 0; n < batch; ++n) {
-        for (uint64_t oh = 0; oh < out_h; ++oh) {
-            for (uint64_t ow = 0; ow < out_w; ++ow) {
+    for (int64_t n = 0; n < static_cast<int64_t>(batch); ++n) {
+        for (int64_t oh = 0; oh < static_cast<int64_t>(out_h); ++oh) {
+            for (int64_t ow = 0; ow < static_cast<int64_t>(out_w); ++ow) {
                 for (uint64_t c = 0; c < channels; ++c) {
                     float max_val = -std::numeric_limits<float>::infinity();
 
@@ -110,9 +110,9 @@ void avg_pooling_reference_impl(const T *input, T *output,
 // NHWC format: [batch, height, width, channels]
 // Parallelize over batch, output height, and output width dimensions
 #pragma omp parallel for collapse(3) num_threads(num_threads)
-    for (uint64_t n = 0; n < batch; ++n) {
-        for (uint64_t oh = 0; oh < out_h; ++oh) {
-            for (uint64_t ow = 0; ow < out_w; ++ow) {
+    for (int64_t n = 0; n < static_cast<int64_t>(batch); ++n) {
+        for (int64_t oh = 0; oh < static_cast<int64_t>(out_h); ++oh) {
+            for (int64_t ow = 0; ow < static_cast<int64_t>(out_w); ++ow) {
                 for (uint64_t c = 0; c < channels; ++c) {
                     float sum = 0.0f;
                     uint64_t valid_count = 0;

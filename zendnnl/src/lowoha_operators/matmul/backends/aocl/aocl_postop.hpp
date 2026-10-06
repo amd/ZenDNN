@@ -19,7 +19,9 @@
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "aocl_dlp.h"
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -79,6 +81,7 @@ inline bool src_scale_is_collapsed_per_token(
                     || has_per_channel_wei_scale(quant_params, N));
 }
 
+#if ZENDNNL_DEPENDS_AOCLDLP
 /**
  * @brief Creates DLP metadata for post-operations
  *
@@ -163,6 +166,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
  * @param metadata Pointer returned by create_dlp_post_op(); may be null.
  */
 void cleanup_dlp_post_op(dlp_metadata_t *metadata);
+#endif
 
 /**
  * @brief Clears the calling thread's AOCL DLP post-op metadata cache.

@@ -122,9 +122,9 @@ void conv2d_reference_impl(const T *input, const T *filter, const T *bias,
 // NHWC format: [batch, height, width, channels]
 // Parallelize over batch and output spatial dimensions
 #pragma omp parallel for collapse(3) num_threads(num_threads)
-    for (uint64_t n = 0; n < batch; ++n) {
-        for (uint64_t oh = 0; oh < out_h; ++oh) {
-            for (uint64_t ow = 0; ow < out_w; ++ow) {
+    for (int64_t n = 0; n < static_cast<int64_t>(batch); ++n) {
+        for (int64_t oh = 0; oh < static_cast<int64_t>(out_h); ++oh) {
+            for (int64_t ow = 0; ow < static_cast<int64_t>(out_w); ++ow) {
                 // Process all output channels
                 for (uint64_t oc = 0; oc < out_c; ++oc) {
                     float sum = 0.0f;

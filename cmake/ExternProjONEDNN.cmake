@@ -34,33 +34,17 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
     list(APPEND ONEDNN_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-DXbyak=XbyakoneDNN")
 
-    # On MSVC, force the oneDNN sub-build onto the LLVM OpenMP runtime
-    # (/openmp:llvm -> libomp) so it MATCHES ZenDNN, AOCL-DLP and the gtests,
-    # which all select /openmp:llvm (see `zendnnl_required_packages` in
-    # cmake/ZenDnnlMacros.cmake). This ExternalProject runs its own
-    # find_package(OpenMP) and does NOT inherit ZenDNN's OpenMP_RUNTIME_MSVC,
-    # so without this it defaults to MSVC's /openmp (vcomp / VCOMP140.dll) and
-    # the process ends up with TWO OpenMP runtimes (vcomp + libomp). Mixing
-    # them corrupts oneDNN's multithreaded work partitioning: brgemm f32
-    # matmul returns wrong results at 2 threads and takes an out-of-bounds
-    # read in the JIT AVX-512 kernel (SIGSEGV) at higher thread counts, while
-    # single-threaded is correct. Requires CMake >= 3.30; no effect on
-    # non-MSVC toolchains.
-    if(MSVC)
-      if(CMAKE_VERSION VERSION_LESS "3.30")
-        message(FATAL_ERROR
-          "ZenDNN MSVC builds require CMake >= 3.30: OpenMP_RUNTIME_MSVC (which "
-          "selects the LLVM OpenMP runtime /openmp:llvm for the oneDNN "
-          "sub-build) is only honored by CMake >= 3.30. On older CMake it is "
-          "silently ignored and oneDNN falls back to /openmp (vcomp), mixing two "
-          "OpenMP runtimes in one process. Use CMake >= 3.30.")
-      endif()
-      list(APPEND ONEDNN_CMAKE_ARGS "-DOpenMP_RUNTIME_MSVC=llvm")
-    endif()
-
     message(DEBUG "${ZENDNNL_MSG_PREFIX}ONEDNN_CMAKE_ARGS=${ONEDNN_CMAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+    # MSBuild rejects "-j", has no "all" target and builds Debug without --config.
+    if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+      set(ONEDNN_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+      set(ONEDNN_INSTALL_COMMAND cmake --build . --config Release --target install)
+    else()
+      set(ONEDNN_BUILD_COMMAND cmake --build . --target all -- -j${NPROC})
+      set(ONEDNN_INSTALL_COMMAND cmake --build . --target install)
+    endif()
     if (ZENDNNL_LOCAL_ONEDNN)
 
       message(WARNING "${ZENDNNL_MSG_PREFIX}ONEDNN will be built from local source at ${ONEDNN_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
@@ -87,8 +71,8 @@ if (ZENDNNL_DEPENDS_ONEDNN)
         BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/onednn"
         INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/onednn"
         CMAKE_ARGS ${ONEDNN_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build .  --target all -- -j${NPROC}
-        INSTALL_COMMAND cmake --build .  --target install)
+        BUILD_COMMAND ${ONEDNN_BUILD_COMMAND}
+        INSTALL_COMMAND ${ONEDNN_INSTALL_COMMAND})
     else()
 
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download ONEDNN with tag ${ONEDNN_GIT_TAG}")
@@ -101,8 +85,8 @@ if (ZENDNNL_DEPENDS_ONEDNN)
         GIT_TAG ${ONEDNN_GIT_TAG}
         GIT_PROGRESS ${ONEDNN_GIT_PROGRESS}
         CMAKE_ARGS ${ONEDNN_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --target all -- -j${NPROC}
-        INSTALL_COMMAND cmake --build .  --target install
+        BUILD_COMMAND ${ONEDNN_BUILD_COMMAND}
+        INSTALL_COMMAND ${ONEDNN_INSTALL_COMMAND}
         UPDATE_DISCONNECTED TRUE)
     endif()
 

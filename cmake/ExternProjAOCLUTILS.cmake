@@ -86,6 +86,12 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   message(DEBUG "${ZENDNNL_MSG_PREFIX}AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
   set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+  # MSBuild rejects "-j" and has no "all" target.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set(AU_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+  else()
+    set(AU_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
+  endif()
   if (ZENDNNL_LOCAL_AOCLUTILS)
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-UTILS from ${AOCLUTILS_ROOT_DIR}")
@@ -95,7 +101,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      BUILD_COMMAND ${AU_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install
       BUILD_BYPRODUCTS ${AU_BYPRODUCTS})
   else()
@@ -110,7 +116,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       GIT_TAG ${AOCLUTILS_GIT_TAG}
       GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      BUILD_COMMAND ${AU_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install
       BUILD_BYPRODUCTS ${AU_BYPRODUCTS}
       UPDATE_DISCONNECTED TRUE)

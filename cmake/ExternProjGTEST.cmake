@@ -47,6 +47,12 @@ if(ZENDNNL_BUILD_GTEST)
   message(DEBUG "${ZENDNNL_MSG_PREFIX}GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
 
   set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+  # MSBuild rejects "-j" and has no "all" target.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set(GTEST_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+  else()
+    set(GTEST_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
+  endif()
   ExternalProject_ADD(zendnnl-gtest
     SOURCE_DIR "${GTEST_ROOT_DIR}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/gtest"
@@ -55,7 +61,7 @@ if(ZENDNNL_BUILD_GTEST)
     GIT_TAG ${GTEST_GIT_TAG}
     GIT_PROGRESS ${GTEST_GIT_PROGRESS}
     CMAKE_ARGS ${GTEST_CMAKE_ARGS}
-    BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+    BUILD_COMMAND ${GTEST_BUILD_COMMAND}
     INSTALL_COMMAND cmake --build . --config Release --target install
     UPDATE_DISCONNECTED TRUE)
 

@@ -49,14 +49,23 @@ if(ZENDNNL_BUILD_EXAMPLES)
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}ZENDNNL_EXAMPLES_CMAKE_ARGS = ${ZLE_CMAKE_ARGS}")
 
+  # MSBuild has no "all" target and builds Debug without --config.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set(ZLE_BUILD_COMMAND cmake --build . --config ${CMAKE_BUILD_TYPE})
+    set(ZLE_INSTALL_COMMAND cmake --build . --config ${CMAKE_BUILD_TYPE} --target install)
+  else()
+    set(ZLE_BUILD_COMMAND cmake --build . --target all)
+    set(ZLE_INSTALL_COMMAND cmake --build . --target install)
+  endif()
+
   ExternalProject_ADD(zendnnl-examples
     DEPENDS    "zendnnl"
     SOURCE_DIR "${ZENDNNL_EXAMPLES_ROOT}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/examples"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/examples"
     CMAKE_ARGS "${ZLE_CMAKE_ARGS}"
-    BUILD_COMMAND cmake --build . --target all
-    INSTALL_COMMAND cmake --build . --target install)
+    BUILD_COMMAND ${ZLE_BUILD_COMMAND}
+    INSTALL_COMMAND ${ZLE_INSTALL_COMMAND})
 
   add_dependencies(zendnnl-examples zendnnl)
 

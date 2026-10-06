@@ -76,8 +76,8 @@ static void softmax_reference_impl(const void *input, void *output,
     const float sign = params.softmin ? -1.0f : 1.0f;
 
 #pragma omp parallel for num_threads(num_threads)
-    for (uint64_t outer = 0; outer < outer_size; ++outer) {
-        const uint64_t offset = outer * axis_size;
+    for (int64_t outer = 0; outer < static_cast<int64_t>(outer_size); ++outer) {
+        const uint64_t offset = static_cast<uint64_t>(outer) * axis_size;
 
         // Find max for numerical stability
         float max_val = -std::numeric_limits<float>::infinity();

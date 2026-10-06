@@ -40,6 +40,45 @@ inline int32_t resolve_num_threads(
     return (requested == 0) ? current_max : requested;
 }
 
+#if defined(_MSC_VER) && !defined(__clang__)
+/**
+ * @brief Per-thread team size recorded by thread_guard, MSVC only.
+ *
+ * vcomp is OpenMP 2.0 and has no task-scoped nthreads-var: omp_set_num_threads
+ * is ignored inside an active parallel region, so a guard constructed there
+ * cannot publish its count through the ICV. This thread_local is ZenDNNL-owned
+ * storage that does carry it, with the same per-thread meaning.
+ *
+ * Not compiled on any other toolchain — those provide OpenMP 3.0 task-scoped
+ * ICV semantics, so the ICV already is the per-thread home for this value.
+ *
+ * @return Reference to the calling thread's count; 0 means "unset".
+ */
+inline int32_t &nested_thread_budget() noexcept {
+    static thread_local int32_t budget = 0;
+    return budget;
+}
+#endif
+
+/**
+ * @brief The thread count currently in effect for the calling thread.
+ *
+ * Reads back what a thread_guard installed. Callers opening a nested parallel
+ * region should pass this to a num_threads() clause rather than relying on the
+ * region inheriting the ICV, which does not carry per-thread counts on vcomp.
+ *
+ * Outside MSVC this is exactly omp_get_max_threads().
+ *
+ * @return The active budget when one is set, else the nthreads-var ICV
+ */
+inline int32_t effective_num_threads() noexcept {
+#if defined(_MSC_VER) && !defined(__clang__)
+    const int32_t budget = nested_thread_budget();
+    if (budget > 0) { return budget; }
+#endif
+    return static_cast<int32_t>(omp_get_max_threads());
+}
+
 /**
  * @brief RAII guard for the OpenMP nthreads-var ICV.
  *
@@ -63,6 +102,13 @@ inline int32_t resolve_num_threads(
  *       - Nested (inside a loop): prefer the two-arg constructor with a
  *         pre-captured per-task ICV (via omp_get_max_threads() before the
  *         loop) to avoid repeated OMP API calls per iteration.
+ *
+ * @note The task-scoped ICV above is OpenMP 3.0. On MSVC (vcomp, OpenMP 2.0)
+ *       omp_set_num_threads() is ignored inside an active parallel region, so
+ *       the nested uses would silently keep the full outer team. There the
+ *       guard also records the count in nested_thread_budget(). Read it back
+ *       with effective_num_threads() — including in a num_threads() clause on
+ *       the nested region, since that region will not inherit it.
  *
  * @example
  *   {
@@ -102,20 +148,38 @@ public:
      *                     the per-task ICV inside a parallel region.
      */
     thread_guard(int32_t desired, int32_t current_max) noexcept
-        : old_(current_max), modified_(desired != current_max) {
-        if (modified_) omp_set_num_threads(desired);
+        : old_(current_max)
+#if defined(_MSC_VER) && !defined(__clang__)
+        , old_budget_(nested_thread_budget())
+#endif
+        , modified_(desired != current_max) {
+        if (modified_) {
+            omp_set_num_threads(desired);
+#if defined(_MSC_VER) && !defined(__clang__)
+            nested_thread_budget() = desired;
+#endif
+        }
     }
 
     /**
-     * @brief Construct by querying the current nthreads-var ICV internally.
+     * @brief Construct by querying the thread count currently in effect.
      *
      * @param desired  Desired thread count for the scoped region
      */
     explicit thread_guard(int32_t desired) noexcept
-        : thread_guard(desired, omp_get_max_threads()) {}
+        : thread_guard(desired, effective_num_threads()) {}
 
     ~thread_guard() noexcept {
-        if (modified_) omp_set_num_threads(old_);
+        if (modified_) {
+            omp_set_num_threads(old_);
+#if defined(_MSC_VER) && !defined(__clang__)
+            // Restore the previous budget verbatim, including the 0 "unset"
+            // state: leaving a stale non-zero value here would make
+            // effective_num_threads() shadow the live ICV for every later
+            // caller on this thread.
+            nested_thread_budget() = old_budget_;
+#endif
+        }
     }
 
     thread_guard(const thread_guard &) = delete;
@@ -123,6 +187,9 @@ public:
 
 private:
     const int32_t old_;
+#if defined(_MSC_VER) && !defined(__clang__)
+    const int32_t old_budget_;
+#endif
     const bool modified_;
 };
 
@@ -135,6 +202,10 @@ private:
  *
  * @note Must be constructed in the initial task region (outside any active
  *       parallel region), same as thread_guard.
+ *
+ * @note On MSVC (vcomp, OpenMP 2.0) the level count degrades to the boolean
+ *       nest-var: a desired level >= 2 enables nesting but does not bound it
+ *       to that depth.
  *
  * @example
  *   {
@@ -154,16 +225,40 @@ public:
      * @param desired  Desired maximum number of active nested parallel regions
      */
     explicit scoped_active_levels(int32_t desired) noexcept
-        : old_(omp_get_max_active_levels()), modified_(desired != old_) {
-        if (modified_) omp_set_max_active_levels(desired);
+        : old_(query_levels()), modified_(desired != old_) {
+        if (modified_) apply_levels(desired);
     }
 
     ~scoped_active_levels() noexcept {
-        if (modified_) omp_set_max_active_levels(old_);
+        if (modified_) apply_levels(old_);
     }
 
     scoped_active_levels(const scoped_active_levels &) = delete;
     scoped_active_levels &operator=(const scoped_active_levels &) = delete;
+
+    // max-active-levels-var is OpenMP 3.0. MSVC's vcomp is OpenMP 2.0 and
+    // exposes only the boolean nest-var, so levels collapse to on/off there:
+    // any desired >= 2 enables nesting without capping its depth, and the
+    // saved state round-trips as 1 or 2.
+    //
+    // Public so callers that must observe or restore the ICV outside a scope
+    // (fixtures, tests) can do so through the same mapping the guard applies,
+    // instead of calling the OpenMP 3.0 entry points directly.
+    static int32_t query_levels() noexcept {
+#if defined(_MSC_VER) && !defined(__clang__)
+        return omp_get_nested() ? 2 : 1;
+#else
+        return static_cast<int32_t>(omp_get_max_active_levels());
+#endif
+    }
+
+    static void apply_levels(int32_t levels) noexcept {
+#if defined(_MSC_VER) && !defined(__clang__)
+        omp_set_nested(levels > 1 ? 1 : 0);
+#else
+        omp_set_max_active_levels(levels);
+#endif
+    }
 
 private:
     const int32_t old_;

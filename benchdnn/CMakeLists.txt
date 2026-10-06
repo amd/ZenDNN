@@ -45,28 +45,12 @@ if(MSVC)
 endif()
 
 # find common packages
-# On MSVC, request the LLVM OpenMP runtime (/openmp:llvm, OpenMP 3.1) so benchdnn
-# matches the zendnnl library and AOCL-DLP (built /openmp:llvm) and resolves the
-# OpenMP 3.x APIs (e.g. omp_get_max_active_levels) used by the installed headers.
-# vcomp (/openmp) only implements OpenMP 2.0 and lacks those symbols. Requires
-# CMake >= 3.30; no effect elsewhere.
-if(MSVC)
-  if(CMAKE_VERSION VERSION_LESS "3.30")
-    message(FATAL_ERROR
-      "ZenDNN MSVC builds require CMake >= 3.30: OpenMP_RUNTIME_MSVC (which "
-      "selects the LLVM OpenMP runtime /openmp:llvm) is only honored by CMake "
-      ">= 3.30. On older CMake it is silently ignored and MSVC falls back to "
-      "/openmp (vcomp), which breaks OpenMP 3.x linking and mixes two OpenMP "
-      "runtimes with the zendnnl library and AOCL-DLP. Use CMake >= 3.30.")
-  endif()
-  set(OpenMP_RUNTIME_MSVC "llvm")
-endif()
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
 
-# Propagate the OpenMP usage requirements (notably the MSVC /openmp:llvm compile
-# option) to the benchdnn sub-libraries added below: they compile the installed
-# public headers that call omp_* APIs, so they need the matching OpenMP flag.
+# Propagate the OpenMP usage requirements (notably the MSVC compile option) to
+# the benchdnn sub-libraries added below: they compile the installed public
+# headers that call omp_* APIs, so they need the matching OpenMP flag.
 link_libraries(OpenMP::OpenMP_CXX)
 
 # find zendnnl

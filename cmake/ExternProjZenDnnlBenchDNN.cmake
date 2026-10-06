@@ -47,14 +47,23 @@ if(ZENDNNL_BUILD_BENCHDNN)
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}BENCHDNN_CMAKE_ARGS  = ${BDN_CMAKE_ARGS}")
 
+  # MSBuild builds Debug without --config.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set(BDN_BUILD_COMMAND cmake --build . --config ${CMAKE_BUILD_TYPE})
+    set(BDN_INSTALL_COMMAND cmake --install . --config ${CMAKE_BUILD_TYPE})
+  else()
+    set(BDN_BUILD_COMMAND cmake --build .)
+    set(BDN_INSTALL_COMMAND cmake --install .)
+  endif()
+
   ExternalProject_ADD(zendnnl-benchdnn
     DEPENDS    "zendnnl"
     SOURCE_DIR "${ZENDNNL_BENCHDNN_ROOT}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/benchdnn"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/benchdnn"
     CMAKE_ARGS "${BDN_CMAKE_ARGS}"
-    BUILD_COMMAND cmake --build .
-    INSTALL_COMMAND cmake --install .)
+    BUILD_COMMAND ${BDN_BUILD_COMMAND}
+    INSTALL_COMMAND ${BDN_INSTALL_COMMAND})
 
   add_dependencies(zendnnl-benchdnn zendnnl)
 

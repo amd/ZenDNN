@@ -363,6 +363,11 @@ endif()
 # No-op on GCC/Clang (maps to default ELF visibility).
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_compile_definitions(zendnnl PRIVATE ZENDNNL_DLL ZENDNNL_DLL_EXPORTS)
+  # In-tree gtests, benchdnn and examples call internal functions, which a
+  # Windows DLL would not export otherwise (data still needs ZENDNNL_API).
+  if(WIN32)
+    set_target_properties(zendnnl PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  endif()
 endif()
 
 # create top level include file

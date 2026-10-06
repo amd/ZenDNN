@@ -27,6 +27,12 @@ if(ZENDNNL_DEPENDS_JSON)
   message(DEBUG "${ZENDNNL_MSG_PREFIX}JSON_CMAKE_ARGS=${JSON_CMAKE_ARGS}")
 
   set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+  # MSBuild rejects "-j" and has no "all" target.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set(JSON_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+  else()
+    set(JSON_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
+  endif()
   if(ZENDNNL_LOCAL_JSON)
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local JSON from ${JSON_ROOT_DIR}")
@@ -36,7 +42,7 @@ if(ZENDNNL_DEPENDS_JSON)
       BINARY_DIR "${CMAKE_BINARY_DIR}/json"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      BUILD_COMMAND ${JSON_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install)
   else()
 
@@ -50,7 +56,7 @@ if(ZENDNNL_DEPENDS_JSON)
       GIT_TAG ${JSON_GIT_TAG}
       GIT_PROGRESS ${JSON_GIT_PROGRESS}
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+      BUILD_COMMAND ${JSON_BUILD_COMMAND}
       INSTALL_COMMAND cmake --build . --config Release --target install
       UPDATE_DISCONNECTED TRUE)
   endif()

@@ -52,7 +52,17 @@ inline bool parse_cache_bool(const char *raw, bool &out) {
 inline bool is_global_cache_off_env() {
     static const bool cache_off = []() {
         bool value = false;
+#if defined(_MSC_VER)
+        // MSVC deprecates getenv (C4996), an error for consumers built with /sdl.
+        char *raw = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&raw, &len, "ZENDNNL_CACHE_OFF") == 0) {
+            parse_cache_bool(raw, value);
+        }
+        std::free(raw);
+#else
         parse_cache_bool(std::getenv("ZENDNNL_CACHE_OFF"), value);
+#endif
         return value;
     }();
     return cache_off;

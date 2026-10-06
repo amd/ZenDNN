@@ -27,12 +27,26 @@ namespace {
 
 // Capture the helper's cached baseline before tests mutate the OMP ICV.
 const int32_t kCachedMaxThreads = thread_guard::max_threads();
-const int32_t kInitialMaxActiveLevels = omp_get_max_active_levels();
+const int32_t kInitialMaxActiveLevels = scoped_active_levels::query_levels();
+
+// omp_get_thread_limit is OpenMP 3.0; MSVC's vcomp implements only 2.0. Every
+// call site below asks the same question -- does this runtime give us more
+// than one thread to play with -- so the stand-in must be a ceiling, not the
+// live nthreads-var: callers below call omp_set_num_threads(1) first, and
+// reading max_threads there would answer "only one thread exists" and skip the
+// test. omp_get_num_procs is OpenMP 2.0 and unaffected by omp_set_num_threads.
+int32_t usable_thread_limit() {
+#if defined(_MSC_VER) && !defined(__clang__)
+    return static_cast<int32_t>(omp_get_num_procs());
+#else
+    return static_cast<int32_t>(omp_get_thread_limit());
+#endif
+}
 
 int32_t alternate_thread_count(int32_t current) {
     if (current > 1) { return 1; }
 
-    return static_cast<int32_t>(omp_get_thread_limit()) > 1 ? 2 : 1;
+    return usable_thread_limit() > 1 ? 2 : 1;
 }
 
 class OmpApiTest : public ::testing::Test {
@@ -41,12 +55,12 @@ protected:
         dynamic_before_ = omp_get_dynamic();
         omp_set_dynamic(0);
         omp_set_num_threads(kCachedMaxThreads);
-        omp_set_max_active_levels(kInitialMaxActiveLevels);
+        scoped_active_levels::apply_levels(kInitialMaxActiveLevels);
     }
 
     void TearDown() override {
         omp_set_num_threads(kCachedMaxThreads);
-        omp_set_max_active_levels(kInitialMaxActiveLevels);
+        scoped_active_levels::apply_levels(kInitialMaxActiveLevels);
         omp_set_dynamic(dynamic_before_);
     }
 
@@ -145,7 +159,7 @@ TEST_F(OmpApiTest, SingleArgumentThreadGuardRestoresCapturedCurrentIcv) {
 
 TEST_F(OmpApiTest,
         SingleArgumentThreadGuardRestoresPerTaskIcvInsideParallelRegion) {
-    if (static_cast<int32_t>(omp_get_thread_limit()) < 2) {
+    if (usable_thread_limit() < 2) {
         GTEST_SKIP() << "OpenMP runtime exposes only one usable thread";
     }
 
@@ -155,16 +169,20 @@ TEST_F(OmpApiTest,
 #pragma omp parallel num_threads(2)
     {
         participants.fetch_add(1, std::memory_order_relaxed);
-        const int32_t before = omp_get_max_threads();
+        // effective_num_threads(), not omp_get_max_threads(): the guard cannot
+        // publish a per-thread count through the ICV on vcomp (OpenMP 2.0), so
+        // the count is read back through the same accessor a nested region
+        // would use. Identical to omp_get_max_threads() off MSVC.
+        const int32_t before = effective_num_threads();
 
         {
             thread_guard guard(1);
-            if (omp_get_max_threads() != 1) {
+            if (effective_num_threads() != 1) {
                 failures.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
-        if (omp_get_max_threads() != before) {
+        if (effective_num_threads() != before) {
             failures.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -174,7 +192,7 @@ TEST_F(OmpApiTest,
 }
 
 TEST_F(OmpApiTest, TwoArgumentThreadGuardUsesPreCapturedPerTaskIcvInLoop) {
-    if (static_cast<int32_t>(omp_get_thread_limit()) < 2) {
+    if (usable_thread_limit() < 2) {
         GTEST_SKIP() << "OpenMP runtime exposes only one usable thread";
     }
 
@@ -184,7 +202,7 @@ TEST_F(OmpApiTest, TwoArgumentThreadGuardUsesPreCapturedPerTaskIcvInLoop) {
 #pragma omp parallel num_threads(2)
     {
         participants.fetch_add(1, std::memory_order_relaxed);
-        const int32_t per_task_icv = omp_get_max_threads();
+        const int32_t per_task_icv = effective_num_threads();
         const int32_t desired = alternate_thread_count(per_task_icv);
 
         if (desired == per_task_icv) {
@@ -192,13 +210,13 @@ TEST_F(OmpApiTest, TwoArgumentThreadGuardUsesPreCapturedPerTaskIcvInLoop) {
         } else {
             for (int i = 0; i < 10; ++i) {
                 thread_guard guard(desired, per_task_icv);
-                if (omp_get_max_threads() != desired) {
+                if (effective_num_threads() != desired) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
 
-        if (omp_get_max_threads() != per_task_icv) {
+        if (effective_num_threads() != per_task_icv) {
             failures.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -282,7 +300,7 @@ TEST_F(OmpApiTest, CombinedThreadGuardAndScopedActiveLevels) {
         GTEST_SKIP() << "OpenMP runtime exposes only one usable thread";
     }
 
-    const int32_t orig_levels = omp_get_max_active_levels();
+    const int32_t orig_levels = scoped_active_levels::query_levels();
     const int32_t alt_levels = (orig_levels == 1) ? 2 : 1;
 
     {
@@ -292,15 +310,15 @@ TEST_F(OmpApiTest, CombinedThreadGuardAndScopedActiveLevels) {
         scoped_active_levels sal(alt_levels);
 
         EXPECT_EQ(omp_get_max_threads(), alternate);
-        EXPECT_EQ(omp_get_max_active_levels(), alt_levels);
+        EXPECT_EQ(scoped_active_levels::query_levels(), alt_levels);
     }
 
     EXPECT_EQ(omp_get_max_threads(), kCachedMaxThreads);
-    EXPECT_EQ(omp_get_max_active_levels(), orig_levels);
+    EXPECT_EQ(scoped_active_levels::query_levels(), orig_levels);
 }
 
 TEST_F(OmpApiTest, MaxThreadsReturnsSameValueFromAllParallelThreads) {
-    if (static_cast<int32_t>(omp_get_thread_limit()) < 2) {
+    if (usable_thread_limit() < 2) {
         GTEST_SKIP() << "OpenMP runtime exposes only one usable thread";
     }
 
@@ -321,28 +339,28 @@ TEST_F(OmpApiTest, MaxThreadsReturnsSameValueFromAllParallelThreads) {
 }
 
 TEST_F(OmpApiTest, ScopedActiveLevelsDoesNotModifyWhenDesiredEqualsCurrent) {
-    const int32_t current = omp_get_max_active_levels();
+    const int32_t current = scoped_active_levels::query_levels();
     {
         scoped_active_levels guard(current);
-        EXPECT_EQ(omp_get_max_active_levels(), current);
+        EXPECT_EQ(scoped_active_levels::query_levels(), current);
     }
-    EXPECT_EQ(omp_get_max_active_levels(), current);
+    EXPECT_EQ(scoped_active_levels::query_levels(), current);
 }
 
 TEST_F(OmpApiTest, ScopedActiveLevelsSetsAndRestoresPreviousValue) {
-    const int32_t original = omp_get_max_active_levels();
+    const int32_t original = scoped_active_levels::query_levels();
     const int32_t desired = (original == 1) ? 2 : 1;
 
     {
         scoped_active_levels guard(desired);
-        if (omp_get_max_active_levels() != desired) {
+        if (scoped_active_levels::query_levels() != desired) {
             GTEST_SKIP()
                     << "OpenMP runtime did not accept requested active level";
         }
-        EXPECT_EQ(omp_get_max_active_levels(), desired);
+        EXPECT_EQ(scoped_active_levels::query_levels(), desired);
     }
 
-    EXPECT_EQ(omp_get_max_active_levels(), original);
+    EXPECT_EQ(scoped_active_levels::query_levels(), original);
 }
 
 } // namespace

@@ -153,6 +153,14 @@ static void invoke_fbgemm_kernel(const void *table, const void *indices,
 
 static inline bool can_use_fbgemm(const embag_params_t &params) {
     // TODO: Explore the feasibility of using FBGEMM for other algorithms and data types.
+#if defined(_WIN32)
+    // FBGEMM throws for BF16 input with FP32 output on Windows
+    // (EmbeddingSpMDM.cc), so that combination must take the native kernel.
+    if (params.dtypes.table == data_type_t::bf16
+            && params.dtypes.output == data_type_t::f32) {
+        return false;
+    }
+#endif
     return (params.algo == embag_algo_t::sum
             && params.dtypes.table != data_type_t::s8
             && params.dtypes.table != data_type_t::s4

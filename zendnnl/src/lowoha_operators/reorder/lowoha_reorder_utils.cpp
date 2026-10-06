@@ -798,6 +798,29 @@ status_t compute_dynamic_quant_params(
             // Fast path: contiguous memory — flat scan avoids per-element index
             // arithmetic and enables the best possible OpenMP work distribution.
             const int64_t total = batch * M * N;
+#if defined(_MSC_VER) && !defined(__clang__)
+            // min/max reduction operators are OpenMP 3.1; MSVC's vcomp is
+            // OpenMP 2.0 and rejects them (C7660). Accumulate per-thread
+            // extremes and combine them once per thread instead.
+#pragma omp parallel num_threads(nthreads)
+            {
+                float t_min = std::numeric_limits<float>::max();
+                float t_max = std::numeric_limits<float>::lowest();
+#pragma omp for
+                for (int64_t i = 0; i < total; ++i) {
+                    float val = read_src_value(i);
+                    if (std::isfinite(val)) {
+                        t_min = std::min(t_min, val);
+                        t_max = std::max(t_max, val);
+                    }
+                }
+#pragma omp critical
+                {
+                    min_val = std::min(min_val, t_min);
+                    max_val = std::max(max_val, t_max);
+                }
+            }
+#else
 #pragma omp parallel for num_threads(nthreads) reduction(min : min_val) \
         reduction(max : max_val)
             for (int64_t i = 0; i < total; ++i) {
@@ -807,9 +830,40 @@ status_t compute_dynamic_quant_params(
                     max_val = std::max(max_val, val);
                 }
             }
+#endif
         } else {
 // Strided path: collapse(2) on (batch, M) gives good parallelism
 // while keeping the inner N loop sequential for cache locality.
+#if defined(_MSC_VER) && !defined(__clang__)
+            // Besides lacking min/max reduction, MSVC has `collapse`
+            // neutralized by zendnnl_compat.hpp -- which would leave this
+            // parallel over `batch` alone, and that is 1 for the common
+            // per-tensor case. Flatten (batch, M) by hand, keep N inner for
+            // locality, and reduce per-thread as above.
+            const int64_t bm_total = batch * M;
+#pragma omp parallel num_threads(nthreads)
+            {
+                float t_min = std::numeric_limits<float>::max();
+                float t_max = std::numeric_limits<float>::lowest();
+#pragma omp for
+                for (int64_t bm = 0; bm < bm_total; ++bm) {
+                    const int64_t b = bm / M;
+                    const int64_t m = bm % M;
+                    for (int64_t n = 0; n < N; ++n) {
+                        float val = read_src_value(compute_src_idx(b, m, n));
+                        if (std::isfinite(val)) {
+                            t_min = std::min(t_min, val);
+                            t_max = std::max(t_max, val);
+                        }
+                    }
+                }
+#pragma omp critical
+                {
+                    min_val = std::min(min_val, t_min);
+                    max_val = std::max(max_val, t_max);
+                }
+            }
+#else
 #pragma omp parallel for num_threads(nthreads) collapse(2) \
         reduction(min : min_val) reduction(max : max_val)
             for (int64_t b = 0; b < batch; ++b) {
@@ -823,6 +877,7 @@ status_t compute_dynamic_quant_params(
                     }
                 }
             }
+#endif
         }
 
         auto [scale, zp] = compute_scale_zp(min_val, max_val);

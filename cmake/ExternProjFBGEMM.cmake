@@ -43,6 +43,14 @@ if (ZENDNNL_DEPENDS_FBGEMM)
     message(DEBUG "${ZENDNNL_MSG_PREFIX}FBGEMM_CMAKE_ARGS=${FBGEMM_CMAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+    # MSBuild rejects "-j" and builds Debug without --config.
+    if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+      set(FBGEMM_BUILD_COMMAND cmake --build . --config Release --target fbgemm --parallel ${NPROC})
+      set(FBGEMM_INSTALL_COMMAND cmake --build . --config Release --target install)
+    else()
+      set(FBGEMM_BUILD_COMMAND cmake --build . --target fbgemm -- -j${NPROC})
+      set(FBGEMM_INSTALL_COMMAND cmake --build . --target install)
+    endif()
     if (ZENDNNL_LOCAL_FBGEMM)
 
       message(WARNING "${ZENDNNL_MSG_PREFIX}FBGEMM will be built from local source at ${FBGEMM_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
@@ -69,8 +77,8 @@ if (ZENDNNL_DEPENDS_FBGEMM)
         BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/fbgemm"
         INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/fbgemm"
         CMAKE_ARGS ${FBGEMM_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --target fbgemm -- -j${NPROC}
-        INSTALL_COMMAND cmake --build . --target install)
+        BUILD_COMMAND ${FBGEMM_BUILD_COMMAND}
+        INSTALL_COMMAND ${FBGEMM_INSTALL_COMMAND})
     else()
 
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download FBGEMM with tag ${FBGEMM_GIT_TAG}")
@@ -83,8 +91,8 @@ if (ZENDNNL_DEPENDS_FBGEMM)
         GIT_TAG ${FBGEMM_GIT_TAG}
         GIT_PROGRESS ${FBGEMM_GIT_PROGRESS}
         CMAKE_ARGS ${FBGEMM_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --target fbgemm -- -j${NPROC}
-        INSTALL_COMMAND cmake --build . --target install
+        BUILD_COMMAND ${FBGEMM_BUILD_COMMAND}
+        INSTALL_COMMAND ${FBGEMM_INSTALL_COMMAND}
         UPDATE_DISCONNECTED TRUE)
     endif()
 

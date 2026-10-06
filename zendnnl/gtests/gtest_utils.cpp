@@ -4137,9 +4137,10 @@ static void compare_tensors_elementwise(tensor_t &output, tensor_t &output_ref,
     {
         std::vector<uint64_t> idx(shape.size());
 #pragma omp for
-        for (uint64_t flat = 0; flat < total_elements; ++flat) {
+        for (int64_t flat = 0; flat < static_cast<int64_t>(total_elements);
+                ++flat) {
             if (success.load(std::memory_order_relaxed)) {
-                uint64_t remaining = flat;
+                uint64_t remaining = static_cast<uint64_t>(flat);
                 for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
                     idx[d] = remaining % shape[d];
                     remaining /= shape[d];

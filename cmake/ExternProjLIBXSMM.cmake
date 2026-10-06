@@ -51,9 +51,15 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
         ${CMAKE_COMMAND} -E rm -f <SOURCE_DIR>/src/libxsmm_binaryexport_generator.c)
       # LIBXSMM's CMake build defines no install target, so install the built
       # static library (xsmm.lib) and the public headers manually.
+      # Visual Studio writes xsmm.lib to a per-config directory.
+      if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+        set(LIBXSMM_WIN_LIB "<BINARY_DIR>/$<CONFIG>/xsmm.lib")
+      else()
+        set(LIBXSMM_WIN_LIB "<BINARY_DIR>/xsmm.lib")
+      endif()
       set(LIBXSMM_WIN_INSTALL
         ${CMAKE_COMMAND} -E make_directory <INSTALL_DIR>/lib
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different <BINARY_DIR>/xsmm.lib <INSTALL_DIR>/lib/xsmm.lib
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LIBXSMM_WIN_LIB} <INSTALL_DIR>/lib/xsmm.lib
         COMMAND ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/include <INSTALL_DIR>/include)
     else()
       list(APPEND LIBXSMM_MAKE_ARGS "NOFORTRAN=1")

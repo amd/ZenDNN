@@ -65,6 +65,14 @@ message(DEBUG "${ZENDNNL_MSG_PREFIX}ZENDNNL_LIB_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
 
 set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
 set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+# MSBuild rejects "-j", has no "all" target and builds Debug without --config.
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+  set(ZL_BUILD_COMMAND cmake --build . --config ${CMAKE_BUILD_TYPE} --parallel ${NPROC})
+  set(ZL_INSTALL_COMMAND cmake --build . --config ${CMAKE_BUILD_TYPE} --target install)
+else()
+  set(ZL_BUILD_COMMAND cmake --build . --target all -- -j${NPROC})
+  set(ZL_INSTALL_COMMAND cmake --build . --target install)
+endif()
 set(ZL_BUILD_BYPRODUCTS "")
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   # Platform-correct static library name: libzendnnl_archive.a on GNU/Linux,
@@ -80,8 +88,8 @@ ExternalProject_ADD(zendnnl
   BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/zendnnl"
   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}"
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
-  BUILD_COMMAND cmake --build . --target all -- -j${NPROC}
-  INSTALL_COMMAND cmake --build .  --target install
+  BUILD_COMMAND ${ZL_BUILD_COMMAND}
+  INSTALL_COMMAND ${ZL_INSTALL_COMMAND}
   BUILD_BYPRODUCTS ${ZL_BUILD_BYPRODUCTS}
   BUILD_ALWAYS TRUE
   CONFIGURE_HANDLED_BY_BUILD TRUE)

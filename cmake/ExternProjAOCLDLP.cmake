@@ -51,6 +51,12 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
     message(DEBUG "${ZENDNNL_MSG_PREFIX}AOCLDLP_CMAKE_ARGS=${AD_CMAKE_ARGS}")
 
     set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+    # MSBuild rejects "-j" and has no "all" target.
+    if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+      set(AD_BUILD_COMMAND cmake --build . --config Release --parallel ${NPROC})
+    else()
+      set(AD_BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC})
+    endif()
     if (ZENDNNL_LOCAL_AOCLDLP)
       message(WARNING "${ZENDNNL_MSG_PREFIX}AOCL-DLP will be built from local source at ${AOCLDLP_ROOT_DIR}. This version may not be fully compatible with ZenDNN. If unsure, it is recommended to use the standard ZenDNN build.")
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-DLP from ${AOCLDLP_ROOT_DIR}")
@@ -76,7 +82,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
         INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
         CMAKE_ARGS ${AD_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+        BUILD_COMMAND ${AD_BUILD_COMMAND}
         INSTALL_COMMAND cmake --build . --config Release --target install)
     else()
       message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download AOCL-DLP with tag ${AOCLDLP_GIT_TAG}")
@@ -88,7 +94,7 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         GIT_TAG ${AOCLDLP_GIT_TAG}
         GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
         CMAKE_ARGS ${AD_CMAKE_ARGS}
-        BUILD_COMMAND cmake --build . --config Release --target all -- -j${NPROC}
+        BUILD_COMMAND ${AD_BUILD_COMMAND}
         INSTALL_COMMAND cmake --build . --config Release --target install
         UPDATE_DISCONNECTED TRUE)
     endif()

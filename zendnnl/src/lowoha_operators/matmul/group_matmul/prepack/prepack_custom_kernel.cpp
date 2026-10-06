@@ -212,7 +212,9 @@ status_t warm_pack_all_custom_kernel_experts(
         num_threads(pack_threads) schedule(dynamic) \
         reduction(+ : att, ok, hits, misses, skip)
 #endif
-    for (size_t i = 0; i < bound; ++i) {
+    // Signed counter: MSVC's OpenMP 2.0 (vcomp) rejects unsigned loop indices.
+    for (int64_t si = 0; si < static_cast<int64_t>(bound); ++si) {
+        const size_t i = static_cast<size_t>(si);
         ++att;
 
         if (weight[i] == nullptr || K[i] <= 0 || N[i] <= 0 || ldb[i] <= 0) {

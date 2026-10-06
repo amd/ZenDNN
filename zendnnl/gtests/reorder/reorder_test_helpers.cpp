@@ -584,7 +584,10 @@ void compare_lowoha_reorder_output(tensor_t &output_tensor,
     if (batch == 0) {
 // 1D comparison
 #pragma omp parallel for
-        for (uint64_t i = 0; i < N; ++i) {
+        for (int64_t si = 0; si < static_cast<int64_t>(N); ++si) {
+            // OpenMP 2.0 (MSVC vcomp) requires a signed induction variable;
+            // tensor_t::at takes uint64_t, so convert once per iteration.
+            const uint64_t i = static_cast<uint64_t>(si);
             if (success.load(std::memory_order_relaxed)) {
                 float actual_val = output_tensor.at({i});
                 float ref_val = ref_tensor.at({i});
@@ -603,52 +606,80 @@ void compare_lowoha_reorder_output(tensor_t &output_tensor,
         }
     } else if (batch == 1) {
 // 2D comparison
+#if defined(_MSC_VER) && !defined(__clang__)
+        // MSVC: zendnnl_compat.hpp neutralizes `collapse`, which would leave
+        // this parallel over M alone. Flatten (M, N) to keep full parallelism.
+        const long long flat_mn
+                = static_cast<long long>(M) * static_cast<long long>(N);
+#pragma omp parallel for
+        for (long long flat_it = 0; flat_it < flat_mn; ++flat_it) {
+            const uint64_t i = static_cast<uint64_t>(flat_it) / N;
+            const uint64_t j = static_cast<uint64_t>(flat_it) % N;
+#else
 #pragma omp parallel for collapse(2)
         for (uint64_t i = 0; i < M; ++i) {
             for (uint64_t j = 0; j < N; ++j) {
-                if (success.load(std::memory_order_relaxed)) {
-                    float actual_val = output_tensor.at({i, j});
-                    float ref_val = ref_tensor.at({i, j});
+#endif
+            if (success.load(std::memory_order_relaxed)) {
+                float actual_val = output_tensor.at({i, j});
+                float ref_val = ref_tensor.at({i, j});
 
-                    float abs_err = std::fabs(ref_val - actual_val);
-                    float rel_tol = tol * std::fabs(ref_val);
-                    float allowed_err = tol + rel_tol;
+                float abs_err = std::fabs(ref_val - actual_val);
+                float rel_tol = tol * std::fabs(ref_val);
+                float allowed_err = tol + rel_tol;
 
-                    if (abs_err > allowed_err) {
-                        log_verbose("Mismatch at [", i, ",", j,
-                                "]: actual=", actual_val, ", ref=", ref_val,
-                                ", abs_err=", abs_err,
-                                ", allowed=", allowed_err);
-                        success.store(false, std::memory_order_relaxed);
-                    }
+                if (abs_err > allowed_err) {
+                    log_verbose("Mismatch at [", i, ",", j,
+                            "]: actual=", actual_val, ", ref=", ref_val,
+                            ", abs_err=", abs_err, ", allowed=", allowed_err);
+                    success.store(false, std::memory_order_relaxed);
                 }
             }
+#if defined(_MSC_VER) && !defined(__clang__)
         }
+#else
+            }
+        }
+#endif
     } else {
 // 3D comparison
+#if defined(_MSC_VER) && !defined(__clang__)
+        const long long flat_mn
+                = static_cast<long long>(M) * static_cast<long long>(N);
+        const long long flat_bmn = static_cast<long long>(batch) * flat_mn;
+#pragma omp parallel for
+        for (long long flat_it = 0; flat_it < flat_bmn; ++flat_it) {
+            const uint64_t b = static_cast<uint64_t>(flat_it / flat_mn);
+            const uint64_t i = static_cast<uint64_t>(flat_it % flat_mn) / N;
+            const uint64_t j = static_cast<uint64_t>(flat_it) % N;
+#else
 #pragma omp parallel for collapse(3)
         for (uint64_t b = 0; b < batch; ++b) {
             for (uint64_t i = 0; i < M; ++i) {
                 for (uint64_t j = 0; j < N; ++j) {
-                    if (success.load(std::memory_order_relaxed)) {
-                        float actual_val = output_tensor.at({b, i, j});
-                        float ref_val = ref_tensor.at({b, i, j});
+#endif
+            if (success.load(std::memory_order_relaxed)) {
+                float actual_val = output_tensor.at({b, i, j});
+                float ref_val = ref_tensor.at({b, i, j});
 
-                        float abs_err = std::fabs(ref_val - actual_val);
-                        float rel_tol = tol * std::fabs(ref_val);
-                        float allowed_err = tol + rel_tol;
+                float abs_err = std::fabs(ref_val - actual_val);
+                float rel_tol = tol * std::fabs(ref_val);
+                float allowed_err = tol + rel_tol;
 
-                        if (abs_err > allowed_err) {
-                            log_verbose("Mismatch at [", b, ",", i, ",", j,
-                                    "]: actual=", actual_val, ", ref=", ref_val,
-                                    ", abs_err=", abs_err,
-                                    ", allowed=", allowed_err);
-                            success.store(false, std::memory_order_relaxed);
-                        }
-                    }
+                if (abs_err > allowed_err) {
+                    log_verbose("Mismatch at [", b, ",", i, ",", j,
+                            "]: actual=", actual_val, ", ref=", ref_val,
+                            ", abs_err=", abs_err, ", allowed=", allowed_err);
+                    success.store(false, std::memory_order_relaxed);
+                }
+            }
+#if defined(_MSC_VER) && !defined(__clang__)
+        }
+#else
                 }
             }
         }
+#endif
     }
 
     if (!success.load()) { is_comparison_successful = false; }
@@ -899,7 +930,8 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
     if (batch == 0) {
 // 1D comparison
 #pragma omp parallel for
-        for (uint64_t j = 0; j < N; ++j) {
+        for (int64_t sj = 0; sj < static_cast<int64_t>(N); ++sj) {
+            const uint64_t j = static_cast<uint64_t>(sj);
             if (success.load(std::memory_order_relaxed)) {
                 float orig_val = original_tensor.at({j});
                 float deq_val = dequant_tensor.at({j});
@@ -915,44 +947,72 @@ void compare_lowoha_quant_output(tensor_t &original_tensor,
         }
     } else if (batch == 1) {
 // 2D comparison
+#if defined(_MSC_VER) && !defined(__clang__)
+        const long long flat_mn
+                = static_cast<long long>(M) * static_cast<long long>(N);
+#pragma omp parallel for
+        for (long long flat_it = 0; flat_it < flat_mn; ++flat_it) {
+            const uint64_t i = static_cast<uint64_t>(flat_it) / N;
+            const uint64_t j = static_cast<uint64_t>(flat_it) % N;
+#else
 #pragma omp parallel for collapse(2)
         for (uint64_t i = 0; i < M; ++i) {
             for (uint64_t j = 0; j < N; ++j) {
-                if (success.load(std::memory_order_relaxed)) {
-                    float orig_val = original_tensor.at({i, j});
-                    float deq_val = dequant_tensor.at({i, j});
-                    float abs_err = std::fabs(orig_val - deq_val);
+#endif
+            if (success.load(std::memory_order_relaxed)) {
+                float orig_val = original_tensor.at({i, j});
+                float deq_val = dequant_tensor.at({i, j});
+                float abs_err = std::fabs(orig_val - deq_val);
 
-                    if (abs_err > tol) {
-                        log_verbose("Mismatch at [", i, ",", j,
-                                "]: orig=", orig_val, ", dequant=", deq_val,
-                                ", abs_err=", abs_err, ", tol=", tol);
-                        success.store(false, std::memory_order_relaxed);
-                    }
+                if (abs_err > tol) {
+                    log_verbose("Mismatch at [", i, ",", j,
+                            "]: orig=", orig_val, ", dequant=", deq_val,
+                            ", abs_err=", abs_err, ", tol=", tol);
+                    success.store(false, std::memory_order_relaxed);
                 }
             }
+#if defined(_MSC_VER) && !defined(__clang__)
         }
+#else
+            }
+        }
+#endif
     } else {
 // 3D comparison
+#if defined(_MSC_VER) && !defined(__clang__)
+        const long long flat_mn
+                = static_cast<long long>(M) * static_cast<long long>(N);
+        const long long flat_bmn = static_cast<long long>(batch) * flat_mn;
+#pragma omp parallel for
+        for (long long flat_it = 0; flat_it < flat_bmn; ++flat_it) {
+            const uint64_t b = static_cast<uint64_t>(flat_it / flat_mn);
+            const uint64_t i = static_cast<uint64_t>(flat_it % flat_mn) / N;
+            const uint64_t j = static_cast<uint64_t>(flat_it) % N;
+#else
 #pragma omp parallel for collapse(3)
         for (uint64_t b = 0; b < batch; ++b) {
             for (uint64_t i = 0; i < M; ++i) {
                 for (uint64_t j = 0; j < N; ++j) {
-                    if (success.load(std::memory_order_relaxed)) {
-                        float orig_val = original_tensor.at({b, i, j});
-                        float deq_val = dequant_tensor.at({b, i, j});
-                        float abs_err = std::fabs(orig_val - deq_val);
+#endif
+            if (success.load(std::memory_order_relaxed)) {
+                float orig_val = original_tensor.at({b, i, j});
+                float deq_val = dequant_tensor.at({b, i, j});
+                float abs_err = std::fabs(orig_val - deq_val);
 
-                        if (abs_err > tol) {
-                            log_verbose("Mismatch at [", b, ",", i, ",", j,
-                                    "]: orig=", orig_val, ", dequant=", deq_val,
-                                    ", abs_err=", abs_err, ", tol=", tol);
-                            success.store(false, std::memory_order_relaxed);
-                        }
-                    }
+                if (abs_err > tol) {
+                    log_verbose("Mismatch at [", b, ",", i, ",", j,
+                            "]: orig=", orig_val, ", dequant=", deq_val,
+                            ", abs_err=", abs_err, ", tol=", tol);
+                    success.store(false, std::memory_order_relaxed);
+                }
+            }
+#if defined(_MSC_VER) && !defined(__clang__)
+        }
+#else
                 }
             }
         }
+#endif
     }
 
     if (!success.load()) { is_comparison_successful = false; }

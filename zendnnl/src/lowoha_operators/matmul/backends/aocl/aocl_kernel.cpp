@@ -1926,10 +1926,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
         reordered_mem = nullptr;
     }
     // Free zero-point compensation buffer (only if not cached)
-    // 1D compensation (wei_zp == 0) is cached, 2D compensation is always freed
+    // 1D compensation (wei_zp == 0) is cached, 2D compensation is always freed.
+    // The buffer comes from zendnnl_aligned_alloc, so it must be released with
+    // zendnnl_aligned_free (_aligned_free on Windows), never std::free.
     bool zp_cache_enabled = matmul_config.get_zp_comp_cache();
     if (zp_comp_acc && (!zp_cache_enabled || wei_zp != 0)) {
-        std::free(zp_comp_acc);
+        zendnnl_aligned_free(zp_comp_acc);
     }
     // Per-call teardown for the metadata returned by create_dlp_post_op().
     // No-op for cached holders (the common case); frees the per-call
