@@ -31,8 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp tag AOCL-202610W01
-set(AOCLDLP_GIT_TAG "62595423d66111c19bd82304229d3d8cdba51bf5"
+# aocl-dlp tag AOCL-202609W03
+set(AOCLDLP_GIT_TAG "a8551406997d95e900c4ae979a3d4bc072e9b07d"
   CACHE STRING "AOCL-DLP git tag or ref")
 option(AOCLDLP_GIT_PROGRESS ON)
 

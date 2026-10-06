@@ -289,9 +289,8 @@ get_postop_metadata_cache() {
 //     wrong results or segfaults because the patch path only refreshes
 //     mutable pointers into the slot type chosen at build time.
 //   - source and weight scale granularity. Per-tensor, per-token/channel,
-//     and per-group scales produce different quant-op topology that
-//     patch_mutable_fields does not rebuild. WOQ B scale/zp outer_dim and
-//     group_size are the exception: they are rewritten from the live shape.
+//     and per-group scales produce different quant-op topology/outer_dim
+//     values that patch_mutable_fields does not refresh.
 //
 // Intentionally NOT in the signature:
 //   - po.alpha/po.beta (parameterized eltwise values): patched per-call via holder-owned
@@ -538,58 +537,6 @@ static void setup_dlp_postops(dlp_metadata_t *md,
 // b_quant_op->dequant_scale_factors / zero_point are pre-wired by
 // init_metadata_holder() at the holder's embedded buffers; this function
 // fills them in.
-// AOCL-DLP WOQ B-side contract (dlp_gemm_translate_to_pre_ops_list):
-//   PER_TENSOR  -> length 1
-//   PER_CHANNEL -> length N
-//   PER_GROUP   -> length N * num_groups, num_groups = K / group_size
-// Scale and zero-point are classified from their own shapes. A per-channel
-// scale may be paired with a per-tensor zero-point; copying the scale's
-// outer_dim onto the zero-point makes DLP reject length 1 as PER_CHANNEL.
-struct woq_b_qparam_t {
-    DLP_PARAM_DIM_TYPE dim = DLP_PARAM_DIM_PER_TENSOR;
-    size_t len = 1;
-};
-
-static woq_b_qparam_t classify_woq_b_qparam(
-        const std::vector<int64_t> &dims, int64_t N) {
-    woq_b_qparam_t q;
-    q.len = get_num_elements(dims);
-    // {} / {1} / {1,1} are one scalar. {1,1} must not fall through to
-    // PER_CHANNEL: DLP requires a per-channel buffer to have length N.
-    if (q.len <= 1) {
-        q.dim = DLP_PARAM_DIM_PER_TENSOR;
-        q.len = 1;
-        return q;
-    }
-    if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
-        q.dim = DLP_PARAM_DIM_PER_GROUP;
-        return q;
-    }
-    // {N} or {1, N}. Length stays at the real element count so a malformed
-    // buffer is rejected by DLP instead of being reported as length N.
-    q.dim = DLP_PARAM_DIM_PER_CHANNEL;
-    return q;
-}
-
-// group_size is the K-span that shares one scale value. Per-tensor and
-// per-channel are a single group over all of K. Per-group is K / G.
-static int64_t woq_group_size(
-        const woq_b_qparam_t &scale, int64_t num_groups, int64_t K) {
-    if (scale.dim != DLP_PARAM_DIM_PER_GROUP) { return K; }
-    if (num_groups <= 0 || K % num_groups != 0) {
-        log_error("WOQ: group count (", num_groups, ") must divide K (", K,
-                ") evenly");
-        return K;
-    }
-    const int64_t group_size = K / num_groups;
-    // DLP rejects a partial-K group size that is odd.
-    if (group_size != K && (group_size % 2) != 0) {
-        log_error("WOQ: group_size (", group_size, ") must be even");
-        return K;
-    }
-    return group_size;
-}
-
 static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
         dlp_postop_metadata_holder_t *h, const matmul_params &lowoha_param,
         int64_t K, int64_t N, data_type_t wei_dt) {
@@ -611,42 +558,60 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
     // WOQ never forward-quantizes B; only the dequant direction is used.
     dlp_metadata->b_quant_op->quant_scale_factors = nullptr;
 
-    //   - Per-tensor:  nelems <= 1 ({} / {1} / {1,1}) → group_size = K
-    //   - Per-channel: {N} or {1, N}                  → group_size = K
-    //   - Per-group:   {G, N}, G > 1                  → group_size = K / G
-    // Length is the real element count: 1, N, or G*N. DLP checks that
-    // against outer_dim (PER_GROUP expects N * num_groups, not N).
-    const woq_b_qparam_t scale = classify_woq_b_qparam(wei_scale.dims, N);
-    const int64_t num_groups = wei_scale.dims.empty() ? 1 : wei_scale.dims[0];
-    const int64_t group_size = woq_group_size(scale, num_groups, K);
+    // Determine group_size and granularity from wei_scale.dims:
+    //   - Per-tensor:  dims = {} or {1}     → group_size = K, PER_TENSOR
+    //   - Per-channel: dims = {N} or {1, N} → group_size = K, PER_CHANNEL
+    //   - Per-group:   dims = {G, N}        → group_size = K / G, PER_GROUP
+    int64_t group_size = K; // Default per-tensor / per-channel (single K group)
+    DLP_PARAM_DIM_TYPE outer_dim = DLP_PARAM_DIM_PER_TENSOR;
+    const auto &dims = wei_scale.dims;
+    if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
+        if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
+            group_size = K / dims[0]; // Per-group: dims = {G, N}
+            outer_dim = DLP_PARAM_DIM_PER_GROUP;
+        } else {
+            outer_dim = DLP_PARAM_DIM_PER_CHANNEL; // dims = {N} or {1, N}
+        }
+    }
+
+    // Validation: group_size must divide K evenly
+    if (K % group_size != 0) {
+        log_error("WOQ: group_size (", group_size, ") must divide K (", K,
+                ") evenly");
+        group_size = K; // Fallback to per-tensor
+        outer_dim = DLP_PARAM_DIM_PER_TENSOR;
+    }
     dlp_metadata->b_quant_op->group_size = static_cast<int>(group_size);
+    const size_t scale_len = group_size != K ? static_cast<size_t>(N)
+                                             : get_num_elements(wei_scale.dims);
 
     // Weight dequant scale (dequant_scale_factors slot pre-wired by
     // init_metadata_holder).
     dlp_metadata->b_quant_op->dequant_scale_factors->data
             = const_cast<void *>(wei_scale.buff);
-    dlp_metadata->b_quant_op->dequant_scale_factors->len = scale.len;
+    dlp_metadata->b_quant_op->dequant_scale_factors->len = scale_len;
     dlp_metadata->b_quant_op->dequant_scale_factors->stor_type
             = (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
-    dlp_metadata->b_quant_op->dequant_scale_factors->outer_dim = scale.dim;
+    dlp_metadata->b_quant_op->dequant_scale_factors->outer_dim = outer_dim;
 
     // Weight zero-point (asymmetric u4 only). zero_point slot is pre-wired by
     // init_metadata_holder; the explicit re-assignment documents the u4 path
     // and the else branch nulls it for symmetric (s4) weights.
     if (wei_dt == data_type_t::u4) {
-        const woq_b_qparam_t zp = classify_woq_b_qparam(wei_zp.dims, N);
         dlp_metadata->b_quant_op->zero_point = &h->b_quant_zp;
         dlp_metadata->b_quant_op->zero_point->data
                 = const_cast<void *>(wei_zp.buff);
-        dlp_metadata->b_quant_op->zero_point->len = zp.len;
+        dlp_metadata->b_quant_op->zero_point->len = group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_zp.dims);
         dlp_metadata->b_quant_op->zero_point->stor_type
                 = (wei_zp.dt == data_type_t::s8) ? DLP_S8 : DLP_BF16;
-        dlp_metadata->b_quant_op->zero_point->outer_dim = zp.dim;
+        dlp_metadata->b_quant_op->zero_point->outer_dim = outer_dim;
     } else {
         dlp_metadata->b_quant_op->zero_point = nullptr;
     }
 
-    apilog_info("WOQ: scale_len=", scale.len, ", group_size=", group_size);
+    apilog_info("WOQ: scale_len=", scale_len, ", group_size=", group_size);
 }
 
 // Patch the per-call mutable fields onto a previously-built cached metadata.
@@ -682,18 +647,11 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 //   - b_quant_op->{group_size, dequant_scale_factors->{data, len, stor_type}}
 //                                           : per-call sym-quant weight
 //                                             metadata
-//   - b_quant_op->{group_size,
-//                  dequant_scale_factors->{data, len, stor_type, outer_dim}}
-//                                           : per-call WOQ weight-scale buffer.
-//                                             group_size and outer_dim move
-//                                             with the live scale shape so a
-//                                             per-group hit keeps
-//                                             len == N * num_groups.
-//   - b_quant_op->zero_point->{data, len, stor_type, outer_dim}
+//   - b_quant_op->dequant_scale_factors->{data, len, stor_type}
+//                                           : per-call WOQ weight-scale buffer
+//   - b_quant_op->zero_point->{data, len, stor_type}
 //                                           : per-call WOQ-asymmetric (u4)
-//                                             weight-zp buffer, classified
-//                                             from the zp shape rather than
-//                                             copied from the scale
+//                                             weight-zp buffer
 //   - scale[i].sf->{scale_factor,
 //                   scale_factor_len,
 //                   scale_factor_type}       : per-call src/wei/dst_scale
@@ -947,27 +905,24 @@ static void patch_mutable_fields(dlp_metadata_t *md,
     if (md->b_quant_op && !is_sym_quant && md->b_quant_op->dequant_scale_factors
             && lowoha_param.quant_params.wei_scale.buff) {
         const auto &wei_scale = lowoha_param.quant_params.wei_scale;
-        const woq_b_qparam_t scale = classify_woq_b_qparam(wei_scale.dims, N);
-        const int64_t num_groups
-                = wei_scale.dims.empty() ? 1 : wei_scale.dims[0];
-        md->b_quant_op->group_size
-                = static_cast<int>(woq_group_size(scale, num_groups, K));
         md->b_quant_op->dequant_scale_factors->data
                 = const_cast<void *>(wei_scale.buff);
-        md->b_quant_op->dequant_scale_factors->len = scale.len;
+        md->b_quant_op->dequant_scale_factors->len
+                = md->b_quant_op->group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_scale.dims);
         md->b_quant_op->dequant_scale_factors->stor_type
                 = (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
-        md->b_quant_op->dequant_scale_factors->outer_dim = scale.dim;
     }
     if (md->b_quant_op && !is_sym_quant && md->b_quant_op->zero_point
             && lowoha_param.quant_params.wei_zp.buff) {
         const auto &wei_zp = lowoha_param.quant_params.wei_zp;
-        const woq_b_qparam_t zp = classify_woq_b_qparam(wei_zp.dims, N);
         md->b_quant_op->zero_point->data = const_cast<void *>(wei_zp.buff);
-        md->b_quant_op->zero_point->len = zp.len;
+        md->b_quant_op->zero_point->len = md->b_quant_op->group_size != K
+                ? static_cast<size_t>(N)
+                : get_num_elements(wei_zp.dims);
         md->b_quant_op->zero_point->stor_type
                 = (wei_zp.dt == data_type_t::s8) ? DLP_S8 : DLP_BF16;
-        md->b_quant_op->zero_point->outer_dim = zp.dim;
     }
 
     // Non-symmetric INT8 SCALE post-op slots refresh on cache hit.
