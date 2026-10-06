@@ -83,14 +83,14 @@ struct PackProbeStats {
 /// caller, because the active-set dispatcher will independently
 /// re-validate any expert it actually processes.
 ///
-/// Thread-safety: the per-expert loop is OpenMP-parallel only for S4,
-/// when there is more than one expert and the caller is not already
-/// inside a parallel region (`omp_in_parallel` is false).  The other
-/// dtype families remain serial because their pack functions hold a
-/// family-wide mutex across packing.  S4 packing no longer holds that
-/// outer mutex across `pack_s4_vnni`; the LRU `get_or_add` serialises
-/// insert, and a duplicate-miss loser frees its buffer.  Safe to call
-/// before an OMP parallel region.  Callers must NOT invoke this
+/// Thread-safety: for the F16 and S4 families the per-expert loop is
+/// OpenMP-parallel when there is more than one expert and the caller is not
+/// already inside a parallel region (`omp_in_parallel` is false).  Those
+/// families pack into private buffers outside any lock; the LRU `get_or_add`
+/// serialises insert, and a duplicate-miss loser frees its buffer.  BF16 and
+/// INT8 misses pack under their family mutex (an in-place WC=2 pack may
+/// rewrite the same source buffer), so their loop runs serially.  Safe to
+/// call before an OMP parallel region.  Callers must NOT invoke this
 /// concurrently with any in-flight `dispatch_tile()` (which reads
 /// cached pointers) or `clear_custom_kernel_pack_cache()` (which drops
 /// every cached entry) on other threads.

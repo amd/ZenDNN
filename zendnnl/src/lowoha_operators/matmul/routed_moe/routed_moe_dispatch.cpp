@@ -511,9 +511,10 @@ status_t build_grouped_tokens(const char layout_src, const bool trans_src,
     if (threads > 1 && live_rows > 1
             && checked_mul_size(live_rows, source_row_bytes, gathered_bytes)
             && gathered_bytes >= kParallelCopyBytes) {
-        const int team = static_cast<int>(
-                std::min<size_t>(static_cast<size_t>(threads), live_rows));
-#pragma omp parallel num_threads(team)
+        // The full team even with fewer rows than threads: a smaller request
+        // makes the runtime rebuild the pool here and again at the grouped
+        // GEMM region that follows.  Surplus ranks get an empty range.
+#pragma omp parallel num_threads(threads)
         {
             const int count = omp_get_num_threads();
             const int rank = omp_get_thread_num();
@@ -1329,9 +1330,8 @@ status_t finish_output(const grouped_tokens_t &grouped,
         if (threads > 1 && slots > 1
                 && checked_mul_size(slots, row_bytes, scattered_bytes)
                 && scattered_bytes >= kParallelCopyBytes) {
-            const int team = static_cast<int>(
-                    std::min<size_t>(static_cast<size_t>(threads), slots));
-#pragma omp parallel for schedule(static) num_threads(team)
+            // Same full-team rule as the source gather.
+#pragma omp parallel for schedule(static) num_threads(threads)
             for (long long slot = 0; slot < static_cast<long long>(slots);
                     ++slot) {
                 std::memcpy(output
@@ -1371,8 +1371,8 @@ status_t finish_output(const grouped_tokens_t &grouped,
     postop.topk_weights = weights;
     postop.skip_weighted = routing.skip_weighted;
     postop.row_ptrs = desc.row_ptrs.data();
-    return group_matmul_moe_postop_execute(
-            &postop, final_width, num_threads, final_dtype);
+    return group_matmul_moe_postop_execute(&postop, final_width,
+            routed_moe::effective_num_threads(num_threads), final_dtype);
 }
 
 status_t run_generic(const char layout_src, const bool trans_src,

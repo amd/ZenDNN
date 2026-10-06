@@ -1681,11 +1681,11 @@ inline bool try_decode_d_plan(
 // eligibility's `num_ops ≤ num_ccds` gate refuses).
 //
 // One structural floor remains: `num_threads >= num_ops`.  DecodeD's
-// executor opens `#pragma omp parallel num_threads(num_ops ×
-// thr_per_expert)` and maps `tid / thr_per_expert → expert`.  If the
-// team is smaller than `num_ops` we'd over-subscribe the OMP team
-// and the integer-division mapping would collide on the wrap, so
-// return false here and let the caller fall through to Rounds.
+// executor needs `num_ops × thr_per_expert` threads and maps
+// `tid / thr_per_expert → expert`.  If the team is smaller than
+// `num_ops` we'd over-subscribe the OMP team and the integer-division
+// mapping would collide on the wrap, so return false here and let the
+// caller fall through to Rounds.
 //
 // `thr_per_expert` for the force path is `max(1, num_threads/num_ops)`
 // — the eligibility-path's additional `max_tiles` cap is dropped so
@@ -2195,10 +2195,31 @@ inline bool apply_adaptive_tiers(const GroupNTileTopology &topo,
     return true;
 }
 
+inline bool active_experts_have_uniform_nk(const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K) {
+    int ref_N = 0;
+    int ref_K = 0;
+    bool seen_active = false;
+    const int nops = static_cast<int>(M.size());
+    for (int e = 0; e < nops; ++e) {
+        if (M[e] <= 0) { continue; }
+        const int n = (e < static_cast<int>(N.size())) ? N[e] : 0;
+        const int k = (e < static_cast<int>(K.size())) ? K[e] : 0;
+        if (!seen_active) {
+            ref_N = n;
+            ref_K = k;
+            seen_active = true;
+            continue;
+        }
+        if (n != ref_N || k != ref_K) { return false; }
+    }
+    return true;
+}
+
 inline void apply_round_pick(const GroupNTileTopology &topo,
         const RoundCandidates &c, RoundPick pick, int ab_min_tile,
         GroupNTilePlan &plan, const std::vector<int> &M,
-        const std::vector<int> &N, bool use_custom) {
+        const std::vector<int> &N, const std::vector<int> &K, bool use_custom) {
     plan.strategy = GroupNTileStrategy::ManyExperts;
     plan.min_n_tile = ab_min_tile;
     switch (pick) {
@@ -2446,15 +2467,17 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
             // clamped away.  Allocation is a pure function of
             // (M, N, num_threads) -> deterministic / cache-key stable.
             // Decode-only (`max_M <= kDecodeMaxM`); the non-decode CK Single
-            // case keeps the `+1` remainder distribution below.  This is an
-            // opt-in for decode CK Single-round (both dtypes): OFF by default
-            // (decode uses the uniform Phase B base+1), turned ON only via the
-            // dedicated knob ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=1.  It is
-            // INDEPENDENT of ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD, which is
-            // prompt-only.
+            // case keeps the `+1` remainder distribution below.  By default,
+            // engage only for uniform active N/K groups where M is a reliable
+            // work estimate.  The env knob can still force ON/OFF.
             bool proportional_applied = false;
+            const int proportional_mode
+                    = get_grp_matmul_decode_proportional_mode();
+            const bool proportional_allowed = proportional_mode > 0
+                    || (proportional_mode == 0
+                            && active_experts_have_uniform_nk(M, N, K));
             if (use_custom && topo.max_M <= kDecodeMaxM
-                    && get_grp_matmul_decode_proportional()) {
+                    && proportional_allowed) {
                 const int nops = topo.num_ops;
                 const int nthreads = topo.num_threads;
                 long long sum_M = 0;
@@ -2703,7 +2726,8 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         matmul_algo_t algo, int nr_align, bool fused_epilogue,
         bool use_custom_at_plan_time, bool ck_int8_at_plan_time,
-        const std::vector<int> &M, const std::vector<int> &N) {
+        const std::vector<int> &M, const std::vector<int> &N,
+        const std::vector<int> &K) {
 
     GroupNTilePlan plan {};
     plan.algo = algo;
@@ -3140,7 +3164,7 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         // commit the chosen candidate's parameters to the plan.
         const RoundCandidates c = build_round_candidates(topo, ab_min_tile);
         const RoundPick pick = pick_round_strategy(topo, c);
-        apply_round_pick(topo, c, pick, ab_min_tile, plan, M, N,
+        apply_round_pick(topo, c, pick, ab_min_tile, plan, M, N, K,
                 use_custom_at_plan_time);
     }
 
@@ -3179,6 +3203,11 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
 // Each executor consumes the planner's `GroupNTilePlan` and a
 // `GroupNTileContext` and runs the actual GEMM calls.  All OMP and
 // barriers live here.
+
+// With fewer rows than threads and less than this many bytes of tight-dst
+// rows, waking the team costs more than the copy, so it runs serialized.
+// A tuning cutoff, not a correctness bound.
+constexpr size_t kTightCopySerialBytes = 64u * 1024u;
 
 // (F) Sequential — N too small for tiling.  Runs one expert at a time
 // with the full thread team per kernel.  Two flows:
@@ -3334,8 +3363,16 @@ inline void execute_sequential(
                 const char *const src_rows
                         = static_cast<const char *>(scratch.buf);
                 char *const dst_rows = static_cast<char *>(ctx.dst[e]);
-                const int copy_thr
-                        = std::max(1, std::min(plan.num_threads, ctx.M[e]));
+                // The GEMM's full team or a serialized copy, never a team in
+                // between: any other size makes the runtime rebuild the pool
+                // here and again at the next GEMM region.
+                const int copy_thr = ctx.M[e] > 1
+                                && (ctx.M[e] >= plan.num_threads
+                                        || static_cast<size_t>(ctx.M[e])
+                                                        * row_bytes
+                                                >= kTightCopySerialBytes)
+                        ? std::max(1, plan.num_threads)
+                        : 1;
 #pragma omp parallel for if (copy_thr > 1) num_threads(copy_thr) \
         schedule(static)
                 for (int m = 0; m < ctx.M[e]; ++m) {
@@ -3390,15 +3427,18 @@ inline void execute_sequential(
 // (D) DecodeD — small-M, balanced, ≤ num_ccds experts.
 //
 // Equal CCD-sized team per expert; one flat OMP region.  The planner
-// sizes `decode_total_threads = num_ops × decode_thr_per_expert`
-// exactly, so every thread in the region has a valid expert
-// (`e = tid / thr_per_expert ∈ [0, num_ops)`) — no idle-thread guard
-// needed.  Fused activation runs after a single barrier so all matmul
-// writes are visible before any thread reads them back.
+// sizes `decode_total_threads = num_ops × decode_thr_per_expert`, which
+// can fall short of the caller's team when `thr_per_expert` is capped by
+// the N-tile count.  The region still opens the full team, so the runtime
+// does not rebuild the pool here and again at the next region; threads
+// past `decode_total_threads` own no expert and only meet the barrier.
+// Fused activation runs after a single barrier so all matmul writes are
+// visible before any thread reads them back.
 inline void execute_decode_d(
         const GroupNTilePlan &plan, GroupNTileContext &ctx) {
     const int thr_per_expert = plan.decode_thr_per_expert;
     const int total_threads = plan.decode_total_threads;
+    const int team_threads = std::max(total_threads, plan.num_threads);
     // Respect ZENDNNL_GRP_MATMUL_N_ORDER even on DecodeD: ordering is
     // perf-neutral here (DecodeD has no rounds, all experts are
     // processed concurrently), but keeping the indirection consistent
@@ -3412,7 +3452,7 @@ inline void execute_decode_d(
     // mapping).
     const bool sort_on = (plan.expert_order_size > 0);
 
-#pragma omp parallel num_threads(total_threads)
+#pragma omp parallel num_threads(team_threads)
     {
         // A requested team size is a request, not a guarantee -- OMP_DYNAMIC,
         // OMP_THREAD_LIMIT, or an already-active outer level can all trim it.
@@ -3425,12 +3465,17 @@ inline void execute_decode_d(
             ctx.signal_abort(kNTileAbortShortTeam);
         } else {
             const int tid = omp_get_thread_num();
+            const bool owns_tile = tid < total_threads;
             const int local_expert = tid / thr_per_expert;
             const int local_tid = tid % thr_per_expert;
-            const int e
-                    = sort_on ? plan.expert_order[local_expert] : local_expert;
+            const int e = !owns_tile ? -1
+                    : sort_on        ? plan.expert_order[local_expert]
+                                     : local_expert;
 
-            ctx.do_tile(plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+            if (owns_tile) {
+                ctx.do_tile(
+                        plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+            }
 
             // Fused activation: barrier so every thread's matmul write is
             // globally visible before any thread reads it back for its
@@ -3455,8 +3500,10 @@ inline void execute_decode_d(
             if (plan.fused_epilogue && !ctx.use_custom
                     && !plan.tight_fused_epilogue) {
 #pragma omp barrier
-                ctx.apply_swiglu_oai(
-                        plan, e, local_tid, thr_per_expert, plan.min_n_tile);
+                if (owns_tile) {
+                    ctx.apply_swiglu_oai(plan, e, local_tid, thr_per_expert,
+                            plan.min_n_tile);
+                }
             }
         }
     }
@@ -4289,8 +4336,8 @@ void flat_n_tile(const std::vector<char> &layout,
     bool ck_scales_interleave = false; // silu/gelu split-halves permute
     // W4A8 shares the DQ-INT8 `scale_kind` contract; only the cost
     // differs, since its `{G, N}` scale permutes G rows, not one.
-    if (custom_kernel::is_int8_variant(kctx.variant)
-            || custom_kernel::is_s4_variant(kctx.variant)) {
+    const bool ck_int8_variant = custom_kernel::is_int8_variant(kctx.variant);
+    if (ck_int8_variant || custom_kernel::is_s4_variant(kctx.variant)) {
         ck_scales_interleave
                 = (kctx.act_kind == custom_kernel::ActKind::silu_and_mul)
                 || (kctx.act_kind == custom_kernel::ActKind::gelu_and_mul);
@@ -4298,7 +4345,27 @@ void flat_n_tile(const std::vector<char> &layout,
         const data_type_t wdt = params[rep].quant_params.wei_scale.dt;
         const bool supported_dt
                 = (sdt == data_type_t::bf16 || sdt == data_type_t::f32);
-        ck_scales_raw = !ck_scales_interleave && supported_dt && (sdt == wdt);
+        // DA8W8 weights are constant and their per-channel scale is weight-tied.
+        // When a framework stores that scale as BF16, convert/cache it once as
+        // FP32 instead of making every INT8 CK tile widen the same BF16 scale
+        // lanes in the epilogue.  `materialise_f32_wei_scale_cached` below owns
+        // the cache; source scales are per-call/per-row and are materialised
+        // into the hoist slot's small owned vector when this forces kF32.
+        // The cache only holds const weights, so a non-const active expert
+        // would pay the conversion on every call; keep raw BF16 then.
+        bool active_weights_const = true;
+        for (int e = 0; e < num_ops && active_weights_const; ++e) {
+            if (M[e] > 0 && static_cast<size_t>(e) < is_weights_const.size()
+                    && !is_weights_const[e])
+                active_weights_const = false;
+        }
+        const bool force_bf16_wei_scale_f32 = ck_int8_variant
+                && wdt == data_type_t::bf16 && active_weights_const
+                && zendnnl::common::matmul_config_t::instance()
+                                .get_weight_cache()
+                        != 0;
+        ck_scales_raw = !force_bf16_wei_scale_f32 && !ck_scales_interleave
+                && supported_dt && (sdt == wdt);
         kctx.scale_kind = (ck_scales_raw && sdt == data_type_t::bf16)
                 ? custom_kernel::ScaleKind::kBf16
                 : custom_kernel::ScaleKind::kF32;
@@ -4789,7 +4856,7 @@ void flat_n_tile(const std::vector<char> &layout,
     // pack cache is shape-keyed, not tile-keyed.
     GroupNTilePlan plan
             = plan_group_n_tile(topo, algo, nr_align, fused_epilogue,
-                    use_custom, /*ck_int8_at_plan_time=*/is_int8_call, M, N);
+                    use_custom, /*ck_int8_at_plan_time=*/is_int8_call, M, N, K);
     // The tight-dst switch is orthogonal to the planner's strategy /
     // threading decisions: it only toggles how each thread writes its
     // final swiglu output (scratch + OOP vs in-place).  Set after the
@@ -5048,8 +5115,13 @@ void flat_n_tile(const std::vector<char> &layout,
             tunables = " pack_nr=" + std::to_string(kctx.pack_nr)
                     + " subtile_cols=" + std::to_string(kctx.subtile_cols);
             if (is_decode_log) {
-                tunables += std::string(" decode_proportional=")
-                        + (get_grp_matmul_decode_proportional() ? "on" : "off");
+                const int prop_mode = get_grp_matmul_decode_proportional_mode();
+                const char *prop_label = prop_mode < 0 ? "off"
+                        : prop_mode > 0                ? "force"
+                        : active_experts_have_uniform_nk(M, N, K)
+                        ? "auto-uniform"
+                        : "auto-declined-nonuniform";
+                tunables += std::string(" decode_proportional=") + prop_label;
             } else {
                 tunables += " n_tile_heavy_thr="
                         + std::to_string(

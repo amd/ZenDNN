@@ -721,6 +721,9 @@ status_t group_matmul_fused_moe_execute(
  *     because `shrink_to_fit()` is a non-binding REQUEST per the C++
  *     standard and some libstdc++ / allocator configurations may
  *     no-op it, which would defeat the purpose of this API.
+ *   * Dynamic-quant pools: the per-expert and grouped source
+ *     quantization buffers are freed; the next quantized call
+ *     re-grows them.
  *
  * LIMITATION: the per-thread scratches inside the M-tile vertical
  * fusion executor and the N-tile tight-fused-epilogue path (both

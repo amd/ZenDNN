@@ -1558,6 +1558,299 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8AlgoCustomBf16Scale,
                         /*act=*/0, /*M=*/64, /*num_ops=*/4, /*dim=*/64}),
         Int8AlgoCustomParamName);
 
+// With the weight cache on, the CK converts a BF16 weight scale to FP32 once
+// and caches it; with it off the kernel widens the BF16 scale on load.  Both
+// widenings are exact, so the two runs must agree bit for bit.
+TEST(TestGroupMatmulInt8Bf16ScaleCache, WeightCacheOnOffBitExact) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+
+    for (const Int8AlgoCustomParam &p :
+            {Int8AlgoCustomParam {/*act=*/0, /*M=*/4, /*num_ops=*/4,
+                     /*dim=*/64},
+                    Int8AlgoCustomParam {/*act=*/0, /*M=*/25, /*num_ops=*/1,
+                            /*dim=*/1024}}) {
+        reset_grp_matmul_caches();
+        const int N_op1 = p.dim;
+        const int K = 128;
+        tensor_factory_t tf;
+        std::vector<tensor_t> src, wei, bias, dst;
+        ASSERT_NO_FATAL_FAILURE(
+                build_int8_dq_inputs(tf, p, N_op1, K, src, wei, bias, dst,
+                        /*scale_dt=*/data_type_t::bf16));
+
+        AlgoEnvGuard algo_guard(3);
+        std::vector<std::vector<bfloat16_t>> out[2];
+        for (int wc = 0; wc <= 1; ++wc) {
+            WeightCacheGuard wc_guard(wc);
+            for (auto &d : dst) {
+                auto *raw
+                        = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+                std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
+                        bfloat16_t(0.0f));
+            }
+            GemmModeCaptureGuard gemm_mode_guard;
+            ASSERT_NO_FATAL_FAILURE(
+                    run_int8_dq_pass(/*int8_on=*/true, src, wei, bias, dst,
+                            grp_matmul_gated_act_t::none, out[wc], p.M, N_op1));
+            const char *mode
+                    = zendnnl::lowoha::matmul::test_api ::
+                              s_last_group_matmul_direct_gemm_mode.load(
+                                      std::memory_order_relaxed);
+            ASSERT_NE(mode, nullptr);
+            ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+                    << "WEIGHT_CACHE=" << wc << " M=" << p.M << " ran on '"
+                    << mode << "' instead of the INT8 CK";
+        }
+        for (int e = 0; e < p.num_ops; ++e) {
+            EXPECT_EQ(std::memcmp(out[0][e].data(), out[1][e].data(),
+                              out[0][e].size() * sizeof(bfloat16_t)),
+                    0)
+                    << "BF16 scale cache on/off differ: M=" << p.M
+                    << " E=" << p.num_ops << " e=" << e;
+        }
+    }
+}
+
+// The FP32 scale cache re-checks a per-channel scale's bytes on every hit, so
+// a BF16 scale rewritten in place behind the same pointer must take effect on
+// the next call and match a run with the cache off.
+TEST(TestGroupMatmulInt8Bf16ScaleCache, InPlaceScaleUpdateIsHonored) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    reset_grp_matmul_caches();
+
+    const Int8AlgoCustomParam p {/*act=*/0, /*M=*/25, /*num_ops=*/1,
+            /*dim=*/1024};
+    const int N_op1 = p.dim;
+    const int K = 128;
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(build_int8_dq_inputs(tf, p, N_op1, K, src, wei,
+            bias, dst, /*scale_dt=*/data_type_t::bf16));
+
+    AlgoEnvGuard algo_guard(3);
+    WeightCacheGuard wc_on(1);
+    auto run = [&](std::vector<std::vector<bfloat16_t>> &out) {
+        for (auto &d : dst) {
+            auto *raw = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+            std::fill(raw, raw + static_cast<size_t>(p.M) * N_op1,
+                    bfloat16_t(0.0f));
+        }
+        GemmModeCaptureGuard gemm_mode_guard;
+        ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei,
+                bias, dst, grp_matmul_gated_act_t::none, out, p.M, N_op1));
+        const char *mode = zendnnl::lowoha::matmul::test_api ::
+                                   s_last_group_matmul_direct_gemm_mode.load(
+                                           std::memory_order_relaxed);
+        ASSERT_NE(mode, nullptr);
+        ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+                << "ran on '" << mode << "' instead of the INT8 CK";
+    };
+
+    std::vector<std::vector<bfloat16_t>> before, after, uncached;
+    ASSERT_NO_FATAL_FAILURE(run(before));
+    // Doubling a BF16 value only moves its exponent, so the new scale is exact.
+    auto *scale = static_cast<bfloat16_t *>(
+            const_cast<void *>(wei[0].get_quant_scale_raw_handle_const()));
+    ASSERT_NE(scale, nullptr);
+    for (int n = 0; n < N_op1; ++n)
+        scale[n] = bfloat16_t(2.0f * static_cast<float>(scale[n]));
+    ASSERT_NO_FATAL_FAILURE(run(after));
+    {
+        WeightCacheGuard wc_off(0);
+        ASSERT_NO_FATAL_FAILURE(run(uncached));
+    }
+
+    const size_t bytes = before[0].size() * sizeof(bfloat16_t);
+    EXPECT_NE(std::memcmp(before[0].data(), after[0].data(), bytes), 0)
+            << "the rewritten scale did not change the output";
+    EXPECT_EQ(std::memcmp(after[0].data(), uncached[0].data(), bytes), 0)
+            << "the cached run disagrees with a cache-off run after the "
+               "in-place scale update";
+}
+
+// ===============================================================================
+// [8c-oblk] TestGroupMatmulInt8OblockOuter — DQ-INT8 o-block-outer nesting
+//
+// `dispatch_tile_int8` swaps to o-block-outer loops for one expert with at
+// least `kOblockOuterMinCalls` MR calls.  At the NV=2 symmetric cap of MR=12
+// that needs M >= 25, and every other INT8 differential runs below it, so
+// the swapped loops would otherwise go unexecuted.  N is wide enough that
+// each tile spans several o-blocks, otherwise both orders are one loop.  The
+// asymmetric U8 kernels cap at MR=8, so M=17 already makes three calls.  The
+// two-expert case is the control that keeps the MR-call-outer order.
+//
+// Checked against an f64 oracle on the unquantized source rather than the
+// AOCL DLP arm, whose U8 output drifts from the oracle by more than an
+// element-wise band allows.  The band scales with each row's largest output:
+// source quantization error does not shrink with an element's own magnitude,
+// while a misplaced o-block or MR call corrupts whole rows or column spans.
+// ===============================================================================
+struct Int8OblockParam {
+    int act_int; // 0=none, 1=silu
+    int M, num_ops, dim;
+    data_type_t compute; // s8 (symmetric) or u8 (asymmetric)
+    data_type_t dst_dt; // bf16, or f32 for act=none
+    bool bias; // act=none only
+};
+
+static std::string Int8OblockParamName(
+        const ::testing::TestParamInfo<Int8OblockParam> &info) {
+    const auto &p = info.param;
+    std::string name = (p.compute == data_type_t::u8) ? "asym_" : "sym_";
+    name += (p.act_int == 0) ? "none" : "silu";
+    name += "_M" + std::to_string(p.M) + "_E" + std::to_string(p.num_ops) + "_d"
+            + std::to_string(p.dim);
+    name += (p.dst_dt == data_type_t::f32) ? "_f32dst" : "_bf16dst";
+    if (p.bias) name += "_bias";
+    return name;
+}
+
+class TestGroupMatmulInt8OblockOuter
+    : public ::testing::TestWithParam<Int8OblockParam> {};
+
+TEST_P(TestGroupMatmulInt8OblockOuter, MatchesOracle) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    reset_grp_matmul_caches();
+
+    const auto &p = GetParam();
+    const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
+    const int N_op1 = (p.act_int == 0) ? p.dim : 2 * p.dim;
+    const int K = 256;
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(build_int8_dq_inputs(tf,
+            Int8AlgoCustomParam {p.act_int, p.M, p.num_ops, p.dim}, N_op1, K,
+            src, wei, bias, dst));
+    const std::vector<uint64_t> dst_shape {
+            static_cast<uint64_t>(p.M), static_cast<uint64_t>(N_op1)};
+    for (int e = 0; e < p.num_ops; ++e) {
+        dst[e] = tf.zero_tensor(dst_shape, p.dst_dt);
+        if (p.bias) {
+            bias[e] = tf.uniform_dist_tensor(
+                    {1, static_cast<uint64_t>(N_op1)}, data_type_t::bf16, 2.0);
+        }
+    }
+
+    AlgoEnvGuard algo_guard(3);
+    // ALGO 3 takes a source the grouped pre-pass already quantized only when
+    // it is S8, so U8 keeps dynamic_quant and quantizes inside the N-tile.
+    GroupDqOverride group_dq(p.compute == data_type_t::u8 ? 0 : -1);
+    grp_matmul_gated_act_params act_params {};
+    act_params.act = act_type;
+    CustomKernelOverride ck_master(true);
+    CustomKernelInt8Override ck_int8(true);
+    GemmModeCaptureGuard gemm_mode_guard;
+    ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                      matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
+                      /*moe_postop=*/nullptr,
+                      p.act_int == 0 ? nullptr : &act_params,
+                      /*pack_format_b=*/ {}, /*active_rows=*/ {}, p.compute),
+            status_t::success);
+    const char *mode = zendnnl::lowoha::matmul::test_api ::
+                               s_last_group_matmul_direct_gemm_mode.load(
+                                       std::memory_order_relaxed);
+    ASSERT_NE(mode, nullptr)
+            << "group_matmul_direct did not publish a gemm_mode";
+    ASSERT_NE(std::strstr(mode, "_custom"), nullptr)
+            << "M=" << p.M << " E=" << p.num_ops << " ran on '" << mode
+            << "' instead of the INT8 microkernel, so the loop nesting "
+               "under test was never executed.";
+
+    constexpr double kRowBand = 0.03;
+    const int cmpN = (p.act_int == 0) ? N_op1 : p.dim;
+    std::vector<double> acc(N_op1), ref(cmpN);
+    for (int e = 0; e < p.num_ops; ++e) {
+        const auto *s = static_cast<const bfloat16_t *>(
+                src[e].get_raw_handle_unsafe());
+        const auto *w
+                = static_cast<const int8_t *>(wei[e].get_raw_handle_unsafe());
+        ASSERT_EQ(wei[e].get_quant_scale_data_type(), data_type_t::f32)
+                << "oracle reads the weight scale as f32";
+        const auto *wsc = static_cast<const float *>(
+                wei[e].get_quant_scale_raw_handle_const());
+        const auto *b = p.bias ? static_cast<const bfloat16_t *>(
+                                         bias[e].get_raw_handle_unsafe())
+                               : nullptr;
+        const void *raw = dst[e].get_raw_handle_unsafe();
+        for (int m = 0; m < p.M; ++m) {
+            std::fill(acc.begin(), acc.end(), 0.0);
+            for (int k = 0; k < K; ++k) {
+                const double sv = static_cast<float>(s[(size_t)m * K + k]);
+                const int8_t *wr = w + (size_t)k * N_op1;
+                for (int n = 0; n < N_op1; ++n)
+                    acc[n] += sv * wr[n];
+            }
+            for (int n = 0; n < N_op1; ++n) {
+                acc[n] *= wsc[n];
+                if (b) acc[n] += static_cast<float>(b[n]);
+            }
+            double row_max = 0.0, worst = 0.0;
+            int worst_n = 0;
+            for (int n = 0; n < cmpN; ++n) {
+                const double g = acc[n];
+                ref[n] = (p.act_int == 0)
+                        ? g
+                        : g / (1.0 + std::exp(-g)) * acc[n + p.dim];
+                row_max = std::max(row_max, std::abs(ref[n]));
+            }
+            for (int n = 0; n < cmpN; ++n) {
+                const size_t idx = static_cast<size_t>(m) * N_op1 + n;
+                const double val = (p.dst_dt == data_type_t::f32)
+                        ? static_cast<const float *>(raw)[idx]
+                        : static_cast<float>(
+                                  static_cast<const bfloat16_t *>(raw)[idx]);
+                const double err = std::abs(val - ref[n]);
+                if (err > worst) {
+                    worst = err;
+                    worst_n = n;
+                }
+            }
+            EXPECT_LE(worst, kRowBand * row_max)
+                    << "int8 o-block nesting act=" << p.act_int
+                    << " E=" << p.num_ops << " e=" << e << " m=" << m
+                    << " worst n=" << worst_n << " (row max " << row_max << ")";
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8OblockOuter,
+        TestGroupMatmulInt8OblockOuter,
+        ::testing::Values(Int8OblockParam {0, 25, 1, 1024, data_type_t::s8,
+                                  data_type_t::bf16, false},
+                Int8OblockParam {0, 32, 1, 1024, data_type_t::s8,
+                        data_type_t::bf16, false},
+                Int8OblockParam {0, 36, 1, 1024, data_type_t::s8,
+                        data_type_t::bf16, true},
+                Int8OblockParam {0, 25, 1, 1024, data_type_t::s8,
+                        data_type_t::f32, true},
+                Int8OblockParam {1, 25, 1, 512, data_type_t::s8,
+                        data_type_t::bf16, false},
+                Int8OblockParam {0, 17, 1, 1024, data_type_t::u8,
+                        data_type_t::bf16, false},
+                Int8OblockParam {0, 17, 1, 1024, data_type_t::u8,
+                        data_type_t::f32, true},
+                Int8OblockParam {1, 17, 1, 512, data_type_t::u8,
+                        data_type_t::bf16, false},
+                Int8OblockParam {0, 25, 2, 1024, data_type_t::s8,
+                        data_type_t::bf16, false}),
+        Int8OblockParamName);
+
 // ===============================================================================
 // [8a] TestGroupMatmulPhaseBRemainder — CK Single-round + non-zero-remainder
 //
@@ -1908,14 +2201,13 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
 // call.  Assert that:
 //
 //   * `per_expert_remainder` is true (Phase B fired).
-//   * `n_thr_fixed == base`.
-//   * Exactly `remainder` experts received `base+1`, all others
-//     received `base`, and the recipients are the M-heaviest
-//     eligible experts (here all eligible because N is uniform).
+//   * Every active expert has 1..cap threads and the team is saturated.
+//   * The decode auto default chose the M-proportional split: the
+//     heaviest expert reaches its cap and the lightest stays at the
+//     floor, which the uniform base/base+1 split cannot produce.
 //
 // Shape: same 32t / 14ops / N=1024 setup as the correctness test
-// above, but with skewed M = {16,12,10,8,6,4×9} so only the FIRST
-// FOUR experts (M ∈ {16,12,10,8}) qualify as the heaviest.
+// above, but with skewed M = {16,12,10,8,6,4×9}.
 // ===============================================================================
 
 TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
@@ -1951,9 +2243,14 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
     NTileStrategyOverride auto_strategy(0);
-    // Decode M-proportional split is OFF by default; this test asserts the
-    // proportional contract (heaviest-first, capacity-clamped), so pin it ON.
-    DecodeProportionalOverride prop_on(true);
+    // Leave DecodeProportionalOverride unset: this uniform-N/K fixture
+    // exercises the production default-auto path, which an env value
+    // would replace.
+    if (const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL");
+            e != nullptr && e[0] != '\0') {
+        GTEST_SKIP() << "Exercises the auto default; "
+                        "ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL is set.";
+    }
 
     // Defence-in-depth: env overrides force the PLANNER's intent to
     // take the CK path, but `prepare_for_call` separately refuses CK
@@ -2045,13 +2342,12 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
                "(Single round picked by N_ROUNDS=1 + use_custom).";
     EXPECT_EQ(snap.num_ops_active, num_ops);
 
-    // 32 threads / 14 ops, max_M=16 <= kDecodeMaxM=32 → decode-class, so
-    // the CK Single round uses the M-PROPORTIONAL thread split (the new
-    // decode default), NOT the legacy uniform Phase B base/base+1.  The
-    // "heaviest-first" intent is preserved: proportional allocates threads
-    // in proportion to M (clamped to each expert's N-tile capacity
-    // cap=N/ab_min_tile=1024/256=4), so the M-heaviest experts receive the
-    // most threads.  Assert that contract rather than the old {2,3}.
+    // 32 threads / 14 ops, max_M=16 <= kDecodeMaxM=32 → decode-class with
+    // uniform N/K, so the auto default picks the M-PROPORTIONAL thread split
+    // over the uniform Phase B base/base+1.  Proportional allocates threads
+    // in proportion to M, clamped to each expert's N-tile capacity
+    // cap=N/ab_min_tile=1024/256=4, so the M-heaviest experts receive the
+    // most threads.
     EXPECT_NE(snap.n_thr_fixed, 0)
             << "proportional leaves n_thr_fixed at base (HYBRID clears to 0).";
 
@@ -2069,13 +2365,14 @@ TEST(TestGroupMatmulPhaseBRemainder, HeaviestFirstAssignment) {
             << "M-proportional should saturate the full thread team; "
                "sum(stable_n_thr_per_expert) = "
             << sum;
-    // Heaviest-first: the M-heaviest expert (e=0, M=16) gets a
-    // proportional share above the uniform base (2) and >= every other
-    // expert; the lightest (M=4) experts get strictly fewer.
-    const int n_heavy = static_cast<int>(snap.stable_n_thr_per_expert[0]);
-    EXPECT_GE(n_heavy, 3) << "heaviest expert (M=16) under-allocated";
-    EXPECT_GT(n_heavy, static_cast<int>(snap.stable_n_thr_per_expert[13]))
-            << "heaviest expert must outrank the lightest under proportional";
+    // The uniform split would give {3,3,3,3,2,...,2}.  Proportional fills
+    // the heaviest expert (M=16, want 5.8) to its cap of 4 and leaves the
+    // last light experts (M=4, want 1.45) at the floor of 1, a pair the
+    // uniform split cannot produce.
+    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[0]), 4)
+            << "heaviest expert (M=16) must reach its N-tile cap";
+    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[13]), 1)
+            << "lightest expert (M=4) must stay at the 1-thread floor";
 }
 
 // ===============================================================================
@@ -2138,8 +2435,8 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
     // ManyExperts and skip Phase B — see
     // `CkSingleRoundRemainderCorrectness` for the full rationale.
     NTileStrategyOverride auto_strategy(0);
-    // Decode M-proportional split is OFF by default; this test verifies the
-    // proportional split's per-expert capacity-cap clamp, so pin it ON.
+    // Pin the proportional path ON so this non-uniform-N fixture exercises the
+    // forced per-expert capacity clamp rather than the default-auto gate.
     DecodeProportionalOverride prop_on(true);
 
     if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
@@ -2257,6 +2554,124 @@ TEST(TestGroupMatmulPhaseBRemainder, EligibilityFilter_NonUniformN) {
     // capacity-capped e=0.
     EXPECT_GT(static_cast<int>(snap.stable_n_thr_per_expert[1]), n_e0)
             << "full-capacity heavy e=1 should outrank capacity-capped e=0.";
+}
+
+TEST(TestGroupMatmulPhaseBRemainder, DecodeProportionalEnvParsing) {
+    using zendnnl::lowoha::matmul::parse_grp_matmul_decode_proportional;
+
+    EXPECT_EQ(parse_grp_matmul_decode_proportional(nullptr), 0);
+    EXPECT_EQ(parse_grp_matmul_decode_proportional(""), 0);
+    EXPECT_EQ(parse_grp_matmul_decode_proportional("0"), -1);
+    EXPECT_EQ(parse_grp_matmul_decode_proportional("1"), 1);
+    EXPECT_EQ(parse_grp_matmul_decode_proportional("2"), 0);
+    EXPECT_EQ(parse_grp_matmul_decode_proportional("false"), 0);
+}
+
+TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
+    using namespace moe_test_utils;
+    using zendnnl::lowoha::matmul::group_matmul_direct;
+    using zendnnl::lowoha::matmul::GroupNTileStrategy;
+
+    const int saved_num_threads = omp_get_max_threads();
+    struct ThreadGuard {
+        int prev;
+        ~ThreadGuard() { omp_set_num_threads(prev); }
+    } thread_guard {saved_num_threads};
+    omp_set_num_threads(32);
+
+    int actual_team_size = 0;
+#pragma omp parallel
+    {
+#pragma omp master
+        actual_team_size = omp_get_num_threads();
+    }
+    if (actual_team_size < 32) {
+        GTEST_SKIP() << "Requires >= 32 active OMP threads; have "
+                     << actual_team_size;
+    }
+
+    CustomKernelOverride ck_on(true);
+    NRoundsModeOverride single_round(1);
+    CustomKernelNTileOverride default_n_tile(0);
+    NTileStrategyOverride auto_strategy(0);
+    DecodeProportionalOverride prop_default_auto(-1);
+
+    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "Test requires AVX512BF16 / custom-kernel "
+                        "dispatch support; cannot exercise Phase B "
+                        "without CK engagement.";
+    }
+
+    reset_grp_matmul_caches();
+
+    const int num_ops = 14;
+    const int K = 64;
+    const int N_wide = 1024;
+    const int N_narrow = 512;
+    const std::vector<int> Ms = {16, 12, 10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+    std::vector<int> Ns(num_ops, N_wide);
+    Ns[0] = N_narrow;
+
+    std::vector<std::vector<bfloat16_t>> src(num_ops);
+    std::vector<std::vector<bfloat16_t>> wei(num_ops);
+    std::vector<std::vector<bfloat16_t>> dst(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+        src[e].resize(static_cast<size_t>(Ms[e]) * K);
+        wei[e].resize(static_cast<size_t>(K) * Ns[e]);
+        dst[e].assign(static_cast<size_t>(Ms[e]) * Ns[e], bfloat16_t(0.0f));
+        fill_src(src[e], e, 0.02f);
+        fill_wei1(wei[e], e, 0.005f);
+    }
+
+    std::vector<const void *> srcs(num_ops), weis(num_ops),
+            biases(num_ops, nullptr);
+    std::vector<void *> dsts(num_ops);
+    for (int e = 0; e < num_ops; ++e) {
+        srcs[e] = src[e].data();
+        weis[e] = wei[e].data();
+        dsts[e] = dst[e].data();
+    }
+
+    auto gv = GemmVecs::uniform(num_ops, /*M=*/0, /*N=*/N_wide, K,
+            /*alpha=*/1.0f, /*beta=*/0.0f,
+            /*wc=*/true, /*tA=*/false,
+            /*tB=*/false);
+    gv.Ms = Ms;
+    gv.Ns = Ns;
+    for (int e = 0; e < num_ops; ++e) {
+        gv.ldb[e] = Ns[e];
+        gv.ldc[e] = Ns[e];
+    }
+
+    auto params = make_uniform_params(num_ops, data_type_t::bf16);
+    for (int e = 0; e < num_ops; ++e) {
+        params[e].num_threads = 32;
+    }
+
+    AlgoEnvGuard algo_guard(3);
+    PhaseBCaptureGuard cap;
+
+    ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                      gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
+                      gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                      /*moe_postop=*/nullptr,
+                      /*gated_act=*/nullptr),
+            status_t::success);
+
+    const auto &snap
+            = zendnnl::lowoha::matmul::test_api::s_last_phase_b_snapshot;
+    ASSERT_TRUE(snap.valid);
+    EXPECT_TRUE(snap.per_expert_remainder);
+    EXPECT_EQ(static_cast<int>(snap.strategy),
+            static_cast<int>(GroupNTileStrategy::ManyExperts));
+
+    const int base = 2; // 32 threads / 14 experts, single-round fixture.
+    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[0]), base)
+            << "default auto should decline M-only proportional split for "
+               "heterogeneous active N/K groups";
+    EXPECT_EQ(static_cast<int>(snap.stable_n_thr_per_expert[1]), base + 1)
+            << "fallback Phase B should distribute extras only to eligible "
+               "experts";
 }
 
 // ===============================================================================
@@ -5778,10 +6193,10 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
     CustomKernelNTileOverride default_n_tile(0);
     NTileStrategyOverride auto_strategy(0);
     NTileHeavyThresholdOverride hybrid_off(-1); // explicit DISABLED
-    // Decode M-proportional split is OFF by default; this test asserts the
-    // proportional contract (heaviest expert gets > uniform base+1), so pin
-    // it ON explicitly.  The knob under test here is the PROMPT-only hybrid
-    // threshold, which must NOT fire on decode regardless of this.
+    // Pin proportional ON explicitly so the decode contract (heaviest expert
+    // gets > uniform base+1) is tested independent of default-auto gating.  The
+    // knob under test here is the PROMPT-only hybrid threshold, which must NOT
+    // fire on decode regardless of this.
     DecodeProportionalOverride prop_on(true);
 
     if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
@@ -5841,9 +6256,10 @@ TEST(TestGroupMatmulHybridMSplit, OffByDefaultRunsPhaseB) {
 // executor to use prefix-sum mapping; `sum(stable_n_thr) <=
 // num_threads` (water-fill may leave a tail of idle threads when
 // every heavy hits its per-expert cap).
-// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=0 (the default) disables the
-// decode M-proportional split; decode CK Single-round uses the uniform
-// Phase B base/base+1 distribution.
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=0 disables the decode
+// M-proportional split even where the auto default would engage it;
+// decode CK Single-round uses the uniform Phase B base/base+1
+// distribution.
 TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOffUsesUniformPhaseB) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;
@@ -5903,8 +6319,8 @@ TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOffUsesUniformPhaseB) {
     }
 }
 
-// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=1 (opt-in; default is OFF)
-// gives the M-weighted split: heavier experts get a proportional share
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL=1 forces the M-weighted split
+// regardless of the auto default: heavier experts get a proportional share
 // above the uniform base+1, light experts the floor.
 TEST(TestGroupMatmulHybridMSplit, DecodeProportionalOnUsesMWeightedSplit) {
     using namespace moe_test_utils;
@@ -6410,9 +6826,9 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         CustomKernelNTileOverride default_n_tile(0);
         NTileStrategyOverride auto_strategy(0);
         NTileHeavyThresholdOverride hybrid_auto(0);
-        // Proportional split is OFF by default; pin it ON so the proportional
-        // contract asserted below holds.  The tier-skip assertion
-        // (n_thr_fixed != 0) is independent of this knob.
+        // Pin proportional ON so the proportional contract asserted below
+        // holds.  The tier-skip assertion (n_thr_fixed != 0) is independent of
+        // this knob.
         DecodeProportionalOverride prop_on(true);
 
         reset_grp_matmul_caches();
@@ -6471,9 +6887,9 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsDecodeClass) {
         // Threshold=10 would tag M ∈ {24,20,16,12} as heavy on this
         // Ms — i.e. would have engaged MANUAL on legacy semantics.
         NTileHeavyThresholdOverride hybrid_manual(10);
-        // Proportional split is OFF by default; pin it ON so the proportional
-        // contract asserted below holds.  The tier-skip assertion
-        // (n_thr_fixed != 0) is independent of this knob.
+        // Pin proportional ON so the proportional contract asserted below
+        // holds.  The tier-skip assertion (n_thr_fixed != 0) is independent of
+        // this knob.
         DecodeProportionalOverride prop_on(true);
 
         reset_grp_matmul_caches();

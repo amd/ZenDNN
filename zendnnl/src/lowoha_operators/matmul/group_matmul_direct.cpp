@@ -1680,7 +1680,9 @@ status_t group_matmul_direct(const std::vector<char> &layout,
             // `execute_expert_slice` (legacy behaviour).
             std::vector<const void *> quantized_src;
             std::vector<int> quantized_lda;
-            group_reorder_quant_buffers_t group_quant_buffers;
+            group_reorder_quant_buffers_t &group_quant_buffers
+                    = get_thread_local_group_quant_buffers(
+                            group_quant_pool_t::unfused);
             bool group_quantized = false;
             if (get_grp_matmul_enable_group_dq()) {
                 status_t group_quant_st = group_reorder_quantization_wrapper(

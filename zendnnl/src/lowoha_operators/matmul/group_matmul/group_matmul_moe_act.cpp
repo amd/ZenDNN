@@ -36,6 +36,7 @@
 #include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "group_matmul_direct.hpp"
+#include "group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_act_avx512.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
@@ -100,30 +101,30 @@ inline float gelu_scalar(float x) {
 // Scalar row kernels (fallback for non-AVX-512 platforms)
 // ═══════════════════════════════════════════════════════════════════════
 
-void silu_and_mul_row_scalar_f32(float *row, int dim) {
-    float *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n)
+// Split-layout kernels take `count` gate columns starting at `gate`, with the
+// matching up columns at `up`, so a row can be handed out in column chunks.
+void silu_and_mul_row_scalar_f32(float *gate, const float *up, int count) {
+    for (int n = 0; n < count; ++n)
         gate[n] = silu_scalar(gate[n]) * up[n];
 }
 
-void silu_and_mul_row_scalar_bf16(bfloat16_t *row, int dim) {
-    bfloat16_t *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n) {
+void silu_and_mul_row_scalar_bf16(
+        bfloat16_t *gate, const bfloat16_t *up, int count) {
+    for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = bfloat16_t(silu_scalar(g) * u);
     }
 }
 
-void gelu_and_mul_row_scalar_f32(float *row, int dim) {
-    float *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n)
+void gelu_and_mul_row_scalar_f32(float *gate, const float *up, int count) {
+    for (int n = 0; n < count; ++n)
         gate[n] = gelu_scalar(gate[n]) * up[n];
 }
 
-void gelu_and_mul_row_scalar_bf16(bfloat16_t *row, int dim) {
-    bfloat16_t *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n) {
+void gelu_and_mul_row_scalar_bf16(
+        bfloat16_t *gate, const bfloat16_t *up, int count) {
+    for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = bfloat16_t(gelu_scalar(g) * u);
@@ -164,18 +165,18 @@ void swiglu_oai_mul_row_scalar_bf16(bfloat16_t *row, int dim) {
 // `float16_t(value)` converting constructor (→ f32_to_f16_val) on
 // write.  The activation math (silu / gelu / swiglu_oai) runs in F32
 // throughout — same pattern as the bf16 siblings.
-void silu_and_mul_row_scalar_f16(float16_t *row, int dim) {
-    float16_t *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n) {
+void silu_and_mul_row_scalar_f16(
+        float16_t *gate, const float16_t *up, int count) {
+    for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = float16_t(silu_scalar(g) * u);
     }
 }
 
-void gelu_and_mul_row_scalar_f16(float16_t *row, int dim) {
-    float16_t *gate = row, *up = row + dim;
-    for (int n = 0; n < dim; ++n) {
+void gelu_and_mul_row_scalar_f16(
+        float16_t *gate, const float16_t *up, int count) {
+    for (int n = 0; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = float16_t(gelu_scalar(g) * u);
@@ -221,23 +222,23 @@ alignas(64) static const uint16_t kDeintUpIdx[32]
 // ═══════════════════════════════════════════════════════════════════════
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void silu_and_mul_row_avx512_f32(float *row, int dim) {
-    float *gate = row, *up = row + dim;
+static void silu_and_mul_row_avx512_f32(
+        float *gate, const float *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = _mm512_loadu_ps(gate + n);
         __m512 u = _mm512_loadu_ps(up + n);
         _mm512_storeu_ps(gate + n, _mm512_mul_ps(silu_avx512(g), u));
     }
-    for (; n < dim; ++n)
+    for (; n < count; ++n)
         gate[n] = silu_scalar(gate[n]) * up[n];
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
-    bfloat16_t *gate = row, *up = row + dim;
+static void silu_and_mul_row_avx512_bf16(
+        bfloat16_t *gate, const bfloat16_t *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = bf16x16_to_f32(_mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(&gate[n])));
         __m512 u = bf16x16_to_f32(
@@ -245,7 +246,7 @@ static void silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
                 f32_to_bf16x16(_mm512_mul_ps(silu_avx512(g), u)));
     }
-    for (; n < dim; ++n) {
+    for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = bfloat16_t(silu_scalar(g) * u);
@@ -253,23 +254,23 @@ static void silu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void gelu_and_mul_row_avx512_f32(float *row, int dim) {
-    float *gate = row, *up = row + dim;
+static void gelu_and_mul_row_avx512_f32(
+        float *gate, const float *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = _mm512_loadu_ps(gate + n);
         __m512 u = _mm512_loadu_ps(up + n);
         _mm512_storeu_ps(gate + n, _mm512_mul_ps(gelu_avx512(g), u));
     }
-    for (; n < dim; ++n)
+    for (; n < count; ++n)
         gate[n] = gelu_scalar(gate[n]) * up[n];
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
-    bfloat16_t *gate = row, *up = row + dim;
+static void gelu_and_mul_row_avx512_bf16(
+        bfloat16_t *gate, const bfloat16_t *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = bf16x16_to_f32(_mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(&gate[n])));
         __m512 u = bf16x16_to_f32(
@@ -277,7 +278,7 @@ static void gelu_and_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
                 f32_to_bf16x16(_mm512_mul_ps(gelu_avx512(g), u)));
     }
-    for (; n < dim; ++n) {
+    for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = bfloat16_t(gelu_scalar(g) * u);
@@ -369,10 +370,10 @@ static void swiglu_oai_mul_row_avx512_bf16(bfloat16_t *row, int dim) {
 // activation post-pass does not depend on it.
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
-    float16_t *gate = row, *up = row + dim;
+static void silu_and_mul_row_avx512_f16(
+        float16_t *gate, const float16_t *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = f16x16_to_f32(_mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(&gate[n])));
         __m512 u = f16x16_to_f32(
@@ -380,7 +381,7 @@ static void silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
                 f32_to_f16x16(_mm512_mul_ps(silu_avx512(g), u)));
     }
-    for (; n < dim; ++n) {
+    for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = float16_t(silu_scalar(g) * u);
@@ -388,10 +389,10 @@ static void silu_and_mul_row_avx512_f16(float16_t *row, int dim) {
 }
 
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-static void gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
-    float16_t *gate = row, *up = row + dim;
+static void gelu_and_mul_row_avx512_f16(
+        float16_t *gate, const float16_t *up, int count) {
     int n = 0;
-    for (; n + 16 <= dim; n += 16) {
+    for (; n + 16 <= count; n += 16) {
         __m512 g = f16x16_to_f32(_mm256_loadu_si256(
                 reinterpret_cast<const __m256i *>(&gate[n])));
         __m512 u = f16x16_to_f32(
@@ -399,7 +400,7 @@ static void gelu_and_mul_row_avx512_f16(float16_t *row, int dim) {
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&gate[n]),
                 f32_to_f16x16(_mm512_mul_ps(gelu_avx512(g), u)));
     }
-    for (; n < dim; ++n) {
+    for (; n < count; ++n) {
         float g = static_cast<float>(gate[n]);
         float u = static_cast<float>(up[n]);
         gate[n] = float16_t(gelu_scalar(g) * u);
@@ -593,141 +594,170 @@ static void swiglu_oai_tile_avx512_f16(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Target-attributed execute functions (contain OMP loop — eliminates
-// per-row dispatch function call overhead)
+// Span dispatch: one (row, gate-column range) work item
 // ═══════════════════════════════════════════════════════════════════════
 
-// Target attribute is `avx512f,avx512bw,avx512vl,fma`:
-// all three dtype branches — including the F16 branch — emit only
-// AVX-512F/BW instructions (F16↔F32 cvt via VCVTPH2PS/VCVTPS2PH, F32
-// activation math, AVX-512BW deinterleave).  This keeps the function's
-// compile-time ISA license aligned with the `avx512f_available()`
-// dispatch gate below, so it cannot SIGILL on an AVX-512F host that
-// lacks AVX-512-FP16.
+// Activates gate columns [c0, c1) of `row`.  swiglu_oai compacts the
+// interleaved row in place (out[n] overwrites in[n], read from in[2n]), so
+// its columns depend on each other; it is only ever handed the whole row
+// and ignores c0/c1.
+//
+// Target attribute is `avx512f,avx512bw,avx512vl,fma`: all three dtype
+// branches -- including F16 -- emit only AVX-512F/BW instructions (F16<->F32
+// cvt via VCVTPH2PS/VCVTPS2PH, F32 activation math, AVX-512BW deinterleave),
+// matching the `avx512f_available()` dispatch gate, so it cannot SIGILL on
+// an AVX-512F host that lacks AVX-512-FP16.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
-void execute_act_rows_avx512(grp_matmul_gated_act_t act, data_type_t dst_dtype,
-        const std::vector<void *> &dst, const std::vector<int64_t> &row_offsets,
-        const std::vector<int> &N, const std::vector<int> &ldc,
-        int64_t total_rows, int num_threads) {
-
-#pragma omp parallel for num_threads(num_threads) schedule(static)
-    for (int64_t t = 0; t < total_rows; ++t) {
-        const int e = static_cast<int>(std::upper_bound(row_offsets.begin() + 1,
-                                               row_offsets.end(), t)
-                              - row_offsets.begin())
-                - 1;
-        const int m = static_cast<int>(t - row_offsets[e]);
-        const int dim = N[e] / 2;
-
-        if (dst_dtype == data_type_t::f32) {
-            float *row = static_cast<float *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_avx512_f32(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_avx512_f32(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_avx512_f32(row, dim);
-                    break;
-                default: break;
-            }
-        } else if (dst_dtype == data_type_t::bf16) {
-            auto *row = static_cast<bfloat16_t *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_avx512_bf16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_avx512_bf16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_avx512_bf16(row, dim);
-                    break;
-                default: break;
-            }
-        } else {
-            auto *row = static_cast<float16_t *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_avx512_f16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_avx512_f16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_avx512_f16(row, dim);
-                    break;
-                default: break;
-            }
+void act_span_avx512(grp_matmul_gated_act_t act, data_type_t dst_dtype,
+        void *row_ptr, int dim, int c0, int c1) {
+    const int count = c1 - c0;
+    if (dst_dtype == data_type_t::f32) {
+        auto *row = static_cast<float *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_avx512_f32(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_avx512_f32(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_avx512_f32(row, dim);
+                break;
+            default: break;
+        }
+    } else if (dst_dtype == data_type_t::bf16) {
+        auto *row = static_cast<bfloat16_t *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_avx512_bf16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_avx512_bf16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_avx512_bf16(row, dim);
+                break;
+            default: break;
+        }
+    } else {
+        auto *row = static_cast<float16_t *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_avx512_f16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_avx512_f16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_avx512_f16(row, dim);
+                break;
+            default: break;
         }
     }
 }
 
-void execute_act_rows_scalar(grp_matmul_gated_act_t act, data_type_t dst_dtype,
+void act_span_scalar(grp_matmul_gated_act_t act, data_type_t dst_dtype,
+        void *row_ptr, int dim, int c0, int c1) {
+    const int count = c1 - c0;
+    if (dst_dtype == data_type_t::f32) {
+        auto *row = static_cast<float *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_scalar_f32(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_scalar_f32(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_scalar_f32(row, dim);
+                break;
+            default: break;
+        }
+    } else if (dst_dtype == data_type_t::bf16) {
+        auto *row = static_cast<bfloat16_t *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_scalar_bf16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_scalar_bf16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_scalar_bf16(row, dim);
+                break;
+            default: break;
+        }
+    } else {
+        auto *row = static_cast<float16_t *>(row_ptr);
+        switch (act) {
+            case grp_matmul_gated_act_t::silu_and_mul:
+                silu_and_mul_row_scalar_f16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::gelu_and_mul:
+                gelu_and_mul_row_scalar_f16(row + c0, row + dim + c0, count);
+                break;
+            case grp_matmul_gated_act_t::swiglu_oai_mul:
+                swiglu_oai_mul_row_scalar_f16(row, dim);
+                break;
+            default: break;
+        }
+    }
+}
+
+// With fewer rows than threads and at most this many activated elements
+// (rows x widest gate width), waking the team costs more than the pass
+// saves, so it runs serialized.  A tuning cutoff, not a correctness bound.
+constexpr int64_t kActSerialElems = 8192;
+
+// Full team or serialized (see the team-size note in
+// group_matmul_parallel_common.hpp).  A lone swiglu_oai row is a single
+// work item, so the team would only idle.
+inline int act_team(grp_matmul_gated_act_t act, int64_t rows, int max_dim,
+        int num_threads) {
+    if (num_threads <= 1) return 1;
+    if (rows >= num_threads) return num_threads;
+    if ((act == grp_matmul_gated_act_t::swiglu_oai_mul && rows <= 1)
+            || rows * max_dim <= kActSerialElems)
+        return 1;
+    return num_threads;
+}
+
+// swiglu_oai compacts a row in place, so its columns cannot be split.
+inline int act_chunks_per_row(grp_matmul_gated_act_t act, int64_t rows,
+        int max_dim, int num_threads) {
+    if (act == grp_matmul_gated_act_t::swiglu_oai_mul) return 1;
+    return col_chunks_per_row(rows, max_dim, num_threads);
+}
+
+void execute_act_items(grp_matmul_gated_act_t act, data_type_t dst_dtype,
         const std::vector<void *> &dst, const std::vector<int64_t> &row_offsets,
         const std::vector<int> &N, const std::vector<int> &ldc,
-        int64_t total_rows, int num_threads) {
+        int64_t total_rows, int max_dim, int num_threads) {
+    const bool use_avx512 = avx512f_available();
+    const size_t elem = size_of(dst_dtype);
+    const int chunks
+            = act_chunks_per_row(act, total_rows, max_dim, num_threads);
+    const int64_t items = total_rows * chunks;
 
 #pragma omp parallel for num_threads(num_threads) schedule(static)
-    for (int64_t t = 0; t < total_rows; ++t) {
+    for (int64_t it = 0; it < items; ++it) {
+        const int64_t t = it / chunks;
         const int e = static_cast<int>(std::upper_bound(row_offsets.begin() + 1,
                                                row_offsets.end(), t)
                               - row_offsets.begin())
                 - 1;
         const int m = static_cast<int>(t - row_offsets[e]);
         const int dim = N[e] / 2;
-
-        if (dst_dtype == data_type_t::f32) {
-            float *row = static_cast<float *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_scalar_f32(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_scalar_f32(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_scalar_f32(row, dim);
-                    break;
-                default: break;
-            }
-        } else if (dst_dtype == data_type_t::bf16) {
-            auto *row = static_cast<bfloat16_t *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_scalar_bf16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_scalar_bf16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_scalar_bf16(row, dim);
-                    break;
-                default: break;
-            }
-        } else {
-            auto *row = static_cast<float16_t *>(dst[e])
-                    + static_cast<size_t>(m) * ldc[e];
-            switch (act) {
-                case grp_matmul_gated_act_t::silu_and_mul:
-                    silu_and_mul_row_scalar_f16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::gelu_and_mul:
-                    gelu_and_mul_row_scalar_f16(row, dim);
-                    break;
-                case grp_matmul_gated_act_t::swiglu_oai_mul:
-                    swiglu_oai_mul_row_scalar_f16(row, dim);
-                    break;
-                default: break;
-            }
-        }
+        const int span = col_chunk_span(dim, chunks);
+        const int c0 = static_cast<int>(it % chunks) * span;
+        if (c0 >= dim) continue;
+        const int c1 = std::min(dim, c0 + span);
+        void *row = static_cast<char *>(dst[e])
+                + static_cast<size_t>(m) * ldc[e] * elem;
+        if (use_avx512)
+            act_span_avx512(act, dst_dtype, row, dim, c0, c1);
+        else
+            act_span_scalar(act, dst_dtype, row, dim, c0, c1);
     }
 }
 
@@ -820,32 +850,23 @@ status_t group_matmul_moe_act_execute(
     // separate-pass fused_moe path would otherwise hit on every call
     // (the in-tile fused-activation path doesn't go through this
     // function — it fuses activation in-register).
+    // Reaches the region below only through `execute_act_items`' reference
+    // parameter; naming it inside the region would resolve to each worker's
+    // own empty instance.
     static thread_local std::vector<int64_t> row_offsets;
     row_offsets.resize(num_ops + 1);
     row_offsets[0] = 0;
+    int max_dim = 0;
     for (int e = 0; e < num_ops; ++e) {
         const int64_t rows = (dst[e] != nullptr && M[e] > 0) ? M[e] : 0;
         row_offsets[e + 1] = row_offsets[e] + rows;
+        if (rows > 0) max_dim = std::max(max_dim, N[e] / 2);
     }
     const int64_t total_rows = row_offsets[num_ops];
     if (total_rows == 0) return status_t::success;
 
-    // Single runtime dispatch into target-attributed execute function.
-    // The supported AVX-512 platforms all include BW/VL/FMA as part of
-    // the base AVX-512 package.  Xeon Phi (KNL/KNM) has F without
-    // BW/VL but is not a supported platform.  This matches
-    // the dispatch pattern in group_matmul_moe_postop.cpp.
-    // Clamp the team to the work.  `total_rows` is batch x top-k, so a
-    // batch-1 decode has a handful of rows; forking the full team for them
-    // pays a region entry for nothing.
-    const int act_threads = static_cast<int>(
-            std::min<int64_t>(std::max(1, num_threads), total_rows));
-    if (avx512f_available())
-        execute_act_rows_avx512(act, dst_dtype, dst, row_offsets, N, ldc,
-                total_rows, act_threads);
-    else
-        execute_act_rows_scalar(act, dst_dtype, dst, row_offsets, N, ldc,
-                total_rows, act_threads);
+    execute_act_items(act, dst_dtype, dst, row_offsets, N, ldc, total_rows,
+            max_dim, act_team(act, total_rows, max_dim, num_threads));
 
     return status_t::success;
 }
@@ -881,109 +902,28 @@ void apply_gated_act_inplace(grp_matmul_gated_act_t act, void *dst,
 
     const int dim = N / 2;
     const bool use_avx512 = avx512f_available();
+    const size_t row_bytes = static_cast<size_t>(ldc) * size_of(dst_dtype);
 
-    // `if (num_threads > 1)` keeps the construct INACTIVE for the callers
-    // that are already inside an OMP region (M-tile, ALGO 4/5), so they run
-    // exactly as before and never nest a team.  Rows are independent —
-    // each touches only `dst + m*ldc` — so no synchronisation is needed.
-    const int nt = (num_threads > 1) ? num_threads : 1;
+    // `if (nt > 1)` keeps the construct inactive for callers that are
+    // already inside an OMP region and pass num_threads == 1, so they never
+    // nest a team.  Items are disjoint (row, column) ranges, so no
+    // synchronisation is needed.
+    const int nt = act_team(act, row_end - row_start, dim, num_threads);
+    const int chunks = act_chunks_per_row(act, row_end - row_start, dim, nt);
+    const int span = col_chunk_span(dim, chunks);
+    const int64_t items = static_cast<int64_t>(row_end - row_start) * chunks;
 #pragma omp parallel for if (nt > 1) num_threads(nt) schedule(static)
-    for (int m = row_start; m < row_end; ++m) {
-        if (use_avx512) {
-            if (dst_dtype == data_type_t::f32) {
-                float *row = static_cast<float *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_avx512_f32(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_avx512_f32(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_avx512_f32(row, dim);
-                        break;
-                    default: break;
-                }
-            } else if (dst_dtype == data_type_t::bf16) {
-                auto *row = static_cast<bfloat16_t *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_avx512_bf16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_avx512_bf16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_avx512_bf16(row, dim);
-                        break;
-                    default: break;
-                }
-            } else {
-                auto *row = static_cast<float16_t *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_avx512_f16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_avx512_f16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_avx512_f16(row, dim);
-                        break;
-                    default: break;
-                }
-            }
-        } else {
-            if (dst_dtype == data_type_t::f32) {
-                float *row = static_cast<float *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_scalar_f32(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_scalar_f32(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_scalar_f32(row, dim);
-                        break;
-                    default: break;
-                }
-            } else if (dst_dtype == data_type_t::bf16) {
-                auto *row = static_cast<bfloat16_t *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_scalar_bf16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_scalar_bf16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_scalar_bf16(row, dim);
-                        break;
-                    default: break;
-                }
-            } else {
-                auto *row = static_cast<float16_t *>(dst)
-                        + static_cast<size_t>(m) * ldc;
-                switch (act) {
-                    case grp_matmul_gated_act_t::silu_and_mul:
-                        silu_and_mul_row_scalar_f16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::gelu_and_mul:
-                        gelu_and_mul_row_scalar_f16(row, dim);
-                        break;
-                    case grp_matmul_gated_act_t::swiglu_oai_mul:
-                        swiglu_oai_mul_row_scalar_f16(row, dim);
-                        break;
-                    default: break;
-                }
-            }
-        }
+    for (int64_t it = 0; it < items; ++it) {
+        const int m = row_start + static_cast<int>(it / chunks);
+        const int c0 = static_cast<int>(it % chunks) * span;
+        if (c0 >= dim) continue;
+        const int c1 = std::min(dim, c0 + span);
+        void *row
+                = static_cast<char *>(dst) + static_cast<size_t>(m) * row_bytes;
+        if (use_avx512)
+            act_span_avx512(act, dst_dtype, row, dim, c0, c1);
+        else
+            act_span_scalar(act, dst_dtype, row, dim, c0, c1);
     }
 }
 

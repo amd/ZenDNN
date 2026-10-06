@@ -56,7 +56,7 @@
 ///     swiglu_oai_mul / silu_and_mul / gelu_and_mul).
 ///
 /// Compile-time template parameters:
-///   * MR ∈ {1..8}      — row count handled per call (max_mr depends on NV).
+///   * MR ∈ {1..max_mr_for_nv_int8(NV, Compute)} — row count handled per call.
 ///   * NV ∈ {2, 4}      — accumulator zmms per row (NR = NV × 16).
 ///   * Compute ∈
 ///       {kS8_Sym, kU8_Asym}  — quant flavour (see `IntCompute` below).
@@ -163,6 +163,14 @@ enum class ScaleKind : uint8_t {
 /// back to AOCL DLP `aocl_gemm_s8s8s32obf16_sym_quant`.
 bool avx512vnni_available();
 
+/// INT8-specific MR limit.  The generic BF16 bound remains 8 rows for
+/// NV=2; the S8/NV=2 scalar INT8 family instantiates up to 12 rows.
+/// Dispatchers should query this helper rather than assuming the BF16
+/// row bound applies to every dtype/kernel family.
+inline int max_mr_for_nv_int8(int NV, IntCompute compute) {
+    return (NV == 2 && compute == IntCompute::kS8_Sym) ? 12 : max_mr_for_nv(NV);
+}
+
 /// Function-pointer type for one (MR, NV, Compute, Act) int8
 /// microkernel specialization.  Whichever of `Cout` / `Cout_tight`
 /// is unused is passed nullptr / 0 — see the dispatcher for
@@ -215,8 +223,8 @@ using int8_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
         int ldc_tight, int K);
 
 /// Runtime selector — returns the function pointer for the
-/// requested `(MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4}, Compute,
-/// Act, DstDt)` tuple, or `nullptr` if the combination is not
+/// requested `(MR ∈ 1..max_mr_for_nv_int8(NV, Compute), NV ∈ {2, 4},
+/// Compute, Act, DstDt)` tuple, or `nullptr` if the combination is not
 /// instantiated.
 ///
 /// `dst_dt` mirrors the bf16 sibling's `DstDt` axis: `kBf16` for the

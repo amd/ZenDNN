@@ -106,7 +106,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         float beta, const group_matmul_moe_postop_params *moe_postop,
         const grp_matmul_gated_act_params *gated_act,
         const std::vector<int> &pack_format_b,
-        const std::vector<int> &active_rows) {
+        const std::vector<int> &active_rows, data_type_t dq_compute) {
     using namespace zendnnl::lowoha::matmul;
     try {
         const size_t num_ops = inputs.size();
@@ -228,7 +228,12 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
                             || src_dt == data_type_t::f32)
                     && inputs[i].is_quantized()) {
                 params_v[i].dynamic_quant = true;
-                params_v[i].dtypes.compute = data_type_t::s8;
+                params_v[i].dtypes.compute = dq_compute;
+                if (dq_compute == data_type_t::u8
+                        && params_v[i].quant_params.src_zp.buff == nullptr) {
+                    params_v[i].quant_params.src_zp.dims = {Ms[i], 1};
+                    params_v[i].quant_params.src_zp.dt = data_type_t::s32;
+                }
             }
 
             //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues

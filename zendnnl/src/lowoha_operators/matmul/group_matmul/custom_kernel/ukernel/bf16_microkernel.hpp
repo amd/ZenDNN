@@ -175,9 +175,10 @@ using ukernel_fn_t = void (*)(const bfloat16_t *A, int lda,
 /// (`kfn_table[kMaxMR + 1]`; slot 0 is unused).  Keeping it as a
 /// single constant makes the table sizing independent of future
 /// additions (larger MR for int8, or another NV value).  Current
-/// upper bound is 8, from NV=2 (NR=32) where register budget allows
-/// MR=8; NV=4 caps at MR=6 (register pressure).
-inline constexpr int kMaxMR = 8;
+/// upper bound is 12, from the DQ-INT8 S8/NV=2 scalar kernel; the
+/// BF16 family still uses max_mr_for_nv(NV) below (8 for NV=2, 6 for
+/// NV=4).
+inline constexpr int kMaxMR = 12;
 
 /// Maximum MR safe for this NV under the 32-zmm AVX-512 register
 /// budget (matches the BRGEMM ukernel instantiation set).  Must

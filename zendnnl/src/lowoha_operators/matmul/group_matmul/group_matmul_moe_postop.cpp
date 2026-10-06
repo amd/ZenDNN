@@ -29,6 +29,7 @@
 ///   - AVX-512: 16 floats / 16 bf16 per iteration
 ///   - Scalar fallback: when AVX-512 is unavailable
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 #include "common/zendnnl_compat.hpp"
@@ -41,6 +42,7 @@
 #include "common/float16.hpp"
 #include "common/zendnnl_global.hpp"
 #include "group_matmul_direct.hpp"
+#include "group_matmul_parallel_common.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
@@ -96,17 +98,43 @@ inline void store_from_f32(Elem *ptr, int idx, float val) {
     }
 }
 
+// With fewer tokens than threads and less than this many bytes of source
+// rows (num_tokens x topk x D x element size), waking the team costs more
+// than the reduce saves, so it runs serialized.  A tuning cutoff, not a
+// correctness bound.
+constexpr size_t kReduceSerialBytes = 128u * 1024u;
+
+// Work items are (token, output-column chunk); see `col_chunks_per_row`.
+struct reduce_split_t {
+    int chunks;
+    int span;
+    int64_t items;
+};
+
+inline reduce_split_t make_reduce_split(
+        const int num_tokens, const int D, const int num_threads) {
+    const int chunks = col_chunks_per_row(num_tokens, D, num_threads);
+    return {chunks, col_chunk_span(D, chunks),
+            static_cast<int64_t>(std::max(0, num_tokens)) * chunks};
+}
+
 template <typename Elem, data_type_t Kind>
 void moe_weighted_reduce_scalar(const group_matmul_moe_postop_params *postop,
         const int D, const int num_threads) {
 
     auto *out_base = static_cast<Elem *>(postop->output);
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
+    const reduce_split_t split
+            = make_reduce_split(postop->num_tokens, D, num_threads);
 
 #pragma omp parallel for schedule(static) num_threads(num_threads)
-    for (int t = 0; t < postop->num_tokens; ++t) {
+    for (int64_t it = 0; it < split.items; ++it) {
+        const int t = static_cast<int>(it / split.chunks);
+        const int d0 = static_cast<int>(it % split.chunks) * split.span;
+        if (d0 >= D) continue;
+        const int d1 = std::min(D, d0 + split.span);
         Elem *out_row = out_base + static_cast<size_t>(t) * out_stride;
-        for (int d = 0; d < D; ++d) {
+        for (int d = d0; d < d1; ++d) {
             float acc = 0.f;
             for (int k = 0; k < postop->topk; ++k) {
                 const int64_t slot = static_cast<int64_t>(t) * postop->topk + k;
@@ -133,27 +161,34 @@ void moe_weighted_reduce_avx512_f32(
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
 
     const int topk = postop->topk;
-    const int D16 = D & ~15;
+    const reduce_split_t split
+            = make_reduce_split(postop->num_tokens, D, num_threads);
 
 #pragma omp parallel for schedule(static) num_threads(num_threads)
-    for (int t = 0; t < postop->num_tokens; ++t) {
-        float *out_row = out_base + static_cast<size_t>(t) * out_stride;
+    for (int64_t it = 0; it < split.items; ++it) {
+        const int t = static_cast<int>(it / split.chunks);
+        const int d0 = static_cast<int>(it % split.chunks) * split.span;
+        if (d0 >= D) continue;
+        const int n = std::min(D, d0 + split.span) - d0;
+        const int n16 = n & ~15;
+        float *out_row = out_base + static_cast<size_t>(t) * out_stride + d0;
 
         // k=0: initialize output with w0 * src0 (no load of output needed).
         {
             const int64_t slot = static_cast<int64_t>(t) * topk;
             const auto *src_row = static_cast<const float *>(
                     postop->row_ptrs[static_cast<size_t>(slot)]);
+            src_row += d0;
             const float w = postop->skip_weighted
                     ? 1.f
                     : postop->topk_weights[static_cast<size_t>(slot)];
             const __m512 vw = _mm512_set1_ps(w);
             int d = 0;
-            for (; d < D16; d += 16) {
+            for (; d < n16; d += 16) {
                 __m512 vsrc = _mm512_loadu_ps(src_row + d);
                 _mm512_storeu_ps(out_row + d, _mm512_mul_ps(vw, vsrc));
             }
-            for (; d < D; ++d) {
+            for (; d < n; ++d) {
                 out_row[d] = w * src_row[d];
             }
         }
@@ -163,17 +198,18 @@ void moe_weighted_reduce_avx512_f32(
             const int64_t slot = static_cast<int64_t>(t) * topk + k;
             const auto *src_row = static_cast<const float *>(
                     postop->row_ptrs[static_cast<size_t>(slot)]);
+            src_row += d0;
             const float w = postop->skip_weighted
                     ? 1.f
                     : postop->topk_weights[static_cast<size_t>(slot)];
             const __m512 vw = _mm512_set1_ps(w);
             int d = 0;
-            for (; d < D16; d += 16) {
+            for (; d < n16; d += 16) {
                 __m512 vacc = _mm512_loadu_ps(out_row + d);
                 __m512 vsrc = _mm512_loadu_ps(src_row + d);
                 _mm512_storeu_ps(out_row + d, _mm512_fmadd_ps(vw, vsrc, vacc));
             }
-            for (; d < D; ++d) {
+            for (; d < n; ++d) {
                 out_row[d] += w * src_row[d];
             }
         }
@@ -189,20 +225,27 @@ void moe_weighted_reduce_avx512_bf16(
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
 
     const int topk = postop->topk;
-    const int D16 = D & ~15;
+    const reduce_split_t split
+            = make_reduce_split(postop->num_tokens, D, num_threads);
 
 // Accumulate entirely in FP32 to avoid BF16 truncation between topk
 // iterations. Per-thread buffer reused across calls to amortize allocation.
 #pragma omp parallel num_threads(num_threads)
     {
         static thread_local std::vector<float> acc_buf;
-        if (acc_buf.size() < static_cast<size_t>(D)) {
-            acc_buf.resize(static_cast<size_t>(D));
+        if (acc_buf.size() < static_cast<size_t>(split.span)) {
+            acc_buf.resize(static_cast<size_t>(split.span));
         }
 
-#pragma omp for schedule(static)
-        for (int t = 0; t < postop->num_tokens; ++t) {
-            uint16_t *out_row = out_base + static_cast<size_t>(t) * out_stride;
+#pragma omp for schedule(static) nowait
+        for (int64_t it = 0; it < split.items; ++it) {
+            const int t = static_cast<int>(it / split.chunks);
+            const int d0 = static_cast<int>(it % split.chunks) * split.span;
+            if (d0 >= D) continue;
+            const int n = std::min(D, d0 + split.span) - d0;
+            const int n16 = n & ~15;
+            uint16_t *out_row
+                    = out_base + static_cast<size_t>(t) * out_stride + d0;
             float *acc = acc_buf.data();
 
             // k=0: initialize FP32 accumulator with w0 * src0.
@@ -210,19 +253,20 @@ void moe_weighted_reduce_avx512_bf16(
                 const int64_t slot = static_cast<int64_t>(t) * topk;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
+                src_row += d0;
                 const float w = postop->skip_weighted
                         ? 1.f
                         : postop->topk_weights[static_cast<size_t>(slot)];
                 const __m512 vw = _mm512_set1_ps(w);
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     __m256i src_bf16 = _mm256_loadu_si256(
                             reinterpret_cast<const __m256i *>(src_row + d));
                     __m512 vsrc = _mm512_castsi512_ps(_mm512_slli_epi32(
                             _mm512_cvtepu16_epi32(src_bf16), 16));
                     _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
                 }
-                for (; d < D; ++d)
+                for (; d < n; ++d)
                     acc[d] = w
                             * bfloat16_t::bf16_to_f32_val(
                                     static_cast<int16_t>(src_row[d]));
@@ -233,12 +277,13 @@ void moe_weighted_reduce_avx512_bf16(
                 const int64_t slot = static_cast<int64_t>(t) * topk + k;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
+                src_row += d0;
                 const float w = postop->skip_weighted
                         ? 1.f
                         : postop->topk_weights[static_cast<size_t>(slot)];
                 const __m512 vw = _mm512_set1_ps(w);
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     __m256i src_bf16 = _mm256_loadu_si256(
                             reinterpret_cast<const __m256i *>(src_row + d));
                     __m512 vsrc = _mm512_castsi512_ps(_mm512_slli_epi32(
@@ -246,7 +291,7 @@ void moe_weighted_reduce_avx512_bf16(
                     __m512 vacc = _mm512_loadu_ps(acc + d);
                     _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
                 }
-                for (; d < D; ++d)
+                for (; d < n; ++d)
                     acc[d] += w
                             * bfloat16_t::bf16_to_f32_val(
                                     static_cast<int16_t>(src_row[d]));
@@ -261,7 +306,7 @@ void moe_weighted_reduce_avx512_bf16(
                 const __m512i one = _mm512_set1_epi32(1);
                 const __m512i bias = _mm512_set1_epi32(0x7FFF);
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     __m512i bits
                             = _mm512_castps_si512(_mm512_loadu_ps(acc + d));
                     __m512i lsb = _mm512_and_si512(
@@ -274,7 +319,7 @@ void moe_weighted_reduce_avx512_bf16(
                             reinterpret_cast<__m256i *>(out_row + d),
                             _mm512_cvtepi32_epi16(_mm512_srai_epi32(bits, 16)));
                 }
-                for (; d < D; ++d)
+                for (; d < n; ++d)
                     out_row[d] = static_cast<uint16_t>(
                             bfloat16_t::f32_to_bf16_val(acc[d]));
             }
@@ -307,21 +352,28 @@ void moe_weighted_reduce_avx512_f16(
     const size_t out_stride = static_cast<size_t>(postop->ldc_output);
 
     const int topk = postop->topk;
-    const int D16 = D & ~15;
+    const reduce_split_t split
+            = make_reduce_split(postop->num_tokens, D, num_threads);
 
 // Per-thread FP32 accumulator — same buffer-reuse pattern as the BF16
-// specialisation.  Sized to D once and reused across calls; vectors
-// monotonically grow, so steady-state calls see zero allocation.
+// specialisation.  Sized to one work item once and reused across calls;
+// vectors monotonically grow, so steady-state calls see zero allocation.
 #pragma omp parallel num_threads(num_threads)
     {
         static thread_local std::vector<float> acc_buf;
-        if (acc_buf.size() < static_cast<size_t>(D)) {
-            acc_buf.resize(static_cast<size_t>(D));
+        if (acc_buf.size() < static_cast<size_t>(split.span)) {
+            acc_buf.resize(static_cast<size_t>(split.span));
         }
 
-#pragma omp for schedule(static)
-        for (int t = 0; t < postop->num_tokens; ++t) {
-            uint16_t *out_row = out_base + static_cast<size_t>(t) * out_stride;
+#pragma omp for schedule(static) nowait
+        for (int64_t it = 0; it < split.items; ++it) {
+            const int t = static_cast<int>(it / split.chunks);
+            const int d0 = static_cast<int>(it % split.chunks) * split.span;
+            if (d0 >= D) continue;
+            const int n = std::min(D, d0 + split.span) - d0;
+            const int n16 = n & ~15;
+            uint16_t *out_row
+                    = out_base + static_cast<size_t>(t) * out_stride + d0;
             float *acc = acc_buf.data();
 
             // k=0: initialize FP32 accumulator with w0 * src0.
@@ -329,19 +381,20 @@ void moe_weighted_reduce_avx512_f16(
                 const int64_t slot = static_cast<int64_t>(t) * topk;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
+                src_row += d0;
                 const float w = postop->skip_weighted
                         ? 1.f
                         : postop->topk_weights[static_cast<size_t>(slot)];
                 const __m512 vw = _mm512_set1_ps(w);
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     // Load 16 × F16 (256-bit) and cvt to 16 × F32 (512-bit).
                     __m256i src_f16 = _mm256_loadu_si256(
                             reinterpret_cast<const __m256i *>(src_row + d));
                     __m512 vsrc = _mm512_cvtph_ps(src_f16);
                     _mm512_storeu_ps(acc + d, _mm512_mul_ps(vw, vsrc));
                 }
-                for (; d < D; ++d) {
+                for (; d < n; ++d) {
                     acc[d] = w * float16_t::f16_to_f32_val(src_row[d]);
                 }
             }
@@ -352,19 +405,20 @@ void moe_weighted_reduce_avx512_f16(
                 const int64_t slot = static_cast<int64_t>(t) * topk + k;
                 const auto *src_row = static_cast<const uint16_t *>(
                         postop->row_ptrs[static_cast<size_t>(slot)]);
+                src_row += d0;
                 const float w = postop->skip_weighted
                         ? 1.f
                         : postop->topk_weights[static_cast<size_t>(slot)];
                 const __m512 vw = _mm512_set1_ps(w);
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     __m256i src_f16 = _mm256_loadu_si256(
                             reinterpret_cast<const __m256i *>(src_row + d));
                     __m512 vsrc = _mm512_cvtph_ps(src_f16);
                     __m512 vacc = _mm512_loadu_ps(acc + d);
                     _mm512_storeu_ps(acc + d, _mm512_fmadd_ps(vw, vsrc, vacc));
                 }
-                for (; d < D; ++d) {
+                for (; d < n; ++d) {
                     acc[d] += w * float16_t::f16_to_f32_val(src_row[d]);
                 }
             }
@@ -383,14 +437,14 @@ void moe_weighted_reduce_avx512_f16(
             // very large weighted sums must already bound their inputs.
             {
                 int d = 0;
-                for (; d < D16; d += 16) {
+                for (; d < n16; d += 16) {
                     __m512 vacc = _mm512_loadu_ps(acc + d);
                     __m256i out_f16 = _mm512_cvtps_ph(vacc,
                             _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
                     _mm256_storeu_si256(
                             reinterpret_cast<__m256i *>(out_row + d), out_f16);
                 }
-                for (; d < D; ++d) {
+                for (; d < n; ++d) {
                     out_row[d] = float16_t::f32_to_f16_val(acc[d]);
                 }
             }
@@ -406,12 +460,16 @@ void moe_weighted_reduce(const group_matmul_moe_postop_params *postop,
 
     const auto &plat = zendnnl::common::zendnnl_platform_info();
 
-    // The reduce parallelises over `num_tokens` rows, which at batch-1 decode
-    // is a single row -- forking the full team for it costs more than the
-    // work.  Clamp once here rather than in each of the four kernels; the
-    // activation pass next door already does the same.
-    const int num_threads = std::max(
-            1, std::min(requested_threads, std::max(1, postop->num_tokens)));
+    // Full team or serialized; see the team-size note in
+    // group_matmul_parallel_common.hpp.
+    const size_t src_bytes
+            = static_cast<size_t>(std::max(0, postop->num_tokens))
+            * static_cast<size_t>(std::max(0, postop->topk))
+            * static_cast<size_t>(std::max(0, D)) * sizeof(Elem);
+    const int num_threads = postop->num_tokens < requested_threads
+                    && src_bytes < kReduceSerialBytes
+            ? 1
+            : std::max(1, requested_threads);
 
     if constexpr (Kind == data_type_t::f32) {
         if (plat.get_avx512f_status()) {

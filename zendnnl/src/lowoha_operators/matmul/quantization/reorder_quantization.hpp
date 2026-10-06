@@ -166,6 +166,21 @@ struct group_reorder_quant_buffers_t {
     // `scale_buf` index into these and must not be freed individually.
     uint8_t *src_arena = nullptr;
     uint8_t *scale_arena = nullptr;
+    size_t src_arena_cap = 0;
+    size_t scale_arena_cap = 0;
+
+    /// Free both arenas and the fallback pools, for the same reason as
+    /// `reorder_quant_buffers_t::release`.  The views into the arenas are
+    /// dropped with them; the next call rebuilds everything.
+    void release() {
+        free(src_arena);
+        free(scale_arena);
+        src_arena = scale_arena = nullptr;
+        src_arena_cap = scale_arena_cap = 0;
+        std::vector<uint8_t *> {}.swap(src_buf);
+        std::vector<uint8_t *> {}.swap(scale_buf);
+        std::vector<reorder_quant_buffers_t> {}.swap(fallback_buf);
+    }
 
     group_reorder_quant_buffers_t() = default;
     ~group_reorder_quant_buffers_t() {
@@ -178,6 +193,16 @@ struct group_reorder_quant_buffers_t {
     group_reorder_quant_buffers_t &operator=(
             const group_reorder_quant_buffers_t &)
             = delete;
+
+    static bool ensure_arena(uint8_t *&arena, size_t &cap, size_t bytes) {
+        return reorder_quant_buffers_t::ensure_buf(arena, cap, bytes);
+    }
+    bool ensure_src_arena(size_t bytes) {
+        return ensure_arena(src_arena, src_arena_cap, bytes);
+    }
+    bool ensure_scale_arena(size_t bytes) {
+        return ensure_arena(scale_arena, scale_arena_cap, bytes);
+    }
 };
 
 /**

@@ -199,8 +199,10 @@ static inline __m512 load_bias_f32(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Templated microkernel — MR ∈ 1..8, NV ∈ {2, 4},
+// Templated microkernel — MR ∈ 1..max_mr_for_nv(NV), NV ∈ {2, 4},
 // Compute ∈ {kS8_Sym, kU8_Asym}, Act ∈ {none, swiglu, silu, gelu}.
+// The dispatcher routes NV=2 kS8_Sym to `ukernel_impl_nv2_sym_scalar`
+// instead, so this template serves NV=2 only for kU8_Asym.
 //
 // `noinline` keeps each (MR, NV, Compute, Act) specialization as a
 // single callable the dispatcher reaches through a function pointer
@@ -730,17 +732,211 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     }
 }
 
+// NV=2 symmetric kernel with scalar-named accumulators.  The generic kernel
+// keeps accumulators in a small 3-D array so one body can cover every
+// (MR, NV, Compute) tuple.  Naming the accumulators as scalars gives the
+// compiler a simpler dependency graph around the pipelined K-loop while
+// preserving the same dispatch policy and output contract.
+//
+// MSVC (cl) has no x64 inline asm, so the accumulator register barrier is
+// GCC/Clang only.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ZENDNNL_INT8_NV2_ACC_BARRIER(lo, hi)
+#else
+#define ZENDNNL_INT8_NV2_ACC_BARRIER(lo, hi) asm("" : "+v"(lo), "+v"(hi))
+#endif
+template <int MR, ActKind Act, DstDt Dst = DstDt::kBf16>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
+static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict Bpacked, const void *__restrict src_scale,
+        const int32_t *__restrict src_zp, const void *__restrict wei_scale,
+        ScaleKind scale_kind, const void *__restrict bias, BiasKind bias_kind,
+        void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
+        int ldc_tight, int K) {
+    static_assert(MR >= 1 && MR <= 12, "NV=2 scalar kernel covers MR 1..12");
+    static_assert(Act == ActKind::none || Dst == DstDt::kBf16,
+            "Gated activations are BF16-dst only");
+    (void)src_zp; // symmetric path uses the constant 128 compensation.
+
+    const auto src_scale_at = [src_scale, scale_kind](int m) -> float {
+        return (scale_kind == ScaleKind::kBf16)
+                ? static_cast<float>(
+                          static_cast<const bfloat16_t *>(src_scale)[m])
+                : static_cast<const float *>(src_scale)[m];
+    };
+
+    constexpr int NV = 2;
+    constexpr int kq_stride_bytes = NV * 16 * kVNNIInt8Quad;
+    constexpr int v_stride_bytes = 16 * kVNNIInt8Quad;
+    const int K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
+    const int weight_bytes_in_oblock = K_quad * kq_stride_bytes;
+
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i c00 = zero, c01 = zero, c10 = zero, c11 = zero;
+    __m512i c20 = zero, c21 = zero, c30 = zero, c31 = zero;
+    __m512i c40 = zero, c41 = zero, c50 = zero, c51 = zero;
+    __m512i c60 = zero, c61 = zero, c70 = zero, c71 = zero;
+    __m512i c80 = zero, c81 = zero, c90 = zero, c91 = zero;
+    __m512i c100 = zero, c101 = zero, c110 = zero, c111 = zero;
+
+    const __m512i s8_to_u8_bias_vec
+            = _mm512_set1_epi32(static_cast<int32_t>(0x80808080U));
+    for (int kq = 0; kq < K_quad; ++kq) {
+        const int8_t *bp = Bpacked + static_cast<size_t>(kq) * kq_stride_bytes;
+        const __m512i b0
+                = _mm512_load_si512(reinterpret_cast<const __m512i *>(bp));
+        const __m512i b1 = _mm512_load_si512(
+                reinterpret_cast<const __m512i *>(bp + v_stride_bytes));
+#define ZENDNNL_INT8_NV2_SYM_ROW(r) \
+    if constexpr (MR > r) { \
+        uint32_t a_quad; \
+        std::memcpy(&a_quad, \
+                A + static_cast<size_t>(r) * lda + kq * kVNNIInt8Quad, \
+                sizeof(a_quad)); \
+        const __m512i av = _mm512_xor_si512( \
+                _mm512_set1_epi32(static_cast<int32_t>(a_quad)), \
+                s8_to_u8_bias_vec); \
+        c##r##0 = _mm512_dpbusd_epi32(c##r##0, av, b0); \
+        c##r##1 = _mm512_dpbusd_epi32(c##r##1, av, b1); \
+        ZENDNNL_INT8_NV2_ACC_BARRIER(c##r##0, c##r##1); \
+    }
+        ZENDNNL_INT8_NV2_SYM_ROW(0)
+        ZENDNNL_INT8_NV2_SYM_ROW(1)
+        ZENDNNL_INT8_NV2_SYM_ROW(2)
+        ZENDNNL_INT8_NV2_SYM_ROW(3)
+        ZENDNNL_INT8_NV2_SYM_ROW(4)
+        ZENDNNL_INT8_NV2_SYM_ROW(5)
+        ZENDNNL_INT8_NV2_SYM_ROW(6)
+        ZENDNNL_INT8_NV2_SYM_ROW(7)
+        ZENDNNL_INT8_NV2_SYM_ROW(8)
+        ZENDNNL_INT8_NV2_SYM_ROW(9)
+        ZENDNNL_INT8_NV2_SYM_ROW(10)
+        ZENDNNL_INT8_NV2_SYM_ROW(11)
+#undef ZENDNNL_INT8_NV2_SYM_ROW
+    }
+#undef ZENDNNL_INT8_NV2_ACC_BARRIER
+
+    const int32_t *comp_base = reinterpret_cast<const int32_t *>(
+            Bpacked + weight_bytes_in_oblock);
+    const __m512i k_sym = _mm512_set1_epi32(128);
+    const __m512i comp0 = _mm512_mullo_epi32(k_sym,
+            _mm512_load_si512(reinterpret_cast<const __m512i *>(comp_base)));
+    const __m512i comp1 = _mm512_mullo_epi32(k_sym,
+            _mm512_load_si512(
+                    reinterpret_cast<const __m512i *>(comp_base + 16)));
+
+    __m512 wei_scale0;
+    __m512 wei_scale1;
+    if (scale_kind == ScaleKind::kBf16) {
+        const auto *ws = static_cast<const bfloat16_t *>(wei_scale);
+        wei_scale0 = bf16x16_to_f32(
+                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(ws)));
+        wei_scale1 = bf16x16_to_f32(
+                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(ws + 16)));
+    } else {
+        const auto *ws = static_cast<const float *>(wei_scale);
+        wei_scale0 = _mm512_loadu_ps(ws);
+        wei_scale1 = _mm512_loadu_ps(ws + 16);
+    }
+
+    const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
+    alignas(64) float bias_slab[NV * 16];
+    const float *__restrict bias_f32 = static_cast<const float *>(bias);
+    if (has_bias && bias_kind != BiasKind::fp32) {
+        _mm512_store_ps(bias_slab, load_bias_f32(bias, bias_kind, 0));
+        _mm512_store_ps(bias_slab + 16, load_bias_f32(bias, bias_kind, 1));
+        bias_f32 = bias_slab;
+    }
+    const __m512 bias0
+            = has_bias ? _mm512_loadu_ps(bias_f32) : _mm512_setzero_ps();
+    const __m512 bias1
+            = has_bias ? _mm512_loadu_ps(bias_f32 + 16) : _mm512_setzero_ps();
+
+    if constexpr (Act == ActKind::swiglu_oai_mul || Act == ActKind::silu_and_mul
+            || Act == ActKind::gelu_and_mul) {
+        auto *Cout_tight = static_cast<bfloat16_t *>(Cout_tight_void);
+#define ZENDNNL_INT8_NV2_SYM_STORE_GATED(r) \
+    if constexpr (MR > r) { \
+        const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(r)); \
+        const __m512 lo = dequant_finish(c##r##0, comp0, \
+                _mm512_mul_ps(src_scale_m, wei_scale0), bias0, has_bias); \
+        const __m512 hi = dequant_finish(c##r##1, comp1, \
+                _mm512_mul_ps(src_scale_m, wei_scale1), bias1, has_bias); \
+        bfloat16_t *dst = Cout_tight + static_cast<size_t>(r) * ldc_tight; \
+        if constexpr (Act == ActKind::swiglu_oai_mul) { \
+            swiglu_oai_store_pair_int(lo, hi, dst); \
+        } else if constexpr (Act == ActKind::silu_and_mul) { \
+            silu_and_mul_store_pair_int(lo, hi, dst); \
+        } else { \
+            gelu_and_mul_store_pair_int(lo, hi, dst); \
+        } \
+    }
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(0)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(1)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(2)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(3)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(4)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(5)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(6)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(7)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(8)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(9)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(10)
+        ZENDNNL_INT8_NV2_SYM_STORE_GATED(11)
+#undef ZENDNNL_INT8_NV2_SYM_STORE_GATED
+    } else {
+        static_assert(Act == ActKind::none,
+                "int8 NV=2 scalar kernel only supports known acts");
+#define ZENDNNL_INT8_NV2_SYM_STORE_NONE(r) \
+    if constexpr (MR > r) { \
+        const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(r)); \
+        const __m512 lo = dequant_finish(c##r##0, comp0, \
+                _mm512_mul_ps(src_scale_m, wei_scale0), bias0, has_bias); \
+        const __m512 hi = dequant_finish(c##r##1, comp1, \
+                _mm512_mul_ps(src_scale_m, wei_scale1), bias1, has_bias); \
+        if constexpr (Dst == DstDt::kBf16) { \
+            auto *dst = static_cast<bfloat16_t *>(Cout_void) \
+                    + static_cast<size_t>(r) * ldc; \
+            _mm256_storeu_si256( \
+                    reinterpret_cast<__m256i *>(dst), f32_to_bf16x16(lo)); \
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16), \
+                    f32_to_bf16x16(hi)); \
+        } else { \
+            static_assert(Dst == DstDt::kF32, \
+                    "int8 NV=2 scalar act=none dst must be bf16 or f32"); \
+            auto *dst = static_cast<float *>(Cout_void) \
+                    + static_cast<size_t>(r) * ldc; \
+            _mm512_storeu_ps(dst, lo); \
+            _mm512_storeu_ps(dst + 16, hi); \
+        } \
+    }
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(0)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(1)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(2)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(3)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(4)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(5)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(6)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(7)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(8)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(9)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(10)
+        ZENDNNL_INT8_NV2_SYM_STORE_NONE(11)
+#undef ZENDNNL_INT8_NV2_SYM_STORE_NONE
+    }
+}
+
 } // namespace
 
 // ── Function-pointer table dispatch ─────────────────────────────
 //
 // One entry per supported (MR, NV, Compute, Act) tuple.
 // Instantiation set:
-//   NV=2 (NR=32): MR ∈ {1..8} × Compute ∈ {sym, asym}
-//                   × Act ∈ {none, swiglu, silu, gelu}
-//   NV=4 (NR=64): MR ∈ {1..6} × Compute ∈ {sym, asym}
-//                   × Act ∈ {none, swiglu, silu, gelu}
-// Total: (8 + 6) × 2 × 4 = 112 BF16-dst specializations, all
+//   NV=2 (NR=32) sym:  MR ∈ {1..12} (`ukernel_impl_nv2_sym_scalar`)
+//   NV=2 (NR=32) asym: MR ∈ {1..8}
+//   NV=4 (NR=64):      MR ∈ {1..6} × Compute ∈ {sym, asym}
+//   each × Act ∈ {none, swiglu, silu, gelu}
+// Total: (12 + 8 + 6 × 2) × 4 = 128 BF16-dst specializations, all
 // `noinline`.  The `act=none` cells additionally instantiate an
 // FP32-dst variant (`DstDt::kF32`) via `select_none<kF32>`; gated
 // acts are BF16-dst only (`select_int8_ukernel` returns nullptr for
@@ -748,7 +944,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
 
 // Hand-rolled per-(Compute, Act) switch helpers — matches the bf16
 // sibling's pattern (no macros, every instantiation explicit).
-// NV=2 supports MR ∈ {1..8}; NV=4 caps at MR=6 (register pressure).
+// NV=2 supports MR ∈ {1..12} for sym and {1..8} for asym; NV=4 caps at
+// MR=6 (register pressure).  `max_mr_for_nv_int8` is the matching bound.
 //
 // The pair of switch helpers is repeated 4× per Compute (one for
 // each Act value) and 2× per NV — verbose but the explicit set is
@@ -758,14 +955,18 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
 template <ActKind Act, DstDt Dst>
 static int8_ukernel_fn_t select_nv2_sym(int MR) {
     switch (MR) {
-        case 1: return ukernel_impl<1, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 2: return ukernel_impl<2, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 3: return ukernel_impl<3, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 4: return ukernel_impl<4, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 5: return ukernel_impl<5, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 6: return ukernel_impl<6, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 7: return ukernel_impl<7, 2, IntCompute::kS8_Sym, Act, Dst>;
-        case 8: return ukernel_impl<8, 2, IntCompute::kS8_Sym, Act, Dst>;
+        case 1: return ukernel_impl_nv2_sym_scalar<1, Act, Dst>;
+        case 2: return ukernel_impl_nv2_sym_scalar<2, Act, Dst>;
+        case 3: return ukernel_impl_nv2_sym_scalar<3, Act, Dst>;
+        case 4: return ukernel_impl_nv2_sym_scalar<4, Act, Dst>;
+        case 5: return ukernel_impl_nv2_sym_scalar<5, Act, Dst>;
+        case 6: return ukernel_impl_nv2_sym_scalar<6, Act, Dst>;
+        case 7: return ukernel_impl_nv2_sym_scalar<7, Act, Dst>;
+        case 8: return ukernel_impl_nv2_sym_scalar<8, Act, Dst>;
+        case 9: return ukernel_impl_nv2_sym_scalar<9, Act, Dst>;
+        case 10: return ukernel_impl_nv2_sym_scalar<10, Act, Dst>;
+        case 11: return ukernel_impl_nv2_sym_scalar<11, Act, Dst>;
+        case 12: return ukernel_impl_nv2_sym_scalar<12, Act, Dst>;
         default: return nullptr;
     }
 }

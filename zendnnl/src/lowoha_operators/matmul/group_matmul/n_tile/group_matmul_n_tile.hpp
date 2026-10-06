@@ -306,10 +306,11 @@ inline std::atomic<int> s_grp_n_tile_strategy_override {-1};
 inline std::atomic<int> s_grp_matmul_n_tile_heavy_threshold_override {
         std::numeric_limits<int>::min()};
 
-// Sentinel `-1` = no override (falls through to env / default OFF).
-// `0` = force OFF (decode uses uniform Phase B base+1), `1` = force ON
-// (decode M-proportional split).  RAII helper `DecodeProportionalOverride`
-// in `gtests/group_matmul/moe_test_utils.hpp` saves/restores it.
+// Sentinel `-1` = no override (falls through to the env, then the auto
+// default).  `0` = force OFF (decode uses uniform Phase B base+1), `1` =
+// force ON (decode M-proportional split).  RAII helper
+// `DecodeProportionalOverride` in `gtests/group_matmul/moe_test_utils.hpp`
+// saves/restores it.
 inline std::atomic<int> s_grp_matmul_decode_proportional_override {-1};
 
 } // namespace test_api
@@ -632,16 +633,15 @@ inline int get_grp_matmul_n_order() {
 
 // ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD = { -1, 0, positive int } —
 //   cached, default 0 (AUTO).  NOTE: this knob is PROMPT-ONLY; decode
-//   uses the unconditional M-proportional split regardless of its value
-//   (gate `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`).
+//   uses either the decode-proportional policy or Phase B according to
+//   `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`.
 //
 // Three-mode dispatch for asymmetric per-expert thread distribution
 // inside the ALGO 3 ManyExperts Single-round plan.  ALL active modes
 // are PROMPT-ONLY (`max_M > kDecodeMaxM`); decode-class calls bypass
-// the N_TILE heavy-threshold dispatch entirely.  NOTE: decode no longer
-// uses uniform Phase B base+1 — it uses the UNCONDITIONAL M-proportional
-// thread split (see `apply_round_pick` Single case), which is
-// independent of this knob.  This knob only governs the PROMPT path.
+// the N_TILE heavy-threshold dispatch entirely.  Decode balancing is governed
+// by `ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`; this knob only governs the
+// PROMPT path.
 //
 //   -1  DISABLED (explicit opt-out).  Phase B
 //       base+1 only: top few experts by M get one extra thread, all
@@ -706,23 +706,35 @@ inline int get_grp_matmul_n_tile_heavy_threshold() {
     return v;
 }
 
-// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL = { "0", "1" } — cached,
-//   default OFF.  Gates the DECODE-class M-proportional per-expert
-//   thread split in the ALGO 3 CK Single-round plan (allocate threads
-//   to each active expert in proportion to its M, clamped to its
-//   N-tile capacity).
-//   OFF (default): uniform Phase B base/base+1 distribution.
-//   ON ("1"):      M-proportional split for decode CK (opt-in).
+// ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL = { "0", "1" } — cached.
+//   Gates the DECODE-class M-proportional per-expert thread split in the
+//   ALGO 3 CK Single-round plan (allocate threads to each active expert
+//   in proportion to its M, clamped to its N-tile capacity).
+//   0:       uniform Phase B base/base+1 distribution.
+//   1:       force M-proportional split for decode CK.
+//   unset or invalid: default auto policy, enabled only for uniform-N/K
+//   decode groups where M is the work-proportional signal.
 //   Independent of ZENDNNL_GRP_MATMUL_N_TILE_HEAVY_THRESHOLD (which is
 //   prompt-only).  Mid-process env changes have no effect (static const).
-inline bool get_grp_matmul_decode_proportional() {
+//
+// Return values:
+//   -1 = force OFF, 0 = auto default, 1 = force ON.
+inline int parse_grp_matmul_decode_proportional(const char *e) {
+    if (e == nullptr || e[0] == '\0') return 0; // default: auto
+    int parsed = 0;
+    if (!parse_env_int_strict(e, parsed) || (parsed != 0 && parsed != 1)) {
+        return 0; // invalid: default auto
+    }
+    return parsed != 0 ? 1 : -1;
+}
+
+inline int get_grp_matmul_decode_proportional_mode() {
     const int ovr = test_api::s_grp_matmul_decode_proportional_override.load(
             std::memory_order_relaxed);
-    if (ovr >= 0) return ovr != 0;
-    static const bool v = []() {
-        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL");
-        if (e == nullptr || e[0] == '\0') return false; // default: OFF
-        return e[0] != '0';
+    if (ovr >= 0) return ovr != 0 ? 1 : -1;
+    static const int v = []() {
+        return parse_grp_matmul_decode_proportional(
+                std::getenv("ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL"));
     }();
     return v;
 }

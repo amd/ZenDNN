@@ -384,7 +384,7 @@ status_t fill_kfn_table(int NV, ActKind act_kind, DstDt dst_dt,
 // mis-resolved f32 gated variant refuses here rather than at runtime.
 status_t fill_kfn_table_int8(int NV, IntCompute compute, ActKind act_kind,
         DstDt dst_dt, int8_ukernel_fn_t (&kfn_table)[kMaxMR + 1]) {
-    const int max_mr = max_mr_for_nv(NV);
+    const int max_mr = max_mr_for_nv_int8(NV, compute);
     for (int mr = 1; mr <= max_mr; ++mr) {
         kfn_table[mr] = select_int8_ukernel(mr, NV, compute, act_kind, dst_dt);
         if (kfn_table[mr] == nullptr) return status_t::failure;
@@ -912,7 +912,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // W4A8 caps MR lower: its per-group f32 accumulator lives alongside
     // the s32 one.  The general bound would index null table slots.
     out.max_mr = is_s4_variant(variant) ? max_mr_for_nv_s4(out.NV)
-                                        : max_mr_for_nv(out.NV);
+            : is_int8_variant(variant)
+            ? max_mr_for_nv_int8(out.NV, out.compute_int)
+            : max_mr_for_nv(out.NV);
     if (is_s4_variant(variant)) {
         out.group_size = group_size;
         out.wei_scale_grp_stride = wei_scale_grp_stride;
@@ -1236,6 +1238,33 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
 // the public dispatch.hpp surface so the prepack module can compute
 // the same NR the dispatcher will pack under.)
 
+// Minimum MR-call count at which the custom-kernel tile loops
+// (`dispatch_tile` for BF16, `dispatch_tile_int8` for DQ-INT8) switch to
+// o-block-outer nesting.  The swap trades redundant walks of the sub-tile's
+// B strip for re-reading the A panel once per o-block; with two MR calls it
+// saves a single B walk and does not pay, so it starts at three.
+//
+// Paired with `ctx.single_expert`: the reordering only engages for
+// num_ops == 1.  Both orders compute identical results; the MoE exclusion
+// is explained at the BF16 use site in `dispatch_tile`.
+inline constexpr int kOblockOuterMinCalls = 3;
+
+// Visits every (MR call, o-block) pair of one sub-tile, o-block outer when
+// `oblk_outer` is set.  Each pair writes a disjoint output block.
+template <typename CallOne>
+inline void for_each_call_block(
+        bool oblk_outer, int n_calls, int n_blocks, const CallOne &call_one) {
+    if (oblk_outer) {
+        for (int b = 0; b < n_blocks; ++b)
+            for (int c = 0; c < n_calls; ++c)
+                call_one(c, b);
+    } else {
+        for (int c = 0; c < n_calls; ++c)
+            for (int b = 0; b < n_blocks; ++b)
+                call_one(c, b);
+    }
+}
+
 // DQ-INT8 dispatch tile — owns the per-tile sub-tile + per-MR loop
 // for the `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM` variants.  Splits
 // out of the public `dispatch_tile` so the BF16 loop body stays
@@ -1338,6 +1367,15 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
             ? sizeof(bfloat16_t)
             : sizeof(float);
 
+    const bool oblk_outer
+            = ctx.single_expert && n_calls >= kOblockOuterMinCalls;
+    const auto mr_of = [mr_base, n_big](int c) {
+        return (c < n_big) ? mr_base + 1 : mr_base;
+    };
+    const auto m_off_of = [mr_base, n_big](int c) {
+        return c * mr_base + std::min(c, n_big);
+    };
+
     const bool is_gated_act = (ctx.act_kind == ActKind::swiglu_oai_mul)
             || (ctx.act_kind == ActKind::silu_and_mul)
             || (ctx.act_kind == ActKind::gelu_and_mul);
@@ -1360,9 +1398,9 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                     = static_cast<const char *>(wei_scale_full)
                     + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
 
-            int m_off = 0;
-            for (int c = 0; c < n_calls; ++c) {
-                const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+            const auto call_one = [&](int c, int b) {
+                const int mr_now = mr_of(c);
+                const int m_off = m_off_of(c);
                 const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
 
                 const uint8_t *A_chunk
@@ -1379,32 +1417,29 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                                   + (sub_col_base / 2))
                                 * dst_elem_bytes_int8;
 
-                for (int b = 0; b < n_blocks; ++b) {
-                    const int8_t *Bpacked_blk = Bpacked_blk_base
-                            + static_cast<size_t>(b) * o_blk_stride_bytes;
-                    const void *bias_blk = (bias_blk_base != nullptr)
-                            ? static_cast<const void *>(bias_blk_base
-                                      + static_cast<size_t>(b) * ctx.pack_nr
-                                              * bias_elem_bytes)
-                            : nullptr;
-                    const void *wei_scale_blk
-                            = static_cast<const void *>(wei_scale_blk_base
-                                    + static_cast<size_t>(b) * ctx.pack_nr
-                                            * scale_elem_bytes);
-                    // 16 cols per (g, u) pair × NV/2 pairs per kernel call —
-                    // mirror of the bf16 sibling's tight stride.
-                    std::byte *Tight_row = Tight_row_base
-                            + static_cast<size_t>(b) * (ctx.pack_nr / 2)
-                                    * dst_elem_bytes_int8;
+                const int8_t *Bpacked_blk = Bpacked_blk_base
+                        + static_cast<size_t>(b) * o_blk_stride_bytes;
+                const void *bias_blk = (bias_blk_base != nullptr)
+                        ? static_cast<const void *>(bias_blk_base
+                                  + static_cast<size_t>(b) * ctx.pack_nr
+                                          * bias_elem_bytes)
+                        : nullptr;
+                const void *wei_scale_blk
+                        = static_cast<const void *>(wei_scale_blk_base
+                                + static_cast<size_t>(b) * ctx.pack_nr
+                                        * scale_elem_bytes);
+                // 16 cols per (g, u) pair × NV/2 pairs per kernel call —
+                // mirror of the bf16 sibling's tight stride.
+                std::byte *Tight_row = Tight_row_base
+                        + static_cast<size_t>(b) * (ctx.pack_nr / 2)
+                                * dst_elem_bytes_int8;
 
-                    kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk,
-                            src_zp_chunk, wei_scale_blk, ctx.scale_kind,
-                            bias_blk, ctx.bias_kind,
-                            /*Cout=*/nullptr, /*ldc=*/0, Tight_row, tight_ldc,
-                            K);
-                }
-                m_off += mr_now;
-            }
+                kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk, src_zp_chunk,
+                        wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
+                        /*Cout=*/nullptr, /*ldc=*/0, Tight_row, tight_ldc, K);
+            };
+
+            for_each_call_block(oblk_outer, n_calls, n_blocks, call_one);
         }
         return;
     }
@@ -1426,9 +1461,9 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                 = static_cast<const char *>(wei_scale_full)
                 + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
 
-        int m_off = 0;
-        for (int c = 0; c < n_calls; ++c) {
-            const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+        const auto call_one = [&](int c, int b) {
+            const int mr_now = mr_of(c);
+            const int m_off = m_off_of(c);
             const int8_ukernel_fn_t kfn = ctx.kfn_table_int8[mr_now];
 
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
@@ -1442,29 +1477,27 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                     + (static_cast<size_t>(m_off) * tight_ldc + sub_col_base)
                             * dst_elem_bytes_int8;
 
-            for (int b = 0; b < n_blocks; ++b) {
-                const int8_t *Bpacked_blk = Bpacked_blk_base
-                        + static_cast<size_t>(b) * o_blk_stride_bytes;
-                const void *bias_blk = (bias_blk_base != nullptr)
-                        ? static_cast<const void *>(bias_blk_base
-                                  + static_cast<size_t>(b) * ctx.pack_nr
-                                          * bias_elem_bytes)
-                        : nullptr;
-                const void *wei_scale_blk
-                        = static_cast<const void *>(wei_scale_blk_base
-                                + static_cast<size_t>(b) * ctx.pack_nr
-                                        * scale_elem_bytes);
-                std::byte *Wide_row = Wide_row_base
-                        + static_cast<size_t>(b) * ctx.pack_nr
-                                * dst_elem_bytes_int8;
+            const int8_t *Bpacked_blk = Bpacked_blk_base
+                    + static_cast<size_t>(b) * o_blk_stride_bytes;
+            const void *bias_blk = (bias_blk_base != nullptr)
+                    ? static_cast<const void *>(bias_blk_base
+                              + static_cast<size_t>(b) * ctx.pack_nr
+                                      * bias_elem_bytes)
+                    : nullptr;
+            const void *wei_scale_blk = static_cast<const void *>(
+                    wei_scale_blk_base
+                    + static_cast<size_t>(b) * ctx.pack_nr * scale_elem_bytes);
+            std::byte *Wide_row = Wide_row_base
+                    + static_cast<size_t>(b) * ctx.pack_nr
+                            * dst_elem_bytes_int8;
 
-                kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk, src_zp_chunk,
-                        wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
-                        Wide_row, tight_ldc,
-                        /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
-            }
-            m_off += mr_now;
-        }
+            kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk, src_zp_chunk,
+                    wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
+                    Wide_row, tight_ldc,
+                    /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
+        };
+
+        for_each_call_block(oblk_outer, n_calls, n_blocks, call_one);
     }
 }
 
@@ -1878,16 +1911,6 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
     }
 }
 
-// Minimum MR-call count at which `dispatch_tile` switches to o-block-outer
-// loop nesting.  Below this the swap does not pay: it trades one redundant
-// walk of the sub-tile's B strip for re-reading the A panel once per o-block,
-// and at 2 calls that is a measured wash-to-slight-loss on a cold cache
-// (-0.5% on Llama-8B, -1.1% on Llama-3B).  From 3 calls up the saved walks
-// dominate on every shape and both cache modes.
-//
-// Paired with `ctx.single_expert`: the reordering only engages for
-// num_ops == 1.  See the use site for why MoE is excluded.
-inline constexpr int kOblockOuterMinCalls = 3;
 } // namespace
 
 void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,

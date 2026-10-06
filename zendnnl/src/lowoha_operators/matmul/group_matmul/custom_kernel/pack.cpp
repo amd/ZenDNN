@@ -791,12 +791,7 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     // rationale.
     key.ldb = static_cast<unsigned>(ldb);
 
-    // `s_pack_log` is hoisted above the disable-cache branch — shared
-    // by both pack routes (NOCACHE / HIT / MISS) so we never query
-    // `apilog_verbose_enabled()` twice per call.
-    std::lock_guard<std::mutex> lock(pack_mutex_singleton());
-
-    if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+    auto serve_cached = [&](void *cached_pack) {
         // A nullptr value is the in-place sentinel: the pack lives in the
         // caller's `weight` buffer itself (see the in-place MISS branch
         // below).  Any non-null value is an out-of-place cached buffer.
@@ -804,6 +799,12 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
                 ? static_cast<const bfloat16_t *>(cached_pack)
                 : weight;
         if (was_hit_out != nullptr) *was_hit_out = true;
+    };
+
+    // `s_pack_log` is hoisted above the disable-cache branch — shared
+    // by both pack routes (NOCACHE / HIT / MISS) so we never query
+    // `apilog_verbose_enabled()` twice per call.
+    auto log_hit = [&]() {
         // Include the full cache key on the HIT line so a model-level
         // log shows exactly which (weight_ptr, K, N, ldb, transB,
         // pack_nr) tuple is being served.  Under the assumption "a fixed
@@ -820,109 +821,151 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
+    };
+
+    auto log_miss = [&]() {
+        // Same rationale as the HIT path above — the full key (weight_ptr,
+        // K, N, ldb, transB, pack_nr) is on the line so the user can see
+        // *which* dimension is rotating.  In a stable-weight workload each
+        // unique key should appear in a MISS line exactly once; recurring
+        // MISSes for the same (K, N, ldb, transB, pack_nr) with only
+        // weight_ptr cycling indicate weight-pointer churn.
+        if (s_pack_log) {
+            apilog_verbose("[GRP_MATMUL.PACK MISS] weight=",
+                    static_cast<const void *>(weight), " K=", K, " N=", N,
+                    " ldb=", ldb, " transB=", (transB ? 1 : 0),
+                    " interleave=", (interleave_split_halves ? 1 : 0),
+                    " pack_nr=", pack_nr);
+        }
+    };
+
+    if (in_place) {
+        // In-place mutation rewrites the caller's weight buffer, so both this
+        // path and the out-of-place miss below hold the family mutex.
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton());
+
+        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+            serve_cached(cached_pack);
+            log_hit();
+            return status_t::success;
+        }
+
+        log_miss();
+        // In-place (WEIGHT_CACHE=2): when the packed layout is byte-for-byte
+        // the same size as the raw weight (bf16 even-K: `bytes == K*N*2`),
+        // write the pack back into the caller's buffer and cache a nullptr
+        // sentinel.  Saves one packed buffer per weight.  We pack into a
+        // transient temp first (the pack permutes the source, so it cannot
+        // run safely directly over its own input) then memcpy into `weight`.
+        // Falls through to the out-of-place path only on a size mismatch
+        // (e.g. odd K, where the VNNI K-pair pad makes the pack larger).
+        //
+        // Alignment is intentionally NOT a precondition.  The in-place path
+        // hands the caller's own `weight` buffer to the kernel as the packed
+        // stream, and that buffer is not guaranteed 64-byte aligned — so the
+        // bf16 microkernel reads the B-stream with the UNALIGNED
+        // `_mm512_loadu_si512` (vmovdqu64).  On AVX-512 CPUs that load is as
+        // fast as the aligned form when the address happens to be aligned
+        // (out-of-place packs, which still come from zendnnl_aligned_alloc(64));
+        // a non-64-aligned in-place base only pays a cache-line split-load
+        // cost.  We accept that to capture the memory saving on every
+        // bf16/even-K weight regardless of how the framework allocated it.
+        const size_t plain_bytes = static_cast<size_t>(K)
+                * static_cast<size_t>(N) * sizeof(bfloat16_t);
+        // In-place write-back memcpy's K*N CONTIGUOUS elements back into
+        // `weight`, which is only correct when the raw weight is contiguous:
+        // leading dim == the minor dim (K for transB, else N).  A strided/tiled
+        // view (ldb > min) would have its padding / adjacent rows clobbered, so
+        // it must stay out-of-place.  Same contiguity rule the AOCL WC=2 path
+        // uses.
+        const bool inplace_layout_ok = (ldb == (transB ? K : N));
+        // Same rule the AOCL reorder uses (`wei_inplace_fits`,
+        // lowoha_common.hpp), fed by this backend's own size query: DLP asks
+        // `aocl_get_reorder_buf_size_*`, CK asks `packed_weight_size_*`.
+        // Keeping ONE predicate means a caller-declared buffer capacity unlocks
+        // in-place identically on both paths, and neither has to understand the
+        // other's layout -- the write-back copies the packed image verbatim.
+        const bool can_in_place = inplace_layout_ok
+                && wei_inplace_fits(
+                        bytes, bytes, plain_bytes, wei_buffer_capacity_bytes);
+        if (can_in_place) {
+            void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
+            if (tmp != nullptr) {
+                pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                        interleave_split_halves,
+                        static_cast<bfloat16_t *>(tmp));
+                // const_cast write-back: `weight` is declared const because
+                // the DEFAULT (out-of-place) path only reads it, and the public
+                // grouped API hands weights through as `const void *` — so the
+                // cast must happen at some boundary; this is it.  It is
+                // well-defined here: the in-place path is reached ONLY under
+                // WEIGHT_CACHE=2, which is the caller's explicit opt-in that the
+                // weight buffer is MUTABLE single-consumer storage (a framework
+                // weight tensor on the heap, never a genuinely const-qualified
+                // object — writing through a cast to such an object would be
+                // UB).  This mirrors the established AOCL in-place reorder path
+                // (aocl_kernel.cpp), which const_casts the same caller weight
+                // pointer under the identical WC=2 contract.
+                std::memcpy(const_cast<bfloat16_t *>(weight), tmp, bytes);
+                zendnnl_aligned_free(tmp);
+                pack_cache.add(key, nullptr); // pack lives in `weight`
+                *out_packed = weight;
+                return status_t::success;
+            }
+            // Interim aligned_alloc failed.  Do NOT fail the whole call: fall
+            // through to the out-of-place cache path below (allocate a fresh
+            // packed buffer and cache it) so WEIGHT_CACHE=2 is no less robust
+            // than WC=1/0.  This mirrors the AOCL in-place reorder fallback
+            // (aocl_kernel.cpp).  The caller's `weight` buffer is left
+            // UNMUTATED, so the nullptr in-place sentinel is NOT cached — the
+            // out-of-place buffer becomes the pack.
+            log_error(
+                    "custom_kernel pack (in-place): interim aligned_alloc "
+                    "failed for ",
+                    bytes_aligned, " bytes; falling back to out-of-place");
+        }
+
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+        pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, static_cast<bfloat16_t *>(raw));
+        pack_cache.add(key, raw);
+        *out_packed = static_cast<const bfloat16_t *>(raw);
         return status_t::success;
     }
 
-    // Miss — allocate, pack, insert.  64-byte aligned so the
-    // microkernel's vmovdqu reads start on a cache-line boundary.
-    // Same rationale as the HIT path above — the full key (weight_ptr,
-    // K, N, ldb, transB, pack_nr) is on the line so the user can see
-    // *which* dimension is rotating.  In a stable-weight workload each
-    // unique key should appear in a MISS line exactly once; recurring
-    // MISSes for the same (K, N, ldb, transB, pack_nr) with only
-    // weight_ptr cycling indicate weight-pointer churn.
-    if (s_pack_log) {
-        apilog_verbose("[GRP_MATMUL.PACK MISS] weight=",
-                static_cast<const void *>(weight), " K=", K, " N=", N,
-                " ldb=", ldb, " transB=", (transB ? 1 : 0),
-                " interleave=", (interleave_split_halves ? 1 : 0),
-                " pack_nr=", pack_nr);
-    }
-    // In-place (WEIGHT_CACHE=2): when the packed layout is byte-for-byte
-    // the same size as the raw weight (bf16 even-K: `bytes == K*N*2`),
-    // write the pack back into the caller's buffer and cache a nullptr
-    // sentinel.  Saves one packed buffer per weight.  We pack into a
-    // transient temp first (the pack permutes the source, so it cannot
-    // run safely directly over its own input) then memcpy into `weight`.
-    // Falls through to the out-of-place path only on a size mismatch
-    // (e.g. odd K, where the VNNI K-pair pad makes the pack larger).
-    //
-    // Alignment is intentionally NOT a precondition.  The in-place path
-    // hands the caller's own `weight` buffer to the kernel as the packed
-    // stream, and that buffer is not guaranteed 64-byte aligned — so the
-    // bf16 microkernel reads the B-stream with the UNALIGNED
-    // `_mm512_loadu_si512` (vmovdqu64).  On AVX-512 CPUs that load is as
-    // fast as the aligned form when the address happens to be aligned
-    // (out-of-place packs, which still come from zendnnl_aligned_alloc(64));
-    // a non-64-aligned in-place base only pays a cache-line split-load
-    // cost.  We accept that to capture the memory saving on every
-    // bf16/even-K weight regardless of how the framework allocated it.
-    const size_t plain_bytes = static_cast<size_t>(K) * static_cast<size_t>(N)
-            * sizeof(bfloat16_t);
-    // In-place write-back memcpy's K*N CONTIGUOUS elements back into `weight`,
-    // which is only correct when the raw weight is contiguous: leading dim ==
-    // the minor dim (K for transB, else N).  A strided/tiled view (ldb > min)
-    // would have its padding / adjacent rows clobbered, so it must stay
-    // out-of-place.  Same contiguity rule the AOCL WC=2 path uses.
-    const bool inplace_layout_ok = (ldb == (transB ? K : N));
-    // Same rule the AOCL reorder uses (`wei_inplace_fits`, lowoha_common.hpp),
-    // fed by this backend's own size query: DLP asks
-    // `aocl_get_reorder_buf_size_*`, CK asks `packed_weight_size_*`.  Keeping
-    // ONE predicate means a caller-declared buffer capacity unlocks in-place
-    // identically on both paths, and neither has to understand the other's
-    // layout -- the write-back copies the packed image verbatim.
-    const bool can_in_place = in_place && inplace_layout_ok
-            && wei_inplace_fits(
-                    bytes, bytes, plain_bytes, wei_buffer_capacity_bytes);
-    if (can_in_place) {
-        void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
-        if (tmp != nullptr) {
-            pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
-                    interleave_split_halves, static_cast<bfloat16_t *>(tmp));
-            // const_cast write-back: `weight` is declared const because the
-            // DEFAULT (out-of-place) path only reads it, and the public grouped
-            // API hands weights through as `const void *` — so the cast must
-            // happen at some boundary; this is it.  It is well-defined here: the
-            // in-place path is reached ONLY under WEIGHT_CACHE=2, which is the
-            // caller's explicit opt-in that the weight buffer is MUTABLE
-            // single-consumer storage (a framework weight tensor on the heap,
-            // never a genuinely const-qualified object — writing through a cast
-            // to such an object would be UB).  This mirrors the established AOCL
-            // in-place reorder path (aocl_kernel.cpp), which const_casts the same
-            // caller weight pointer under the identical WC=2 contract.
-            std::memcpy(const_cast<bfloat16_t *>(weight), tmp, bytes);
-            zendnnl_aligned_free(tmp);
-            pack_cache.add(key, nullptr); // sentinel: pack lives in `weight`
-            *out_packed = weight;
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton());
+
+        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+            serve_cached(cached_pack);
+            log_hit();
             return status_t::success;
         }
-        // Interim aligned_alloc failed.  Do NOT fail the whole call: fall through
-        // to the out-of-place cache path below (allocate a fresh packed buffer
-        // and cache it) so WEIGHT_CACHE=2 is no less robust than WC=1/0.  This
-        // mirrors the AOCL in-place reorder fallback (aocl_kernel.cpp).  The
-        // caller's `weight` buffer is left UNMUTATED, so the nullptr in-place
-        // sentinel is NOT cached — the out-of-place buffer becomes the pack.
-        log_error(
-                "custom_kernel pack (in-place): interim aligned_alloc failed "
-                "for ",
-                bytes_aligned, " bytes; falling back to out-of-place");
+
+        // Miss — out-of-place packing reads the caller's raw weight buffer, so
+        // it must synchronize with the in-place path that can rewrite the same
+        // buffer under WC=2.
+        log_miss();
+        // `bytes_aligned` + `alignment` are hoisted above the disable-cache
+        // branch so cached and caller-owned packs use identical allocations.
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+
+        pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, static_cast<bfloat16_t *>(raw));
+        pack_cache.add(key, raw);
+        *out_packed = static_cast<const bfloat16_t *>(raw);
+        return status_t::success;
     }
-
-    // `bytes_aligned` + `alignment` are hoisted above the disable-cache
-    // branch so cached and caller-owned packs use identical allocations.
-    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
-    if (raw == nullptr) {
-        log_error("custom_kernel pack: aligned_alloc failed for ",
-                bytes_aligned, " bytes");
-        return status_t::failure;
-    }
-
-    pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
-            static_cast<bfloat16_t *>(raw));
-    pack_cache.add(key, raw);
-
-    *out_packed = static_cast<const bfloat16_t *>(raw);
-    return status_t::success;
 }
 
 // ── Caller-owned packed-weight release ───────────────────────────
@@ -1055,8 +1098,6 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
             extra_hash);
     key.ldb = static_cast<unsigned>(ldb);
 
-    std::lock_guard<std::mutex> lock(pack_mutex_singleton_f16());
-
     if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
         // No nullptr in-place sentinel to decode here (contrast the bf16
         // HIT path above): the F16 pack family has no in-place (WC=2)
@@ -1089,9 +1130,10 @@ status_t get_or_pack_weight_f16(const float16_t *weight, int K, int N, int ldb,
 
     pack_f16_simple(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
             static_cast<float16_t *>(raw));
-    pack_cache.add(key, raw);
+    void *winner = pack_cache.get_or_add(key, raw);
+    if (winner != raw) { zendnnl_aligned_free(raw); }
 
-    *out_packed = static_cast<const float16_t *>(raw);
+    *out_packed = static_cast<const float16_t *>(winner);
     return status_t::success;
 }
 
@@ -1111,12 +1153,11 @@ void clear_custom_kernel_pack_cache_f16() {
 }
 
 // See pack.hpp for the quiescent-window safety contract.  The
-// implementation calls `lru_cache_t::clear()` under the same
-// `pack_mutex_singleton()` that `get_or_pack_weight_bf16()` holds,
-// so any racing pack call blocks until the clear completes.
-// Combined with the caller's quiescent-window guarantee (no
-// in-flight `dispatch_tile` reading a `ctx.packed_ptrs[i]` from a
-// previous prepare_for_call), the clear is safe even though the
+// implementation calls `lru_cache_t::clear()` through the LRU's internal
+// mutex.  The outer family mutex serializes the clear against every
+// insert, but dispatch still reads cached pointers without it, so no
+// concurrent custom-kernel user may be holding cached pointers while a
+// clear runs.  With that caller guarantee, clear is safe even though the
 // cache's eviction-disabled UINT32_MAX capacity is never lowered.
 //
 // `lru_cache_t::clear()` walks the map and `std::free()`s every
@@ -1270,11 +1311,16 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
             extra_hash);
     key.ldb = static_cast<unsigned>(ldb);
 
-    std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
-
-    if (pack_cache.find_key(key)) {
-        *out_packed = static_cast<const int8_t *>(pack_cache.get(key));
+    auto serve_cached = [&](void *cached_pack) {
+        // nullptr is the in-place sentinel: the caller's weight buffer itself
+        // holds the packed image.
+        *out_packed = (cached_pack != nullptr)
+                ? static_cast<const int8_t *>(cached_pack)
+                : weight;
         if (was_hit_out != nullptr) *was_hit_out = true;
+    };
+
+    auto log_hit = [&]() {
         if (s_pack_log) {
             apilog_verbose("[GRP_MATMUL.PACK HIT INT8] weight=",
                     static_cast<const void *>(weight), " K=", K, " N=", N,
@@ -1282,64 +1328,102 @@ status_t get_or_pack_weight_int8(const int8_t *weight, int K, int N, int ldb,
                     " interleave=", (interleave_split_halves ? 1 : 0),
                     " pack_nr=", pack_nr);
         }
+    };
+
+    auto log_miss = [&]() {
+        if (s_pack_log) {
+            apilog_verbose("[GRP_MATMUL.PACK MISS INT8] weight=",
+                    static_cast<const void *>(weight), " K=", K, " N=", N,
+                    " ldb=", ldb, " transB=", (transB ? 1 : 0),
+                    " interleave=", (interleave_split_halves ? 1 : 0),
+                    " pack_nr=", pack_nr);
+        }
+    };
+
+    if (in_place) {
+        // In-place mutation rewrites the caller's weight buffer, so both this
+        // path and the out-of-place miss below hold the family mutex.
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
+
+        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+            serve_cached(cached_pack);
+            log_hit();
+            return status_t::success;
+        }
+
+        log_miss();
+        // In-place write-back, mirroring `get_or_pack_weight_bf16`: same
+        // `wei_inplace_fits` rule, same contiguity requirement, same interim ->
+        // memcpy -> nullptr-sentinel shape.  The int8 pack is `N*K_pad` weight
+        // bytes PLUS a `pack_nr` int32 compensation row per output block, so it
+        // never equals the logical extent and only a caller-declared capacity
+        // can admit it -- see `wei_inplace_fits` in lowoha_common.hpp for why
+        // that row is mandatory rather than droppable.  The copy takes the
+        // whole packed image, so the interleaved rows keep the exact offsets
+        // the microkernel reads them from.
+        const size_t plain_bytes = static_cast<size_t>(K)
+                * static_cast<size_t>(N) * sizeof(int8_t);
+        const bool inplace_layout_ok = (ldb == (transB ? K : N));
+        if (inplace_layout_ok
+                && wei_inplace_fits(
+                        bytes, bytes, plain_bytes, wei_buffer_capacity_bytes)) {
+            void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
+            if (tmp != nullptr) {
+                pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
+                        interleave_split_halves, static_cast<int8_t *>(tmp));
+                // const_cast under the same WC=2 contract the bf16 path
+                // documents: the caller opted in to a mutable single-consumer
+                // weight buffer.
+                std::memcpy(const_cast<int8_t *>(weight), tmp, bytes);
+                zendnnl_aligned_free(tmp);
+                pack_cache.add(key, nullptr); // pack lives in `weight`
+                *out_packed = weight;
+                return status_t::success;
+            }
+            // Interim alloc failed -- fall through to out-of-place, leaving the
+            // caller's buffer unmutated (so no sentinel is cached).
+            log_error(
+                    "custom_kernel pack int8 (in-place): interim "
+                    "aligned_alloc failed for ",
+                    bytes_aligned, " bytes; falling back to out-of-place");
+        }
+
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack int8: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+        pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, static_cast<int8_t *>(raw));
+        pack_cache.add(key, raw);
+        *out_packed = static_cast<const int8_t *>(raw);
         return status_t::success;
     }
 
-    if (s_pack_log) {
-        apilog_verbose("[GRP_MATMUL.PACK MISS INT8] weight=",
-                static_cast<const void *>(weight), " K=", K, " N=", N,
-                " ldb=", ldb, " transB=", (transB ? 1 : 0),
-                " interleave=", (interleave_split_halves ? 1 : 0),
-                " pack_nr=", pack_nr);
-    }
-    // In-place write-back, mirroring `get_or_pack_weight_bf16`: same
-    // `wei_inplace_fits` rule, same contiguity requirement, same interim ->
-    // memcpy -> nullptr-sentinel shape.  The int8 pack is `N*K_pad` weight
-    // bytes PLUS a `pack_nr` int32 compensation row per output block, so it
-    // never equals the logical extent and only a caller-declared capacity can
-    // admit it -- see `wei_inplace_fits` in lowoha_common.hpp for why that row
-    // is mandatory rather than droppable.  The copy takes the whole packed
-    // image, so the interleaved rows keep the exact offsets the microkernel
-    // reads them from.
-    const size_t plain_bytes
-            = static_cast<size_t>(K) * static_cast<size_t>(N) * sizeof(int8_t);
-    const bool inplace_layout_ok = (ldb == (transB ? K : N));
-    if (in_place && inplace_layout_ok
-            && wei_inplace_fits(
-                    bytes, bytes, plain_bytes, wei_buffer_capacity_bytes)) {
-        void *tmp = zendnnl_aligned_alloc(alignment, bytes_aligned);
-        if (tmp != nullptr) {
-            pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
-                    interleave_split_halves, static_cast<int8_t *>(tmp));
-            // const_cast under the same WC=2 contract the bf16 path documents:
-            // the caller opted in to a mutable single-consumer weight buffer.
-            std::memcpy(const_cast<int8_t *>(weight), tmp, bytes);
-            zendnnl_aligned_free(tmp);
-            pack_cache.add(key, nullptr); // sentinel: pack lives in `weight`
-            *out_packed = weight;
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_singleton_int8());
+
+        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
+            serve_cached(cached_pack);
+            log_hit();
             return status_t::success;
         }
-        // Interim alloc failed -- fall through to out-of-place, leaving the
-        // caller's buffer unmutated (so no sentinel is cached).
-        log_error(
-                "custom_kernel pack int8 (in-place): interim aligned_alloc "
-                "failed for ",
-                bytes_aligned, " bytes; falling back to out-of-place");
+
+        log_miss();
+        void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
+        if (raw == nullptr) {
+            log_error("custom_kernel pack int8: aligned_alloc failed for ",
+                    bytes_aligned, " bytes");
+            return status_t::failure;
+        }
+
+        pack_int8_vnni(weight, K, N, ldb, pack_nr, transB,
+                interleave_split_halves, static_cast<int8_t *>(raw));
+        pack_cache.add(key, raw);
+        *out_packed = static_cast<const int8_t *>(raw);
+        return status_t::success;
     }
-
-    void *raw = zendnnl_aligned_alloc(alignment, bytes_aligned);
-    if (raw == nullptr) {
-        log_error("custom_kernel pack int8: aligned_alloc failed for ",
-                bytes_aligned, " bytes");
-        return status_t::failure;
-    }
-
-    pack_int8_vnni(weight, K, N, ldb, pack_nr, transB, interleave_split_halves,
-            static_cast<int8_t *>(raw));
-    pack_cache.add(key, raw);
-
-    *out_packed = static_cast<const int8_t *>(raw);
-    return status_t::success;
 }
 
 void free_owned_packed_weight_int8(const int8_t *packed) {
@@ -1501,10 +1585,7 @@ status_t get_or_pack_weight_s4(const int8_t *weight, int K, int N, int ldb,
     // Pack outside the cache lock. The loser of a duplicate-miss race
     // frees its buffer; get_or_add keeps the first insert.
     void *winner = pack_cache.get_or_add(key, raw);
-    if (winner != raw) {
-        zendnnl_aligned_free(raw);
-        if (was_hit_out != nullptr) *was_hit_out = true;
-    }
+    if (winner != raw) { zendnnl_aligned_free(raw); }
 
     *out_packed = static_cast<const int8_t *>(winner);
     return status_t::success;

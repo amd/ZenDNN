@@ -816,6 +816,326 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulMoEPostop, TestMoEPostop,
         ::testing::ValuesIn(make_moe_postop_params()), MoEPostopParamName);
 
 // ===============================================================================
+// TestChunkedPostPasses: column-chunked gated activation and weighted reduce.
+//
+// With fewer rows than threads both passes split each row into column chunks
+// whose edges are multiples of `kColChunk`, so every column takes the same
+// vector-or-scalar path as a whole-row pass and the chunked output must be
+// bit-identical to the serialized one.  The shapes sit above both serial
+// cutoffs, and the odd widths leave a scalar tail inside the last chunk.
+// ===============================================================================
+namespace {
+std::vector<char> random_rows(data_type_t dt, size_t n, uint32_t seed) {
+    const size_t esz = zendnnl::common::size_of(dt);
+    std::vector<char> out(n * esz);
+    uint32_t s = seed;
+    for (size_t i = 0; i < n; ++i) {
+        s = s * 1664525u + 1013904223u;
+        const float v
+                = (static_cast<float>(s >> 8) / 16777216.0f - 0.5f) * 8.0f;
+        char *p = out.data() + i * esz;
+        if (dt == data_type_t::bf16) {
+            const bfloat16_t b(v);
+            std::memcpy(p, &b, sizeof(b));
+        } else if (dt == data_type_t::f16) {
+            const float16_t h(v);
+            std::memcpy(p, &h, sizeof(h));
+        } else {
+            std::memcpy(p, &v, sizeof(v));
+        }
+    }
+    return out;
+}
+
+const char *chunk_test_dt_name(data_type_t dt) {
+    return dt == data_type_t::bf16   ? "bf16"
+            : dt == data_type_t::f16 ? "f16"
+                                     : "f32";
+}
+
+constexpr int kChunkTestThreads = 32;
+} // namespace
+
+TEST(TestChunkedPostPasses, WeightedReduceMatchesSerial) {
+    using namespace zendnnl::lowoha::matmul;
+    constexpr int kTokens = 4, kTopk = 8;
+    for (data_type_t dt :
+            {data_type_t::f32, data_type_t::bf16, data_type_t::f16}) {
+        for (int D : {4096, 4004}) {
+            const size_t esz = zendnnl::common::size_of(dt);
+            const auto rows
+                    = random_rows(dt, static_cast<size_t>(kTokens) * kTopk * D,
+                            static_cast<uint32_t>(D));
+            std::vector<const void *> row_ptrs(kTokens * kTopk);
+            std::vector<float> weights(kTokens * kTopk);
+            for (int i = 0; i < kTokens * kTopk; ++i) {
+                row_ptrs[i] = rows.data() + static_cast<size_t>(i) * D * esz;
+                weights[i] = 0.1f * static_cast<float>(1 + i % 5);
+            }
+            // 0x7F bytes decode to a value no input here can reduce to, so a
+            // leftover sentinel marks a column neither run wrote.
+            auto run = [&](int num_threads) {
+                std::vector<char> out(
+                        static_cast<size_t>(kTokens) * D * esz, 0x7F);
+                group_matmul_moe_postop_params p {};
+                p.num_tokens = kTokens;
+                p.topk = kTopk;
+                p.output = out.data();
+                p.ldc_output = D;
+                p.topk_weights = weights.data();
+                p.row_ptrs = row_ptrs.data();
+                EXPECT_EQ(
+                        group_matmul_moe_postop_execute(&p, D, num_threads, dt),
+                        status_t::success);
+                return out;
+            };
+            const auto serial = run(1);
+            const auto chunked = run(kChunkTestThreads);
+            EXPECT_EQ(std::memcmp(serial.data(), chunked.data(), serial.size()),
+                    0)
+                    << chunk_test_dt_name(dt) << " D=" << D;
+            const std::vector<char> sentinel(esz, 0x7F);
+            size_t unwritten = 0;
+            for (size_t i = 0; i < chunked.size(); i += esz) {
+                if (std::memcmp(chunked.data() + i, sentinel.data(), esz) == 0)
+                    ++unwritten;
+            }
+            EXPECT_EQ(unwritten, 0u) << chunk_test_dt_name(dt) << " D=" << D;
+        }
+    }
+}
+
+TEST(TestChunkedPostPasses, GatedActMatchesSerial) {
+    using namespace zendnnl::lowoha::matmul;
+    // Four rows over two experts, the second at a padded stride.
+    const std::vector<int> M {3, 1};
+    const std::vector<int> N {2 * 4096, 2 * 4100};
+    const std::vector<int> ldc {N[0], N[1] + 32};
+    for (data_type_t dt :
+            {data_type_t::f32, data_type_t::bf16, data_type_t::f16}) {
+        for (grp_matmul_gated_act_t act : {grp_matmul_gated_act_t::silu_and_mul,
+                     grp_matmul_gated_act_t::gelu_and_mul,
+                     grp_matmul_gated_act_t::swiglu_oai_mul}) {
+            std::vector<std::vector<char>> init(M.size());
+            for (size_t e = 0; e < M.size(); ++e) {
+                init[e] = random_rows(dt, static_cast<size_t>(M[e]) * ldc[e],
+                        static_cast<uint32_t>(11 + e));
+            }
+            grp_matmul_gated_act_params ap;
+            ap.act = act;
+            auto run_all = [&](int num_threads) {
+                auto bufs = init;
+                std::vector<void *> dst(M.size());
+                for (size_t e = 0; e < M.size(); ++e)
+                    dst[e] = bufs[e].data();
+                EXPECT_EQ(group_matmul_moe_act_execute(
+                                  &ap, dst, M, N, ldc, dt, num_threads),
+                        status_t::success);
+                return bufs;
+            };
+            auto run_rows = [&](int num_threads) {
+                auto buf = init[0];
+                apply_gated_act_inplace(act, buf.data(), 0, M[0], N[0], ldc[0],
+                        dt, num_threads);
+                return buf;
+            };
+            const int act_id = static_cast<int>(act);
+            const auto all_serial = run_all(1);
+            const auto all_chunked = run_all(kChunkTestThreads);
+            for (size_t e = 0; e < M.size(); ++e) {
+                EXPECT_EQ(std::memcmp(all_serial[e].data(),
+                                  all_chunked[e].data(), all_serial[e].size()),
+                        0)
+                        << "group_matmul_moe_act_execute "
+                        << chunk_test_dt_name(dt) << " act=" << act_id
+                        << " e=" << e;
+            }
+            const auto rows_serial = run_rows(1);
+            const auto rows_chunked = run_rows(kChunkTestThreads);
+            EXPECT_EQ(std::memcmp(rows_serial.data(), rows_chunked.data(),
+                              rows_serial.size()),
+                    0)
+                    << "apply_gated_act_inplace " << chunk_test_dt_name(dt)
+                    << " act=" << act_id;
+        }
+    }
+}
+
+// Edges of the chunked passes, each compared byte for byte with a serial
+// run at several team sizes: widths under one chunk mixed with wider ones in
+// a single call, both sides of each serial cutoff, padded strides whose
+// padding must stay untouched, and an in-place row range that starts past
+// row 0.
+TEST(TestChunkedPostPasses, GatedActEdgesMatchSerial) {
+    using namespace zendnnl::lowoha::matmul;
+    struct Shape {
+        std::vector<int> M, dim;
+    };
+    // One row of 8192 activated columns is the largest pass kept serialized;
+    // 8193 columns, or two rows of 4097, open the team.
+    const std::vector<Shape> shapes {{{1, 1, 1, 1}, {63, 100, 2100, 4100}},
+            {{1}, {8192}}, {{1}, {8193}}, {{2}, {4097}}};
+    constexpr int kPad = 16;
+    for (data_type_t dt :
+            {data_type_t::f32, data_type_t::bf16, data_type_t::f16}) {
+        const size_t esz = zendnnl::common::size_of(dt);
+        for (grp_matmul_gated_act_t act : {grp_matmul_gated_act_t::silu_and_mul,
+                     grp_matmul_gated_act_t::gelu_and_mul,
+                     grp_matmul_gated_act_t::swiglu_oai_mul}) {
+            grp_matmul_gated_act_params ap;
+            ap.act = act;
+            for (const Shape &s : shapes) {
+                const size_t ops = s.M.size();
+                std::vector<int> N(ops), ldc(ops);
+                std::vector<std::vector<char>> init(ops);
+                for (size_t e = 0; e < ops; ++e) {
+                    N[e] = 2 * s.dim[e];
+                    ldc[e] = N[e] + kPad;
+                    init[e] = random_rows(dt,
+                            static_cast<size_t>(s.M[e]) * ldc[e],
+                            static_cast<uint32_t>(31 + e + s.dim[e]));
+                }
+                auto run = [&](int num_threads) {
+                    auto bufs = init;
+                    std::vector<void *> dst(ops);
+                    for (size_t e = 0; e < ops; ++e)
+                        dst[e] = bufs[e].data();
+                    EXPECT_EQ(group_matmul_moe_act_execute(
+                                      &ap, dst, s.M, N, ldc, dt, num_threads),
+                            status_t::success);
+                    return bufs;
+                };
+                const auto serial = run(1);
+                for (int nt : {2, 3, 7, 32}) {
+                    const auto team = run(nt);
+                    for (size_t e = 0; e < ops; ++e) {
+                        EXPECT_EQ(std::memcmp(serial[e].data(), team[e].data(),
+                                          serial[e].size()),
+                                0)
+                                << chunk_test_dt_name(dt)
+                                << " act=" << static_cast<int>(act)
+                                << " dim=" << s.dim[e] << " threads=" << nt;
+                        for (int m = 0; m < s.M[e]; ++m) {
+                            const size_t pad
+                                    = (static_cast<size_t>(m) * ldc[e] + N[e])
+                                    * esz;
+                            EXPECT_EQ(std::memcmp(team[e].data() + pad,
+                                              init[e].data() + pad, kPad * esz),
+                                    0)
+                                    << "row padding written: "
+                                    << chunk_test_dt_name(dt)
+                                    << " dim=" << s.dim[e] << " threads=" << nt;
+                        }
+                    }
+                }
+            }
+
+            // Rows [1, 3) of four: rows 0 and 3 must come back untouched.
+            const int dim = 4100, n = 2 * dim, ld = n + kPad, rows = 4;
+            const auto init
+                    = random_rows(dt, static_cast<size_t>(rows) * ld, 77u);
+            auto run_rows = [&](int num_threads) {
+                auto buf = init;
+                apply_gated_act_inplace(
+                        act, buf.data(), 1, 3, n, ld, dt, num_threads);
+                return buf;
+            };
+            const auto serial = run_rows(1);
+            const size_t row_bytes = static_cast<size_t>(ld) * esz;
+            EXPECT_EQ(std::memcmp(serial.data(), init.data(), row_bytes), 0);
+            EXPECT_EQ(std::memcmp(serial.data() + 3 * row_bytes,
+                              init.data() + 3 * row_bytes, row_bytes),
+                    0);
+            for (int nt : {2, 3, 7, 32}) {
+                EXPECT_EQ(std::memcmp(serial.data(), run_rows(nt).data(),
+                                  serial.size()),
+                        0)
+                        << "apply_gated_act_inplace rows [1,3) "
+                        << chunk_test_dt_name(dt)
+                        << " act=" << static_cast<int>(act)
+                        << " threads=" << nt;
+            }
+        }
+    }
+}
+
+TEST(TestChunkedPostPasses, WeightedReduceEdgesMatchSerial) {
+    using namespace zendnnl::lowoha::matmul;
+    struct Shape {
+        int tokens, topk, D;
+    };
+    // BF16 with 2 tokens x top-8 x 4096 columns, or 1 token x top-64 x 1024,
+    // is exactly kReduceSerialBytes and opens the team; 4095 columns stays
+    // serialized.  The rest cover widths under one chunk and odd tails.
+    const Shape shapes[] = {{1, 8, 63}, {2, 8, 100}, {2, 8, 2100}, {6, 8, 4100},
+            {2, 8, 4096}, {2, 8, 4095}, {1, 64, 1024}};
+    constexpr int kPad = 9;
+    for (data_type_t dt :
+            {data_type_t::f32, data_type_t::bf16, data_type_t::f16}) {
+        const size_t esz = zendnnl::common::size_of(dt);
+        const std::vector<char> sentinel(esz, 0x7F);
+        for (const Shape &s : shapes) {
+            const int rows_in = s.tokens * s.topk;
+            const auto rows
+                    = random_rows(dt, static_cast<size_t>(rows_in) * s.D,
+                            static_cast<uint32_t>(s.D + s.topk));
+            std::vector<const void *> row_ptrs(rows_in);
+            std::vector<float> weights(rows_in);
+            for (int i = 0; i < rows_in; ++i) {
+                row_ptrs[i] = rows.data() + static_cast<size_t>(i) * s.D * esz;
+                weights[i] = 0.05f * static_cast<float>(1 + i % 7);
+            }
+            const int ldc = s.D + kPad;
+            auto run = [&](int num_threads) {
+                std::vector<char> out(
+                        static_cast<size_t>(s.tokens) * ldc * esz, 0x7F);
+                group_matmul_moe_postop_params p {};
+                p.num_tokens = s.tokens;
+                p.topk = s.topk;
+                p.output = out.data();
+                p.ldc_output = ldc;
+                p.topk_weights = weights.data();
+                p.row_ptrs = row_ptrs.data();
+                EXPECT_EQ(group_matmul_moe_postop_execute(
+                                  &p, s.D, num_threads, dt),
+                        status_t::success);
+                return out;
+            };
+            const auto serial = run(1);
+            for (int nt : {2, 3, 7, 32}) {
+                const auto team = run(nt);
+                EXPECT_EQ(
+                        std::memcmp(serial.data(), team.data(), serial.size()),
+                        0)
+                        << chunk_test_dt_name(dt) << " tokens=" << s.tokens
+                        << " topk=" << s.topk << " D=" << s.D
+                        << " threads=" << nt;
+                size_t unwritten = 0, padding_written = 0;
+                for (int t = 0; t < s.tokens; ++t) {
+                    for (int c = 0; c < ldc; ++c) {
+                        const bool is_sentinel
+                                = std::memcmp(team.data()
+                                                  + (static_cast<size_t>(t)
+                                                                    * ldc
+                                                            + c)
+                                                          * esz,
+                                          sentinel.data(), esz)
+                                == 0;
+                        if (c < s.D && is_sentinel) ++unwritten;
+                        if (c >= s.D && !is_sentinel) ++padding_written;
+                    }
+                }
+                EXPECT_EQ(unwritten, 0u) << chunk_test_dt_name(dt)
+                                         << " D=" << s.D << " threads=" << nt;
+                EXPECT_EQ(padding_written, 0u)
+                        << chunk_test_dt_name(dt) << " D=" << s.D
+                        << " threads=" << nt;
+            }
+        }
+    }
+}
+
+// ===============================================================================
 // [34] TestSingleExpertParallelRouting: single-expert dispatch routing.
 //
 // `group_matmul_direct` picks its mode from `src.size()`: `src.size() == 1`

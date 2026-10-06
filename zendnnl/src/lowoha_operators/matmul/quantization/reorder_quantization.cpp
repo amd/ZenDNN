@@ -408,16 +408,11 @@ status_t group_reorder_quantization_wrapper(
     const bool requires_dynamic_quant
             = group_reorder_quantization_required(params, num_ops);
     auto fallback_per_expert = [&]() -> status_t {
-        // Release any grouped-path arenas a PRIOR call left on a reused
-        // `buffers` object and drop their per-expert views.  The fallback
-        // path owns its memory via `fallback_buf` and never reads
-        // `src_arena` / `scale_arena` / `src_buf` / `scale_buf`, so leaving
-        // them would retain large allocations until destruction and keep
-        // stale pointers that no longer describe the current state.
-        free(buffers.src_arena);
-        free(buffers.scale_arena);
-        buffers.src_arena = nullptr;
-        buffers.scale_arena = nullptr;
+        // Drop per-expert grouped-path views, but keep the arenas.  A
+        // thread-local `buffers` object can then alternate fallback/grouped
+        // calls without freeing and reallocating the large source/scale slabs.
+        // The fallback path owns its memory through fallback_buf and never reads
+        // src_arena / scale_arena.
         buffers.src_buf.clear();
         buffers.scale_buf.clear();
         buffers.fallback_buf.resize(num_ops);
@@ -605,39 +600,18 @@ status_t group_reorder_quantization_wrapper(
             }
         }
     }
-    // Allocate into locals and commit to `buffers` only once BOTH arenas
-    // succeed.  This (a) avoids leaking the src arena if the scale arena
-    // fails, and (b) avoids leaking any arenas a prior call left on a
-    // REUSED `buffers` object (we free the stale ones at commit time).
-    uint8_t *new_src_arena = nullptr;
-    uint8_t *new_scale_arena = nullptr;
-    if (src_total > 0) {
-        new_src_arena = static_cast<uint8_t *>(malloc(src_total));
-        if (!new_src_arena) {
-            log_error(
-                    "Group reorder quantization: failed to allocate source "
-                    "arena");
-            return status_t::failure;
-        }
+    // Grow/reuse the grouped arenas.  Allocation happens before any per-expert
+    // view is published below, so a failed grow leaves the previous arenas
+    // untouched and unreferenced by this call.
+    if (src_total > 0 && !buffers.ensure_src_arena(src_total)) {
+        log_error(
+                "Group reorder quantization: failed to allocate source arena");
+        return status_t::failure;
     }
-    if (scale_total > 0) {
-        new_scale_arena = static_cast<uint8_t *>(malloc(scale_total));
-        if (!new_scale_arena) {
-            log_error(
-                    "Group reorder quantization: failed to allocate scale "
-                    "arena");
-            free(new_src_arena); // release the src arena taken just above
-            return status_t::failure;
-        }
+    if (scale_total > 0 && !buffers.ensure_scale_arena(scale_total)) {
+        log_error("Group reorder quantization: failed to allocate scale arena");
+        return status_t::failure;
     }
-    // Commit: drop any stale arenas from a prior reuse (free(nullptr) is a
-    // no-op), then adopt the freshly-sized ones.  The per-expert
-    // `src_buf` / `scale_buf` views were already reset to null above, so
-    // they cannot dangle into the old arenas.
-    free(buffers.src_arena);
-    free(buffers.scale_arena);
-    buffers.src_arena = new_src_arena;
-    buffers.scale_arena = new_scale_arena;
 
     // Release any per-expert fallback buffers a PRIOR fallback call left on
     // this reused `buffers` object.  The grouped fast path never reads

@@ -26,7 +26,8 @@
 /// Coverage axes (parameterised):
 ///   * MR ∈ {1, 4, 6, 8}  — a representative cross section that
 ///     exercises both the small-MR (no double-buffer) and the
-///     large-MR (full chain) code paths.
+///     large-MR (full chain) code paths, plus MR ∈ {9..12} for the
+///     NV=2 sym kernel, the only tuple that goes past MR=8.
 ///   * NV ∈ {2, 4}        — NR = 32 and NR = 64; the only two
 ///     production NRs (`plan_pack_nr_int8` returns one of these).
 ///   * Compute ∈ {kS8_Sym, kU8_Asym}.
@@ -34,9 +35,9 @@
 ///   * Bias   ∈ {none, bf16, f32, f16} (f16 widened to fp32 in-kernel
 ///     via `_mm512_cvtph_ps`).
 ///
-/// `select_int8_ukernel` returning `nullptr` for any (MR, NV) tuple
-/// where `MR > max_mr_for_nv(NV)` is asserted in the negative
-/// coverage block (the dispatcher's `kfn_table_int8` filler relies
+/// `select_int8_ukernel` returning `nullptr` for any (MR, NV, Compute)
+/// tuple where `MR > max_mr_for_nv_int8(NV, Compute)` is asserted in the
+/// negative coverage block (the dispatcher's `kfn_table_int8` filler relies
 /// on this contract).
 
 #include <gtest/gtest.h>
@@ -196,9 +197,9 @@ void apply_gated_ref(int M, int N, ck::ActKind act, const bfloat16_t *mm,
 TEST(CkInt8UkernelSelect, NonNullForValidTuples) {
     INT8_CK_SKIP_IF_NO_VNNI();
     for (int NV : {2, 4}) {
-        const int max_mr = ck::max_mr_for_nv(NV);
-        for (int MR = 1; MR <= max_mr; ++MR) {
-            for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
+        for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
+            const int max_mr = ck::max_mr_for_nv_int8(NV, C);
+            for (int MR = 1; MR <= max_mr; ++MR) {
                 for (auto act : {ck::ActKind::none, ck::ActKind::swiglu_oai_mul,
                              ck::ActKind::silu_and_mul,
                              ck::ActKind::gelu_and_mul}) {
@@ -222,9 +223,9 @@ TEST(CkInt8UkernelSelect, NonNullForValidTuples) {
 TEST(CkInt8UkernelSelect, F32DstNonNullForNoneNullForGated) {
     INT8_CK_SKIP_IF_NO_VNNI();
     for (int NV : {2, 4}) {
-        const int max_mr = ck::max_mr_for_nv(NV);
-        for (int MR = 1; MR <= max_mr; ++MR) {
-            for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
+        for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
+            const int max_mr = ck::max_mr_for_nv_int8(NV, C);
+            for (int MR = 1; MR <= max_mr; ++MR) {
                 EXPECT_NE(ck::select_int8_ukernel(MR, NV, C, ck::ActKind::none,
                                   ck::DstDt::kF32),
                         nullptr)
@@ -248,13 +249,16 @@ TEST(CkInt8UkernelSelect, F32DstNonNullForNoneNullForGated) {
 TEST(CkInt8UkernelSelect, NullForOutOfRangeMR) {
     INT8_CK_SKIP_IF_NO_VNNI();
     for (int NV : {2, 4}) {
-        const int max_mr = ck::max_mr_for_nv(NV);
-        auto *fn = ck::select_int8_ukernel(max_mr + 1, NV,
-                ck::IntCompute::kS8_Sym, ck::ActKind::none, ck::DstDt::kBf16);
-        EXPECT_EQ(fn, nullptr)
-                << "select_int8_ukernel must return null for MR > "
-                   "max_mr_for_nv(NV)"
-                << " (NV=" << NV << " MR=" << (max_mr + 1) << ")";
+        for (auto C : {ck::IntCompute::kS8_Sym, ck::IntCompute::kU8_Asym}) {
+            const int max_mr = ck::max_mr_for_nv_int8(NV, C);
+            auto *fn = ck::select_int8_ukernel(
+                    max_mr + 1, NV, C, ck::ActKind::none, ck::DstDt::kBf16);
+            EXPECT_EQ(fn, nullptr)
+                    << "select_int8_ukernel must return null for MR > "
+                       "max_mr_for_nv_int8(NV, compute)"
+                    << " (NV=" << NV << " MR=" << (max_mr + 1)
+                    << " compute=" << static_cast<int>(C) << ")";
+        }
     }
 }
 
@@ -288,8 +292,9 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
     const int pack_nr = NR;
     const int K = c.K;
     ASSERT_EQ(K % 4, 0) << "K must be a multiple of kVNNIInt8Quad=4";
-    ASSERT_LE(MR, ck::max_mr_for_nv(NV))
-            << "MR exceeds max_mr_for_nv(NV) — case is malformed";
+    ASSERT_LE(MR, ck::max_mr_for_nv_int8(NV, c.compute))
+            << "MR exceeds max_mr_for_nv_int8(NV, compute) — case is "
+               "malformed";
     const int lda = (c.lda_pad > 0) ? c.lda_pad : K;
     ASSERT_GE(lda, K) << "lda must cover K — case is malformed";
 
@@ -734,7 +739,63 @@ INSTANTIATE_TEST_SUITE_P(SymAndAsym, CkInt8UkernelTest,
                         "sym_mr5_nv2_K68_ktail"},
                 Int8UkernelCase {3, 4, 68, ck::IntCompute::kS8_Sym,
                         ck::ActKind::none, ck::BiasKind::none,
-                        "sym_mr3_nv4_K68_ktail"}),
+                        "sym_mr3_nv4_K68_ktail"},
+                // NV=2 sym runs up to MR=12, past every other tuple's
+                // cap of 8, so MR 9..12 need their own cells.
+                Int8UkernelCase {9, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr9_nv2_K64_none"},
+                Int8UkernelCase {10, 2, 128, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::fp32,
+                        "sym_mr10_nv2_K128_none_biasf32"},
+                Int8UkernelCase {11, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::bf16,
+                        "sym_mr11_nv2_K68_none_biasbf16_ktail"},
+                Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr12_nv2_K64_none"},
+                Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::none,
+                        "sym_mr12_nv2_K64_swiglu"},
+                Int8UkernelCase {12, 2, 128, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::silu_and_mul, ck::BiasKind::bf16,
+                        "sym_mr12_nv2_K128_silu_biasbf16"},
+                Int8UkernelCase {10, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        "sym_mr10_nv2_K64_gelu"},
+                Int8UkernelCase {12, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::none,
+                        "sym_mr12_nv2_K64_lda80_none", 80},
+                Int8UkernelCase {9, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::silu_and_mul, ck::BiasKind::f16,
+                        "sym_mr9_nv2_K76_silu_biasf16_ktail3"},
+                Int8UkernelCase {9, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::fp32,
+                        "sym_mr9_nv2_K64_swiglu_biasf32"},
+                Int8UkernelCase {9, 2, 128, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::gelu_and_mul, ck::BiasKind::none,
+                        "sym_mr9_nv2_K128_gelu"},
+                Int8UkernelCase {10, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::f16,
+                        "sym_mr10_nv2_K76_swiglu_biasf16_ktail3"},
+                Int8UkernelCase {10, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::silu_and_mul, ck::BiasKind::none,
+                        "sym_mr10_nv2_K64_lda96_silu", 96},
+                Int8UkernelCase {11, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::gelu_and_mul, ck::BiasKind::fp32,
+                        "sym_mr11_nv2_K76_gelu_biasf32_ktail3"},
+                Int8UkernelCase {11, 2, 64, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::silu_and_mul, ck::BiasKind::f16,
+                        "sym_mr11_nv2_K64_silu_biasf16"},
+                Int8UkernelCase {11, 2, 128, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::swiglu_oai_mul, ck::BiasKind::bf16,
+                        "sym_mr11_nv2_K128_swiglu_biasbf16"},
+                Int8UkernelCase {12, 2, 68, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::gelu_and_mul, ck::BiasKind::f16,
+                        "sym_mr12_nv2_K68_gelu_biasf16_ktail1"},
+                Int8UkernelCase {12, 2, 76, ck::IntCompute::kS8_Sym,
+                        ck::ActKind::none, ck::BiasKind::f16,
+                        "sym_mr12_nv2_K76_none_biasf16_ktail3"}),
         [](const ::testing::TestParamInfo<Int8UkernelCase> &info) {
             return info.param.label;
         });
@@ -893,6 +954,8 @@ TEST(CkInt8UkernelF32Dst, MatchesScalarF32Reference) {
             {2, 2, 64, ck::IntCompute::kS8_Sym}, // double-buffer, sym
             {3, 2, 256, ck::IntCompute::kS8_Sym}, // double-buffer, multi-K
             {8, 2, 64, ck::IntCompute::kS8_Sym}, // single-buffer, sym
+            {9, 2, 76, ck::IntCompute::kS8_Sym}, // NV=2 sym past MR=8, K tail
+            {12, 2, 256, ck::IntCompute::kS8_Sym}, // NV=2 sym max MR, multi-K
             {1, 4, 64, ck::IntCompute::kU8_Asym}, // double-buffer, asym
             {3, 4, 128, ck::IntCompute::kU8_Asym}, // double-buffer, asym
             {6, 4, 256, ck::IntCompute::kU8_Asym}, // single-buffer, asym

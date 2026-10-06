@@ -266,9 +266,12 @@ inline void reset_thread_local_fused_moe_state() {
     std::vector<void *> {}.swap(s.op2_dst_internal);
     std::vector<int> {}.swap(s.op1_ldc_local);
     ntile_flat_parallel::reset_thread_local_scratch();
-    // The per-expert dynamic-quant pool: every DA8W8 fused call quantizes
-    // W2's float intermediate per expert, so this holds a high-water block.
+    // The dynamic-quant pools: every DA8W8 call quantizes its sources, per
+    // expert or grouped, so each holds a high-water block.
     get_thread_local_quant_buffers().release();
+    for (int p = 0; p < static_cast<int>(group_quant_pool_t::count); ++p)
+        get_thread_local_group_quant_buffers(static_cast<group_quant_pool_t>(p))
+                .release();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1315,7 +1318,9 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     // exec vector before Pass 1 mutates it.
     std::vector<const void *> pass1_quant_src;
     std::vector<int> pass1_quant_lda;
-    group_reorder_quant_buffers_t pass1_quant_buffers;
+    group_reorder_quant_buffers_t &pass1_quant_buffers
+            = get_thread_local_group_quant_buffers(
+                    group_quant_pool_t::fused_pass1);
     bool pass1_group_quantized = false;
     if (enable_group_dq) {
         const status_t pass1_quant_st = group_reorder_quantization_wrapper(src,
@@ -1413,7 +1418,9 @@ inline status_t run_fused_moe_legacy_two_pass(grp_matmul_gated_act_t act,
     // `execute_expert_slice` (params_down still carries dynamic_quant).
     std::vector<const void *> pass2_quant_src;
     std::vector<int> pass2_quant_lda;
-    group_reorder_quant_buffers_t pass2_quant_buffers;
+    group_reorder_quant_buffers_t &pass2_quant_buffers
+            = get_thread_local_group_quant_buffers(
+                    group_quant_pool_t::fused_pass2);
     bool pass2_group_quantized = false;
     if (enable_group_dq) {
         const status_t pass2_quant_st

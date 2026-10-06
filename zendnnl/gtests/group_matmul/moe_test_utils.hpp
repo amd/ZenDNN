@@ -737,14 +737,21 @@ struct CustomKernelOverride {
 
 // RAII guard for the decode M-proportional A/B knob
 // (`ZENDNNL_GRP_MATMUL_DECODE_PROPORTIONAL`).  `true` forces the
-// proportional split ON, `false` forces uniform Phase B base+1.  Same
-// save/restore-on-scope-exit contract as `CustomKernelOverride`.
+// proportional split ON, `false` forces uniform Phase B base+1.  The integer
+// overload accepts the production sentinel `-1` (no override: the env, then
+// the auto default, decides).
+// Same save/restore-on-scope-exit contract as `CustomKernelOverride`.
 struct DecodeProportionalOverride {
     int prev;
     explicit DecodeProportionalOverride(bool value) {
         prev = zendnnl::lowoha::matmul::test_api ::
                        s_grp_matmul_decode_proportional_override.exchange(
                                value ? 1 : 0, std::memory_order_relaxed);
+    }
+    explicit DecodeProportionalOverride(int value) {
+        prev = zendnnl::lowoha::matmul::test_api ::
+                       s_grp_matmul_decode_proportional_override.exchange(
+                               value, std::memory_order_relaxed);
     }
     ~DecodeProportionalOverride() {
         zendnnl::lowoha::matmul::test_api ::

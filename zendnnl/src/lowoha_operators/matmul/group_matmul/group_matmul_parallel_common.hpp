@@ -73,6 +73,32 @@ inline constexpr int kGrpMatmulAlgoNTileFlatParallel = 4;
 // files, and a bare `5` there says nothing about the strategy it selects.
 inline constexpr int kGrpMatmulAlgoExpertParallel = 5;
 
+// Team size for the short passes around the grouped GEMMs (gated activation,
+// weighted reduce, tight-dst copy, DecodeD, ALGO 5): a region opens either
+// the caller's whole team or a serialized region, never a team in between.
+// A serialized region leaves the pool alone, while any other size makes the
+// runtime rebuild the pool there and again at the next GEMM region.
+//
+// Row-wise passes that run with fewer rows than threads split each row into
+// column chunks until the team has work.  Chunk edges are multiples of
+// `kColChunk` columns: a multiple of the 16-lane vector width keeps every
+// column on the same vector-or-scalar path as a whole-row pass, so chunked
+// output is bit-identical, and 64 keeps neighbouring chunks off each other's
+// output cache lines.
+inline constexpr int kColChunk = 64;
+
+inline int col_chunks_per_row(int64_t rows, int width, int num_threads) {
+    if (num_threads <= 1 || rows <= 0 || rows >= num_threads) return 1;
+    const int64_t want = (num_threads + rows - 1) / rows;
+    return static_cast<int>(
+            std::max<int64_t>(1, std::min<int64_t>(want, width / kColChunk)));
+}
+
+inline int col_chunk_span(int width, int chunks) {
+    const int per = (width + chunks - 1) / chunks;
+    return (per + kColChunk - 1) / kColChunk * kColChunk;
+}
+
 inline constexpr bool is_grp_matmul_generic_algo(int algo) {
     return algo == 1 || algo == 2 || algo == 3
             || algo == kGrpMatmulAlgoExpertParallel
@@ -1996,6 +2022,24 @@ inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
 inline reorder_quant_buffers_t &get_thread_local_quant_buffers() {
     static thread_local reorder_quant_buffers_t buffers;
     return buffers;
+}
+
+/// The per-thread pools the grouped source quantization fills on the calling
+/// thread, one per call site: the two fused-MoE passes and the unfused
+/// grouped call.  Named for the same reason as
+/// `get_thread_local_quant_buffers`.
+enum class group_quant_pool_t : int {
+    fused_pass1,
+    fused_pass2,
+    unfused,
+    count
+};
+
+inline group_reorder_quant_buffers_t &get_thread_local_group_quant_buffers(
+        group_quant_pool_t pool) {
+    static thread_local group_reorder_quant_buffers_t
+            pools[static_cast<int>(group_quant_pool_t::count)];
+    return pools[static_cast<int>(pool)];
 }
 
 /// Status-bearing form of `execute_expert_slice`, for callers that can

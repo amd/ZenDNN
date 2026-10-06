@@ -200,9 +200,15 @@ status_t warm_pack_all_custom_kernel_experts(
 
     int att = 0, ok = 0, hits = 0, misses = 0, skip = 0;
 #if defined(_OPENMP)
-    const int pack_threads = static_cast<int>(
-            std::min(bound, static_cast<size_t>(omp_get_max_threads())));
-#pragma omp parallel for if (is_s4 && !omp_in_parallel() && pack_threads > 1) \
+    // BF16 and INT8 misses pack under their family mutex, so only the F16
+    // and S4 families, which pack outside any lock, gain from a team.
+    const bool lock_free_pack = dtype_family == WarmDtypeFamily::kF16
+            || dtype_family == WarmDtypeFamily::kS4;
+    const int pack_threads = lock_free_pack
+            ? static_cast<int>(std::min(
+                      bound, static_cast<size_t>(omp_get_max_threads())))
+            : 1;
+#pragma omp parallel for if (!omp_in_parallel() && pack_threads > 1) \
         num_threads(pack_threads) schedule(dynamic) \
         reduction(+ : att, ok, hits, misses, skip)
 #endif

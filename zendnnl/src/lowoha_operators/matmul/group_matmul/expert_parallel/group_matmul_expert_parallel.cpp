@@ -132,9 +132,6 @@ void parallel_per_expert(const std::vector<char> &layout,
     scoped_active_levels guard(1);
 
     const bool want_act = (fused_act != grp_matmul_gated_act_t::none);
-    // No intra-expert split, so threads beyond the firing-expert count can
-    // never win a ticket and only widen the fork/join.
-    const int nthr = std::min(num_threads, num_active);
 
     // ALGO 5 has no planner, so this is the only record of what it decided.
     // `active < num_threads` means idle cores no tuning can reach.
@@ -151,15 +148,18 @@ void parallel_per_expert(const std::vector<char> &layout,
             }
         }
         apilog_info("[GRP_MATMUL.PLAN] algo=5 expert_parallel num_ops=",
-                num_ops, " active=", num_active, " team_req=", nthr, "/",
-                num_threads, " act=", (want_act ? "fused_pass" : "none"),
+                num_ops, " active=", num_active, " threads=", num_threads,
+                " act=", (want_act ? "fused_pass" : "none"),
                 " kernel=", static_cast<int>(first_kernel),
                 " kernel_mixed=", (mixed_kernels ? 1 : 0));
     }
 
-    // `if`: one firing expert has nothing to distribute, and that is the M=1
-    // decode shape where the fixed cost is the whole cost.
-#pragma omp parallel for num_threads(nthr) \
+    // The full team even though threads beyond the firing-expert count never
+    // win a ticket (see the team-size note in
+    // group_matmul_parallel_common.hpp).  `if`: one firing expert has nothing
+    // to distribute, and that is the M=1 decode shape where the fixed cost is
+    // the whole cost.
+#pragma omp parallel for num_threads(num_threads) \
         schedule(dynamic, 1) if (num_active > 1)
     for (int a = 0; a < num_active; ++a) {
         const int i = active[a];
@@ -459,14 +459,12 @@ expert_parallel_result try_expert_parallel_pipeline(
     scoped_active_levels guard(1);
 
     const bool want_act = (fused_act != grp_matmul_gated_act_t::none);
-    // Clamped for the same reason `parallel_per_expert` clamps.
-    const int nthr = std::min(num_threads, num_active);
 
     static const bool s_log_plan = apilog_info_enabled();
     if (s_log_plan) {
         apilog_info("[GRP_MATMUL.PLAN] algo=5 expert_parallel_fused num_ops=",
-                num_ops, " active=", num_active, " team_req=", nthr, "/",
-                num_threads, " act=", (want_act ? "fused_pass" : "none"),
+                num_ops, " active=", num_active, " threads=", num_threads,
+                " act=", (want_act ? "fused_pass" : "none"),
                 " regime=", (regime == half_regime::da8w8 ? "da8w8" : "float"),
                 " kernel=", static_cast<int>(algo));
     }
@@ -481,8 +479,9 @@ expert_parallel_result try_expert_parallel_pipeline(
     // is ordered by the implicit barrier.
     std::atomic<bool> slice_failed {false};
 
-    // See the note on `parallel_per_expert`'s loop for the `if` clause.
-#pragma omp parallel for num_threads(nthr) \
+    // See the note on `parallel_per_expert`'s loop for the team size and the
+    // `if` clause.
+#pragma omp parallel for num_threads(num_threads) \
         schedule(dynamic, 1) if (num_active > 1)
     for (int a = 0; a < num_active; ++a) {
         // Drain the remaining iterations cheaply once any expert has failed:

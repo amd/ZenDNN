@@ -115,6 +115,10 @@ void PrintTo(const GroupQuantMatmulType &value, ::std::ostream *os);
  *                    test model sparse MoE routing where some experts receive
  *                    zero tokens (`active_rows[i] == 0`) while still owning
  *                    full-size weight / scale buffers.
+ *  @param dq_compute Compute dtype for dynamically quantized S8-weight
+ *                    experts (default s8 = symmetric).  `u8` selects the
+ *                    asymmetric path and declares a per-token s32 `src_zp`
+ *                    for the source quantization to fill.
  *  @return group_matmul_direct status
  */
 status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
@@ -124,6 +128,7 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const group_matmul_moe_postop_params *moe_postop = nullptr,
         const grp_matmul_gated_act_params *gated_act = nullptr,
         const std::vector<int> &pack_format_b = {},
-        const std::vector<int> &active_rows = {});
+        const std::vector<int> &active_rows = {},
+        data_type_t dq_compute = data_type_t::s8);
 
 #endif // ZENDNNL_GTESTS_GROUP_MATMUL_TEST_HELPERS_HPP
