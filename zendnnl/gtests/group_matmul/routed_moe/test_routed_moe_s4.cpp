@@ -840,6 +840,28 @@ TEST_F(RoutedMoES4Validate, InvalidGroupsDtypesAndStridesHaveExecuteParity) {
     expect_rejected(params, status_t::unimplemented);
 }
 
+TEST_F(RoutedMoES4Execute, NullGeneratedSourceScaleAcceptsF32AndBf16Metadata) {
+    for (const data_type_t scale_dt : {data_type_t::f32, data_type_t::bf16}) {
+        SCOPED_TRACE(::testing::Message()
+                << "src_scale_dt=" << static_cast<int>(scale_dt));
+        group_matmul_routed_moe_flush_weight_cache();
+        reset_grouped_s4_caches();
+
+        s4_problem pb;
+        pb.build(8, 0x4435u + static_cast<uint32_t>(scale_dt));
+        s4_call call(pb);
+        call.primary.params.quant_params.src_scale.buff = nullptr;
+        call.primary.params.quant_params.src_scale.dt = scale_dt;
+        call.secondary.params.quant_params.src_scale.buff = nullptr;
+        call.secondary.params.quant_params.src_scale.dt = scale_dt;
+
+        oracle_options oracle;
+        oracle.reduction = oracle_reduction_t::fused_f32;
+        ASSERT_NO_FATAL_FAILURE(check_native_high_level(
+                pb, call, oracle, w4_reduction_path_t::fused_f32));
+    }
+}
+
 TEST_F(RoutedMoES4Execute,
         NativeDecodeMatchesScalarOracleAndGenericSupplement) {
     for (int64_t tokens : {int64_t {1}, int64_t {9}, int64_t {16}}) {

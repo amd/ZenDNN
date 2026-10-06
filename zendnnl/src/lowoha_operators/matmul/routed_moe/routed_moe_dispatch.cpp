@@ -1216,8 +1216,9 @@ bool fast_w4_candidate(const char layout_src, const bool trans_src,
     const auto per_token_scale
             = [num_tokens](
                       const matmul_quantization_params_t::matmul_quant_t &q) {
-        return q.dt == data_type_t::f32 && q.dims.size() == 2
-                && q.dims[0] == num_tokens && q.dims[1] == 1;
+        return (q.dt == data_type_t::f32 || q.dt == data_type_t::bf16)
+                && q.dims.size() == 2 && q.dims[0] == num_tokens
+                && q.dims[1] == 1;
     };
     return p1.dtypes.src == data_type_t::bf16
             && p1.dtypes.wei == data_type_t::s4
