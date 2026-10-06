@@ -51,6 +51,17 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     auto &config = zendnnl::common::matmul_config_t::instance();
     if (!config.get_custom_kernel_route()) return false;
 
+    // One-op grouped AUTO owns an AOCL-DLP prompt layout plus a CK decode
+    // layout. Other scalar backends have independent in-place cache formats
+    // that this path cannot cross-warm. Routing them can therefore trigger a
+    // late process-wide cache-mode downgrade after weights were already
+    // mutated in place. Restrict scalar CK routing to MATMUL_ALGO=1, whose
+    // AOCL-DLP layout participates in the grouped cross-warm contract.
+    if (config.get_algo()
+            != static_cast<int32_t>(matmul_algo_t::aocl_dlp_blocked)) {
+        return false;
+    }
+
     const int32_t global_cache = config.get_weight_cache();
     if (global_cache < 0 || global_cache > 2) return false;
     if (!custom_kernel::dispatch_supported() || !get_grp_matmul_custom_kernel())
@@ -63,10 +74,8 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (params.mem_format_a != 'n') return false;
     if (omp_in_parallel() || omp_get_dynamic()) return false;
 
-    // Preserve a per-operation algorithm chosen through the API.  The
-    // process-wide algorithm, however, is the fallback backend when CK is
-    // disabled, ineligible, or declined and must not veto an enabled CK
-    // attempt.  Layout-specific prepacked inputs remain excluded below by the
+    // Preserve a per-operation algorithm chosen through the API.
+    // Layout-specific prepacked inputs remain excluded below by the
     // mem_format_b == 'n' contract.
     if (params.lowoha_algo != matmul_algo_t::none) return false;
 

@@ -72,7 +72,7 @@ struct ScalarRouteConfigGuard {
     }
 };
 
-TEST(CkDispatchRouting, ScalarRouteUsesGlobalAlgoAsFallback) {
+TEST(CkDispatchRouting, ScalarRouteRequiresMatmulAlgo1) {
     CK_SKIP_IF_NO_BF16_ISA();
 
     ScalarRouteConfigGuard guard;
@@ -90,24 +90,50 @@ TEST(CkDispatchRouting, ScalarRouteUsesGlobalAlgoAsFallback) {
     params.dtypes.dst = data_type_t::bf16;
     params.dtypes.bias = data_type_t::none;
 
-    // The process-wide AOCL selection is the fallback; an enabled scalar CK
-    // route still gets the first opportunity for an eligible raw BF16 call.
-    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
-            /*M=*/8, /*N=*/2048, /*K=*/256, /*batch_count=*/1,
-            /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f, /*beta=*/0.0f,
-            /*bias=*/nullptr, /*ldb=*/256, /*is_weights_const=*/true, params));
+    const auto routable = [&]() {
+        return zendnnl::lowoha::matmul::custom_kernel_routable('r',
+                /*M=*/8, /*N=*/2048, /*K=*/256, /*batch_count=*/1,
+                /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f,
+                /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
+                /*is_weights_const=*/true, params);
+    };
+
+    // Only MATMUL_ALGO=1 (AOCL-DLP blocked) shares the grouped AUTO
+    // cross-warm contract used by the scalar CK route.
+    EXPECT_TRUE(routable());
+
+    const zendnnl::common::matmul_algo_t rejected_algos[] = {
+            zendnnl::common::matmul_algo_t::none,
+            zendnnl::common::matmul_algo_t::dynamic_dispatch,
+            zendnnl::common::matmul_algo_t::onednn_blocked,
+            zendnnl::common::matmul_algo_t::libxsmm_blocked,
+            zendnnl::common::matmul_algo_t::aocl_dlp,
+            zendnnl::common::matmul_algo_t::onednn,
+            zendnnl::common::matmul_algo_t::libxsmm,
+            zendnnl::common::matmul_algo_t::batched_sgemm,
+            zendnnl::common::matmul_algo_t::auto_tuner,
+            zendnnl::common::matmul_algo_t::reference,
+            zendnnl::common::matmul_algo_t::native_gemm,
+            zendnnl::common::matmul_algo_t::native_brgemm,
+            zendnnl::common::matmul_algo_t::moe_custom_kernel,
+    };
+    for (const auto algo : rejected_algos) {
+        guard.config.set_algo(static_cast<int32_t>(algo));
+        EXPECT_FALSE(routable()) << "unexpected scalar CK route for algo="
+                                 << static_cast<int32_t>(algo);
+    }
 
     // A per-operation API selection remains stronger than the process-wide
     // CK policy because grouped fallback cannot preserve that local choice.
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
     params.lowoha_algo = zendnnl::common::matmul_algo_t::onednn;
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 8, 2048,
-            256, 1, false, true, 1.0f, 0.0f, nullptr, 256, true, params));
+    EXPECT_FALSE(routable());
 
     // Disabling the scalar CK knob restores the configured AOCL path.
     params.lowoha_algo = zendnnl::common::matmul_algo_t::none;
     guard.config.set_custom_kernel_route(false);
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 8, 2048,
-            256, 1, false, true, 1.0f, 0.0f, nullptr, 256, true, params));
+    EXPECT_FALSE(routable());
 }
 
 // ──────────────────────────────────────────────────────────────────
