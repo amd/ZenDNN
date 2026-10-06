@@ -34,7 +34,7 @@ void matmul_config_t::set_default_config() {
     set_otf_bpack(0);
     set_zp_comp_cache(true); // Enable ZP compensation caching by default
     set_accum_type(data_type_t::f32); // Default to F32 accumulation
-    set_dlp_m_hint(32);
+    set_dlp_m_hint(0);
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {
@@ -49,7 +49,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     bool zp_comp_cache_enabled = true; // Default enabled
     bool custom_kernel_route = true;
     uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
-    int64_t dlp_m_hint = 32;
+    int64_t dlp_m_hint = 0;
     auto matmul_json = runtime_variables_json["matmul"];
     if (!matmul_json.empty()) {
         auto matmul_algo_json = matmul_json["mm_kernel"];
@@ -99,7 +99,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
                 apilog_warning("Unrecognized matmul dlp_m_hint JSON value ",
                         dlp_m_hint_json.dump(),
                         "; expected a non-negative integer (0 disables "
-                        "hints). Defaulting to 32.");
+                        "hints). Defaulting to 0.");
             }
         }
         auto bmm_algo_json = matmul_json["bmm_kernel"];
@@ -371,7 +371,7 @@ void matmul_config_t::set_env_config() {
     set_tile_n(tile_n);
 
     char *dlp_m_hint_env = std::getenv("ZENDNNL_DLP_M_HINT");
-    int64_t dlp_m_hint = 32;
+    int64_t dlp_m_hint = 0;
     if (dlp_m_hint_env) {
         bool valid = false;
         try {
@@ -384,7 +384,7 @@ void matmul_config_t::set_env_config() {
             apilog_warning("Unrecognized ZENDNNL_DLP_M_HINT value '",
                     dlp_m_hint_env,
                     "'; expected a non-negative base-10 integer (0 disables "
-                    "hints). Defaulting to 32.");
+                    "hints). Defaulting to 0.");
         }
     }
     set_dlp_m_hint(dlp_m_hint);

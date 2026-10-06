@@ -149,7 +149,7 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
     // share, so both resolve the hint decision identically.  For a family that
     // carries unified metadata the dispatcher folds `m_hint`/`nt_hint` into
     // the cache key AND performs the reorder under those hints whenever
-    // `ZENDNNL_DLP_M_HINT` is live; it defaults to 32.  A warm that skipped
+    // `ZENDNNL_DLP_M_HINT` is enabled (> 0).  A warm that skipped
     // either addresses a slot the dispatcher never queries: under WC=1 that
     // costs an unread cache entry, and under WC=2 the mutation lands in one
     // slot while the lookup misses in another and reorders the already-blocked

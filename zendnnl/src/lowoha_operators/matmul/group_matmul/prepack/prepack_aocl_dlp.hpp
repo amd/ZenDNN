@@ -119,7 +119,7 @@ struct AoclDlpPackProbeStats {
 /// reverse, populates a key it never queries.
 ///
 /// `num_threads` must be the value the dispatcher will run this weight under:
-/// with `ZENDNNL_DLP_M_HINT` live (default 32) the runtime keys on `m_hint`
+/// with `ZENDNNL_DLP_M_HINT` enabled (> 0) the runtime keys on `m_hint`
 /// and `nt_hint` and reorders under them, and AOCL treats `nt_hint` as part of
 /// the reordered layout's identity.  Warming under a different count populates
 /// a key the dispatcher never queries.  `0` resolves it the same way

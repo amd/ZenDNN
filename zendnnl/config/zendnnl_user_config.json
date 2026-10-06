@@ -42,13 +42,13 @@
                 "acceptable values for weight_cache are as follows",
                 "0, 1",
                 "custom_kernel accepts 0 or 1; defaults to 0",
-                "dlp_m_hint accepts a non-negative integer; defaults to 32; 0 disables hints"
+                "dlp_m_hint accepts a non-negative integer; defaults to 0; 0 disables hints"
             ],
             "mm_kernel" : "none",
             "bmm_kernel" : "none",
             "weight_cache" : "0",
             "custom_kernel" : "0",
-            "dlp_m_hint" : 32
+            "dlp_m_hint" : 0
         }
     }
 }

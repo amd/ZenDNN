@@ -6817,7 +6817,7 @@ int run_lowoha_weight_prepack_s8_test() {
 // Inverse of the prepack examples. Pack a plain KxN weight, recover it
 // with weight_unreorder_size + reorder_direct (is_unreorder), and compare.
 // Skips when AOCL-DLP is not built. bf16 and s8 keep the process m_hint
-// (default 32) so pack and unpack share gemm_hints.
+// (default 0, hints off) so pack and unpack share gemm_hints.
 //==============================================================================
 
 // Shared prepack -> unreorder -> verify round-trip for one weight dtype.

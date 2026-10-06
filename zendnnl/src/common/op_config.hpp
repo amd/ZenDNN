@@ -328,7 +328,7 @@ private:
     bool mm_partitioner_enabled; /**< Enable MM partitioner. */
     int32_t tile_m; /**< Tile size for M dimension. */
     int32_t tile_n; /**< Tile size for N dimension. */
-    int64_t dlp_m_hint = 32; /**< AOCL DLP m_hint; 0 disables gemm_hints. */
+    int64_t dlp_m_hint = 0; /**< AOCL DLP m_hint; 0 disables gemm_hints. */
 };
 
 /** @enum embag_algo_t
