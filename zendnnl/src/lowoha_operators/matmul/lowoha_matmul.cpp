@@ -346,12 +346,13 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
     // Wide-N projection: run it as a one-op group so it reaches the
     // single-expert custom-kernel path.  Safe to sit ahead of the
-    // reorder-quant and GGML-unpack blocks below because the predicate
-    // already excludes dynamic_quant and GGML-packed weights, so neither
-    // block would have rewritten `src` / `weight` for a routable call.
+    // reorder-quant and GGML-unpack blocks below: routed INT8 calls are
+    // quantized by group_matmul_direct's own pre-pass, while the predicate
+    // still excludes INT4 and GGML-packed weights.
     // A declined grouped call falls through to the standard dispatch.
-    if (custom_kernel_routable(layout, M, N, K, batch_count, transA, transB,
-                alpha, beta, bias, ldb, is_weights_const, exec_params)) {
+    if (custom_kernel_routable(layout, M, N, K, num_threads, batch_count,
+                transA, transB, alpha, beta, bias, ldb, is_weights_const,
+                exec_params)) {
         matmul_params grp_param = exec_params;
         grp_param.num_threads = num_threads;
 

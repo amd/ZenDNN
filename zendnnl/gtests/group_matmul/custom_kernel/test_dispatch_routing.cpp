@@ -72,7 +72,7 @@ struct ScalarRouteConfigGuard {
     }
 };
 
-TEST(CkDispatchRouting, ScalarRouteRequiresMatmulAlgo1) {
+TEST(CkDispatchRouting, ScalarRouteUsesEffectiveMatmulAlgo1) {
     CK_SKIP_IF_NO_BF16_ISA();
 
     ScalarRouteConfigGuard guard;
@@ -92,41 +92,17 @@ TEST(CkDispatchRouting, ScalarRouteRequiresMatmulAlgo1) {
 
     const auto routable = [&]() {
         return zendnnl::lowoha::matmul::custom_kernel_routable('r',
-                /*M=*/8, /*N=*/2048, /*K=*/256, /*batch_count=*/1,
-                /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f,
-                /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
+                /*M=*/8, /*N=*/2048, /*K=*/256, /*num_threads=*/32,
+                /*batch_count=*/1, /*transA=*/false, /*transB=*/true,
+                /*alpha=*/1.0f, /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
                 /*is_weights_const=*/true, params);
     };
 
-    // Only MATMUL_ALGO=1 (AOCL-DLP blocked) shares the grouped AUTO
-    // cross-warm contract used by the scalar CK route.
+    // The effective grouped fallback is AOCL-DLP blocked.
     EXPECT_TRUE(routable());
-
-    const zendnnl::common::matmul_algo_t rejected_algos[] = {
-            zendnnl::common::matmul_algo_t::none,
-            zendnnl::common::matmul_algo_t::dynamic_dispatch,
-            zendnnl::common::matmul_algo_t::onednn_blocked,
-            zendnnl::common::matmul_algo_t::libxsmm_blocked,
-            zendnnl::common::matmul_algo_t::aocl_dlp,
-            zendnnl::common::matmul_algo_t::onednn,
-            zendnnl::common::matmul_algo_t::libxsmm,
-            zendnnl::common::matmul_algo_t::batched_sgemm,
-            zendnnl::common::matmul_algo_t::auto_tuner,
-            zendnnl::common::matmul_algo_t::reference,
-            zendnnl::common::matmul_algo_t::native_gemm,
-            zendnnl::common::matmul_algo_t::native_brgemm,
-            zendnnl::common::matmul_algo_t::moe_custom_kernel,
-    };
-    for (const auto algo : rejected_algos) {
-        guard.config.set_algo(static_cast<int32_t>(algo));
-        EXPECT_FALSE(routable()) << "unexpected scalar CK route for algo="
-                                 << static_cast<int32_t>(algo);
-    }
 
     // A per-operation API selection remains stronger than the process-wide
     // CK policy because grouped fallback cannot preserve that local choice.
-    guard.config.set_algo(static_cast<int32_t>(
-            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
     params.lowoha_algo = zendnnl::common::matmul_algo_t::onednn;
     EXPECT_FALSE(routable());
 
@@ -134,6 +110,324 @@ TEST(CkDispatchRouting, ScalarRouteRequiresMatmulAlgo1) {
     params.lowoha_algo = zendnnl::common::matmul_algo_t::none;
     guard.config.set_custom_kernel_route(false);
     EXPECT_FALSE(routable());
+}
+
+TEST(CkDispatchRouting, ScalarRouteUsesRequestedThreadTileCapacity) {
+    CK_SKIP_IF_NO_BF16_ISA();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+
+    struct RouteCase {
+        int N;
+        int num_threads;
+    };
+    const RouteCase boundary_cases[] = {
+            {128, 2}, {256, 4}, {512, 8}, {1024, 16}, {2048, 32}, {4096, 64}};
+    for (const auto &c : boundary_cases) {
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+                /*M=*/8, c.N, /*K=*/256, c.num_threads, /*batch_count=*/1,
+                /*transA=*/false, /*transB=*/true, /*alpha=*/1.0f,
+                /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
+                /*is_weights_const=*/true, params))
+                << "boundary route rejected for N=" << c.N
+                << " num_threads=" << c.num_threads;
+        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r',
+                /*M=*/8, c.N, /*K=*/256, c.num_threads + 1,
+                /*batch_count=*/1, /*transA=*/false, /*transB=*/true,
+                /*alpha=*/1.0f, /*beta=*/0.0f, /*bias=*/nullptr, /*ldb=*/256,
+                /*is_weights_const=*/true, params))
+                << "under-capacity route accepted for N=" << c.N
+                << " num_threads=" << (c.num_threads + 1);
+    }
+}
+
+TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndRejectsInt4) {
+    CK_SKIP_IF_NO_INT8_ISA();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    constexpr int M = 8;
+    constexpr int N = 2048;
+    constexpr int K = 256;
+    float wei_scale = 1.0f;
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.wei_scale.buff = &wei_scale;
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+
+    {
+        mt::CustomKernelInt8Override int8_ck_on(true);
+        EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    }
+    {
+        mt::CustomKernelInt8Override int8_ck_off(false);
+        EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    }
+
+    params.dtypes.wei = data_type_t::s4;
+    params.quant_params.wei_scale.dims = {K / 32, N};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    // Scalar routing is intentionally limited to INT8.  INT4 remains on its
+    // existing standard scalar path even when its group metadata is valid.
+    params.quant_params.wei_scale.dims = {K / 4, N};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+}
+
+TEST(CkDispatchRouting, ScalarInt8EndToEndMatchesFallbackAndRunsCk) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    ::reset_grp_matmul_caches();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::CustomKernelInt8Override int8_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    constexpr int M = 8, N = 2048, K = 256;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> weight(static_cast<size_t>(N) * K);
+    std::vector<float> wei_scale(N);
+    std::vector<bfloat16_t> dst_ck(static_cast<size_t>(M) * N);
+    std::vector<bfloat16_t> dst_fallback(static_cast<size_t>(M) * N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t((static_cast<int>(i % 17) - 8) * 0.03125f);
+    for (size_t i = 0; i < weight.size(); ++i)
+        weight[i] = static_cast<int8_t>(static_cast<int>(i % 9) - 4);
+    for (int n = 0; n < N; ++n)
+        wei_scale[n] = 0.005f + static_cast<float>(n % 7) * 0.0005f;
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.mem_format_a = 'n';
+    params.mem_format_b = 'n';
+    params.weight_cache_type = 2;
+    params.num_threads = 32;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+    zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
+
+    std::string mode;
+    {
+        mt::GemmModeCaptureGuard mode_guard;
+        ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N,
+                          K, 1.0f, src.data(), K, weight.data(), K,
+                          /*bias=*/nullptr, 0.0f, dst_ck.data(), N,
+                          /*is_weights_const=*/true, batch_params, params),
+                status_t::success);
+        const char *captured
+                = zendnnl::lowoha::matmul::test_api::
+                          s_last_group_matmul_direct_gemm_mode.load(
+                                  std::memory_order_relaxed);
+        ASSERT_NE(captured, nullptr);
+        mode = captured;
+    }
+    EXPECT_NE(mode.find("custom"), std::string::npos)
+            << "route-enabled scalar INT8 call did not execute CK; mode="
+            << mode;
+
+    ::reset_grp_matmul_caches();
+    guard.config.set_custom_kernel_route(false);
+    ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                      1.0f, src.data(), K, weight.data(), K,
+                      /*bias=*/nullptr, 0.0f, dst_fallback.data(), N,
+                      /*is_weights_const=*/true, batch_params, params),
+            status_t::success);
+
+    for (size_t i = 0; i < dst_ck.size(); ++i) {
+        const float actual = static_cast<float>(dst_ck[i]);
+        const float expected = static_cast<float>(dst_fallback[i]);
+        EXPECT_NEAR(actual, expected, 0.05f + 0.05f * std::fabs(expected))
+                << "route-enabled INT8 output differs at i=" << i;
+    }
+}
+
+TEST(CkDispatchRouting, ScalarInt8DstMetadataFallsBackNumerically) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    ::reset_grp_matmul_caches();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::CustomKernelInt8Override int8_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    constexpr int M = 8, N = 2048, K = 256;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> weight(static_cast<size_t>(N) * K);
+    std::vector<float> wei_scale(N, 0.01f);
+    std::vector<bfloat16_t> dst_route_on(static_cast<size_t>(M) * N);
+    std::vector<bfloat16_t> dst_route_off(static_cast<size_t>(M) * N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t((static_cast<int>(i % 13) - 6) * 0.03125f);
+    for (size_t i = 0; i < weight.size(); ++i)
+        weight[i] = static_cast<int8_t>(static_cast<int>(i % 7) - 3);
+
+    float dst_scale = 0.5f;
+    int32_t dst_zp = 3;
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.mem_format_a = 'n';
+    params.mem_format_b = 'n';
+    params.weight_cache_type = 2;
+    params.num_threads = 32;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+    params.quant_params.dst_scale.buff = &dst_scale;
+    params.quant_params.dst_scale.dt = data_type_t::f32;
+    params.quant_params.dst_scale.dims = {1, 1};
+    params.quant_params.dst_zp.buff = &dst_zp;
+    params.quant_params.dst_zp.dt = data_type_t::s32;
+    params.quant_params.dst_zp.dims = {1, 1};
+    zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
+
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                      1.0f, src.data(), K, weight.data(), K,
+                      /*bias=*/nullptr, 0.0f, dst_route_on.data(), N,
+                      /*is_weights_const=*/true, batch_params, params),
+            status_t::success);
+
+    ::reset_grp_matmul_caches();
+    guard.config.set_custom_kernel_route(false);
+    ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                      1.0f, src.data(), K, weight.data(), K,
+                      /*bias=*/nullptr, 0.0f, dst_route_off.data(), N,
+                      /*is_weights_const=*/true, batch_params, params),
+            status_t::success);
+    for (size_t i = 0; i < dst_route_on.size(); ++i) {
+        EXPECT_FLOAT_EQ(static_cast<float>(dst_route_on[i]),
+                static_cast<float>(dst_route_off[i]))
+                << "destination-metadata fallback differs at i=" << i;
+    }
+}
+
+TEST(CkDispatchRouting, ScalarSignedInt8SrcZpFallsBackWithGroupDqOff) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    ::reset_grp_matmul_caches();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::CustomKernelInt8Override int8_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    mt::GroupDqOverride group_dq_off(0);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    constexpr int M = 1, N = 2048, K = 256;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    std::vector<int8_t> weight(static_cast<size_t>(N) * K);
+    std::vector<float> wei_scale(N, 0.01f);
+    std::vector<bfloat16_t> dst_route_on(static_cast<size_t>(M) * N);
+    std::vector<bfloat16_t> dst_route_off(static_cast<size_t>(M) * N);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t((static_cast<int>(i % 11) - 5) * 0.03125f);
+    for (size_t i = 0; i < weight.size(); ++i)
+        weight[i] = static_cast<int8_t>(static_cast<int>(i % 7) - 3);
+
+    int32_t src_zp = 11;
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+    params.dtypes.compute = data_type_t::s8;
+    params.dynamic_quant = true;
+    params.mem_format_a = 'n';
+    params.mem_format_b = 'n';
+    params.weight_cache_type = 2;
+    params.num_threads = 32;
+    params.quant_params.src_scale.dt = data_type_t::f32;
+    params.quant_params.src_scale.dims = {M, 1};
+    params.quant_params.src_zp.buff = &src_zp;
+    params.quant_params.src_zp.dt = data_type_t::s32;
+    params.quant_params.src_zp.dims = {M, 1};
+    params.quant_params.wei_scale.buff = wei_scale.data();
+    params.quant_params.wei_scale.dt = data_type_t::f32;
+    params.quant_params.wei_scale.dims = {1, N};
+    zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
+
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                      1.0f, src.data(), K, weight.data(), K,
+                      /*bias=*/nullptr, 0.0f, dst_route_on.data(), N,
+                      /*is_weights_const=*/true, batch_params, params),
+            status_t::success);
+
+    ::reset_grp_matmul_caches();
+    guard.config.set_custom_kernel_route(false);
+    ASSERT_EQ(zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                      1.0f, src.data(), K, weight.data(), K,
+                      /*bias=*/nullptr, 0.0f, dst_route_off.data(), N,
+                      /*is_weights_const=*/true, batch_params, params),
+            status_t::success);
+    for (size_t i = 0; i < dst_route_on.size(); ++i) {
+        EXPECT_FLOAT_EQ(static_cast<float>(dst_route_on[i]),
+                static_cast<float>(dst_route_off[i]))
+                << "signed source-zero-point fallback differs at i=" << i;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────
