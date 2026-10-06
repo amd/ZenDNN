@@ -147,7 +147,7 @@ In **standalone** builds, injected dependencies are linked with `WHOLE_ARCHIVE` 
 |--------|-------------|------|---------|
 | ZENDNNL_DEPENDS_AOCLDLP | Enable AOCL-DLP as the BLAS backend. Mandatory; defaults ON and configuring with it OFF fails with a CMake error. | BOOL | ON |
 | ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN | BOOL | ON |
-| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
+| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is an optional backend for optimized small matrix multiplication. Off by default; set it ON (build script: `--enable-libxsmm`) to build with LIBXSMM. | BOOL | OFF |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
 | ZENDNNL_DEPENDS_FBGEMM | FBGEMM is a backend for embedding_bag in ZenDNN. Off by default; set it ON (build script: `--enable-fbgemm`) to build with FBGEMM. It must also be ON for `ZENDNNL_LOCAL_FBGEMM` and `ZENDNNL_FBGEMM_INJECT_DIR` to take effect. | BOOL | OFF |
 | ZENDNNL_DEPENDS_AOCLUTILS | Enable aocl-utils for hardware identification. CMake forces this ON. | BOOL | ON |
@@ -339,7 +339,7 @@ To assist the build process a bash script **ZenDNN/scripts/zendnnl_build.sh** is
 
 ##### Build Script Options
 
-> **Important**: `--all` builds the library together with gtests, examples, benchdnn, doxygen, and parlooper. FBGEMM is not enabled by `--all`; add `--enable-fbgemm` to build it. The default BLAS backend remains AOCL-DLP. Component targets (`--zendnnl-gtest`, `--examples`, `--benchdnn`) depend on the `zendnnl` library target, which is built automatically.
+> **Important**: `--all` builds the library together with gtests, examples, benchdnn, doxygen, and parlooper. FBGEMM and LIBXSMM are not enabled by `--all`; add `--enable-fbgemm` and/or `--enable-libxsmm` to build them. The default BLAS backend remains AOCL-DLP. Component targets (`--zendnnl-gtest`, `--examples`, `--benchdnn`) depend on the `zendnnl` library target, which is built automatically.
 
 | Option | Description |
 |--------|-------------|
@@ -355,7 +355,7 @@ To assist the build process a bash script **ZenDNN/scripts/zendnnl_build.sh** is
 | `--clean-all` | Clean dependencies and build folders |
 | **Dependency Options** | |
 | `--no-deps` | Don't rebuild (or clean) dependencies |
-| `--enable-<dep>` | Enable a dependency (e.g., `--enable-parlooper`, `--enable-fbgemm`) |
+| `--enable-<dep>` | Enable a dependency (e.g., `--enable-parlooper`, `--enable-fbgemm`, `--enable-libxsmm`) |
 | **Local Dependency Options** | Build from source in `dependencies/<name>/` |
 | `--local-<dep>` | Use local source from `dependencies/<dep>/` (e.g., `--local-aocldlp`, `--local-onednn`) |
 | **Local Dependency with Custom Path** | Build from source at specified directory |
@@ -383,6 +383,9 @@ source zendnnl_build.sh --all --nproc 8
 
 # Build all targets with FBGEMM enabled
 source zendnnl_build.sh --all --enable-fbgemm
+
+# Build all targets with LIBXSMM enabled
+source zendnnl_build.sh --all --enable-libxsmm
 
 # Build library only
 source zendnnl_build.sh --zendnnl

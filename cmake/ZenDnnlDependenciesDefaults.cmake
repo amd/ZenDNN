@@ -24,7 +24,7 @@ include(CMakeDependentOption)
 
 set(ZENDNNL_DEPENDS_AOCLDLP   ON  CACHE BOOL "Add AOCL DLP as a dependency")
 set(ZENDNNL_DEPENDS_ONEDNN    ON  CACHE BOOL "Add ONEDNN as a dependency")
-set(ZENDNNL_DEPENDS_LIBXSMM   ON  CACHE BOOL "Add LIBXSMM as a dependency")
+set(ZENDNNL_DEPENDS_LIBXSMM   OFF CACHE BOOL "Add LIBXSMM as a dependency")
 set(ZENDNNL_DEPENDS_PARLOOPER OFF CACHE BOOL "Add PARLOOPER as a dependency")
 set(ZENDNNL_DEPENDS_FBGEMM    OFF CACHE BOOL "Add FBGEMM as a dependency")
 

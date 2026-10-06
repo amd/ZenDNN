@@ -123,7 +123,7 @@ struct matmul_params {
   matmul_quantization_params_t quant_params; // Quantization parameters
   char mem_format_a;                         // Memory format for A ('n'=non-reordered, 'r'=reordered)
   char mem_format_b;                         // Memory format for B ('n'=non-reordered; 'r'=pre-reordered into AOCL-DLP blocked layout via a prior reorder_direct() prepack — backend skips its internal reorder)
-  matmul_algo_t lowoha_algo;                 // Preferred backend algorithm (default: matmul_algo_t::none → resolves to aocl_dlp_blocked for single MatMul, libxsmm for batched)
+  matmul_algo_t lowoha_algo;                 // Preferred backend algorithm (default: none → single uses aocl_dlp_blocked; batched uses libxsmm when built, otherwise aocl_dlp/reference)
   int32_t num_threads;                       // Number of threads (0 = auto)
   std::string plugin_op;                     // Plugin op name
   bool dynamic_quant;                        // Enable dynamic quantization of source (default: false)
@@ -1139,9 +1139,9 @@ The same algorithms can be selected by either the `matmul_algo_t` enum value (in
 | `3`                   | `libxsmm_blocked`    | Blocked LibXSMM backend |
 | `4`                   | `aocl_dlp`           | AOCL-DLP backend |
 | `5`                   | `onednn`             | OneDNN backend |
-| `6`                   | `libxsmm`            | LibXSMM backend (default for batched MatMul) |
+| `6`                   | `libxsmm`            | LibXSMM backend (initial batched default when LIBXSMM is built) |
 
-> **Note:** When neither `params.lowoha_algo` nor `ZENDNNL_MATMUL_ALGO` is set, single MatMul falls back to `aocl_dlp_blocked` and batched MatMul falls back to `libxsmm`.
+> **Note:** When `params.lowoha_algo` is `none` and the applicable runtime setting (`ZENDNNL_MATMUL_ALGO` for single MatMul or `ZENDNNL_BMM_ALGO` for batched MatMul) is unset, single MatMul falls back to `aocl_dlp_blocked`. Batched MatMul initially selects `libxsmm`, but uses it only in builds with `ZENDNNL_DEPENDS_LIBXSMM=ON`; otherwise it falls back to `aocl_dlp`, or to `reference` when AOCL-DLP is also unavailable. The default LIBXSMM-disabled build therefore runs LowOHA BMM with AOCL-DLP.
 
 ### Via `matmul_params`
 

@@ -66,6 +66,10 @@ function parse_args() {
                 ZENDNNL_DEPENDS_FBGEMM=1
                 shift
                 ;;
+            --enable-libxsmm )
+                ZENDNNL_DEPENDS_LIBXSMM=1
+                shift
+                ;;
             --no-aocldlp )
                 ZENDNNL_DEPENDS_AOCLDLP=0
                 shift
@@ -212,6 +216,7 @@ function parse_args() {
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
                 echo " --enable-parlooper : enable parlooper."
                 echo " --enable-fbgemm    : enable fbgemm (off by default, not enabled by --all)."
+                echo " --enable-libxsmm   : enable libxsmm (off by default, not enabled by --all)."
                 echo " --no-aocldlp       : build without the aocl-dlp dependency (aocl-dlp kernels unavailable at runtime)."
                 echo
                 echo " local dependency options (builds from local source) :"
@@ -301,6 +306,7 @@ ZENDNNL_DOXYGEN=0
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_PARLOOPER=0
 ZENDNNL_DEPENDS_FBGEMM=0
+ZENDNNL_DEPENDS_LIBXSMM=0
 ZENDNNL_DEPENDS_AOCLDLP=1
 ZENDNNL_LOCAL_AOCLDLP=0
 ZENDNNL_LOCAL_AOCLUTILS=0
@@ -526,6 +532,12 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=OFF"
     fi
 
+    if [ ${ZENDNNL_DEPENDS_LIBXSMM} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=OFF"
+    fi
+
     # optional dependency toggles
     if [ ${ZENDNNL_DEPENDS_AOCLDLP} -eq 0 ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF"
@@ -573,7 +585,7 @@ else
     fi
 
     if [ ${ZENDNNL_LOCAL_LIBXSMM} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_LIBXSMM=ON"
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=ON -DZENDNNL_LOCAL_LIBXSMM=ON"
         if [ -n "${ZENDNNL_LOCAL_LIBXSMM_DIR}" ];then
             CMAKE_OPTIONS="${CMAKE_OPTIONS} -DLIBXSMM_ROOT_DIR=${ZENDNNL_LOCAL_LIBXSMM_DIR}"
         fi
