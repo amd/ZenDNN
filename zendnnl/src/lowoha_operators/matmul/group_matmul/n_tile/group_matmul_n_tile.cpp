@@ -522,6 +522,11 @@ static const float *materialise_f32_wei_scale_cached(const void *wei,
     return cache.emplace(key, std::move(entry)).first->second.converted.data();
 }
 
+inline bool s4_bf16_scale_f32_enabled() noexcept {
+    const char *e = std::getenv("ZENDNNL_GRP_MATMUL_S4_BF16_SCALE_F32");
+    return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+}
+
 // Bundle every reference / dtype-size the executors and per-thread
 // tile primitives need.  Cuts the per-call argument list down to
 // `(plan, ctx, e, local_tid, team_size, min_n_tile)`.  The two
@@ -4337,7 +4342,8 @@ void flat_n_tile(const std::vector<char> &layout,
     // W4A8 shares the DQ-INT8 `scale_kind` contract; only the cost
     // differs, since its `{G, N}` scale permutes G rows, not one.
     const bool ck_int8_variant = custom_kernel::is_int8_variant(kctx.variant);
-    if (ck_int8_variant || custom_kernel::is_s4_variant(kctx.variant)) {
+    const bool ck_s4_scale_variant = custom_kernel::is_s4_variant(kctx.variant);
+    if (ck_int8_variant || ck_s4_scale_variant) {
         ck_scales_interleave
                 = (kctx.act_kind == custom_kernel::ActKind::silu_and_mul)
                 || (kctx.act_kind == custom_kernel::ActKind::gelu_and_mul);
@@ -4364,7 +4370,19 @@ void flat_n_tile(const std::vector<char> &layout,
                 && zendnnl::common::matmul_config_t::instance()
                                 .get_weight_cache()
                         != 0;
-        ck_scales_raw = !force_bf16_wei_scale_f32 && !ck_scales_interleave
+        // W4A8 dense shapes benefit from widening the constant {G,N} BF16
+        // weight scale once instead of widening the same lanes inside every
+        // S4 microkernel call.  Set ZENDNNL_GRP_MATMUL_S4_BF16_SCALE_F32=0
+        // to opt out for debugging.
+        const bool force_s4_bf16_wei_scale_f32 = ck_s4_scale_variant
+                && wdt == data_type_t::bf16 && active_weights_const
+                && s4_bf16_scale_f32_enabled()
+                && zendnnl::common::matmul_config_t::instance()
+                                .get_weight_cache()
+                        != 0;
+        const bool force_scale_f32
+                = force_bf16_wei_scale_f32 || force_s4_bf16_wei_scale_f32;
+        ck_scales_raw = !force_scale_f32 && !ck_scales_interleave
                 && supported_dt && (sdt == wdt);
         kctx.scale_kind = (ck_scales_raw && sdt == data_type_t::bf16)
                 ? custom_kernel::ScaleKind::kBf16
