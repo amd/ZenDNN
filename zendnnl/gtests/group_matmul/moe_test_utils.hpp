@@ -477,6 +477,7 @@ inline grp_matmul_gated_act_t pick_random_gated_act(
 //               where |g|, |u| ≈ √|ref|.
 //   rel_term    30% · |ref| — takes over for very large |ref|.
 //   gate_term   ill-conditioned gated-activation regime (see below).
+//   up_term     large-|u|, near-zero gate amplification (see below).
 //
 // The bound is a "no order-of-magnitude regression" envelope, not a
 // BF16-precise tracking bound.  When `ok` flips false the per-element
@@ -496,6 +497,17 @@ inline grp_matmul_gated_act_t pick_random_gated_act(
 // by the large `|act(g)| ≈ |g|`, giving an absolute error `≈ ε · |g|²`
 // that the flat / √|r| / rel terms above never bound (they only see the
 // moderate product `|r| = |g·u|`).  Add a `C · ε · |g|²` regime for it.
+//
+// ── up_term: large-|u|, near-zero gate ──
+// The opposite cancellation also shows up on INT8 per-group GEMMs.  The
+// gate can round to ~0 while the up projection stays O(10³).  Then
+// `r = act(g)·u` is only a few units, so the 30% relative budget is
+// sub-unit, but a δg of a few ULPs of that large accumulator is
+// multiplied by `|u|` (`|act'(g)|` is O(1) near 0).  Budget δg with the
+// same `16·α²·k·ε` GEMM envelope as `floor_abs` — not the hard 0.5
+// output floor, which would accept an O(|u|) error — and scale it by
+// `|u|`.
+//
 // Like every other regime this only widens `allowed` via `max`, so it can
 // never tighten (and therefore never regress) any existing comparison.
 inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
@@ -524,10 +536,13 @@ inline void compare_activated_2D(const tensor_t &out, const tensor_t &out_ref,
                     const_cast<tensor_t &>(out_ref).at({i, cmp_n + j}));
             const float gate_est = r_abs / std::max(u_abs, u_floor);
             const float gate_term = gate_factor * gate_est * gate_est;
+            // δg ≤ 16·α²·k·ε, then |u|·|act'(g)| with |act'| = O(1).
+            const float up_term = floor_abs_formula * u_abs;
             float allowed = floor_abs;
             if (sqrt_term > allowed) { allowed = sqrt_term; }
             if (rel_term > allowed) { allowed = rel_term; }
             if (gate_term > allowed) { allowed = gate_term; }
+            if (up_term > allowed) { allowed = up_term; }
             const float abs_err = std::fabs(a - r);
             if (abs_err > allowed) { ok = false; }
         }
