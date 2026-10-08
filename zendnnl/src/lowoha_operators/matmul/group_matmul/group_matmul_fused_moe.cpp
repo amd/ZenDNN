@@ -1605,7 +1605,8 @@ status_t group_matmul_fused_moe_execute(
     // serial Sequential strategy.  Asking the same question the kernel asks
     // makes `..._INT8=0` mean what it reads like: int8 on N-tile + DLP with
     // a separate activation pass in a wide arena, bf16 untouched on CK.
-    const bool custom_kernel_en = grp_matmul_custom_kernel_effective(params, M);
+    const bool custom_kernel_en
+            = grp_matmul_custom_kernel_effective(params, M, N, act);
     // Resolve (and safety-clamp) the ALGO for this call ONCE — shared by
     // both the tight-arena decision below and the vertical-fusion gate at
     // Step 8.  NOTE: this is NOT simply `env_algo_fused`: even a pinned
@@ -1620,7 +1621,7 @@ status_t group_matmul_fused_moe_execute(
     // case an operator sets the pin to observe.
     auto_algo_trace algo_trace;
     const int resolved_algo = select_grp_matmul_algo(
-            layout, M, N, K, params, num_threads, &algo_trace);
+            layout, M, N, K, params, num_threads, &algo_trace, act);
     const bool want_tight = pick_fused_moe_want_tight(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 

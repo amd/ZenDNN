@@ -407,9 +407,9 @@ inline PrepackParams build_prepack_params(
     }
     if (!params.empty()) {
         p.src_dtype = params[rep].dtypes.src;
-        p.wei_dtype = params[0].dtypes.wei;
-        p.dst_dtype = params[0].dtypes.dst;
-        p.bias_dtype = params[0].dtypes.bias;
+        p.wei_dtype = params[rep].dtypes.wei;
+        p.dst_dtype = params[rep].dtypes.dst;
+        p.bias_dtype = params[rep].dtypes.bias;
         // Capacity is declared PER weight pointer, but prepack warms every
         // expert through one scalar, so take the MINIMUM rather than slot
         // 0's value.  The common case -- per-expert weights carved out of
@@ -525,8 +525,8 @@ inline PrepackParams build_prepack_params(
         const bool is_dq_int8 = params[rep].dynamic_quant
                 || (params[rep].dtypes.wei == data_type_t::s8
                         && (params[rep].dtypes.compute == data_type_t::s8
-                                || params[rep].dtypes.compute
-                                        == data_type_t::u8));
+                                || params[rep].dtypes.compute == data_type_t::u8
+                                || params[rep].dtypes.src == data_type_t::u8));
         const bool is_w4a8 = params[rep].dtypes.wei == data_type_t::s4
                 && params[rep].dtypes.compute == data_type_t::s8;
         // DQ-INT8 (either form): carry the runtime compute dtype so the
@@ -535,8 +535,11 @@ inline PrepackParams build_prepack_params(
         // non-DQ s8 combo we don't warm) forces `none` so a stale trailing
         // `compute_dtype` can't skew the fingerprint and split the bf16
         // cache.
-        p.compute_dtype = (is_dq_int8 || is_w4a8) ? params[rep].dtypes.compute
-                                                  : data_type_t::none;
+        p.compute_dtype = (params[rep].dtypes.src == data_type_t::u8
+                                  && params[rep].dtypes.wei == data_type_t::s8)
+                ? data_type_t::u8
+                : (is_dq_int8 || is_w4a8) ? params[rep].dtypes.compute
+                                          : data_type_t::none;
     } else {
         p.dynamic_quant = dynamic_quant;
         p.compute_dtype = compute_dtype;

@@ -17,7 +17,8 @@
 /// Group-matmul custom kernel — public dispatcher.
 ///
 /// Serves three per-tile microkernel families through one surface:
-/// BF16 (`bf16×bf16→{bf16,f32}`), DQ-INT8 (`s8×s8→{bf16,f32}`), and
+/// BF16 (`bf16×bf16→{bf16,f32}`), DQ/static INT8
+/// (`{s8,u8}×s8→{bf16,f32,u8}`), and
 /// FP16 (native AVX-512-FP16 `f16×f16→{f16,f32}`).  `resolve_variant`
 /// is the single source of truth for which (src, wei, dst, …) tuples
 /// each family serves.
@@ -188,11 +189,12 @@ bool dispatch_supported();
 // `dispatch_tile()` to switch between kernel paths.
 //
 // `kBF16_BF16_BF16` and `kBF16_BF16_F32` are the bf16-family
-// variants; `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM` (bf16 dst) and
-// `kS8_S8_F32_SYM` / `kU8_S8_F32_ASYM` (f32 dst, act=none only) are
-// the DQ-INT8 variants.  The FP16 family adds `kF16_F16_F16` and
+// variants; `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM` (bf16 dst),
+// `kS8_S8_F32_SYM` / `kU8_S8_F32_ASYM` (f32 dst), and
+// `kU8_S8_U8_ASYM` (static per-tensor U8 source; act=none only) are the INT8
+// variants.  The FP16 family adds `kF16_F16_F16` and
 // `kF16_F16_F32` (native AVX-512-FP16).  Any tuple outside these
-// eight resolves to `kUnsupported` and the caller falls back to DLP.
+// ten resolves to `kUnsupported` and the caller falls back to DLP.
 enum class KernelVariant : uint8_t {
     kUnsupported
     = 0, ///< Not supported by the custom kernel; caller falls back to DLP.
@@ -209,6 +211,7 @@ enum class KernelVariant : uint8_t {
     kF16_F16_F32 = 8, ///< `f16:f16:f32` (native AVX-512-FP16, act=none only).
     kS8_S4_BF16_SYM
     = 9, ///< W4A8: src(s8, per-token) × wei(s4, per-group) → bf16.
+    kU8_S8_U8_ASYM = 10, ///< Static per-tensor U8 × symmetric S8 → U8.
 };
 
 /// Is this variant in the W4A8 (s4) family?  One member today:
@@ -217,7 +220,7 @@ inline bool is_s4_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kS8_S4_BF16_SYM;
 }
 
-/// Predicate: is this variant in the DQ-INT8 family?
+/// Predicate: is this variant in the INT8 family?
 ///
 /// Useful at call sites that branch on bf16 vs DQ-INT8 ahead of the
 /// `dispatch_tile()` call (e.g. the N-tile `do_tile()` body in
@@ -229,7 +232,8 @@ inline bool is_int8_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kS8_S8_BF16_SYM
             || v == KernelVariant::kU8_S8_BF16_ASYM
             || v == KernelVariant::kS8_S8_F32_SYM
-            || v == KernelVariant::kU8_S8_F32_ASYM;
+            || v == KernelVariant::kU8_S8_F32_ASYM
+            || v == KernelVariant::kU8_S8_U8_ASYM;
 }
 
 /// Predicate: is this variant in the FP16 family?
@@ -244,12 +248,10 @@ inline bool is_f16_variant(KernelVariant v) noexcept {
     return v == KernelVariant::kF16_F16_F16 || v == KernelVariant::kF16_F16_F32;
 }
 
-/// Does this variant consume the per-token-quantised s8/u8 source the
-/// N-tile hoist produces?  True for DQ-INT8 and W4A8, which differ
-/// only on the weight side.  Sites that set up or validate that hoist
-/// MUST use this rather than `is_int8_variant`, or a W4A8 call reaches
-/// the kernel with an unconverted bf16 source and a null scale.
-inline bool needs_s8_src_hoist(KernelVariant v) noexcept {
+/// Does this variant require quantized-source metadata setup? True for every
+/// INT8 and W4A8 variant, including static U8 input that needs scalar metadata
+/// but no source conversion.
+inline bool needs_quantized_src_setup(KernelVariant v) noexcept {
     return is_int8_variant(v) || is_s4_variant(v);
 }
 
@@ -280,6 +282,11 @@ inline bool needs_s8_src_hoist(KernelVariant v) noexcept {
 ///       f32 dst (Act = none only):
 ///         `(s8*, s8, f32 , _, s8)`           → `kS8_S8_F32_SYM`
 ///         `(s8*, s8, f32 , _, u8)`           → `kU8_S8_F32_ASYM`
+///
+///   * Static per-tensor U8 source (`dynamic_quant == false`):
+///     `(u8, s8, bf16, false, {none,u8})`      → `kU8_S8_BF16_ASYM`
+///     `(u8, s8, f32 , false, {none,u8})`      → `kU8_S8_F32_ASYM`
+///     `(u8, s8, u8  , false, {none,u8})`      → `kU8_S8_U8_ASYM`
 ///
 ///   * FP16 family (`dynamic_quant == false`):
 ///     `(f16, f16, f16, _, _)`               → `kF16_F16_F16`
@@ -326,10 +333,10 @@ struct CallContext {
 
     /// Resolved kernel variant for this call.  Set by
     /// `prepare_for_call()` via `resolve_variant()`.  On the success
-    /// path it is one of the eight served variants: the two BF16 family
-    /// variants (bf16/f32 dst), the four DQ-INT8 variants (sym/asym ×
-    /// bf16/f32 dst), or one of the two FP16 family variants
-    /// (`kF16_F16_F16` / `kF16_F16_F32`).  `dispatch_tile()` reads this
+    /// path it is one of the served variants: the two BF16 family variants,
+    /// the DQ/static-INT8 variants (including static u8×s8→u8), or one of
+    /// the two FP16 family variants (`kF16_F16_F16` / `kF16_F16_F32`).
+    /// `dispatch_tile()` reads this
     /// to route to the correct kernel instantiation.
     KernelVariant variant = KernelVariant::kUnsupported;
 
@@ -548,6 +555,9 @@ struct CallContext {
 ///                             -> kS8/U8_S8_{BF16,F32}_{SYM,ASYM}
 ///                              (see the DQ-INT8 truth table on
 ///                              `resolve_variant` above)
+///       Static per-tensor U8 source:
+///         (u8, s8, {bf16,f32,u8}) + dynamic_quant=false
+///                             -> kU8_S8_{BF16,F32,U8}_ASYM
 ///
 ///     REJECTED (returns failure -> caller falls back to DLP):
 ///       Anything else, including:
@@ -687,25 +697,26 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
 ///                    context was prepared with act=swiglu_oai_mul
 ///                    this is the halved [M, N/2] tight arena;
 ///                    otherwise it is the wide [M, N] destination.
-/// `src_scale` / `src_zp` / `wei_scale` are consumed only on the
-/// DQ-INT8 path (`ctx.variant ∈ {kS8_S8_BF16_SYM, kU8_S8_BF16_ASYM}`).
-/// On the BF16 path they must be `nullptr` (the caller can either
-/// omit the args entirely — they default to `nullptr` — or pass
-/// `nullptr` explicitly).  Layout contract (DQ-INT8 only):
-///   * `src_scale` — `M` floats (one per row of the expert's A).
-///                   The dispatcher slices to the per-call MR
-///                   window before invoking the microkernel.
-///   * `src_zp`    — `M` int32s, OR nullptr for symmetric calls.
+/// `src_scale` / `src_zp` / `wei_scale` are consumed only on the INT8 path.
+/// On the BF16/FP16 path the caller must pass `nullptr` explicitly.
+/// Layout contract (INT8 only):
+///   * `src_scale` — `M` row values or one scalar.
+///                   The dispatcher slices only the vector form.
+///   * `src_zp`    — `M` row values, one scalar, or nullptr for symmetric calls.
 ///                   Required when variant is `kU8_S8_BF16_ASYM`,
 ///                   ignored when variant is `kS8_S8_BF16_SYM`.
-///   * `wei_scale` — `N` floats (one per output column).  The
-///                   dispatcher slices to the per-(o-block) NR
-///                   window before invoking the microkernel.
+///   * `wei_scale` — `N` values (one per output column), or one scalar.
+///                   Static U8xS8 supports both forms; the dispatcher slices
+///                   only the vector form.
+///   * `int8_epilogue` — mandatory granularity/requantization descriptor.
+///                   Legacy per-token/per-channel callers pass a default-
+///                   constructed value.
 void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         int n_tile, int col_start, const void *src, int lda,
         const void *bias, // per `ctx.bias_kind`; nullptr when BiasKind::none
-        void *tight_dst, int tight_ldc, const void *src_scale = nullptr,
-        const int32_t *src_zp = nullptr, const void *wei_scale = nullptr);
+        void *tight_dst, int tight_ldc, const void *src_scale,
+        const int32_t *src_zp, const void *wei_scale,
+        const Int8EpilogueConfig &int8_epilogue);
 
 } // namespace custom_kernel
 } // namespace matmul

@@ -670,6 +670,7 @@ static void ukernel_impl(const bfloat16_t *__restrict A, int lda,
 // `prepare_for_call` time (see the `select_ukernel` early-out below
 // returning nullptr for that case).
 ukernel_fn_t select_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
+    if (dst_dt != DstDt::kBf16 && dst_dt != DstDt::kF32) return nullptr;
     // Refuse the structurally-impossible (gated_act, FP32) combinations
     // before the per-(MR, NV) switch so callers see a clean nullptr.
     const bool is_gated_act = (act == ActKind::swiglu_oai_mul

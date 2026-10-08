@@ -18,6 +18,7 @@
 #define LOWOHA_MATMUL_UTILS_HPP
 
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <omp.h>
@@ -159,6 +160,114 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
         const bool is_weights_const);
 
 /**
+ * @brief Checked quant-parameter element count with scalar empty-dims semantics.
+ *
+ * Quant metadata uses `{}`, `{1}`, and `{1,1}` for per-tensor storage in
+ * different frontends. Returns one for empty dims, or -1 for non-positive /
+ * overflowing dimensions.
+ */
+inline int64_t checked_quant_param_num_elements(
+        const std::vector<int64_t> &dims) noexcept {
+    int64_t count = 1;
+    for (const int64_t dim : dims) {
+        if (dim <= 0 || count > std::numeric_limits<int64_t>::max() / dim)
+            return -1;
+        count *= dim;
+    }
+    return count;
+}
+
+inline bool quant_param_dims_are_per_tensor(
+        const std::vector<int64_t> &dims) noexcept {
+    return checked_quant_param_num_elements(dims) == 1;
+}
+
+inline bool quant_param_is_per_tensor(
+        const matmul_quantization_params_t::matmul_quant_t &q) noexcept {
+    return q.buff != nullptr && quant_param_dims_are_per_tensor(q.dims);
+}
+
+inline bool quant_param_is_per_channel(
+        const matmul_quantization_params_t::matmul_quant_t &q, int N) noexcept {
+    if (q.buff == nullptr || N <= 0) return false;
+    return (q.dims.size() == 1 && q.dims[0] == static_cast<int64_t>(N))
+            || (q.dims.size() == 2 && q.dims[0] == 1
+                    && q.dims[1] == static_cast<int64_t>(N));
+}
+
+inline bool quant_param_is_per_token(
+        const matmul_quantization_params_t::matmul_quant_t &q, int M) noexcept {
+    return M > 0 && q.dims.size() == 2 && q.dims[0] == static_cast<int64_t>(M)
+            && q.dims[1] == 1;
+}
+
+inline bool quant_scale_dtype_supported(data_type_t dt) noexcept {
+    return dt == data_type_t::f32 || dt == data_type_t::bf16;
+}
+
+inline bool read_positive_per_tensor_scale(
+        const matmul_quantization_params_t::matmul_quant_t &q,
+        float &value) noexcept {
+    if (!quant_param_is_per_tensor(q) || !quant_scale_dtype_supported(q.dt))
+        return false;
+    value = q.dt == data_type_t::f32
+            ? *static_cast<const float *>(q.buff)
+            : static_cast<float>(
+                      *static_cast<const zendnnl::common::bfloat16_t *>(
+                              q.buff));
+    return std::isfinite(value) && value > 0.0f;
+}
+
+inline bool valid_positive_per_tensor_scale(
+        const matmul_quantization_params_t::matmul_quant_t &q) noexcept {
+    float value = 0.0f;
+    return read_positive_per_tensor_scale(q, value);
+}
+
+inline bool read_u8_per_tensor_zero_point(
+        const matmul_quantization_params_t::matmul_quant_t &q,
+        int32_t &value) noexcept {
+    if (!quant_param_is_per_tensor(q) || q.dt != data_type_t::s32) return false;
+    value = *static_cast<const int32_t *>(q.buff);
+    return value >= 0 && value <= 255;
+}
+
+inline bool valid_u8_per_tensor_zero_point(
+        const matmul_quantization_params_t::matmul_quant_t &q) noexcept {
+    int32_t value = 0;
+    return read_u8_per_tensor_zero_point(q, value);
+}
+
+inline bool is_static_u8s8_quant_config(const matmul_params &params) noexcept {
+    return !params.dynamic_quant && params.dtypes.src == data_type_t::u8
+            && params.dtypes.wei == data_type_t::s8
+            && (params.dtypes.compute == data_type_t::none
+                    || params.dtypes.compute == data_type_t::u8);
+}
+
+inline bool static_u8s8_quant_supported(
+        const matmul_params &params, int N) noexcept {
+    if (!is_static_u8s8_quant_config(params)) return false;
+    const auto &q = params.quant_params;
+    const bool weight_scale_supported
+            = valid_positive_per_tensor_scale(q.wei_scale)
+            || (quant_param_is_per_channel(q.wei_scale, N)
+                    && quant_scale_dtype_supported(q.wei_scale.dt));
+    if (!valid_positive_per_tensor_scale(q.src_scale)
+            || !valid_u8_per_tensor_zero_point(q.src_zp)
+            || !weight_scale_supported || q.wei_zp.buff != nullptr) {
+        return false;
+    }
+    if (params.dtypes.dst == data_type_t::u8) {
+        return valid_positive_per_tensor_scale(q.dst_scale)
+                && valid_u8_per_tensor_zero_point(q.dst_zp);
+    }
+    return (params.dtypes.dst == data_type_t::bf16
+                   || params.dtypes.dst == data_type_t::f32)
+            && q.dst_scale.buff == nullptr && q.dst_zp.buff == nullptr;
+}
+
+/**
  * @brief Detects a symmetric-quantization INT8 configuration.
  *
  * Returns true when @p params describes the AOCL-DLP sym_quant kernel
@@ -184,11 +293,8 @@ inline bool is_sym_quant_config(const matmul_params &params) {
             && params.dtypes.dst != data_type_t::bf16) {
         return false;
     }
-    size_t src_scale_nelems = 1;
-    for (auto d : params.quant_params.src_scale.dims) {
-        src_scale_nelems *= static_cast<size_t>(d);
-    }
-    return src_scale_nelems > 1;
+    return checked_quant_param_num_elements(params.quant_params.src_scale.dims)
+            > 1;
 }
 
 /**
@@ -259,11 +365,36 @@ inline bool is_w4a8_config(const matmul_params &params) {
     return false;
 }
 
-/** @brief Product of quant-param dims; 0 when dims is empty. */
-inline int64_t quant_param_num_elements(const std::vector<int64_t> &dims) {
-    if (dims.empty()) { return 0; }
-    return std::accumulate(
-            dims.begin(), dims.end(), int64_t {1}, std::multiplies<int64_t>());
+inline int effective_postop_leading_dim(
+        const matmul_post_op &postop, int N) noexcept {
+    return postop.leading_dim == -1 ? N : postop.leading_dim;
+}
+
+inline bool int8_ck_binary_postops_supported(
+        const matmul_params &params, int M, int N) noexcept {
+    if (params.postop_.size() != 2 || M <= 0 || N <= 0) return false;
+    const auto valid
+            = [&](const matmul_post_op &postop, post_op_type_t expected_type) {
+        return postop.po_type == expected_type && postop.buff != nullptr
+                && postop.dtype == data_type_t::f32 && postop.dims.size() == 2
+                && postop.dims[0] == static_cast<int64_t>(M)
+                && postop.dims[1] == static_cast<int64_t>(N)
+                && effective_postop_leading_dim(postop, N) >= N;
+    };
+    return valid(params.postop_[0], post_op_type_t::binary_mul)
+            && valid(params.postop_[1], post_op_type_t::binary_add);
+}
+
+inline bool int8_ck_postops_supported(
+        const matmul_params &params, int M, int N) noexcept {
+    if (params.postop_.empty()) return true;
+    if (params.postop_.size() == 1) {
+        const auto &postop = params.postop_[0];
+        return postop.buff == nullptr
+                && (postop.po_type == post_op_type_t::relu
+                        || postop.po_type == post_op_type_t::sigmoid);
+    }
+    return int8_ck_binary_postops_supported(params, M, N);
 }
 
 /** @brief AOCL sym_quant requires K/G divisible and group_size % 4 == 0. */

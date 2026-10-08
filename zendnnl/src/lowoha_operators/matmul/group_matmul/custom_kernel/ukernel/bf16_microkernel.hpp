@@ -137,15 +137,14 @@ enum class BiasKind {
 /// returns `nullptr` for any (gated_act, kF32) tuple so the dispatcher's
 /// `fill_kfn_table` refuses the call cleanly.
 /// `kF16` is consumed only by the FP16 microkernel family
-/// (`f16_microkernel.{hpp,cpp}`); the BF16 and DQ-INT8 selectors
-/// never receive it (their `resolve_variant` rows only ever produce
-/// `kBf16` / `kF32`), so their `if (dst_dt == kF32) … else <bf16>`
-/// branches are unaffected.  Kept in this shared enum so all three
-/// families thread store-dtype through one `DstDt` axis.
+/// (`f16_microkernel.{hpp,cpp}`). BF16/FP16 selectors explicitly reject it;
+/// only the INT8 selector instantiates a U8 store. Kept in this shared enum so
+/// all three families thread store-dtype through one `DstDt` axis.
 enum class DstDt {
     kBf16,
     kF32,
     kF16,
+    kU8,
 };
 
 /// True when the running CPU supports AVX512_BF16 (VDPBF16PS).

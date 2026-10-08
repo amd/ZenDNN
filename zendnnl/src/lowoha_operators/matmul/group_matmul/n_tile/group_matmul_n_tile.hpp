@@ -921,7 +921,8 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
     //     `ck_eligible_int8` / prepack which honour the sub-toggle).
     // Bf16 calls (`src=bf16, wei=bf16`) never satisfy either clause.
     const bool is_dq_int8_call = wei_dtype == data_type_t::s8
-            && (dynamic_quant || src_dtype == data_type_t::s8);
+            && (dynamic_quant || src_dtype == data_type_t::s8
+                    || src_dtype == data_type_t::u8);
     if (is_dq_int8_call && !get_grp_matmul_custom_kernel_int8()) return;
     // FP16 CK sub-toggle — independent from the master + int8 knobs so
     // operators can A/B the native AVX-512-FP16 fast path without

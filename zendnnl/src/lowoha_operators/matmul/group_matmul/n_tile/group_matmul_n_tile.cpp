@@ -124,11 +124,8 @@ namespace {
 inline void offset_quant_by_col(matmul_quantization_params_t::matmul_quant_t &q,
         int col_start, int n_tile) {
     if (q.buff == nullptr || q.dims.empty()) return;
-    int64_t nelems = 1;
-    for (auto d : q.dims) {
-        if (d <= 0) return;
-        nelems *= d;
-    }
+    const int64_t nelems = checked_quant_param_num_elements(q.dims);
+    if (nelems < 0) return;
     if (nelems <= 1) return; // Per-tensor — no slicing.
 
     // Per-channel detection: rank-1 `{N}` or rank-2 `{1, N}`.  The
@@ -285,8 +282,11 @@ struct HoistedSrcQuant {
     // means "cannot serve" and `do_tile` falls back to AOCL.
     std::vector<float> src_scale_f32_owned;
     std::vector<float> wei_scale_f32_owned;
+    float src_scale_f32_scalar = 0.0f;
+    float wei_scale_f32_scalar = 0.0f;
     const void *src_scale_view = nullptr;
     const void *wei_scale_view = nullptr;
+    custom_kernel::Int8EpilogueConfig epilogue;
 };
 
 // apply_w4a8_substitution is a member of GroupNTileContext (see below).
@@ -330,6 +330,31 @@ static const float *materialise_f32_scale(const void *buff, data_type_t dt,
         return owned.data();
     }
     return nullptr;
+}
+
+static bool configure_static_int8_postops(const matmul_params &params, int M,
+        int N, custom_kernel::Int8EpilogueConfig &epilogue) {
+    if (!int8_ck_postops_supported(params, M, N)) return false;
+    if (params.postop_.empty()) return true;
+    if (params.postop_.size() == 1) {
+        const auto &po = params.postop_[0];
+        if (po.po_type == post_op_type_t::relu) {
+            epilogue.unary_postop = custom_kernel::Int8UnaryPostOp::kRelu;
+            return true;
+        }
+        if (po.po_type == post_op_type_t::sigmoid) {
+            epilogue.unary_postop = custom_kernel::Int8UnaryPostOp::kSigmoid;
+            return true;
+        }
+        return false;
+    }
+    const auto &mul = params.postop_[0];
+    const auto &add = params.postop_[1];
+    epilogue.binary_mul = static_cast<const float *>(mul.buff);
+    epilogue.binary_add = static_cast<const float *>(add.buff);
+    epilogue.binary_mul_ld = effective_postop_leading_dim(mul, N);
+    epilogue.binary_add_ld = effective_postop_leading_dim(add, N);
+    return true;
 }
 
 // f32 view of the per-channel wei_scale.  Like `materialise_f32_scale`
@@ -846,6 +871,9 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         const void *src_scale_ptr = nullptr;
         const int32_t *src_zp_ptr = nullptr;
         const void *wei_scale_ptr = nullptr;
+        const custom_kernel::Int8EpilogueConfig default_int8_epilogue {};
+        const custom_kernel::Int8EpilogueConfig *int8_epilogue
+                = &default_int8_epilogue;
         // For the DQ-INT8 family the CK ukernel consumes an s8/u8 byte
         // stream — the bf16 caller src must be substituted with the
         // hoisted s8 reorder result that `flat_n_tile`'s pre-OMP loop
@@ -870,7 +898,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         // re-quant via execute_expert_slice's wrapper invocation, so
         // correctness is preserved even when the pre-OMP hoist failed.
         bool int8_hoist_ok = true;
-        if (custom_kernel::needs_s8_src_hoist(kctx->variant)) {
+        if (custom_kernel::needs_quantized_src_setup(kctx->variant)) {
             // The hoist sets the src/wei scale VIEWS — either the caller's raw
             // bf16/f32 buffers (kernel converts on load) or owned f32 copies
             // (silu/gelu interleave / dtype-mismatch path).  A null view
@@ -898,6 +926,7 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
                 ck_src_ptr = h.src_ptr;
                 ck_src_lda = h.lda;
                 wei_scale_ptr = h.wei_scale_view;
+                int8_epilogue = &h.epilogue;
             } else {
                 int8_hoist_ok = false;
                 // A fused call must never reach the AOCL fall-through: it
@@ -934,9 +963,8 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
         }
         if (int8_hoist_ok) {
             custom_kernel::dispatch_tile(*kctx, e, M[e], K[e], n_tile,
-                    col_start, ck_src_ptr, ck_src_lda, bias[e],
-                    static_cast<bfloat16_t *>(dst[e]), ldc[e], src_scale_ptr,
-                    src_zp_ptr, wei_scale_ptr);
+                    col_start, ck_src_ptr, ck_src_lda, bias[e], dst[e], ldc[e],
+                    src_scale_ptr, src_zp_ptr, wei_scale_ptr, *int8_epilogue);
             return;
         }
         // Fall through to AOCL path — supported only for a NON-fused call.
@@ -4246,7 +4274,9 @@ void flat_n_tile(const std::vector<char> &layout,
     if (!params.empty() && params[rep].dynamic_quant) {
         ck_dynamic_quant = true;
         ck_compute_dtype = params[rep].dtypes.compute;
-    } else if (!params.empty() && params[rep].dtypes.src == data_type_t::s8
+    } else if (!params.empty()
+            && (params[rep].dtypes.src == data_type_t::s8
+                    || params[rep].dtypes.src == data_type_t::u8)
             && params[rep].quant_params.src_scale.buff != nullptr) {
         // Grouped pre-quant (ZENDNNL_ENABLE_GROUP_DQ): the group_dynamic_quant
         // pre-pass already quantized the src to s8 and CLEARED dynamic_quant,
@@ -4254,7 +4284,9 @@ void flat_n_tile(const std::vector<char> &layout,
         // `ck_dynamic_quant=false` (no runtime hoist needed; src is already
         // s8) but propagate the compute dtype so `resolve_variant` selects the
         // sym/asym CK int8 variant instead of falling back to AOCL.
-        ck_compute_dtype = params[rep].dtypes.compute;
+        ck_compute_dtype = (params[rep].dtypes.src == data_type_t::u8)
+                ? data_type_t::u8
+                : params[rep].dtypes.compute;
     }
     // Per-expert "weight already CK-VNNI-packed" flags.  `mem_format_b ==
     // 'r'` alone is ambiguous — it marks ANY pre-reordered weight, and the
@@ -4315,7 +4347,16 @@ void flat_n_tile(const std::vector<char> &layout,
     // call drops to the AOCL fallback for no reason.  Slot 0 is only a valid
     // source when it happens to be active, which is exactly what `rep`
     // already encodes.
-    if (!ck_s4_src_per_group) {
+    bool ck_has_unsupported_postops = false;
+    for (int e = 0; e < num_ops && !ck_has_unsupported_postops; ++e) {
+        if (M[e] <= 0 || params[e].postop_.empty()) continue;
+        const bool static_u8s8 = is_static_u8s8_quant_config(params[e]);
+        custom_kernel::Int8EpilogueConfig probe;
+        if (!static_u8s8 || custom_act != grp_matmul_gated_act_t::none
+                || !configure_static_int8_postops(params[e], M[e], N[e], probe))
+            ck_has_unsupported_postops = true;
+    }
+    if (!ck_s4_src_per_group && !ck_has_unsupported_postops) {
         engage_ntile_custom_kernel(custom_act,
                 /*src_dtype=*/params[rep].dtypes.src,
                 /*wei_dtype=*/params[rep].dtypes.wei,
@@ -4349,8 +4390,15 @@ void flat_n_tile(const std::vector<char> &layout,
                 || (kctx.act_kind == custom_kernel::ActKind::gelu_and_mul);
         const data_type_t sdt = params[rep].quant_params.src_scale.dt;
         const data_type_t wdt = params[rep].quant_params.wei_scale.dt;
-        const bool supported_dt
-                = (sdt == data_type_t::bf16 || sdt == data_type_t::f32);
+        bool uniform_raw_scale_dt
+                = quant_scale_dtype_supported(sdt) && sdt == wdt;
+        for (int e = 0; e < num_ops && uniform_raw_scale_dt; ++e) {
+            if (M[e] <= 0) continue;
+            const data_type_t expert_sdt = params[e].quant_params.src_scale.dt;
+            const data_type_t expert_wdt = params[e].quant_params.wei_scale.dt;
+            uniform_raw_scale_dt = quant_scale_dtype_supported(expert_sdt)
+                    && expert_sdt == expert_wdt && expert_sdt == sdt;
+        }
         // DA8W8 weights are constant and their per-channel scale is weight-tied.
         // When a framework stores that scale as BF16, convert/cache it once as
         // FP32 instead of making every INT8 CK tile widen the same BF16 scale
@@ -4383,7 +4431,7 @@ void flat_n_tile(const std::vector<char> &layout,
         const bool force_scale_f32
                 = force_bf16_wei_scale_f32 || force_s4_bf16_wei_scale_f32;
         ck_scales_raw = !force_scale_f32 && !ck_scales_interleave
-                && supported_dt && (sdt == wdt);
+                && uniform_raw_scale_dt;
         kctx.scale_kind = (ck_scales_raw && sdt == data_type_t::bf16)
                 ? custom_kernel::ScaleKind::kBf16
                 : custom_kernel::ScaleKind::kF32;
@@ -4542,7 +4590,7 @@ void flat_n_tile(const std::vector<char> &layout,
         group_matmul_prepack::prepack_for_algo_3(
                 group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                         transB, is_weights_const, params, M,
-                        get_grp_matmul_custom_kernel(),
+                        /*custom_kernel_env=*/use_custom,
                         /*num_threads=*/num_threads,
                         /*nr_align=*/nr_align, fused_act, act_dtype,
                         /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta,
@@ -4625,29 +4673,71 @@ void flat_n_tile(const std::vector<char> &layout,
         // path consumes it exactly like the runtime-hoisted case, and
         // materialise the CK scale views.  Gated on the int8 CK variant
         // having resolved (set below from the same s8-src + compute dtype).
-        if (!params[e].dynamic_quant && params[e].dtypes.src == data_type_t::s8
+        if (!params[e].dynamic_quant
+                && (params[e].dtypes.src == data_type_t::s8
+                        || params[e].dtypes.src == data_type_t::u8)
                 && params[e].quant_params.src_scale.buff != nullptr
-                && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
+                && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
             hoisted[e].valid = true;
             hoisted[e].src_ptr = src[e]; // already s8
             hoisted[e].lda = lda[e];
             hoisted[e].src_dtype = params[e].dtypes.src;
             hoisted[e].src_scale = params[e].quant_params.src_scale;
             hoisted[e].src_zp = params[e].quant_params.src_zp;
+            const bool static_u8s8 = is_static_u8s8_quant_config(params[e]);
+            const auto &wei_scale = params[e].quant_params.wei_scale;
+            const bool wei_scale_per_tensor
+                    = static_u8s8 && quant_param_is_per_tensor(wei_scale);
+            hoisted[e].epilogue.src_quant_per_tensor = static_u8s8;
+            hoisted[e].epilogue.wei_scale_per_tensor = wei_scale_per_tensor;
+            if (static_u8s8) {
+                hoisted[e].valid = static_u8s8_quant_supported(params[e], N[e])
+                        && configure_static_int8_postops(
+                                params[e], M[e], N[e], hoisted[e].epilogue);
+            }
+            if (static_u8s8 && params[e].dtypes.dst == data_type_t::u8) {
+                hoisted[e].valid = hoisted[e].valid
+                        && read_positive_per_tensor_scale(
+                                params[e].quant_params.dst_scale,
+                                hoisted[e].epilogue.dst_scale)
+                        && read_u8_per_tensor_zero_point(
+                                params[e].quant_params.dst_zp,
+                                hoisted[e].epilogue.dst_zp);
+            }
             any_hoist = true;
             if (ck_scales_raw) {
                 hoisted[e].src_scale_view = hoisted[e].src_scale.buff;
                 hoisted[e].wei_scale_view
                         = params[e].quant_params.wei_scale.buff;
             } else {
-                hoisted[e].src_scale_view = materialise_f32_scale(
-                        hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
-                        M[e], hoisted[e].src_scale_f32_owned);
-                hoisted[e].wei_scale_view = materialise_f32_wei_scale_cached(
-                        weight[e], params[e].quant_params.wei_scale.buff,
-                        params[e].quant_params.wei_scale.dt, N[e],
-                        ck_scales_interleave, is_weights_const[e],
-                        hoisted[e].wei_scale_f32_owned, ck_wei_scale_groups(e));
+                if (hoisted[e].epilogue.src_quant_per_tensor) {
+                    hoisted[e].valid = hoisted[e].valid
+                            && read_positive_per_tensor_scale(
+                                    hoisted[e].src_scale,
+                                    hoisted[e].src_scale_f32_scalar);
+                    hoisted[e].src_scale_view
+                            = &hoisted[e].src_scale_f32_scalar;
+                } else {
+                    hoisted[e].src_scale_view = materialise_f32_scale(
+                            hoisted[e].src_scale.buff, hoisted[e].src_scale.dt,
+                            M[e], hoisted[e].src_scale_f32_owned);
+                }
+                if (hoisted[e].epilogue.wei_scale_per_tensor) {
+                    hoisted[e].valid = hoisted[e].valid
+                            && read_positive_per_tensor_scale(
+                                    params[e].quant_params.wei_scale,
+                                    hoisted[e].wei_scale_f32_scalar);
+                    hoisted[e].wei_scale_view
+                            = &hoisted[e].wei_scale_f32_scalar;
+                } else {
+                    hoisted[e].wei_scale_view
+                            = materialise_f32_wei_scale_cached(weight[e],
+                                    params[e].quant_params.wei_scale.buff,
+                                    params[e].quant_params.wei_scale.dt, N[e],
+                                    ck_scales_interleave, is_weights_const[e],
+                                    hoisted[e].wei_scale_f32_owned,
+                                    ck_wei_scale_groups(e));
+                }
             }
             continue;
         }
@@ -4716,7 +4806,7 @@ void flat_n_tile(const std::vector<char> &layout,
             // silu/gelu interleave permutation to wei_scale) since the kernel
             // can't gather the permuted columns / express a mixed dtype.  A
             // null view routes the expert back to AOCL in `do_tile`.
-            if (custom_kernel::needs_s8_src_hoist(kctx.variant)) {
+            if (custom_kernel::needs_quantized_src_setup(kctx.variant)) {
                 if (ck_scales_raw) {
                     hoisted[e].src_scale_view = hoisted[e].src_scale.buff;
                     hoisted[e].wei_scale_view
@@ -4745,7 +4835,7 @@ void flat_n_tile(const std::vector<char> &layout,
     // single per-call apilog warn so the operator can see why the
     // CK did not run on these experts; the OMP region itself stays
     // log-silent in the hot path.
-    if (use_custom && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
+    if (use_custom && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
         static const bool s_int8_bad_hoist_warn = apilog_info_enabled();
         if (s_int8_bad_hoist_warn) {
             int n_bad_hoist = 0;
@@ -4757,7 +4847,8 @@ void flat_n_tile(const std::vector<char> &layout,
                 // Filtering on dynamic_quant alone would make a failed
                 // pre-quant hoist silent.
                 const bool expected_hoist = params[e].dynamic_quant
-                        || (params[e].dtypes.src == data_type_t::s8
+                        || ((params[e].dtypes.src == data_type_t::s8
+                                    || params[e].dtypes.src == data_type_t::u8)
                                 && params[e].quant_params.src_scale.buff
                                         != nullptr);
                 if (!expected_hoist) continue;
@@ -4811,7 +4902,7 @@ void flat_n_tile(const std::vector<char> &layout,
     // below the planner, or narrowing it to a subset of experts, silently
     // removes DecodeDynamic's correctness precondition.
     if (use_custom && fused_epilogue
-            && custom_kernel::needs_s8_src_hoist(kctx.variant)) {
+            && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
         bool any_tile_falls_back = false;
         for (int e = 0; e < num_ops; ++e) {
             if (M[e] <= 0) continue;
@@ -4958,6 +5049,32 @@ void flat_n_tile(const std::vector<char> &layout,
         }
     }
 
+    // Dense binary post-op buffers are full [M,N] matrices. The custom INT8
+    // dispatcher offsets them by each N tile, but the standard AOCL tile path
+    // does not. If CK was refused after ALGO 3 selection, use the full-N
+    // Sequential executor rather than applying columns [0,n_tile) repeatedly.
+    if (!use_custom) {
+        bool has_dense_binary_postops = false;
+        for (int e = 0; e < num_ops && !has_dense_binary_postops; ++e) {
+            if (M[e] <= 0) continue;
+            const bool static_u8s8 = is_static_u8s8_quant_config(params[e]);
+            has_dense_binary_postops = static_u8s8
+                    && int8_ck_binary_postops_supported(params[e], M[e], N[e]);
+        }
+        if (has_dense_binary_postops
+                && plan.strategy != GroupNTileStrategy::Sequential) {
+            plan.strategy = GroupNTileStrategy::Sequential;
+            plan.tight_fused_epilogue = false;
+            static const bool s_binary_fallback_log = apilog_info_enabled();
+            if (s_binary_fallback_log) {
+                apilog_info(
+                        "[GRP_MATMUL.PLAN.FALLBACK] strategy=Sequential "
+                        "reason=dense_binary_postops_require_full_N_when_CK_"
+                        "refused");
+            }
+        }
+    }
+
     // ── Mixed-in-place: a CK refusal must not land on per-tile keys ──
     //
     // Under AUTO mixed in-place the prompt's full-weight reorder has already
@@ -4988,13 +5105,12 @@ void flat_n_tile(const std::vector<char> &layout,
     //
     // Sequential gives up cross-expert parallelism for this call.
     //
-    // `kctx.enabled` records that CK was expected for this call's dtype and
-    // env, which is what cross-warm keyed its choice of decode layout on — so
-    // `kctx.enabled && !use_custom` is "the warmed layout is the CK pack, and
-    // this call cannot use it".  With CK off altogether `kctx.enabled` is
-    // false, cross-warm packed the AOCL per-tile layout, and per-tile keys are
-    // the warmed ones, so Sequential is not forced there.
-    if (kctx.enabled && !use_custom && is_grp_auto_mixed_inplace_active()
+    // An active mixed-in-place mode proves the process licensed mutation on a
+    // split-independent CK decode pack. If this call cannot use CK for any
+    // reason (including a refusal before kctx was prepared), it must use the
+    // whole-weight key. When CK is off process-wide, mixed mode is never
+    // enabled, so this fallback remains inactive.
+    if (!use_custom && is_grp_auto_mixed_inplace_active()
             && plan.strategy != GroupNTileStrategy::Sequential) {
         plan.strategy = GroupNTileStrategy::Sequential;
         // Sequential re-detects a tight caller from `ldc[e] < N[e]` and owns

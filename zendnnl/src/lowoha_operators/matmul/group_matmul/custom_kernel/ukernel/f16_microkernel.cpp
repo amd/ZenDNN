@@ -380,6 +380,7 @@ static void ukernel_impl(const float16_t *__restrict A, int lda,
 // dispatcher then falls back to AOCL DLP for every F16 call.
 f16_ukernel_fn_t select_f16_ukernel(int MR, int NV, ActKind act, DstDt dst_dt) {
 #if ZENDNNL_GRP_F16_CK_AVAILABLE
+    if (dst_dt != DstDt::kF16 && dst_dt != DstDt::kF32) return nullptr;
     const bool is_gated_act = (act == ActKind::swiglu_oai_mul
             || act == ActKind::silu_and_mul || act == ActKind::gelu_and_mul);
     if (is_gated_act && dst_dt != DstDt::kF16) { return nullptr; }

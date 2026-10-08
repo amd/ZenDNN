@@ -573,7 +573,8 @@ void flat_m_tile(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_2(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads,
+                    grp_matmul_custom_kernel_effective(params, M, N, fused_act),
+                    num_threads,
                     algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
@@ -1630,7 +1631,9 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_2(
             group_matmul_prepack::build_prepack_params(weight_w13, K_in, N_w13,
                     ldb_w13, transB, is_weights_const, params_w13, M,
-                    get_grp_matmul_custom_kernel(), num_threads,
+                    grp_matmul_custom_kernel_effective(
+                            params_w13, M, N_w13, fused_act),
+                    num_threads,
                     algo3_decode_nr_align(
                             M, N_w13, ldc_w13, fused_act, params_w13),
                     fused_act, act_dtype,
@@ -1639,7 +1642,9 @@ bool flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_2(
             group_matmul_prepack::build_prepack_params(weight_w2, K_w2, N_w2,
                     ldb_w2, transB, is_weights_const, params_w2, M,
-                    get_grp_matmul_custom_kernel(), num_threads, /*nr_align=*/0,
+                    grp_matmul_custom_kernel_effective(
+                            params_w2, M, N_w2, grp_matmul_gated_act_t::none),
+                    num_threads, /*nr_align=*/0,
                     /*fused_act=*/grp_matmul_gated_act_t::none,
                     /*act_dtype=*/data_type_t::none,
                     /*transA=*/&transA_w2, /*alpha=*/&alpha_w2,

@@ -1423,9 +1423,15 @@ status_t group_matmul_direct(const std::vector<char> &layout,
                             num_ops));
     // Normalize post-op defaults on the per-call copies. Group matmul
     // dispatches through matmul_execute() without entering matmul_direct().
-    for (auto &matmul_param : exec_params) {
+    for (size_t e = 0; e < exec_params.size(); ++e) {
+        auto &matmul_param = exec_params[e];
         for (auto &po : matmul_param.postop_) {
             po.apply_alpha_default();
+            if ((po.po_type == post_op_type_t::binary_add
+                        || po.po_type == post_op_type_t::binary_mul)
+                    && po.leading_dim == -1) {
+                po.leading_dim = N[e];
+            }
         }
     }
 

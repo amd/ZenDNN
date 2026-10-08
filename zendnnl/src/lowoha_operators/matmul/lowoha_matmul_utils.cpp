@@ -269,8 +269,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                       const char *param_name) -> bool {
         if (!buff) { return true; }
 
-        int64_t nelems = std::accumulate(dims.begin(), dims.end(), int64_t {1},
-                std::multiplies<int64_t>());
+        const int64_t nelems = checked_quant_param_num_elements(dims);
 
         if (nelems != 1) {
             log_error(param_name, " supports only per-tensor");
@@ -280,8 +279,12 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     };
 
     if (!is_w4a8 && params.quant_params.src_scale.buff) {
-        int64_t nelems
-                = quant_param_num_elements(params.quant_params.src_scale.dims);
+        const int64_t nelems = checked_quant_param_num_elements(
+                params.quant_params.src_scale.dims);
+        if (nelems < 0) {
+            log_error("Source quant scale has invalid or overflowing dims");
+            return status_t::failure;
+        }
         if (nelems != 1) {
             bool is_supported_src = (params.dtypes.src == data_type_t::s8
                     || params.dtypes.src == data_type_t::bf16
@@ -303,12 +306,14 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                         "symmetric quantization, and f32/bf16 output");
                 return status_t::failure;
             }
-            int64_t wei_scale_nelems = params.quant_params.wei_scale.buff
-                    ? std::accumulate(
-                              params.quant_params.wei_scale.dims.begin(),
-                              params.quant_params.wei_scale.dims.end(),
-                              int64_t {1}, std::multiplies<int64_t>())
+            const int64_t wei_scale_nelems = params.quant_params.wei_scale.buff
+                    ? checked_quant_param_num_elements(
+                              params.quant_params.wei_scale.dims)
                     : 0;
+            if (wei_scale_nelems < 0) {
+                log_error("Weight quant scale has invalid or overflowing dims");
+                return status_t::failure;
+            }
             // GGML-packed weights (pack_format_b == 1) carry per-group fp16
             // scales interleaved inside the packed buffer; the matching
             // params.quant_params.wei_scale.{buff,dt,dims} is populated later

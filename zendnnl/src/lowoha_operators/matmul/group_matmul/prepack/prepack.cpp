@@ -1435,19 +1435,29 @@ inline bool ck_eligible_int8(const PrepackParams &p) {
     // the runtime executor exactly.  (When the custom kernel gains per-group
     // support, this guard and the runtime `ck_per_group` guard lift together.)
     if (p.group_size > 0) { return false; }
-    // Two int8 entry forms reach the CK microkernel (mirror
+    // Three int8 entry forms reach the CK microkernel (mirror
     // resolve_variant in custom_kernel/dispatch.cpp):
     //   * runtime hoist     — `dynamic_quant=true` with bf16 src;
     //   * grouped pre-quant — `group_dynamic_quant` produced an s8 src
-    //     and CLEARED `dynamic_quant` (the default-on production path).
+    //     and CLEARED `dynamic_quant` (the default-on production path);
+    //   * static U8xS8      — `dynamic_quant=false` with u8 src.
     // Keying on `dynamic_quant && src==bf16` alone missed the grouped
     // form, so the prepack never warmed the int8 CK pack for it.
     const bool dq_int8_form
             = (p.dynamic_quant && p.src_dtype == data_type_t::bf16)
-            || (p.src_dtype == data_type_t::s8);
-    if (!dq_int8_form) { return false; }
+            || (!p.dynamic_quant && p.src_dtype == data_type_t::s8);
+    const bool static_u8s8_form
+            = !p.dynamic_quant && p.src_dtype == data_type_t::u8;
+    if (!dq_int8_form && !static_u8s8_form) { return false; }
     if (p.wei_dtype != data_type_t::s8) { return false; }
-    if (p.dst_dtype != data_type_t::bf16) { return false; }
+    if (p.dst_dtype != data_type_t::bf16 && p.dst_dtype != data_type_t::f32
+            && p.dst_dtype != data_type_t::u8) {
+        return false;
+    }
+    // U8 destination quantization exists only on the static U8-source
+    // variant. An s8 grouped-DQ source with dst=u8 is unsupported at runtime
+    // and must not allocate a dead full-weight CK pack.
+    if (p.dst_dtype == data_type_t::u8 && !static_u8s8_form) { return false; }
     if (p.compute_dtype != data_type_t::s8
             && p.compute_dtype != data_type_t::u8) {
         return false;
@@ -1465,6 +1475,10 @@ inline bool ck_eligible_int8(const PrepackParams &p) {
     }
     if (p.act != grp_matmul_gated_act_t::none
             && p.act_dtype != data_type_t::bf16) {
+        return false;
+    }
+    if (p.dst_dtype != data_type_t::bf16
+            && p.act != grp_matmul_gated_act_t::none) {
         return false;
     }
     if (p.bias_dtype != data_type_t::none && p.bias_dtype != data_type_t::bf16
@@ -1494,37 +1508,28 @@ inline bool ck_eligible_int8(const PrepackParams &p) {
             return false;
         }
     }
-    // Pack-NR planner — shared with the bf16 family.
+    // Pack-NR / accumulator gates — mirror prepare_for_call for every active
+    // expert. A representative-only check can warm CK for a heterogeneous
+    // group that runtime must refuse as a whole.
     namespace ck = ::zendnnl::lowoha::matmul::custom_kernel;
     if (p.K == nullptr || p.K->empty()) { return false; }
     if (p.N == nullptr || p.N->empty()) { return false; }
-    int rep_K = (*p.K)[0];
-    int rep_N = (*p.N)[0];
-    if (p.M != nullptr) {
-        const int sweep = std::min<int>(n_active,
-                static_cast<int>(
-                        std::min({p.K->size(), p.N->size(), p.M->size()})));
-        for (int i = 0; i < sweep; ++i) {
-            if ((*p.M)[i] > 0) {
-                rep_K = (*p.K)[i];
-                rep_N = (*p.N)[i];
-                break;
-            }
+    size_t sweep = std::min<size_t>(
+            static_cast<size_t>(n_active), std::min(p.K->size(), p.N->size()));
+    if (p.M != nullptr) { sweep = std::min(sweep, p.M->size()); }
+    bool found_active = false;
+    for (size_t i = 0; i < sweep; ++i) {
+        if (p.M != nullptr && (*p.M)[i] <= 0) continue;
+        found_active = true;
+        const int Ki = (*p.K)[i];
+        const int Ni = (*p.N)[i];
+        if ((Ki % ck::kVNNIInt8Quad) != 0 || Ki > ck::kMaxSafeInt8AccumK) {
+            return false;
         }
+        const int pack_nr = ck::plan_pack_nr(Ki, Ni);
+        if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) return false;
     }
-    // DQ-INT8 CK additionally requires K divisible by 4 (the VNNI K-quad).
-    // The packed weight is zero-padded to a K-quad but the hoisted src row
-    // is exactly K bytes, so a `K % 4 != 0` tail would over-read src — the
-    // runtime dispatcher refuses CK for unaligned K and falls back to AOCL
-    // DLP sym-quant (see `custom_kernel/dispatch.cpp::prepare_for_call`,
-    // the `int8_K_not_multiple_of_4` gate).  Mirror it here so prepack does
-    // NOT mark the call CK-eligible and skip the AOCL warm — otherwise the
-    // runtime AOCL fallback would run on a cold cache.  (bf16's K-pair pack
-    // is unaffected; this gate is int8-only, hence in `ck_eligible_int8`.)
-    if ((rep_K % ck::kVNNIInt8Quad) != 0) { return false; }
-    const int pack_nr = ck::plan_pack_nr(rep_K, rep_N);
-    if (pack_nr != ck::kNRMin && pack_nr != ck::kNRMax) { return false; }
-    return true;
+    return found_active;
 }
 
 // Eligibility for the FP16 custom-kernel pack (ALGO 3 only).  Mirrors
@@ -1919,7 +1924,8 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         // full-weight warm, and repeating it re-walks every expert through
         // two cache mutexes and double-counts `packed_ok`, which is what the
         // log-based footprint estimates read.
-        if (ck_eligible_int8(p) && !primary_did_aocl_fw) {
+        if (ck_eligible_int8(p) && int8_sym_quant_warm_candidate(p)
+                && !primary_did_aocl_fw) {
             out_regime = CrossWarmRegime::aocl_full_weight_sym_quant;
             const auto st_extra = warm_aocl_sym_quant(p, primary_complete);
             st_aocl.total_attempted += st_extra.total_attempted;

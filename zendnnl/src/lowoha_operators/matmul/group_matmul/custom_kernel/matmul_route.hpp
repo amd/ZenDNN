@@ -18,6 +18,7 @@
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_MATMUL_ROUTE_HPP
 
 #include <algorithm>
+#include <cmath>
 
 #include <omp.h>
 
@@ -25,6 +26,7 @@
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -46,13 +48,18 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         custom_kernel::KernelVariant variant,
         const matmul_params &params) noexcept {
     const auto &qp = params.quant_params;
-    const bool src_per_token = qp.src_scale.dims.size() == 2
-            && qp.src_scale.dims[0] == static_cast<int64_t>(M)
-            && qp.src_scale.dims[1] == 1;
+    const bool src_per_token = quant_param_is_per_token(qp.src_scale, M);
 
     if (custom_kernel::is_int8_variant(variant)) {
         if (!get_grp_matmul_custom_kernel_int8()) return false;
         if ((K % custom_kernel::kVNNIInt8Quad) != 0) return false;
+        if (K > custom_kernel::kMaxSafeInt8AccumK) return false;
+
+        // Static asymmetric U8xS8 uses scalar source metadata and scalar or
+        // per-channel symmetric weight scales.
+        if (is_static_u8s8_quant_config(params))
+            return static_u8s8_quant_supported(params, N);
+
         const bool signed_compute
                 = variant == custom_kernel::KernelVariant::kS8_S8_BF16_SYM
                 || variant == custom_kernel::KernelVariant::kS8_S8_F32_SYM;
@@ -64,12 +71,7 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
             return false;
         if (!params.dynamic_quant && qp.src_scale.buff == nullptr) return false;
 
-        const bool wei_per_channel
-                = (qp.wei_scale.dims.size() == 1
-                          && qp.wei_scale.dims[0] == static_cast<int64_t>(N))
-                || (qp.wei_scale.dims.size() == 2 && qp.wei_scale.dims[0] == 1
-                        && qp.wei_scale.dims[1] == static_cast<int64_t>(N));
-        return wei_per_channel;
+        return quant_param_is_per_channel(qp.wei_scale, N);
     }
 
     return true;
@@ -110,6 +112,9 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (!get_grp_matmul_custom_kernel()) return false;
     if (get_grp_n_tile_strategy() == 0) return false;
 
+    // Prompt-sized calls cannot reach CK through one-op grouped AUTO.
+    // The exact grouped-ALGO verdict is checked below after all cheap gates.
+    if (M > kDecodeMaxM) return false;
     if (!has_enough_single_expert_tiles(N, K, num_threads)) return false;
     if (M <= 0 || batch_count != 1 || transA || !is_weights_const) return false;
     if (layout != 'r' && layout != 'R') return false;
@@ -128,7 +133,6 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (alpha != 1.0f || beta != 0.0f) return false;
     if (!matmul_custom_kernel_bias_supported(bias, params.dtypes.bias))
         return false;
-    if (!params.postop_.empty()) return false;
 
     const custom_kernel::KernelVariant variant = custom_kernel::resolve_variant(
             params.dtypes.src, params.dtypes.wei, params.dtypes.dst,
@@ -137,6 +141,11 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
             = variant == custom_kernel::KernelVariant::kBF16_BF16_BF16;
     const bool int_variant = custom_kernel::is_int8_variant(variant);
     if (!bf16_variant && !int_variant) return false;
+    if (!params.postop_.empty()
+            && !(int_variant && !params.dynamic_quant
+                    && params.dtypes.src == data_type_t::u8
+                    && int8_ck_postops_supported(params, M, N)))
+        return false;
     if (bf16_variant && !custom_kernel::dispatch_supported()) return false;
     if (int_variant && !custom_kernel::avx512vnni_available()) return false;
     if (!matmul_custom_kernel_quant_supported(M, N, K, variant, params))
@@ -148,7 +157,19 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (pack_nr != custom_kernel::kNRMin && pack_nr != custom_kernel::kNRMax)
         return false;
     const int min_ldb = transB ? K : N;
-    return ldb >= min_ldb;
+    if (ldb < min_ldb) return false;
+
+    // Reuse the grouped selector itself rather than approximating its policy.
+    // In particular, one thread, a global ALGO 1 pin, or a decode-phase ALGO 1
+    // pin all make the one-op wrapper succeed without ever reaching CK.
+    const std::vector<char> grouped_layout {layout};
+    const std::vector<int> grouped_m {M};
+    const std::vector<int> grouped_n {N};
+    const std::vector<int> grouped_k {K};
+    const std::vector<matmul_params> grouped_params {params};
+    return select_grp_matmul_algo(grouped_layout, grouped_m, grouped_n,
+                   grouped_k, grouped_params, num_threads)
+            == 3;
 }
 
 } // namespace matmul

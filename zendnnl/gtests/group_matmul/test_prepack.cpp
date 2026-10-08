@@ -4499,6 +4499,154 @@ TEST_F(TestPrepackInt8WarmDtypeFamily, Int8WarmHitsInt8Probe) {
     EXPECT_EQ(probe_stats.cache_misses, 0);
 }
 
+TEST_F(TestPrepackInt8WarmDtypeFamily, StaticU8S8WarmsInt8Family) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    prepack::clear_fingerprint_cache_for_test();
+    reset_grp_matmul_caches();
+
+    constexpr int E = 2;
+    constexpr int K_in = 64, N1 = 128;
+    std::vector<std::vector<int8_t>> wei(E);
+    std::vector<const void *> wei_ptrs(E);
+    for (int e = 0; e < E; ++e) {
+        wei[e].assign(
+                static_cast<size_t>(K_in) * N1, static_cast<int8_t>(e + 1));
+        wei_ptrs[e] = wei[e].data();
+    }
+    std::vector<int> Ms {0, 5}, Ks(E, K_in), Ns(E, N1), ldbs(E, N1);
+    std::vector<bool> transA(E, false), transB(E, false), is_const(E, true);
+    std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    float src_scale = 0.02f, wei_scale = 0.03f, dst_scale = 2.0f;
+    int32_t src_zp = 121, dst_zp = 113;
+    std::vector<matmul_params> params(E);
+    // Slot 0 is an inactive placeholder with default dtypes. The active
+    // representative in slot 1 must drive every prepack dtype field.
+    for (int e = 1; e < E; ++e) {
+        auto &p = params[e];
+        p.dtypes.src = data_type_t::u8;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::u8;
+        p.dtypes.compute = data_type_t::none;
+        p.quant_params.src_scale.buff = &src_scale;
+        p.quant_params.src_scale.dt = data_type_t::f32;
+        p.quant_params.src_scale.dims = {1, 1};
+        p.quant_params.src_zp.buff = &src_zp;
+        p.quant_params.src_zp.dt = data_type_t::s32;
+        p.quant_params.src_zp.dims = {1, 1};
+        p.quant_params.wei_scale.buff = &wei_scale;
+        p.quant_params.wei_scale.dt = data_type_t::f32;
+        p.quant_params.wei_scale.dims = {1, 1};
+        p.quant_params.dst_scale.buff = &dst_scale;
+        p.quant_params.dst_scale.dt = data_type_t::f32;
+        p.quant_params.dst_scale.dims = {1, 1};
+        p.quant_params.dst_zp.buff = &dst_zp;
+        p.quant_params.dst_zp.dt = data_type_t::s32;
+        p.quant_params.dst_zp.dims = {1, 1};
+    }
+
+    auto warm = prepack::build_prepack_params(wei_ptrs, Ks, Ns, ldbs, transB,
+            is_const, params, Ms, /*custom_kernel_env=*/1,
+            /*num_threads=*/4, /*nr_align=*/1, grp_matmul_gated_act_t::none,
+            data_type_t::none, &transA, &alpha, &beta);
+    EXPECT_EQ(warm.src_dtype, data_type_t::u8);
+    EXPECT_EQ(warm.wei_dtype, data_type_t::s8);
+    EXPECT_EQ(warm.dst_dtype, data_type_t::u8);
+    prepack::prepack_for_algo_3(warm);
+
+    prepack::custom_kernel::PackProbeStats probe;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                      wei_ptrs, Ks, Ns, ldbs, transB, is_const, E, probe,
+                      /*interleave_split_halves=*/false,
+                      prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            zendnnl::error_handling::status_t::success);
+    EXPECT_EQ(probe.cache_hits, E)
+            << "static src=u8/compute=none must warm the INT8 pack family";
+    EXPECT_EQ(probe.cache_misses, 0);
+    prepack::clear_fingerprint_cache_for_test();
+}
+
+TEST_F(TestPrepackInt8WarmDtypeFamily, GroupedS8ToU8SkipsCkWarm) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    prepack::clear_fingerprint_cache_for_test();
+    reset_grp_matmul_caches();
+
+    constexpr int E = 2, M = 5, K = 64, N = 128;
+    std::vector<std::vector<int8_t>> weights(
+            E, std::vector<int8_t>(static_cast<size_t>(K) * N, int8_t {1}));
+    std::vector<const void *> weight_ptrs(E);
+    for (int e = 0; e < E; ++e)
+        weight_ptrs[e] = weights[e].data();
+    std::vector<int> Ms(E, M), Ks(E, K), Ns(E, N), ldbs(E, N);
+    std::vector<bool> transA(E, false), transB(E, false), is_const(E, true);
+    std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    std::vector<matmul_params> params(E);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::s8;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::u8;
+        p.dtypes.compute = data_type_t::u8;
+    }
+
+    auto warm = prepack::build_prepack_params(weight_ptrs, Ks, Ns, ldbs, transB,
+            is_const, params, Ms, /*custom_kernel_env=*/1,
+            /*num_threads=*/4, /*nr_align=*/1, grp_matmul_gated_act_t::none,
+            data_type_t::none, &transA, &alpha, &beta);
+    prepack::prepack_for_algo_3(warm);
+
+    prepack::custom_kernel::PackProbeStats probe;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                      weight_ptrs, Ks, Ns, ldbs, transB, is_const, E, probe,
+                      /*interleave_split_halves=*/false,
+                      prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            status_t::success);
+    EXPECT_EQ(probe.cache_hits, 0)
+            << "s8-source/u8-destination is not a CK variant and must not "
+               "warm a dead INT8 pack";
+    prepack::clear_fingerprint_cache_for_test();
+}
+
+TEST_F(TestPrepackInt8WarmDtypeFamily, HeterogeneousUnsafeKSkipsCkWarm) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    prepack::clear_fingerprint_cache_for_test();
+    reset_grp_matmul_caches();
+
+    constexpr int E = 2;
+    constexpr int N = 32;
+    constexpr int unsafe_k = ((ck::kMaxSafeInt8AccumK / ck::kVNNIInt8Quad) + 1)
+            * ck::kVNNIInt8Quad;
+    std::vector<int> Ms(E, 5), Ks {64, unsafe_k}, Ns(E, N), ldbs(E, N);
+    std::vector<std::vector<int8_t>> weights(E);
+    std::vector<const void *> weight_ptrs(E);
+    for (int e = 0; e < E; ++e) {
+        weights[e].assign(static_cast<size_t>(Ks[e]) * N, int8_t {1});
+        weight_ptrs[e] = weights[e].data();
+    }
+    std::vector<bool> transA(E, false), transB(E, false), is_const(E, true);
+    std::vector<float> alpha(E, 1.0f), beta(E, 0.0f);
+    std::vector<matmul_params> params(E);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::u8;
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+    }
+
+    auto warm = prepack::build_prepack_params(weight_ptrs, Ks, Ns, ldbs, transB,
+            is_const, params, Ms, /*custom_kernel_env=*/1,
+            /*num_threads=*/4, /*nr_align=*/1, grp_matmul_gated_act_t::none,
+            data_type_t::none, &transA, &alpha, &beta);
+    prepack::prepack_for_algo_3(warm);
+
+    prepack::custom_kernel::PackProbeStats probe;
+    ASSERT_EQ(prepack::custom_kernel::warm_pack_all_custom_kernel_experts(
+                      weight_ptrs, Ks, Ns, ldbs, transB, is_const, E, probe,
+                      /*interleave_split_halves=*/false,
+                      prepack::custom_kernel::WarmDtypeFamily::kINT8),
+            status_t::success);
+    EXPECT_EQ(probe.cache_hits, 0)
+            << "one unsafe active K must reject CK warm for the whole group";
+    prepack::clear_fingerprint_cache_for_test();
+}
+
 TEST_F(TestPrepackInt8WarmDtypeFamily, Int8WarmDoesNotPolluteBf16Cache) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
 

@@ -31,6 +31,8 @@
 /// refuses every shape regardless of the per-gate logic — see
 /// CK_SKIP_IF_NO_BF16_ISA.
 
+#include <limits>
+
 #include "ck_test_helpers.hpp"
 
 namespace {
@@ -485,6 +487,28 @@ TEST(CkPrepareForCallInt8, AcceptsGroupedPreQuantS8Asym) {
     EXPECT_EQ(kctx.variant, ck::KernelVariant::kU8_S8_BF16_ASYM);
 }
 
+TEST(CkPrepareForCallInt8, AcceptsStaticU8S8Destinations) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    for (auto dst : {data_type_t::bf16, data_type_t::f32, data_type_t::u8}) {
+        auto c = baseline("int8_static_u8s8");
+        c.src_dt = data_type_t::u8;
+        c.wei_dt = data_type_t::s8;
+        c.dst_dt = dst;
+        c.dynamic_quant = false;
+        c.compute_dt = data_type_t::none;
+        c.act = grp_matmul_gated_act_t::none;
+        ck_test::PrepCallStorage storage;
+        ck::CallContext kctx;
+        ASSERT_EQ(ck_test::run_prepare(c, storage, kctx), status_t::success);
+        EXPECT_TRUE(kctx.enabled);
+        const auto expected = (dst == data_type_t::bf16)
+                ? ck::KernelVariant::kU8_S8_BF16_ASYM
+                : (dst == data_type_t::f32) ? ck::KernelVariant::kU8_S8_F32_ASYM
+                                            : ck::KernelVariant::kU8_S8_U8_ASYM;
+        EXPECT_EQ(kctx.variant, expected);
+    }
+}
+
 TEST(CkPrepareForCallInt8, AcceptsAsymmetricBaseline) {
     CK_SKIP_IF_NO_INT8_ISA();
     auto c = baseline("int8_asym_baseline");
@@ -664,6 +688,25 @@ TEST(CkPrepareForCallProperties, VariantFieldMatchesResolveVariant) {
         EXPECT_EQ(kctx.variant,
                 ck::resolve_variant(c.src_dt, c.wei_dt, c.dst_dt));
     }
+}
+
+TEST(CkPrepareForCallProperties, NonInt8SelectorsRejectU8Destination) {
+    EXPECT_EQ(ck::select_ukernel(1, 2, ck::ActKind::none, ck::DstDt::kU8),
+            nullptr);
+    EXPECT_EQ(ck::select_f16_ukernel(1, 2, ck::ActKind::none, ck::DstDt::kU8),
+            nullptr);
+}
+
+TEST(CkPrepareForCallProperties,
+        PerTensorDimsRejectInvalidAndOverflowingShapes) {
+    using zendnnl::lowoha::matmul::quant_param_dims_are_per_tensor;
+    EXPECT_TRUE(quant_param_dims_are_per_tensor({}));
+    EXPECT_TRUE(quant_param_dims_are_per_tensor({1}));
+    EXPECT_TRUE(quant_param_dims_are_per_tensor({1, 1}));
+    EXPECT_FALSE(quant_param_dims_are_per_tensor({-1, -1}));
+    EXPECT_FALSE(quant_param_dims_are_per_tensor(
+            {std::numeric_limits<int64_t>::max(),
+                    std::numeric_limits<int64_t>::max()}));
 }
 
 // ──────────────────────────────────────────────────────────────────

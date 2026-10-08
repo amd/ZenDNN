@@ -212,6 +212,18 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
                 return KernelVariant::kU8_S8_F32_ASYM;
         }
     }
+    // Static U8xS8: the caller has already quantized both operands.
+    // Source and weight metadata validation (per-tensor scales, per-tensor
+    // source zp, no weight zp) is owned by the routing/N-tile gates because
+    // this pure dtype resolver cannot inspect quant buffers. `compute=none`
+    // is the normal public-API form; accept an explicit u8 discriminator too.
+    if (!dynamic_quant && src == data_type_t::u8 && wei == data_type_t::s8
+            && (compute_dtype == data_type_t::none
+                    || compute_dtype == data_type_t::u8)) {
+        if (dst == data_type_t::bf16) return KernelVariant::kU8_S8_BF16_ASYM;
+        if (dst == data_type_t::f32) return KernelVariant::kU8_S8_F32_ASYM;
+        if (dst == data_type_t::u8) return KernelVariant::kU8_S8_U8_ASYM;
+    }
     // FP16 family — native AVX-512-FP16.  `dynamic_quant` MUST be false
     // (the FP16 path is non-quant, like the bf16 family); a quantised
     // f16 tuple has no CK route and falls through to kUnsupported.
@@ -247,6 +259,7 @@ DstDt dst_dt_for_variant(KernelVariant v) noexcept {
         case KernelVariant::kU8_S8_BF16_ASYM: return DstDt::kBf16;
         case KernelVariant::kS8_S8_F32_SYM: return DstDt::kF32;
         case KernelVariant::kU8_S8_F32_ASYM: return DstDt::kF32;
+        case KernelVariant::kU8_S8_U8_ASYM: return DstDt::kU8;
         case KernelVariant::kF16_F16_F16: return DstDt::kF16;
         case KernelVariant::kF16_F16_F32: return DstDt::kF32;
         case KernelVariant::kS8_S4_BF16_SYM: return DstDt::kBf16;
@@ -707,7 +720,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // resolved variant (not just the bf16 one) ensures the f32-dst asym
     // path selects the kU8_Asym microkernels and honours src_zp.
     out.compute_int = (variant == KernelVariant::kU8_S8_BF16_ASYM
-                              || variant == KernelVariant::kU8_S8_F32_ASYM)
+                              || variant == KernelVariant::kU8_S8_F32_ASYM
+                              || variant == KernelVariant::kU8_S8_U8_ASYM)
             ? IntCompute::kU8_Asym
             : IntCompute::kS8_Sym;
     // Activation gate.
@@ -864,6 +878,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             return refuse("int8_K_not_multiple_of_4",
                     "DQ-INT8 custom kernel requires K divisible by 4 "
                     "(VNNI K-quad); falling back to AOCL DLP");
+        if (is_int8_variant(variant) && K[i] > kMaxSafeInt8AccumK)
+            return refuse("int8_K_exceeds_s32_accumulator",
+                    "INT8 custom kernel K can overflow its signed int32 "
+                    "accumulator; falling back to AOCL DLP");
         // With the `group_size % 8` check above, this also guarantees
         // `K % 8 == 0`: no partial trailing octet in the pack, and no
         // src over-read in the kernel's 4-byte broadcasts.
@@ -1203,6 +1221,8 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
                 ? "s8_s8_f32_sym"
                 : (out.variant == KernelVariant::kU8_S8_F32_ASYM)
                 ? "u8_s8_f32_asym"
+                : (out.variant == KernelVariant::kU8_S8_U8_ASYM)
+                ? "u8_s8_u8_asym"
                 : (out.variant == KernelVariant::kF16_F16_F16) ? "f16_f16_f16"
                 : (out.variant == KernelVariant::kF16_F16_F32) ? "f16_f16_f32"
                 : (out.variant == KernelVariant::kS8_S4_BF16_SYM)
@@ -1299,8 +1319,7 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
         int K, int n_tile, int col_start, const void *src, int lda,
         const void *bias, void *tight_dst, int tight_ldc,
         const void *src_scale_full, const int32_t *src_zp_full,
-        const void *wei_scale_full) {
-
+        const void *wei_scale_full, const Int8EpilogueConfig &epilogue) {
     // Per-tile contract: src_scale + wei_scale are required; src_zp
     // is required iff the variant is asym.  The caller (N-tile
     // executor) populates both from the hoisted dynamic-quant output;
@@ -1331,10 +1350,10 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
     // element stride here for pointer arithmetic.  FP32 dst is act=none
     // only (gated kinds are BF16-dst), so the gated path below always
     // sees the BF16 width.
-    const size_t dst_elem_bytes_int8
-            = (dst_dt_for_variant(ctx.variant) == DstDt::kF32)
-            ? sizeof(float)
-            : sizeof(bfloat16_t);
+    const DstDt dst_dt = dst_dt_for_variant(ctx.variant);
+    const size_t dst_elem_bytes_int8 = (dst_dt == DstDt::kF32) ? sizeof(float)
+            : (dst_dt == DstDt::kU8)                           ? sizeof(uint8_t)
+                                     : sizeof(bfloat16_t);
 
     const int K_quad = (K + kVNNIInt8Quad - 1) / kVNNIInt8Quad;
     // Per-o-block stride in BYTES: weight slab + per-column int32
@@ -1396,7 +1415,10 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                     : nullptr;
             const char *wei_scale_blk_base
                     = static_cast<const char *>(wei_scale_full)
-                    + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
+                    + (epilogue.wei_scale_per_tensor
+                                    ? 0
+                                    : static_cast<size_t>(sub_col_base)
+                                            * scale_elem_bytes);
 
             const auto call_one = [&](int c, int b) {
                 const int mr_now = mr_of(c);
@@ -1407,9 +1429,13 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                         = A_bytes + static_cast<size_t>(m_off) * lda;
                 const void *src_scale_chunk
                         = static_cast<const char *>(src_scale_full)
-                        + static_cast<size_t>(m_off) * scale_elem_bytes;
+                        + (epilogue.src_quant_per_tensor
+                                        ? 0
+                                        : static_cast<size_t>(m_off)
+                                                * scale_elem_bytes);
                 const int32_t *src_zp_chunk = (src_zp_full != nullptr)
-                        ? src_zp_full + m_off
+                        ? src_zp_full
+                                + (epilogue.src_quant_per_tensor ? 0 : m_off)
                         : nullptr;
 
                 std::byte *Tight_row_base = Tight_bytes
@@ -1424,10 +1450,12 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                                   + static_cast<size_t>(b) * ctx.pack_nr
                                           * bias_elem_bytes)
                         : nullptr;
-                const void *wei_scale_blk
-                        = static_cast<const void *>(wei_scale_blk_base
-                                + static_cast<size_t>(b) * ctx.pack_nr
-                                        * scale_elem_bytes);
+                const void *wei_scale_blk = static_cast<const void *>(
+                        wei_scale_blk_base
+                        + (epilogue.wei_scale_per_tensor
+                                        ? 0
+                                        : static_cast<size_t>(b) * ctx.pack_nr
+                                                * scale_elem_bytes));
                 // 16 cols per (g, u) pair × NV/2 pairs per kernel call —
                 // mirror of the bf16 sibling's tight stride.
                 std::byte *Tight_row = Tight_row_base
@@ -1435,7 +1463,8 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                                 * dst_elem_bytes_int8;
 
                 kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk, src_zp_chunk,
-                        wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
+                        wei_scale_blk, ctx.scale_kind, epilogue, bias_blk,
+                        ctx.bias_kind,
                         /*Cout=*/nullptr, /*ldc=*/0, Tight_row, tight_ldc, K);
             };
 
@@ -1459,7 +1488,10 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                 : nullptr;
         const char *wei_scale_blk_base
                 = static_cast<const char *>(wei_scale_full)
-                + static_cast<size_t>(sub_col_base) * scale_elem_bytes;
+                + (epilogue.wei_scale_per_tensor
+                                ? 0
+                                : static_cast<size_t>(sub_col_base)
+                                        * scale_elem_bytes);
 
         const auto call_one = [&](int c, int b) {
             const int mr_now = mr_of(c);
@@ -1469,9 +1501,13 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
             const uint8_t *A_chunk = A_bytes + static_cast<size_t>(m_off) * lda;
             const void *src_scale_chunk
                     = static_cast<const char *>(src_scale_full)
-                    + static_cast<size_t>(m_off) * scale_elem_bytes;
-            const int32_t *src_zp_chunk
-                    = (src_zp_full != nullptr) ? src_zp_full + m_off : nullptr;
+                    + (epilogue.src_quant_per_tensor
+                                    ? 0
+                                    : static_cast<size_t>(m_off)
+                                            * scale_elem_bytes);
+            const int32_t *src_zp_chunk = (src_zp_full != nullptr)
+                    ? src_zp_full + (epilogue.src_quant_per_tensor ? 0 : m_off)
+                    : nullptr;
 
             std::byte *Wide_row_base = Tight_bytes
                     + (static_cast<size_t>(m_off) * tight_ldc + sub_col_base)
@@ -1486,14 +1522,28 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
                     : nullptr;
             const void *wei_scale_blk = static_cast<const void *>(
                     wei_scale_blk_base
-                    + static_cast<size_t>(b) * ctx.pack_nr * scale_elem_bytes);
+                    + (epilogue.wei_scale_per_tensor ? 0
+                                                     : static_cast<size_t>(b)
+                                            * ctx.pack_nr * scale_elem_bytes));
             std::byte *Wide_row = Wide_row_base
                     + static_cast<size_t>(b) * ctx.pack_nr
                             * dst_elem_bytes_int8;
 
+            Int8EpilogueConfig call_epilogue = epilogue;
+            const int block_col = sub_col_base + b * ctx.pack_nr;
+            if (call_epilogue.binary_mul != nullptr) {
+                call_epilogue.binary_mul += static_cast<size_t>(m_off)
+                                * call_epilogue.binary_mul_ld
+                        + block_col;
+            }
+            if (call_epilogue.binary_add != nullptr) {
+                call_epilogue.binary_add += static_cast<size_t>(m_off)
+                                * call_epilogue.binary_add_ld
+                        + block_col;
+            }
             kfn(A_chunk, lda, Bpacked_blk, src_scale_chunk, src_zp_chunk,
-                    wei_scale_blk, ctx.scale_kind, bias_blk, ctx.bias_kind,
-                    Wide_row, tight_ldc,
+                    wei_scale_blk, ctx.scale_kind, call_epilogue, bias_blk,
+                    ctx.bias_kind, Wide_row, tight_ldc,
                     /*Cout_tight=*/nullptr, /*ldc_tight=*/0, K);
         };
 
@@ -1916,7 +1966,8 @@ inline void dispatch_tile_bf16_kblocked(const CallContext &ctx, int expert_idx,
 void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
         int n_tile, int col_start, const void *src, int lda, const void *bias,
         void *tight_dst, int tight_ldc, const void *src_scale,
-        const int32_t *src_zp, const void *wei_scale) {
+        const int32_t *src_zp, const void *wei_scale,
+        const Int8EpilogueConfig &int8_epilogue) {
 
     // ── Per-tile contract assertions (debug-only) ────────────────────
     //
@@ -1977,7 +2028,8 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // constants we don't need on this path.
     if (is_int8_variant(ctx.variant)) {
         dispatch_tile_int8(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
-                bias, tight_dst, tight_ldc, src_scale, src_zp, wei_scale);
+                bias, tight_dst, tight_ldc, src_scale, src_zp, wei_scale,
+                int8_epilogue);
         return;
     }
     if (is_s4_variant(ctx.variant)) {

@@ -43,12 +43,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <random>
 #include <vector>
+#include <type_traits>
 
 #include "ck_test_helpers.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
@@ -246,6 +248,29 @@ TEST(CkInt8UkernelSelect, F32DstNonNullForNoneNullForGated) {
     }
 }
 
+TEST(CkInt8UkernelSelect, U8DstNonNullForNoneNullForGated) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    for (int NV : {2, 4}) {
+        const auto compute = ck::IntCompute::kU8_Asym;
+        const int max_mr = ck::max_mr_for_nv_int8(NV, compute);
+        for (int MR = 1; MR <= max_mr; ++MR) {
+            EXPECT_EQ(ck::select_int8_ukernel(MR, NV, ck::IntCompute::kS8_Sym,
+                              ck::ActKind::none, ck::DstDt::kU8),
+                    nullptr);
+            EXPECT_NE(ck::select_int8_ukernel(MR, NV, compute,
+                              ck::ActKind::none, ck::DstDt::kU8),
+                    nullptr);
+            for (auto act :
+                    {ck::ActKind::swiglu_oai_mul, ck::ActKind::silu_and_mul,
+                            ck::ActKind::gelu_and_mul}) {
+                EXPECT_EQ(ck::select_int8_ukernel(
+                                  MR, NV, compute, act, ck::DstDt::kU8),
+                        nullptr);
+            }
+        }
+    }
+}
+
 TEST(CkInt8UkernelSelect, NullForOutOfRangeMR) {
     INT8_CK_SKIP_IF_NO_VNNI();
     for (int NV : {2, 4}) {
@@ -394,13 +419,15 @@ TEST_P(CkInt8UkernelTest, MatchesScalarReference) {
                 /*src_zp=*/src_zp_ptr,
                 /*wei_scale=*/wei_scale.data(),
                 /*scale_kind=*/ck::ScaleKind::kF32,
+                /*epilogue=*/ck::Int8EpilogueConfig {},
                 /*bias=*/bias_ptr, c.bias,
                 /*Cout=*/dst.data(), /*ldc=*/out_cols,
                 /*Cout_tight=*/nullptr, /*ldc_tight=*/0,
                 /*K=*/K);
     } else {
         fn(src.data(), lda, packed_raw, src_scale.data(), src_zp_ptr,
-                wei_scale.data(), ck::ScaleKind::kF32, bias_ptr, c.bias,
+                wei_scale.data(), ck::ScaleKind::kF32,
+                ck::Int8EpilogueConfig {}, bias_ptr, c.bias,
                 /*Cout=*/nullptr, /*ldc=*/0,
                 /*Cout_tight=*/dst.data(), /*ldc_tight=*/out_cols,
                 /*K=*/K);
@@ -502,6 +529,7 @@ TEST(CkInt8UkernelBf16Scale, MatchesScalarReference) {
             /*src_scale=*/src_scale_bf16.data(), /*src_zp=*/nullptr,
             /*wei_scale=*/wei_scale_bf16.data(),
             /*scale_kind=*/ck::ScaleKind::kBf16,
+            /*epilogue=*/ck::Int8EpilogueConfig {},
             /*bias=*/nullptr, ck::BiasKind::none,
             /*Cout=*/dst.data(), /*ldc=*/NR,
             /*Cout_tight=*/nullptr, /*ldc_tight=*/0, /*K=*/K);
@@ -854,6 +882,7 @@ TEST(CkInt8UkernelExtremes, ZeroAndMaxValues) {
                     static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
             fn(src.data(), K, packed, src_scale.data(), src_zp_ptr,
                     wei_scale.data(), ck::ScaleKind::kF32,
+                    ck::Int8EpilogueConfig {},
                     /*bias=*/nullptr, ck::BiasKind::none,
                     /*Cout=*/dst.data(), /*ldc=*/NR,
                     /*Cout_tight=*/nullptr, /*ldc_tight=*/0,
@@ -909,7 +938,7 @@ TEST(CkInt8UkernelExtremes, NegativeScales) {
     ASSERT_NE(fn, nullptr);
     std::vector<bfloat16_t> dst(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
     fn(src.data(), K, packed, src_scale.data(), /*src_zp=*/nullptr,
-            wei_scale.data(), ck::ScaleKind::kF32,
+            wei_scale.data(), ck::ScaleKind::kF32, ck::Int8EpilogueConfig {},
             /*bias=*/nullptr, ck::BiasKind::none, dst.data(), NR, nullptr, 0,
             K);
     std::vector<bfloat16_t> ref(static_cast<size_t>(MR) * NR, bfloat16_t(0.0f));
@@ -1014,6 +1043,7 @@ TEST(CkInt8UkernelF32Dst, MatchesScalarF32Reference) {
         std::vector<float> dst(static_cast<size_t>(MR) * NR, 0.0f);
         fn(src.data(), K, packed, src_scale.data(), src_zp_ptr,
                 wei_scale.data(), ck::ScaleKind::kF32,
+                ck::Int8EpilogueConfig {},
                 /*bias=*/nullptr, ck::BiasKind::none,
                 /*Cout=*/dst.data(), /*ldc=*/NR,
                 /*Cout_tight=*/nullptr, /*ldc_tight=*/0, /*K=*/K);
@@ -1052,6 +1082,220 @@ TEST(CkInt8UkernelF32Dst, MatchesScalarF32Reference) {
         }
         EXPECT_EQ(n_bad, 0);
     }
+}
+
+TEST(CkInt8UkernelStaticU8S8FloatDst, PerTensorMatchesIndependentOracleAtNr64) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    constexpr int MR = 5;
+    constexpr int NV = 4;
+    constexpr int NR = NV * 16;
+    constexpr int K = 64;
+    constexpr float src_scale = 0.015625f;
+    constexpr int32_t src_zp = 121;
+    constexpr float wei_scale = 0.03125f;
+
+    std::vector<uint8_t> src(static_cast<size_t>(MR) * K);
+    std::vector<int8_t> wei(static_cast<size_t>(K) * NR);
+    std::vector<float> bias(NR);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<uint8_t>(97 + (i * 13) % 49);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = static_cast<int8_t>(static_cast<int>(i % 9) - 4);
+    for (int n = 0; n < NR; ++n)
+        bias[n] = static_cast<float>((n % 5) - 2) * 0.125f;
+
+    const int8_t *packed = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(wei.data(), K, NR, NR, NR,
+                      /*transB=*/false, /*interleave_split_halves=*/false,
+                      &packed, nullptr, /*disable_cache=*/true),
+            status_t::success);
+    ASSERT_NE(packed, nullptr);
+    struct Guard {
+        const int8_t *p;
+        ~Guard() { ck::free_owned_packed_weight_int8(p); }
+    } guard {packed};
+
+    ck::Int8EpilogueConfig epilogue;
+    epilogue.src_quant_per_tensor = true;
+    epilogue.wei_scale_per_tensor = true;
+    const auto run = [&](auto zero, ck::DstDt dst_dt) {
+        using Dst = decltype(zero);
+        auto *fn = ck::select_int8_ukernel(
+                MR, NV, ck::IntCompute::kU8_Asym, ck::ActKind::none, dst_dt);
+        ASSERT_NE(fn, nullptr);
+        std::vector<Dst> dst(static_cast<size_t>(MR) * NR, zero);
+        fn(src.data(), K, packed, &src_scale, &src_zp, &wei_scale,
+                ck::ScaleKind::kF32, epilogue, bias.data(), ck::BiasKind::fp32,
+                dst.data(), NR, nullptr, 0, K);
+
+        for (int m = 0; m < MR; ++m) {
+            for (int n = 0; n < NR; ++n) {
+                int64_t acc = 0;
+                for (int k = 0; k < K; ++k) {
+                    acc += static_cast<int64_t>(
+                                   static_cast<int32_t>(src[m * K + k])
+                                   - src_zp)
+                            * static_cast<int32_t>(wei[k * NR + n]);
+                }
+                const float expected
+                        = static_cast<float>(acc) * src_scale * wei_scale
+                        + bias[n];
+                const float actual = static_cast<float>(dst[m * NR + n]);
+                if constexpr (std::is_same_v<Dst, float>) {
+                    EXPECT_NEAR(actual, expected,
+                            1e-5f + 1e-5f * std::fabs(expected));
+                } else {
+                    EXPECT_FLOAT_EQ(
+                            actual, static_cast<float>(bfloat16_t(expected)));
+                }
+            }
+        }
+    };
+    run(bfloat16_t(0.0f), ck::DstDt::kBf16);
+    run(0.0f, ck::DstDt::kF32);
+}
+
+TEST(CkInt8UkernelU8Dst, PerTensorStaticU8S8MatchesScalarReference) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    constexpr int MR = 5;
+    constexpr int NV = 4;
+    constexpr int NR = NV * 16;
+    constexpr int K = 64;
+    constexpr float src_scale = 0.015625f;
+    constexpr int32_t src_zp = 121;
+    constexpr float wei_scale = 0.03125f;
+    constexpr float dst_scale = 2.5f;
+    constexpr int32_t dst_zp = 113;
+
+    std::vector<uint8_t> src(static_cast<size_t>(MR) * K);
+    std::vector<int8_t> wei(static_cast<size_t>(K) * NR);
+    std::vector<float> bias(NR);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<uint8_t>(97 + (i * 13) % 49);
+    for (size_t i = 0; i < wei.size(); ++i)
+        wei[i] = static_cast<int8_t>(static_cast<int>(i % 9) - 4);
+    for (int n = 0; n < NR; ++n)
+        bias[n] = static_cast<float>((n % 5) - 2) * 0.125f;
+
+    const int8_t *packed = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(wei.data(), K, NR, NR, NR,
+                      /*transB=*/false, /*interleave_split_halves=*/false,
+                      &packed, nullptr, /*disable_cache=*/true),
+            status_t::success);
+    ASSERT_NE(packed, nullptr);
+    struct Guard {
+        const int8_t *p;
+        ~Guard() { ck::free_owned_packed_weight_int8(p); }
+    } guard {packed};
+
+    auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kU8_Asym,
+            ck::ActKind::none, ck::DstDt::kU8);
+    ASSERT_NE(fn, nullptr);
+    ck::Int8EpilogueConfig epilogue;
+    epilogue.src_quant_per_tensor = true;
+    epilogue.wei_scale_per_tensor = true;
+    epilogue.dst_scale = dst_scale;
+    epilogue.dst_zp = dst_zp;
+
+    std::vector<uint8_t> dst(static_cast<size_t>(MR) * NR, 0);
+    fn(src.data(), K, packed, &src_scale, &src_zp, &wei_scale,
+            ck::ScaleKind::kF32, epilogue, bias.data(), ck::BiasKind::fp32,
+            dst.data(), NR, nullptr, 0, K);
+
+    for (int m = 0; m < MR; ++m) {
+        for (int n = 0; n < NR; ++n) {
+            int64_t acc = 0;
+            for (int k = 0; k < K; ++k) {
+                acc += static_cast<int64_t>(
+                               static_cast<int32_t>(src[m * K + k]) - src_zp)
+                        * static_cast<int32_t>(wei[k * NR + n]);
+            }
+            const float real
+                    = static_cast<float>(acc) * src_scale * wei_scale + bias[n];
+            volatile float scaled = real * dst_scale;
+            int32_t expected = static_cast<int32_t>(
+                    std::nearbyint(scaled + static_cast<float>(dst_zp)));
+            expected = std::max(0, std::min(255, expected));
+            EXPECT_EQ(dst[m * NR + n], static_cast<uint8_t>(expected))
+                    << "m=" << m << " n=" << n;
+        }
+    }
+}
+
+TEST(CkInt8UkernelU8Dst, MatchesReferenceAtRoundingTiesAndSaturation) {
+    INT8_CK_SKIP_IF_NO_VNNI();
+    constexpr int MR = 1, NV = 2, NR = NV * 16, K = 64;
+    constexpr float src_scale = 1.0f, wei_scale = 1.0f;
+    constexpr int32_t src_zp = 121;
+    std::vector<uint8_t> src(static_cast<size_t>(MR) * K, uint8_t {src_zp});
+    std::vector<int8_t> wei(static_cast<size_t>(K) * NR, int8_t {0});
+    const int8_t *packed = nullptr;
+    ASSERT_EQ(ck::get_or_pack_weight_int8(wei.data(), K, NR, NR, NR, false,
+                      false, &packed, nullptr, true),
+            status_t::success);
+    ASSERT_NE(packed, nullptr);
+    struct Guard {
+        const int8_t *ptr;
+        ~Guard() { ck::free_owned_packed_weight_int8(ptr); }
+    } guard {packed};
+    auto *fn = ck::select_int8_ukernel(MR, NV, ck::IntCompute::kU8_Asym,
+            ck::ActKind::none, ck::DstDt::kU8);
+    ASSERT_NE(fn, nullptr);
+
+    const auto nearest_even_u8 = [](float value) {
+        value = std::max(0.0f, std::min(255.0f, value));
+        const float lower_f = std::floor(value);
+        int32_t lower = static_cast<int32_t>(lower_f);
+        const float fraction = value - lower_f;
+        if (fraction > 0.5f || (fraction == 0.5f && (lower & 1) != 0)) {
+            ++lower;
+        }
+        return static_cast<uint8_t>(lower);
+    };
+    const auto run = [&](float dst_scale, int32_t dst_zp,
+                             const std::vector<float> &bias) {
+        ck::Int8EpilogueConfig epilogue;
+        epilogue.src_quant_per_tensor = true;
+        epilogue.wei_scale_per_tensor = true;
+        epilogue.dst_scale = dst_scale;
+        epilogue.dst_zp = dst_zp;
+        std::vector<uint8_t> dst(NR, uint8_t {0});
+        fn(src.data(), K, packed, &src_scale, &src_zp, &wei_scale,
+                ck::ScaleKind::kF32, epilogue, bias.data(), ck::BiasKind::fp32,
+                dst.data(), NR, nullptr, 0, K);
+        for (int n = 0; n < NR; ++n) {
+            volatile float scaled = bias[n] * dst_scale;
+            const float shifted = scaled + static_cast<float>(dst_zp);
+            EXPECT_EQ(dst[n], nearest_even_u8(shifted)) << "n=" << n;
+        }
+        return dst;
+    };
+
+    std::vector<float> tie_bias(NR, 33.6539459f);
+    const auto tie = run(2.71884942f, 119, tie_bias);
+    EXPECT_EQ(tie[0], uint8_t {210});
+
+    std::vector<float> saturation_bias(NR, 0.0f);
+    saturation_bias[0] = -1000.0f;
+    saturation_bias[1] = 1000.0f;
+    const auto saturated = run(1.0f, 128, saturation_bias);
+    EXPECT_EQ(saturated[0], uint8_t {0});
+    EXPECT_EQ(saturated[1], uint8_t {255});
+
+    struct RoundingModeGuard {
+        int saved = std::fegetround();
+        ~RoundingModeGuard() { std::fesetround(saved); }
+    } rounding_mode_guard;
+    std::vector<float> ambient_mode_ties(NR, 210.5f);
+    ambient_mode_ties[1] = 211.5f;
+    ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+    const auto downward = run(1.0f, 0, ambient_mode_ties);
+    EXPECT_EQ(downward[0], uint8_t {210});
+    EXPECT_EQ(downward[1], uint8_t {212});
+    ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
+    const auto upward = run(1.0f, 0, ambient_mode_ties);
+    EXPECT_EQ(upward[0], uint8_t {210});
+    EXPECT_EQ(upward[1], uint8_t {212});
 }
 
 } // namespace

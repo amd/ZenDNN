@@ -190,6 +190,12 @@ static inline __m512 fast_exp_neg_avx512(__m512 x) {
     return _mm512_max_ps(_mm512_mul_ps(pow2i, p), _mm512_setzero_ps());
 }
 
+/// `relu_avx512(x) = max(x, 0)`.
+ZENDNNL_TARGET("avx512f")
+static inline __m512 relu_avx512(__m512 x) {
+    return _mm512_max_ps(x, _mm512_setzero_ps());
+}
+
 /// `sigmoid_avx512(x) = 1 / (1 + exp(-x))`.
 ///
 /// `rcp14_ps` (~2^-14 relative) refined by one Newton-Raphson step

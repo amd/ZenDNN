@@ -109,7 +109,8 @@ void parallel_per_expert(const std::vector<char> &layout,
     group_matmul_prepack::prepack_for_algo_5(
             group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                     transB, is_weights_const, params, M,
-                    get_grp_matmul_custom_kernel(), num_threads,
+                    grp_matmul_custom_kernel_effective(params, M, N, fused_act),
+                    num_threads,
                     algo3_decode_nr_align(M, N, ldc, fused_act, params),
                     fused_act, act_dtype,
                     /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta));
@@ -429,10 +430,13 @@ expert_parallel_result try_expert_parallel_pipeline(
     // Warm BOTH halves before the region: the two-pass got this implicitly by
     // running the dispatcher twice, so fusing must do it explicitly or the
     // first expert to reach each GEMM pays the reorder inside the region.
-    const bool ck_on = get_grp_matmul_custom_kernel();
+    const bool w13_ck_on = grp_matmul_custom_kernel_effective(
+            w13.params, M, w13.N, fused_act);
+    const bool w2_ck_on = grp_matmul_custom_kernel_effective(
+            w2.params, M, w2.N, grp_matmul_gated_act_t::none);
     group_matmul_prepack::prepack_for_algo_5(
             group_matmul_prepack::build_prepack_params(w13.weight, w13.K, w13.N,
-                    w13.ldb, transB, is_weights_const, w13.params, M, ck_on,
+                    w13.ldb, transB, is_weights_const, w13.params, M, w13_ck_on,
                     num_threads,
                     algo3_decode_nr_align(
                             M, w13.N, w13.ldc, fused_act, w13.params),
@@ -441,7 +445,7 @@ expert_parallel_result try_expert_parallel_pipeline(
                     /*beta=*/&w13.beta));
     group_matmul_prepack::prepack_for_algo_5(
             group_matmul_prepack::build_prepack_params(w2.weight, w2.K, w2.N,
-                    w2.ldb, transB, is_weights_const, w2.params, M, ck_on,
+                    w2.ldb, transB, is_weights_const, w2.params, M, w2_ck_on,
                     num_threads, /*nr_align=*/0,
                     /*fused_act=*/grp_matmul_gated_act_t::none,
                     /*act_dtype=*/data_type_t::none, /*transA=*/&w2.transA,

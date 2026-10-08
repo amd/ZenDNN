@@ -96,6 +96,8 @@ namespace {
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::bf16x16_to_f32;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::f32_to_bf16x16;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::gelu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::relu_avx512;
+using zendnnl::lowoha::matmul::group_matmul_act_avx512::sigmoid_avx512;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::silu_avx512;
 using zendnnl::lowoha::matmul::group_matmul_act_avx512::swiglu_oai_avx512;
 
@@ -177,6 +179,100 @@ static inline __m512 dequant_finish(__m512i acc_s32, __m512i correction,
                     : _mm512_mul_ps(f, scale_mv);
 }
 
+static inline float load_int8_scale(
+        const void *scale, ScaleKind kind, int index) {
+    return (kind == ScaleKind::kBf16)
+            ? static_cast<float>(static_cast<const bfloat16_t *>(scale)[index])
+            : static_cast<const float *>(scale)[index];
+}
+
+template <int NV>
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl")
+static inline void load_int8_weight_scales(const void *wei_scale,
+        ScaleKind scale_kind, bool per_tensor, __m512 (&out)[NV]) {
+    if (per_tensor) {
+        const __m512 scalar
+                = _mm512_set1_ps(load_int8_scale(wei_scale, scale_kind, 0));
+        for (int v = 0; v < NV; ++v)
+            out[v] = scalar;
+        return;
+    }
+    if (scale_kind == ScaleKind::kBf16) {
+        const auto *ws = static_cast<const bfloat16_t *>(wei_scale);
+        for (int v = 0; v < NV; ++v) {
+            out[v] = bf16x16_to_f32(_mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(ws + v * 16)));
+        }
+        return;
+    }
+    const auto *ws = static_cast<const float *>(wei_scale);
+    for (int v = 0; v < NV; ++v)
+        out[v] = _mm512_loadu_ps(ws + v * 16);
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline __m512 apply_int8_postops(
+        __m512 value, const Int8EpilogueConfig &epilogue, int m, int v) {
+    if (epilogue.binary_mul != nullptr) {
+        const float *mul = epilogue.binary_mul
+                + static_cast<size_t>(m) * epilogue.binary_mul_ld + v * 16;
+        value = _mm512_mul_ps(value, _mm512_loadu_ps(mul));
+    }
+    if (epilogue.binary_add != nullptr) {
+        const float *add = epilogue.binary_add
+                + static_cast<size_t>(m) * epilogue.binary_add_ld + v * 16;
+        value = _mm512_add_ps(value, _mm512_loadu_ps(add));
+    }
+    if (epilogue.unary_postop == Int8UnaryPostOp::kRelu) {
+        value = relu_avx512(value);
+    } else if (epilogue.unary_postop == Int8UnaryPostOp::kSigmoid) {
+        value = sigmoid_avx512(value);
+    }
+    return value;
+}
+
+// Existing matmul destination-quantization semantics are a SCALE post-op:
+// q = saturate_u8(round(real * dst_scale) + dst_zp). The caller supplies the
+// multiplier (typically the inverse dequantization scale). Keep rounding and
+// saturation aligned with the reference backend.
+#if defined(_MSC_VER) && !defined(__clang__)
+ZENDNNL_TARGET_NOINLINE("avx512f")
+static __m512 multiply_u8_scale_rounded(__m512 real, float dst_scale) {
+    // MSVC has no x64 inline asm. Keep this multiplication out of line so the
+    // caller cannot contract it with the following zero-point addition.
+    return _mm512_mul_ps(real, _mm512_set1_ps(dst_scale));
+}
+#endif
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
+static inline void quantize_u8_store(
+        __m512 real, float dst_scale, int32_t dst_zp, uint8_t *dst) {
+    // The reference/AOCL SCALE post-op adds the integer zero-point in FP32
+    // before the final RNE conversion. Clamp first so extreme finite inputs
+    // never hit CVTPS2DQ's out-of-range INT_MIN sentinel.
+    // Keep the multiply and zero-point addition separate: the reference/AOCL
+    // contract rounds the product to FP32 before adding zp, and fusing these
+    // operations changes RNE results at representable half ties.
+#if defined(_MSC_VER) && !defined(__clang__)
+    __m512 qf = multiply_u8_scale_rounded(real, dst_scale);
+#else
+    __m512 qf = _mm512_mul_ps(real, _mm512_set1_ps(dst_scale));
+    // Prevent GCC/Clang from contracting the explicit intrinsics back into
+    // VFMADD while emitting no instruction.
+    asm volatile("" : "+v"(qf));
+#endif
+    qf = _mm512_add_ps(qf, _mm512_set1_ps(static_cast<float>(dst_zp)));
+    qf = _mm512_max_ps(qf, _mm512_setzero_ps());
+    qf = _mm512_min_ps(qf, _mm512_set1_ps(255.0f));
+    // The API contract is nearest-even regardless of the caller's ambient
+    // MXCSR rounding mode. Use the explicit-rounding AVX-512 form rather than
+    // CVTPS2DQ, which inherits MXCSR and could silently become floor/ceil.
+    const __m512i q = _mm512_cvt_roundps_epi32(
+            qf, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    const __m128i packed = _mm512_cvtusepi32_epi8(q);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), packed);
+}
+
 // Load 16 bias columns as f32.  f16 is copied through memcpy because
 // `float16_t` must not be aliased as an integer type.
 ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,fma")
@@ -216,20 +312,10 @@ ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
         const int32_t *__restrict src_zp, const void *__restrict wei_scale,
-        ScaleKind scale_kind, const void *__restrict bias, BiasKind bias_kind,
+        ScaleKind scale_kind, const Int8EpilogueConfig &epilogue,
+        const void *__restrict bias, BiasKind bias_kind,
         void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
         int ldc_tight, int K) {
-
-    // Scalar per-row src_scale read with on-load bf16→f32 widening.  The
-    // kernel dequantises in f32; f32 scales read directly, bf16 scales
-    // convert here (off the hot K-loop).  Mirrors the wei_scale branch
-    // in the epilogue and the BiasKind bf16-bias load.
-    const auto src_scale_at = [src_scale, scale_kind](int m) -> float {
-        return (scale_kind == ScaleKind::kBf16)
-                ? static_cast<float>(
-                          static_cast<const bfloat16_t *>(src_scale)[m])
-                : static_cast<const float *>(src_scale)[m];
-    };
 
     static_assert(NV == 2 || NV == 4, "NV must be 2 or 4");
     static_assert(Act == ActKind::none || (NV % 2 == 0),
@@ -597,20 +683,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
     // on load when the scales are bf16 (off the hot K-loop, same idiom
     // as the bf16-bias branch below).  f32 scales load directly.
     __m512 wei_scale_v[NV];
-    if (scale_kind == ScaleKind::kBf16) {
-        const auto *ws = static_cast<const bfloat16_t *>(wei_scale);
-#pragma GCC unroll 4
-        for (int v = 0; v < NV; ++v) {
-            wei_scale_v[v] = bf16x16_to_f32(_mm256_loadu_si256(
-                    reinterpret_cast<const __m256i *>(ws + v * 16)));
-        }
-    } else {
-        const auto *ws = static_cast<const float *>(wei_scale);
-#pragma GCC unroll 4
-        for (int v = 0; v < NV; ++v) {
-            wei_scale_v[v] = _mm512_loadu_ps(ws + v * 16);
-        }
-    }
+    load_int8_weight_scales<NV>(
+            wei_scale, scale_kind, epilogue.wei_scale_per_tensor, wei_scale_v);
 
     // Optional bias is read in the store epilogue, at the dequant add:
     // the s32 accumulator cannot hold a float seed.  fp32 bias is read
@@ -656,7 +730,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
         constexpr int n_pairs = NV / 2; // 1 for NV=2, 2 for NV=4
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
-            const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(m));
+            const __m512 src_scale_m = _mm512_set1_ps(load_int8_scale(src_scale,
+                    scale_kind, epilogue.src_quant_per_tensor ? 0 : m));
 #pragma GCC unroll 2
             for (int p = 0; p < n_pairs; ++p) {
                 const __m512 bias_lo = has_bias
@@ -670,7 +745,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                     corr_lo = comp_sym_scaled[2 * p];
                     corr_hi = comp_sym_scaled[2 * p + 1];
                 } else {
-                    const __m512i zp = _mm512_set1_epi32(src_zp[m]);
+                    const int zp_index = epilogue.src_quant_per_tensor ? 0 : m;
+                    const __m512i zp = _mm512_set1_epi32(src_zp[zp_index]);
                     corr_lo = _mm512_mullo_epi32(zp, comp_v[2 * p]);
                     corr_hi = _mm512_mullo_epi32(zp, comp_v[2 * p + 1]);
                 }
@@ -699,7 +775,8 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                 "int8 ukernel only supports {none, swiglu, silu, gelu}");
 #pragma GCC unroll 8
         for (int m = 0; m < MR; ++m) {
-            const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(m));
+            const __m512 src_scale_m = _mm512_set1_ps(load_int8_scale(src_scale,
+                    scale_kind, epilogue.src_quant_per_tensor ? 0 : m));
 #pragma GCC unroll 4
             for (int v = 0; v < NV; ++v) {
                 const __m512 bias_cur = has_bias
@@ -709,23 +786,31 @@ static void ukernel_impl(const uint8_t *__restrict A, int lda,
                 if constexpr (Compute == IntCompute::kS8_Sym) {
                     corr = comp_sym_scaled[v];
                 } else {
+                    const int zp_index = epilogue.src_quant_per_tensor ? 0 : m;
                     corr = _mm512_mullo_epi32(
-                            _mm512_set1_epi32(src_zp[m]), comp_v[v]);
+                            _mm512_set1_epi32(src_zp[zp_index]), comp_v[v]);
                 }
-                const __m512 f = dequant_finish(acc[buf0][m][v], corr,
+                __m512 f = dequant_finish(acc[buf0][m][v], corr,
                         _mm512_mul_ps(src_scale_m, wei_scale_v[v]), bias_cur,
                         has_bias);
+                f = apply_int8_postops(f, epilogue, m, v);
                 if constexpr (Dst == DstDt::kBf16) {
                     bfloat16_t *dst = static_cast<bfloat16_t *>(Cout_void)
                             + static_cast<size_t>(m) * ldc + v * 16;
                     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
                             f32_to_bf16x16(f));
-                } else {
-                    static_assert(Dst == DstDt::kF32,
-                            "int8 ukernel act=none dst must be bf16 or f32");
+                } else if constexpr (Dst == DstDt::kF32) {
                     float *dst = static_cast<float *>(Cout_void)
                             + static_cast<size_t>(m) * ldc + v * 16;
                     _mm512_storeu_ps(dst, f);
+                } else {
+                    static_assert(Dst == DstDt::kU8,
+                            "int8 ukernel act=none dst must be bf16, f32, or "
+                            "u8");
+                    uint8_t *dst = static_cast<uint8_t *>(Cout_void)
+                            + static_cast<size_t>(m) * ldc + v * 16;
+                    quantize_u8_store(
+                            f, epilogue.dst_scale, epilogue.dst_zp, dst);
                 }
             }
         }
@@ -750,20 +835,14 @@ ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq,fma")
 static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         const int8_t *__restrict Bpacked, const void *__restrict src_scale,
         const int32_t *__restrict src_zp, const void *__restrict wei_scale,
-        ScaleKind scale_kind, const void *__restrict bias, BiasKind bias_kind,
+        ScaleKind scale_kind, const Int8EpilogueConfig &epilogue,
+        const void *__restrict bias, BiasKind bias_kind,
         void *__restrict Cout_void, int ldc, void *__restrict Cout_tight_void,
         int ldc_tight, int K) {
     static_assert(MR >= 1 && MR <= 12, "NV=2 scalar kernel covers MR 1..12");
     static_assert(Act == ActKind::none || Dst == DstDt::kBf16,
             "Gated activations are BF16-dst only");
     (void)src_zp; // symmetric path uses the constant 128 compensation.
-
-    const auto src_scale_at = [src_scale, scale_kind](int m) -> float {
-        return (scale_kind == ScaleKind::kBf16)
-                ? static_cast<float>(
-                          static_cast<const bfloat16_t *>(src_scale)[m])
-                : static_cast<const float *>(src_scale)[m];
-    };
 
     constexpr int NV = 2;
     constexpr int kq_stride_bytes = NV * 16 * kVNNIInt8Quad;
@@ -825,19 +904,9 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
             _mm512_load_si512(
                     reinterpret_cast<const __m512i *>(comp_base + 16)));
 
-    __m512 wei_scale0;
-    __m512 wei_scale1;
-    if (scale_kind == ScaleKind::kBf16) {
-        const auto *ws = static_cast<const bfloat16_t *>(wei_scale);
-        wei_scale0 = bf16x16_to_f32(
-                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(ws)));
-        wei_scale1 = bf16x16_to_f32(
-                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(ws + 16)));
-    } else {
-        const auto *ws = static_cast<const float *>(wei_scale);
-        wei_scale0 = _mm512_loadu_ps(ws);
-        wei_scale1 = _mm512_loadu_ps(ws + 16);
-    }
+    __m512 wei_scale_v[NV];
+    load_int8_weight_scales<NV>(
+            wei_scale, scale_kind, epilogue.wei_scale_per_tensor, wei_scale_v);
 
     const bool has_bias = (bias != nullptr && bias_kind != BiasKind::none);
     alignas(64) float bias_slab[NV * 16];
@@ -857,11 +926,12 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
         auto *Cout_tight = static_cast<bfloat16_t *>(Cout_tight_void);
 #define ZENDNNL_INT8_NV2_SYM_STORE_GATED(r) \
     if constexpr (MR > r) { \
-        const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(r)); \
+        const __m512 src_scale_m = _mm512_set1_ps(load_int8_scale(src_scale, \
+                scale_kind, epilogue.src_quant_per_tensor ? 0 : r)); \
         const __m512 lo = dequant_finish(c##r##0, comp0, \
-                _mm512_mul_ps(src_scale_m, wei_scale0), bias0, has_bias); \
+                _mm512_mul_ps(src_scale_m, wei_scale_v[0]), bias0, has_bias); \
         const __m512 hi = dequant_finish(c##r##1, comp1, \
-                _mm512_mul_ps(src_scale_m, wei_scale1), bias1, has_bias); \
+                _mm512_mul_ps(src_scale_m, wei_scale_v[1]), bias1, has_bias); \
         bfloat16_t *dst = Cout_tight + static_cast<size_t>(r) * ldc_tight; \
         if constexpr (Act == ActKind::swiglu_oai_mul) { \
             swiglu_oai_store_pair_int(lo, hi, dst); \
@@ -889,11 +959,12 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
                 "int8 NV=2 scalar kernel only supports known acts");
 #define ZENDNNL_INT8_NV2_SYM_STORE_NONE(r) \
     if constexpr (MR > r) { \
-        const __m512 src_scale_m = _mm512_set1_ps(src_scale_at(r)); \
+        const __m512 src_scale_m = _mm512_set1_ps(load_int8_scale(src_scale, \
+                scale_kind, epilogue.src_quant_per_tensor ? 0 : r)); \
         const __m512 lo = dequant_finish(c##r##0, comp0, \
-                _mm512_mul_ps(src_scale_m, wei_scale0), bias0, has_bias); \
+                _mm512_mul_ps(src_scale_m, wei_scale_v[0]), bias0, has_bias); \
         const __m512 hi = dequant_finish(c##r##1, comp1, \
-                _mm512_mul_ps(src_scale_m, wei_scale1), bias1, has_bias); \
+                _mm512_mul_ps(src_scale_m, wei_scale_v[1]), bias1, has_bias); \
         if constexpr (Dst == DstDt::kBf16) { \
             auto *dst = static_cast<bfloat16_t *>(Cout_void) \
                     + static_cast<size_t>(r) * ldc; \
@@ -901,13 +972,19 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
                     reinterpret_cast<__m256i *>(dst), f32_to_bf16x16(lo)); \
             _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16), \
                     f32_to_bf16x16(hi)); \
-        } else { \
-            static_assert(Dst == DstDt::kF32, \
-                    "int8 NV=2 scalar act=none dst must be bf16 or f32"); \
+        } else if constexpr (Dst == DstDt::kF32) { \
             auto *dst = static_cast<float *>(Cout_void) \
                     + static_cast<size_t>(r) * ldc; \
             _mm512_storeu_ps(dst, lo); \
             _mm512_storeu_ps(dst + 16, hi); \
+        } else { \
+            static_assert(Dst == DstDt::kU8, \
+                    "int8 NV=2 scalar act=none dst must be bf16, f32, or u8"); \
+            auto *dst = static_cast<uint8_t *>(Cout_void) \
+                    + static_cast<size_t>(r) * ldc; \
+            quantize_u8_store(lo, epilogue.dst_scale, epilogue.dst_zp, dst); \
+            quantize_u8_store( \
+                    hi, epilogue.dst_scale, epilogue.dst_zp, dst + 16); \
         } \
     }
         ZENDNNL_INT8_NV2_SYM_STORE_NONE(0)
@@ -1038,11 +1115,24 @@ int8_ukernel_fn_t select_int8_ukernel(
     // (gated, kF32) tuple so the dispatcher falls back cleanly.
     if (is_gated_act && dst_dt != DstDt::kBf16) { return nullptr; }
 
+    // U8 destination exists only for static asymmetric U8xS8. Route directly
+    // to the asym selectors so impossible symmetric-U8 specializations are
+    // never emitted.
+    if (dst_dt == DstDt::kU8) {
+        if (act != ActKind::none || compute != IntCompute::kU8_Asym)
+            return nullptr;
+        if (NV == 2) return select_nv2_asym<ActKind::none, DstDt::kU8>(MR);
+        if (NV == 4) return select_nv4_asym<ActKind::none, DstDt::kU8>(MR);
+        return nullptr;
+    }
+
     // Act = none — branch on dst dtype for the store epilogue.
     if (act == ActKind::none) {
-        return (dst_dt == DstDt::kF32)
-                ? select_none<DstDt::kF32>(MR, NV, compute)
-                : select_none<DstDt::kBf16>(MR, NV, compute);
+        if (dst_dt == DstDt::kF32)
+            return select_none<DstDt::kF32>(MR, NV, compute);
+        if (dst_dt == DstDt::kBf16)
+            return select_none<DstDt::kBf16>(MR, NV, compute);
+        return nullptr;
     }
 
     // Gated activations (BF16 dst only past the guard above).

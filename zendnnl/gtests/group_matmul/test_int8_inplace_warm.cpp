@@ -214,6 +214,47 @@ TEST_F(Int8InPlaceWarm, PermittedInPlaceMutatesUnderMixedMode) {
                "a full extra copy of every expert";
 }
 
+TEST_F(Int8InPlaceWarm, StaticAsymmetricCkMustNotCrossWarmSymQuantInPlace) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+
+    PaddedWeights w;
+    const std::vector<int> M(kExperts, 5);
+    const std::vector<bool> iwc(kExperts, true);
+    prepack::PrepackParams pp;
+    pp.weight = &w.ptrs;
+    pp.K = &w.K;
+    pp.N = &w.N;
+    pp.ldb = &w.ldb;
+    pp.transB = &w.transB;
+    pp.M = &M;
+    pp.is_weights_const = &iwc;
+    pp.num_ops_total = kExperts;
+    pp.num_ops_active = kExperts;
+    pp.src_dtype = data_type_t::u8;
+    pp.wei_dtype = data_type_t::s8;
+    pp.dst_dtype = data_type_t::u8;
+    pp.compute_dtype = data_type_t::u8;
+    pp.custom_kernel_on = true;
+    pp.num_threads = 4;
+    pp.nr_align = 1;
+    pp.wei_buffer_capacity_bytes = PaddedWeights::capacity_bytes();
+
+    moe_test_utils::AlgoEnvGuard algo_guard(0);
+    moe_test_utils::CustomKernelOverride ck_master(true);
+    moe_test_utils::CustomKernelInt8Override ck_int8(true);
+    set_mode(/*wc=*/2, /*mixed=*/true);
+
+    prepack::prepack_for_algo_3(pp);
+
+    EXPECT_FALSE(w.any_mutated())
+            << "static asymmetric U8xS8 has no AOCL sym-quant consumer; "
+               "cross-warming that dead layout in place destroys the raw "
+               "weights required by AOCL fallback";
+}
+
 // ── (3) back-compat: no declaration, no mutation ────────────────────────
 
 TEST_F(Int8InPlaceWarm, UndeclaredCapacityNeverMutates) {

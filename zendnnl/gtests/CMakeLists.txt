@@ -84,7 +84,6 @@ if(ZENDNNL_BUILD_GTEST)
   endif()
 
   add_executable(gtests ${gtests_sources})
-
   # Adds group_matmul/ test sources to the gtests target via
   # target_sources().  Must come AFTER add_executable so the target
   # exists.

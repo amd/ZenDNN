@@ -1293,8 +1293,9 @@ inline bool get_grp_matmul_custom_kernel_f16() {
 /// A representative ACTIVE expert is used: slot 0 may be an inactive padding
 /// placeholder whose dtypes were never filled in.
 template <typename ParamsVec>
-inline bool grp_matmul_custom_kernel_effective(
-        const ParamsVec &params, const std::vector<int> &M) {
+inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
+        const std::vector<int> &M, const std::vector<int> &N,
+        grp_matmul_gated_act_t fused_act) {
     size_t rep = params.size();
     for (size_t i = 0; i < params.size(); ++i) {
         if (i < M.size() && M[i] <= 0) { continue; }
@@ -1305,19 +1306,16 @@ inline bool grp_matmul_custom_kernel_effective(
 
     const auto &d = params[rep].dtypes;
     if (!get_grp_matmul_custom_kernel()) { return false; }
-    // Discriminate the DQ-INT8 family the same way the rest of the tree does
-    // (`int8_aocl_warm_candidate` / `ck_eligible_int8`): weight s8 with an
-    // s8/u8 compute.  Keying on `dynamic_quant` or on an s8 SOURCE misses the
-    // default production shape, because the `group_dynamic_quant` pre-pass
-    // produces the s8 source and CLEARS `dynamic_quant` before this runs --
-    // so the sub-toggle went unread, the arena came back tight, the kernel
-    // then refused, and the tight split-halves path demoted the layer to
-    // serial Sequential.  That is the exact cliff this helper exists to stop.
-    const bool is_int8_call = d.wei == data_type_t::s8
-            && (d.compute == data_type_t::s8 || d.compute == data_type_t::u8);
+    // Start from the dispatcher's positive support table. A master-knob-only
+    // verdict licenses mixed in-place and tight arenas for unrelated families
+    // (for example F32), even though prepare_for_call must reject them.
+    const auto variant = custom_kernel::resolve_variant(
+            d.src, d.wei, d.dst, params[rep].dynamic_quant, d.compute);
+    if (variant == custom_kernel::KernelVariant::kUnsupported) { return false; }
+
+    const bool is_int8_call = custom_kernel::is_int8_variant(variant);
     if (is_int8_call && !get_grp_matmul_custom_kernel_int8()) { return false; }
-    const bool is_f16_call
-            = (d.src == data_type_t::f16 && d.wei == data_type_t::f16);
+    const bool is_f16_call = custom_kernel::is_f16_variant(variant);
     if (is_f16_call && !get_grp_matmul_custom_kernel_f16()) { return false; }
 
     // A per-group `{G, N}` weight scale on ANY active expert disqualifies the
@@ -1326,7 +1324,28 @@ inline bool grp_matmul_custom_kernel_effective(
     // but still reject a per-group `{M, G}` SOURCE scale: the s4 microkernel
     // also reads only one source scale per row.
     for (size_t i = 0; i < params.size(); ++i) {
-        if (i >= M.size() || M[i] <= 0) { continue; }
+        if (i >= M.size() || i >= N.size() || M[i] <= 0) { continue; }
+        if (!params[i].postop_.empty()
+                && !(params[i].dtypes.src == data_type_t::u8
+                        && params[i].dtypes.wei == data_type_t::s8
+                        && !params[i].dynamic_quant
+                        && int8_ck_postops_supported(params[i], M[i], N[i]))) {
+            return false;
+        }
+        // The static U8xS8 epilogue and a gated activation cannot both run:
+        // the custom kernel has one epilogue slot and would otherwise drop
+        // one operation. Keep this shared verdict aligned with
+        // check_n_tile_extra so arena, cache, and execution policy agree.
+        if (fused_act != grp_matmul_gated_act_t::none
+                && !params[i].postop_.empty()) {
+            return false;
+        }
+        const auto &expert_d = params[i].dtypes;
+        if (custom_kernel::resolve_variant(expert_d.src, expert_d.wei,
+                    expert_d.dst, params[i].dynamic_quant, expert_d.compute)
+                != variant) {
+            return false;
+        }
         if (is_w4a8_config(params[i])) {
             const auto &ss = params[i].quant_params.src_scale;
             if (ss.dims.size() == 2 && ss.dims[1] > 1) { return false; }
@@ -1855,7 +1874,7 @@ inline int algo3_decode_nr_align(const std::vector<int> &M,
     const bool tight
             = tls_decode_arena_known ? tls_decode_arena_tight : observed_tight;
     return algo3_decode_nr_align(
-            act, grp_matmul_custom_kernel_effective(params, M), tight);
+            act, grp_matmul_custom_kernel_effective(params, M, N, act), tight);
 }
 
 /// Aligned column-slice partitioner for ALGO 3.  Returns {col_start,
@@ -2200,7 +2219,8 @@ struct auto_algo_trace {
 int select_grp_matmul_algo(const std::vector<char> &layout,
         const std::vector<int> &M, const std::vector<int> &N,
         const std::vector<int> &K, const std::vector<matmul_params> &params,
-        int num_threads, auto_algo_trace *trace = nullptr);
+        int num_threads, auto_algo_trace *trace = nullptr,
+        grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none);
 
 } // namespace matmul
 } // namespace lowoha

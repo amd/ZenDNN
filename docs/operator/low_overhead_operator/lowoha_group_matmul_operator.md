@@ -200,7 +200,7 @@ User-facing knobs that affect `group_matmul_direct` behaviour.  All are read onc
 | `ZENDNNL_GRP_MATMUL_PREPACK` | `1` (ON) | Ahead-of-time weight prepack.  When ON, the first call that observes a given configuration eagerly warms the AOCL DLP and custom-kernel weight caches for all expert slots so timed iterations never pay an on-the-fly reorder cost.  Set `0` for lazy-on-first-touch behaviour. |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | `2` (in-place where supported) | Standard weight-reorder cache for AOCL DLP / BRGEMM. Mode `2` lets paths with in-place support (AOCL blocked reorder, BF16 custom-kernel pack) reuse the caller's weight buffer; every other path keeps caching out-of-place. Set `1` to force out-of-place everywhere. Setting `0` disables both lazy and prepack populations — prepack short-circuits to a no-op rather than wasting CPU on entries that won't be cached. The custom-kernel pack path honours the same knob: `0` allocates caller-owned packed buffers per call (no stale pointer hits). The W8A8 ALGO 4 interceptor instead declines before writes because locally packing both complete expert tensors on every token would be prohibitive; BF16 and caller-prequantized S8 may continue through generic fallback. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL` | `1` (ON) | Master switch for the in-house AVX-512 custom microkernel under ALGO 3 (`flat_n_tile`).  OFF forces every expert through AOCL DLP / BRGEMM regardless of dtype. |
-| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` | `1` (ON) | Sub-toggle for the DQ-INT8 custom microkernel (`s8×s8→{bf16,f32}` with runtime BF16→S8 hoist).  Cascades under the master switch — effective only when `_CUSTOM_KERNEL=1`. |
+| `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8` | `1` (ON) | Sub-toggle for dynamic per-token INT8 (`s8/u8×s8→{bf16,f32}`) and static per-tensor U8×S8 (`u8×s8→{bf16,f32,u8}` with scalar source metadata, scalar/per-channel weight scales, and optional U8 destination requantization). Cascades under the master switch — effective only when `_CUSTOM_KERNEL=1`. |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_F16` | `1` (ON) | Sub-toggle for the native AVX-512-FP16 custom microkernel (`f16×f16→{f16,f32}`).  Cascades under the master switch.  Even when ON, the FP16 path also needs the host to have AVX-512-FP16 at runtime and a toolchain that compiled the FP16 intrinsics (GCC ≥ 12).  Two distinct outcomes when unavailable: (1) if the **host lacks the AVX-512-FP16 ISA**, `group_matmul_direct` rejects any f16 call upstream with `status_t::isa_unsupported` (the whole call fails — there is no AOCL DLP fallback, because no F16 GEMM backend can run without the ISA); (2) if the **ISA is present but the CK kernels were not compiled** (pre-GCC-12 build) or `_CUSTOM_KERNEL_F16=0`, `prepare_for_call` refuses and the call falls back to the AOCL DLP F16 path. |
 
 Additional tuning knobs (`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR`, `_SUBTILE_PER_EXPERT`, `_N_TILE`, `_AOCL_STABLE_NTILE`, etc.) are documented in `group_matmul_parallel_common.hpp` and the [group_matmul gtests README](../../../zendnnl/gtests/group_matmul/README.md) (§5).
@@ -215,6 +215,7 @@ Three dtype families share one dispatcher surface (`prepare_for_call` / `dispatc
 |---|---|---|
 | BF16 | `bf16:bf16:bf16`, `bf16:bf16:f32` | AVX-512 BF16 (`VDPBF16PS`) |
 | DQ-INT8 | `bf16:bf16→s8` hoist × `s8:s8→{bf16,f32}` (sym / asym) | AVX-512 VNNI |
+| Static per-tensor INT8 | `u8:s8:{bf16,f32,u8}`; scalar source scale/zp, symmetric scalar or per-channel `{N}` / `{1,N}` weight scale, and either no post-op, one buffer-free ReLU/sigmoid, or exact F32 `[M,N]` binary-mul then binary-add | AVX-512 VNNI |
 | **FP16** | **`f16:f16:f16`, `f16:f16:f32`** | **Native AVX-512-FP16** (`_mm512_fmadd_ph`) |
 
 ### FP16 family specifics
@@ -237,15 +238,15 @@ The gated-activation cells are parallel across BF16 and FP16 — substitute `bf1
 | `silu_and_mul` / `gelu_and_mul` (no bias) | CK fused epilogue | AOCL DLP + separate pass |
 | `silu_and_mul` / `gelu_and_mul` (+ bias) | two-pass fallback | two-pass fallback |
 
-DQ-INT8 follows the BF16-dst column for gated activations; `f32`-dst DQ-INT8 is matmul-only (`act = none`).
+Dynamic per-token INT8 follows the BF16-dst column for gated activations; its `f32` destination is matmul-only (`act = none`). Static per-tensor U8×S8 additionally fuses one buffer-free ReLU/sigmoid or the exact `binary_mul(F32[M,N]) -> binary_add(F32[M,N])` chain; other post-ops keep the call on the standard grouped path.
 
 ### Env-var cascade
 
 ```
 ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=0          → all CK families off
 ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1
-  && _CUSTOM_KERNEL_INT8=1 (default)        → BF16 + FP16 + DQ-INT8 CK on
-  && _CUSTOM_KERNEL_F16=0                  → BF16 CK on, FP16 off (DQ-INT8 still on by default)
+  && _CUSTOM_KERNEL_INT8=1 (default)        → BF16 + FP16 + DQ/static-INT8 CK on
+  && _CUSTOM_KERNEL_F16=0                  → BF16 CK on, FP16 off (INT8 forms still on by default)
   && both sub-toggles = 1                  → all three families on (subject to per-family ISA gates)
 ```
 

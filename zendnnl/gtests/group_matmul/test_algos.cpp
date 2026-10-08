@@ -4935,10 +4935,10 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
             << d;
 }
 
-// Non-bf16 (f32) under AUTO + WC=2: the dispatcher still sets the mixed
-// flag (it is dtype-agnostic), but the AOCL runtime non-bf16 guard forces
-// f32 OUT-OF-PLACE, so the weight buffer must NOT be mutated and the result
-// must match the WC=1 reference.
+// Non-bf16 (f32) under AUTO + WC=2: F32 is not a custom-kernel family, so it
+// must not license mixed in-place or the mixed-refusal Sequential fallback.
+// The dispatcher downgrades to WC=1, leaves weights raw, and retains the
+// normal parallel standard-backend plan.
 TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4949,15 +4949,28 @@ TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
         WeightCacheGuard wc(1);
         ref = run_min_grp_matmul_typed<float>(data_type_t::f32);
     }
+    std::string mode;
+    int32_t effective_weight_cache = -1;
+    bool mixed_inplace = true;
     {
+        GemmModeCaptureGuard mode_capture;
         reset_grp_matmul_caches();
         WeightCacheGuard wc(2);
         test = run_min_grp_matmul_typed<float>(data_type_t::f32);
+        const char *captured
+                = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                        std::memory_order_relaxed);
+        ASSERT_NE(captured, nullptr);
+        mode = captured;
+        auto &cfg = zendnnl::common::matmul_config_t::instance();
+        effective_weight_cache = cfg.get_weight_cache();
+        mixed_inplace = cfg.get_grp_auto_mixed_inplace();
     }
     EXPECT_FALSE(test.weights_mutated)
-            << "f32 under AUTO mixed mode must stay out-of-place (non-bf16 "
-               "guard) — "
-               "the weight buffer must not be mutated in place";
+            << "f32 AUTO must stay out-of-place and keep weights raw";
+    EXPECT_EQ(effective_weight_cache, 1);
+    EXPECT_FALSE(mixed_inplace);
+    EXPECT_EQ(mode.find("sequential"), std::string::npos) << mode;
     const double d = max_abs_diff_t(ref.dst, test.dst);
     EXPECT_LT(d, 1e-3)
             << "f32 AUTO WC=2 (forced OOP) must match WC=1; max_abs_diff=" << d;

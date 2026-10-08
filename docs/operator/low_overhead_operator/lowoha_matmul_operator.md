@@ -539,6 +539,27 @@ int lowoha_woq_bf16s4_matmul_example() {
 - **Zero-point**: Required for U4 (asymmetric). S4 does not use zero-point in the AOCL-DLP kernel. U4 zero-point can be `s8` or `bf16`.
 - **Dequantization**: Depends on zero-point data type — see the dequantization formulas table above.
 
+### Static per-tensor U8×S8 custom-kernel route
+
+Eligible decode-class calls (`M <= 32`) can use the grouped N-tile VNNI custom
+kernel when `ZENDNNL_MATMUL_CUSTOM_KERNEL=1` and
+`ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=1`:
+
+- source: U8 with one positive finite F32/BF16 scale and one S32 zero-point;
+- weight: symmetric S8 with either one positive finite F32/BF16 scale or
+  per-channel `{N}` / `{1,N}` F32/BF16 scales, and no weight zero-point;
+- destination: BF16, F32, or U8;
+- U8 destination additionally supplies one positive finite F32/BF16
+  destination multiplier and one S32 zero-point;
+- accepted per-tensor metadata shapes are `{}`, `{1}`, and `{1,1}`;
+- row-major, `transA=false`, constant raw weights, `alpha=1`, `beta=0`, and
+  either no post-op, one buffer-free ReLU/sigmoid, or the exact
+  `binary_mul(F32[M,N]) -> binary_add(F32[M,N])` chain are required.
+
+Prompt-sized calls and unsupported metadata remain on the standard scalar
+backend. U8 output follows the AOCL/reference SCALE convention:
+`RNE(real * dst_scale + dst_zp)`, saturated to `[0,255]`.
+
 ### Example 4: INT8 MatMul with Zero-Point Compensation Caching
 
 This example demonstrates INT8 matmul with asymmetric quantization and automatic zero-point compensation caching:
