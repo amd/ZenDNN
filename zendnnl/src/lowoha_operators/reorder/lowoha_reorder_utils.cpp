@@ -732,7 +732,7 @@ status_t compute_dynamic_quant_params(
     // Symmetric:  scale = max(abs(A)) / 127, zp = 0
     // Asymmetric: scale = (max - min) / 255, zp = round(-min / scale)
     auto compute_scale_zp
-            = [is_symmetric](float min_val,
+            = [is_symmetric, s_kind](float min_val,
                       float max_val) -> std::pair<float, int32_t> {
         float scale;
         int32_t zp;
@@ -760,6 +760,11 @@ status_t compute_dynamic_quant_params(
             // Handle edge case where min == max
             if (max_val <= min_val) { max_val = min_val + 1.0f; }
             scale = (max_val - min_val) / 255.0f;
+            // Derive zp from the f16 value that will actually be stored.
+            if (s_kind == scale_kind_t::f16) {
+                scale = common::float16_t::f16_to_f32_val(
+                        common::narrow_f32_scale_to_f16(scale));
+            }
             // zp = round(-min / scale), with clamping to int32_t range to avoid UB
             {
                 double zp_double = std::round(static_cast<double>(-min_val)
