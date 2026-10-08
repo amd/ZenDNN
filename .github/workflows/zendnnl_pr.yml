@@ -939,6 +939,117 @@ jobs:
         exit 1
       shell: bash
 
+  check-onednn-status:
+    name: oneDNN integration CI
+    runs-on: amd-zenai-arc-xsmall-dind
+    timeout-minutes: 200
+    # The build itself runs on onednn_zendnn_presub_server inside oneDNN-Zen.
+    # This job only dispatches that workflow and waits for the commit status.
+    # Pushes to main do not dispatch oneDNN.
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+    - name: Trigger and wait for oneDNN integration CI
+      id: onednn
+      env:
+        GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
+        REPO_ZENDNN: AMD-Zenai/ZenDNN
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        ZENDNN_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        PR_URL: ${{ github.event.pull_request.html_url || '' }}
+        PR_TITLE: ${{ github.event.pull_request.title || github.event.head_commit.message || '' }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login || github.actor }}
+        STATUS_CONTEXT: AMD-Zenai/oneDNN-Zen CI
+      run: |
+        set -euo pipefail
+        echo "Dispatching oneDNN integration CI for ${ZENDNN_REF} @ ${COMMIT_SHA}..."
+        payload=$(jq -n \
+          --arg ref "zendnn-onednn-integration" \
+          --arg zendnn_ref "$ZENDNN_REF" \
+          --arg zendnn_sha "$COMMIT_SHA" \
+          --arg zendnn_pr_number "$PR_NUMBER" \
+          --arg zendnn_pr_url "$PR_URL" \
+          --arg zendnn_pr_title "$PR_TITLE" \
+          --arg zendnn_pr_author "$PR_AUTHOR" \
+          --arg triggering_event "${{ github.event_name }}" \
+          '{
+            ref: $ref,
+            inputs: {
+              zendnn_ref: $zendnn_ref,
+              zendnn_sha: $zendnn_sha,
+              zendnn_pr_number: $zendnn_pr_number,
+              zendnn_pr_url: $zendnn_pr_url,
+              zendnn_pr_title: $zendnn_pr_title,
+              zendnn_pr_author: $zendnn_pr_author,
+              triggering_event: $triggering_event
+            }
+          }')
+        http_code=$(curl -s -o /tmp/onednn_dispatch.json -w '%{http_code}' \
+          -X POST "https://api.github.com/repos/AMD-Zenai/oneDNN-Zen/actions/workflows/AMD-ZenDNN-integration-ci.yml/dispatches" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${GH_TOKEN}" \
+          -d "$payload")
+        if [ "$http_code" != "204" ]; then
+          echo "oneDNN dispatch failed (HTTP ${http_code})"
+          cat /tmp/onednn_dispatch.json || true
+          echo "state=failure" >> "$GITHUB_OUTPUT"
+          echo "run_url=" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        echo "Waiting for oneDNN integration CI on commit $COMMIT_SHA..."
+        published=
+        final_state="error"
+        final_url=""
+        # A single status-API blip should not abort the wait.
+        set +e
+        for i in {1..360}; do
+          payload=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status")
+          status=$(echo "$payload" | jq -r --arg ctx "$STATUS_CONTEXT" \
+            '[.statuses[] | select(.context==$ctx)] | last | .state // empty' 2>/dev/null)
+          url=$(echo "$payload" | jq -r --arg ctx "$STATUS_CONTEXT" \
+            '[.statuses[] | select(.context==$ctx)] | last | .target_url // empty' 2>/dev/null)
+
+          echo "Attempt $i: oneDNN CI status=${status:-pending} url=${url:-none}"
+
+          if [ -n "$url" ] && [ -z "$published" ]; then
+            published=1
+            final_url="$url"
+            echo "::notice title=oneDNN integration CI::$url"
+            {
+              echo "## oneDNN integration CI"
+              echo
+              echo "Run: [$url]($url)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$url" ]; then
+            final_url="$url"
+          fi
+
+          if [ "$status" = "success" ]; then
+            echo "oneDNN integration CI succeeded: ${url:-no url posted}"
+            final_state="success"
+            break
+          fi
+          if [ "$status" = "failure" ] || [ "$status" = "error" ]; then
+            echo "oneDNN integration CI failed: ${url:-no url posted}"
+            final_state="$status"
+            break
+          fi
+          sleep 30
+        done
+
+        if [ "$final_state" = "error" ] && [ -z "$published" ]; then
+          echo "Timeout: oneDNN CI did not finish within 3 hours."
+        fi
+        echo "state=${final_state}" >> "$GITHUB_OUTPUT"
+        echo "run_url=${final_url}" >> "$GITHUB_OUTPUT"
+        if [ "$final_state" != "success" ]; then
+          exit 1
+        fi
+      shell: bash
+
   Zendnnl_build_Push: 
    runs-on: zendnnl_presub_server
    if: ${{ github.event_name == 'push' }}
