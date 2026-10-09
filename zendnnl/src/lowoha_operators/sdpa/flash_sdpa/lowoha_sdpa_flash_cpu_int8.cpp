@@ -190,7 +190,11 @@ status_t cpu_flash_attention_int8_dq(const sdpa_flash_cpu_tensor_view &output,
     const int64_t mStrideM = has_attn_mask ? nmask.m_stride_m : 0;
 
     int64_t qSplitSize = std::min<int64_t>(q_split_size, qSize);
-    if (batchSize > 4) { qSplitSize = std::min<int64_t>(512, qSize); }
+    // Larger Q tiles only widen the KV band a windowed tile has to visit, so
+    // keep the dispatch's tile size for sliding-window calls.
+    if (batchSize > 4 && !use_window) {
+        qSplitSize = std::min<int64_t>(512, qSize);
+    }
     const int64_t kvSplitSize = std::min<int64_t>(kv_split_size, kvSize);
     const int64_t qSlice = (qSize - 1) / qSplitSize + 1;
     const int num_thread
@@ -619,7 +623,11 @@ status_t flash_attention_int8_kernel_dispatch(
         std::optional<sdpa_flash_cpu_mask_view> attn_mask,
         std::optional<double> scale, int num_threads) {
     const int64_t q_seq_len = query.size_s;
-    if (q_seq_len >= 768) {
+    // With a sliding window each Q tile visits only the union of its rows' KV
+    // bands, ~(q_tile + 2 * (W - 1)) keys, so 256-row tiles do noticeably more
+    // masked work than 64-row ones and leave few tiles per head for threads.
+    const bool windowed = sliding_window && sliding_window_size > 0;
+    if (q_seq_len >= 768 && !windowed) {
         return cpu_flash_attention_int8_dq<SimdTag, attention_mask, 256, 512,
                 QkInt8, PvInt8>(output, query, key, value, dropout_p, is_causal,
                 sliding_window, sliding_window_size, attn_mask, scale,
