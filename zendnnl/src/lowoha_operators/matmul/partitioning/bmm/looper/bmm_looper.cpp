@@ -107,6 +107,27 @@ static void run_parallel_omp(const void *src, const void *weight, void *dst,
     }
 }
 
+// Tiles of this call share one weight: an M-split, Batch_B == 1, or a
+// zero weight stride.
+static bool bmm_tiles_share_weight(const BmmConfig &config, const BmmPlan &plan,
+        const matmul_batch_params_t &batch_params) {
+    const bool m_split = plan.M_block > 0 && plan.M_block < config.M;
+    const bool broadcast_b
+            = batch_params.Batch_B == 1 && config.batch_count > 1;
+    const bool aliased_b
+            = config.weight_batch_stride_bytes == 0 && config.batch_count > 1;
+    return m_split || broadcast_b || aliased_b;
+}
+
+// s8 weight whose source zero-point makes run_dlp sum raw columns.
+// bf16 and f32 sources ignore that buffer.
+static bool bmm_src_zp_sums_weights(const matmul_params &params) {
+    return params.dtypes.wei == data_type_t::s8
+            && params.quant_params.src_zp.buff != nullptr
+            && params.dtypes.src != data_type_t::bf16
+            && params.dtypes.src != data_type_t::f32;
+}
+
 // ─── Multi-thread partitioned execution ─────────────────────────────────────
 
 static void execute_partitioned(const void *src, const void *weight, void *dst,
@@ -149,6 +170,9 @@ static void execute_partitioned(const void *src, const void *weight, void *dst,
     ctx.kernel = config.kernel;
     ctx.bias = bias;
     ctx.is_weights_const = is_weights_const;
+    ctx.force_shared_wei_out_of_place
+            = bmm_tiles_share_weight(config, plan, batch_params)
+            && bmm_src_zp_sums_weights(params);
 
     auto process_tile
             = [&](int batch_idx, int m_start, int m_len, const uint8_t *src_ptr,

@@ -83,8 +83,12 @@ using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
  *          reorder, then copied back). The cache stores a borrowed pointer
  *          to the user's buffer, so no extra persistent allocation is kept.
  *          Falls back to out-of-place caching when the AOCL blocked size
- *          differs from the plain k*n size or the aligned allocation size
- *          would exceed the user buffer.
+ *          does not fit the caller's allocation (see
+ *          @c wei_buffer_capacity_bytes).
+ * @param wei_buffer_capacity_bytes Bytes writable at @p weights. 0 means
+ *        exactly k*n. When the blocked image is larger, declare the
+ *        64-byte-rounded reorder size, or the allocation actually owned.
+ *        See @c wei_inplace_fits.
  * @return true if reordering was performed (cache miss), false if cached version was used (cache hit)
  */
 template <typename T>
@@ -92,7 +96,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         void *&reorder_weights, const int k, const int n, const int ldb,
         const char order, const char trans, char mem_format_b,
         get_reorder_buff_size_func_ptr get_reorder_buf_size,
-        reorder_func_ptr<T> reorder_func, int weight_cache_type
+        reorder_func_ptr<T> reorder_func, int weight_cache_type,
+        size_t wei_buffer_capacity_bytes = 0
 #if ZENDNNL_DEPENDS_AOCLDLP
         ,
         dlp_metadata_t *reorder_metadata = nullptr

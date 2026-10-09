@@ -485,7 +485,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         const char order, const char trans, char mem_format_b,
         get_reorder_buff_size_func_ptr get_reorder_buf_size,
         reorder_func_ptr<T> reorder_func, int weight_cache_type,
-        dlp_metadata_t *reorder_metadata) {
+        size_t wei_buffer_capacity_bytes, dlp_metadata_t *reorder_metadata) {
     dlp_metadata_t *reorder_meta = reorder_metadata;
     // Weight caching
     lru_cache_t<Key_matmul, void *> &matmul_weight_cache
@@ -642,7 +642,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         const bool inplace_layout_ok = (ldb == ((trans == 't') ? k : n));
         if (inplace_layout_ok
                 && wei_inplace_fits(b_reorder_buf_siz_req, reorder_size,
-                        plain_size, /*declared_cap=*/0)) {
+                        plain_size, wei_buffer_capacity_bytes)) {
             apilog_info("AOCL reorder weights WEIGHT_CACHE_IN_PLACE");
             T *interim = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (!interim) {
@@ -675,8 +675,18 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
         } else {
             apilog_info(
                     "AOCL reorder weights WEIGHT_CACHE_IN_PLACE "
-                    "(blocked size != plain size, falling back to "
-                    "out-of-place)");
+                    "falling back to out-of-place: ",
+                    (!inplace_layout_ok ? "weight is STRIDED (in-place needs a "
+                                          "contiguous ldb)"
+                                    : (wei_buffer_capacity_bytes == 0)
+                                    ? "no capacity declared (assumed exactly "
+                                      "k*n)"
+                                    : "declared capacity is SHORT"),
+                    " k=", k, " n=", n, " ldb=", ldb, " trans=", trans,
+                    " plain=", plain_size,
+                    " blocked_req=", b_reorder_buf_siz_req,
+                    " needs=", reorder_size,
+                    " declared=", wei_buffer_capacity_bytes);
             reorder_weights
                     = (T *)zendnnl_aligned_alloc(alignment, reorder_size);
             if (reorder_weights == nullptr) {
@@ -695,16 +705,16 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
 
 template bool reorderAndCacheWeights<int16_t>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<int16_t>, int, dlp_metadata_t *);
+        reorder_func_ptr<int16_t>, int, size_t, dlp_metadata_t *);
 template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<float>, int, dlp_metadata_t *);
+        reorder_func_ptr<float>, int, size_t, dlp_metadata_t *);
 template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
         int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-        reorder_func_ptr<int8_t>, int, dlp_metadata_t *);
+        reorder_func_ptr<int8_t>, int, size_t, dlp_metadata_t *);
 template bool reorderAndCacheWeights<uint16_t>(Key_matmul, const void *,
         void *&, int, int, int, char, char, char,
-        get_reorder_buff_size_func_ptr, reorder_func_ptr<uint16_t>, int,
+        get_reorder_buff_size_func_ptr, reorder_func_ptr<uint16_t>, int, size_t,
         dlp_metadata_t *);
 
 template <typename T>
@@ -1458,18 +1468,21 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_f32f32f32of32,
                     aocl_reorder_f32f32f32of32, weight_cache_type,
+                    lowoha_param.wei_buffer_capacity_bytes,
                     uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::bf16) {
             blocked_flag = reorderAndCacheWeights<int16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_bf16bf16f32of32,
                     aocl_reorder_bf16bf16f32of32, weight_cache_type,
+                    lowoha_param.wei_buffer_capacity_bytes,
                     uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::f16) {
             blocked_flag = reorderAndCacheWeights<uint16_t>(cache_key, B,
                     reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                     aocl_get_reorder_buf_size_f16f16f16of16,
                     aocl_reorder_f16f16f16of16, weight_cache_type,
+                    lowoha_param.wei_buffer_capacity_bytes,
                     uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::s4
                 || lowoha_param.dtypes.wei == data_type_t::u4) {
@@ -1478,6 +1491,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                     aocl_get_reorder_buf_size_bf16s4f32of32,
                     aocl_reorder_bf16s4f32of32,
                     (weight_cache_type == 2) ? 1 : weight_cache_type,
+                    lowoha_param.wei_buffer_capacity_bytes,
                     uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
         } else if (lowoha_param.dtypes.wei == data_type_t::s8) {
             if (is_s8_sym_quant_scales) {
@@ -1506,12 +1520,14 @@ void run_dlp(char layout, char transA, char transB, int M, int N, int K,
                         reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                         aocl_get_reorder_buf_size_s8s8s32os32,
                         aocl_reorder_s8s8s32os32, weight_cache_type,
+                        lowoha_param.wei_buffer_capacity_bytes,
                         uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
             } else if (lowoha_param.dtypes.src == data_type_t::u8) {
                 blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B,
                         reordered_mem, K, N, ldb, 'r', transB, mem_format_b,
                         aocl_get_reorder_buf_size_u8s8s32os32,
                         aocl_reorder_u8s8s32os32, weight_cache_type,
+                        lowoha_param.wei_buffer_capacity_bytes,
                         uses_unified_dlp_metadata ? dlp_reorder_md : nullptr);
             }
         }

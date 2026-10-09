@@ -100,7 +100,7 @@ bool aocl_refuse_reorder_from_mutated(const void *, const char *) {
 template <typename T>
 bool reorderAndCacheWeights(Key_matmul, const void *, void *&, const int,
         const int, const int, const char, const char, char,
-        get_reorder_buff_size_func_ptr, reorder_func_ptr<T>, int) {
+        get_reorder_buff_size_func_ptr, reorder_func_ptr<T>, int, size_t) {
     apilog_error(
             "AOCL-DLP weight reorder requested but ZenDNNL was built "
             "without AOCL-DLP support (ZENDNNL_DEPENDS_AOCLDLP=0).");
@@ -109,7 +109,7 @@ bool reorderAndCacheWeights(Key_matmul, const void *, void *&, const int,
 
 template bool reorderAndCacheWeights<int16_t>(Key_matmul, const void *, void *&,
         const int, const int, const int, const char, const char, char,
-        get_reorder_buff_size_func_ptr, reorder_func_ptr<int16_t>, int);
+        get_reorder_buff_size_func_ptr, reorder_func_ptr<int16_t>, int, size_t);
 
 void w4a8_cvt_and_cache_plain_s8(
         Key_matmul, const int8_t *, void *&s8_plain, int, int, int, bool) {

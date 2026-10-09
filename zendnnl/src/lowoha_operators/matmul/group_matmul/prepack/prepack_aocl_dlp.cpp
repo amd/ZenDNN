@@ -240,7 +240,8 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
                           /*mem_format_b=*/'n',
                           aocl_get_reorder_buf_size_f16f16f16of16,
                           aocl_reorder_f16f16f16of16,
-                          /*weight_cache_type=*/warm_wct, reorder_md)
+                          /*weight_cache_type=*/warm_wct,
+                          /*wei_buffer_capacity_bytes=*/0, reorder_md)
                 : reorderAndCacheWeights<int16_t>(key, weight[i],
                           reordered_unused, K[i], N[i], ldb[i],
                           /*order=*/'r',
@@ -248,7 +249,8 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
                           /*mem_format_b=*/'n',
                           aocl_get_reorder_buf_size_bf16bf16f32of32,
                           aocl_reorder_bf16bf16f32of32,
-                          /*weight_cache_type=*/warm_wct, reorder_md);
+                          /*weight_cache_type=*/warm_wct,
+                          /*wei_buffer_capacity_bytes=*/0, reorder_md);
         if (warmed) {
             ++stats.packed_ok;
         } else {

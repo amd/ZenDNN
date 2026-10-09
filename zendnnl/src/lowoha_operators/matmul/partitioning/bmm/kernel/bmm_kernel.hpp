@@ -60,6 +60,10 @@ struct BmmKernelContext {
     matmul_algo_t kernel;
     const void *bias;
     bool is_weights_const;
+    /// Shared tiles that sum raw B columns. Forces out-of-place, because
+    /// clearing the capacity still allows WC=2 when the blocked image
+    /// equals k*n. False on the single-thread path.
+    bool force_shared_wei_out_of_place = false;
 };
 
 /// Execute a single BMM tile: compute A/C sub-matrix pointers, apply

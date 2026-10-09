@@ -198,17 +198,10 @@ struct pack_format {
 /// size equality), so no framework sees a behaviour change until it opts
 /// in.
 ///
-/// WHY THE OPT-IN EXISTS.  The int8 blocked layouts -- AOCL's and the
-/// custom kernel's alike -- are `N*4` bytes larger than the logical
-/// weight, carrying a per-output-column int32 compensation row.  That row
-/// is NOT a zero-point artefact and cannot be dropped: `VPDPBUSD`
-/// multiplies unsigned x signed, so signed activations are shifted by
-/// +128 and the row subtracts the resulting `128 * sum_wei` bias (see
-/// int8_microkernel.hpp).  Strict equality therefore fails for every int8
-/// weight, which is duplicated out-of-place at EVERY ALGO, while bf16 --
-/// which needs no such row -- reorders in place for free.  A framework
-/// that over-allocates each weight by the reorder requirement can declare
-/// it here and reclaim that copy with no layout change on either side.
+/// Some INT8 blocked images exceed k*n. Those stay out-of-place until
+/// @p declared_cap covers the 64-byte-rounded reorder size. Images that
+/// already equal k*n, including bf16, reorder in place with a zero
+/// declaration.
 inline bool wei_inplace_fits(size_t req, size_t reorder_size, size_t plain_size,
         size_t declared_cap) {
     // Historical rule, unchanged: the blocked layout is byte-for-byte the

@@ -128,8 +128,11 @@ struct matmul_params {
   std::string plugin_op;                     // Plugin op name
   bool dynamic_quant;                        // Enable dynamic quantization of source (default: false)
   int32_t weight_cache_type;                 // Per-call weight cache mode (0=disabled, 1=out-of-place, 2=allow in-place; capped by ZENDNNL_WEIGHT_CACHE env var)
+  size_t wei_buffer_capacity_bytes;          // Writable bytes at the weight pointer (0 = exactly k*n). INT8 in-place needs this when the blocked size exceeds k*n.
 };
 ```
+
+A partitioned BMM that shares one weight and has a source zero-point stays out-of-place under mode 2, even when the blocked image already equals `k*n`.
 
 ### `matmul_data_types`
 

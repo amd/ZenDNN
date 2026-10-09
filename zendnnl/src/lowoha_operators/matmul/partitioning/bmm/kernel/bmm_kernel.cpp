@@ -36,6 +36,13 @@ void bmm_tile_execute(int batch_idx, int m_start, int m_len,
     void *C = get_output_block(dst_ptr, m_start, 0, ctx.ldc, ctx.out_type_size);
 
     matmul_params tile_params = params;
+    // Shared tiles sum raw columns before the weight-cache lock. Force
+    // out-of-place: clearing the capacity still allows WC=2 when the
+    // blocked image equals k*n.
+    if (ctx.force_shared_wei_out_of_place) {
+        tile_params.wei_buffer_capacity_bytes = 0;
+        tile_params.weight_cache_type = 1;
+    }
     apply_bmm_postop_offsets(tile_params, batch_idx, m_start, ctx.N);
 
     matmul_algo_t tile_kernel = ctx.kernel;

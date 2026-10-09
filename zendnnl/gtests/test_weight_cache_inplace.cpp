@@ -33,6 +33,11 @@
 // weight buffer to confirm accuracy holds across cache reuse, not just the
 // first warmup+real pair.
 //
+// DeclaredCapacity* / MatmulDirect*: WC=2 rewrites a padded INT8 buffer
+// when the blocked image exceeds k*n, and leaves an undeclared buffer raw.
+// BmmSharedWeight*: shared tiles force WC=1 so a source zero-point sum
+// still sees raw columns, including when the blocked size equals k*n.
+//
 // The two related vulnerable paths (asymmetric wei_zp != 0, and ZP-comp caching
 // disabled) are documented as a TODO next to the compensation code in
 // aocl_kernel.cpp (run_dlp).
@@ -42,6 +47,9 @@
 // =============================================================================
 
 #include <gtest/gtest.h>
+
+#include <cstring>
+#include <vector>
 
 #include "common/op_config.hpp"
 #include "gtest_utils.hpp"
@@ -186,6 +194,215 @@ TEST_F(TestWeightCacheInplace, HintFoldedKeyPacksSeparately) {
                "change must re-pack";
 }
 
+// WC=2 with a declared capacity rewrites the caller's INT8 buffer. The
+// blocked image must match the out-of-place pack, and bytes past it stay
+// untouched. Cap 0 stays out-of-place for this shape.
+TEST_F(TestWeightCacheInplace, DeclaredCapacityRewritesInt8BufferInPlace) {
+    constexpr int k = 128, n = 128;
+    const size_t plain = static_cast<size_t>(k) * static_cast<size_t>(n);
+    const size_t req = aocl_get_reorder_buf_size_s8s8s32os32(
+            'r', 'n', 'B', k, n, nullptr);
+    ASSERT_GT(req, 0u) << "AOCL INT8 reorder size query failed";
+    const size_t reorder_size = (req + 63u) & ~static_cast<size_t>(63u);
+    const size_t capacity = reorder_size + 4096u;
+
+    std::vector<int8_t> pristine(plain);
+    for (size_t i = 0; i < pristine.size(); ++i) {
+        pristine[i] = static_cast<int8_t>((i * 37) % 251 - 125);
+    }
+
+    const auto pack
+            = [&](std::vector<int8_t> &buf, int32_t wc, size_t cap) -> void * {
+        void *out = nullptr;
+        Key_matmul key(/*TransB=*/false, k, n, /*ldb=*/n, buf.data(),
+                static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+                /*extra_input_hash=*/0);
+        EXPECT_TRUE(reorderAndCacheWeights<int8_t>(key, buf.data(), out, k, n,
+                /*ldb=*/n, /*order=*/'r', /*trans=*/'n', /*mem_format_b=*/'n',
+                aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
+                wc, cap, nullptr));
+        return out;
+    };
+
+    std::vector<int8_t> oop_buf(pristine);
+    void *oop = pack(oop_buf, /*wc=*/1, /*cap=*/0);
+    ASSERT_NE(oop, nullptr);
+    ASSERT_NE(oop, oop_buf.data())
+            << "WC=1 must leave the caller's buffer untouched";
+
+    std::vector<int8_t> ip_buf(capacity, 0);
+    std::memcpy(ip_buf.data(), pristine.data(), plain);
+    // Canary past the blocked image.
+    std::memset(ip_buf.data() + req, 0xA5, capacity - req);
+    ASSERT_TRUE(wei_inplace_fits(req, reorder_size, plain, capacity))
+            << "test capacity " << capacity << " must cover blocked "
+            << reorder_size << " (req=" << req << ", plain=" << plain << ")";
+    void *ip = pack(ip_buf, /*wc=*/2, capacity);
+    ASSERT_EQ(ip, ip_buf.data())
+            << "declared capacity under WC=2 must reorder INTO the caller's "
+               "buffer; if this fails the comparison below is vacuous because "
+               "no in-place reorder happened";
+
+    EXPECT_EQ(std::memcmp(oop, ip, req), 0)
+            << "the in-place blocked image differs from the out-of-place one "
+               "over "
+            << req
+            << " bytes -- same reorder, same input, different destination";
+
+    for (size_t i = req; i < ip_buf.size(); ++i) {
+        ASSERT_EQ(static_cast<uint8_t>(ip_buf[i]), 0xA5u)
+                << "in-place reorder wrote past its blocked image at byte " << i
+                << " (declared need was " << req << ")";
+    }
+
+    // Cap 0 must stay out-of-place for this shape.
+    ASSERT_FALSE(wei_inplace_fits(req, reorder_size, plain, /*declared_cap=*/0))
+            << "s8s8 " << k << "x" << n
+            << " blocked image fits k*n; the undeclared control would not "
+               "prove the capacity gate";
+    std::vector<int8_t> und_buf(pristine);
+    void *und = pack(und_buf, /*wc=*/2, /*cap=*/0);
+    ASSERT_NE(und, und_buf.data())
+            << "undeclared INT8 under WC=2 must stay out-of-place when "
+               "the blocked image does not fit k*n";
+    EXPECT_EQ(std::memcmp(und_buf.data(), pristine.data(), plain), 0)
+            << "out-of-place fallback mutated the caller's weight buffer";
+    EXPECT_EQ(std::memcmp(und, oop, req), 0);
+}
+
+// 130x130 u8 is larger than k*n, so cap 0 stays raw and a declared
+// capacity mutates. The output must still match the reference.
+TEST_F(TestWeightCacheInplace, MatmulDirectDeclaredCapacityInPlaceMatchesRef) {
+    const uint64_t m = 32, k = 130, n = 130;
+    const bool use_LOWOHA = true;
+    const auto algo = matmul_algo_t::aocl_dlp_blocked;
+    const std::vector<post_op_type_t> po_types {};
+    const std::vector<tensor_t> binary_tensors {};
+
+    auto wei_ref = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::bf16, 25.0, /*transB=*/false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, wei_scale,
+                      wei_zp, &weight_tensor),
+            status_t::success)
+            << "weight quantization failed";
+
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {m, k}, data_type_t::bf16, 25.0, /*transA=*/false);
+    tensor_t input_tensor, src_scale, src_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, data_type_t::bf16,
+                      data_type_t::u8, {1, 1}, data_type_t::f32, src_scale,
+                      src_zp, &input_tensor),
+            status_t::success)
+            << "source quantization failed";
+
+    auto bias_tensor
+            = tensor_factory.uniform_dist_tensor({1, n}, data_type_t::f32, 2.0);
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {m, n}, data_type_t::bf16, 2.0);
+
+    status_t ref_status = matmul_kernel_test(input_tensor, weight_tensor,
+            bias_tensor, output_tensor_ref, po_types, binary_tensors,
+            use_LOWOHA, algo, 1.0, 0.0, true);
+    ASSERT_EQ(ref_status, status_t::success) << "reference kernel failed";
+    clear_matmul_test_caches();
+
+    const int ki = static_cast<int>(k), ni = static_cast<int>(n);
+    const size_t plain = static_cast<size_t>(ki) * static_cast<size_t>(ni);
+    const size_t req = aocl_get_reorder_buf_size_u8s8s32os32(
+            'r', 'n', 'B', ki, ni, nullptr);
+    ASSERT_GT(req, 0u);
+    const size_t reorder_size = (req + 63u) & ~static_cast<size_t>(63u);
+    const size_t capacity = reorder_size + 4096u;
+    ASSERT_TRUE(wei_inplace_fits(req, reorder_size, plain, capacity));
+    ASSERT_FALSE(wei_inplace_fits(req, reorder_size, plain, /*declared_cap=*/0))
+            << "u8s8 " << k << "x" << n
+            << " fits k*n with no declared capacity, so this test cannot "
+               "tell a forwarded capacity from the historical equality gate";
+
+    std::vector<int8_t> padded(capacity, 0);
+    std::memcpy(padded.data(), weight_tensor.get_raw_handle_unsafe(), plain);
+    const std::vector<int8_t> pristine(padded.begin(),
+            padded.begin() + static_cast<std::ptrdiff_t>(plain));
+
+    auto fill_q = [](matmul_quantization_params_t::matmul_quant_t &q,
+                          const tensor_t &t, bool scale) {
+        if (!t.is_quantized()) return;
+        if (scale) {
+            q.buff = t.get_quant_scale_raw_handle_const();
+            q.dt = t.get_quant_scale_data_type();
+            auto dims = t.get_quant_scale_size();
+            q.dims.assign(dims.begin(), dims.end());
+            return;
+        }
+        if (t.get_quant_subtype() != quant_subtype_t::asymmetric) return;
+        q.buff = t.get_quant_zero_raw_handle_const();
+        if (!q.buff) return;
+        q.dt = t.get_quant_zero_data_type();
+        auto dims = t.get_quant_zero_size();
+        q.dims.assign(dims.begin(), dims.end());
+    };
+
+    matmul_params params;
+    params.lowoha_algo = algo;
+    params.dtypes.src = data_type_t::u8;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::f32;
+    params.weight_cache_type = 2;
+    params.wei_buffer_capacity_bytes = capacity;
+    fill_q(params.quant_params.src_scale, input_tensor, true);
+    fill_q(params.quant_params.src_zp, input_tensor, false);
+    fill_q(params.quant_params.wei_scale, weight_tensor, true);
+    fill_q(params.quant_params.wei_zp, weight_tensor, false);
+
+    WeightCacheGuard wc_guard(2);
+    ZpCompCacheGuard zp_guard(true);
+    matmul_batch_params_t batch;
+
+    std::vector<int8_t> plain_buf(pristine);
+    matmul_params cap0_params = params;
+    cap0_params.wei_buffer_capacity_bytes = 0;
+    status_t cap0_status = matmul_direct('r', /*transA=*/false,
+            /*transB=*/false, static_cast<int>(m), ni, ki, 1.0f,
+            input_tensor.get_raw_handle_unsafe(), ki, plain_buf.data(), ni,
+            bias_tensor.get_raw_handle_unsafe(), 0.0f,
+            output_tensor.get_raw_handle_unsafe(), ni,
+            /*is_weights_const=*/true, batch, cap0_params);
+    if (cap0_status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "AOCL-DLP blocked INT8 not supported on this ISA";
+    }
+    ASSERT_EQ(cap0_status, status_t::success);
+    EXPECT_EQ(std::memcmp(plain_buf.data(), pristine.data(), plain), 0)
+            << "undeclared capacity mutated the caller's weight buffer";
+    clear_matmul_test_caches();
+
+    status_t status = matmul_direct('r', /*transA=*/false, /*transB=*/false,
+            static_cast<int>(m), ni, ki, 1.0f,
+            input_tensor.get_raw_handle_unsafe(), ki, padded.data(), ni,
+            bias_tensor.get_raw_handle_unsafe(), 0.0f,
+            output_tensor.get_raw_handle_unsafe(), ni,
+            /*is_weights_const=*/true, batch, params);
+    if (status == status_t::isa_unsupported) {
+        GTEST_SKIP() << "AOCL-DLP blocked INT8 not supported on this ISA";
+    }
+    ASSERT_EQ(status, status_t::success);
+
+    EXPECT_NE(std::memcmp(padded.data(), pristine.data(), plain), 0)
+            << "matmul_direct did not mutate the padded INT8 weight under "
+               "WC=2 with a declared capacity — run_dlp is not forwarding "
+               "wei_buffer_capacity_bytes into reorderAndCacheWeights";
+
+    bool ok = true;
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
+            rtol_bf16, epsilon_bf16, ok, false, 1.0f, /*is_quant=*/true);
+    EXPECT_TRUE(ok) << "in-place matmul_direct output diverged from the "
+                       "reference";
+}
+
 // Same shape as the test above, but with ZP-comp caching DISABLED — one of the
 // two paths the TODO next to the compensation code called out as unguarded.
 //
@@ -264,5 +481,282 @@ TEST_F(TestWeightCacheInplace, Uncached1D_ZpCompCacheOff_InPlaceRefused) {
                 << " with ZENDNNL_ZP_COMP_CACHE=0 — in-place must be refused "
                    "when the compensation is re-derived from the weights on "
                    "every call";
+    }
+}
+
+// Shared BMM tiles sum raw columns for a nonzero s8 source zero-point.
+// The weight must stay raw and the output must match the reference.
+TEST_F(TestWeightCacheInplace, BmmSharedWeightKeepsAsymmetricS8OutOfPlace) {
+    constexpr int kBatch = 4;
+    constexpr int kThreads = 4;
+    const uint64_t m = 32, k = 128, n = 128;
+    const int mi = static_cast<int>(m);
+    const int ki = static_cast<int>(k);
+    const int ni = static_cast<int>(n);
+    const auto algo = matmul_algo_t::aocl_dlp_blocked;
+
+    auto wei_ref = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::bf16, 25.0, /*transB=*/false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, wei_scale,
+                      wei_zp, &weight_tensor),
+            status_t::success)
+            << "weight quantization failed";
+
+    // s8 quant emits no zero-point; attach one below.
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, k}, data_type_t::bf16, 25.0,
+            /*transA=*/false);
+    tensor_t input_tensor, src_scale, src_zp_tensor;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, src_scale,
+                      src_zp_tensor, &input_tensor),
+            status_t::success)
+            << "source quantization failed";
+
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+
+    const size_t plain = static_cast<size_t>(ki) * static_cast<size_t>(ni);
+    const size_t req = aocl_get_reorder_buf_size_s8s8s32os32(
+            'r', 'n', 'B', ki, ni, nullptr);
+    ASSERT_GT(req, 0u) << "AOCL INT8 reorder size query failed";
+    const size_t reorder_size = (req + 63u) & ~static_cast<size_t>(63u);
+    const size_t capacity = reorder_size + 4096u;
+    ASSERT_TRUE(wei_inplace_fits(req, reorder_size, plain, capacity))
+            << "test capacity must be large enough that WC=2 would rewrite "
+               "the buffer if a tile forwarded it";
+
+    std::vector<int8_t> padded(capacity, 0);
+    std::memcpy(padded.data(), weight_tensor.get_raw_handle_unsafe(), plain);
+    const std::vector<int8_t> pristine(padded);
+
+    auto fill_q = [](matmul_quantization_params_t::matmul_quant_t &q,
+                          const tensor_t &t, bool scale) {
+        if (!t.is_quantized()) return;
+        if (scale) {
+            q.buff = t.get_quant_scale_raw_handle_const();
+            q.dt = t.get_quant_scale_data_type();
+            auto dims = t.get_quant_scale_size();
+            q.dims.assign(dims.begin(), dims.end());
+            return;
+        }
+        if (t.get_quant_subtype() != quant_subtype_t::asymmetric) return;
+        q.buff = t.get_quant_zero_raw_handle_const();
+        if (!q.buff) return;
+        q.dt = t.get_quant_zero_data_type();
+        auto dims = t.get_quant_zero_size();
+        q.dims.assign(dims.begin(), dims.end());
+    };
+
+    // Explicit source zero-point. quant_params stores the pointer.
+    const int32_t src_zp_value = 13;
+
+    matmul_params params;
+    params.lowoha_algo = algo;
+    params.dtypes.src = data_type_t::s8;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.weight_cache_type = 2;
+    params.wei_buffer_capacity_bytes = capacity;
+    params.num_threads = kThreads;
+    fill_q(params.quant_params.src_scale, input_tensor, true);
+    fill_q(params.quant_params.wei_scale, weight_tensor, true);
+    params.quant_params.src_zp.buff = &src_zp_value;
+    params.quant_params.src_zp.dt = data_type_t::s32;
+    params.quant_params.src_zp.dims = {1};
+
+    matmul_batch_params_t batch;
+    batch.Batch_A = kBatch;
+    batch.Batch_B = 1;
+    batch.batch_stride_src = static_cast<size_t>(-1);
+    batch.batch_stride_wei = static_cast<size_t>(-1);
+    batch.batch_stride_dst = static_cast<size_t>(-1);
+
+    matmul_params ref_params = params;
+    ref_params.lowoha_algo = matmul_algo_t::reference;
+    ref_params.num_threads = 1;
+    ref_params.weight_cache_type = 0;
+    ref_params.wei_buffer_capacity_bytes = 0;
+
+    status_t ref_status = matmul_direct('r', /*transA=*/false,
+            /*transB=*/false, mi, ni, ki, 1.0f,
+            input_tensor.get_raw_handle_unsafe(), ki, padded.data(), ni,
+            /*bias=*/nullptr, 0.0f, output_tensor_ref.get_raw_handle_unsafe(),
+            ni, /*is_weights_const=*/true, batch, ref_params);
+    ASSERT_EQ(ref_status, status_t::success) << "reference kernel failed";
+    EXPECT_EQ(std::memcmp(padded.data(), pristine.data(), padded.size()), 0)
+            << "reference kernel mutated the weight buffer";
+    clear_matmul_test_caches();
+
+    WeightCacheGuard wc_guard(2);
+    ZpCompCacheGuard zp_guard(true);
+
+    constexpr int kIterations = 2;
+    for (int iter = 0; iter < kIterations; ++iter) {
+        status_t status = matmul_direct('r', /*transA=*/false,
+                /*transB=*/false, mi, ni, ki, 1.0f,
+                input_tensor.get_raw_handle_unsafe(), ki, padded.data(), ni,
+                /*bias=*/nullptr, 0.0f, output_tensor.get_raw_handle_unsafe(),
+                ni, /*is_weights_const=*/true, batch, params);
+        if (status == status_t::isa_unsupported) {
+            GTEST_SKIP() << "AOCL-DLP blocked INT8 not supported on this ISA";
+        }
+        ASSERT_EQ(status, status_t::success)
+                << "BMM failed on iteration " << iter;
+
+        EXPECT_EQ(std::memcmp(padded.data(), pristine.data(), padded.size()), 0)
+                << "shared BMM weight was rewritten in place on iteration "
+                << iter
+                << " — a shared tile took WC=2 while another tile can still "
+                   "be summing the raw columns";
+
+        bool ok = true;
+        compare_tensor_2D_matrix(output_tensor, output_tensor_ref,
+                static_cast<uint64_t>(kBatch) * m, n, k, rtol_bf16,
+                epsilon_bf16, ok, false, 1.0f, /*is_quant=*/true);
+        EXPECT_TRUE(ok) << "BMM output diverged from the reference on "
+                           "iteration "
+                        << iter << " with a nonzero s8 source zero-point";
+    }
+}
+
+// u8 128x128 blocked size equals k*n, so cap 0 would still allow WC=2.
+// Shared tiles must force out-of-place and keep the weight raw.
+TEST_F(TestWeightCacheInplace, BmmSharedWeightKeepsAsymmetricU8OutOfPlace) {
+    constexpr int kBatch = 4;
+    constexpr int kThreads = 4;
+    const uint64_t m = 32, k = 128, n = 128;
+    const int mi = static_cast<int>(m);
+    const int ki = static_cast<int>(k);
+    const int ni = static_cast<int>(n);
+    const auto algo = matmul_algo_t::aocl_dlp_blocked;
+
+    auto wei_ref = tensor_factory.uniform_dist_tensor(
+            {k, n}, data_type_t::bf16, 25.0, /*transB=*/false);
+    tensor_t weight_tensor, wei_scale, wei_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, wei_ref, data_type_t::bf16,
+                      data_type_t::s8, {1, 1}, data_type_t::f32, wei_scale,
+                      wei_zp, &weight_tensor),
+            status_t::success)
+            << "weight quantization failed";
+
+    auto src_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, k}, data_type_t::bf16, 25.0,
+            /*transA=*/false);
+    tensor_t input_tensor, src_scale, src_zp;
+    ASSERT_EQ(quant_params_compute(tensor_factory, src_ref, data_type_t::bf16,
+                      data_type_t::u8, {1, 1}, data_type_t::f32, src_scale,
+                      src_zp, &input_tensor),
+            status_t::success)
+            << "source quantization failed";
+
+    auto output_tensor = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+    auto output_tensor_ref = tensor_factory.uniform_dist_tensor(
+            {static_cast<uint64_t>(kBatch) * m, n}, data_type_t::bf16, 2.0);
+
+    const size_t plain = static_cast<size_t>(ki) * static_cast<size_t>(ni);
+    const size_t req = aocl_get_reorder_buf_size_u8s8s32os32(
+            'r', 'n', 'B', ki, ni, nullptr);
+    ASSERT_GT(req, 0u) << "AOCL INT8 reorder size query failed";
+    const size_t reorder_size = (req + 63u) & ~static_cast<size_t>(63u);
+    const size_t capacity = reorder_size + 4096u;
+    ASSERT_TRUE(wei_inplace_fits(req, reorder_size, plain, /*declared_cap=*/0))
+            << "u8s8 " << k << "x" << n
+            << " does not fit k*n; this case would already be refused by "
+               "clearing wei_buffer_capacity_bytes";
+    ASSERT_TRUE(wei_inplace_fits(req, reorder_size, plain, capacity));
+
+    std::vector<int8_t> padded(capacity, 0);
+    std::memcpy(padded.data(), weight_tensor.get_raw_handle_unsafe(), plain);
+    const std::vector<int8_t> pristine(padded);
+
+    auto fill_q = [](matmul_quantization_params_t::matmul_quant_t &q,
+                          const tensor_t &t, bool scale) {
+        if (!t.is_quantized()) return;
+        if (scale) {
+            q.buff = t.get_quant_scale_raw_handle_const();
+            q.dt = t.get_quant_scale_data_type();
+            auto dims = t.get_quant_scale_size();
+            q.dims.assign(dims.begin(), dims.end());
+            return;
+        }
+        if (t.get_quant_subtype() != quant_subtype_t::asymmetric) return;
+        q.buff = t.get_quant_zero_raw_handle_const();
+        if (!q.buff) return;
+        q.dt = t.get_quant_zero_data_type();
+        auto dims = t.get_quant_zero_size();
+        q.dims.assign(dims.begin(), dims.end());
+    };
+
+    matmul_params params;
+    params.lowoha_algo = algo;
+    params.dtypes.src = data_type_t::u8;
+    params.dtypes.wei = data_type_t::s8;
+    params.dtypes.dst = data_type_t::bf16;
+    params.weight_cache_type = 2;
+    params.wei_buffer_capacity_bytes = capacity;
+    params.num_threads = kThreads;
+    fill_q(params.quant_params.src_scale, input_tensor, true);
+    fill_q(params.quant_params.src_zp, input_tensor, false);
+    fill_q(params.quant_params.wei_scale, weight_tensor, true);
+    ASSERT_NE(params.quant_params.src_zp.buff, nullptr)
+            << "u8 source must carry a zero-point so tiles sum raw columns";
+
+    matmul_batch_params_t batch;
+    batch.Batch_A = kBatch;
+    batch.Batch_B = 1;
+    batch.batch_stride_src = static_cast<size_t>(-1);
+    batch.batch_stride_wei = static_cast<size_t>(-1);
+    batch.batch_stride_dst = static_cast<size_t>(-1);
+
+    matmul_params ref_params = params;
+    ref_params.lowoha_algo = matmul_algo_t::reference;
+    ref_params.num_threads = 1;
+    ref_params.weight_cache_type = 0;
+    ref_params.wei_buffer_capacity_bytes = 0;
+
+    status_t ref_status = matmul_direct('r', /*transA=*/false,
+            /*transB=*/false, mi, ni, ki, 1.0f,
+            input_tensor.get_raw_handle_unsafe(), ki, padded.data(), ni,
+            /*bias=*/nullptr, 0.0f, output_tensor_ref.get_raw_handle_unsafe(),
+            ni, /*is_weights_const=*/true, batch, ref_params);
+    ASSERT_EQ(ref_status, status_t::success) << "reference kernel failed";
+    EXPECT_EQ(std::memcmp(padded.data(), pristine.data(), padded.size()), 0)
+            << "reference kernel mutated the weight buffer";
+    clear_matmul_test_caches();
+
+    WeightCacheGuard wc_guard(2);
+    ZpCompCacheGuard zp_guard(true);
+
+    constexpr int kIterations = 2;
+    for (int iter = 0; iter < kIterations; ++iter) {
+        status_t status = matmul_direct('r', /*transA=*/false,
+                /*transB=*/false, mi, ni, ki, 1.0f,
+                input_tensor.get_raw_handle_unsafe(), ki, padded.data(), ni,
+                /*bias=*/nullptr, 0.0f, output_tensor.get_raw_handle_unsafe(),
+                ni, /*is_weights_const=*/true, batch, params);
+        if (status == status_t::isa_unsupported) {
+            GTEST_SKIP() << "AOCL-DLP blocked INT8 not supported on this ISA";
+        }
+        ASSERT_EQ(status, status_t::success)
+                << "BMM failed on iteration " << iter;
+
+        EXPECT_EQ(std::memcmp(padded.data(), pristine.data(), padded.size()), 0)
+                << "shared u8 BMM weight was rewritten in place on iteration "
+                << iter
+                << " — blocked size equals k*n, so WC=2 must be forced off";
+
+        bool ok = true;
+        compare_tensor_2D_matrix(output_tensor, output_tensor_ref,
+                static_cast<uint64_t>(kBatch) * m, n, k, rtol_bf16,
+                epsilon_bf16, ok, false, 1.0f, /*is_quant=*/true);
+        EXPECT_TRUE(ok) << "u8 BMM output diverged from the reference on "
+                           "iteration "
+                        << iter;
     }
 }
