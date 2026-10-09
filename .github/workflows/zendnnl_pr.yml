@@ -192,13 +192,17 @@ jobs:
        fetch-depth: 0 
     - name: Checkout PR tip commit
       if: github.event_name == 'pull_request'
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
        echo " Checking out PR tip commit..."
        echo "Current commit: $(git rev-parse HEAD)"
-       echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
-       git checkout ${{ github.event.pull_request.head.sha }}
+       echo "PR HEAD SHA: ${PR_HEAD_SHA}"
+       git checkout "${PR_HEAD_SHA}"
        echo " Now on commit: $(git rev-parse HEAD)"
-       echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+       echo "PR #${PR_NUMBER} - ${PR_TITLE}"
       shell: bash
     - name: PR INFO
       shell: bash
@@ -435,13 +439,17 @@ jobs:
        fetch-depth: 0
     - name: Checkout PR tip commit
       if: github.event_name == 'pull_request'
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
        echo " Checking out PR tip commit..."
        echo "Current commit: $(git rev-parse HEAD)"
-       echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
-       git checkout ${{ github.event.pull_request.head.sha }}
+       echo "PR HEAD SHA: ${PR_HEAD_SHA}"
+       git checkout "${PR_HEAD_SHA}"
        echo " Now on commit: $(git rev-parse HEAD)"
-       echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+       echo "PR #${PR_NUMBER} - ${PR_TITLE}"
       shell: bash
 
     - name: Set up build environment
@@ -662,13 +670,17 @@ jobs:
     - name: Checkout PR tip commit
       if: github.event_name == 'pull_request'
       shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         echo " Checking out PR tip commit..."
         echo "Current commit: $(git rev-parse HEAD)"
-        echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
-        git checkout ${{ github.event.pull_request.head.sha }}
+        echo "PR HEAD SHA: ${PR_HEAD_SHA}"
+        git checkout "${PR_HEAD_SHA}"
         echo " Now on commit: $(git rev-parse HEAD)"
-        echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+        echo "PR #${PR_NUMBER} - ${PR_TITLE}"
 
     - name: Configure, build and test (MSVC)
       shell: bash
