@@ -35,4 +35,6 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_group_reorder.cpp
     # Weight unreorder. Round-trips are TEST_P; guards are plain TEST().
     ${CMAKE_CURRENT_SOURCE_DIR}/test_lowoha_unreorder_aocl.cpp
+    # Cached AOCL-blocked -> final CK-pack conversion; raw storage is temporary.
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_aocl_raw_weight_cache.cpp
 )

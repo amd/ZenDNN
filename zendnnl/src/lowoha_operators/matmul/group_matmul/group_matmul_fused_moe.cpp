@@ -1543,6 +1543,7 @@ status_t group_matmul_fused_moe_execute(
         const group_matmul_moe_postop_params *moe_postop) {
     const size_t num_ops = M.size();
     if (num_ops == 0) return status_t::failure;
+    scoped_grp_auto_mutation_tracking mutation_tracking;
 
     // ── Step 1: detect per-side internal-alloc state ───────────────────
     // Each side is detected independently so callers can mix any of the
@@ -1695,6 +1696,23 @@ status_t group_matmul_fused_moe_execute(
     const std::vector<void *> &op2_dst
             = op2_internal ? scratch.op2_dst_internal : fused.dst_down;
     const std::vector<int> &op2_ldc = op2_internal ? lda : fused.ldc_down;
+
+    // Fused ALGO 2/5 can execute both GEMMs without entering the ordinary
+    // grouped dispatcher, so establish AUTO WC=2 mixed-mode policy here,
+    // before either pipeline's prepack can mutate a raw weight. Treat Op1 and
+    // Op2 as one pool: both decode halves need a split-independent CK pack,
+    // and a raw/caller-packed mixture on either side caps the whole call to
+    // out-of-place caching.
+    const bool op2_custom_kernel_en = grp_matmul_custom_kernel_effective(
+            scratch.params_down, M, fused.N_down, grp_matmul_gated_act_t::none);
+    const bool track_grouped_inplace_mutation
+            = prepare_grouped_auto_weight_cache(params,
+                    custom_kernel_en && op2_custom_kernel_en,
+                    &scratch.params_down);
+    mutation_tracking.set(track_grouped_inplace_mutation);
+    const uint64_t mutated_conflicts_before
+            = aocl_mutated_source_conflict_count(
+                    weight, &fused.down_weight, &M);
 
     // ── Step 6: per-path dispatch fork ─────────────────────────────────
     // Try vertical fusion FIRST.  The eligibility gate inside
@@ -1875,6 +1893,18 @@ status_t group_matmul_fused_moe_execute(
             apilog_info(
                     "[GRP_MATMUL.EXEC] op=fused_moe exit=legacy_two_pass_ok");
         }
+    }
+
+    // ALGO 2/5 vertical pipelines bypass the ordinary grouped dispatcher,
+    // whose gemm-mode sentinel normally propagates a refused reorder. Check
+    // both fused weight pools here so those paths also fail closed. Counts are
+    // per pointer, avoiding false failures from unrelated concurrent calls.
+    if (aocl_mutated_source_conflict_count(weight, &fused.down_weight, &M)
+            != mutated_conflicts_before) {
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpMatmulErrMutatedWeightMiss;
+        }
+        return status_t::failure;
     }
 
     // ── Step 7: optional MoE post-op (weighted reduce) ─────────────────

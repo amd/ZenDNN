@@ -135,7 +135,7 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t src_dtype, data_type_t wei_dtype,
         AoclDlpPackProbeStats &stats, int32_t num_threads = 0,
-        bool allow_inplace = true);
+        bool allow_inplace = true, int32_t weight_cache_type = -1);
 
 /// Per-tile variant of `warm_pack_all_aocl_dlp_experts`, sized for
 /// ALGO 3 flat_n_tile's strict-stable plan
@@ -179,7 +179,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        AoclDlpPackProbeStats &stats);
+        AoclDlpPackProbeStats &stats, int32_t weight_cache_type = -1);
 
 /// DQ-INT8 symmetric-quant full-weight warmer (Gap B — int8/bf16
 /// cross-warm parity).  Sibling of `warm_pack_all_aocl_dlp_experts`
@@ -228,7 +228,8 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, AoclDlpPackProbeStats &stats, int group_size = 0,
-        size_t wei_buffer_capacity_bytes = 0, bool allow_inplace = true);
+        size_t wei_buffer_capacity_bytes = 0, bool allow_inplace = true,
+        int32_t weight_cache_type = -1);
 
 /// DQ-INT8 symmetric-quant PER-TILE warmer — per-tile sibling of
 /// `warm_pack_all_aocl_dlp_experts_sym_quant`, and the sym-quant
@@ -253,7 +254,8 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        AoclDlpPackProbeStats &stats, int group_size = 0);
+        AoclDlpPackProbeStats &stats, int group_size = 0,
+        int32_t weight_cache_type = -1);
 
 /// W4A8 full-weight warm for ALGOs 1/2/5/6. @param algo must match runtime.
 status_t warm_pack_all_aocl_dlp_experts_w4a8(
@@ -262,7 +264,7 @@ status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats,
-        zendnnl::common::matmul_algo_t algo);
+        zendnnl::common::matmul_algo_t algo, int32_t weight_cache_type = -1);
 
 /// W4A8 per-N-tile warm for ALGO 3.
 /// aocl_dlp_blocked warms native packed-s4 tiles; aocl_dlp keeps the existing
@@ -274,7 +276,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
         int group_size, AoclDlpPackProbeStats &stats,
-        zendnnl::common::matmul_algo_t algo);
+        zendnnl::common::matmul_algo_t algo, int32_t weight_cache_type = -1);
 
 } // namespace aocl_dlp
 } // namespace group_matmul_prepack

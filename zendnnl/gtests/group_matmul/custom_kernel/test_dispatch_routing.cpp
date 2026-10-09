@@ -442,6 +442,7 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
 }
 
 TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     CK_SKIP_IF_NO_INT8_ISA();
 
     ScalarRouteConfigGuard guard;
@@ -770,6 +771,7 @@ TEST(CkDispatchRouting, ScalarInt8EndToEndMatchesFallbackAndRunsCk) {
 }
 
 TEST(CkDispatchRouting, ScalarStaticU8S8PerTensorMatchesFallbackAndRunsCk) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     CK_SKIP_IF_NO_INT8_ISA();
     ::reset_grp_matmul_caches();
 
@@ -960,7 +962,8 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PerTensorMatchesFallbackAndRunsCk) {
     }
 }
 
-TEST(CkDispatchRouting, ScalarStaticU8S8PromptStaysOnStandardPath) {
+TEST(CkDispatchRouting, ScalarStaticU8S8PromptUsesGroupedAoclWarmup) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     CK_SKIP_IF_NO_INT8_ISA();
     ::reset_grp_matmul_caches();
 
@@ -1000,10 +1003,10 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PromptStaysOnStandardPath) {
     params.quant_params.wei_scale.dims = {1, 1};
     zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
 
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K, 4,
+            1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 2048, N, K,
             4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
-    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', 2048, N,
-            K, 4, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
     constexpr int decode_m = 5;
     EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', decode_m,

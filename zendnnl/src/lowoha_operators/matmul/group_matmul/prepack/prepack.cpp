@@ -309,11 +309,9 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
     // per-call buffer instead of the LRU singleton; the AOCL DLP
     // runtime independently honours the same toggle via its
     // `weight_cache_type=0` branch (fresh reorder + free per call).
-    // Folding the toggle into the hash on every call is one
-    // singleton-load (~1 ns) and keeps the hash regime simple.
-    s = mix_hash(s,
-            static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
-                                        .get_weight_cache()));
+    // Fold the effective per-call mode, not only the process global: a caller
+    // may cap caching at 0/1 through matmul_params::weight_cache_type.
+    s = mix_hash(s, static_cast<size_t>(p.weight_cache_type));
     // `should_warm_weight_cache` ANDs the WC value with the mixed-in-place
     // flag, so the flag is an input to whether the warmers do anything at
     // all -- but it is set by `group_matmul_run_parallel_dispatch`, which the
@@ -391,6 +389,9 @@ inline size_t weight_pool_fingerprint(const PrepackParams &p) {
         s = mix_hash(s, transb_xor);
         s = mix_hash(s, bound);
     }
+    // This latch protects the physical weight pool across calls. Per-call
+    // cache caps must not split it: a cap-1 and cap-2 call sharing the same
+    // buffer still contend with the same possible in-place mutation.
     s = mix_hash(s,
             static_cast<size_t>(zendnnl::common::matmul_config_t::instance()
                                         .get_weight_cache()));
@@ -594,6 +595,7 @@ enum class PreludeSkipReason {
     none = 0, ///< `skip == false`; ignore this field
     env_disabled = 1, ///< `ZENDNNL_GRP_MATMUL_PREPACK = 0`
     fingerprint_already = 2, ///< `already_warmed(...) == true`
+    caller_prepacked = 3, ///< input bytes are already backend-packed
 };
 
 // Result of the shared opening sequence: one of `skip` (the per-ALGO
@@ -610,6 +612,10 @@ struct PreludeResult {
 
 inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     PreludeResult r;
+    if (p.caller_prepacked) {
+        r.skip_reason = PreludeSkipReason::caller_prepacked;
+        return r;
+    }
     if (!get_grp_matmul_prepack()) {
         r.skip_reason = PreludeSkipReason::env_disabled;
         return r;
@@ -719,7 +725,7 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl(
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts(*p.weight, *p.K, *p.N, *p.ldb,
             *p.transB, warm_iwc(p), p.num_ops_total, p.src_dtype, p.wei_dtype,
-            st, p.num_threads, allow_inplace);
+            st, p.num_threads, allow_inplace, p.weight_cache_type);
     return st;
 }
 
@@ -730,7 +736,7 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_w4a8(
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts_w4a8(*p.weight, *p.K, *p.N, *p.ldb,
             *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, group_size,
-            st, algo);
+            st, algo, p.weight_cache_type);
     return st;
 }
 
@@ -754,7 +760,8 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_sym_quant(
     // fallback a per-group layer routed to ALGO 1/2/5/6 will read).
     aocl_dlp::warm_pack_all_aocl_dlp_experts_sym_quant(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype, st,
-            p.group_size, p.wei_buffer_capacity_bytes, allow_inplace);
+            p.group_size, p.wei_buffer_capacity_bytes, allow_inplace,
+            p.weight_cache_type);
     return st;
 }
 
@@ -773,7 +780,7 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile(
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype,
-            p.num_threads, stable, nr_align_eff, st);
+            p.num_threads, stable, nr_align_eff, st, p.weight_cache_type);
     return st;
 }
 
@@ -790,7 +797,8 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile_sym_quant(
     // reorder granularity — same contract as `warm_aocl_sym_quant`.
     aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(*p.weight, *p.K,
             *p.N, *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype,
-            p.num_threads, stable, nr_align_eff, st, p.group_size);
+            p.num_threads, stable, nr_align_eff, st, p.group_size,
+            p.weight_cache_type);
     return st;
 }
 
@@ -801,7 +809,8 @@ inline aocl_dlp::AoclDlpPackProbeStats warm_aocl_n_tile_w4a8(
     aocl_dlp::AoclDlpPackProbeStats st;
     aocl_dlp::warm_pack_all_aocl_dlp_experts_n_tile_w4a8(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, warm_iwc(p), p.num_ops_total, p.wei_dtype,
-            p.num_threads, stable, nr_align_eff, p.w4a8_group_size, st, algo);
+            p.num_threads, stable, nr_align_eff, p.w4a8_group_size, st, algo,
+            p.weight_cache_type);
     return st;
 }
 
@@ -943,7 +952,7 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
     // `flat_n_tile` derives at runtime (K / wei_scale.dims[0]).
     custom_kernel::warm_pack_all_custom_kernel_experts(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, iwc, p.num_ops_total, st,
-            interleave_split_halves, family, p.group_size);
+            interleave_split_halves, family, p.group_size, p.weight_cache_type);
     return st;
 }
 
@@ -1147,6 +1156,9 @@ inline void log_pack_probe_skip(
     if (reason == PreludeSkipReason::env_disabled) {
         state = "disabled";
         note = " note=first_runtime_call_pays_lazy_reorder_cost";
+    } else if (reason == PreludeSkipReason::caller_prepacked) {
+        state = "skipped_caller_prepacked";
+        note = " note=backend_packed_input_is_not_raw";
     }
     const std::string fp_str
             = format_fingerprint(fingerprint(p, scheduling_algo));
@@ -2172,12 +2184,41 @@ static void prepack_aocl_only_algo(
         if (cross_warm_complete) {
             // ... then the in-place full-weight prompt mutation last.
             warm_primary_full_weight(/*allow_inplace=*/true);
+            // The final warm can still fail independently (for example its
+            // temporary or fallback allocation may fail). Do not leave WC=2
+            // published in that state: an ALGO 2/5/6 worker could retry
+            // lazily, mutate there without inheriting the parent thread's
+            // mutation-registry authorization, and make a later divergent key
+            // reinterpret blocked bytes as raw. Successful entries may
+            // already be in-place, but they are registered and cached under
+            // the full-weight key; downgrading the remaining runtime work to
+            // WC=1 is therefore safe and monotonic.
+            const bool primary_warm_complete = st_aocl.total_attempted > 0
+                    && st_aocl.skipped_invalid == 0
+                    && st_aocl.packed_ok == st_aocl.total_attempted;
+            if (!primary_warm_complete) {
+                zendnnl::common::matmul_config_t::instance()
+                        .downgrade_weight_cache(1);
+                static std::atomic<bool> s_wc2_primary_downgrade_warned {false};
+                if (!s_wc2_primary_downgrade_warned.exchange(
+                            true, std::memory_order_relaxed)) {
+                    zendnnl::error_handling::apilog_warning(
+                            "[GRP_MATMUL.WEIGHT_CACHE] AUTO mixed-in-place: "
+                            "full-weight prompt warm was incomplete "
+                            "(attempted=",
+                            st_aocl.total_attempted,
+                            " packed=", st_aocl.packed_ok,
+                            " skipped=", st_aocl.skipped_invalid,
+                            "); downgrading process-wide to out-of-place "
+                            "(weight_cache_type=1) before compute.");
+                }
+            }
         } else {
-            // Publish WC=1 before clearing the mixed flag (WC==2 is what gates every
-            // in-place path; mirrors the dispatch downgrade order).  Leave W RAW.
-            zendnnl::common::matmul_config_t::instance().set_weight_cache(1);
-            zendnnl::common::matmul_config_t::instance()
-                    .set_grp_auto_mixed_inplace(false);
+            // Publish the monotonic WC=1 downgrade and leave W raw. Keep the
+            // mixed flag sticky so a concurrent call holding an earlier WC=2
+            // snapshot remains barred from CK in-place mutation.
+            zendnnl::common::matmul_config_t::instance().downgrade_weight_cache(
+                    1);
             static std::atomic<bool> s_wc2_xwarm_downgrade_warned {false};
             if (!s_wc2_xwarm_downgrade_warned.exchange(
                         true, std::memory_order_relaxed)) {

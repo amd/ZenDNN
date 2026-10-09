@@ -1101,6 +1101,107 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
             M, N, K, params, num_threads, m_tile_safe, n_tile_safe, trace);
 }
 
+// ── Grouped-AUTO in-place cache policy ─────────────────────────────────
+
+bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
+        bool custom_kernel_effective,
+        std::vector<matmul_params> *secondary_params) {
+    auto &config = matmul_config_t::instance();
+    if (config.get_weight_cache() != 2) { return false; }
+
+    // A pinned ALGO has one weight layout. Mixed mode is AUTO-only; clear a
+    // stale AUTO verdict so it cannot force a pinned CK pack out-of-place.
+    if (get_grp_matmul_algo() != 0) {
+        config.set_grp_auto_mixed_inplace(false);
+        return false;
+    }
+
+    bool has_caller_packed_weight = false;
+    bool has_raw_weight = false;
+    auto scan_formats = [&](const std::vector<matmul_params> &pool) {
+        for (const auto &p : pool) {
+            if (p.mem_format_b == 'r')
+                has_caller_packed_weight = true;
+            else
+                has_raw_weight = true;
+        }
+    };
+    scan_formats(params);
+    if (secondary_params != nullptr) { scan_formats(*secondary_params); }
+
+    // A per-call mixed raw/caller-packed pool cannot share the process-wide
+    // in-place licence. Cap both fused-MoE halves together when present.
+    if (has_caller_packed_weight && has_raw_weight) {
+        auto cap_out_of_place = [](std::vector<matmul_params> &pool) {
+            for (auto &p : pool) {
+                p.weight_cache_type = std::min<int32_t>(p.weight_cache_type, 1);
+            }
+        };
+        cap_out_of_place(params);
+        if (secondary_params != nullptr) {
+            cap_out_of_place(*secondary_params);
+        }
+        // Sticky by design: a concurrent caller may already hold a WC=2
+        // snapshot, which must not become permission for an in-place CK pack.
+        config.set_grp_auto_mixed_inplace(true);
+        apilog_info(
+                "[GRP_MATMUL.WEIGHT_CACHE] mixed raw/caller-packed pool: "
+                "preserving process WC/mixed policy and capping this call at "
+                "out-of-place weight caching");
+        return false;
+    }
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+    const bool aocl_dlp_compiled = true;
+#else
+    const bool aocl_dlp_compiled = false;
+#endif
+    const bool process_mixed_eligible = aocl_dlp_compiled
+            && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
+            && custom_kernel_effective
+            && config.get_lru_cache_capacity()
+                    == std::numeric_limits<uint32_t>::max();
+    if (process_mixed_eligible) {
+        config.set_grp_auto_mixed_inplace(true);
+        static std::atomic<bool> s_wc2_mixed_announced {false};
+        if (!s_wc2_mixed_announced.exchange(true, std::memory_order_relaxed)) {
+            apilog_info(
+                    "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 AUTO "
+                    "mixed-in-place ENABLED "
+                    "(prepack+cross_warm+custom_kernel on, unlimited LRU "
+                    "capacity): AOCL full-weight prompt reorder mutates the "
+                    "weight buffer in place; CK / AOCL per-tile decode stay "
+                    "out-of-place, pre-warmed from raw weights before the "
+                    "mutation.");
+        }
+        return true;
+    }
+
+    // Without a split-independent CK decode pack, AUTO cannot safely retain
+    // raw bytes after the prompt's irreversible in-place AOCL reorder.
+    config.downgrade_weight_cache(1);
+    static std::atomic<bool> s_wc2_downgrade_warned {false};
+    if (!s_wc2_downgrade_warned.exchange(true, std::memory_order_relaxed)) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+        apilog_warning(
+                "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 (in-place) "
+                "requires AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=OFF): "
+                "mixed-in-place is unavailable. Downgrading process-wide to "
+                "out-of-place (weight_cache_type=1) for the rest of the run; "
+                "kernel selection unchanged.");
+#else
+        apilog_warning(
+                "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 (in-place) is "
+                "unsafe under AUTO scheduling without prepack+cross_warm, an "
+                "effective custom-kernel decode pack and unlimited LRU "
+                "capacity. Downgrading process-wide to out-of-place "
+                "(weight_cache_type=1) for the rest of the run; kernel "
+                "selection unchanged.");
+#endif
+    }
+    return false;
+}
+
 // ── Dispatch ────────────────────────────────────────────────────────────
 
 bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
@@ -1115,6 +1216,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         std::vector<matmul_params> &params, const int num_threads,
         const char **gemm_mode_out, grp_matmul_gated_act_t fused_act,
         data_type_t act_dtype) {
+
+    scoped_grp_auto_mutation_tracking mutation_tracking;
+    bool track_grouped_inplace_mutation = false;
 
     // Must be the EFFECTIVE verdict, not the master knob: this feeds
     // `a3_fuses`, which in turn decides whether the tight-dst guard runs.
@@ -1141,7 +1245,7 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // violates that on the SAME W13/W2 buffers: the prompt phase routes to
     // an AOCL full-weight reorder while decode routes to AOCL per-tile or
     // the custom-kernel pack — two layouts over one buffer (corruption).
-    // So under AUTO we take ONE of two deterministic verdicts (detailed at
+    // So under AUTO we take one of three deterministic verdicts (detailed at
     // the (A)/(B) branch below):
     //   (A) keep WC=2 in a MIXED in-place mode when it is provably safe
     //       (PREPACK + CROSS_WARM + unlimited LRU pre-warm every out-of-
@@ -1149,9 +1253,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //       mutation), or
     //   (B) downgrade the process-wide cache mode to out-of-place (1)
     //       otherwise — a mirror of the single-matmul guard in
-    //       `lowoha_matmul_utils.cpp`.
-    // Both verdicts are derived from process-constant env, so the decision
-    // (and its one-shot log) is stable for the rest of the run.
+    //       `lowoha_matmul_utils.cpp`, or
+    //   (C) for a per-call mixed raw/caller-packed pool under an otherwise
+    //       eligible process policy, keep mixed mode active but cap only that
+    //       call's weights at out-of-place caching.
+    // Process-wide verdicts (A)/(B) are derived from process-constant env, so
+    // their decision (and one-shot log) is stable for the rest of the run.
     //
     // PINNED algos keep a single layout per weight and so KEEP WC=2:
     //   * ALGO 1/2/5/6 — one AOCL reorder layout per buffer, via AOCL's
@@ -1164,197 +1271,10 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //     K-pair pad) fall back to an out-of-place cache that never
     //     mutates the weight (see prepare_for_call +
     //     get_or_pack_weight_bf16).
-    if (matmul_config_t::instance().get_weight_cache() == 2) {
-        // Only AUTO (env_algo==0) mixes layouts on one buffer; pinned algos
-        // are left at WC=2 (see the route table above).
-        const int wc_env_algo = get_grp_matmul_algo();
-        if (wc_env_algo == 0) {
-            // AUTO has two outcomes for WC=2:
-            //
-            //  (A) MIXED in-place (preferred when safe) — keep WC=2 and route
-            //      asymmetrically: the AOCL full-weight (prompt) reorder mutates
-            //      the weight buffer IN PLACE, while CK decode and AOCL per-tile
-            //      decode stay OUT-OF-PLACE.  This is only correct because
-            //      cross-warm prefetches every out-of-place layout from the RAW
-            //      weights BEFORE the single in-place mutation, and nothing
-            //      re-reads raw W afterwards.  Preconditions:
-            //        * PREPACK on   — cross-warm runs upfront (before compute);
-            //        * CROSS_WARM on — both phases' layouts are warmed on the
-            //          first call;
-            //        * AOCL-DLP compiled in — mixed mode's in-place prompt
-            //          reorder and cross-warm both route through the AOCL DLP
-            //          inner kernel (`aocl_dlp_blocked`); without it the warmers
-            //          stub out and cross-warm is a no-op, so mixed-in-place is
-            //          disabled at dispatch rather than enabled-then-failed in
-            //          prepack;
-            //        * the decode layout is fully pre-warmed AND SPLIT-
-            //          INDEPENDENT — the real invariant.  Decode must never be
-            //          left to reorder lazily after the prompt mutation,
-            //          because it would read the already-mutated buffer as raw
-            //          and corrupt.  Only the CK pack satisfies this: it is
-            //          shape-keyed on the full N and cross-warmed as regime 3
-            //          from raw W, so it stays valid across a team-size change.
-            //          AOCL per-tile is cross-warmed from raw W too (regime 2,
-            //          at the alignment decode splits on), but its keys embed
-            //          `(col_start, n_tile)`, so a later call on a different
-            //          split misses them and re-derives from the mutated
-            //          buffer — see the split-independence note below for why
-            //          that is unrecoverable.  Requiring the CK pack therefore
-            //          costs one extra out-of-place copy of every in-place-
-            //          eligible weight whenever CK is off for the call's dtype,
-            //          which for a W8A8 model means the int8 sub-toggle
-            //          (ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0) alone disables
-            //          mixed-in-place process-wide;
-            //        * unlimited LRU capacity — the in-place sentinel can never
-            //          be evicted and lazily re-derived from the mutated buffer.
-            //      The grouped dispatcher sets `grp_auto_mixed_inplace`; the CK
-            //      runtime and the prepack warmers consult it (see
-            //      custom_kernel/dispatch.cpp + prepack/prepack.cpp).
-            //
-            //  (B) DOWNGRADE to out-of-place (1) — the historical safe fallback
-            //      whenever (A)'s preconditions do not hold.
-            //
-            // Both writes are IDEMPOTENT (every AUTO call re-derives the same
-            // deterministic verdict from process-constant env, so concurrent
-            // cold-start calls converge); only the log lines are one-shot.
-#if ZENDNNL_DEPENDS_AOCLDLP
-            const bool aocl_dlp_compiled = true;
-#else
-            const bool aocl_dlp_compiled = false;
-#endif
-            // The decode layout must be SPLIT-INDEPENDENT, not merely warmed.
-            //
-            // The in-place mutation is irreversible: once the prompt reorder
-            // has rewritten W, the raw bytes are gone and anything that still
-            // needs them is unrecoverable.  Cross-warm packs the decode layout
-            // out-of-place from raw W first, so the keys warmed at that moment
-            // are safe -- but the AOCL per-tile keys embed `(col_start,
-            // n_tile)`, which is derived from `num_threads` and `nr_align`.
-            // A later call on the same weight pool with a different team size
-            // builds different keys, misses, and `run_dlp` then reorders the
-            // already-blocked bytes as if they were raw.  That is silent
-            // corruption, and `weight_pool_fingerprint` deliberately omits the
-            // split (it keys the mutual-exclusion latch, which must be shared
-            // by every caller of one buffer), so the completion record cannot
-            // distinguish the two calls either.
-            //
-            // The CK pack is shape-keyed on the full N, so it survives any
-            // team-size change and is the one decode layout that stays valid
-            // after the mutation.  Requiring it costs an extra out-of-place
-            // copy whenever CK is off, which is a real memory regression --
-            // but correctness first, and the duplicate-layout waste that
-            // dominated the CK-off footprint is addressed separately by the
-            // sym-quant warm/runtime predicate agreement.
-            //
-            // A split-aware completion key alone does NOT fix this: re-running
-            // prepack for the new split would warm the per-tile keys from the
-            // mutated buffer.  Making the per-tile arm safe needs decode
-            // routed to the full-weight key once W has been mutated.
-            // Only the CK pack licenses the mutation.  It is shape-keyed on
-            // the full N, so every decode call builds the key cross-warm
-            // populated, however the team or the routed expert set moves.
-            //
-            // AOCL per-tile does not qualify.  Its keys embed `(col_start,
-            // n_tile)`, which tracks `nr_align` and a narrow-N escape
-            // evaluated over the ACTIVE expert set, so a decode call can ask
-            // for keys no warm populated; with the raw weights already
-            // rewritten those cannot be rebuilt and the call ends at
-            // `kGrpMatmulErrMutatedWeightMiss`.
-            //
-            // Keeping this term process-constant is what makes the writes
-            // below idempotent: `custom_kernel_en` is per-call-shaped, so it
-            // may only ever WIDEN the verdict and can never flip an eligible
-            // process to ineligible mid-run.  A per-call CK refusal is handled
-            // at the routing layer (`mixed_inplace_ck_refused` in
-            // `flat_n_tile`), not by revoking a licence the weights have
-            // already been rewritten under.
-            const bool decode_layout_prewarmed = custom_kernel_en;
-            const bool mixed_eligible = aocl_dlp_compiled
-                    && get_grp_matmul_prepack() && get_grp_matmul_cross_warm()
-                    && decode_layout_prewarmed
-                    && matmul_config_t::instance().get_lru_cache_capacity()
-                            == std::numeric_limits<uint32_t>::max();
-            if (mixed_eligible) {
-                matmul_config_t::instance().set_grp_auto_mixed_inplace(true);
-                static std::atomic<bool> s_wc2_mixed_announced {false};
-                if (!s_wc2_mixed_announced.exchange(
-                            true, std::memory_order_relaxed)) {
-                    apilog_info(
-                            "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
-                            "AUTO "
-                            "mixed-in-place ENABLED "
-                            "(prepack+cross_warm+custom_kernel on, "
-                            "unlimited LRU capacity): AOCL full-weight prompt "
-                            "reorder "
-                            "mutates the weight "
-                            "buffer in place; CK / AOCL per-tile decode stay "
-                            "out-of-place, "
-                            "pre-warmed from raw weights before the mutation.");
-                }
-            } else {
-                // Store weight_cache=1 before clearing the mixed-mode flag so THIS
-                // thread's own later reads never see (weight_cache==2, mixed false).
-                // NOTE: both are RELAXED atomics on independent locations, so this
-                // program order is NOT a cross-thread visibility guarantee — another
-                // thread may observe the two updates in either order.  Correctness
-                // does not rely on it: the AUTO verdict is deterministic from
-                // process-constant env, so for an ineligible config the mixed flag is
-                // never set true (the eligible branch above is never taken); this
-                // branch only ever clears an already-false flag and pins WC=1.  The
-                // first-call cold-start window (before any thread runs this downgrade)
-                // is covered by the framework's single warm-up call — see the
-                // mixed-mode contract in the header block above.
-                matmul_config_t::instance().set_weight_cache(1);
-                matmul_config_t::instance().set_grp_auto_mixed_inplace(false);
-                static std::atomic<bool> s_wc2_downgrade_warned {false};
-                if (!s_wc2_downgrade_warned.exchange(
-                            true, std::memory_order_relaxed)) {
-#if !ZENDNNL_DEPENDS_AOCLDLP
-                    apilog_warning(
-                            "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
-                            "(in-place) "
-                            "requires AOCL-DLP (ZENDNNL_DEPENDS_AOCLDLP=OFF): "
-                            "mixed-in-place "
-                            "is unavailable.  Downgrading process-wide to "
-                            "out-of-place "
-                            "(weight_cache_type=1) for the rest of the run; "
-                            "kernel selection "
-                            "unchanged.");
-#else
-                    apilog_warning(
-                            "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 "
-                            "(in-place) is "
-                            "unsafe under AUTO scheduling (env_algo=0) without "
-                            "prepack+cross_warm, the custom-kernel decode pack "
-                            "and unlimited LRU capacity.  The CK pack is the "
-                            "only decode layout that survives the prompt's "
-                            "in-place mutation; AOCL per-tile keys embed the N "
-                            "split, so it does NOT qualify whatever "
-                            "AOCL_STABLE_NTILE is set to.  The CK pack must be "
-                            "EFFECTIVE for the call, which the env knobs are "
-                            "only one way to lose: on a W8A8 model "
-                            "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_INT8=0 lands "
-                            "here, and so does a per-group {G,N} weight scale "
-                            "on any active expert, which refuses CK with the "
-                            "env untouched.  Downgrading "
-                            "process-wide to out-of-place "
-                            "(weight_cache_type=1) for the "
-                            "rest of the run; kernel selection unchanged.  "
-                            "This costs one extra copy of every "
-                            "in-place-eligible weight.");
-#endif
-                }
-            }
-        } else {
-            // Pinned generic ALGO under WC=2: a single reorder layout owns each
-            // weight buffer, so the backends' normal in-place path is already
-            // safe.  Mixed mode is AUTO-only — clear the flag deterministically
-            // so a value left set by a prior AUTO run cannot leak into the
-            // pinned path (which would wrongly force the CK pack out-of-place).
-            // env_algo is process-constant, so all threads agree on this branch.
-            matmul_config_t::instance().set_grp_auto_mixed_inplace(false);
-        }
-    }
+    track_grouped_inplace_mutation
+            = prepare_grouped_auto_weight_cache(params, custom_kernel_en);
+
+    mutation_tracking.set(track_grouped_inplace_mutation);
 
     auto_algo_trace algo_trace;
     const int use_algo = select_grp_matmul_algo(
@@ -1643,14 +1563,40 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // must NOT trip this guard.
     {
         bool has_prepacked_b = false;
+        bool has_unsupported_prepacked_b = false;
+#if !ZENDNNL_DEPENDS_AOCLDLP
+        bool has_aocl_prepacked_b = false;
+#endif
         for (size_t i = 0; i < params.size() && i < M.size(); ++i) {
-            if (M[i] > 0 && params[i].mem_format_b == 'r'
-                    && params[i].lowoha_algo
-                            == matmul_algo_t::moe_custom_kernel) {
+            if (M[i] <= 0 || params[i].mem_format_b != 'r') { continue; }
+            if (params[i].lowoha_algo == matmul_algo_t::moe_custom_kernel) {
                 has_prepacked_b = true;
-                break;
+            } else if (is_aocl_prepacked_weight(params[i])) {
+#if !ZENDNNL_DEPENDS_AOCLDLP
+                has_aocl_prepacked_b = true;
+#endif
+            } else {
+                has_unsupported_prepacked_b = true;
             }
         }
+        if (has_unsupported_prepacked_b) {
+            log_error(
+                    "group_matmul: pre-reordered weight has unsupported "
+                    "backend provenance; only AOCL-DLP and custom-kernel "
+                    "packed layouts are accepted");
+            set_mode(kGrpMatmulErrPrepackedNoCk);
+            return false;
+        }
+#if !ZENDNNL_DEPENDS_AOCLDLP
+        if (has_aocl_prepacked_b) {
+            log_error(
+                    "group_matmul: AOCL-blocked weight cannot execute because "
+                    "ZenDNNL was built without AOCL-DLP; refusing to "
+                    "reinterpret packed bytes as raw");
+            set_mode(kGrpMatmulErrPrepackedNoCk);
+            return false;
+        }
+#endif
         if (has_prepacked_b && use_algo != 3) {
             set_mode(kGrpMatmulErrPrepackedNoCk);
             return false;
@@ -1718,7 +1664,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // count here and compare after the executor, so a refusal anywhere in the
     // call turns into a failed call rather than a dst nobody reordered for.
     const uint64_t mutated_conflicts_before
-            = aocl_mutated_source_conflict_count();
+            = aocl_mutated_source_conflict_count(
+                    weight, /*secondary_weights=*/nullptr, &M);
 
     switch (use_algo) {
         case 1:
@@ -1781,7 +1728,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // `status_t::failure`.  Deliberately compares against the snapshot rather
     // than testing for non-zero, so an unrelated earlier refusal in the
     // process cannot fail an otherwise good call.
-    if (aocl_mutated_source_conflict_count() != mutated_conflicts_before) {
+    if (aocl_mutated_source_conflict_count(
+                weight, /*secondary_weights=*/nullptr, &M)
+            != mutated_conflicts_before) {
         set_mode(kGrpMatmulErrMutatedWeightMiss);
     }
     return act_fused;

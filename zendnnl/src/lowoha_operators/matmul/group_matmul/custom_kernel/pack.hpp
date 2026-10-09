@@ -34,8 +34,8 @@
 ///   * For odd K the implementation pads the trailing K-pair with a
 ///     zero second element (no contribution to the dot product).
 ///
-/// CACHE: shared `lru_cache_t<Key_matmul, void *>` (the same template
-/// the AOCL DLP / oneDNN reorder caches in `aocl_kernel.cpp` use).
+/// CACHE: shared `lru_cache_t` keyed by `Key_matmul`; each value owns the
+/// derived packed buffer.
 /// Keyed on (weight_ptr, K, N, pack_nr, ldb, transB) — different
 /// NR / layout / stride variants of the same weight occupy distinct
 /// cache entries.

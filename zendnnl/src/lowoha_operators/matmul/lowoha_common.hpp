@@ -470,6 +470,38 @@ static inline int32_t warm_wct_for_full_weight(int32_t weight_cache_type) {
             : 1;
 }
 
+// Call-scoped authorization for the grouped AUTO mutation registry. The
+// process-wide mixed flag is intentionally sticky to protect calls holding an
+// older WC=2 snapshot, so it cannot distinguish a grouped reorder from an
+// unrelated scalar/BMM reorder. Group dispatch scopes this TLS flag around
+// preparation and execution; scalar paths leave it false.
+inline thread_local bool tls_grp_auto_track_inplace_mutation = false;
+
+class scoped_grp_auto_mutation_tracking {
+public:
+    explicit scoped_grp_auto_mutation_tracking(bool enable = false)
+        : previous_(tls_grp_auto_track_inplace_mutation) {
+        tls_grp_auto_track_inplace_mutation = enable;
+    }
+    ~scoped_grp_auto_mutation_tracking() {
+        tls_grp_auto_track_inplace_mutation = previous_;
+    }
+    void set(bool enable) { tls_grp_auto_track_inplace_mutation = enable; }
+
+    scoped_grp_auto_mutation_tracking(const scoped_grp_auto_mutation_tracking &)
+            = delete;
+    scoped_grp_auto_mutation_tracking &operator=(
+            const scoped_grp_auto_mutation_tracking &)
+            = delete;
+
+private:
+    bool previous_;
+};
+
+static inline bool is_grp_auto_mutation_tracking_active() {
+    return tls_grp_auto_track_inplace_mutation;
+}
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

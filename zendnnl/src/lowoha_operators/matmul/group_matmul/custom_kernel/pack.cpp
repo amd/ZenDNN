@@ -263,14 +263,23 @@ void pack_f16_simple(const float16_t *weight, int K, int N, int ldb,
 // Frameworks that repeatedly rebuild or reallocate weight tensors
 // (e.g. dynamic LoRA hot-swap, retraining loops, compile/decompile
 // cycles) will see the cache footprint grow by one entry per
-// distinct (weight pointer, N, K, pack_nr) tuple observed — the
-// cache cannot distinguish "the old weight at ptr P is gone" from
-// "a fresh weight at ptr P is arriving", so old packed buffers
-// stay resident.  For those deployments call
+// distinct (weight pointer, N, K, pack_nr) tuple observed. For those
+// deployments call
 // `clear_custom_kernel_pack_cache()` during a known quiescent
 // window between workload phases (see the safety note in pack.hpp).
-lru_cache_t<Key_matmul, void *> &pack_cache_singleton() {
-    static lru_cache_t<Key_matmul, void *> pack_cache(
+struct aligned_pack_deleter {
+    void operator()(void *ptr) const noexcept {
+        if (ptr != nullptr) zendnnl_aligned_free(ptr);
+    }
+};
+
+struct Bf16PackCacheEntry {
+    std::shared_ptr<void> packed_owner;
+    bool in_place = false;
+};
+
+lru_cache_t<Key_matmul, Bf16PackCacheEntry> &pack_cache_singleton() {
+    static lru_cache_t<Key_matmul, Bf16PackCacheEntry> pack_cache(
             std::numeric_limits<uint32_t>::max());
     return pack_cache;
 }
@@ -791,13 +800,12 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     // rationale.
     key.ldb = static_cast<unsigned>(ldb);
 
-    auto serve_cached = [&](void *cached_pack) {
-        // A nullptr value is the in-place sentinel: the pack lives in the
-        // caller's `weight` buffer itself (see the in-place MISS branch
-        // below).  Any non-null value is an out-of-place cached buffer.
-        *out_packed = (cached_pack != nullptr)
-                ? static_cast<const bfloat16_t *>(cached_pack)
-                : weight;
+    auto serve_cached = [&](const Bf16PackCacheEntry &cached) {
+        // The explicit in-place marker means the pack lives in the caller's
+        // `weight` buffer. Otherwise `packed_owner` owns the out-of-place pack.
+        *out_packed = cached.in_place
+                ? weight
+                : static_cast<const bfloat16_t *>(cached.packed_owner.get());
         if (was_hit_out != nullptr) *was_hit_out = true;
     };
 
@@ -844,8 +852,8 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
         // path and the out-of-place miss below hold the family mutex.
         std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
-        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
-            serve_cached(cached_pack);
+        if (Bf16PackCacheEntry cached; pack_cache.try_get(key, cached)) {
+            serve_cached(cached);
             log_hit();
             return status_t::success;
         }
@@ -908,7 +916,9 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
                 // pointer under the identical WC=2 contract.
                 std::memcpy(const_cast<bfloat16_t *>(weight), tmp, bytes);
                 zendnnl_aligned_free(tmp);
-                pack_cache.add(key, nullptr); // pack lives in `weight`
+                pack_cache.add(key,
+                        Bf16PackCacheEntry {/*packed_owner=*/ {},
+                                /*in_place=*/true});
                 *out_packed = weight;
                 return status_t::success;
             }
@@ -933,7 +943,9 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
         }
         pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
                 interleave_split_halves, static_cast<bfloat16_t *>(raw));
-        pack_cache.add(key, raw);
+        std::shared_ptr<void> packed_owner(raw, aligned_pack_deleter {});
+        pack_cache.add(
+                key, Bf16PackCacheEntry {packed_owner, /*in_place=*/false});
         *out_packed = static_cast<const bfloat16_t *>(raw);
         return status_t::success;
     }
@@ -941,8 +953,8 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
     {
         std::lock_guard<std::mutex> lock(pack_mutex_singleton());
 
-        if (void *cached_pack = nullptr; pack_cache.try_get(key, cached_pack)) {
-            serve_cached(cached_pack);
+        if (Bf16PackCacheEntry cached; pack_cache.try_get(key, cached)) {
+            serve_cached(cached);
             log_hit();
             return status_t::success;
         }
@@ -962,7 +974,9 @@ status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
 
         pack_bf16_vnni(weight, K, N, ldb, pack_nr, transB,
                 interleave_split_halves, static_cast<bfloat16_t *>(raw));
-        pack_cache.add(key, raw);
+        std::shared_ptr<void> packed_owner(raw, aligned_pack_deleter {});
+        pack_cache.add(
+                key, Bf16PackCacheEntry {packed_owner, /*in_place=*/false});
         *out_packed = static_cast<const bfloat16_t *>(raw);
         return status_t::success;
     }

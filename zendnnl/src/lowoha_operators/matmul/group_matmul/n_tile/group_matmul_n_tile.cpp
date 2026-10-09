@@ -4295,21 +4295,38 @@ void flat_n_tile(const std::vector<char> &layout,
     //     (e.g. a caller AOCL prepack, or a GGML unpack+reorder result);
     //   * lowoha_algo == moe_custom_kernel -> the custom-kernel VNNI
     //     layout this executor consumes directly.
-    // ONLY the moe_custom_kernel case is CK-VNNI, so gate on it.  A
-    // CK-VNNI weight is CK-ONLY: any standard/AOCL fallback would read the
-    // packed bytes as a raw weight and silently corrupt results.  We
-    // detect it here, forward it to prepare_for_call (which aliases the
-    // buffer instead of packing), and guard the no-CK case below.  An
-    // AOCL-blocked / GGML-reordered 'r' is left untouched here so it flows
-    // to its own (non-CK) path instead of being mis-aliased.
+    // ONLY the moe_custom_kernel case is CK-VNNI and may be aliased directly.
+    // It is CK-ONLY: any standard/AOCL fallback would read the packed bytes as
+    // raw and silently corrupt results, so the no-CK guard below refuses it.
+    // AOCL-blocked provenance is separate: prepare_for_call unreorders it only
+    // after CK validation, while standard fallback keeps this original pointer.
     std::vector<bool> weights_prepacked(static_cast<size_t>(num_ops), false);
-    bool any_prepacked_b = false;
+    std::vector<bool> weights_aocl_prepacked(
+            static_cast<size_t>(num_ops), false);
+    bool any_ck_prepacked_b = false;
+    bool any_aocl_prepacked_b = false;
+    bool any_unsupported_prepacked_b = false;
+    bool any_caller_prepacked_b = false;
     for (int i = 0; i < num_ops; ++i) {
-        if (static_cast<size_t>(i) < params.size()
-                && params[i].mem_format_b == 'r'
-                && params[i].lowoha_algo == matmul_algo_t::moe_custom_kernel) {
+        if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()
+                || params[i].mem_format_b != 'r') {
+            continue;
+        }
+        any_caller_prepacked_b = true;
+        if (params[i].lowoha_algo == matmul_algo_t::moe_custom_kernel) {
             weights_prepacked[i] = true;
-            if (M[i] > 0) any_prepacked_b = true;
+            any_ck_prepacked_b = true;
+        } else if (params[i].lowoha_algo == matmul_algo_t::none
+                || params[i].lowoha_algo == matmul_algo_t::aocl_dlp_blocked) {
+            // Do not unreorder here. The CK dispatcher performs it only after
+            // every CK contract check succeeds; standard fallbacks continue
+            // to consume this original blocked pointer. Scalar prepack
+            // currently marks AOCL layout through mem_format_b='r' alone;
+            // explicit moe_custom_kernel provenance was handled above.
+            weights_aocl_prepacked[i] = true;
+            any_aocl_prepacked_b = true;
+        } else {
+            any_unsupported_prepacked_b = true;
         }
     }
 
@@ -4339,6 +4356,13 @@ void flat_n_tile(const std::vector<char> &layout,
     }
 
     custom_kernel::CallContext kctx;
+    int32_t ck_weight_cache_mode
+            = matmul_config_t::instance().get_weight_cache();
+    for (int i = 0; i < num_ops; ++i) {
+        if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()) continue;
+        ck_weight_cache_mode
+                = std::min(ck_weight_cache_mode, params[i].weight_cache_type);
+    }
     // All four dtypes come from `rep`, the first ACTIVE expert.  Mixing
     // `params[rep]` for src with `params[0]` for wei/dst/bias let a padded
     // call (`M[0] == 0`, placeholder dtypes in slot 0) hand the resolver a
@@ -4347,16 +4371,8 @@ void flat_n_tile(const std::vector<char> &layout,
     // call drops to the AOCL fallback for no reason.  Slot 0 is only a valid
     // source when it happens to be active, which is exactly what `rep`
     // already encodes.
-    bool ck_has_unsupported_postops = false;
-    for (int e = 0; e < num_ops && !ck_has_unsupported_postops; ++e) {
-        if (M[e] <= 0 || params[e].postop_.empty()) continue;
-        const bool static_u8s8 = is_static_u8s8_quant_config(params[e]);
-        custom_kernel::Int8EpilogueConfig probe;
-        if (!static_u8s8 || custom_act != grp_matmul_gated_act_t::none
-                || !configure_static_int8_postops(params[e], M[e], N[e], probe))
-            ck_has_unsupported_postops = true;
-    }
-    if (!ck_s4_src_per_group && !ck_has_unsupported_postops) {
+    if (!ck_s4_src_per_group
+            && grp_matmul_custom_kernel_effective(params, M, N, custom_act)) {
         engage_ntile_custom_kernel(custom_act,
                 /*src_dtype=*/params[rep].dtypes.src,
                 /*wei_dtype=*/params[rep].dtypes.wei,
@@ -4364,7 +4380,8 @@ void flat_n_tile(const std::vector<char> &layout,
                 /*bias_dtype=*/params[rep].dtypes.bias, transA, transB, M, N, K,
                 ldb, alpha, beta, weight, is_weights_const, kctx,
                 ck_dynamic_quant, ck_compute_dtype, weights_prepacked,
-                ck_s4_group_size, ck_s4_wei_scale_grp_stride);
+                ck_s4_group_size, ck_s4_wei_scale_grp_stride,
+                weights_aocl_prepacked, num_threads, ck_weight_cache_mode);
     }
 
     // ── DQ-INT8 scale-path decision (uniform across experts) ──────────
@@ -4520,16 +4537,29 @@ void flat_n_tile(const std::vector<char> &layout,
         }
     }
 
-    // ── CK-only-or-fail guard for caller-prepacked weights ────────────
-    // A `mem_format_b == 'r'` weight is already in the custom-kernel VNNI
-    // layout and is consumable ONLY by the custom kernel.  If any active
-    // expert is prepacked but the custom kernel did NOT engage (CK env
+    // A reordered buffer explicitly owned by another backend is neither raw,
+    // AOCL-blocked, nor CK-VNNI. No N-tile executor can interpret it safely.
+    if (any_unsupported_prepacked_b) {
+        apilog_error(
+                "flat_n_tile: mem_format_b='r' carries unsupported explicit "
+                "backend provenance; refusing to reinterpret packed bytes");
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
+        }
+        return;
+    }
+
+    // ── CK-only-or-fail guard for caller CK-prepacked weights ─────────
+    // A weight explicitly tagged `moe_custom_kernel` is already in CK VNNI
+    // layout and is consumable ONLY by the custom kernel. AOCL-blocked weights
+    // do not enter this guard: AOCL remains their safe fallback. If any active
+    // expert is CK-prepacked but the custom kernel did NOT engage (CK env
     // off, unsupported shape/host, or the wide-swiglu guard above), the
     // standard executors below would read the packed bytes as a raw
     // weight and silently corrupt results.  Abort instead: skip compute
     // and signal failure to `group_matmul_direct` via the gemm_mode
     // sentinel (it returns status_t::failure on this value).
-    if (any_prepacked_b && !use_custom) {
+    if (any_ck_prepacked_b && !use_custom) {
         apilog_error(
                 "flat_n_tile: mem_format_b='r' (pre-reordered VNNI weight) "
                 "but the custom kernel did not engage (kctx.enabled=",
@@ -4542,6 +4572,32 @@ void flat_n_tile(const std::vector<char> &layout,
             *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
         }
         return;
+    }
+
+    // AOCL-blocked bytes have a safe grouped fallback only when AOCL-DLP is
+    // compiled in. Without AOCL, the generic fallback would hand blocked bytes
+    // to the reference kernel as if they were raw and silently miscompute.
+#if !ZENDNNL_DEPENDS_AOCLDLP
+    if (any_aocl_prepacked_b && !use_custom) {
+        apilog_error(
+                "flat_n_tile: AOCL-blocked input cannot fall back because "
+                "ZenDNNL was built without AOCL-DLP; refusing to reinterpret "
+                "packed bytes");
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
+        }
+        return;
+    }
+#endif
+    // With AOCL-DLP available, execute every expert at full N through
+    // Sequential, which hands the untouched blocked pointer to full-weight
+    // AOCL. Never let a sliced N-tile executor reinterpret it as raw.
+    bool force_aocl_prepacked_fallback = any_aocl_prepacked_b && !use_custom;
+    if (force_aocl_prepacked_fallback) {
+        apilog_info(
+                "flat_n_tile: AOCL-blocked input reached ALGO 3 but CK "
+                "preparation declined; routing to full-weight grouped AOCL "
+                "fallback");
     }
 
     // Widen the per-thread N-slice floor to the custom kernel's pack_nr
@@ -4578,15 +4634,12 @@ void flat_n_tile(const std::vector<char> &layout,
     // on `nr_align`, so an early call (pre-kctx) would warm a key set
     // the runtime never queries when the dispatcher widens nr_align to
     // the custom kernel's pack_nr or the tight-pair-align floor.
-    // Skip the ahead-of-time warm when any active expert is already
-    // prepacked (mem_format_b='r').  Those weights are in the VNNI layout
-    // and are consumed DIRECTLY by the custom kernel (aliased in
-    // prepare_for_call), so warming would just re-reorder an already-packed
-    // buffer into a throwaway cache entry — the wasted work seen in the
-    // [GRP_MATMUL.PREPACK] ck=[misses=...] line.  If the custom kernel
-    // can't engage for a prepacked call, the CK-only-or-fail guard fails
-    // the call, so the AOCL warm is never needed here either.
-    if (!any_prepacked_b) {
+    // Skip generic ahead-of-time warming when any active weight is already
+    // backend-packed (`mem_format_b='r'`). CK-VNNI is consumed directly;
+    // AOCL-blocked is either consumed by AOCL fallback or normalized inside
+    // validated CK preparation. Treating either representation as raw here
+    // would build a cache entry from packed bytes.
+    if (!any_caller_prepacked_b) {
         group_matmul_prepack::prepack_for_algo_3(
                 group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
                         transB, is_weights_const, params, M,
@@ -4901,17 +4954,16 @@ void flat_n_tile(const std::vector<char> &layout,
     // final at this point and read-only afterwards.  Reordering this
     // below the planner, or narrowing it to a subset of experts, silently
     // removes DecodeDynamic's correctness precondition.
-    if (use_custom && fused_epilogue
-            && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
-        bool any_tile_falls_back = false;
+    bool any_int8_tile_falls_back = false;
+    if (use_custom && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
         for (int e = 0; e < num_ops; ++e) {
             if (M[e] <= 0) continue;
             if (!ck_int8_tile_dispatches(hoisted[e], kctx.compute_int)) {
-                any_tile_falls_back = true;
+                any_int8_tile_falls_back = true;
                 break;
             }
         }
-        if (any_tile_falls_back) {
+        if (any_int8_tile_falls_back && fused_epilogue) {
             static const bool s_fused_fb_warn = apilog_warning_enabled();
             if (s_fused_fb_warn) {
                 apilog_warning(
@@ -4931,6 +4983,27 @@ void flat_n_tile(const std::vector<char> &layout,
             }
             use_custom = false;
         }
+    }
+
+    // Caller CK-VNNI bytes have no non-CK interpretation. Hoist validation is
+    // deliberately later than initial CK preparation, so re-check after it:
+    // otherwise one bad INT8 expert can send a tile to AOCL with the original
+    // CK-packed pointer and silently treat it as raw.
+    if (any_int8_tile_falls_back && any_ck_prepacked_b) {
+        apilog_error(
+                "flat_n_tile: INT8 source setup declined after accepting a "
+                "CK-prepacked weight; no raw/AOCL fallback exists");
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
+        }
+        return;
+    }
+    // AOCL-blocked provenance does have a safe fallback, but only at full N.
+    // A late per-tile INT8 fallback must therefore force the Sequential AOCL
+    // plan rather than slicing the blocked pointer as if it were raw.
+    if (any_int8_tile_falls_back && any_aocl_prepacked_b) {
+        use_custom = false;
+        force_aocl_prepacked_fallback = true;
     }
 
     const bool w4a8_native_layout
@@ -4966,6 +5039,10 @@ void flat_n_tile(const std::vector<char> &layout,
     GroupNTilePlan plan
             = plan_group_n_tile(topo, algo, nr_align, fused_epilogue,
                     use_custom, /*ck_int8_at_plan_time=*/is_int8_call, M, N, K);
+    if (force_aocl_prepacked_fallback) {
+        plan.strategy = GroupNTileStrategy::Sequential;
+        plan.algo = matmul_algo_t::aocl_dlp_blocked;
+    }
     // The tight-dst switch is orthogonal to the planner's strategy /
     // threading decisions: it only toggles how each thread writes its
     // final swiglu output (scratch + OOP vs in-place).  Set after the

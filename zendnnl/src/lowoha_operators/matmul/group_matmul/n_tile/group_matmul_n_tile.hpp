@@ -907,7 +907,11 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
         // `mem_format_b == 'r'`).  Empty ⇒ no prepacked experts.
         const std::vector<bool> &weights_prepacked = {},
         // W4A8 only; 0 elsewhere, which is the "not an s4 call" signal.
-        int group_size = 0, int wei_scale_grp_stride = 0) {
+        int group_size = 0, int wei_scale_grp_stride = 0,
+        // Explicit AOCL-DLP-blocked provenance. These weights are normalized
+        // to raw only inside a validated CK preparation.
+        const std::vector<bool> &weights_aocl_prepacked = {},
+        int32_t num_threads = 0, int32_t weight_cache_mode = -1) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -934,7 +938,8 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
     custom_kernel::prepare_for_call(act, src_dtype, wei_dtype, dst_dtype,
             act_dtype, bias_dtype, transA, transB, M, N, K, ldb, alpha, beta,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
-            weights_prepacked, group_size, wei_scale_grp_stride);
+            weights_prepacked, group_size, wei_scale_grp_stride,
+            weights_aocl_prepacked, num_threads, weight_cache_mode);
 }
 
 /// Effective N-column alignment for the per-thread split:

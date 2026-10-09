@@ -86,7 +86,8 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
-        WarmDtypeFamily dtype_family, int group_size) {
+        WarmDtypeFamily dtype_family, int group_size,
+        int32_t weight_cache_type) {
 
     // Every exit reports: a silent bail is indistinguishable from
     // "warmed nothing" in the PREPACK summary, which is how a missing
@@ -167,8 +168,9 @@ status_t warm_pack_all_custom_kernel_experts(
     // (`prepack.cpp::fingerprint`), so a process that flips
     // WEIGHT_CACHE=0 → 1 mid-run will re-enter this function on the
     // new state and warm normally.
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    const int32_t effective_cache_type = weight_cache_type >= 0
+            ? effective_weight_cache_type(weight_cache_type)
+            : matmul_config_t::instance().get_weight_cache();
     // Warm the (always out-of-place) CK pack arena when the runtime will
     // consult it: WC==1 (normal out-of-place), OR WC==2 under the grouped
     // AUTO mixed-in-place mode (where CK decode is forced out-of-place and
@@ -176,7 +178,7 @@ status_t warm_pack_all_custom_kernel_experts(
     // prompt reorder mutates the buffer in place — see prepack.cpp).  The
     // CK pack here is unconditionally out-of-place (no `in_place` arg to
     // get_or_pack_weight_*), so it never mutates the weight.
-    if (!should_warm_weight_cache(weight_cache_type)) {
+    if (!should_warm_weight_cache(effective_cache_type)) {
         return bail("weight_cache_disabled");
     }
 

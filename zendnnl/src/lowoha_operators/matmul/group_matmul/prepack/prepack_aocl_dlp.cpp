@@ -94,7 +94,8 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         const std::vector<int> &ldb, const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t src_dtype, data_type_t wei_dtype,
-        AoclDlpPackProbeStats &stats, int32_t num_threads, bool allow_inplace) {
+        AoclDlpPackProbeStats &stats, int32_t num_threads, bool allow_inplace,
+        int32_t weight_cache_type) {
 
     if (total_count <= 0) { return status_t::success; }
 
@@ -106,8 +107,11 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
     // dispatcher will not consult — wasted CPU + memory.
     // Short-circuit at entry; `stats` stays zeroed so the PREPACK
     // log line surfaces "no work attempted" rather than "all skipped".
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     // Warm the full-weight AOCL DLP cache when the runtime consults it:
     // WC==1 (out-of-place), OR WC==2 under the grouped AUTO mixed-in-place
     // mode.  In mixed mode this full-weight (prompt) reorder is THE single
@@ -290,7 +294,8 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, AoclDlpPackProbeStats &stats, int group_size,
-        size_t wei_buffer_capacity_bytes, bool allow_inplace) {
+        size_t wei_buffer_capacity_bytes, bool allow_inplace,
+        int32_t weight_cache_type) {
 
     if (total_count <= 0) { return status_t::success; }
 
@@ -307,8 +312,11 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
     // ALGO is otherwise entitled to.  Skipping is what `should_warm_weight_
     // cache` already documents for this case, and what bf16 has always done;
     // this warmer was testing `== 0` instead and so kept running.
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     if (!should_warm_weight_cache(weight_cache_type)) {
         return status_t::success;
     }
@@ -455,7 +463,7 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        AoclDlpPackProbeStats &stats) {
+        AoclDlpPackProbeStats &stats, int32_t weight_cache_type) {
 
     if (total_count <= 0 || num_threads <= 0 || stable <= 0 || nr_align <= 0) {
         return status_t::success;
@@ -464,8 +472,11 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
     // Production-cache gate — same as the full-weight warmer above.
     // If `ZENDNNL_MATMUL_WEIGHT_CACHE != 1`, `run_dlp(...)` won't
     // consult the LRU cache, so warming would be wasted CPU + memory.
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     // Out-of-place warmer: also run under WC==2 in the grouped AUTO
     // mixed-in-place mode so this layout is pre-warmed from the RAW weights
     // before the bf16/f16 full-weight AOCL in-place mutation.  Stays
@@ -650,14 +661,18 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_sym_quant(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        AoclDlpPackProbeStats &stats, int group_size) {
+        AoclDlpPackProbeStats &stats, int group_size,
+        int32_t weight_cache_type) {
 
     if (total_count <= 0 || num_threads <= 0 || stable <= 0 || nr_align <= 0) {
         return status_t::success;
     }
 
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     // Out-of-place warmer: also run under WC==2 in the grouped AUTO
     // mixed-in-place mode so this layout is pre-warmed from the RAW weights
     // before the bf16 full-weight AOCL in-place mutation.  Stays
@@ -793,12 +808,15 @@ status_t warm_pack_all_aocl_dlp_experts_w4a8(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int group_size, AoclDlpPackProbeStats &stats,
-        matmul_algo_t algo) {
+        matmul_algo_t algo, int32_t weight_cache_type) {
     if (total_count <= 0) { return status_t::success; }
 
     // W4A8 uses out-of-place cache only (s4->s8 cannot mutate in place).
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     if (weight_cache_type == 0) { return status_t::success; }
 
     const size_t bound = std::min<size_t>({static_cast<size_t>(total_count),
@@ -873,14 +891,18 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile_w4a8(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         data_type_t wei_dtype, int num_threads, int stable, int nr_align,
-        int group_size, AoclDlpPackProbeStats &stats, matmul_algo_t algo) {
+        int group_size, AoclDlpPackProbeStats &stats, matmul_algo_t algo,
+        int32_t weight_cache_type) {
     if (total_count <= 0 || num_threads <= 0 || stable <= 0 || nr_align <= 0
             || group_size <= 0) {
         return status_t::success;
     }
 
-    const int32_t weight_cache_type
-            = matmul_config_t::instance().get_weight_cache();
+    if (weight_cache_type < 0) {
+        weight_cache_type = matmul_config_t::instance().get_weight_cache();
+    } else {
+        weight_cache_type = effective_weight_cache_type(weight_cache_type);
+    }
     if (weight_cache_type == 0) { return status_t::success; }
 
     const size_t bound = std::min<size_t>({static_cast<size_t>(total_count),

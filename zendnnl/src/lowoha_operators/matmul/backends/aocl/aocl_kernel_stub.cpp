@@ -89,7 +89,12 @@ bool aocl_weight_buffer_is_mutated(const void *) {
     return false;
 }
 
-uint64_t aocl_mutated_source_conflict_count() {
+uint64_t aocl_mutated_source_conflict_count(const std::vector<const void *> &,
+        const std::vector<const void *> *, const std::vector<int> *) {
+    return 0;
+}
+
+uint64_t aocl_mutated_source_conflict_count(const void *) {
     return 0;
 }
 

@@ -227,13 +227,18 @@ void clear_aocl_matmul_weight_caches();
 /// tracked rather than the key.
 ///
 /// `aocl_refuse_reorder_from_mutated` returns true when the caller must NOT
-/// reorder; it counts the refusal and logs once.  `run_dlp` returns void and
-/// runs inside OMP regions, so the group-matmul layer snapshots
-/// `aocl_mutated_source_conflict_count()` around a call and fails it closed
-/// with an `error_` gemm_mode sentinel when the count moved.
+/// reorder; it counts the refusal per weight pointer and logs once. `run_dlp`
+/// returns void and runs inside OMP regions, so the group-matmul layer
+/// snapshots the aggregate for that call's weight pool around execution and
+/// fails it closed when the pool-local count moves. Per-weight accounting
+/// prevents an unrelated concurrent call from contaminating the verdict.
 void aocl_mark_weight_buffer_mutated(const void *weights);
 bool aocl_weight_buffer_is_mutated(const void *weights);
-uint64_t aocl_mutated_source_conflict_count();
+uint64_t aocl_mutated_source_conflict_count(
+        const std::vector<const void *> &weights,
+        const std::vector<const void *> *secondary_weights = nullptr,
+        const std::vector<int> *active_rows = nullptr);
+uint64_t aocl_mutated_source_conflict_count(const void *weight);
 bool aocl_refuse_reorder_from_mutated(const void *weights, const char *site);
 /// W4A8 s4→s8 expansion + cache (plain row-major, NO blocked reorder).
 /// Returns a pointer to a plain [k, n] s8 buffer stored in a dedicated

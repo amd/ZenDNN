@@ -27,6 +27,7 @@ add_subdirectory(lru_cache)
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
   group_matmul_direct.cpp
+  aocl_unreorder_cache.cpp
   ${lowoha_group_matmul_sources}
   ${lowoha_routed_moe_sources}
   lowoha_matmul_utils.cpp
@@ -40,6 +41,7 @@ set(lowoha_matmul_public_headers
   ${lowoha_routed_moe_public_headers})
 
 set(lowoha_matmul_private_headers
+  aocl_unreorder_cache.hpp
   brgemm_matmul.hpp
   ggml_weight_unpack.hpp)
 

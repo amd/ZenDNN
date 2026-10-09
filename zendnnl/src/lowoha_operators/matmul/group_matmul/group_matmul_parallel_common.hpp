@@ -2027,6 +2027,14 @@ inline matmul_algo_t w4a8_runtime_algo(
 /// are centralized here so individual executors do not encode dtype policy.
 inline matmul_algo_t resolve_expert_kernel(int scheduling_algo,
         matmul_algo_t inner_kernel, const matmul_params &params) {
+    // A reordered weight with AOCL (or legacy unset) provenance must remain
+    // on AOCL even when the process-wide backend resolves differently.
+    // Reinterpreting those blocked bytes as oneDNN/libxsmm/raw is invalid.
+    if (params.mem_format_b == 'r'
+            && (params.lowoha_algo == matmul_algo_t::none
+                    || params.lowoha_algo == matmul_algo_t::aocl_dlp_blocked)) {
+        return matmul_algo_t::aocl_dlp_blocked;
+    }
     return is_w4a8_config(params)
             ? w4a8_runtime_algo(scheduling_algo, inner_kernel)
             : inner_kernel;

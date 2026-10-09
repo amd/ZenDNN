@@ -2798,6 +2798,46 @@ TEST_P(TestGroupMatmulAutoSelectAlgo, MatchesExpected) {
             << p.expected_algo << "  [" << p.label << "]";
 }
 
+TEST(TestGroupMatmulAutoSelectAlgo,
+        AoclPackedCkRouteRejectsPostopsAndForeignProvenance) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride legacy_prompt(0);
+    AutoDecodeAlgoOverride legacy_decode(0);
+
+    constexpr int E = 2;
+    std::vector<char> layout(E, 'r');
+    std::vector<int> M(E, 8), N(E, 2048), K(E, 64);
+    std::vector<matmul_params> params(E);
+    for (auto &p : params) {
+        p.dtypes.src = data_type_t::bf16;
+        p.dtypes.wei = data_type_t::bf16;
+        p.dtypes.dst = data_type_t::bf16;
+        p.mem_format_b = 'r';
+        p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 3)
+            << "eligible AOCL-packed decode should reach CK";
+
+    matmul_post_op relu;
+    relu.po_type = post_op_type_t::relu;
+    for (auto &p : params)
+        p.postop_.push_back(relu);
+    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 1)
+            << "CK does not apply generic unary post-ops; full-weight AOCL "
+               "must "
+               "preserve them";
+
+    for (auto &p : params) {
+        p.postop_.clear();
+        p.lowoha_algo = matmul_algo_t::onednn_blocked;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(layout, M, N, K, params, /*threads=*/E), 1)
+            << "packed bytes explicitly owned by another backend must never "
+               "reach AOCL unreorder or CK";
+}
+
 // Grid: enumerate at least one canonical workload per rule plus
 // thread-count sweeps where they exercise the rule, and a few
 // edge-case rows to lock the rule precedence.  The label composes
@@ -4173,7 +4213,8 @@ struct MinRunResult {
 // many bf16 elements inside an over-allocated buffer — set to an odd value
 // to force a non-64-byte-aligned weight pointer (exercises the unaligned
 // in-place pack + unaligned microkernel B-load path).
-inline MinRunResult run_min_grp_matmul(int weight_offset_elems = 0) {
+inline MinRunResult run_min_grp_matmul(
+        int weight_offset_elems = 0, bool include_inactive_packed = false) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     constexpr int num_ops = 4, M = 8, K = 256, N = 256; // K even, N%32==0
@@ -4208,6 +4249,14 @@ inline MinRunResult run_min_grp_matmul(int weight_offset_elems = 0) {
     auto params = make_uniform_params(num_ops, data_type_t::bf16);
     for (int e = 0; e < num_ops; ++e)
         params[e].num_threads = 8;
+    if (include_inactive_packed) {
+        // Exercise a mixed raw/caller-packed pool without asking any backend
+        // to consume synthetic packed bytes: expert 0 is inactive metadata,
+        // while experts 1..3 execute from raw weights.
+        gv.Ms[0] = 0;
+        params[0].mem_format_b = 'r';
+        params[0].lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    }
     EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
                       gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
                       gv.beta, dsts, gv.ldc, gv.is_wc, params,
@@ -4360,8 +4409,8 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoDowngradesWc2WhenIneligible) {
     auto &cfg = zendnnl::common::matmul_config_t::instance();
     EXPECT_EQ(cfg.get_weight_cache(), 1) << "AUTO + WC=2 must downgrade to 1 "
                                             "when mixed-in-place is ineligible";
-    EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
-            << "mixed-in-place flag must be clear on the downgrade path";
+    EXPECT_FALSE(is_grp_auto_mixed_inplace_active())
+            << "WC=1 must make the sticky mixed guard inactive";
 }
 
 // AUTO + WC=2 with all preconditions (PREPACK + CROSS_WARM default ON,
@@ -4381,6 +4430,61 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
                "keep WC=2";
     EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace())
             << "mixed-in-place flag must be set when eligible";
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        AutoMixedPackedAndRawPoolUsesLocalFallback) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    WeightCacheGuard wc(2);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    const auto mixed_first = run_min_grp_matmul(/*weight_offset_elems=*/0,
+            /*include_inactive_packed=*/true);
+    EXPECT_EQ(cfg.get_weight_cache(), 2)
+            << "a per-call mixed-format pool must not revoke the process-wide "
+               "WC=2 policy used by concurrent raw-only calls";
+    EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace())
+            << "an otherwise eligible process must keep CK out-of-place; only "
+               "this call's AOCL cache cap should change";
+    EXPECT_FALSE(mixed_first.weights_mutated)
+            << "the mixed-format call must cap its raw experts at "
+               "out-of-place caching";
+
+    // A raw-only call observes the retained process-wide mixed policy.
+    run_min_grp_matmul();
+    ASSERT_EQ(cfg.get_weight_cache(), 2);
+    ASSERT_TRUE(cfg.get_grp_auto_mixed_inplace());
+
+    // A later mixed-format call must remain a local fallback. The former
+    // process-wide downgrade cleared the mixed flag here; a concurrent raw
+    // call that had already snapshotted WC=2 could then CK-pack its weights
+    // in place and corrupt their later AOCL use.
+    const auto mixed_after_raw = run_min_grp_matmul(/*weight_offset_elems=*/0,
+            /*include_inactive_packed=*/true);
+    EXPECT_EQ(cfg.get_weight_cache(), 2);
+    EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace());
+    EXPECT_FALSE(mixed_after_raw.weights_mutated);
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        AutoMixedPackedAndRawFiniteCapacityHonorsPerCallCap) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    WeightCacheGuard wc(2);
+    LruCapacityGuard finite_capacity(4096);
+    const auto mixed = run_min_grp_matmul(/*weight_offset_elems=*/0,
+            /*include_inactive_packed=*/true);
+    EXPECT_EQ(matmul_config_t::instance().get_weight_cache(), 2)
+            << "a per-call mixed pool must not downgrade global WC";
+    EXPECT_FALSE(mixed.weights_mutated)
+            << "the per-call mode-1 cap must reach CK preparation even when "
+               "finite capacity makes process mixed-inplace ineligible";
 }
 
 // CK OFF downgrades to out-of-place.  The decode layout cross-warm packs with
@@ -4405,8 +4509,9 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
             << "AUTO + WC=2 with the custom kernel OFF must downgrade to "
                "out-of-place: the AOCL per-tile decode layout is split-keyed "
                "and cannot license the in-place prompt mutation";
-    EXPECT_FALSE(cfg.get_grp_auto_mixed_inplace())
-            << "mixed-in-place must not engage without the custom-kernel pack";
+    EXPECT_FALSE(is_grp_auto_mixed_inplace_active())
+            << "WC=1 must disable mixed-in-place without the custom-kernel "
+               "pack";
 }
 
 // Correctness companion: with CK OFF the WC=2 request is downgraded, so the
@@ -4426,15 +4531,17 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2MatchesWc1) {
         WeightCacheGuard wc(1);
         ref = run_min_grp_matmul();
     }
+    bool mixed_active_during_downgraded_call = true;
     {
         reset_grp_matmul_caches();
         CustomKernelOverride ck_off(false);
         WeightCacheGuard wc(2);
         downgraded = run_min_grp_matmul();
+        mixed_active_during_downgraded_call
+                = is_grp_auto_mixed_inplace_active();
     }
-    EXPECT_FALSE(zendnnl::common::matmul_config_t::instance()
-                         .get_grp_auto_mixed_inplace())
-            << "mixed-in-place must not have engaged for a CK-off AUTO run";
+    EXPECT_FALSE(mixed_active_during_downgraded_call)
+            << "WC=1 must disable mixed-in-place for a CK-off AUTO run";
     const double d = max_abs_diff(ref.dst, downgraded.dst);
     EXPECT_LT(d, 1e-2) << "CK-off WC=2 (downgraded) must match WC=1; "
                           "max_abs_diff="
@@ -4858,6 +4965,115 @@ TEST(TestGroupMatmulWeightCacheDowngrade, EffectiveWeightCacheTypeLiveRead) {
     cfg.set_weight_cache(0);
     EXPECT_EQ(effective_weight_cache_type(2), 0)
             << "WC=0 (disabled) must propagate live as well";
+    cfg.downgrade_weight_cache(1);
+    EXPECT_EQ(cfg.get_weight_cache(), 0)
+            << "a safety downgrade must not overwrite a concurrent WC=0 "
+               "disable with WC=1";
+    cfg.set_weight_cache(2);
+    cfg.downgrade_weight_cache(1);
+    EXPECT_EQ(cfg.get_weight_cache(), 1);
+}
+
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        MutationRegistryRequiresGroupedCallScope) {
+    using namespace zendnnl::lowoha::matmul;
+    reset_grp_matmul_caches();
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    const bool old_mixed = cfg.get_grp_auto_mixed_inplace();
+    cfg.set_grp_auto_mixed_inplace(true);
+    int scalar_weight = 0;
+
+    aocl_mark_weight_buffer_mutated(&scalar_weight);
+    EXPECT_FALSE(aocl_weight_buffer_is_mutated(&scalar_weight))
+            << "a sticky grouped policy must not register an unrelated scalar "
+               "in-place reorder";
+
+    {
+        scoped_grp_auto_mutation_tracking grouped_scope(true);
+        aocl_mark_weight_buffer_mutated(&scalar_weight);
+    }
+    EXPECT_TRUE(aocl_weight_buffer_is_mutated(&scalar_weight))
+            << "the grouped call that authorized mutation must be tracked";
+
+    int unrelated_weight = 0;
+    {
+        scoped_grp_auto_mutation_tracking grouped_scope(true);
+        aocl_mark_weight_buffer_mutated(&unrelated_weight);
+    }
+    const std::vector<const void *> scalar_pool = {&scalar_weight};
+    const std::vector<const void *> unrelated_pool = {&unrelated_weight};
+    const std::vector<const void *> shared_model_pool
+            = {&scalar_weight, &unrelated_weight};
+    const std::vector<int> only_scalar_active = {1, 0};
+    const uint64_t scalar_before
+            = aocl_mutated_source_conflict_count(scalar_pool);
+    const uint64_t active_subset_before
+            = aocl_mutated_source_conflict_count(shared_model_pool,
+                    /*secondary_weights=*/nullptr, &only_scalar_active);
+    const uint64_t unrelated_before
+            = aocl_mutated_source_conflict_count(unrelated_pool);
+    EXPECT_TRUE(aocl_refuse_reorder_from_mutated(
+            &unrelated_weight, "test unrelated pool"));
+    EXPECT_EQ(aocl_mutated_source_conflict_count(scalar_pool), scalar_before)
+            << "a conflict in one weight pool must not fail an unrelated "
+               "concurrent grouped call";
+    EXPECT_EQ(aocl_mutated_source_conflict_count(shared_model_pool,
+                      /*secondary_weights=*/nullptr, &only_scalar_active),
+            active_subset_before)
+            << "a concurrent conflict on an inactive expert from the same "
+               "model pool must not fail this routed call";
+    EXPECT_EQ(aocl_mutated_source_conflict_count(unrelated_pool),
+            unrelated_before + 1);
+
+    cfg.set_grp_auto_mixed_inplace(old_mixed);
+    reset_grp_matmul_caches();
+}
+
+// Fused ALGO 2/5 may execute both GEMMs without entering the ordinary grouped
+// dispatcher. Its cold-start preflight must therefore initialize mixed mode
+// for Op1+Op2 as one pool before either pipeline warms or mutates a weight.
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        FusedTwoPoolColdStartInitializesMixedMode) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard auto_algo(0);
+    CustomKernelOverride ck_on(true);
+    WeightCacheGuard wc(2);
+    LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+
+    if (!get_grp_matmul_prepack() || !get_grp_matmul_cross_warm()) {
+        GTEST_SKIP() << "requires the default prepack+cross-warm policy";
+    }
+
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    const bool old_mixed = cfg.get_grp_auto_mixed_inplace();
+    struct MixedRestore {
+        zendnnl::common::matmul_config_t &cfg;
+        bool value;
+        ~MixedRestore() { cfg.set_grp_auto_mixed_inplace(value); }
+    } restore {cfg, old_mixed};
+    cfg.set_grp_auto_mixed_inplace(false);
+
+    auto op1 = make_uniform_params(2, data_type_t::bf16);
+    auto op2 = make_uniform_params(2, data_type_t::bf16);
+    const std::vector<int> M = {128, 128};
+    const std::vector<int> N = {128, 128};
+    ASSERT_TRUE(grp_matmul_custom_kernel_effective(
+            op1, M, N, grp_matmul_gated_act_t::none));
+    ASSERT_TRUE(grp_matmul_custom_kernel_effective(
+            op2, M, N, grp_matmul_gated_act_t::none));
+
+    EXPECT_TRUE(prepare_grouped_auto_weight_cache(
+            op1, /*custom_kernel_effective=*/true, &op2));
+    EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace())
+            << "the first fused call must license cross-warm before a vertical "
+               "pipeline can perform the in-place AOCL prompt reorder";
+    for (const auto &p : op1)
+        EXPECT_EQ(p.weight_cache_type, 2);
+    for (const auto &p : op2)
+        EXPECT_EQ(p.weight_cache_type, 2);
 }
 
 // Pinned ALGO 2/5/6 (single AOCL reorder layout per weight) must KEEP
@@ -4943,6 +5159,14 @@ TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    const bool old_mixed = cfg.get_grp_auto_mixed_inplace();
+    cfg.set_grp_auto_mixed_inplace(false);
+    struct MixedRestore {
+        zendnnl::common::matmul_config_t &cfg;
+        bool value;
+        ~MixedRestore() { cfg.set_grp_auto_mixed_inplace(value); }
+    } mixed_restore {cfg, old_mixed};
     MinRunResultT<float> ref, test;
     {
         reset_grp_matmul_caches();
@@ -4962,7 +5186,6 @@ TEST(TestGroupMatmulWeightCacheDowngrade, F32AutoWc2StaysOutOfPlace) {
                         std::memory_order_relaxed);
         ASSERT_NE(captured, nullptr);
         mode = captured;
-        auto &cfg = zendnnl::common::matmul_config_t::instance();
         effective_weight_cache = cfg.get_weight_cache();
         mixed_inplace = cfg.get_grp_auto_mixed_inplace();
     }

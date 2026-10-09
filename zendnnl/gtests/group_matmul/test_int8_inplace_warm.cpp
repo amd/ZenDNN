@@ -653,10 +653,8 @@ TEST_F(Int8InPlaceWarm, EmptyCrossWarmMustNotLicenseTheInPlacePrompt) {
                "stayed in the in-place mode.  Nothing pre-warmed the decode "
                "layout, so the next prompt reorder would mutate weights the "
                "decode fallback still has to read raw";
-    EXPECT_FALSE(matmul_config_t::instance().get_grp_auto_mixed_inplace())
-            << "the mixed-in-place flag must be cleared alongside the "
-               "weight-cache downgrade; leaving it set keeps the CK runtime "
-               "on its out-of-place branch for a mode that no longer exists";
+    EXPECT_FALSE(is_grp_auto_mixed_inplace_active())
+            << "WC=1 must make the sticky mixed guard inactive";
 }
 #endif
 

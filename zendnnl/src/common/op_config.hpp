@@ -161,6 +161,13 @@ public:
   */
     void set_weight_cache(int32_t weight_cache);
 
+    /** @brief Atomically lower matmul_weight_cache to at most upper_bound.
+     *
+     * Unlike set_weight_cache(), this never re-enables a mode concurrently
+     * disabled by another caller (for example, it cannot overwrite 0 with 1).
+     */
+    void downgrade_weight_cache(int32_t upper_bound);
+
     /** @brief Get matmul_weight_cache.
    *
    * @return matmul_weight_cache (0 = disabled, 1 = out-of-place,

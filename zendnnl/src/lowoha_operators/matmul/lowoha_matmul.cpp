@@ -18,6 +18,7 @@
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/common/operator_instrumentation.hpp"
+#include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/auto_tuner/auto_tuner.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #if ZENDNNL_DEPENDS_AOCLDLP
@@ -343,6 +344,18 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const int32_t omp_mt = thread_guard::max_threads();
     const int32_t num_threads
             = resolve_num_threads(exec_params.num_threads, omp_mt);
+    // A weight may have been mutated by an earlier scalar call that routed
+    // through grouped AUTO. AOCL refuses any later reorder miss from that
+    // blocked buffer, but its inner API cannot propagate status. Snapshot the
+    // pointer-local refusal generation across both the optional grouped route
+    // and the standard scalar fallback so this public scalar boundary fails
+    // closed instead of returning an invalid destination.
+    const uint64_t scalar_mutated_conflicts_before
+            = aocl_mutated_source_conflict_count(weight);
+    auto scalar_mutation_conflict = [&]() {
+        return aocl_mutated_source_conflict_count(weight)
+                != scalar_mutated_conflicts_before;
+    };
 
     // Wide-N projection: run it as a one-op group so it reaches the
     // single-expert custom-kernel path.  Safe to sit ahead of the
@@ -355,7 +368,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 exec_params)) {
         matmul_params grp_param = exec_params;
         grp_param.num_threads = num_threads;
-
+        const bool aocl_prepacked = is_aocl_prepacked_weight(exec_params);
         const std::vector<char> grp_layout {layout};
         const std::vector<bool> grp_trans_a {transA};
         const std::vector<bool> grp_trans_b {transB};
@@ -365,6 +378,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         const std::vector<float> grp_alpha {alpha};
         const std::vector<const void *> grp_src {src};
         const std::vector<int> grp_lda {lda};
+        // Preserve the caller's weight representation through AUTO. AOCL
+        // consumes its blocked buffer directly; only a selected CK path may
+        // unreorder it into a CK-local raw lease.
         const std::vector<const void *> grp_weight {weight};
         const std::vector<int> grp_ldb {ldb};
         const std::vector<const void *> grp_bias {bias};
@@ -381,16 +397,64 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
                 /*fused_moe=*/nullptr);
         if (grp_status == status_t::success) {
+            if (scalar_mutation_conflict()) {
+                if (is_profile) { profiler.tbp_stop(); }
+                log_error(
+                        "matmul_direct: grouped scalar route refused a reorder "
+                        "from an in-place-mutated weight; failing the call");
+                return status_t::failure;
+            }
             if (is_profile) { profiler.tbp_stop(); }
             apilog_info(
                     "LOWOHA matmul_direct: routed to group_matmul_direct "
                     "(num_ops=1, act=none), M=",
-                    M, ", K=", K, ", N=", N);
+                    M, ", K=", K, ", N=", N,
+                    ", source=", (aocl_prepacked ? "aocl_prepacked" : "raw"));
             return status_t::success;
+        }
+        if (scalar_mutation_conflict()) {
+            if (is_profile) { profiler.tbp_stop(); }
+            log_error(
+                    "matmul_direct: grouped scalar route hit a mutated-weight "
+                    "cache conflict; refusing standard scalar fallback");
+            return status_t::failure;
         }
         log_info(
                 "group_matmul_direct route declined; continuing on the "
                 "standard single-matmul path");
+    }
+
+    if (is_foreign_prepacked_weight(exec_params)) {
+        log_error(
+                "matmul_direct: pre-reordered weight has unsupported backend "
+                "provenance; only AOCL-DLP and custom-kernel packed layouts "
+                "are accepted");
+        return status_t::failure;
+    }
+
+    // The current call may be prompt-shaped, under-threaded, or carry an
+    // execution-only option that prevents grouped routing while a later call
+    // reusing the SAME raw weight is decode-eligible. Do not let this scalar
+    // AOCL fallback consume WC=2 and destroy the raw bytes that future CK
+    // packing needs. The candidate predicate intentionally ignores those
+    // per-call fields and only identifies a CK-compatible weight family.
+    if (custom_kernel_cross_phase_weight_candidate(exec_params)) {
+        exec_params.weight_cache_type
+                = std::min<int32_t>(exec_params.weight_cache_type, 1);
+        apilog_verbose(
+                "[MATMUL.CK CROSS_PHASE] scalar fallback capped at WC=1 "
+                "to preserve raw weight for a future grouped CK call");
+    }
+
+    // A CK-VNNI caller-prepacked weight has no scalar consumer. The grouped
+    // route above is the only legal hand-off; if it did not engage, fail
+    // closed before kernel_select can reinterpret mem_format_b='r' as AOCL.
+    if (exec_params.mem_format_b == 'r'
+            && exec_params.lowoha_algo == matmul_algo_t::moe_custom_kernel) {
+        log_error(
+                "matmul_direct: CK-prepacked weight requires the grouped "
+                "custom-kernel route; no scalar fallback can consume it");
+        return status_t::failure;
     }
 
     status_t ggml_val_status
@@ -478,6 +542,14 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 kernel, exec_params, exec_batch_params, auto_version);
     }
 
+    if (scalar_mutation_conflict()) {
+        if (is_profile) { profiler.tbp_stop(); }
+        log_error(
+                "matmul_direct: scalar AOCL reorder was refused because the "
+                "weight was already mutated under a different cache key");
+        return status_t::failure;
+    }
+
     if (is_profile) { profiler.tbp_stop(); }
 
     if (apilog_info_enabled() || is_profile) {
@@ -543,6 +615,7 @@ ZENDNNL_API void clear_matmul_onednn_weight_caches() {
 }
 
 ZENDNNL_API void clear_grp_matmul_weight_caches() {
+    clear_aocl_ck_weight_cache();
     custom_kernel::clear_custom_kernel_pack_cache();
     custom_kernel::clear_custom_kernel_pack_cache_int8();
     custom_kernel::clear_custom_kernel_pack_cache_f16();

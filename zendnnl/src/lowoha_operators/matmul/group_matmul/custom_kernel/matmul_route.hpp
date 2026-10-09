@@ -114,6 +114,39 @@ inline bool has_enough_single_expert_tiles(
     return usable_n_tiles >= requested_threads * kSingleExpertTilesPerThread;
 }
 
+/// True when a raw scalar weight can become eligible for CK on another phase
+/// or thread configuration in this process. This deliberately ignores
+/// execution-only fields (M, current thread count, alpha/beta, bias, post-ops):
+/// when the current call falls back to scalar AOCL under WC=2, those fields may
+/// change on a later call that reuses the same weight. The caller uses this
+/// verdict only to cap the CURRENT scalar fallback at WC=1 and preserve raw
+/// bytes for that future CK pack.
+inline bool custom_kernel_cross_phase_weight_candidate(
+        const matmul_params &params) noexcept {
+    auto &config = zendnnl::common::matmul_config_t::instance();
+    if (!config.get_custom_kernel_route() || !get_grp_matmul_custom_kernel())
+        return false;
+    if (config.get_weight_cache() != 2
+            || effective_weight_cache_type(params.weight_cache_type) != 2) {
+        return false;
+    }
+    if (params.mem_format_b != 'n') return false;
+
+    // Weight-centric by design: src/dst/compute metadata can change between
+    // calls while the same weight pointer is reused. Current transA, A format,
+    // batching, backend, constness, N/K view, and variant rejection therefore
+    // must not license an irreversible in-place reorder that a future
+    // supported scalar tuple would CK-pack as raw. Capping a non-AOCL or
+    // non-constant current call is harmless; those paths do not consume the
+    // AOCL in-place permission in the first place.
+    const bool bf16_route = params.dtypes.wei == data_type_t::bf16
+            && custom_kernel::dispatch_supported();
+    const bool int8_route = params.dtypes.wei == data_type_t::s8
+            && get_grp_matmul_custom_kernel_int8()
+            && custom_kernel::avx512vnni_available();
+    return bf16_route || int8_route;
+}
+
 /// Return true when a single MatMul can be reproduced by one-op grouped AUTO.
 ///
 /// The grouped dispatcher owns prompt/decode selection and cache-mode-2
@@ -134,25 +167,35 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
                                                         : resolve_kernel();
     if (effective_kernel != matmul_algo_t::aocl_dlp_blocked) return false;
 
+    const bool aocl_prepacked = is_aocl_prepacked_weight(params);
     const int32_t global_cache = config.get_weight_cache();
     if (global_cache < 0 || global_cache > 2) return false;
     if (!get_grp_matmul_custom_kernel()) return false;
     if (get_grp_n_tile_strategy() == 0) return false;
 
+    // Prompt calls intentionally enter one-op grouped AUTO: BF16/INT8 execute
+    // full-weight AOCL (ALGO 1) so mixed-WC2 preparation can warm a future
+    // decode CK layout, while W4A8 executes its supported ALGO 2 prompt path.
+    // Decode still has to resolve to ALGO 3 below.
     if (!has_enough_single_expert_tiles(N, K, num_threads)) return false;
     if (M <= 0 || batch_count != 1 || transA || !is_weights_const) return false;
     if (layout != 'r' && layout != 'R') return false;
     if (params.mem_format_a != 'n') return false;
     if (omp_in_parallel() || omp_get_dynamic()) return false;
 
-    // Preserve a per-operation algorithm chosen through the API.
-    // Layout-specific prepacked inputs remain excluded below by the
-    // mem_format_b == 'n' contract.
-    if (params.lowoha_algo != matmul_algo_t::none) return false;
+    // Raw scalar inputs must not override a per-operation algorithm. AOCL
+    // prepacked inputs may carry the matching aocl_dlp_blocked provenance, or
+    // leave it unset for scalar ZenTorch compatibility.
+    if (!aocl_prepacked && params.lowoha_algo != matmul_algo_t::none)
+        return false;
 
     const int32_t effective_cache
             = effective_weight_cache_type(params.weight_cache_type);
     if (effective_cache != global_cache) return false;
+    if (aocl_prepacked
+            && (effective_cache == 0 || config.get_lru_cache_capacity() == 0)) {
+        return false;
+    }
 
     if (alpha != 1.0f || beta != 0.0f) return false;
     if (!matmul_custom_kernel_bias_supported(bias, params.dtypes.bias))
@@ -166,9 +209,6 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const bool int_variant = custom_kernel::is_int8_variant(variant);
     const bool s4_variant = custom_kernel::is_s4_variant(variant);
     if (!bf16_variant && !int_variant && !s4_variant) return false;
-    // BF16/INT8 scalar routing remains decode-only. W4A8 is the exception:
-    // one-op grouped AUTO deliberately sends its prompt form to ALGO 2.
-    if (M > kDecodeMaxM && !s4_variant) return false;
     if (!params.postop_.empty()
             && !(int_variant && !params.dynamic_quant
                     && params.dtypes.src == data_type_t::u8
@@ -181,7 +221,7 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (!matmul_custom_kernel_quant_supported(M, N, K, variant, params))
         return false;
     if (params.packing.pack_format_b == 1) return false;
-    if (params.mem_format_b != 'n') return false;
+    if (!aocl_prepacked && params.mem_format_b != 'n') return false;
 
     const int pack_nr = custom_kernel::plan_pack_nr(K, N);
     if (pack_nr != custom_kernel::kNRMin && pack_nr != custom_kernel::kNRMax)
@@ -199,7 +239,8 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const std::vector<matmul_params> grouped_params {params};
     const int selected = select_grp_matmul_algo(grouped_layout, grouped_m,
             grouped_n, grouped_k, grouped_params, num_threads);
-    return selected == 3 || (s4_variant && selected == 2);
+    return selected == 3 || (s4_variant && selected == 2)
+            || (M > kDecodeMaxM && selected == 1);
 }
 
 } // namespace matmul

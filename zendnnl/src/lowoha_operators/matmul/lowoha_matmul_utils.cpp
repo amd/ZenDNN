@@ -804,8 +804,8 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     // avoid matmul_direct's mem_format_b=='r' guard. In this configuration the
     // prepack API falls back to a dense row-major buffer, and the compute path
     // will later fall back to the reference kernel.
-    // CK-VNNI prepack (lowoha_algo == moe_custom_kernel) is still rejected there.
-    if (params.mem_format_b == 'r') {
+    // CK-VNNI and foreign backend packs are rejected at the matmul boundary.
+    if (is_aocl_prepacked_weight(params)) {
         params.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
         return matmul_algo_t::aocl_dlp_blocked;
     }
@@ -834,7 +834,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                 "auto_tuner/dynamic_dispatch; downgrading cache mode to "
                 "out-of-place (weight_cache_type=1) for the rest of the "
                 "process; kernel selection unchanged");
-        matmul_config.set_weight_cache(1);
+        matmul_config.downgrade_weight_cache(1);
     }
 
     bool is_woq = (params.dtypes.src == data_type_t::bf16)

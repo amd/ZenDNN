@@ -767,7 +767,7 @@ A single CK prepack op covers one weight; prepacking a **group** of experts is d
 
 ## Weight Unreorder Mode
 
-Weight unreorder is the **inverse** of the AOCL-DLP weight prepack: it takes a blocked weight buffer and recovers the plain `K×N` weight it was packed from, same dtype, into a caller-owned buffer. Use it for debug, export, or to feed the weights to another backend. It is **not** part of the GEMM path — matmul never unpacks a `mem_format_b = 'r'` weight; that stays blocked and is consumed directly.
+Weight unreorder is the **inverse** of the AOCL-DLP weight prepack: it takes a blocked weight buffer and recovers the plain `K×N` weight it was packed from, same dtype, into a caller-owned buffer. Use it for debug, export, or to feed the weights to another backend. The normal AOCL GEMM path keeps `mem_format_b = 'r'` blocked and consumes it directly. For scalar prepack compatibility, an `'r'` weight is treated as AOCL-DLP blocked unless `lowoha_algo = moe_custom_kernel` explicitly identifies CK-VNNI. The ALGO-3 CK path unreorders into temporary raw storage and packs directly into one right-sized, library-owned final CK arena before publishing it; no persistent raw copy or full-size CK memcpy remains. Prompt/AOCL paths and CK fallbacks retain the original blocked pointer.
 
 The mode is selected by setting `reorder_params_t::is_unreorder = true` on the same `reorder_params_t` you hand to `reorder_direct`, reusing the embedded `prepack` sub-struct (algo / wei_dtype / src_dtype / K / N / ldb / transposed). `is_prepack` and `is_unreorder` are **mutually exclusive** — setting both makes `reorder_direct` return `status_t::failure`.
 

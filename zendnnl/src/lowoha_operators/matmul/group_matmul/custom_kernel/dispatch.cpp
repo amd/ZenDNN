@@ -25,6 +25,7 @@
 
 #include "../group_matmul_parallel_common.hpp"
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
 #include "pack.hpp"
@@ -146,6 +147,8 @@ void CallContext::reset() {
     packed_ptrs_int8.fill(nullptr);
     packed_ptrs_f16.fill(nullptr);
     packed_ptrs_s4.fill(nullptr);
+    for (auto &lease : aocl_ck_weight_leases)
+        lease.reset();
     subtile_cols_per_expert.fill(0);
 }
 
@@ -448,7 +451,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<bool> &is_weights_const, CallContext &out,
         bool dynamic_quant, data_type_t compute_dtype,
         const std::vector<bool> &weights_prepacked, int group_size,
-        int wei_scale_grp_stride) {
+        int wei_scale_grp_stride,
+        const std::vector<bool> &weights_aocl_prepacked, int32_t num_threads,
+        int32_t weight_cache_mode) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -610,8 +615,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     //     second mutator of the shared buffer and corrupt it.
     // (AUTO WITHOUT the mixed flag has already downgraded WC 2→1 upstream, so
     // it never reaches here with WC==2.)
-    const int wc_mode
-            = zendnnl::common::matmul_config_t::instance().get_weight_cache();
+    auto &matmul_config = zendnnl::common::matmul_config_t::instance();
+    const int wc_mode = weight_cache_mode >= 0
+            ? weight_cache_mode
+            : matmul_config.get_weight_cache();
     const bool cache_off = (wc_mode == 0);
     // AUTO mixed-in-place mode (grp ALGO 0 + WC=2 + prepack/cross_warm):
     // exactly ONE layout may mutate the shared weight buffer, and that
@@ -621,7 +628,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     // each other.  Pinned ALGO 3 + CK (env_algo==3, mixed flag false) keeps
     // true in-place as before.
     const bool ck_in_place
-            = (wc_mode == 2) && !is_grp_auto_mixed_inplace_active();
+            = (wc_mode == 2) && !matmul_config.get_grp_auto_mixed_inplace();
     if (cache_off && s_refuse_log) {
         apilog_verbose(
                 "[GRP_MATMUL.CK NOCACHE] "
@@ -1055,6 +1062,14 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const bool prepacked_i = !weights_prepacked.empty()
                 && static_cast<size_t>(i) < weights_prepacked.size()
                 && weights_prepacked[i];
+        const bool aocl_prepacked_i = !weights_aocl_prepacked.empty()
+                && static_cast<size_t>(i) < weights_aocl_prepacked.size()
+                && weights_aocl_prepacked[i];
+        if (prepacked_i && aocl_prepacked_i) {
+            return refuse("conflicting_prepacked_weight_provenance",
+                    "one expert cannot be both CK-VNNI-packed and "
+                    "AOCL-DLP-blocked");
+        }
         if (prepacked_i) {
             if (variant_is_s4) {
                 // The prepack API has no s4 family (`prepack_params_t`
@@ -1082,13 +1097,76 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             }
             continue;
         }
+
+        // AOCL blocked -> CK conversion belongs to CK preparation, not
+        // scalar/group AUTO routing. Reaching this point means every CK
+        // structural/ISA/shape contract and function-table check above has
+        // succeeded. AOCL fallbacks retain the original blocked pointer.
+        //
+        // The derived cache owns one right-sized final CK arena. On a miss,
+        // AOCL unreorders into temporary raw storage and CK packs directly
+        // into the arena before publication.
+        const void *ck_weight = weight[i];
+        int ck_ldb = ldb[i];
+        if (aocl_prepacked_i) {
+            const bool bf16_variant
+                    = out.variant == KernelVariant::kBF16_BF16_BF16
+                    || out.variant == KernelVariant::kBF16_BF16_F32;
+            // AOCL exposes an inverse for pure U8xS8 packing, which is the
+            // static per-tensor scalar route merged with PR #745. DQ/grouped
+            // S8 uses AOCL's sym-quant pack; that format has no unreorder API
+            // and must retain its AOCL fallback.
+            const bool static_u8s8_variant = variant_is_int8
+                    && src_dtype == data_type_t::u8
+                    && wei_dtype == data_type_t::s8 && !dynamic_quant;
+            if (!bf16_variant && !static_u8s8_variant) {
+                return refuse("aocl_unreorder_unsupported_variant",
+                        "AOCL unreorder-to-CK supports BF16 and pure static "
+                        "U8xS8 only; sym-quant INT8 has no inverse API");
+            }
+            bool derived_cache_hit = false;
+            std::shared_ptr<void> derived_ck_weight;
+            const status_t conversion_status = static_u8s8_variant
+                    ? get_or_cache_aocl_ck_weight_int8(weight[i], K[i], N[i],
+                              ldb[i], transB[i], num_threads, pack_nr,
+                              interleave_split_halves, derived_ck_weight,
+                              &derived_cache_hit, wc_mode)
+                    : get_or_cache_aocl_ck_weight(weight[i], K[i], N[i], ldb[i],
+                              transB[i], num_threads, pack_nr,
+                              interleave_split_halves, derived_ck_weight,
+                              &derived_cache_hit, wc_mode);
+            if (conversion_status != status_t::success || !derived_ck_weight) {
+                return refuse("aocl_to_ck_conversion_failed",
+                        "CK declined; AOCL fallback keeps the original "
+                        "blocked weight");
+            }
+            out.aocl_ck_weight_leases[i] = derived_ck_weight;
+            if (static_u8s8_variant) {
+                out.packed_ptrs_int8[i]
+                        = static_cast<const int8_t *>(derived_ck_weight.get());
+            } else {
+                out.packed_ptrs[i] = static_cast<const bfloat16_t *>(
+                        derived_ck_weight.get());
+            }
+            apilog_verbose("[GRP_MATMUL.CK AOCL->CK] expert=", i,
+                    " family=", (static_u8s8_variant ? "u8s8" : "bf16"),
+                    " cache=", (derived_cache_hit ? "hit" : "miss"),
+                    " K=", K[i], " N=", N[i], " transB=", (transB[i] ? 1 : 0));
+            if (per_expert_subtile) {
+                out.subtile_cols_per_expert[i] = pick_l2_subtile_cols(M[i],
+                        K[i], pack_nr, sb.src_bytes_per_elem,
+                        sb.wei_bytes_per_elem, sb.comp_bytes_per_col);
+            }
+            continue;
+        }
+
         if (variant_is_f16) {
             // FP16 path — caller's weight is f16; the plain (non-K-
             // interleaved) FP16 pack mirrors the bf16 contract for
             // is_weights_const / pack_nr / ldb / transB.
             status_t pst = get_or_pack_weight_f16(
-                    static_cast<const float16_t *>(weight[i]), K[i], N[i],
-                    ldb[i], pack_nr,
+                    static_cast<const float16_t *>(ck_weight), K[i], N[i],
+                    ck_ldb, pack_nr,
                     /*transB=*/transB[i],
                     /*interleave_split_halves=*/interleave_split_halves,
                     &out.packed_ptrs_f16[i],
@@ -1109,7 +1187,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             // per-column compensation row; the microkernel reads both
             // through a single `int8_t *`.
             status_t pst = get_or_pack_weight_int8(
-                    static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
+                    static_cast<const int8_t *>(ck_weight), K[i], N[i], ck_ldb,
                     pack_nr,
                     /*transB=*/transB[i],
                     /*interleave_split_halves=*/interleave_split_halves,
@@ -1137,7 +1215,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             // Caller's weight is the nibble-packed s4 buffer, same as
             // the AOCL s4 path receives.
             status_t pst = get_or_pack_weight_s4(
-                    static_cast<const int8_t *>(weight[i]), K[i], N[i], ldb[i],
+                    static_cast<const int8_t *>(ck_weight), K[i], N[i], ck_ldb,
                     pack_nr,
                     /*transB=*/transB[i],
                     /*interleave_split_halves=*/interleave_split_halves,
@@ -1155,14 +1233,15 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         } else {
             // BF16 path — unchanged.
             status_t pst = get_or_pack_weight_bf16(
-                    static_cast<const bfloat16_t *>(weight[i]), K[i], N[i],
-                    ldb[i], pack_nr,
+                    static_cast<const bfloat16_t *>(ck_weight), K[i], N[i],
+                    ck_ldb, pack_nr,
                     /*transB=*/transB[i],
                     /*interleave_split_halves=*/interleave_split_halves,
                     &out.packed_ptrs[i],
                     /*was_hit_out=*/&was_hit_unused,
                     /*disable_cache=*/cache_off,
-                    /*in_place=*/ck_in_place);
+                    /*in_place=*/ck_in_place,
+                    /*wei_buffer_capacity_bytes=*/0);
             if (pst != status_t::success) {
                 return refuse("weight_pack_failed",
                         "get_or_pack_weight_bf16 returned failure — "

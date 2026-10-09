@@ -124,6 +124,11 @@ void run_fused_ggml_scenario(const std::string &label,
     const auto act = static_cast<grp_matmul_gated_act_t>(act_int);
     ASSERT_NE(act, grp_matmul_gated_act_t::none) << label;
 
+    // Every scenario allocates a fresh weight bank. Clear all pointer-keyed
+    // group caches so allocator address reuse from an earlier parametrized
+    // test cannot serve stale packed weights.
+    reset_grp_matmul_caches();
+
     const int E = static_cast<int>(rows.size());
     int M_buf = 1;
     for (int r : rows)

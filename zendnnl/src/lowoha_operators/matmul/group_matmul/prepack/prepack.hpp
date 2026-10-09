@@ -196,6 +196,16 @@ struct PrepackParams {
     // applies the per-call W4A8 override before using it.
     bool custom_kernel_on = false;
 
+    // Effective per-call cache cap: minimum of the process mode and every
+    // expert's matmul_params::weight_cache_type. Warmers must use this rather
+    // than rereading the process-global value.
+    int32_t weight_cache_type = 2;
+
+    // At least one caller-supplied weight is already in a backend-specific
+    // packed representation (`mem_format_b == 'r'`). Generic eager/cross
+    // warmers must not reinterpret those bytes as raw weights.
+    bool caller_prepacked = false;
+
     // Gated activation kind for this dispatcher invocation, mirrored
     // here so `ck_eligible(p)` can match the runtime CK refusal gate
     // in `custom_kernel/dispatch.cpp::prepare_for_call`.
@@ -425,6 +435,13 @@ inline PrepackParams build_prepack_params(
             cap = std::min(cap, params[i].wei_buffer_capacity_bytes);
         }
         p.wei_buffer_capacity_bytes = cap;
+
+        p.weight_cache_type = zendnnl::common::matmul_config_t::instance()
+                                      .get_weight_cache();
+        for (const auto &param : params) {
+            p.weight_cache_type
+                    = std::min(p.weight_cache_type, param.weight_cache_type);
+        }
     }
 
     // Mirror the dispatcher's active/total contract
@@ -473,6 +490,14 @@ inline PrepackParams build_prepack_params(
                                      : p.num_ops_active;
 
     p.custom_kernel_on = custom_kernel_on;
+    for (size_t i = 0;
+            i < params.size() && i < static_cast<size_t>(p.num_ops_total);
+            ++i) {
+        if (params[i].mem_format_b == 'r') {
+            p.caller_prepacked = true;
+            break;
+        }
+    }
     p.num_threads = num_threads;
     p.nr_align = nr_align;
     p.act = act;

@@ -39,6 +39,7 @@
 
 #include "ck_test_helpers.hpp"
 #include "common/op_config.hpp"
+#include "common/zendnnl_compat.hpp"
 
 namespace {
 

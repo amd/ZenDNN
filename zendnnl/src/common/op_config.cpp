@@ -421,6 +421,13 @@ void matmul_config_t::set_weight_cache(int32_t weight_cache) {
     matmul_weight_cache.store(weight_cache, std::memory_order_relaxed);
 }
 
+void matmul_config_t::downgrade_weight_cache(int32_t upper_bound) {
+    int32_t current = matmul_weight_cache.load(std::memory_order_relaxed);
+    while (current > upper_bound
+            && !matmul_weight_cache.compare_exchange_weak(current, upper_bound,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {}
+}
+
 int32_t matmul_config_t::get_weight_cache() {
     return matmul_weight_cache.load(std::memory_order_relaxed);
 }

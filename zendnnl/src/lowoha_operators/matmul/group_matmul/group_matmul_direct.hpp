@@ -764,6 +764,17 @@ void clear_fused_moe_scratch();
  *                                halves layout does not colocate (g, u)
  *                                pairs on the same thread's N-tile.
  */
+/**
+ * @brief Apply the grouped-AUTO WC=2 safety policy before any prepack/compute.
+ *
+ * `secondary_params` lets fused-MoE treat Op1 and Op2 as one weight pool.
+ * Returns true only when this call is authorised to register the single
+ * in-place AOCL mutation used by mixed prompt/decode caching.
+ */
+bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
+        bool custom_kernel_effective,
+        std::vector<matmul_params> *secondary_params = nullptr);
+
 bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,

@@ -46,6 +46,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_prepare_for_call.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_pack_bf16.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_bf16.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_matmul_unreorder_route.cpp
     # FP16 sibling suites -- mirror test_ukernel_bf16.cpp /
     # test_pack_bf16.cpp for the native AVX-512-FP16 microkernel family
     # (f16:f16:f16 / f16:f16:f32) and its disjoint f16 pack cache, gated

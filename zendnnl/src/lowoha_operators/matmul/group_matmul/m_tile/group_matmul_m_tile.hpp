@@ -892,12 +892,31 @@ inline bool check_m_tile_safe(const std::vector<char> &layout,
                 && params[i].quant_params.src_scale.dims[1] > 1;
         const bool reordered_pergroup_s8
                 = reordered_pergroup_dyn_s8 || reordered_pergroup_static_s8;
-        const bool prepacked_b_ok = allow_prepacked_b
+        const bool ck_prepacked_b_ok = allow_prepacked_b
                 && params[i].mem_format_b == 'r'
                 && params[i].lowoha_algo
                         == zendnnl::common::matmul_algo_t::moe_custom_kernel;
+        const bool aocl_prepacked_bf16
+                = params[i].dtypes.src == data_type_t::bf16
+                && params[i].dtypes.wei == data_type_t::bf16
+                && params[i].postop_.empty();
+        // Static U8xS8 post-ops are validated by check_n_tile_extra (which has
+        // N) and by the effective CK gate. Do not require an empty chain here:
+        // PR #745's supported unary and dense mul+add epilogues must remain
+        // routable after an AOCL-prepacked weight is introduced.
+        const bool aocl_prepacked_static_u8s8
+                = is_static_u8s8_quant_config(params[i]);
+        const bool aocl_prepacked_for_ck_ok = allow_prepacked_b
+                && get_grp_matmul_custom_kernel()
+                && params[i].mem_format_b == 'r'
+                && (params[i].lowoha_algo
+                                == zendnnl::common::matmul_algo_t::none
+                        || params[i].lowoha_algo
+                                == zendnnl::common::matmul_algo_t::
+                                        aocl_dlp_blocked)
+                && (aocl_prepacked_bf16 || aocl_prepacked_static_u8s8);
         if (params[i].mem_format_b != 'n' && !reordered_pergroup_s8
-                && !prepacked_b_ok) {
+                && !ck_prepacked_b_ok && !aocl_prepacked_for_ck_ok) {
             return false;
         }
         if (params[i].packing.pack_format_b != 0 && !reordered_pergroup_s8) {

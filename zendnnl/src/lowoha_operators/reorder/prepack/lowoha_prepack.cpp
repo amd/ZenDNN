@@ -266,7 +266,7 @@ status_t validate_prepack_inputs(const char *caller, const void *weights,
 }
 
 // True when prepack attaches gemm_hints: bf16, or s8 with an s8/u8 source.
-bool aocl_pack_uses_m_hint(const prepack_params_t &params) {
+[[maybe_unused]] bool aocl_pack_uses_m_hint(const prepack_params_t &params) {
     if (params.wei_dtype == data_type_t::bf16) { return true; }
     return params.wei_dtype == data_type_t::s8
             && (params.src_dtype == data_type_t::s8

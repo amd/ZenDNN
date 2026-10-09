@@ -141,6 +141,7 @@
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_DISPATCH_HPP
 
 #include <array>
+#include <memory>
 #include <vector>
 
 #include "common/bfloat16.hpp"
@@ -422,6 +423,12 @@ struct CallContext {
     /// Maximum experts per call we cache packed pointers for.  Must
     /// match (or exceed) each caller's own expert-count cap.
     static constexpr int kMaxExperts = 256;
+    /// Call-scoped leases for final BF16 or static-U8xS8 CK packs derived from
+    /// AOCL-DLP blocked inputs. AOCL unreorders into temporary raw storage and
+    /// CK packs directly into the cached final arena. Keeping the leases here
+    /// prevents eviction or explicit clear from freeing a pack while a CK tile
+    /// uses it. AOCL sym-quant S8 is excluded because it has no unreorder API.
+    std::array<std::shared_ptr<void>, kMaxExperts> aocl_ck_weight_leases {};
     std::array<const bfloat16_t *, kMaxExperts> packed_ptrs {};
     /// DQ-INT8 packed-weight pointers (signed `int8_t *`).  Populated
     /// when the variant is `kS8_S8_BF16_SYM` / `kU8_S8_BF16_ASYM`;
@@ -670,7 +677,13 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<bool> &weights_prepacked = {},
         // W4A8 only.  Both default to 0, the "not an s4 call" signal;
         // a `wei_dtype == s4` tuple with `group_size == 0` is refused.
-        int group_size = 0, int wei_scale_grp_stride = 0);
+        int group_size = 0, int wei_scale_grp_stride = 0,
+        // Per-expert AOCL-DLP-blocked provenance. Unlike
+        // `weights_prepacked`, these buffers are NOT CK-ready. A true slot is
+        // unreordered and cached only after CK validation succeeds; AOCL
+        // fallbacks continue to own and consume the original blocked pointer.
+        const std::vector<bool> &weights_aocl_prepacked = {},
+        int32_t num_threads = 0, int32_t weight_cache_mode = -1);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the

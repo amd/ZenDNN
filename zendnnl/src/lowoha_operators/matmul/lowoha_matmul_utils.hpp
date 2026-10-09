@@ -36,6 +36,21 @@ namespace matmul {
  */
 std::mutex &get_lowoha_mutex();
 
+inline bool is_aocl_prepacked_weight(const matmul_params &params) noexcept {
+    // Scalar ZenTorch prepack currently publishes only mem_format_b='r', so
+    // unset provenance is the legacy AOCL representation.
+    return params.mem_format_b == 'r'
+            && (params.lowoha_algo == matmul_algo_t::none
+                    || params.lowoha_algo == matmul_algo_t::aocl_dlp_blocked);
+}
+
+inline bool is_foreign_prepacked_weight(const matmul_params &params) noexcept {
+    return params.mem_format_b == 'r'
+            && params.lowoha_algo != matmul_algo_t::none
+            && params.lowoha_algo != matmul_algo_t::aocl_dlp_blocked
+            && params.lowoha_algo != matmul_algo_t::moe_custom_kernel;
+}
+
 inline int64_t divup(int64_t x, int64_t y) {
     return (x + y - 1) / y;
 }

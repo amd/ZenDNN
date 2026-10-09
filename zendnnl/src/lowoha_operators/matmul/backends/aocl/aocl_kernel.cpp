@@ -22,10 +22,12 @@
 #include <mutex>
 #include "common/op_config.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
+#include "lowoha_operators/matmul/aocl_unreorder_cache.hpp"
 #include "lowoha_operators/matmul/backends/aocl/aocl_postop.hpp"
 #include "lowoha_operators/matmul/ggml_weight_unpack.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "lowoha_operators/matmul/lru_cache/lowoha_cache.hpp"
+#include <unordered_map>
 #include <unordered_set> // in-place mutation registry
 
 namespace zendnnl {
@@ -412,6 +414,10 @@ std::unordered_set<const void *> &mutated_wei_set() {
     static std::unordered_set<const void *> s;
     return s;
 }
+std::unordered_map<const void *, uint64_t> &mutated_wei_conflicts() {
+    static std::unordered_map<const void *, uint64_t> counts;
+    return counts;
+}
 std::atomic<uint64_t> g_mutated_source_conflicts {0};
 } // namespace
 
@@ -422,7 +428,10 @@ void aocl_mark_weight_buffer_mutated(const void *weights) {
     // grouped dispatcher.  Registering a buffer from an entry point that does
     // not compare the counter would refuse the reorder without failing the
     // call, so the registry stays inside the regime that acts on it.
-    if (!is_grp_auto_mixed_inplace_active()) { return; }
+    // The process mixed flag is sticky to protect stale WC=2 snapshots, so it
+    // cannot scope this registry by itself. Only the grouped AUTO dispatcher
+    // that authorized the mutation enables this call-local guard.
+    if (!is_grp_auto_mutation_tracking_active()) { return; }
     std::lock_guard<std::mutex> lock(mutated_wei_mutex());
     mutated_wei_set().insert(weights);
 }
@@ -433,13 +442,53 @@ bool aocl_weight_buffer_is_mutated(const void *weights) {
     return mutated_wei_set().count(weights) != 0;
 }
 
-uint64_t aocl_mutated_source_conflict_count() {
-    return g_mutated_source_conflicts.load(std::memory_order_relaxed);
+uint64_t aocl_mutated_source_conflict_count(
+        const std::vector<const void *> &weights,
+        const std::vector<const void *> *secondary_weights,
+        const std::vector<int> *active_rows) {
+    // Zero-cost common path: conflict accounting is never populated during a
+    // correct run. The map lock/weight scan is paid only after some refusal
+    // has occurred in the process (normally a terminal integration error).
+    if (g_mutated_source_conflicts.load(std::memory_order_relaxed) == 0) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+    uint64_t total = 0;
+    auto accumulate = [&](const std::vector<const void *> &pool) {
+        for (size_t i = 0; i < pool.size(); ++i) {
+            if (active_rows != nullptr
+                    && (i >= active_rows->size() || (*active_rows)[i] <= 0)) {
+                continue;
+            }
+            const auto it = mutated_wei_conflicts().find(pool[i]);
+            if (it != mutated_wei_conflicts().end()) { total += it->second; }
+        }
+    };
+    accumulate(weights);
+    if (secondary_weights != nullptr) { accumulate(*secondary_weights); }
+    return total;
+}
+
+uint64_t aocl_mutated_source_conflict_count(const void *weight) {
+    if (weight == nullptr
+            || g_mutated_source_conflicts.load(std::memory_order_relaxed)
+                    == 0) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+    const auto it = mutated_wei_conflicts().find(weight);
+    return it == mutated_wei_conflicts().end() ? 0 : it->second;
 }
 
 bool aocl_refuse_reorder_from_mutated(const void *weights, const char *site) {
-    if (!aocl_weight_buffer_is_mutated(weights)) { return false; }
-    g_mutated_source_conflicts.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(mutated_wei_mutex());
+        if (weights == nullptr || mutated_wei_set().count(weights) == 0) {
+            return false;
+        }
+        ++mutated_wei_conflicts()[weights];
+        g_mutated_source_conflicts.fetch_add(1, std::memory_order_relaxed);
+    }
     static std::atomic<bool> s_warned {false};
     if (!s_warned.exchange(true, std::memory_order_relaxed)) {
         apilog_error("[AOCL.reorder REFUSED] ", site,
@@ -461,8 +510,9 @@ void clear_aocl_matmul_weight_caches() {
     {
         std::lock_guard<std::mutex> lock(mutated_wei_mutex());
         mutated_wei_set().clear();
+        mutated_wei_conflicts().clear();
+        g_mutated_source_conflicts.store(0, std::memory_order_relaxed);
     }
-    g_mutated_source_conflicts.store(0, std::memory_order_relaxed);
     // Lock only the mutex paired with each cache so clear does not interleave
     // reorderAndCacheWeights* between find_key() and get()/add(), without
     // blocking all dtypes for the entire teardown.
@@ -477,6 +527,7 @@ void clear_aocl_matmul_weight_caches() {
     clear_w4a8_plain_s8_cache_under_lock();
     clear_ggml_weight_unpack_cache();
     clear_zp_compensation_cache();
+    clear_aocl_ck_weight_cache();
 }
 
 template <typename T>

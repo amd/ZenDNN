@@ -149,6 +149,59 @@ TEST_F(TestFusedMoECacheStress, ColdThenWarm) {
     EXPECT_EQ(st_warm.packed_ok, E);
 }
 
+TEST_F(TestFusedMoECacheStress, PerCallCacheOffSkipsAotCkWarm) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+
+    constexpr int E = 4;
+    constexpr int K = 32;
+    constexpr int N = 64;
+    TypedBuffers wei_buf;
+    wei_buf.alloc(E, static_cast<size_t>(K) * N, /*is_bf16=*/true);
+    fill_moe_tensors(E, /*is_bf16=*/true, nullptr, &wei_buf, nullptr);
+    auto weights = wei_buf.cptrs(true);
+    std::vector<int> ks(E, K), ns(E, N), ldb(E, N);
+    std::vector<bool> trans_b(E, false);
+
+    group_matmul_prepack::custom_kernel::PackProbeStats disabled;
+    ASSERT_EQ(group_matmul_prepack::custom_kernel::
+                      warm_pack_all_custom_kernel_experts(weights, ks, ns, ldb,
+                              trans_b, /*is_weights_const=*/ {}, E, disabled,
+                              /*interleave_split_halves=*/false,
+                              group_matmul_prepack::custom_kernel::
+                                      WarmDtypeFamily::kBF16,
+                              /*group_size=*/0, /*weight_cache_type=*/0),
+            status_t::success);
+    EXPECT_EQ(disabled.total_attempted, 0)
+            << "per-call cache-off must not publish a persistent CK pack";
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+    group_matmul_prepack::aocl_dlp::AoclDlpPackProbeStats aocl_disabled;
+    ASSERT_EQ(group_matmul_prepack::aocl_dlp::warm_pack_all_aocl_dlp_experts(
+                      weights, ks, ns, ldb, trans_b, /*is_weights_const=*/ {},
+                      E, data_type_t::bf16, data_type_t::bf16, aocl_disabled,
+                      /*num_threads=*/4,
+                      /*allow_inplace=*/false,
+                      /*weight_cache_type=*/0),
+            status_t::success);
+    EXPECT_EQ(aocl_disabled.total_attempted, 0)
+            << "per-call cache-off must not publish a persistent AOCL pack";
+#endif
+
+    group_matmul_prepack::custom_kernel::PackProbeStats enabled;
+    ASSERT_EQ(group_matmul_prepack::custom_kernel::
+                      warm_pack_all_custom_kernel_experts(weights, ks, ns, ldb,
+                              trans_b, /*is_weights_const=*/ {}, E, enabled,
+                              /*interleave_split_halves=*/false,
+                              group_matmul_prepack::custom_kernel::
+                                      WarmDtypeFamily::kBF16,
+                              /*group_size=*/0, /*weight_cache_type=*/1),
+            status_t::success);
+    EXPECT_EQ(enabled.cache_misses, E)
+            << "cache-off warm must not have populated any entries";
+}
+
 // ===============================================================================
 // [17] TestFusedMoEPointerChurn - validates the pack cache is keyed on
 //      weight pointer (not per-expert index).  Re-allocating one
