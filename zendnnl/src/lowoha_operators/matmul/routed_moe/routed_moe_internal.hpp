@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <shared_mutex>
 
 #include "lowoha_operators/matmul/routed_moe/routed_moe.hpp"
 
@@ -152,6 +153,15 @@ status_t validate_routing_ids(const routed_moe_params &p);
 /// Execute a validated routed-MoE problem.
 status_t execute(const routed_moe_params &p);
 
+/// Serializes generic row-major readers against the first routed in-place
+/// conversion. Acquire the shared side before checking the sentinel and keep
+/// it through the complete generic execution.
+std::shared_mutex &inplace_storage_lifecycle_mutex();
+
+/// Whether caller-owned storage currently contains the routed packed layout.
+/// Generic fallback must fail closed for such storage.
+bool is_inplace_packed_storage(const void *storage);
+
 /// Pack `[num_experts, out_channels, in_channels]` int8 weights into the
 /// executor's block-VNNI layout.  Each block stores 32 output channels'
 /// quants followed by their 32 int32 compensation values.
@@ -176,6 +186,15 @@ inline std::atomic<bool> s_capture_native_w4 {false};
 inline std::atomic<uint64_t> s_native_w4_completed {0};
 inline std::atomic<w4_reduction_path_t> s_last_w4_reduction_path {
         w4_reduction_path_t::none};
+/// One-shot failure injection between mutation-sentinel and cache insertion.
+/// Used to verify strong exception safety before caller storage is overwritten.
+inline std::atomic<bool> s_fail_inplace_registration_after_sentinel {false};
+/// Deterministic synchronization hooks for the mixed generic/routed race test.
+/// Dormant unless explicitly armed by that test.
+inline std::atomic<bool> s_pause_generic_with_storage_guard {false};
+inline std::atomic<bool> s_generic_storage_guard_entered {false};
+inline std::atomic<bool> s_capture_inplace_pack_request {false};
+inline std::atomic<bool> s_inplace_pack_requested {false};
 
 } // namespace test_api
 

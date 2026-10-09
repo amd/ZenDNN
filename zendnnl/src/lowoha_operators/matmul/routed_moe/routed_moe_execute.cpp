@@ -78,6 +78,11 @@ static status_t pack_weights_strided(const int8_t *src, int8_t *dst,
         int64_t num_experts, int64_t out_channels, int64_t in_channels,
         int64_t expert_stride, int64_t num_threads);
 
+std::shared_mutex &inplace_storage_lifecycle_mutex() {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
 namespace {
 
 // A routed execution holds a shared lock from validation through its final
@@ -112,6 +117,8 @@ struct packed_cache_key_t {
     int64_t group_size = 0;
     int32_t pack_nr = 0;
     bool interleave_split_halves = false;
+    size_t expert_capacity_bytes = 0;
+    const void *inplace_storage = nullptr;
     data_type_t dtype = data_type_t::none;
     uint32_t layout_version = 0;
 
@@ -124,6 +131,8 @@ struct packed_cache_key_t {
                 && expert_stride == other.expert_stride
                 && group_size == other.group_size && pack_nr == other.pack_nr
                 && interleave_split_halves == other.interleave_split_halves
+                && expert_capacity_bytes == other.expert_capacity_bytes
+                && inplace_storage == other.inplace_storage
                 && dtype == other.dtype
                 && layout_version == other.layout_version;
     }
@@ -145,19 +154,39 @@ struct packed_cache_key_hash_t {
         combine(std::hash<int64_t> {}(key.group_size));
         combine(std::hash<int32_t> {}(key.pack_nr));
         combine(std::hash<bool> {}(key.interleave_split_halves));
+        combine(std::hash<size_t> {}(key.expert_capacity_bytes));
+        combine(std::hash<const void *> {}(key.inplace_storage));
         combine(std::hash<int32_t> {}(static_cast<int32_t>(key.dtype)));
         combine(std::hash<uint32_t> {}(key.layout_version));
         return hash;
     }
 };
 
+bool same_packed_layout_request(
+        const packed_cache_key_t &lhs, const packed_cache_key_t &rhs) {
+    return lhs.identity == rhs.identity
+            && lhs.scale_identity == rhs.scale_identity && lhs.role == rhs.role
+            && lhs.num_experts == rhs.num_experts
+            && lhs.out_channels == rhs.out_channels
+            && lhs.in_channels == rhs.in_channels
+            && lhs.expert_stride == rhs.expert_stride
+            && lhs.group_size == rhs.group_size && lhs.pack_nr == rhs.pack_nr
+            && lhs.interleave_split_halves == rhs.interleave_split_halves
+            && lhs.dtype == rhs.dtype
+            && lhs.layout_version == rhs.layout_version;
+}
+
 struct packed_weight_t {
     int8_t *data = nullptr;
     size_t bytes = 0;
+    int64_t expert_stride = 0;
+    bool owns_data = true;
     std::vector<float> scales;
     packed_cache_key_t key {};
 
-    ~packed_weight_t() { zendnnl_aligned_free(data); }
+    ~packed_weight_t() {
+        if (owns_data) { zendnnl_aligned_free(data); }
+    }
 
     packed_weight_t() = default;
     packed_weight_t(const packed_weight_t &) = delete;
@@ -165,7 +194,7 @@ struct packed_weight_t {
 
     bool matches(const packed_cache_key_t &expected, size_t expected_bytes,
             size_t expected_scales = 0) const {
-        return data != nullptr && bytes == expected_bytes
+        return data != nullptr && bytes == expected_bytes && expert_stride > 0
                 && scales.size() == expected_scales && key == expected;
     }
 };
@@ -182,6 +211,24 @@ cache_store() {
             std::shared_ptr<packed_weight_t>, packed_cache_key_hash_t>
             store;
     return store;
+}
+
+// A separate model-lifetime sentinel is required because generic dispatch
+// does not consult the packed-weight cache.  An entry means the caller's
+// storage no longer contains row-major weights and may only be consumed by
+// the matching routed packed-cache entry.
+std::unordered_map<const void *, packed_cache_key_t> &inplace_store() {
+    static std::unordered_map<const void *, packed_cache_key_t> store;
+    return store;
+}
+
+// Retained while an in-place image exists so cache flush can reconstruct the
+// caller's row-major bytes without performing a fallible allocation. One
+// 32-channel block is sufficient for every cached tensor, so this grows only
+// to the largest reduction width seen rather than with model size.
+std::vector<int8_t> &inplace_restore_scratch() {
+    static std::vector<int8_t> scratch;
+    return scratch;
 }
 
 struct scale_cache_key_t {
@@ -263,6 +310,130 @@ bool checked_scale_elements(int64_t num_experts, int64_t groups,
     return true;
 }
 
+status_t pack_weights_strided_inplace(int8_t *weight, int64_t num_experts,
+        int64_t out_channels, int64_t in_channels, int64_t expert_stride,
+        size_t expert_capacity_bytes, int num_threads) {
+    if (weight == nullptr || expert_capacity_bytes == 0) {
+        return status_t::op_bad_io;
+    }
+    size_t src_bytes = 0;
+    size_t packed_bytes = 0;
+    int64_t blocks_per_expert = 0;
+    int64_t packed_row = 0;
+    const status_t size_status
+            = checked_pack_sizes(num_experts, out_channels, in_channels,
+                    src_bytes, packed_bytes, blocks_per_expert, packed_row);
+    if (size_status != status_t::success) { return size_status; }
+    const size_t logical_expert_bytes
+            = src_bytes / static_cast<size_t>(num_experts);
+    const size_t packed_expert_bytes
+            = packed_bytes / static_cast<size_t>(num_experts);
+    if (expert_stride < 0
+            || static_cast<uint64_t>(expert_stride)
+                    < static_cast<uint64_t>(expert_capacity_bytes)
+            || expert_capacity_bytes < logical_expert_bytes
+            || expert_capacity_bytes < packed_expert_bytes) {
+        return status_t::memory_bad_storage;
+    }
+
+#if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
+    const int requested = effective_num_threads(num_threads);
+    const int team = static_cast<int>(
+            std::min<int64_t>(num_experts, std::max(1, requested)));
+    constexpr size_t alignment = 64;
+    if (packed_expert_bytes
+            > std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        return status_t::memory_bad_size;
+    }
+    const size_t scratch_stride
+            = (packed_expert_bytes + alignment - 1) & ~(alignment - 1);
+    if (scratch_stride != 0
+            && static_cast<size_t>(team)
+                    > std::numeric_limits<size_t>::max() / scratch_stride) {
+        return status_t::memory_bad_size;
+    }
+    const size_t scratch_bytes = scratch_stride * static_cast<size_t>(team);
+    void *raw = zendnnl_aligned_alloc(alignment, scratch_bytes);
+    if (raw == nullptr) { return status_t::memory_bad_storage; }
+    auto *scratch = static_cast<int8_t *>(raw);
+
+#pragma omp parallel num_threads(team)
+    {
+        const int rank = omp_get_thread_num();
+        const int count = omp_get_num_threads();
+        int8_t *const packed
+                = scratch + static_cast<size_t>(rank) * scratch_stride;
+        for (int64_t expert = rank; expert < num_experts; expert += count) {
+            const int8_t *const source = weight + expert * expert_stride;
+            for (int64_t block = 0; block < blocks_per_expert; ++block) {
+                pack_weight_block(packed + block * block_n * packed_row,
+                        source + block * block_n * in_channels, in_channels);
+            }
+            std::memcpy(weight + expert * expert_stride, packed,
+                    packed_expert_bytes);
+        }
+    }
+    zendnnl_aligned_free(raw);
+    return status_t::success;
+#else
+    (void)num_threads;
+    return status_t::isa_unsupported;
+#endif
+}
+
+status_t ensure_inplace_restore_scratch(int64_t in_channels) {
+    if (in_channels <= 0
+            || static_cast<uint64_t>(in_channels)
+                    > std::numeric_limits<size_t>::max()
+                            / static_cast<size_t>(block_n)) {
+        return status_t::memory_bad_size;
+    }
+    const size_t bytes
+            = static_cast<size_t>(block_n) * static_cast<size_t>(in_channels);
+    auto &scratch = inplace_restore_scratch();
+    if (scratch.size() < bytes) { scratch.resize(bytes); }
+    return status_t::success;
+}
+
+void restore_inplace_weights() {
+    auto &scratch = inplace_restore_scratch();
+    for (const auto &mutation : inplace_store()) {
+        const auto &key = mutation.second;
+        auto *const weight = const_cast<int8_t *>(
+                static_cast<const int8_t *>(mutation.first));
+        const size_t in_channels = static_cast<size_t>(key.in_channels);
+        const size_t logical_block_bytes
+                = static_cast<size_t>(block_n) * in_channels;
+        const size_t packed_block_bytes = static_cast<size_t>(block_n)
+                * (in_channels + sizeof(int32_t));
+        const int64_t blocks = key.out_channels / block_n;
+
+        for (int64_t expert = 0; expert < key.num_experts; ++expert) {
+            auto *const expert_base = weight + expert * key.expert_stride;
+            for (int64_t block = 0; block < blocks; ++block) {
+                const int8_t *const packed = expert_base
+                        + static_cast<size_t>(block) * packed_block_bytes;
+                for (int64_t k4 = 0; k4 < key.in_channels / vnni_step; ++k4) {
+                    for (int64_t n = 0; n < block_n; ++n) {
+                        std::memcpy(scratch.data()
+                                        + static_cast<size_t>(n) * in_channels
+                                        + static_cast<size_t>(k4) * vnni_step,
+                                packed
+                                        + (static_cast<size_t>(k4) * block_n
+                                                  + static_cast<size_t>(n))
+                                                * vnni_step,
+                                vnni_step);
+                    }
+                }
+                std::memcpy(expert_base
+                                + static_cast<size_t>(block)
+                                        * logical_block_bytes,
+                        scratch.data(), logical_block_bytes);
+            }
+        }
+    }
+}
+
 status_t lookup_converted_scale(const void *identity, const void *scale,
         packed_tensor_role_t role, int64_t num_experts, int64_t groups,
         int64_t out_channels, data_type_t dtype, uint32_t layout_version,
@@ -321,7 +492,8 @@ status_t lookup_converted_scale(const void *identity, const void *scale,
 status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
         const int8_t *weight, int64_t num_experts, int64_t out_channels,
         int64_t in_channels, int64_t expert_stride, data_type_t dtype,
-        int num_threads, std::shared_ptr<const packed_weight_t> &result) {
+        size_t expert_capacity_bytes, int num_threads,
+        std::shared_ptr<const packed_weight_t> &result) {
     size_t src_bytes = 0;
     size_t packed_bytes = 0;
     int64_t blocks_per_expert = 0;
@@ -330,9 +502,17 @@ status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
             in_channels, src_bytes, packed_bytes, blocks_per_expert,
             packed_bytes_per_oc);
     if (size_status != status_t::success) { return size_status; }
-    (void)src_bytes;
     (void)blocks_per_expert;
     (void)packed_bytes_per_oc;
+    const size_t logical_expert_bytes
+            = src_bytes / static_cast<size_t>(num_experts);
+    const size_t packed_expert_bytes
+            = packed_bytes / static_cast<size_t>(num_experts);
+    const bool can_inplace = expert_capacity_bytes >= logical_expert_bytes
+            && expert_capacity_bytes >= packed_expert_bytes
+            && expert_stride >= 0
+            && static_cast<uint64_t>(expert_stride)
+                    >= static_cast<uint64_t>(expert_capacity_bytes);
 
     packed_cache_key_t key;
     key.identity = identity;
@@ -341,8 +521,120 @@ status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
     key.out_channels = out_channels;
     key.in_channels = in_channels;
     key.expert_stride = expert_stride;
+    key.expert_capacity_bytes = expert_capacity_bytes;
+    key.inplace_storage = can_inplace ? weight : nullptr;
     key.dtype = dtype;
     key.layout_version = packed_layout_version;
+
+    if (can_inplace) {
+        // Keep cache hits cheap. Only a miss needs the exclusive side of the
+        // storage lifecycle lock because only a miss can rewrite caller bytes.
+        {
+            std::lock_guard<std::mutex> guard(cache_mutex());
+            auto &store = cache_store();
+            const auto found = store.find(key);
+            if (found != store.end()) {
+                if (found->second == nullptr
+                        || !found->second->matches(key, packed_bytes)) {
+                    return status_t::memory_bad_size;
+                }
+                result = found->second;
+                return status_t::success;
+            }
+        }
+
+        if (test_api::s_capture_inplace_pack_request.load(
+                    std::memory_order_relaxed)) {
+            test_api::s_inplace_pack_requested.store(
+                    true, std::memory_order_release);
+        }
+        std::unique_lock<std::shared_mutex> storage_lock(
+                inplace_storage_lifecycle_mutex());
+        // The grouped fallback can downgrade the process cache mode while
+        // this miss waits behind its row-major read. Honor that live verdict
+        // instead of mutating with stale WC=2 permission.
+        if (zendnnl::common::matmul_config_t::instance().get_weight_cache()
+                != 2) {
+            storage_lock.unlock();
+            return lookup_packed_weight(identity, role, weight, num_experts,
+                    out_channels, in_channels, expert_stride, dtype,
+                    /*expert_capacity_bytes=*/0, num_threads, result);
+        }
+        std::lock_guard<std::mutex> guard(cache_mutex());
+        auto &store = cache_store();
+
+        // Another routed caller may have populated this key while this caller
+        // waited for a generic row-major reader to release the shared side.
+        const auto found = store.find(key);
+        if (found != store.end()) {
+            if (found->second == nullptr
+                    || !found->second->matches(key, packed_bytes)) {
+                return status_t::memory_bad_size;
+            }
+            result = found->second;
+            return status_t::success;
+        }
+
+        auto &mutated = inplace_store();
+        if (mutated.find(weight) != mutated.end()) {
+            // A mutation without this exact cache entry cannot be repacked.
+            return status_t::memory_bad_storage;
+        }
+
+        const status_t scratch_status
+                = ensure_inplace_restore_scratch(in_channels);
+        if (scratch_status != status_t::success) { return scratch_status; }
+
+        auto entry = std::make_shared<packed_weight_t>();
+        entry->bytes = packed_bytes;
+        entry->expert_stride = static_cast<int64_t>(packed_expert_bytes);
+        entry->key = key;
+
+        // Register all throwing metadata before touching caller storage.
+        // If either unordered_map allocation fails, rollback leaves the
+        // original row-major bytes and both maps unchanged.
+        auto mutation_it = mutated.end();
+        auto cache_it = store.end();
+        bool mutation_inserted = false;
+        bool cache_inserted = false;
+        try {
+            const auto mutation_result = mutated.emplace(weight, key);
+            mutation_it = mutation_result.first;
+            mutation_inserted = mutation_result.second;
+            if (!mutation_inserted) { return status_t::memory_bad_storage; }
+
+            if (test_api::s_fail_inplace_registration_after_sentinel.exchange(
+                        false, std::memory_order_relaxed)) {
+                throw std::bad_alloc();
+            }
+
+            const auto cache_result = store.emplace(key, entry);
+            cache_it = cache_result.first;
+            cache_inserted = cache_result.second;
+            if (!cache_inserted) {
+                mutated.erase(mutation_it);
+                return status_t::memory_bad_size;
+            }
+        } catch (...) {
+            if (cache_inserted) { store.erase(cache_it); }
+            if (mutation_inserted) { mutated.erase(mutation_it); }
+            throw;
+        }
+
+        const status_t pack_status = pack_weights_strided_inplace(
+                const_cast<int8_t *>(weight), num_experts, out_channels,
+                in_channels, expert_stride, expert_capacity_bytes, num_threads);
+        if (pack_status != status_t::success) {
+            store.erase(cache_it);
+            mutated.erase(mutation_it);
+            return pack_status;
+        }
+        entry->data = const_cast<int8_t *>(weight);
+        entry->expert_stride = expert_stride;
+        entry->owns_data = false;
+        result = std::move(entry);
+        return status_t::success;
+    }
 
     std::lock_guard<std::mutex> guard(cache_mutex());
     auto &store = cache_store();
@@ -356,12 +648,32 @@ status_t lookup_packed_weight(const void *identity, packed_tensor_role_t role,
         return status_t::success;
     }
 
+    const auto mutation = inplace_store().find(weight);
+    if (mutation != inplace_store().end()) {
+        // A live process-level downgrade changes the requested capacity from
+        // nonzero to zero, but cannot turn the caller's packed bytes back into
+        // row-major storage. Keep serving the exact routed layout that owns
+        // those bytes; any genuinely different request still fails closed.
+        if (!same_packed_layout_request(key, mutation->second)) {
+            return status_t::memory_bad_storage;
+        }
+        const auto packed = store.find(mutation->second);
+        if (packed == store.end() || packed->second == nullptr
+                || !packed->second->matches(mutation->second, packed_bytes)) {
+            return status_t::memory_bad_storage;
+        }
+        result = packed->second;
+        return status_t::success;
+    }
+
     auto entry = std::make_shared<packed_weight_t>();
+    entry->bytes = packed_bytes;
+    entry->expert_stride = static_cast<int64_t>(packed_expert_bytes);
+    entry->key = key;
     void *raw = zendnnl_aligned_alloc(64, packed_bytes);
     if (raw == nullptr) { return status_t::memory_bad_storage; }
     entry->data = static_cast<int8_t *>(raw);
-    entry->bytes = packed_bytes;
-    entry->key = key;
+    entry->owns_data = true;
     const status_t pack_status = pack_weights_strided(weight, entry->data,
             num_experts, out_channels, in_channels, expert_stride, num_threads);
     if (pack_status != status_t::success) { return pack_status; }
@@ -436,6 +748,7 @@ status_t lookup_packed_weight_s4(const void *identity,
     if (raw == nullptr) { return status_t::memory_bad_storage; }
     entry->data = static_cast<int8_t *>(raw);
     entry->bytes = packed_bytes;
+    entry->expert_stride = static_cast<int64_t>(bytes_per_expert);
     entry->key = key;
     entry->scales.resize(scale_count);
 
@@ -1136,6 +1449,17 @@ status_t execute_w4(
 
 } // namespace
 
+bool is_inplace_packed_storage(const void *storage) {
+#if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
+    if (storage == nullptr) { return false; }
+    std::lock_guard<std::mutex> guard(cache_mutex());
+    return inplace_store().find(storage) != inplace_store().end();
+#else
+    (void)storage;
+    return false;
+#endif
+}
+
 static status_t pack_weights_strided(const int8_t *src, int8_t *dst,
         int64_t num_experts, int64_t out_channels, int64_t in_channels,
         int64_t expert_stride, int64_t num_threads) {
@@ -1248,12 +1572,13 @@ status_t execute(const routed_moe_params &p) {
                 packed_tensor_role_t::gate_up,
                 static_cast<const int8_t *>(p.gate_up_weight),
                 p.num_local_experts, gate_up_oc, K, gate_up_expert_stride,
-                p.wei_dt, nth, pw_gate_up);
+                p.wei_dt, p.gate_up_wei_buffer_capacity_bytes, nth, pw_gate_up);
         if (cache_status != status_t::success) { return cache_status; }
-        cache_status = lookup_packed_weight(down_key,
-                packed_tensor_role_t::down,
-                static_cast<const int8_t *>(p.down_weight), p.num_local_experts,
-                K, N, down_expert_stride, p.wei_dt, nth, pw_down);
+        cache_status
+                = lookup_packed_weight(down_key, packed_tensor_role_t::down,
+                        static_cast<const int8_t *>(p.down_weight),
+                        p.num_local_experts, K, N, down_expert_stride, p.wei_dt,
+                        p.down_wei_buffer_capacity_bytes, nth, pw_down);
         if (cache_status != status_t::success) { return cache_status; }
         const int8_t *packed_gate_up = pw_gate_up->data;
         const int8_t *packed_down = pw_down->data;
@@ -1338,8 +1663,8 @@ status_t execute(const routed_moe_params &p) {
         // that follow from it.
         const int64_t packed_K = packed_row_bytes(K);
         const int64_t packed_N = packed_row_bytes(N);
-        const int64_t stride_gate_up = gate_up_oc * packed_K;
-        const int64_t stride_down = K * packed_N;
+        const int64_t stride_gate_up = pw_gate_up->expert_stride;
+        const int64_t stride_down = pw_down->expert_stride;
 
         const int64_t NB1 = N / block_n;
         const int64_t NB2 = K / block_n;
@@ -1621,10 +1946,19 @@ status_t execute(const routed_moe_params &p) {
 void flush_weight_cache() {
     std::unique_lock<std::shared_mutex> lifecycle_lock(
             execution_lifecycle_mutex());
+    std::unique_lock<std::shared_mutex> storage_lock(
+            inplace_storage_lifecycle_mutex());
 #if ZENDNNL_ROUTED_MOE_KERNELS_COMPILED
     std::lock_guard<std::mutex> guard(cache_mutex());
+    // In-place packing is reversible: the packed quant bytes retain every
+    // source value and only add compensation rows. Restore the logical
+    // row-major tensors before discarding the metadata that identifies them,
+    // so a post-flush reuse or a recycled allocation cannot be double-packed.
+    restore_inplace_weights();
     cache_store().clear();
     scale_cache_store().clear();
+    inplace_store().clear();
+    std::vector<int8_t> {}.swap(inplace_restore_scratch());
 #endif
 }
 

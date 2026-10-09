@@ -33,7 +33,9 @@
 #include <memory>
 #include <new>
 #include <numeric>
+#include <thread>
 #include <vector>
+#include <shared_mutex>
 
 namespace zendnnl {
 namespace lowoha {
@@ -732,8 +734,15 @@ status_t build_projection_params(
     // `assign`, not `resize`: the vector is reused across calls, so a shorter
     // request must still re-seed every surviving element from `projection`.
     matmul_params grouped_params = projection.params;
-    grouped_params.wei_buffer_capacity_bytes
-            = projection.wei_buffer_capacity_bytes;
+    // The routed entry point owns a second DA8W8 layout for these weights.
+    // Its generic fallback must therefore remain out-of-place: allowing WC=2
+    // could replace the row-major bytes before a later routed cache miss.
+    grouped_params.weight_cache_type
+            = std::min<int32_t>(grouped_params.weight_cache_type, 1);
+    // The projection-level capacity has already been used to slice expert
+    // pointers. Do not forward it as mutation permission to group Matmul's
+    // global-WC prepack warmers.
+    grouped_params.wei_buffer_capacity_bytes = 0;
     params.assign(grouped.active_experts.size(), grouped_params);
     const size_t live_rows = grouped.row_base.back();
     status_t status = gather_source_quant(
@@ -944,7 +953,9 @@ status_t run_fused_grouped(const group_matmul_projection_params &primary,
     fused.down_weight.resize(total);
     fused.N_down.assign(total, secondary.output_size);
     fused.ldb_down.assign(total, secondary.ldb);
-    fused.down_wei_buffer_capacity_bytes = secondary.wei_buffer_capacity_bytes;
+    // Expert pointers were already sliced with the projection stride. Keep
+    // grouped fallback from treating that stride as in-place permission.
+    fused.down_wei_buffer_capacity_bytes = 0;
     fused.bias_down.assign(active, nullptr);
     fused.bias_dt_down = secondary.params.dtypes.bias;
     // The optional vectors are read as "present when non-empty", so a reused
@@ -1274,6 +1285,16 @@ routed_moe_params make_fast_params(const void *token_src,
         p.down_stride_expert = static_cast<int64_t>(
                 secondary.wei_buffer_capacity_bytes / sizeof(int8_t));
     }
+    if (!w4
+            && effective_weight_cache_type(primary.params.weight_cache_type)
+                    == 2) {
+        p.gate_up_wei_buffer_capacity_bytes = primary.wei_buffer_capacity_bytes;
+    }
+    if (!w4
+            && effective_weight_cache_type(secondary.params.weight_cache_type)
+                    == 2) {
+        p.down_wei_buffer_capacity_bytes = secondary.wei_buffer_capacity_bytes;
+    }
     p.gate_up_scale = primary.params.quant_params.wei_scale.buff;
     p.down_scale = secondary.params.quant_params.wei_scale.buff;
     p.scale_dt = primary.params.quant_params.wei_scale.dt;
@@ -1602,6 +1623,31 @@ status_t routed_fused_moe_direct(const char layout_src, const bool trans_src,
                     ? "isa_unsupported"
                     : "unimplemented";
         }
+    }
+
+    // Hold the shared side from the sentinel check through the final generic
+    // read. A first routed in-place pack takes the exclusive side before
+    // registering or rewriting storage, making check-and-consume atomic.
+    std::shared_lock<std::shared_mutex> storage_lock(
+            routed_moe::inplace_storage_lifecycle_mutex());
+    if (routed_moe::test_api::s_pause_generic_with_storage_guard.load(
+                std::memory_order_acquire)) {
+        routed_moe::test_api::s_generic_storage_guard_entered.store(
+                true, std::memory_order_release);
+        while (routed_moe::test_api::s_pause_generic_with_storage_guard.load(
+                std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+
+    // While the routed cache is live, in-place packing replaces the caller's
+    // row-major bytes. No generic implementation understands that private
+    // layout, so a fallback must fail closed rather than reinterpret it.
+    if (routed_moe::is_inplace_packed_storage(primary.weight)
+            || (secondary != nullptr
+                    && routed_moe::is_inplace_packed_storage(
+                            secondary->weight))) {
+        return status_t::memory_bad_storage;
     }
     if (s_route_log) {
         error_handling::apilog_info("[ROUTED_MOE] path=generic reason=",

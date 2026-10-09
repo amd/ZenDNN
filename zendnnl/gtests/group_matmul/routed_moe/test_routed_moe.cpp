@@ -33,6 +33,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -44,6 +45,7 @@
 
 #include <omp.h>
 
+#include "common/zendnnl_global.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
@@ -511,6 +513,28 @@ struct disable_routed_guard {
         EXPECT_EQ(setenv("ZENDNNL_ENABLE_ROUTED_MOE", "0", 1), 0);
     }
     ~disable_routed_guard() { unsetenv("ZENDNNL_ENABLE_ROUTED_MOE"); }
+};
+
+struct routed_cache_flush_guard {
+    ~routed_cache_flush_guard() {
+        group_matmul_routed_moe_flush_weight_cache();
+    }
+};
+
+struct routed_weight_cache_mode_guard {
+    zendnnl::common::matmul_config_t &config
+            = zendnnl::common::matmul_config_t::instance();
+    int32_t previous_cache = config.get_weight_cache();
+    bool previous_mixed = config.get_grp_auto_mixed_inplace();
+
+    routed_weight_cache_mode_guard() {
+        config.set_weight_cache(2);
+        config.set_grp_auto_mixed_inplace(false);
+    }
+    ~routed_weight_cache_mode_guard() {
+        config.set_weight_cache(previous_cache);
+        config.set_grp_auto_mixed_inplace(previous_mixed);
+    }
 };
 
 struct RoutedMoECapability : routed_moe_test {};
@@ -1747,6 +1771,310 @@ TEST_F(RoutedMoESuperset, PaddedExpertWeightsUseRoutedExecutor) {
     ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
     EXPECT_FALSE(probe.grouped_ran());
     EXPECT_LT(rel_mae(pb.dst, expected), 3e-3);
+}
+
+TEST_F(RoutedMoESuperset, WeightCache2PacksDA8W8ExpertsInPlace) {
+    routed_weight_cache_mode_guard cache_mode_guard;
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 0xc4cu);
+    const auto expected_output = reference_moe(pb);
+    da8w8_call call(pb);
+
+    const size_t experts = static_cast<size_t>(pb.E);
+    const size_t w13_logical = pb.w13.size() / experts;
+    const size_t w2_logical = pb.w2.size() / experts;
+    const size_t w13_capacity = static_cast<size_t>(2 * pb.N)
+            * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                    pb.K, data_type_t::s8));
+    const size_t w2_capacity = static_cast<size_t>(pb.K)
+            * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                    pb.N, data_type_t::s8));
+    ASSERT_GT(w13_capacity, w13_logical);
+    ASSERT_GT(w2_capacity, w2_logical);
+
+    std::vector<int8_t> padded_w13(experts * w13_capacity, int8_t {0x5a});
+    std::vector<int8_t> padded_w2(experts * w2_capacity, int8_t {0x5a});
+    routed_cache_flush_guard cache_guard;
+    for (size_t e = 0; e < experts; ++e) {
+        std::memcpy(padded_w13.data() + e * w13_capacity,
+                pb.w13.data() + e * w13_logical, w13_logical);
+        std::memcpy(padded_w2.data() + e * w2_capacity,
+                pb.w2.data() + e * w2_logical, w2_logical);
+    }
+
+    std::vector<int8_t> expected_w13(experts * w13_capacity);
+    std::vector<int8_t> expected_w2(experts * w2_capacity);
+    ASSERT_EQ(group_matmul_routed_moe_pack_weights(pb.w13.data(),
+                      expected_w13.data(), pb.E, 2 * pb.N, pb.K,
+                      data_type_t::s8, 4),
+            status_t::success);
+    ASSERT_EQ(group_matmul_routed_moe_pack_weights(pb.w2.data(),
+                      expected_w2.data(), pb.E, pb.K, pb.N, data_type_t::s8, 4),
+            status_t::success);
+
+    call.primary.weight = padded_w13.data();
+    call.primary.wei_buffer_capacity_bytes = w13_capacity;
+    call.primary.params.weight_cache_type = 2;
+    call.secondary.weight = padded_w2.data();
+    call.secondary.wei_buffer_capacity_bytes = w2_capacity;
+    call.secondary.params.weight_cache_type = 2;
+
+    const auto original_w13 = padded_w13;
+    const auto original_w2 = padded_w2;
+    grouped_call_probe probe;
+
+    auto &fail_registration = zendnnl::lowoha::matmul::routed_moe::test_api::
+            s_fail_inplace_registration_after_sentinel;
+    fail_registration.store(true, std::memory_order_relaxed);
+    probe.arm();
+    EXPECT_EQ(call.run(pb, pb.dst.data()), status_t::memory_bad_storage);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_EQ(padded_w13, original_w13);
+    EXPECT_EQ(padded_w2, original_w2);
+
+    // The failed registration rolled both maps back and left source bytes
+    // untouched, so an immediate retry can pack and execute normally.
+    probe.arm();
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected_output), 3e-3);
+    for (size_t e = 0; e < experts; ++e) {
+        EXPECT_EQ(std::memcmp(padded_w13.data() + e * w13_capacity,
+                          expected_w13.data() + e * w13_capacity, w13_capacity),
+                0);
+        EXPECT_EQ(std::memcmp(padded_w2.data() + e * w2_capacity,
+                          expected_w2.data() + e * w2_capacity, w2_capacity),
+                0);
+    }
+
+    // A cache hit must consume the caller-owned pack directly, without trying
+    // to interpret the mutated buffer as row-major weights.
+    std::fill(pb.dst.begin(), pb.dst.end(), 0);
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_LT(rel_mae(pb.dst, expected_output), 3e-3);
+
+    // A live process downgrade cannot revoke an existing caller-owned pack:
+    // the row-major image is gone until flush, so the matching routed layout
+    // must remain usable even though new in-place mutations are disabled.
+    cache_mode_guard.config.set_weight_cache(1);
+    std::fill(pb.dst.begin(), pb.dst.end(), 0);
+    probe.arm();
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected_output), 3e-3);
+    cache_mode_guard.config.set_weight_cache(2);
+
+    // Once caller storage is packed in place, no generic fallback may consume
+    // it as row-major weights. A later eligibility/configuration change must
+    // fail closed before entering grouped Matmul.
+    {
+        disable_routed_guard disable;
+        probe.arm();
+        EXPECT_EQ(call.run(pb, pb.dst.data()), status_t::memory_bad_storage);
+        EXPECT_FALSE(probe.grouped_ran());
+    }
+
+    // Flush must reconstruct the row-major image before dropping its sentinel;
+    // otherwise this same model would be packed a second time on reuse.
+    group_matmul_routed_moe_flush_weight_cache();
+    for (size_t e = 0; e < experts; ++e) {
+        EXPECT_EQ(std::memcmp(padded_w13.data() + e * w13_capacity,
+                          original_w13.data() + e * w13_capacity, w13_logical),
+                0);
+        EXPECT_EQ(std::memcmp(padded_w2.data() + e * w2_capacity,
+                          original_w2.data() + e * w2_capacity, w2_logical),
+                0);
+    }
+    std::fill(pb.dst.begin(), pb.dst.end(), uint16_t {0});
+    probe.arm();
+    ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+    EXPECT_FALSE(probe.grouped_ran());
+    EXPECT_LT(rel_mae(pb.dst, expected_output), 3e-3);
+}
+
+TEST_F(RoutedMoESuperset,
+        GenericFirstWeightCache2PreservesRowMajorForRoutedPacking) {
+    for (int64_t M : {int64_t {8}, int64_t {65}}) {
+        SCOPED_TRACE(::testing::Message() << "M=" << M);
+        routed_weight_cache_mode_guard cache_mode_guard;
+        group_matmul_routed_moe_flush_weight_cache();
+        reset_grp_matmul_caches();
+
+        moe_problem pb;
+        pb.build(M, 128, 64, 8, 2, 0xc4e0u + static_cast<uint32_t>(M));
+        const auto expected_output = reference_moe(pb);
+        da8w8_call call(pb);
+
+        const size_t experts = static_cast<size_t>(pb.E);
+        const size_t w13_logical = pb.w13.size() / experts;
+        const size_t w2_logical = pb.w2.size() / experts;
+        const size_t w13_capacity = static_cast<size_t>(2 * pb.N)
+                * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                        pb.K, data_type_t::s8));
+        const size_t w2_capacity = static_cast<size_t>(pb.K)
+                * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                        pb.N, data_type_t::s8));
+        std::vector<int8_t> padded_w13(experts * w13_capacity, int8_t {0x5a});
+        std::vector<int8_t> padded_w2(experts * w2_capacity, int8_t {0x5a});
+        routed_cache_flush_guard cache_guard;
+        for (size_t e = 0; e < experts; ++e) {
+            std::memcpy(padded_w13.data() + e * w13_capacity,
+                    pb.w13.data() + e * w13_logical, w13_logical);
+            std::memcpy(padded_w2.data() + e * w2_capacity,
+                    pb.w2.data() + e * w2_logical, w2_logical);
+        }
+        const auto original_w13 = padded_w13;
+        const auto original_w2 = padded_w2;
+
+        call.primary.weight = padded_w13.data();
+        call.primary.wei_buffer_capacity_bytes = w13_capacity;
+        call.primary.params.weight_cache_type = 2;
+        call.secondary.weight = padded_w2.data();
+        call.secondary.wei_buffer_capacity_bytes = w2_capacity;
+        call.secondary.params.weight_cache_type = 2;
+
+        grouped_call_probe probe;
+        {
+            disable_routed_guard disable;
+            ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+            EXPECT_TRUE(probe.grouped_ran());
+        }
+        EXPECT_LT(rel_mae(pb.dst, expected_output), 2e-2);
+        EXPECT_EQ(padded_w13, original_w13);
+        EXPECT_EQ(padded_w2, original_w2);
+
+        // The generic call may update process-wide grouped policy. Restore WC=2
+        // and prove the routed miss still sees untouched row-major weights.
+        cache_mode_guard.config.set_weight_cache(2);
+        cache_mode_guard.config.set_grp_auto_mixed_inplace(false);
+        std::fill(pb.dst.begin(), pb.dst.end(), uint16_t {0});
+        probe.arm();
+        ASSERT_EQ(call.run(pb, pb.dst.data()), status_t::success);
+        EXPECT_FALSE(probe.grouped_ran());
+        EXPECT_LT(rel_mae(pb.dst, expected_output), 3e-3);
+        EXPECT_NE(padded_w13, original_w13);
+        EXPECT_NE(padded_w2, original_w2);
+
+        group_matmul_routed_moe_flush_weight_cache();
+        reset_grp_matmul_caches();
+    }
+}
+
+TEST_F(RoutedMoESuperset, ConcurrentGenericReadSerializesFirstInplacePacking) {
+    routed_weight_cache_mode_guard cache_mode_guard;
+    moe_problem pb;
+    pb.build(8, 128, 64, 8, 2, 0xc4du);
+    const auto expected_output = reference_moe(pb);
+    da8w8_call call(pb);
+    call.primary.params.num_threads = 1;
+    call.secondary.params.num_threads = 1;
+
+    const size_t experts = static_cast<size_t>(pb.E);
+    const size_t w13_logical = pb.w13.size() / experts;
+    const size_t w2_logical = pb.w2.size() / experts;
+    const size_t w13_capacity = static_cast<size_t>(2 * pb.N)
+            * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                    pb.K, data_type_t::s8));
+    const size_t w2_capacity = static_cast<size_t>(pb.K)
+            * static_cast<size_t>(group_matmul_routed_moe_packed_row_bytes(
+                    pb.N, data_type_t::s8));
+    std::vector<int8_t> padded_w13(experts * w13_capacity, int8_t {0x5a});
+    std::vector<int8_t> padded_w2(experts * w2_capacity, int8_t {0x5a});
+    routed_cache_flush_guard cache_guard;
+    for (size_t e = 0; e < experts; ++e) {
+        std::memcpy(padded_w13.data() + e * w13_capacity,
+                pb.w13.data() + e * w13_logical, w13_logical);
+        std::memcpy(padded_w2.data() + e * w2_capacity,
+                pb.w2.data() + e * w2_logical, w2_logical);
+    }
+    const auto original_w13 = padded_w13;
+    const auto original_w2 = padded_w2;
+
+    call.primary.weight = padded_w13.data();
+    call.primary.wei_buffer_capacity_bytes = w13_capacity;
+    call.primary.params.weight_cache_type = 2;
+    call.secondary.weight = padded_w2.data();
+    call.secondary.wei_buffer_capacity_bytes = w2_capacity;
+    call.secondary.params.weight_cache_type = 2;
+
+    // Bias makes this call generic-ineligible for the routed kernel while
+    // preserving the same zero-bias numerical result.
+    std::vector<uint16_t> zero_b13(
+            static_cast<size_t>(pb.E * 2 * pb.N), uint16_t {0});
+    std::vector<uint16_t> zero_b2(
+            static_cast<size_t>(pb.E * pb.K), uint16_t {0});
+    da8w8_call generic_call = call;
+    generic_call.primary.bias = zero_b13.data();
+    generic_call.primary.params.dtypes.bias = data_type_t::bf16;
+    generic_call.secondary.bias = zero_b2.data();
+    generic_call.secondary.params.dtypes.bias = data_type_t::bf16;
+
+    auto &pause = zendnnl::lowoha::matmul::routed_moe::test_api::
+            s_pause_generic_with_storage_guard;
+    auto &generic_entered = zendnnl::lowoha::matmul::routed_moe::test_api::
+            s_generic_storage_guard_entered;
+    auto &capture_request = zendnnl::lowoha::matmul::routed_moe::test_api::
+            s_capture_inplace_pack_request;
+    auto &pack_requested = zendnnl::lowoha::matmul::routed_moe::test_api::
+            s_inplace_pack_requested;
+    struct hook_guard_t {
+        std::atomic<bool> &pause;
+        std::atomic<bool> &capture;
+        ~hook_guard_t() {
+            pause.store(false, std::memory_order_release);
+            capture.store(false, std::memory_order_relaxed);
+        }
+    } hook_guard {pause, capture_request};
+
+    generic_entered.store(false, std::memory_order_relaxed);
+    pack_requested.store(false, std::memory_order_relaxed);
+    capture_request.store(true, std::memory_order_relaxed);
+    pause.store(true, std::memory_order_release);
+
+    const auto wait_until = [](const std::atomic<bool> &flag) {
+        const auto deadline
+                = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!flag.load(std::memory_order_acquire)
+                && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        return flag.load(std::memory_order_acquire);
+    };
+
+    std::vector<uint16_t> generic_output(pb.dst.size(), uint16_t {0});
+    std::vector<uint16_t> fast_output(pb.dst.size(), uint16_t {0});
+    status_t generic_status = status_t::failure;
+    status_t fast_status = status_t::failure;
+    std::thread generic_thread([&]() {
+        generic_status = generic_call.run(pb, generic_output.data());
+    });
+
+    const bool saw_generic_guard = wait_until(generic_entered);
+    std::thread fast_thread;
+    bool saw_pack_request = false;
+    bool storage_stayed_raw = false;
+    if (saw_generic_guard) {
+        fast_thread = std::thread(
+                [&]() { fast_status = call.run(pb, fast_output.data()); });
+        saw_pack_request = wait_until(pack_requested);
+        storage_stayed_raw
+                = padded_w13 == original_w13 && padded_w2 == original_w2;
+    }
+
+    pause.store(false, std::memory_order_release);
+    generic_thread.join();
+    if (fast_thread.joinable()) { fast_thread.join(); }
+    capture_request.store(false, std::memory_order_relaxed);
+
+    ASSERT_TRUE(saw_generic_guard);
+    ASSERT_TRUE(saw_pack_request);
+    EXPECT_TRUE(storage_stayed_raw);
+    ASSERT_EQ(generic_status, status_t::success);
+    ASSERT_EQ(fast_status, status_t::success);
+    EXPECT_LT(rel_mae(generic_output, expected_output), 2e-2);
+    EXPECT_LT(rel_mae(fast_output, expected_output), 3e-3);
+    EXPECT_NE(padded_w13, original_w13);
+    EXPECT_NE(padded_w2, original_w2);
 }
 
 // The explicit DA8W8 superset call with gelu_and_mul must take the routed

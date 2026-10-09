@@ -409,6 +409,17 @@ status_t validate_static(const routed_moe_params &p) {
             == routed_moe_quant_t::sym_per_oc_w8a8_dynamic_per_token;
     const bool w4 = is_w4(p);
     if (!w8 && !w4) { return status_t::unimplemented; }
+    if (w4
+            && (p.gate_up_wei_buffer_capacity_bytes != 0
+                    || p.down_wei_buffer_capacity_bytes != 0)) {
+        return status_t::unimplemented;
+    }
+    if (p.gate_up_wei_buffer_capacity_bytes
+                    > static_cast<size_t>(std::numeric_limits<int64_t>::max())
+            || p.down_wei_buffer_capacity_bytes > static_cast<size_t>(
+                       std::numeric_limits<int64_t>::max())) {
+        return status_t::memory_bad_size;
+    }
     if (p.apply_router_weight_on_input != 0) { return status_t::unimplemented; }
     if (p.gate_up_bias != nullptr || p.down_bias != nullptr
             || p.bias_dt != data_type_t::none) {

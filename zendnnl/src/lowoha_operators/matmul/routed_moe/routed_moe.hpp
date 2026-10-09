@@ -62,10 +62,13 @@ struct group_matmul_projection_params {
     const void *weight = nullptr;
     /// Bytes the caller guarantees are writable at each expert weight slice.
     /// 0 (default) means exactly that expert's logical weight extent.  The
-    /// generic fallback forwards this to group Matmul.  The routed fast
-    /// executor uses a larger value as the source stride between experts while
-    /// producing its normal contiguous out-of-place pack; it does not yet
-    /// reorder into the caller's buffer.
+    /// generic fallback uses this as the expert stride; its DA8W8 descriptors
+    /// deliberately do not forward it as in-place permission.  For DA8W8 with
+    /// weight-cache type 2, the routed fast executor also uses a sufficiently
+    /// large value as explicit permission to replace each immutable expert
+    /// slice with its packed image in place; otherwise it retains the
+    /// out-of-place packed cache.  In both cases this value is the source
+    /// stride between experts.
     size_t wei_buffer_capacity_bytes = 0;
     int ldb = 0;
     const void *bias = nullptr;
@@ -336,6 +339,24 @@ struct routed_moe_params {
     // remain zero.
     int64_t gate_up_group_size = 0; ///< K elements per W13 scale group
     int64_t down_group_size = 0; ///< K elements per W2 scale group
+
+    // ── append-only writable weight capacity contract ───────────────
+    //
+    // A nonzero value opts the corresponding DA8W8 weight into in-place
+    // packing.  It is the writable capacity of ONE expert slice in bytes,
+    // not the whole tensor.  The expert stride above identifies where each
+    // slice starts.  The executor mutates the caller's storage only when both
+    // the logical source and packed image fit without crossing that stride;
+    // otherwise it preserves the source and uses its out-of-place cache.
+    //
+    // Until the cache is flushed, the weight is a routed packed image and must
+    // not be read as the original row-major tensor.  Cache metadata is
+    // registered before mutation; a later call that cannot use the matching
+    // routed layout fails with memory_bad_storage rather than falling back to
+    // a generic row-major implementation.  Cache flush reconstructs the
+    // logical row-major bytes before dropping that metadata.
+    size_t gate_up_wei_buffer_capacity_bytes = 0;
+    size_t down_wei_buffer_capacity_bytes = 0;
 };
 
 static_assert(sizeof(routed_moe_activation_t) == sizeof(int32_t),
@@ -392,6 +413,9 @@ ZENDNNL_API status_t group_matmul_routed_moe_validate(
  * maintain separate cache representations. This is their canonical shared
  * generation boundary: a host that reloads or frees a model must call it
  * first, so neither cache can retain a pack keyed by recycled storage.
+ * Caller-owned routed in-place packs are converted back to their logical
+ * row-major weights before their cache entries are removed; per-expert slack
+ * beyond the logical matrix has unspecified contents after the flush.
  *
  * Safe to call when nothing is cached.  This is a model-lifecycle operation:
  * callers must not invoke it concurrently with ANY routed-MoE execution, not
