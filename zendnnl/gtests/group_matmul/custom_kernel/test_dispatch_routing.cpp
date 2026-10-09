@@ -39,7 +39,11 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <random>
+#include <string>
 #include <vector>
 #include <type_traits>
 
@@ -47,6 +51,7 @@
 #include "common/op_config.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_custom_kernel.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "moe_test_utils.hpp"
 
 namespace {
@@ -74,6 +79,128 @@ struct ScalarRouteConfigGuard {
         omp_set_dynamic(old_dynamic);
     }
 };
+
+struct ScalarW4Problem {
+    int M;
+    int N;
+    int K;
+    int group_size;
+    int G;
+    int num_threads;
+
+    std::vector<bfloat16_t> src;
+    std::vector<int8_t> weight;
+    std::vector<float> src_scale;
+    std::vector<float> wei_scale;
+    matmul_params params;
+
+    ScalarW4Problem(int rows, int output_cols, int reduction, int scale_group,
+            int threads)
+        : M(rows)
+        , N(output_cols)
+        , K(reduction)
+        , group_size(scale_group)
+        , G(K / group_size)
+        , num_threads(threads)
+        , src(static_cast<size_t>(M) * K)
+        , weight((static_cast<size_t>(N) * K + 1) / 2, 0)
+        , src_scale(M, 0.0f)
+        , wei_scale(static_cast<size_t>(G) * N) {
+        for (size_t i = 0; i < src.size(); ++i) {
+            src[i] = bfloat16_t((static_cast<int>(i % 19) - 9) * 0.03125f);
+        }
+        for (int n = 0; n < N; ++n) {
+            for (int k = 0; k < K; ++k) {
+                const int value
+                        = static_cast<int>(
+                                  (static_cast<uint32_t>(k) * 3U
+                                          + static_cast<uint32_t>(n) * 5U)
+                                  % 15U)
+                        - 7;
+                const size_t index = static_cast<size_t>(n) * K + k;
+                uint8_t byte = static_cast<uint8_t>(weight[index >> 1]);
+                const uint8_t nibble
+                        = static_cast<uint8_t>(value) & uint8_t {0x0F};
+                byte = (index & 1U)
+                        ? static_cast<uint8_t>((byte & 0x0FU) | (nibble << 4))
+                        : static_cast<uint8_t>((byte & 0xF0U) | nibble);
+                weight[index >> 1] = static_cast<int8_t>(byte);
+            }
+        }
+        for (int g = 0; g < G; ++g) {
+            for (int n = 0; n < N; ++n) {
+                wei_scale[static_cast<size_t>(g) * N + n]
+                        = 0.004f + 0.00025f * static_cast<float>((g + n) % 7);
+            }
+        }
+
+        params.dtypes.src = data_type_t::bf16;
+        params.dtypes.wei = data_type_t::s4;
+        params.dtypes.dst = data_type_t::bf16;
+        params.dtypes.bias = data_type_t::none;
+        params.dtypes.compute = data_type_t::s8;
+        params.dynamic_quant = true;
+        params.mem_format_a = 'n';
+        params.mem_format_b = 'n';
+        params.weight_cache_type = 2;
+        params.num_threads = num_threads;
+        params.quant_params.src_scale.buff = src_scale.data();
+        params.quant_params.src_scale.dt = data_type_t::f32;
+        params.quant_params.src_scale.dims = {M, 1};
+        params.quant_params.wei_scale.buff = wei_scale.data();
+        params.quant_params.wei_scale.dt = data_type_t::f32;
+        params.quant_params.wei_scale.dims = {G, N};
+    }
+
+    status_t run(std::vector<bfloat16_t> &dst) {
+        zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
+        return zendnnl::lowoha::matmul::matmul_direct('r', false, true, M, N, K,
+                1.0f, src.data(), K, weight.data(), K, /*bias=*/nullptr, 0.0f,
+                dst.data(), N, /*is_weights_const=*/true, batch_params, params);
+    }
+};
+
+struct ScalarW4RouteShape {
+    int M;
+    int N;
+    int K;
+    int group_size;
+    int num_threads;
+};
+
+std::vector<ScalarW4RouteShape> make_scalar_w4_route_stress_shapes() {
+    constexpr int kCases = 400;
+    constexpr int kThreadCounts[] = {2, 4, 8, 16, 32, 64};
+    constexpr int kGroupSizes[] = {8, 16, 32, 64};
+    std::mt19937 rng(0xD34A8U);
+    std::vector<ScalarW4RouteShape> shapes;
+    shapes.reserve(kCases);
+    for (int i = 0; i < kCases; ++i) {
+        const int num_threads = kThreadCounts[i % 6];
+        const int group_size = kGroupSizes[(i / 6) % 4];
+        const int groups = 2 + static_cast<int>(rng() % 3);
+        const int K = group_size * groups;
+        const int extra_n_tiles
+                = (i % 5 == 0) ? 0 : static_cast<int>(rng() % 5);
+        const int N = custom_kernel::kNRMin * (2 * num_threads + extra_n_tiles);
+        const int M = (i % 2 == 0) ? 1 + static_cast<int>(rng() % 32)
+                                   : 33 + static_cast<int>(rng() % 96);
+        shapes.push_back({M, N, K, group_size, num_threads});
+    }
+    return shapes;
+}
+
+class CkDispatchRoutingW4EndToEnd
+    : public ::testing::TestWithParam<ScalarW4RouteShape> {};
+
+std::string scalar_w4_route_shape_name(
+        const ::testing::TestParamInfo<ScalarW4RouteShape> &info) {
+    const auto &s = info.param;
+    return "Case" + std::to_string(info.index) + "_M" + std::to_string(s.M)
+            + "_N" + std::to_string(s.N) + "_K" + std::to_string(s.K) + "_G"
+            + std::to_string(s.group_size) + "_T"
+            + std::to_string(s.num_threads);
+}
 
 TEST(CkDispatchRouting, ScalarRouteUsesEffectiveMatmulAlgo1) {
     CK_SKIP_IF_NO_BF16_ISA();
@@ -158,7 +285,72 @@ TEST(CkDispatchRouting, ScalarRouteUsesRequestedThreadTileCapacity) {
     }
 }
 
-TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndRejectsInt4) {
+TEST(CkDispatchRouting, ScalarW4RouteUsesThreadAndGroupBoundaries) {
+    CK_SKIP_IF_NO_INT8_ISA();
+
+    ScalarRouteConfigGuard guard;
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    float src_scale = 1.0f;
+    float wei_scale = 1.0f;
+    const auto make_params = [&](int M, int N, int K, int group_size) {
+        matmul_params params;
+        params.dtypes.src = data_type_t::bf16;
+        params.dtypes.wei = data_type_t::s4;
+        params.dtypes.dst = data_type_t::bf16;
+        params.dtypes.bias = data_type_t::none;
+        params.dtypes.compute = data_type_t::s8;
+        params.dynamic_quant = true;
+        params.mem_format_a = 'n';
+        params.mem_format_b = 'n';
+        params.weight_cache_type = 2;
+        params.quant_params.src_scale.buff = &src_scale;
+        params.quant_params.src_scale.dt = data_type_t::f32;
+        params.quant_params.src_scale.dims = {M, 1};
+        params.quant_params.wei_scale.buff = &wei_scale;
+        params.quant_params.wei_scale.dt = data_type_t::f32;
+        params.quant_params.wei_scale.dims = {K / group_size, N};
+        return params;
+    };
+    const auto routable
+            = [&](int M, int N, int K, int group_size, int num_threads) {
+        const matmul_params params = make_params(M, N, K, group_size);
+        return zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+                num_threads, 1, false, true, 1.0f, 0.0f, nullptr, K, true,
+                params);
+    };
+
+    constexpr int M = 8;
+    constexpr int K = 64;
+    constexpr int group_size = 32;
+    for (const int num_threads : {2, 4, 8, 16, 32, 64}) {
+        const int min_n = 2 * num_threads * custom_kernel::kNRMin;
+        EXPECT_TRUE(routable(M, min_n, K, group_size, num_threads))
+                << "exact W4 tile capacity rejected for threads="
+                << num_threads;
+        EXPECT_FALSE(routable(
+                M, min_n - custom_kernel::kNRMin, K, group_size, num_threads))
+                << "aligned but under-capacity W4 route accepted for threads="
+                << num_threads;
+        EXPECT_FALSE(routable(M, min_n + 1, K, group_size, num_threads))
+                << "non-32-aligned W4 N accepted for threads=" << num_threads;
+    }
+
+    for (const int candidate_group_size : {8, 16, 32, 64}) {
+        const int candidate_k = 2 * candidate_group_size;
+        EXPECT_TRUE(routable(
+                M, /*N=*/128, candidate_k, candidate_group_size, /*threads=*/2))
+                << "valid W4 group size rejected: " << candidate_group_size;
+    }
+}
+
+TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndW4) {
     CK_SKIP_IF_NO_INT8_ISA();
 
     ScalarRouteConfigGuard guard;
@@ -173,6 +365,7 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndRejectsInt4) {
     constexpr int M = 8;
     constexpr int N = 2048;
     constexpr int K = 256;
+    float src_scale = 1.0f;
     float wei_scale = 1.0f;
 
     matmul_params params;
@@ -201,12 +394,49 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsInt8AndRejectsInt4) {
 
     params.dtypes.wei = data_type_t::s4;
     params.quant_params.wei_scale.dims = {K / 32, N};
+    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    // W4A8 has exactly two supported source forms: dynamic BF16 and static,
+    // already-quantized S8. S8 with dynamic_quant=true is contradictory and
+    // must not be classified or routed as a W4A8 custom-kernel call.
+    params.dtypes.src = data_type_t::s8;
+    params.dynamic_quant = false;
+    params.quant_params.src_scale.buff = &src_scale;
+    EXPECT_TRUE(zendnnl::lowoha::matmul::is_w4a8_config(params));
+    EXPECT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    params.dynamic_quant = true;
+    EXPECT_FALSE(zendnnl::lowoha::matmul::is_w4a8_config(params));
     EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
             32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 
-    // Scalar routing is intentionally limited to INT8.  INT4 remains on its
-    // existing standard scalar path even when its group metadata is valid.
+    params.dtypes.src = data_type_t::bf16;
+    params.dynamic_quant = true;
+
+    // Group N-tile requires true per-group {G>1,N} metadata.
+    params.quant_params.wei_scale.dims = {1, N};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    // The S4 pack has no N-tail kernel.
+    params.quant_params.wei_scale.dims = {K / 32, N + 1};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N + 1,
+            K, 32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    // The S4 custom kernel consumes whole K-octets per scale group.
     params.quant_params.wei_scale.dims = {K / 4, N};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    params.quant_params.wei_scale.dims = {K / 32, N - 1};
+    EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
+            32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
+
+    int32_t src_zp = 0;
+    params.quant_params.wei_scale.dims = {K / 32, N};
+    params.quant_params.src_zp.buff = &src_zp;
     EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N, K,
             32, 1, false, true, 1.0f, 0.0f, nullptr, K, true, params));
 }
@@ -337,6 +567,106 @@ TEST(CkDispatchRouting, ScalarRouteAcceptsStaticU8S8PerTensor) {
     EXPECT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
             unsafe_k, 4, 1, false, true, 1.0f, 0.0f, nullptr, unsafe_k, true,
             params));
+}
+
+void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
+    ::reset_grp_matmul_caches();
+
+    SCOPED_TRACE(::testing::Message()
+            << "M=" << s.M << " N=" << s.N << " K=" << s.K << " group_size="
+            << s.group_size << " num_threads=" << s.num_threads);
+
+    ScalarRouteConfigGuard guard;
+    mt::AlgoEnvGuard group_auto(0);
+    mt::CustomKernelOverride group_ck_on(true);
+    mt::NTileStrategyOverride rounds(2);
+    guard.config.set_custom_kernel_route(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    ScalarW4Problem problem(s.M, s.N, s.K, s.group_size, s.num_threads);
+    ASSERT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', s.M, s.N,
+            s.K, s.num_threads, 1, false, true, 1.0f, 0.0f, nullptr, s.K, true,
+            problem.params));
+
+    std::vector<bfloat16_t> dst_route(
+            static_cast<size_t>(problem.M) * problem.N);
+    std::vector<bfloat16_t> dst_fallback(dst_route.size());
+
+    const char *mode = nullptr;
+    {
+        mt::GemmModeCaptureGuard capture;
+        ASSERT_EQ(problem.run(dst_route), status_t::success);
+        mode = zendnnl::lowoha::matmul::test_api ::
+                       s_last_group_matmul_direct_gemm_mode.load(
+                               std::memory_order_relaxed);
+    }
+    ASSERT_NE(mode, nullptr);
+    if (s.M <= zendnnl::lowoha::matmul::kDecodeMaxM) {
+        EXPECT_NE(std::strstr(mode, "custom"), nullptr)
+                << "dense W4 decode did not execute CK; mode=" << mode;
+    } else {
+        EXPECT_NE(std::strstr(mode, "flat_m_tile"), nullptr)
+                << "dense W4 prompt did not execute ALGO 2; mode=" << mode;
+    }
+
+    ::reset_grp_matmul_caches();
+    guard.config.set_custom_kernel_route(false);
+    ASSERT_EQ(problem.run(dst_fallback), status_t::success);
+
+    size_t mismatch_count = 0;
+    size_t first_mismatch = dst_route.size();
+    float first_actual = 0.0f;
+    float first_expected = 0.0f;
+    float max_abs_error = 0.0f;
+    for (size_t i = 0; i < dst_route.size(); ++i) {
+        const float actual = static_cast<float>(dst_route[i]);
+        const float expected = static_cast<float>(dst_fallback[i]);
+        const float abs_error = std::fabs(actual - expected);
+        const float tolerance = 0.05f + 0.05f * std::fabs(expected);
+        if (abs_error > max_abs_error) { max_abs_error = abs_error; }
+        if (!std::isfinite(actual) || !std::isfinite(expected)
+                || abs_error > tolerance) {
+            if (mismatch_count == 0) {
+                first_mismatch = i;
+                first_actual = actual;
+                first_expected = expected;
+            }
+            ++mismatch_count;
+        }
+    }
+    EXPECT_EQ(mismatch_count, 0u)
+            << "dense W4 routed result differs; first_index=" << first_mismatch
+            << " actual=" << first_actual << " expected=" << first_expected
+            << " max_abs_error=" << max_abs_error;
+}
+
+TEST_P(CkDispatchRoutingW4EndToEnd, RouteMatchesFallbackAndUsesExpectedPhase) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    check_scalar_w4_route_matches_fallback(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(DecodeAndPromptBoundaries, CkDispatchRoutingW4EndToEnd,
+        ::testing::Values(ScalarW4RouteShape {/*M=*/8, /*N=*/512, /*K=*/64,
+                                  /*group_size=*/32, /*num_threads=*/8},
+                ScalarW4RouteShape {/*M=*/33, /*N=*/256, /*K=*/64,
+                        /*group_size=*/32, /*num_threads=*/4}),
+        scalar_w4_route_shape_name);
+
+TEST(CkDispatchRoutingW4Stress, RandomDenseShapes) {
+    CK_SKIP_IF_NO_INT8_ISA();
+    const char *enabled = std::getenv("ZENDNNL_GTEST_W4_ROUTE_STRESS");
+    if (enabled == nullptr || std::strcmp(enabled, "1") != 0) {
+        GTEST_SKIP()
+                << "set ZENDNNL_GTEST_W4_ROUTE_STRESS=1 for the 400-case sweep";
+    }
+
+    for (const auto &shape : make_scalar_w4_route_stress_shapes()) {
+        check_scalar_w4_route_matches_fallback(shape);
+        if (::testing::Test::HasFatalFailure()) { return; }
+    }
 }
 
 TEST(CkDispatchRouting, ScalarInt8EndToEndMatchesFallbackAndRunsCk) {

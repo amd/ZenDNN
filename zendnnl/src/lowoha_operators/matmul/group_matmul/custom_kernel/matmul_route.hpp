@@ -74,6 +74,33 @@ inline bool matmul_custom_kernel_quant_supported(int M, int N, int K,
         return quant_param_is_per_channel(qp.wei_scale, N);
     }
 
+    if (custom_kernel::is_s4_variant(variant)) {
+        if (!is_w4a8_config(params) || (K % custom_kernel::kS4Octet) != 0) {
+            return false;
+        }
+        if (qp.dst_scale.buff != nullptr || qp.dst_zp.buff != nullptr)
+            return false;
+        if (!src_per_token || qp.wei_scale.buff == nullptr
+                || qp.src_zp.buff != nullptr || qp.wei_zp.buff != nullptr) {
+            return false;
+        }
+        if (!params.dynamic_quant && qp.src_scale.buff == nullptr) return false;
+
+        const bool src_scale_dt_supported = qp.src_scale.dt == data_type_t::f32
+                || qp.src_scale.dt == data_type_t::bf16;
+        const bool wei_scale_dt_supported = qp.wei_scale.dt == data_type_t::f32
+                || qp.wei_scale.dt == data_type_t::bf16;
+        const auto &wei_dims = qp.wei_scale.dims;
+        if (!src_scale_dt_supported || !wei_scale_dt_supported
+                || wei_dims.size() != 2 || wei_dims[0] <= 1
+                || wei_dims[1] != static_cast<int64_t>(N)
+                || static_cast<int64_t>(K) % wei_dims[0] != 0) {
+            return false;
+        }
+        const int64_t group_size = static_cast<int64_t>(K) / wei_dims[0];
+        return group_size > 0 && (group_size % custom_kernel::kS4Octet) == 0;
+    }
+
     return true;
 }
 
@@ -112,9 +139,6 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     if (!get_grp_matmul_custom_kernel()) return false;
     if (get_grp_n_tile_strategy() == 0) return false;
 
-    // Prompt-sized calls cannot reach CK through one-op grouped AUTO.
-    // The exact grouped-ALGO verdict is checked below after all cheap gates.
-    if (M > kDecodeMaxM) return false;
     if (!has_enough_single_expert_tiles(N, K, num_threads)) return false;
     if (M <= 0 || batch_count != 1 || transA || !is_weights_const) return false;
     if (layout != 'r' && layout != 'R') return false;
@@ -140,14 +164,20 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const bool bf16_variant
             = variant == custom_kernel::KernelVariant::kBF16_BF16_BF16;
     const bool int_variant = custom_kernel::is_int8_variant(variant);
-    if (!bf16_variant && !int_variant) return false;
+    const bool s4_variant = custom_kernel::is_s4_variant(variant);
+    if (!bf16_variant && !int_variant && !s4_variant) return false;
+    // BF16/INT8 scalar routing remains decode-only. W4A8 is the exception:
+    // one-op grouped AUTO deliberately sends its prompt form to ALGO 2.
+    if (M > kDecodeMaxM && !s4_variant) return false;
     if (!params.postop_.empty()
             && !(int_variant && !params.dynamic_quant
                     && params.dtypes.src == data_type_t::u8
                     && int8_ck_postops_supported(params, M, N)))
         return false;
     if (bf16_variant && !custom_kernel::dispatch_supported()) return false;
-    if (int_variant && !custom_kernel::avx512vnni_available()) return false;
+    if ((int_variant || s4_variant) && !custom_kernel::avx512vnni_available()) {
+        return false;
+    }
     if (!matmul_custom_kernel_quant_supported(M, N, K, variant, params))
         return false;
     if (params.packing.pack_format_b == 1) return false;
@@ -167,9 +197,9 @@ inline bool custom_kernel_routable(char layout, int M, int N, int K,
     const std::vector<int> grouped_n {N};
     const std::vector<int> grouped_k {K};
     const std::vector<matmul_params> grouped_params {params};
-    return select_grp_matmul_algo(grouped_layout, grouped_m, grouped_n,
-                   grouped_k, grouped_params, num_threads)
-            == 3;
+    const int selected = select_grp_matmul_algo(grouped_layout, grouped_m,
+            grouped_n, grouped_k, grouped_params, num_threads);
+    return selected == 3 || (s4_variant && selected == 2);
 }
 
 } // namespace matmul

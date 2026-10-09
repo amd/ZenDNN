@@ -351,7 +351,8 @@ inline bool is_w4a8_config(const matmul_params &params) {
     }
     // Runtime/pre-quantized path: source is already quantized to s8.
     if (params.dtypes.src == data_type_t::s8) {
-        return has_quant_scale_metadata(params.quant_params.src_scale)
+        return !params.dynamic_quant
+                && has_quant_scale_metadata(params.quant_params.src_scale)
                 && has_quant_scale_metadata(params.quant_params.wei_scale);
     }
     // Entry path: bf16 source with dynamic quant enabled.
