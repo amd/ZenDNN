@@ -583,22 +583,28 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
     guard.config.set_custom_kernel_route(true);
     guard.config.set_algo(static_cast<int32_t>(
             zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
-    guard.config.set_weight_cache(2);
+    // Keep the reference weights raw and independent from the route-on run.
+    guard.config.set_weight_cache(1);
     omp_set_dynamic(0);
 
-    ScalarW4Problem problem(s.M, s.N, s.K, s.group_size, s.num_threads);
+    ScalarW4Problem route_problem(s.M, s.N, s.K, s.group_size, s.num_threads);
+    ScalarW4Problem fallback_problem(
+            s.M, s.N, s.K, s.group_size, s.num_threads);
     ASSERT_TRUE(zendnnl::lowoha::matmul::custom_kernel_routable('r', s.M, s.N,
             s.K, s.num_threads, 1, false, true, 1.0f, 0.0f, nullptr, s.K, true,
-            problem.params));
+            route_problem.params));
 
+    constexpr float kOutputPoison = -123.0f;
     std::vector<bfloat16_t> dst_route(
-            static_cast<size_t>(problem.M) * problem.N);
-    std::vector<bfloat16_t> dst_fallback(dst_route.size());
+            static_cast<size_t>(route_problem.M) * route_problem.N,
+            bfloat16_t(kOutputPoison));
+    std::vector<bfloat16_t> dst_fallback(
+            dst_route.size(), bfloat16_t(kOutputPoison));
 
     const char *mode = nullptr;
     {
         mt::GemmModeCaptureGuard capture;
-        ASSERT_EQ(problem.run(dst_route), status_t::success);
+        ASSERT_EQ(route_problem.run(dst_route), status_t::success);
         mode = zendnnl::lowoha::matmul::test_api ::
                        s_last_group_matmul_direct_gemm_mode.load(
                                std::memory_order_relaxed);
@@ -614,9 +620,12 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
 
     ::reset_grp_matmul_caches();
     guard.config.set_custom_kernel_route(false);
-    ASSERT_EQ(problem.run(dst_fallback), status_t::success);
+    ASSERT_EQ(fallback_problem.run(dst_fallback), status_t::success);
 
     size_t mismatch_count = 0;
+    size_t unwritten_count = 0;
+    size_t nonfinite_count = 0;
+    size_t nonzero_count = 0;
     size_t first_mismatch = dst_route.size();
     float first_actual = 0.0f;
     float first_expected = 0.0f;
@@ -626,6 +635,11 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
         const float expected = static_cast<float>(dst_fallback[i]);
         const float abs_error = std::fabs(actual - expected);
         const float tolerance = 0.05f + 0.05f * std::fabs(expected);
+        if (expected == kOutputPoison) { ++unwritten_count; }
+        if (!std::isfinite(expected)) { ++nonfinite_count; }
+        if (std::isfinite(expected) && std::fabs(expected) > 1.0e-6f) {
+            ++nonzero_count;
+        }
         if (abs_error > max_abs_error) { max_abs_error = abs_error; }
         if (!std::isfinite(actual) || !std::isfinite(expected)
                 || abs_error > tolerance) {
@@ -637,6 +651,12 @@ void check_scalar_w4_route_matches_fallback(const ScalarW4RouteShape &s) {
             ++mismatch_count;
         }
     }
+    EXPECT_EQ(unwritten_count, 0u)
+            << "scalar W4 fallback returned success without writing dst";
+    EXPECT_EQ(nonfinite_count, 0u)
+            << "scalar W4 fallback produced non-finite output";
+    EXPECT_GT(nonzero_count, 0u)
+            << "scalar W4 fallback produced an all-zero output";
     EXPECT_EQ(mismatch_count, 0u)
             << "dense W4 routed result differs; first_index=" << first_mismatch
             << " actual=" << first_actual << " expected=" << first_expected

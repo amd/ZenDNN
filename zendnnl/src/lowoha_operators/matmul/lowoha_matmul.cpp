@@ -405,12 +405,22 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     const void *exec_src = src;
     int reordered_lda = lda;
     reorder_quant_buffers_t quant_buffers;
+    const bool scalar_dynamic_w4a8 = exec_params.packing.pack_format_b == 0
+            && exec_params.dynamic_quant
+            && exec_params.dtypes.src == data_type_t::bf16
+            && is_w4a8_config(exec_params);
     if (reorder_quantization_wrapper(exec_src, lda, reordered_lda,
                 src_type_size, exec_params, exec_batch_params, transA, M, K,
                 num_threads, quant_buffers)
             != status_t::success) {
         return status_t::failure;
     }
+    // The scalar reorder has materialized the dynamic BF16 source as S8. From
+    // this point onward it is the same representation as caller-prequantized
+    // W4A8 and must not retain the entry-state dynamic flag.
+    const bool w4a8_source_reordered = scalar_dynamic_w4a8 && exec_src != src
+            && exec_params.dtypes.src == data_type_t::s8;
+    if (w4a8_source_reordered) { exec_params.dynamic_quant = false; }
 
     // GGML unpack mutates weight pointer and exec_params mem_format / wei_scale.
     const void *exec_weight = weight;
@@ -445,7 +455,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
     // Dispatch to reference, BMM, or single matmul based on kernel / batch_count
     thread_guard tg(num_threads, omp_mt);
-    const int exec_lda = exec_params.dynamic_quant ? reordered_lda : lda;
+    const int exec_lda = (exec_params.dynamic_quant || w4a8_source_reordered)
+            ? reordered_lda
+            : lda;
 
     if (kernel == matmul_algo_t::reference) {
         reference_matmul_execute(layout, transA, transB, M, N, K, alpha,
