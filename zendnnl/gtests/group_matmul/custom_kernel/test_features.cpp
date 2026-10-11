@@ -102,6 +102,10 @@ TEST(CkFeatures, ResolvedBiasKindMatches) {
 TEST(CkFeatures, RepresentativeSubtileIsValid) {
     CK_SKIP_IF_NO_BF16_ISA();
     for (int N : {64, 128, 256, 512, 1536, 5760}) {
+        // Each case frees its weight storage, and the next one can be
+        // allocated at the same address, which the in-place registry still
+        // lists as a pack of the previous shape.
+        ::reset_grp_matmul_caches();
         ck_test::PrepCallCase c {};
         c.N = N;
         c.label = "subtile_valid";

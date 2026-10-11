@@ -49,6 +49,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "common/op_config.hpp"
@@ -499,6 +500,213 @@ TEST(GroupReorderModelE2E, PrepackedCkWeightsRejectedOnFusedAlgo5) {
     for (int e = 0; e < E; ++e) {
         zendnnl_aligned_free(pk13[e]);
         zendnnl_aligned_free(pk2[e]);
+    }
+}
+
+// ===============================================================================
+// Caller-prepacked CK weights on shapes the N-tile planner used to send to
+// Sequential, which runs every expert on AOCL from the weight buffer and so
+// read these VNNI bytes as a plain weight.
+//
+// Runs one ALGO 3 call over `E` caller-prepacked bf16 experts and checks every
+// output element against a double-precision reference on the raw weights.
+void expect_prepacked_ck_call_matches_reference(
+        int E, int M, int K, int N, int num_threads) {
+    using zendnnl::lowoha::matmul::group_matmul_direct;
+    using zendnnl::ops::matmul_algo_t;
+
+    std::vector<std::vector<bfloat16_t>> src(E), wei(E), dst(E);
+    std::vector<const void *> raw(E);
+    for (int e = 0; e < E; ++e) {
+        src[e].resize(static_cast<size_t>(M) * K);
+        wei[e].resize(static_cast<size_t>(K) * N);
+        dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        mt::fill_src(src[e], e, 0.5f);
+        mt::fill_wei1(wei[e], e, 0.1f);
+        raw[e] = wei[e].data();
+    }
+
+    std::vector<rdr::reorder_params_t> rp(E);
+    std::vector<void *> packed(E, nullptr);
+    for (int e = 0; e < E; ++e) {
+        rp[e].is_prepack = true;
+        rp[e].prepack.algo = matmul_algo_t::moe_custom_kernel;
+        rp[e].prepack.wei_dtype = data_type_t::bf16;
+        rp[e].prepack.src_dtype = data_type_t::bf16;
+        rp[e].prepack.K = K;
+        rp[e].prepack.N = N;
+        rp[e].prepack.ldb = N;
+        rp[e].prepack.transposed = false;
+        rp[e].prepack.pack_nr = 0;
+        const size_t bytes = rdr::weight_prepack_size(rp[e]);
+        ASSERT_GT(bytes, 0u);
+        packed[e] = zendnnl_aligned_alloc(64, bytes);
+        ASSERT_NE(packed[e], nullptr);
+    }
+    ASSERT_EQ(rdr::group_reorder(raw, packed, rp),
+            zendnnl::memory::status_t::success);
+
+    std::vector<char> layouts(E, 'r');
+    std::vector<bool> transAs(E, false), transBs(E, false), is_wc(E, true);
+    std::vector<int> Ms(E, M), Ns(E, N), Ks(E, K);
+    std::vector<float> alphas(E, 1.0f), betas(E, 0.0f);
+    std::vector<int> ldas(E, K), ldbs(E, N), ldcs(E, N);
+    std::vector<const void *> srcs(E), weis(E), no_bias(E, nullptr);
+    std::vector<void *> dsts(E);
+    std::vector<matmul_params> params(E);
+    for (int e = 0; e < E; ++e) {
+        srcs[e] = src[e].data();
+        weis[e] = packed[e];
+        dsts[e] = dst[e].data();
+        params[e].dtypes.src = data_type_t::bf16;
+        params[e].dtypes.wei = data_type_t::bf16;
+        params[e].dtypes.dst = data_type_t::bf16;
+        params[e].dtypes.bias = data_type_t::none;
+        params[e].mem_format_b = 'r';
+        params[e].lowoha_algo = matmul_algo_t::moe_custom_kernel;
+        params[e].num_threads = num_threads;
+    }
+    const status_t st = group_matmul_direct(layouts, transAs, transBs, Ms, Ns,
+            Ks, alphas, srcs, ldas, weis, ldbs, no_bias, betas, dsts, ldcs,
+            is_wc, params, /*moe_postop=*/nullptr);
+    EXPECT_EQ(st, status_t::success);
+
+    if (st == status_t::success) {
+        for (int e = 0; e < E; ++e) {
+            for (int m = 0; m < M; ++m) {
+                for (int n = 0; n < N; ++n) {
+                    double ref = 0.0;
+                    for (int k = 0; k < K; ++k) {
+                        ref += static_cast<double>(static_cast<float>(
+                                       src[e][static_cast<size_t>(m) * K + k]))
+                                * static_cast<float>(
+                                        wei[e][static_cast<size_t>(k) * N + n]);
+                    }
+                    const float got = static_cast<float>(
+                            dst[e][static_cast<size_t>(m) * N + n]);
+                    ASSERT_NEAR(got, ref, std::abs(ref) * 0.01 + 0.01)
+                            << "expert " << e << " row " << m << " col " << n;
+                }
+            }
+        }
+    }
+    for (int e = 0; e < E; ++e)
+        zendnnl_aligned_free(packed[e]);
+}
+
+// More experts than the planner holds run as slices on the custom kernel.
+// Before, the custom kernel declined the call and it failed closed.
+TEST(GroupReorderModelE2E, PrepackedCkWeightsPastPlanCapacity) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 not available";
+    }
+    reset_grp_matmul_caches();
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride ck_on(true);
+    expect_prepacked_ck_call_matches_reference(
+            /*E=*/300, /*M=*/2, /*K=*/64, /*N=*/64, /*num_threads=*/0);
+}
+
+// A shape too thin to split N-wise keeps the custom kernel under
+// N_TILE_STRATEGY=0.  Before, the planner sent it to Sequential, which
+// returned success with output computed from the packed bytes.  Two experts
+// on 16 threads leave a team of 8 per expert, and N=128 holds no full
+// decode tile.
+TEST(GroupReorderModelE2E, PrepackedCkWeightsThinNUnderAutoStrategy) {
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 not available";
+    }
+    reset_grp_matmul_caches();
+    mt::AlgoEnvGuard algo3(3);
+    mt::CustomKernelOverride ck_on(true);
+    mt::NTileStrategyOverride auto_strategy(0);
+    expect_prepacked_ck_call_matches_reference(
+            /*E=*/2, /*M=*/4, /*K=*/64, /*N=*/128, /*num_threads=*/16);
+}
+
+// Under AUTO with ZENDNNL_MATMUL_WEIGHT_CACHE=2 the prepack packs every expert
+// of a call in place, so it must skip a call that carries a caller-prepacked
+// expert, even an idle one, whose bytes would be packed a second time.
+TEST(GroupReorderModelE2E, IdlePrepackedCkWeightsKeepTheirBytes) {
+    using zendnnl::lowoha::matmul::group_matmul_direct;
+    using zendnnl::ops::matmul_algo_t;
+    if (!ck::dispatch_supported()) {
+        GTEST_SKIP() << "AVX-512 BF16 not available";
+    }
+    reset_grp_matmul_caches();
+    mt::AlgoEnvGuard auto_algo(0);
+    mt::CustomKernelOverride ck_on(true);
+    WeightCacheGuard wc_in_place(2);
+
+    // Experts 0 and 1 are raw and active, 2 and 3 prepacked and idle.
+    constexpr int E = 4, M = 8, K = 256, N = 256;
+    std::vector<std::vector<bfloat16_t>> src(E), wei(E), dst(E);
+    for (int e = 0; e < E; ++e) {
+        src[e].resize(static_cast<size_t>(M) * K);
+        wei[e].resize(static_cast<size_t>(K) * N);
+        dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        mt::fill_src(src[e], e, 0.5f);
+        mt::fill_wei1(wei[e], e, 0.1f);
+    }
+    std::vector<rdr::reorder_params_t> rp(2);
+    std::vector<const void *> raw {wei[2].data(), wei[3].data()};
+    std::vector<void *> packed(2, nullptr);
+    size_t bytes = 0;
+    for (auto &r : rp) {
+        r.is_prepack = true;
+        r.prepack.algo = matmul_algo_t::moe_custom_kernel;
+        r.prepack.wei_dtype = data_type_t::bf16;
+        r.prepack.src_dtype = data_type_t::bf16;
+        r.prepack.K = K;
+        r.prepack.N = N;
+        r.prepack.ldb = N;
+        r.prepack.transposed = false;
+        r.prepack.pack_nr = 0;
+        bytes = rdr::weight_prepack_size(r);
+        ASSERT_GT(bytes, 0u);
+    }
+    for (auto &p : packed) {
+        p = zendnnl_aligned_alloc(64, bytes);
+        ASSERT_NE(p, nullptr);
+    }
+    ASSERT_EQ(rdr::group_reorder(raw, packed, rp),
+            zendnnl::memory::status_t::success);
+    std::vector<std::vector<char>> image(2);
+    for (int i = 0; i < 2; ++i) {
+        const char *p = static_cast<const char *>(packed[i]);
+        image[i].assign(p, p + bytes);
+    }
+
+    std::vector<char> layouts(E, 'r');
+    std::vector<bool> transAs(E, false), transBs(E, false), is_wc(E, true);
+    std::vector<int> Ms {M, M, 0, 0}, Ns(E, N), Ks(E, K);
+    std::vector<float> alphas(E, 1.0f), betas(E, 0.0f);
+    std::vector<int> ldas(E, K), ldbs(E, N), ldcs(E, N);
+    std::vector<const void *> srcs(E), no_bias(E, nullptr);
+    std::vector<const void *> weis {
+            wei[0].data(), wei[1].data(), packed[0], packed[1]};
+    std::vector<void *> dsts(E);
+    std::vector<matmul_params> params(E);
+    for (int e = 0; e < E; ++e) {
+        srcs[e] = src[e].data();
+        dsts[e] = dst[e].data();
+        params[e].dtypes.src = data_type_t::bf16;
+        params[e].dtypes.wei = data_type_t::bf16;
+        params[e].dtypes.dst = data_type_t::bf16;
+        params[e].dtypes.bias = data_type_t::none;
+        if (e >= 2) {
+            params[e].mem_format_b = 'r';
+            params[e].lowoha_algo = matmul_algo_t::moe_custom_kernel;
+        }
+    }
+    EXPECT_EQ(group_matmul_direct(layouts, transAs, transBs, Ms, Ns, Ks, alphas,
+                      srcs, ldas, weis, ldbs, no_bias, betas, dsts, ldcs, is_wc,
+                      params, /*moe_postop=*/nullptr),
+            status_t::success);
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_EQ(std::memcmp(packed[i], image[i].data(), bytes), 0)
+                << "prepacked expert " << (i + 2);
+        zendnnl_aligned_free(packed[i]);
     }
 }
 

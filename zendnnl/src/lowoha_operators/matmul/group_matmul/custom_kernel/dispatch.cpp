@@ -120,6 +120,7 @@ void CallContext::reset() {
     enabled = false;
     variant = KernelVariant::kUnsupported;
     pack_nr = 0;
+    pack_in_place = false;
     NV = 0;
     max_mr = 0;
     subtile_cols = 0;
@@ -248,28 +249,6 @@ KernelVariant resolve_variant(data_type_t src, data_type_t wei, data_type_t dst,
     }
     return KernelVariant::kUnsupported;
 }
-
-// Helper to pick the kernel-store dtype (DstDt) from a resolved
-// variant.  Lives in this TU so dispatch.cpp's `fill_kfn_table` and
-// `dispatch_tile` agree with `resolve_variant` on the variant→DstDt
-// mapping (single source of truth: the table here).
-namespace {
-DstDt dst_dt_for_variant(KernelVariant v) noexcept {
-    switch (v) {
-        case KernelVariant::kBF16_BF16_BF16: return DstDt::kBf16;
-        case KernelVariant::kBF16_BF16_F32: return DstDt::kF32;
-        case KernelVariant::kS8_S8_BF16_SYM: return DstDt::kBf16;
-        case KernelVariant::kU8_S8_BF16_ASYM: return DstDt::kBf16;
-        case KernelVariant::kS8_S8_F32_SYM: return DstDt::kF32;
-        case KernelVariant::kU8_S8_F32_ASYM: return DstDt::kF32;
-        case KernelVariant::kU8_S8_U8_ASYM: return DstDt::kU8;
-        case KernelVariant::kF16_F16_F16: return DstDt::kF16;
-        case KernelVariant::kF16_F16_F32: return DstDt::kF32;
-        case KernelVariant::kS8_S4_BF16_SYM: return DstDt::kBf16;
-        default: return DstDt::kBf16; // unreachable on the success path
-    }
-}
-} // namespace
 
 // Pick the pack/microkernel NR for one (K, N) shape.  Env override
 // (from `get_grp_matmul_custom_kernel_nr()` in parallel_common.hpp)
@@ -453,7 +432,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         const std::vector<bool> &weights_prepacked, int group_size,
         int wei_scale_grp_stride,
         const std::vector<bool> &weights_aocl_prepacked, int32_t num_threads,
-        int32_t weight_cache_mode) {
+        int32_t weight_cache_mode, bool allow_in_place) {
 
     // Reset the full CallContext to defaults on entry.  Callers may
     // reuse a single context across calls (e.g. an OMP region that
@@ -605,30 +584,35 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     //       weight buffer (saves a packed buffer); int8 (compensation row
     //       makes the pack larger than the raw weight) and odd-K bf16 fall
     //       back to the out-of-place cache inside get_or_pack_weight_*.
-    // NOTE: reaching here with WC==2 means one of two things:
+    // NOTE: reaching here with WC==2 means one of three things:
     //   * pinned ALGO 3 + custom-kernel — each weight has a single consumer,
-    //     so the CK pack mutates it in place (`ck_in_place` below is true); or
-    //   * AUTO mixed in-place mode — the grouped dispatcher kept WC=2 but also
-    //     set `grp_auto_mixed_inplace`, reserving the one in-place mutation for
-    //     the AOCL full-weight (prompt) reorder.  CK decode must then stay
-    //     OUT-OF-PLACE (`ck_in_place` is forced false), otherwise CK would be a
-    //     second mutator of the shared buffer and corrupt it.
-    // (AUTO WITHOUT the mixed flag has already downgraded WC 2→1 upstream, so
-    // it never reaches here with WC==2.)
+    //     so the CK pack mutates it in place (`ck_in_place` below is true);
+    //   * an AUTO call holding the custom-kernel in-place licence — a BF16
+    //     MoE call whose phases both run ALGO 3 and whose AOCL reorders are
+    //     capped to out-of-place, so the CK pack is again the single mutator
+    //     (`ck_in_place` is true); or
+    //   * any other AUTO call in mixed in-place mode — the grouped dispatcher
+    //     kept WC=2 but also set `grp_auto_mixed_inplace`, reserving the one
+    //     in-place mutation for the AOCL full-weight (prompt) reorder.  CK
+    //     decode must then stay OUT-OF-PLACE (`ck_in_place` is false),
+    //     otherwise CK would be a second mutator of the shared buffer and
+    //     corrupt it.
+    // (Any other AUTO run has already downgraded WC 2→1 upstream, so it never
+    // reaches here with WC==2.)
     auto &matmul_config = zendnnl::common::matmul_config_t::instance();
     const int wc_mode = weight_cache_mode >= 0
             ? weight_cache_mode
             : matmul_config.get_weight_cache();
     const bool cache_off = (wc_mode == 0);
-    // AUTO mixed-in-place mode (grp ALGO 0 + WC=2 + prepack/cross_warm):
-    // exactly ONE layout may mutate the shared weight buffer, and that
-    // owner is the AOCL full-weight (prompt) reorder.  The CK pack must
-    // therefore stay OUT-OF-PLACE here even though WC==2, otherwise CK
-    // (decode) would be a second mutator and the two layouts would corrupt
-    // each other.  Pinned ALGO 3 + CK (env_algo==3, mixed flag false) keeps
-    // true in-place as before.
-    const bool ck_in_place
-            = (wc_mode == 2) && !matmul_config.get_grp_auto_mixed_inplace();
+    // The caller decides whether this pack may mutate the weight
+    // (`allow_in_place`): `flat_n_tile` refuses it when its fallback needs
+    // the raw weight, and in AUTO mixed in-place mode (grp ALGO 0 + WC=2 +
+    // prepack/cross_warm), where exactly ONE layout may mutate the shared
+    // buffer and that owner is the AOCL full-weight (prompt) reorder, unless
+    // the call holds the custom-kernel in-place licence.  Pinned ALGO 3 + CK
+    // (env_algo==3, mixed flag false) keeps true in-place as before.
+    const bool ck_in_place = (wc_mode == 2) && allow_in_place;
+    out.pack_in_place = ck_in_place;
     if (cache_off && s_refuse_log) {
         apilog_verbose(
                 "[GRP_MATMUL.CK NOCACHE] "
@@ -945,9 +929,9 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         out.wei_scale_grp_stride = wei_scale_grp_stride;
     }
     // AUTO deep-K K-blocking: engage for the single-expert (dense-FFN)
-    // decode-class call only (see `is_dense_ffn_decode` — the single scope
-    // predicate shared with Rule 0.45 routing and the adaptive N-tile
-    // sizer).  MoE (num_ops>1) and prompt (m_max>kDecodeMaxM) leave this
+    // decode-class call only (see `is_dense_ffn_decode`, the decode-gated
+    // twin of the adaptive N-tile sizer's scope predicate).  MoE
+    // (num_ops>1) and prompt (m_max>kDecodeMaxM) leave this
     // false; the bf16 / act=none / bias-free / deep-K / M>max_mr guards in
     // dispatch_tile still apply, so only W2 decode actually K-blocks.
     out.kblock_auto = is_dense_ffn_decode(num_ops, m_max);
@@ -1249,7 +1233,7 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
             }
             // Only the no-cache (WC=0) path hands back a caller-owned buffer to
             // free.  The in-place (WC=2) path returns the caller's own weight
-            // pointer (cached behind a nullptr sentinel) — NOT owned here.
+            // pointer (cached as an `in_place` entry) — NOT owned here.
             if (cache_off) { out.owned_packed_ptrs[i] = out.packed_ptrs[i]; }
         }
         if (per_expert_subtile) {

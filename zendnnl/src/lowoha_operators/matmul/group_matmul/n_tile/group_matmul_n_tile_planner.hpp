@@ -171,27 +171,12 @@ inline constexpr int kDecodeNTileInt8 = 256;
 /// helpers (`fill_ntile_expert_order`) and the round-info stack
 /// array in `execute_rounds` (group_matmul_n_tile.cpp).
 ///
-/// Auto-select uses this constant in **rule 0** — the top-level
-/// capacity carve-out applied BEFORE the three policy rules.  Any
-/// shape with `num_ops > kNTilePlanMaxExperts` (regardless of how it
-/// would otherwise be routed by rules 1-3) goes to ALGO 5 (per-expert
-/// parallel) because the N-tile planner's R3 gate would silently
-/// fall back to its Sequential strategy (one expert at a time, full
-/// team each).  ALGO 5 instead fans `num_ops` over the OMP team and
-/// lets each thread own a slice of experts serially, with no
-/// fixed-size lookup arrays of its own, so it is the better fit for
-/// many-experts decode-class shapes.
-///
-/// The carve-out catches both rule-1-territory shapes
-/// (`num_ops >= num_threads`, e.g., 300 experts on 128 threads) and
-/// the rare rule-3-decode-territory shape
-/// (`kNTilePlanMaxExperts < num_ops < num_threads`, e.g., 300
-/// experts on a 512-thread host).
-///
-/// Bump only if `GroupNTilePlan` switches to heap-allocated arrays
-/// (or callers start shipping > 256-expert deployments where the
-/// N-tile planner outperforms ALGO 5 — neither situation exists
-/// today).
+/// `flat_n_tile` runs a BF16 MoE call, or one whose weights only the
+/// custom kernel can read, with more experts as consecutive slices of at
+/// most this many, so neither the planner nor the custom kernel (whose
+/// `CallContext::kMaxExperts` must be at least this) sees a larger count
+/// from it.  The planner's R3 guard sends any other larger call to
+/// Sequential, and AUTO's rule 0 sends such a call to ALGO 1 above it.
 inline constexpr int kNTilePlanMaxExperts = 256;
 
 // =====================================================================
@@ -220,6 +205,10 @@ inline constexpr int kNTilePlanMaxExperts = 256;
 //                        the auto-mirror gate is normally inactive
 //                        and ALGO 3 runs the Rounds path on every
 //                        shape that survives the structural gates.
+//                        A call that must stay on the custom kernel
+//                        (a BF16 MoE call, or weights only the kernel
+//                        can read) skips it, as it skips
+//                        `!ntile_viable`.
 //
 // The auto-mirror replays auto-select's three-rule tree faithfully,
 // so Rule 1 (`num_ops ≥ num_threads → ALGO 3`) keeps many-expert
@@ -359,10 +348,7 @@ struct GroupNTilePlan {
     // more experts skip the sort (perf optimisation, not a correctness
     // requirement) and fall through to input-order assignment.
     //
-    // Value lives in `group_matmul_parallel_common.hpp` as
-    // `kNTilePlanMaxExperts` so the auto-selector can route huge-
-    // experts workloads to ALGO 5 without pulling this header.  Keep
-    // the two in sync — the alias here is the planner-facing name.
+    // The alias is the planner-facing name of `kNTilePlanMaxExperts`.
     static constexpr int kMaxExperts = kNTilePlanMaxExperts;
     std::array<int, kMaxExperts> expert_order {};
     int expert_order_size = 0;

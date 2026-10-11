@@ -24,6 +24,7 @@
 #include <sstream>
 #include <vector>
 
+#include "group_matmul/custom_kernel/pack.hpp"
 #include "group_matmul/detect_internal_alloc.hpp"
 #include "group_matmul/group_matmul_direct.hpp"
 #include "group_matmul/group_matmul_parallel_common.hpp"
@@ -1447,6 +1448,14 @@ status_t group_matmul_direct(const std::vector<char> &layout,
     // were already rejected by the guards above.
     if (src.size() == 1 && !single_expert_parallel) {
         // ── Sequential chain dispatch ─────────────────────────────────────
+        // Every op runs on AOCL, so a weight the custom kernel packed in
+        // place fails the chain.
+        if (custom_kernel::any_weight_packed_in_place(weight, M)) {
+            log_error(
+                    "group_matmul_direct: a sequential chain cannot read a "
+                    "weight the custom kernel packed in place");
+            return status_t::failure;
+        }
         static unsigned int auto_version = get_auto_tuner_ver();
         for (size_t i = 0; i < num_ops; ++i) {
             matmul_batch_params_t bp;

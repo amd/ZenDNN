@@ -22,12 +22,16 @@
 
 #include "group_matmul_test_helpers.hpp"
 
+#include <cstdint>
+#include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <omp.h>
 
 #include "gtest_utils.hpp"
+#include "moe_test_utils.hpp"
 
 // ── GroupQuantMatmulType constructor (was gtest_utils.cpp:242-304) ─────────
 // GroupQuantMatmulType constructor — constrained-by-construction params for the
@@ -263,5 +267,72 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
     } catch (const std::exception &e) {
         log_error("group_matmul_kernel_test: ", e.what());
         return status_t::failure;
+    }
+}
+
+// ── expect_prompt_tile_matches_rounds ──────────────────────────────────────
+namespace {
+std::vector<std::vector<uint8_t>> output_bytes(
+        const std::vector<tensor_t> &outputs) {
+    std::vector<std::vector<uint8_t>> bytes(outputs.size());
+    for (size_t e = 0; e < outputs.size(); ++e) {
+        const auto *p = static_cast<const uint8_t *>(
+                outputs[e].get_raw_handle_const());
+        bytes[e].assign(p, p + outputs[e].get_buffer_sz_bytes());
+    }
+    return bytes;
+}
+} // namespace
+
+void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
+        std::vector<tensor_t> &inputs, std::vector<tensor_t> &weights,
+        std::vector<tensor_t> &biases, std::vector<tensor_t> &outputs,
+        const grp_matmul_gated_act_params *gated_act,
+        const std::vector<int> &active_rows, data_type_t dq_compute) {
+    using namespace moe_test_utils;
+    namespace pt = zendnnl::lowoha::matmul::prompt_tile;
+    AlgoEnvGuard algo(3);
+    CustomKernelOverride ck_on(true);
+    NTileStrategyOverride rounds(2);
+    pt::test_api::ScopedOverride mb_knob(pt::kMb, mb), ns_knob(pt::kNs, ns);
+
+    const auto initial = output_bytes(outputs);
+    std::vector<std::vector<uint8_t>> got[2];
+    std::string mode[2];
+    long served[2] = {0, 0};
+    for (int run = 0; run < 2; ++run) {
+        pt::test_api::ScopedOverride enable(pt::kEnable, run == 0 ? 0 : mask);
+        GemmModeCaptureGuard capture;
+        reset_grp_matmul_caches();
+        for (size_t e = 0; e < outputs.size(); ++e)
+            std::memcpy(outputs[e].get_raw_handle_unsafe(), initial[e].data(),
+                    initial[e].size());
+        const long served0 = pt::test_api::s_calls_served.load();
+        ASSERT_EQ(group_matmul_kernel_test(inputs, weights, biases, outputs,
+                          matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
+                          /*moe_postop=*/nullptr, gated_act,
+                          /*pack_format_b=*/ {}, active_rows, dq_compute),
+                status_t::success)
+                << "run " << run;
+        served[run] = pt::test_api::s_calls_served.load() - served0;
+        const char *m = zendnnl::lowoha::matmul::test_api ::
+                                s_last_group_matmul_direct_gemm_mode.load(
+                                        std::memory_order_relaxed);
+        mode[run] = m != nullptr ? m : "";
+        got[run] = output_bytes(outputs);
+    }
+    ASSERT_NE(mode[0].find("_custom"), std::string::npos)
+            << "the reference ran off the custom kernel: " << mode[0];
+    ASSERT_EQ(mode[0].find("ptile"), std::string::npos) << mode[0];
+    ASSERT_EQ(served[0], 0);
+    ASSERT_NE(mode[1].find("flat_n_tile_ptile_"), std::string::npos)
+            << "prompt tile executor did not engage: " << mode[1];
+    ASSERT_EQ(served[1], 1);
+    for (size_t e = 0; e < outputs.size(); ++e) {
+        if (active_rows.empty() || active_rows[e] > 0) {
+            EXPECT_TRUE(got[0][e] != initial[e])
+                    << "reference left expert " << e << " unwritten";
+        }
+        EXPECT_TRUE(got[0][e] == got[1][e]) << "expert " << e << " differs";
     }
 }

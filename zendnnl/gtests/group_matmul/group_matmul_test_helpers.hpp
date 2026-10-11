@@ -32,6 +32,9 @@
 ///   * `group_matmul_kernel_test(…)`  — dispatch shim that wraps vectors
 ///                                       of (input, weight, bias, output)
 ///                                       tensors into `group_matmul_direct`.
+///   * `expect_prompt_tile_matches_rounds(…)` — runs one such call on the
+///                                       round and prompt tile executors
+///                                       and expects identical outputs.
 ///
 /// Consumers:
 ///   * `gtest_main.cpp` — the only file outside `group_matmul/` that
@@ -129,6 +132,21 @@ status_t group_matmul_kernel_test(std::vector<tensor_t> &inputs,
         const grp_matmul_gated_act_params *gated_act = nullptr,
         const std::vector<int> &pack_format_b = {},
         const std::vector<int> &active_rows = {},
+        data_type_t dq_compute = data_type_t::s8);
+
+/** @fn expect_prompt_tile_matches_rounds
+ *  @brief Runs one `group_matmul_kernel_test` call on ALGO 3's custom kernel
+ *  with the N-tile strategy pinned to rounds: first on the round executor,
+ *  then on the prompt tile executor with family bits `mask` (see
+ *  `ZENDNNL_GRP_MATMUL_PROMPT_TILE`) and forced `mb` / `ns` blocks.  Expects
+ *  the tile run to engage the executor and to write `outputs` bit for bit
+ *  as the round run did.
+ */
+void expect_prompt_tile_matches_rounds(int mask, int mb, int ns,
+        std::vector<tensor_t> &inputs, std::vector<tensor_t> &weights,
+        std::vector<tensor_t> &biases, std::vector<tensor_t> &outputs,
+        const grp_matmul_gated_act_params *gated_act,
+        const std::vector<int> &active_rows,
         data_type_t dq_compute = data_type_t::s8);
 
 #endif // ZENDNNL_GTESTS_GROUP_MATMUL_TEST_HELPERS_HPP

@@ -86,8 +86,8 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &transB,
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves,
-        WarmDtypeFamily dtype_family, int group_size,
-        int32_t weight_cache_type) {
+        WarmDtypeFamily dtype_family, int group_size, int32_t weight_cache_type,
+        bool in_place) {
 
     // Every exit reports: a silent bail is indistinguishable from
     // "warmed nothing" in the PREPACK summary, which is how a missing
@@ -141,7 +141,7 @@ status_t warm_pack_all_custom_kernel_experts(
     // (`prepack_aocl_dlp.cpp::warm_pack_all_aocl_dlp_experts`) and the
     // library-wide weight-cache convention: when
     // `matmul_config_t::get_weight_cache()` (driven by the env knob
-    // `ZENDNNL_MATMUL_WEIGHT_CACHE`) is not 1, no path consults the
+    // `ZENDNNL_MATMUL_WEIGHT_CACHE`) is 0, no path consults the
     // LRU pack cache, so warming would be a pure waste of CPU + memory
     // and would also leave behind cache entries the dispatcher must
     // not read (the CK pack arena is keyed on raw weight pointer; a
@@ -149,7 +149,7 @@ status_t warm_pack_all_custom_kernel_experts(
     // WEIGHT_CACHE=0 specifically to prevent a stale pointer hit from
     // reading freed weights).  The matching runtime gate lives in
     // `custom_kernel/dispatch.cpp::prepare_for_call`, which under
-    // `weight_cache_type != 1` keeps CK ENGAGED but switches the per-
+    // `weight_cache_type == 0` keeps CK ENGAGED but switches the per-
     // expert pack call to `get_or_pack_weight_bf16(..., disable_cache=
     // true)` — allocating a fresh aligned buffer, packing, recording
     // it in `CallContext::owned_packed_ptrs[]`, and freeing it after
@@ -171,13 +171,14 @@ status_t warm_pack_all_custom_kernel_experts(
     const int32_t effective_cache_type = weight_cache_type >= 0
             ? effective_weight_cache_type(weight_cache_type)
             : matmul_config_t::instance().get_weight_cache();
-    // Warm the (always out-of-place) CK pack arena when the runtime will
-    // consult it: WC==1 (normal out-of-place), OR WC==2 under the grouped
-    // AUTO mixed-in-place mode (where CK decode is forced out-of-place and
-    // must be PRE-warmed from the raw weights BEFORE the AOCL full-weight
-    // prompt reorder mutates the buffer in place — see prepack.cpp).  The
-    // CK pack here is unconditionally out-of-place (no `in_place` arg to
-    // get_or_pack_weight_*), so it never mutates the weight.
+    // Warm the CK pack arena when the runtime will consult it: WC==1 (normal
+    // out-of-place), OR WC==2 under a grouped AUTO mode.  Under mixed
+    // in-place CK decode is forced out-of-place and must be PRE-warmed from
+    // the raw weights BEFORE the AOCL full-weight prompt reorder mutates the
+    // buffer in place (see prepack.cpp); `in_place` is then false, so this
+    // pack never mutates the weight.  Under custom-kernel in-place the pack
+    // is the weight's only layout, and `in_place` writes a bf16 pack into
+    // the caller's buffer exactly as the runtime would.
     if (!should_warm_weight_cache(effective_cache_type)) {
         return bail("weight_cache_disabled");
     }
@@ -292,7 +293,8 @@ status_t warm_pack_all_custom_kernel_experts(
                     static_cast<const bfloat16_t *>(weight[i]), K[i], N[i],
                     ldb[i], pack_nr, transB_c[i] != 0,
                     /*interleave_split_halves=*/interleave_split_halves,
-                    &packed_ignored, &was_hit);
+                    &packed_ignored, &was_hit, /*disable_cache=*/false,
+                    in_place);
         }
 
         if (pst == status_t::success) {

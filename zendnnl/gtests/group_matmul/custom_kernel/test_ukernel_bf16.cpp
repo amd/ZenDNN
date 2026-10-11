@@ -358,15 +358,11 @@ TEST_P(CkUkernelCorrectness, MatchesScalarRef) {
 
     // Use FOUR experts so plan_group_n_tile keeps the call on the
     // ntile path (DecodeD / FewExperts / ManyExperts).  Combined with
-    // `params.num_threads = kCkTestThreads = 4` set below, this gives
-    // `num_ops == num_threads` → auto-select Rule 1 fires inside
-    // `auto_select_would_pick_algo1`, the auto-mirror gate returns
-    // false, and the planner builds a real ntile plan that exercises
-    // `GroupNTileContext::do_tile` / `custom_kernel::dispatch_tile`.
-    // (Without the thread pin, num_ops < num_threads on a typical CI
-    // host would trip the auto-mirror Rule 2 gate — `num_ops <= 8`
-    // → Sequential — bypassing the BF16 microkernel and silently
-    // running the AOCL DLP fallback for every case in the matrix.)
+    // `params.num_threads = kCkTestThreads = 4` set below, the planner
+    // builds a real ntile plan that exercises
+    // `GroupNTileContext::do_tile` / `custom_kernel::dispatch_tile`
+    // (a Sequential plan would bypass the BF16 microkernel and silently
+    // run the AOCL DLP fallback for every case in the matrix).
     // Four experts also keep `group_matmul_direct` on the parallel-
     // mode path (`src.size() == num_ops`); sequential-chain mode
     // rejects gated_act and would refuse before reaching the kernel.

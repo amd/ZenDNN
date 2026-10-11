@@ -377,11 +377,17 @@ expert_parallel_result try_expert_parallel_pipeline(
         // it requires a per-group `{M, G>1}` source scale, which
         // `classify_pipeline_half` has already declined above (per-token
         // only).
+        //
+        // A buffer an earlier in-place custom-kernel pack rewrote is still
+        // marked 'n' but holds the CK image, so it is screened the same way.
         for (const auto *h : {&w13, &w2}) {
             if (h->params[i].mem_format_b != 'n') {
                 return expert_parallel_result::declined;
             }
             if (h->params[i].packing.pack_format_b != 0) {
+                return expert_parallel_result::declined;
+            }
+            if (custom_kernel::weight_packed_in_place(h->weight[i])) {
                 return expert_parallel_result::declined;
             }
         }

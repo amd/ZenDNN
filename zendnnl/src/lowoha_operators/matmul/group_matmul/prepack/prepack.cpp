@@ -52,6 +52,20 @@ namespace {
 
 inline bool ck_eligible_f16(const PrepackParams &p);
 
+/// The runtime's `grp_matmul_auto_algo3_call` for a prepack of
+/// `scheduling_algo`: the prelude skips caller-prepacked weights, so this is a
+/// raw bf16 layer of several experts.  With both phases unpinned, only a call
+/// ALGO 3 cannot serve runs another ALGO, and it follows the rules of every
+/// other call.
+inline bool auto_algo3_layer(const PrepackParams &p, int scheduling_algo) {
+    const bool layer
+            = grp_matmul_auto_algo3_layer(p.src_dtype == data_type_t::bf16
+                            && p.wei_dtype == data_type_t::bf16,
+                    p.num_ops_total);
+    return layer
+            && (scheduling_algo == 3 || !grp_matmul_auto_algo3_only(layer));
+}
+
 /// True when mixed in-place mode applies to THIS weight buffer.
 ///
 /// Three families mutate: bf16, f16 whose decode CK layout is warmable, and a
@@ -79,6 +93,12 @@ inline bool ck_eligible_f16(const PrepackParams &p);
 /// allocation for its lifetime, so neither can flip mid-run the way a per-call
 /// configuration could.
 ///
+/// The ALGO 3 prepack of a BF16 layer of several experts that AUTO keeps on
+/// ALGO 3 (`grp_matmul_auto_algo3_only`) answers false: the layer's one
+/// in-place layout is the custom-kernel pack, written under the pack mutex,
+/// and every AOCL DLP layout of it stays out-of-place.  Its dtypes and expert
+/// pool are as fixed as the buffer.
+///
 /// Scope is GROUPED MATMUL ONLY, and deliberately kept local to this file:
 /// `is_grp_auto_mixed_inplace_active()` already requires the
 /// `grp_auto_mixed_inplace` flag that only the grouped dispatcher sets, so
@@ -91,8 +111,11 @@ inline bool ck_eligible_f16(const PrepackParams &p);
 /// in-place mutation; narrowing it there would make the CK pack a SECOND
 /// mutator of the same buffer.  Use this only where the question is
 /// "may I mutate this weight in place?".
-inline bool mixed_inplace_for_wei(const PrepackParams &p) {
+inline bool mixed_inplace_for_wei(const PrepackParams &p, int scheduling_algo) {
     if (!is_grp_auto_mixed_inplace_active()) { return false; }
+    if (grp_matmul_auto_algo3_only(auto_algo3_layer(p, scheduling_algo))) {
+        return false;
+    }
     if (p.wei_dtype == data_type_t::bf16) { return true; }
     if (p.wei_dtype == data_type_t::f16) { return ck_eligible_f16(p); }
     return p.wei_buffer_capacity_bytes > 0;
@@ -324,6 +347,9 @@ inline size_t fingerprint(const PrepackParams &p, int scheduling_algo) {
                                         .get_grp_auto_mixed_inplace()
                             ? 1u
                             : 0u));
+    // Whether this call's custom-kernel pack goes in place decides where the
+    // warm puts it.
+    s = mix_hash(s, static_cast<size_t>(p.ck_in_place ? 1u : 0u));
     return s;
 }
 
@@ -630,11 +656,13 @@ inline PreludeResult prelude(const PrepackParams &p, int scheduling_algo) {
     // that can actually be mutated (bf16, CK-warmable f16, or one whose owner
     // declared a capacity) needs the warm latch; everything else takes the plain
     // out-of-place path below and keeps its thread-local memo fast path.
-    const bool mixed_inplace = mixed_inplace_for_wei(p);
+    const bool mixed_inplace = mixed_inplace_for_wei(p, scheduling_algo);
 
     if (!mixed_inplace) {
         // Out-of-place fast path: insert-and-go.  A concurrent skipper may
-        // compute lazily; nothing shared is mutated, so there is no race.
+        // compute lazily.  Only a custom-kernel in-place pack
+        // (`p.ck_in_place`) mutates the weight, under the pack mutex, so a
+        // custom-kernel reader finds the raw weight or the finished image.
         if (already_warmed(p, scheduling_algo)) {
             r.skip_reason = PreludeSkipReason::fingerprint_already;
             return r;
@@ -952,7 +980,8 @@ inline custom_kernel::PackProbeStats warm_custom(const PrepackParams &p) {
     // `flat_n_tile` derives at runtime (K / wei_scale.dims[0]).
     custom_kernel::warm_pack_all_custom_kernel_experts(*p.weight, *p.K, *p.N,
             *p.ldb, *p.transB, iwc, p.num_ops_total, st,
-            interleave_split_halves, family, p.group_size, p.weight_cache_type);
+            interleave_split_halves, family, p.group_size, p.weight_cache_type,
+            p.ck_in_place);
     return st;
 }
 
@@ -1752,7 +1781,9 @@ inline bool ck_eligible(const PrepackParams &p) {
 // a deployment that fires only the prompt phase during warmup
 // reaches the first decode call with only the ALGO 1 regime warm —
 // the decode's regime 2 (per-tile AOCL) or regime 3 (custom-kernel
-// pack) pays a mid-inference prepack spike.
+// pack) pays a mid-inference prepack spike.  A BF16 layer of several
+// experts runs both unset phases on ALGO 3, so it has another regime to
+// warm only under a phase pin (`grp_matmul_cross_warm_target_reachable`).
 //
 // `cross_warm` opportunistically populates the OTHER regime so the
 // transition is seamless.  Decision is CUSTOM_KERNEL-aware:
@@ -1831,7 +1862,8 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
     // ALGO 3 by ANY route including a declined fallback (see its
     // doc-block).  A heuristic here would not be wrong-but-slow, it would
     // leave decode reordering from mutated bytes -- silent bad output.
-    if (!grp_matmul_cross_warm_target_reachable(current_algo)) {
+    if (!grp_matmul_cross_warm_target_reachable(
+                current_algo, auto_algo3_layer(p, current_algo))) {
         // One-shot: the verdict is derived from process-constant env, so
         // every prepack call in the process would otherwise repeat it --
         // once per layer per phase.  Matches the latching the short-team
@@ -1977,8 +2009,8 @@ inline void cross_warm(const PrepackParams &p, matmul_algo_t inner_kernel,
         // blocked LRU, which has no warmer.  Fall through to the bf16
         // arm below and it would walk every expert to count it skipped.
         if (s8_without_aocl_warmer(p)) { return; }
-        // BF16 family — unchanged.  Skip if `prepack_for_algo_3`'s
-        // narrow-N escape already ran the full-weight warmer.
+        // BF16 family.  Skip if `prepack_for_algo_3`'s narrow-N escape
+        // already ran the full-weight warmer.
         if (!primary_did_aocl_fw) {
             const auto st_extra = warm_aocl(p, primary_complete);
             st_aocl.total_attempted += st_extra.total_attempted;
@@ -2091,7 +2123,7 @@ static void prepack_aocl_only_algo(
     // buffer and the other on the process mode alone.  A weight that cannot be
     // mutated (no declared capacity, not bf16) takes the primary-then-cross
     // branch and needs no reordering.
-    const bool mixed_inplace = mixed_inplace_for_wei(p);
+    const bool mixed_inplace = mixed_inplace_for_wei(p, scheduling_algo);
 
     // ALGOs 2 and 5 parallelise outside the GEMM (over M-slices and experts,
     // respectively), so each full-weight GEMM runs with one inner thread.
@@ -2401,7 +2433,8 @@ void prepack_for_algo_3(const PrepackParams &p) {
                 // so a pinned single-layout WC=2 call keeps its own in-place
                 // path.  A CK-refused f16 under an active mixed flag stays
                 // out-of-place.
-                const bool allow_inplace = mixed_inplace_for_wei(p)
+                const bool allow_inplace
+                        = mixed_inplace_for_wei(p, /*scheduling_algo=*/3)
                         || !is_grp_auto_mixed_inplace_active();
                 st_aocl = warm_aocl(p, allow_inplace);
                 primary_label = "aocl_full_weight";

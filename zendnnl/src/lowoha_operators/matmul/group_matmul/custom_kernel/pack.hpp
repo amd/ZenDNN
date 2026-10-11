@@ -54,6 +54,8 @@
 #ifndef ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_PACK_HPP
 #define ZENDNNL_GROUP_MATMUL_CUSTOM_KERNEL_PACK_HPP
 
+#include <vector>
+
 #include "common/bfloat16.hpp"
 #include "common/error_status.hpp"
 #include "common/float16.hpp"
@@ -194,9 +196,9 @@ inline constexpr int kNRMax = 64;
 /// `in_place` (WEIGHT_CACHE=2): when set AND the packed layout is
 /// byte-for-byte the same size as the raw weight (bf16 even-K, where
 /// `packed_bytes == K*N*sizeof(bf16)`), the pack is written back into
-/// the caller's `weight` buffer itself and the cache stores a nullptr
-/// sentinel (so `*out_packed == weight` and the LRU never frees the
-/// caller's buffer).  This saves one packed buffer per weight.
+/// the caller's `weight` buffer itself and the cache stores an `in_place`
+/// entry with no owner (so `*out_packed == weight` and the LRU never frees
+/// the caller's buffer).  This saves one packed buffer per weight.
 /// Alignment is NOT required: the bf16 microkernel reads the packed
 /// B-stream with the unaligned `_mm512_loadu_si512`, so handing it the
 /// caller's (possibly unaligned) weight buffer is correct — an
@@ -209,11 +211,33 @@ inline constexpr int kNRMax = 64;
 /// to the out-of-place cache on a size mismatch (e.g. odd K), so it is
 /// always safe to request.  Ignored unless the cache is active
 /// (`!disable_cache`).
+///
+/// A rewritten buffer is recorded (`weight_packed_in_place`).  It is never
+/// rewritten again: a later request for another layout of it -- the other
+/// interleave order, another `pack_nr` -- is packed out of place from the raw
+/// weight rebuilt out of the image, on every path including
+/// `disable_cache`.  A request that reads past the image, or that starts
+/// inside it (a slice of the rewritten weight), fails.
 status_t get_or_pack_weight_bf16(const bfloat16_t *weight, int K, int N,
         int ldb, int pack_nr, bool transB, bool interleave_split_halves,
         const bfloat16_t **out_packed, bool *was_hit_out = nullptr,
         bool disable_cache = false, bool in_place = false,
         size_t wei_buffer_capacity_bytes = 0);
+
+/// True when `weight` points into a buffer an in-place pack
+/// (`get_or_pack_weight_bf16`'s `in_place`) rewrote into the custom-kernel
+/// image, at its start or inside it.  The buffer then no longer holds the raw
+/// weight, so the custom kernel is its only valid reader.  Recorded on the
+/// rewrite and forgotten by
+/// `clear_custom_kernel_pack_cache()`.  A single atomic load while no buffer
+/// has been rewritten.  Callers check it before they run, so a call that
+/// reads a weight off the custom kernel while another call packs it in
+/// place is not caught.
+bool weight_packed_in_place(const void *weight);
+
+/// `weight_packed_in_place` over the experts with `M[i] > 0`, under one lock.
+bool any_weight_packed_in_place(
+        const std::vector<const void *> &weight, const std::vector<int> &M);
 
 /// Free a packed-weight buffer returned by
 /// `get_or_pack_weight_bf16(..., disable_cache=true)`.  Safe with
@@ -507,7 +531,9 @@ status_t prepack_weight_into_f16(const float16_t *weight, int K, int N, int ldb,
 ///   * During graceful shutdown.
 ///
 /// After return the cache is empty and future calls to
-/// `get_or_pack_weight_bf16()` pay the repack cost on first miss.
+/// `get_or_pack_weight_bf16()` pay the repack cost on first miss.  The
+/// record of in-place rewritten buffers is dropped too, so a buffer still
+/// holding an in-place image must not be passed again after a clear.
 void clear_custom_kernel_pack_cache();
 
 /// Release every cached packed INT8 weight and reset the cache to

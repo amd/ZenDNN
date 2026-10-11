@@ -62,6 +62,18 @@ zendnnl/gtests/group_matmul/
                                     [8] TestGroupMatmulAlgoCustom,
                                     [8b] TestGroupMatmulAutoSelectAlgo
   test_quant.cpp                    [9] TestGroupMatmulQuant
+  test_prompt_tile.cpp              ALGO 3 prompt tile executor: PromptTilePlanner
+                                    (coverage, row invariant, balance, order,
+                                    golden plans), PromptTileTunables (env values,
+                                    profile grammar, precedence), PromptTileTopology
+                                    (L3 teams, sub-teams, steal order),
+                                    PromptTileExecutor (bitwise A/B vs the round
+                                    executor, knob A/B, decode no-op),
+                                    PromptTileAuto (AUTO prompt routing, its
+                                    cross-warm skip); the INT8 and W4A8 A/B
+                                    sit beside their fixtures, in
+                                    TestGroupMatmulInt8PromptTile (test_algos.cpp)
+                                    and GroupMatmulW4A8PerGroup.Algo3PromptTile*
   test_prepack.cpp                  [16] TestFusedMoECacheStress,
                                     [17] TestFusedMoEPointerChurn,
                                     [18] TestPrepackPerAlgoFunctions,
@@ -352,8 +364,8 @@ the first read for the process lifetime.
 | Env var | Default | Cached? | What it gates |
 |---|---|---|---|
 | `ZENDNNL_GRP_MATMUL_ALGO` | auto | yes (test override available) | Select generic ALGO `{1,2,3,5,6}` or global ALGO 4 W8A8 interception when the active phase knob is unset |
-| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
-| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (Rule 0.7) | yes (test override available) | AUTO prompt setting. Unpinned safe all-active W4A8 uses ALGO 2; other prompts use ALGO 1. Value 4 requests W8A8, then inherits Rule 0.7 on decline. |
+| `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` | 3 | yes (test override available) | AUTO decode setting. Unset, a BF16 layer of at least two experts runs ALGO 3. Value 4 requests W8A8 only for `max active M <= 32`; on decline, generic dispatch inherits the complete decode default policy. |
+| `ZENDNNL_GRP_MATMUL_AUTO_PROMPT_ALGO` | unset (Rule 0.7) | yes (test override available) | AUTO prompt setting. Unset, a BF16 layer of at least two experts runs ALGO 3. Unpinned safe all-active W4A8 uses ALGO 2; other prompts use ALGO 1. Value 4 requests W8A8, then inherits Rule 0.7 on decline. |
 | `ZENDNNL_GRP_MATMUL_PREPACK` | ON | yes | Master prepack switch (PR-443) |
 | `ZENDNNL_GRP_MATMUL_CROSS_WARM` | ON | yes | Opportunistic CK-aware cross-regime warm in `prepack/prepack.cpp::cross_warm` (eliminates decode-first-call spike when prompt-only warmup runs) |
 | `ZENDNNL_GRP_MATMUL_AOCL_STABLE_NTILE` | ON | yes | Pin n_thr to a num_threads-only formula -> AOCL cache key stability |
@@ -369,7 +381,9 @@ the first read for the process lifetime.
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_NR` | 0 (auto -> 32) | yes | Pack/microkernel NR (32 or 64) |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_SUBTILE_PER_EXPERT` | OFF | yes | Per-expert L2-friendly subtile_cols |
 | `ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL_N_TILE` | 0 (off) | yes | Override outer N-tile minimum |
-| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 1 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; 0 short-circuits the prepack AOCL warmer and makes W8A8 ALGO 4 decline without publishing a private packed entry. Changing modes does not itself flush entries from an earlier W8A8 generation. |
+| `ZENDNNL_GRP_MATMUL_PROMPT_TILE` | 1 (BF16) | yes (test override `prompt_tile::test_api::ScopedOverride` / `PromptTileOverride`) | Family bitmask (1 BF16, 2 INT8, 4 W4A8; 0 off): ALGO 3 CK prompt calls of a set family with two or more active experts use the prompt tile executor instead of the round executor (bitwise identical output) |
+| `ZENDNNL_GRP_MATMUL_PROMPT_TILE_<KNOB>`, `ZENDNNL_GRP_MATMUL_PROMPT_TILE_PROFILE` | see `prompt_tile/prompt_tile_tunables.hpp` | yes (`ScopedOverride`) | Prompt tile sizes, cost model, tile order, team layout and stealing; the profile sets knobs per shape |
+| `ZENDNNL_MATMUL_WEIGHT_CACHE` | 2 | runtime-mutable via `set_weight_cache(...)` | AOCL DLP/custom pack policy; under grouped AUTO, 2 writes the custom-kernel pack of a BF16 layer of several experts into the caller's buffer unless a phase pin sends one phase off ALGO 3, and only the AOCL prompt reorder of any other call; 0 short-circuits the prepack AOCL warmer and makes W8A8 ALGO 4 decline without publishing a private packed entry. Changing modes does not itself flush entries from an earlier W8A8 generation. |
 | `ZENDNNL_LRU_CACHE_CAPACITY` | UINT32_MAX | yes (matmul_config) | Capacity for AOCL DLP reorder and W8A8 ALGO-4 complete-tensor LRUs. Caps their populated entries; no effect on the custom-kernel pack arena (intentionally eviction-immune). |
 | `ZENDNNL_DIAGNOSTICS_ENABLE` | ON (set `=0` to disable) | yes | Wraps `validate_group_matmul_direct_inputs` (Phase B-G + log_error).  Default-enabled so contract violations are surfaced; the `[15]` subprocess test re-asserts the knob explicitly via `setenv(..., "1")` to exercise the diagnostic-mode reject paths for `am > M.size()` / `tm < am`. |
 

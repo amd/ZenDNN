@@ -296,10 +296,8 @@ TEST_P(CkF16UkernelCorrectness, MatchesScalarRef) {
     const int N_eff = N_alloc;
 
     // Four experts so plan_group_n_tile keeps the call on the ntile path
-    // (same rationale as the bf16 sibling): num_ops == num_threads makes
-    // auto-select Rule 1 fire, the auto-mirror gate returns false, and
-    // the planner builds a real ntile plan that exercises
-    // `do_tile` / `dispatch_tile`.
+    // (same rationale as the bf16 sibling): the planner builds a real
+    // ntile plan that exercises `do_tile` / `dispatch_tile`.
     constexpr int kNumOps = 4;
 
     // Per-expert src + weight buffers (FP16).

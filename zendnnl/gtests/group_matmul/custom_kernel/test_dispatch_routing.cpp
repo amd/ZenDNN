@@ -50,6 +50,7 @@
 #include "ck_test_helpers.hpp"
 #include "common/op_config.hpp"
 #include "lowoha_operators/matmul/group_matmul/custom_kernel/matmul_route.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/pack.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack_custom_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "moe_test_utils.hpp"
@@ -283,6 +284,80 @@ TEST(CkDispatchRouting, ScalarRouteUsesRequestedThreadTileCapacity) {
                 << "under-capacity route accepted for N=" << c.N
                 << " num_threads=" << (c.num_threads + 1);
     }
+}
+
+// A weight a grouped call packed in place holds the custom-kernel image, so a
+// matmul_direct that misses the route fails instead of reading the image as
+// the weight or rewriting it.
+TEST(CkDispatchRouting, ScalarCallOnGroupedInPlaceImageFailsClosed) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+
+    ScalarRouteConfigGuard guard;
+    mt::AlgoEnvGuard grp_auto(0);
+    mt::CustomKernelOverride group_ck_on(true);
+    guard.config.set_algo(static_cast<int32_t>(
+            zendnnl::common::matmul_algo_t::aocl_dlp_blocked));
+    guard.config.set_weight_cache(2);
+    omp_set_dynamic(0);
+
+    constexpr int E = 2, M = 4, N = 256, K = 256;
+    std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = bfloat16_t((static_cast<int>(i % 11) - 5) * 0.03125f);
+    std::vector<std::vector<bfloat16_t>> weight(E), dst(E);
+    std::vector<const void *> weight_ptr(E);
+    std::vector<void *> dst_ptr(E);
+    for (int e = 0; e < E; ++e) {
+        weight[e].resize(static_cast<size_t>(K) * N);
+        for (size_t i = 0; i < weight[e].size(); ++i)
+            weight[e][i]
+                    = bfloat16_t((static_cast<int>((i + e) % 7) - 3) * 0.0625f);
+        dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+        weight_ptr[e] = weight[e].data();
+        dst_ptr[e] = dst[e].data();
+    }
+
+    matmul_params params;
+    params.dtypes.src = data_type_t::bf16;
+    params.dtypes.wei = data_type_t::bf16;
+    params.dtypes.dst = data_type_t::bf16;
+    params.dtypes.bias = data_type_t::none;
+    params.num_threads = 8;
+    ASSERT_EQ(
+            group_matmul_direct(std::vector<char>(E, 'r'),
+                    std::vector<bool>(E, false), std::vector<bool>(E, false),
+                    std::vector<int>(E, M), std::vector<int>(E, N),
+                    std::vector<int>(E, K), std::vector<float>(E, 1.0f),
+                    std::vector<const void *>(E, src.data()),
+                    std::vector<int>(E, K), weight_ptr, std::vector<int>(E, N),
+                    std::vector<const void *>(E, nullptr),
+                    std::vector<float>(E, 0.0f), dst_ptr,
+                    std::vector<int>(E, N), std::vector<bool>(E, true),
+                    std::vector<matmul_params>(E, params)),
+            status_t::success);
+    ASSERT_TRUE(ck::weight_packed_in_place(weight[0].data()));
+    const std::vector<bfloat16_t> image = weight[0];
+
+    // N=256 is too narrow for a 24-thread route.
+    params.num_threads = 24;
+    zendnnl::lowoha::matmul::matmul_batch_params_t batch_params;
+    std::vector<bfloat16_t> out(static_cast<size_t>(M) * N);
+    for (const bool route : {true, false}) {
+        SCOPED_TRACE(route ? "route on" : "route off");
+        guard.config.set_custom_kernel_route(route);
+        ASSERT_FALSE(zendnnl::lowoha::matmul::custom_kernel_routable('r', M, N,
+                K, 24, 1, false, false, 1.0f, 0.0f, nullptr, N, true, params));
+        EXPECT_EQ(
+                zendnnl::lowoha::matmul::matmul_direct('r', false, false, M, N,
+                        K, 1.0f, src.data(), K, weight[0].data(), N, nullptr,
+                        0.0f, out.data(), N, true, batch_params, params),
+                status_t::failure);
+        EXPECT_EQ(std::memcmp(weight[0].data(), image.data(),
+                          image.size() * sizeof(bfloat16_t)),
+                0);
+    }
+    ::reset_grp_matmul_caches();
 }
 
 TEST(CkDispatchRouting, ScalarW4RouteUsesThreadAndGroupBoundaries) {
@@ -1027,10 +1102,16 @@ TEST(CkDispatchRouting, ScalarStaticU8S8PromptUsesGroupedAoclWarmup) {
                 params));
     }
 
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    mt::LastInvocationCaptureGuard prepack_stats;
     const status_t route_on = zendnnl::lowoha::matmul::matmul_direct('r', false,
             true, M, N, K, 1.0f, src.data(), K, weight.data(), K, nullptr, 0.0f,
             dst_route_on.data(), N, true, batch_params, params);
     ASSERT_EQ(route_on, status_t::success);
+    EXPECT_EQ(static_cast<int>(prepack::test_api::get_last_invocation_stats()
+                                       .cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::custom_kernel_pack))
+            << "the ALGO 1 prompt warms the pack its ALGO 3 decode reads";
 
     ::reset_grp_matmul_caches();
     guard.config.set_custom_kernel_route(false);
@@ -1699,20 +1780,14 @@ TEST(CkDispatchRouting, ScalarSignedInt8SrcZpFallsBackWithGroupDqOff) {
 //
 // Uses FOUR experts AND pins `params.num_threads = kNumOps` so the
 // planner stays on the ntile path (where the BF16 custom kernel's
-// gate actually runs).  Without the thread pin, `num_ops <
-// num_threads` on a typical CI host would trip the auto-mirror
-// Rule 2 gate (`num_ops <= 8` → Sequential — see
-// `auto_select_would_pick_algo1` in
-// `group_matmul/n_tile/group_matmul_n_tile.cpp`), bypassing the custom
-// kernel entirely.  In that case the test would silently pass via
-// the Sequential → AOCL path even if the CK refusal logic were
-// broken: both ALGO=3 (forced, with auto-mirror Sequential) and
+// gate actually runs).  A Sequential plan would bypass the custom
+// kernel entirely, and the test would silently pass via the AOCL
+// path even if the CK refusal logic were broken: both ALGO=3 and
 // ALGO=1 (forced) would run AOCL DLP and produce identical output
 // without ever consulting the `is_weights_const = false` refusal
-// path.  The thread pin makes `num_ops == num_threads` → Rule 1
-// fires inside the auto-mirror → ntile path runs → CK gate is
-// actually exercised → refusal forces the DLP fallback we want
-// to compare against forced ALGO=1.
+// path.  On the ntile path the CK gate is actually exercised, and
+// the refusal forces the DLP fallback we want to compare against
+// forced ALGO=1.
 // ──────────────────────────────────────────────────────────────────
 TEST(CkDispatchRouting, NonConstWeightsFallsBackToDlp) {
     CK_SKIP_IF_NO_BF16_ISA();
@@ -1758,13 +1833,10 @@ TEST(CkDispatchRouting, NonConstWeightsFallsBackToDlp) {
         p.dtypes.dst = data_type_t::bf16;
         p.dtypes.bias = data_type_t::none;
         // Pin the dispatcher's per-call thread team to `kNumOps` so
-        // `num_ops == num_threads` → auto-select Rule 1 fires in the
-        // planner's auto-mirror gate, ntile is picked (instead of
-        // Sequential under the Rule 2 / Rule 3-prompt arrows), and
-        // the CK gate is actually consulted on the call — letting
-        // `is_weights_const = false` exercise the refusal-then-DLP
-        // path this test is named for.  See the function-level
-        // doc-block above for the full rationale.
+        // ntile is picked and the CK gate is actually consulted on the
+        // call — letting `is_weights_const = false` exercise the
+        // refusal-then-DLP path this test is named for.  See the
+        // function-level doc-block above for the full rationale.
         p.num_threads = kNumOps;
     }
 

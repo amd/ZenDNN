@@ -63,6 +63,7 @@
 #include "lowoha_operators/matmul/group_matmul/m_tile/group_matmul_m_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/n_tile/group_matmul_n_tile.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
+#include "lowoha_operators/matmul/group_matmul/prompt_tile/prompt_tile_tunables.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 namespace moe_test_utils {
@@ -748,6 +749,13 @@ struct CustomKernelOverride {
     CustomKernelOverride &operator=(const CustomKernelOverride &) = delete;
     CustomKernelOverride(CustomKernelOverride &&) = delete;
     CustomKernelOverride &operator=(CustomKernelOverride &&) = delete;
+};
+
+// RAII guard for `ZENDNNL_GRP_MATMUL_PROMPT_TILE` (on = the BF16 bit only).
+struct PromptTileOverride {
+    zendnnl::lowoha::matmul::prompt_tile::test_api::ScopedOverride guard;
+    explicit PromptTileOverride(bool value)
+        : guard(zendnnl::lowoha::matmul::prompt_tile::kEnable, value ? 1 : 0) {}
 };
 
 // RAII guard for the decode M-proportional A/B knob

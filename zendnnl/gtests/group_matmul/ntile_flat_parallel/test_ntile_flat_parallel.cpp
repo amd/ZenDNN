@@ -1610,6 +1610,9 @@ TEST(W8A8MoEFallback, DeclinedCallStillComputes) {
 
 TEST(W8A8MoEFallback, PrequantizedS8GeometryMissUsesMainS8Path) {
     SKIP_IF_NO_ISA();
+    // An earlier test's same-shape weights may have sat at this address, and
+    // their pointer-keyed pack entries outlive `~MoEProblem()`.
+    ::reset_grp_matmul_caches();
     using namespace zendnnl::lowoha::matmul;
     // H=48 and padded dst_ldc=53 miss ALGO4 eligibility but are valid for
     // main's generic caller-prequantized-S8 fused-MoE implementation.

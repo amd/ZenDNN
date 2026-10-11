@@ -1176,6 +1176,10 @@ TEST_P(TestFusedMoEWarmPackPipeline, MultiIterationRouting) {
         custom_guard = std::make_unique<EnvVarGuard>(
                 "ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL", "1");
     }
+    // The references below read the weights the fused calls warm, on a wide
+    // fused epilogue the custom kernel does not run, so the pack must leave
+    // them raw.
+    WeightCacheGuard wc_out_of_place(1);
 
     constexpr int E_total = 8;
     constexpr int K = 4;

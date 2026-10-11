@@ -341,14 +341,13 @@ inline bool get_grp_n_tile_fused_act() {
 // (decode_dynamic; see `kGrpNTileStrategyDefault`).
 //
 // Selects the ALGO 3 (flat_n_tile) per-tile dispatch shape AND
-// controls whether the planner's auto-mirror perf gate fires.
+// controls whether the planner's viability perf gate fires.
 // Four values with distinct semantics:
 //
-//     0 = auto (opt-in heuristic).  Honour the planner's auto-mirror
-//         gate (route to Sequential when `auto_select_algo` would
-//         have picked ALGO 1 for this shape — few experts (num_ops ≤
-//         kFewExpertsAlgo1), or prompt-class with num_ops < num_threads).
-//         If the call survives auto-mirror, try DecodeD WITH its
+//     0 = auto (opt-in heuristic).  Honour the planner's viability
+//         gate (route to Sequential when `ntile_viable` says N is too
+//         narrow to split usefully) unless the custom kernel engaged.
+//         If the call survives that gate, try DecodeD WITH its
 //         eligibility heuristic (decode-class max_M ≤ 32,
 //         num_ops ∈ [6, num_ccds], min_M_active ≥ 3, skew_ratio ≤ 4,
 //         max_N / decode_n_tile ≤ team_size_est); fall through to
@@ -357,7 +356,7 @@ inline bool get_grp_n_tile_fused_act() {
 //         rarely engages, so the auto branch reduces to "Rounds with
 //         extra precondition checks" in practice.
 //
-//     1 = decode (FORCE).  SKIP the auto-mirror gate AND skip the
+//     1 = decode (FORCE).  SKIP the viability gate AND skip the
 //         eligibility heuristic — run DecodeD on every shape where it
 //         is STRUCTURALLY feasible (`num_threads >= num_ops`; smaller
 //         teams would over-subscribe DecodeD's OMP region and collide
@@ -370,8 +369,8 @@ inline bool get_grp_n_tile_fused_act() {
 //         describing the resulting allocation, OR a fallback line
 //         if num_threads < num_ops forces a Rounds fall-through.
 //
-//     2 = rounds (FORCE).  SKIP the auto-mirror gate AND the
-//         viability perf heuristic (same as 1) — when the caller
+//     2 = rounds (FORCE).  SKIP the viability perf heuristic (same
+//         as 1) — when the caller
 //         (or ALGO 0 auto-pick) routed to ALGO 3 we mean to run
 //         N-tile, not silently bounce back to Sequential on a perf
 //         preference.  Skip the DecodeDynamic gate entirely; always run
@@ -380,8 +379,8 @@ inline bool get_grp_n_tile_fused_act() {
 //         deterministic ALGO 3 = "true N-tile with rounds" behaviour on
 //         every shape that survives the structural gates.
 //
-//     3 = decode_dynamic (DEFAULT, FORCE).  SKIP the auto-mirror gate
-//         AND the viability heuristics (same as 1/2).  Per op, a gate
+//     3 = decode_dynamic (DEFAULT, FORCE).  SKIP the viability
+//         heuristic (same as 1/2).  Per op, a gate
 //         decides between the barrier-free CCD-cohesive DecodeDynamic
 //         executor (`DecodeDynamic` -> `execute_decode_dynamic`) and
 //         Rounds, from the active expert count and per-expert weight
@@ -412,7 +411,9 @@ inline bool get_grp_n_tile_fused_act() {
 //   * R3 — capacity overflow (`num_ops > GroupNTilePlan::kMaxExperts
 //     = 256`).  Stack-array bound on the planner; demoting to
 //     Sequential is the only safe recourse.  Auto-select rule 0 also
-//     captures this upstream by routing to ALGO 1.
+//     captures this upstream by routing to ALGO 1.  `flat_n_tile`
+//     slices a larger BF16 MoE call, or one whose weights only the
+//     custom kernel can read, so neither reaches the planner.
 //
 //   * F3 narrow-N escape — only reachable when the strict-stable
 //     AOCL path runs (`CUSTOM_KERNEL=0 && AOCL_STABLE_NTILE=1`).
@@ -429,16 +430,11 @@ inline bool get_grp_n_tile_fused_act() {
 //     `apply_gated_act_inplace` + tight memcpy that the tight
 //     swiglu-only fast path cannot.
 //
-// What is GATED behind `!force_ntile` (auto-mode-only perf
-// heuristics — honoured under env=0, ignored under env={1,2}):
-//
-//   * `auto_mirror` — replays auto-select's ALGO 1 preference.
-//     Lets `ALGO=3` behave like `ALGO=0` on shapes the auto-picker
-//     would have routed to ALGO 1, with a distinct gemm_mode label
-//     for telemetry.
+// What is GATED behind `!force_ntile` (an auto-mode-only perf
+// heuristic — honoured under env=0, ignored under env={1,2,3}):
 //
 //   * `!ntile_viable` — heuristic "N too thin for a useful per-
-//     thread split".  Under explicit env=1/2 the user accepts
+//     thread split".  Under explicit env=1/2/3 the user accepts
 //     whatever cost a thin N gives them — we run N-tile and emit a
 //     `[GRP_MATMUL.PLAN.HINT]` line so the env-honoured-over-
 //     heuristic decision is visible in the L3 trail.
@@ -911,7 +907,10 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
         // Explicit AOCL-DLP-blocked provenance. These weights are normalized
         // to raw only inside a validated CK preparation.
         const std::vector<bool> &weights_aocl_prepacked = {},
-        int32_t num_threads = 0, int32_t weight_cache_mode = -1) {
+        int32_t num_threads = 0, int32_t weight_cache_mode = -1,
+        // Forwarded to `prepare_for_call`: false when the call will not
+        // run the kernel even if the context prepares.
+        bool allow_in_place = true) {
     if (!get_grp_matmul_custom_kernel()) { return; }
     // Master CK env is ON; gate the DQ-INT8 sub-toggle separately so
     // operators can toggle int8 without disabling bf16.  The int8 CK path
@@ -939,7 +938,8 @@ inline void engage_ntile_custom_kernel(grp_matmul_gated_act_t act,
             act_dtype, bias_dtype, transA, transB, M, N, K, ldb, alpha, beta,
             weight, is_weights_const, kctx, dynamic_quant, compute_dtype,
             weights_prepacked, group_size, wei_scale_grp_stride,
-            weights_aocl_prepacked, num_threads, weight_cache_mode);
+            weights_aocl_prepacked, num_threads, weight_cache_mode,
+            allow_in_place);
 }
 
 /// Effective N-column alignment for the per-thread split:
@@ -1114,6 +1114,19 @@ inline void fill_ntile_expert_order(int *out, int &out_size, int max_size,
 /// The caller is expected to thread this through to its own
 /// gemm_mode_out so benchdnn / profiler output reveals whether the
 /// custom BF16 microkernel engaged.
+///
+/// A BF16 MoE call, or one whose weights only the custom kernel can read,
+/// with more than `kNTilePlanMaxExperts` experts runs as consecutive
+/// expert slices of at most that many; `gemm_mode_out`
+/// then names the last slice's path, or the first failing slice's
+/// `error_` sentinel, after which no further slice runs.
+///
+/// `ck_weight_cache_mode` is the weight-cache mode the custom kernel packs
+/// with: the least of the process mode and every expert's per-call
+/// `weight_cache_type`, taken before any cap the caller applies to its AOCL
+/// reorders.  -1 derives it from the process mode and `params`.
+/// `ck_inplace_licence` lets that pack be written in place while AUTO mixed
+/// in-place mode is active (`prepare_grouped_auto_weight_cache`).
 void flat_n_tile(const std::vector<char> &layout,
         const std::vector<bool> &transA, const std::vector<bool> &transB,
         const std::vector<int> &M, const std::vector<int> &N,
@@ -1127,7 +1140,8 @@ void flat_n_tile(const std::vector<char> &layout,
         grp_matmul_gated_act_t fused_act = grp_matmul_gated_act_t::none,
         data_type_t act_dtype = data_type_t::none,
         const char **gemm_mode_out = nullptr,
-        const std::vector<void *> *w4a8_s8_weights = nullptr);
+        const std::vector<void *> *w4a8_s8_weights = nullptr,
+        int32_t ck_weight_cache_mode = -1, bool ck_inplace_licence = false);
 
 /// @brief Drop every memoized f32 weight-scale view.
 ///

@@ -306,6 +306,13 @@ struct PrepackParams {
     /// copy the runtime would then hit and keep resident.
     size_t wei_buffer_capacity_bytes = 0;
 
+    /// The custom kernel runs this call and may write its bf16 pack into the
+    /// caller's buffer (`prepare_for_call`'s in-place rule), so the warm
+    /// writes the other experts' packs there too.  Set by the ALGO 3 call
+    /// site; acted on only where a WC=2 warm runs at all
+    /// (`should_warm_weight_cache`).
+    bool ck_in_place = false;
+
     int num_threads = 0;
 
     // Per-thread N-slice alignment that ALGO 3's `aligned_n_split`
@@ -742,7 +749,8 @@ struct LastInvocationStats {
     /// `total_attempted`:
     ///
     ///   * CK=1 + BF16 + ALGO 3 + Fix B: per-tile warm skipped,
-    ///     cross-warm regime 1 contributes `num_experts` entries.
+    ///     cross-warm regime 1 contributes `num_experts` entries (none
+    ///     unless a phase pin sends a phase off ALGO 3).
     ///   * CK=0 + ALGO 3: per-tile warm contributes
     ///     `num_experts × stable_n_thr`, cross-warm regime 1 adds
     ///     another `num_experts`.

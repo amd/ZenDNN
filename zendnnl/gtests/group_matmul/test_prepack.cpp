@@ -1035,6 +1035,9 @@ TEST_P(TestPrepackKDownSynthesis, BothPassesWarmAllExperts) {
     // EnvVarGuard cannot turn CK back on and this test silently stops
     // reaching the branch it exists to cover.
     moe_test_utils::CustomKernelOverride custom_guard(true);
+    // The counters read the out-of-place pack cache, which a pinned ALGO at
+    // the default WC=2 leaves to the lazy in-place pack.
+    WeightCacheGuard wc_on(1);
 
     const auto &p = GetParam();
     const auto act = static_cast<grp_matmul_gated_act_t>(p.act_int);
@@ -2757,7 +2760,7 @@ INSTANTIATE_TEST_SUITE_P(GrpMatmulEnvInteraction,
 //      cross-warm decision in `prepack_for_algo_X`.
 //
 //      Bug-class B12 (deferred decode-time prepack spike):
-//      With the auto-select change that routes prompt → ALGO 1, a
+//      With a prompt phase pin that routes prompt → ALGO 1, a
 //      deployment that fires only prompt during warmup (vLLM) reaches
 //      the first decode call with only regime 1 (full-weight AOCL)
 //      warm.  The first decode token then pays a ~80-150 ms mid-
@@ -2786,7 +2789,41 @@ protected:
     // Production builds leave the atomic at `false` and short-circuit
     // the write entirely.  See `moe_test_utils::LastInvocationCaptureGuard`.
     moe_test_utils::LastInvocationCaptureGuard prepack_stats_guard_;
+    // Unpinned AUTO runs both phases of a BF16 layer of several experts on
+    // ALGO 3, so cross-warm has a reader there only when a phase pin splits
+    // them.  These tests assume the deployment
+    // the regimes were built for: prompt pinned to ALGO 1, decode on ALGO 3.
+    moe_test_utils::AutoPromptAlgoOverride prompt_pin_ {1};
 };
+
+// Unpinned, an ALGO 3 prepack of a BF16 layer of several experts has no
+// reader for the full-weight layout and skips the warm.  The layer reaches
+// the ALGO 1 prepack only from a call ALGO 3 cannot serve, which keeps the
+// rules of every other call and warms the decode layout.
+TEST_F(TestPrepackCrossWarmRegimes, Algo0UnpinnedCrossWarmsOnlyOffAlgo3) {
+    using namespace zendnnl::lowoha::matmul;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    moe_test_utils::AutoPromptAlgoOverride unpinned(-1);
+    moe_test_utils::AlgoEnvGuard algo_guard(0);
+    for (const int algo : {1, 3}) {
+        reset_grp_matmul_caches();
+        prepack::test_api::clear_last_invocation_stats();
+        auto h = make_harness(/*total=*/4, /*active=*/4,
+                /*K=*/32, /*N=*/64, /*fill=*/0.111f + algo);
+        h.pp.num_threads = 16;
+        h.pp.nr_align = 1;
+        if (algo == 1) {
+            prepack::prepack_for_algo_1(h.pp);
+        } else {
+            prepack::prepack_for_algo_3(h.pp);
+        }
+        const auto stats = prepack::test_api::get_last_invocation_stats();
+        EXPECT_EQ(stats.cross_warm_regime == prepack::CrossWarmRegime::none,
+                algo == 3)
+                << "from ALGO " << algo;
+    }
+}
 
 TEST_F(TestPrepackCrossWarmRegimes, CkOnAlgo1CrossWarmsCustomKernelPack) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
@@ -3080,7 +3117,11 @@ TEST_F(TestPrepackCrossWarmRegimes, FixB_CkOnAlgo3SkipsRegime2Warm) {
     // st_aocl.total_attempted would be N + N*stable = 4 + 16 = 20
     // (per-tile contribution PLUS the cross-warm regime-1
     // contribution).  Fix B drops the per-tile contribution to 0 →
-    // total_attempted == 4 (just cross-warm regime 1).
+    // total_attempted == 4 (just cross-warm regime 1).  With the prompt
+    // tile executor on, AUTO's prompt runs ALGO 3 too and regime 1 is
+    // skipped as well (`PromptTileAuto` in test_prompt_tile.cpp), so hold
+    // it off to keep that count.
+    moe_test_utils::PromptTileOverride tile_off(false);
     auto h = make_harness(/*total=*/4, /*active=*/4,
             /*K=*/32, /*N=*/64, /*fill=*/0.111f);
     h.pp.num_threads = 64;
@@ -3400,13 +3441,12 @@ TEST_F(TestPrepackCrossWarmRegimes, PinnedAlgo256DisableCrossWarm) {
     }
 }
 
-// The other half of the cross-warm contract, and the one with no coverage
-// until now: a GLOBAL pin is not the only way to make the ALGO 3 decode
-// arena unreachable.  Under AUTO the per-PHASE knob
-// `ZENDNNL_GRP_MATMUL_AUTO_DECODE_ALGO` can route decode away from ALGO 3
-// while the global selector stays on 0, and cross-warm has to notice --
-// otherwise it packs a full resident copy of every expert weight for an
-// arena nothing will ever read.
+// The other half of the cross-warm contract: a GLOBAL pin is not the only
+// way to make the ALGO 3 arena unreachable.  Under AUTO the per-PHASE knobs
+// can route both phases away from ALGO 3 while the global selector stays on
+// 0 -- here the fixture pins prompt to ALGO 1 and the test pins decode --
+// and cross-warm has to notice, otherwise it packs a full resident copy of
+// every expert weight for an arena nothing will ever read.
 //
 // The reachability rule is deliberately asymmetric and this pins it down:
 // {1, 2, 6} PROVE ALGO 3 unreachable, 5 does NOT.  A pinned-5 decode can be
@@ -3446,6 +3486,35 @@ TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedAwayFromAlgo3SkipsWarm) {
                    "full resident copy of every expert weight.";
         EXPECT_EQ(stats.ck.cache_misses, 0) << "decode_pin=" << decode_pin;
     }
+}
+
+// Decode pinned away from ALGO 3 with the prompt unpinned: the prompt now
+// runs ALGO 3 and reads the CK pack, so the ALGO 1 prepack must warm it.
+TEST_F(TestPrepackCrossWarmRegimes,
+        Algo0DecodePinnedAwayWarmsForUnpinnedPrompt) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+
+    reset_grp_matmul_caches();
+    prepack::test_api::clear_last_invocation_stats();
+    auto h = make_harness(/*total=*/4, /*active=*/4,
+            /*K=*/32, /*N=*/64, /*fill=*/0.333f);
+    h.pp.num_threads = 64;
+    h.pp.nr_align = 1;
+    ASSERT_TRUE(h.pp.custom_kernel_on);
+
+    AlgoEnvGuard algo_guard(0);
+    AutoPromptAlgoOverride prompt_unpinned(-1);
+    AutoDecodeAlgoOverride decode_guard(1);
+    prepack::prepack_for_algo_1(h.pp);
+
+    const auto stats = prepack::test_api::get_last_invocation_stats();
+    ASSERT_TRUE(stats.valid);
+    EXPECT_NE(static_cast<int>(stats.cross_warm_regime),
+            static_cast<int>(prepack::CrossWarmRegime::none))
+            << "an unpinned prompt runs ALGO 3, so the ALGO 3 arena has a "
+               "reader";
 }
 
 TEST_F(TestPrepackCrossWarmRegimes, Algo0DecodePinnedTo5StillCrossWarms) {

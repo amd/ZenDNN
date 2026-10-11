@@ -44,6 +44,7 @@
 
 #include "common/op_config.hpp"
 #include "custom_kernel/dispatch.hpp"
+#include "custom_kernel/pack.hpp"
 #include "group_matmul_direct.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
@@ -268,6 +269,12 @@ inline constexpr int kDecodeNTileThreadFactor = 4;
 inline constexpr const char *kGrpMatmulErrPrefix = "error_";
 inline constexpr const char *kGrpMatmulErrPrepackedNoCk
         = "error_prepacked_no_ck";
+/// An active expert's weight buffer holds the image an earlier in-place
+/// custom-kernel pack (WEIGHT_CACHE=2) wrote over it, and the resolved route
+/// does not run the custom kernel.  Any other reader would take the image for
+/// the raw weight.
+inline constexpr const char *kGrpMatmulErrPackedInPlaceNoCk
+        = "error_packed_in_place_no_ck";
 /// ALGO 3 could not leave dst defined: a per-thread scratch allocation failed,
 /// or a fused-epilogue layout invariant was violated.  `flat_n_tile` logs the
 /// specific reason; the sentinel only has to fail the call.
@@ -354,11 +361,11 @@ inline int executed_algo_from_gemm_mode(const char *mode) {
 // can represent, = 256) now lives in
 // `n_tile/group_matmul_n_tile_planner.hpp` (re-included by the
 // public N-tile header `n_tile/group_matmul_n_tile.hpp`) with the
-// other N-tile-specific constants.  The dispatcher and the
-// auto-selector still read it (the rule-0 capacity carve-out routes
-// `num_ops > 256` to ALGO 5); both translation units include the
-// public N-tile header directly to call `flat_n_tile()`, so the
-// symbol remains visible unchanged.
+// other N-tile-specific constants.  The auto-selector still reads it
+// for its rule-0 capacity exit to ALGO 1, which a BF16 layer of several
+// experts skips because ALGO 3 slices such a call; the dispatcher
+// includes the public N-tile header directly to call `flat_n_tile()`,
+// so the symbol remains visible unchanged.
 
 // Op2's K-dimension as a function of the fused activation.  Gated
 // activations (swiglu/silu/gelu_and_mul) collapse the [gate, up] pair
@@ -478,6 +485,9 @@ inline bool get_grp_matmul_ntile_flat_parallel() {
 //   AUTO_PROMPT_ALGO inherited value = 2; Rule 0.7 narrows the unpinned
 //   prompt outcome to safe W4A8, with every other prompt using ALGO 1.
 //   AUTO_DECODE_ALGO default = 3 (flat_n_tile and its default refinements).
+//
+// A BF16 layer of at least two experts (`grp_matmul_auto_algo3_layer`) runs
+// ALGO 3 in both phases instead while its phase is unset.
 //
 // Accepted explicit values are {0,1,2,3,4,5,6}:
 // scheduler identities beyond that set:
@@ -619,6 +629,43 @@ inline bool grp_matmul_auto_decode_algo_is_set() {
     return get_grp_matmul_auto_decode_setting().pins_generic_policy();
 }
 
+/// Does unpinned AUTO run this layer on ALGO 3 in both phases?  Only a
+/// BF16 layer (bf16 source and weight) of at least two experts does: the
+/// custom kernel serves both of its phases from one pack.  A single-expert
+/// call, such as a routed `matmul_direct`, and a layer of any other dtype
+/// keep the shape rules of `auto_select_algo`, so their prompt and decode
+/// may run different ALGOs.  `layer_experts` counts the pool (`total_matmul`
+/// under the framework opt-in), so a call with one active expert of a larger
+/// pool stays with its layer.
+inline bool grp_matmul_auto_algo3_layer(bool bf16, int layer_experts) {
+    return bf16 && layer_experts >= 2;
+}
+
+/// `grp_matmul_auto_algo3_layer` for one call: every active expert is
+/// bf16 x bf16 on a weight the caller did not AOCL-prepack (such a weight
+/// keeps the AOCL prompt path).
+inline bool grp_matmul_auto_algo3_call(
+        const std::vector<int> &M, const std::vector<matmul_params> &params) {
+    if (params.size() < M.size()) { return false; }
+    bool any_active = false;
+    for (size_t i = 0; i < M.size(); ++i) {
+        if (M[i] <= 0) { continue; }
+        const auto &p = params[i];
+        if (p.dtypes.src != data_type_t::bf16
+                || p.dtypes.wei != data_type_t::bf16
+                || is_aocl_prepacked_weight(p)) {
+            return false;
+        }
+        any_active = true;
+    }
+    int layer_experts = static_cast<int>(M.size());
+    if (!params.empty() && params[0].active_matmul > 0) {
+        layer_experts = std::max(
+                layer_experts, static_cast<int>(params[0].total_matmul));
+    }
+    return any_active && grp_matmul_auto_algo3_layer(true, layer_experts);
+}
+
 /// Can this phase be ruled OUT of ALGO 3 for the whole process?
 ///
 /// PROVABLE, not a heuristic — callers rely on it to skip a warm even
@@ -655,6 +702,24 @@ inline bool grp_matmul_phase_pinned_to_algo3(grp_matmul_phase phase) {
     return setting.pins_generic_policy() && setting.generic_effective_algo == 3;
 }
 
+/// Can this phase of a `grp_matmul_auto_algo3_layer` layer run an
+/// n_tile_safe call on an ALGO other than 3?  Unset, it runs ALGO 3.  A pin
+/// other than 3 can; the legacy cascade (`=0`) and an `=5` pin may pick
+/// another ALGO, so they count.
+inline bool grp_matmul_phase_can_leave_algo3(grp_matmul_phase phase) {
+    const auto setting = get_grp_matmul_auto_phase_setting(phase);
+    return setting.pins_generic_policy() && setting.generic_effective_algo != 3;
+}
+
+/// Does AUTO keep both phases of a `grp_matmul_auto_algo3_layer` layer on
+/// ALGO 3?  The custom-kernel pack is then the only layout of a weight the
+/// kernel serves, and no AOCL DLP layout of the layer is written in place.
+inline bool grp_matmul_auto_algo3_only(bool auto_algo3_layer) {
+    return auto_algo3_layer
+            && !grp_matmul_phase_can_leave_algo3(grp_matmul_phase::prompt)
+            && !grp_matmul_phase_can_leave_algo3(grp_matmul_phase::decode);
+}
+
 /// Will anything read the layout this cross-warm is about to pack?
 ///
 /// Cross-warm prefills the layout the OTHER inference phase will read, so
@@ -678,10 +743,26 @@ inline bool grp_matmul_phase_pinned_to_algo3(grp_matmul_phase phase) {
 ///     pinned to ALGO 3 as well, i.e. when both phases run the same
 ///     layout.  An UNSET prompt must stay reachable: Rule 0.7 sends it to
 ///     ALGO 1, which is precisely the case the warm exists for.
-inline bool grp_matmul_cross_warm_target_reachable(int current_algo) {
-    return current_algo == 3
-            ? !grp_matmul_phase_pinned_to_algo3(grp_matmul_phase::prompt)
-            : !grp_matmul_phase_cannot_reach_algo3(grp_matmul_phase::decode);
+///
+/// A `grp_matmul_auto_algo3_layer` layer runs both unset phases on ALGO 3,
+/// so either target has a reader only when a pin sends some phase off
+/// ALGO 3, and the ALGO 3 arena only while some phase can still reach it.
+inline bool grp_matmul_cross_warm_target_reachable(
+        int current_algo, bool auto_algo3_layer) {
+    if (!auto_algo3_layer) {
+        return current_algo == 3
+                ? !grp_matmul_phase_pinned_to_algo3(grp_matmul_phase::prompt)
+                : !grp_matmul_phase_cannot_reach_algo3(
+                          grp_matmul_phase::decode);
+    }
+    const bool a_phase_leaves_algo3
+            = grp_matmul_phase_can_leave_algo3(grp_matmul_phase::prompt)
+            || grp_matmul_phase_can_leave_algo3(grp_matmul_phase::decode);
+    if (current_algo == 3) { return a_phase_leaves_algo3; }
+    return a_phase_leaves_algo3
+            && (!grp_matmul_phase_cannot_reach_algo3(grp_matmul_phase::prompt)
+                    || !grp_matmul_phase_cannot_reach_algo3(
+                            grp_matmul_phase::decode));
 }
 
 enum class grp_matmul_ntile_flat_parallel_request_source {
@@ -1362,7 +1443,10 @@ inline bool grp_matmul_custom_kernel_effective(const ParamsVec &params,
 //   cache regime that auto-select would route the OTHER phase to in the
 //   same process, so a deployment that fires only prompt during warmup
 //   still arrives at decode with both regimes warm — no first-decode-
-//   call prepack spike.
+//   call prepack spike.  A BF16 layer of several experts runs both unset
+//   phases on ALGO 3, so for it this only fires when an
+//   `AUTO_{PROMPT,DECODE}_ALGO` pin splits them
+//   (`grp_matmul_cross_warm_target_reachable`).
 //
 //   Auto-select-only: cross-warm fires exclusively under
 //   `ZENDNNL_GRP_MATMUL_ALGO=0` (AUTO).  When a single ALGO is pinned
@@ -1790,11 +1874,12 @@ inline int backend_n_align(matmul_algo_t algo) {
 /// disabled and therefore split on the tight alignment.
 ///
 /// `decode_arena_tight` is the arena the DECODE call will use, which is not
-/// observable from the prompt call's `ldc`.  Under AUTO the prompt resolves
-/// to ALGO 1, and `pick_fused_moe_want_tight` requires `resolved_algo == 3`,
-/// so a library-owned Op1 arena is ALWAYS wide on the prompt and always
-/// tight on the decode.  Reading `ldc[0] < N[0]` here would therefore invert
-/// the prediction on exactly the fused-MoE layers this exists to serve.
+/// observable from the prompt call's `ldc`.  Under AUTO a prompt that
+/// resolves to ALGO 1 gets a wide library-owned Op1 arena, because
+/// `pick_fused_moe_want_tight` requires `resolved_algo == 3`, while the
+/// decode call gets a tight one.  Reading `ldc[0] < N[0]` here would
+/// therefore invert the prediction on exactly the fused-MoE layers this
+/// exists to serve.
 /// Callers that know the decode arena (the fused-MoE entry) pass it; callers
 /// that own their own destination and keep one stride across both phases
 /// pass their observed tightness.

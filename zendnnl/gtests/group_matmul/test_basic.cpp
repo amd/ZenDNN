@@ -483,6 +483,11 @@ TEST_P(TestGatedAct, Correctness) {
     using namespace moe_test_utils;
 
     const auto &p = GetParam();
+    // The reference shares the weights with the gated call, which on this
+    // wide dst does not run the custom kernel, so the pack must leave them
+    // raw.  An earlier case's buffers may sit at the same addresses.
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc_out_of_place(1);
     const int dim = p.dim, N = 2 * dim, M = p.M, K = 32;
     const int num_ops = p.num_ops;
     const auto act_type = static_cast<grp_matmul_gated_act_t>(p.act_int);
@@ -659,6 +664,8 @@ TEST_P(TestMoEPostop, Correctness) {
     using namespace moe_test_utils;
 
     const auto &p = GetParam();
+    // An earlier case's in-place packed buffers may sit at these addresses.
+    reset_grp_matmul_caches();
     const int total_M = p.num_ops * p.M;
     if (total_M % p.topk != 0) { return; }
     const int num_tokens = total_M / p.topk;

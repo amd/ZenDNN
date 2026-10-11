@@ -46,6 +46,7 @@
 #include <omp.h>
 
 #include "common/zendnnl_global.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/dispatch.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/routed_moe/routed_moe_internal.hpp"
@@ -2542,6 +2543,94 @@ TEST_F(RoutedMoEGeneric, F32GatedTwoProjectionPipeline) {
                     expected[static_cast<size_t>(h)], 2e-5f);
         }
     }
+}
+
+// The routed executor never packs a BF16 weight, so the generic fallback keeps
+// the caller's WEIGHT_CACHE=2: group Matmul writes the custom-kernel pack of a
+// BF16 MoE layer into the caller's buffers, a second call reads it, and the
+// output matches an out-of-place run bit for bit.
+TEST_F(RoutedMoEGeneric, Bf16FallbackKeepsTheWeightCacheMode) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    constexpr int M = 8;
+    constexpr int E = 4;
+    constexpr int H = 256;
+    constexpr int I = 256;
+    constexpr int topk = 2;
+    std::vector<uint16_t> src(static_cast<size_t>(M) * H);
+    std::vector<uint16_t> w13_raw(static_cast<size_t>(E) * 2 * I * H);
+    std::vector<uint16_t> w2_raw(static_cast<size_t>(E) * H * I);
+    for (size_t i = 0; i < src.size(); ++i) {
+        src[i] = f32_to_bf16(
+                static_cast<float>(static_cast<int>(i % 7) - 3) / 8.f);
+    }
+    for (size_t i = 0; i < w13_raw.size(); ++i) {
+        w13_raw[i] = f32_to_bf16(
+                static_cast<float>(static_cast<int>(i % 13) - 6) / 64.f);
+    }
+    for (size_t i = 0; i < w2_raw.size(); ++i) {
+        w2_raw[i] = f32_to_bf16(
+                static_cast<float>(static_cast<int>(i % 9) - 4) / 48.f);
+    }
+    std::vector<int32_t> ids(static_cast<size_t>(M) * topk);
+    std::vector<float> route_weights(ids.size());
+    for (int m = 0; m < M; ++m) {
+        for (int t = 0; t < topk; ++t) {
+            ids[static_cast<size_t>(m) * topk + t] = (m + t) % E;
+            route_weights[static_cast<size_t>(m) * topk + t]
+                    = t == 0 ? 0.75f : 0.25f;
+        }
+    }
+    group_matmul_routing_params routing;
+    routing.topk_ids = ids.data();
+    routing.topk_weights = route_weights.data();
+    zendnnl::lowoha::matmul::grp_matmul_gated_act_params act;
+    act.act = zendnnl::lowoha::matmul::grp_matmul_gated_act_t::silu_and_mul;
+
+    // The caller asks for WEIGHT_CACHE=2 on both projections.
+    auto run = [&](std::vector<uint16_t> &w13, std::vector<uint16_t> &w2,
+                       std::vector<uint16_t> &out) {
+        auto projection = [](std::vector<uint16_t> &w, int n, int k) {
+            group_matmul_projection_params p;
+            p.output_size = n;
+            p.input_size = k;
+            p.weight = w.data();
+            p.ldb = k;
+            p.params.dtypes.src = data_type_t::bf16;
+            p.params.dtypes.wei = data_type_t::bf16;
+            p.params.dtypes.dst = data_type_t::bf16;
+            p.params.num_threads = 8;
+            p.params.weight_cache_type = 2;
+            return p;
+        };
+        const auto primary = projection(w13, 2 * I, H);
+        const auto secondary = projection(w2, H, I);
+        out.assign(static_cast<size_t>(M) * H, 0);
+        return routed_fused_moe_direct('r', false, src.data(), H, M, E, topk,
+                out.data(), H, primary, routing, &secondary, &act);
+    };
+
+    std::vector<uint16_t> ref, out, again;
+    {
+        routed_weight_cache_mode_guard restore;
+        restore.config.set_weight_cache(1);
+        auto w13 = w13_raw;
+        auto w2 = w2_raw;
+        ASSERT_EQ(run(w13, w2, ref), status_t::success);
+        EXPECT_TRUE(w13 == w13_raw && w2 == w2_raw)
+                << "WEIGHT_CACHE=1 must leave the weights raw";
+    }
+    reset_grp_matmul_caches();
+    routed_weight_cache_mode_guard wc2;
+    auto w13 = w13_raw;
+    auto w2 = w2_raw;
+    ASSERT_EQ(run(w13, w2, out), status_t::success);
+    EXPECT_FALSE(w13 == w13_raw) << "the gate/up pack must be written in place";
+    EXPECT_FALSE(w2 == w2_raw) << "the down pack must be written in place";
+    EXPECT_TRUE(out == ref);
+    ASSERT_EQ(run(w13, w2, again), status_t::success);
+    EXPECT_TRUE(again == ref);
 }
 
 // The generic fallback keeps its grouped-token, descriptor and quant scratch

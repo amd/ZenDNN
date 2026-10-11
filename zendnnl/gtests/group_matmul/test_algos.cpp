@@ -35,6 +35,7 @@
 #include <thread>
 #include <vector>
 #include <gtest/gtest.h>
+#include <type_traits>
 
 #include <omp.h>
 
@@ -1852,6 +1853,125 @@ INSTANTIATE_TEST_SUITE_P(GroupMatmulInt8OblockOuter,
         Int8OblockParamName);
 
 // ===============================================================================
+// [8c-ptile] TestGroupMatmulInt8PromptTile — DQ-INT8 on the prompt tile executor
+//
+// With the INT8 bit of `ZENDNNL_GRP_MATMUL_PROMPT_TILE` set, ALGO 3 cuts an
+// INT8 CK prompt into row and column tiles of the hoisted s8 / u8 source.
+// Each tile reads its own rows' source scales and zero points, so the output
+// must equal the round executor's bit for bit.  Experts of 0 to 200 rows
+// under small forced blocks split into many tiles each.
+// ===============================================================================
+TEST(TestGroupMatmulInt8PromptTile, BitwiseMatchesRounds) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    struct Case {
+        const char *name;
+        data_type_t compute; // s8 (symmetric) or u8 (asymmetric)
+        data_type_t scale_dt;
+        int act_int; // 0=none, 1=silu, 2=gelu
+        data_type_t dst_dt;
+        bool bias; // act=none only
+        int group_dq; // 1: the grouped pre-pass quantizes the source (s8 only)
+    };
+    const auto s8 = data_type_t::s8, u8 = data_type_t::u8;
+    const auto f32 = data_type_t::f32, bf16 = data_type_t::bf16;
+    const std::vector<int> rows {0, 1, 2, 3, 45, 0, 130, 64, 9, 200, 17};
+    const int dim = 128, K = 256;
+    for (const Case &c : {Case {"sym", s8, f32, 0, bf16, false, 0},
+                 Case {"sym_grouped_prequant", s8, f32, 0, bf16, false, 1},
+                 Case {"asym", u8, f32, 0, bf16, false, 0},
+                 Case {"sym_bf16_scales", s8, bf16, 0, bf16, false, 1},
+                 Case {"asym_bf16_scales", u8, bf16, 0, bf16, false, 0},
+                 Case {"sym_silu", s8, f32, 1, bf16, false, 1},
+                 Case {"sym_gelu_bf16_scales", s8, bf16, 2, bf16, false, 0},
+                 Case {"asym_silu", u8, f32, 1, bf16, false, 0},
+                 Case {"asym_gelu_bf16_scales", u8, bf16, 2, bf16, false, 0},
+                 Case {"sym_bias", s8, f32, 0, bf16, true, 1},
+                 Case {"sym_bias_f32_dst", s8, f32, 0, f32, true, 0},
+                 Case {"asym_bias_f32_dst", u8, bf16, 0, f32, true, 0}}) {
+        SCOPED_TRACE(c.name);
+        const int N_op1 = c.act_int == 0 ? dim : 2 * dim;
+        tensor_factory_t tf;
+        std::vector<tensor_t> src, wei, bias, dst;
+        // The source scale must be {M[e], 1}, so each expert gets its own M.
+        for (const int m : rows) {
+            const Int8AlgoCustomParam p {c.act_int, std::max(m, 1), 1, dim};
+            std::vector<tensor_t> s, w, b, d;
+            ASSERT_NO_FATAL_FAILURE(build_int8_dq_inputs(
+                    tf, p, N_op1, K, s, w, b, d, c.scale_dt));
+            src.push_back(s[0]);
+            wei.push_back(w[0]);
+            bias.push_back(c.bias ? tf.uniform_dist_tensor(
+                                            {1, static_cast<uint64_t>(N_op1)},
+                                            bf16, 2.0)
+                                  : tensor_t {});
+            dst.push_back(tf.zero_tensor(
+                    {static_cast<uint64_t>(p.M), static_cast<uint64_t>(N_op1)},
+                    c.dst_dt));
+        }
+        GroupDqOverride group_dq(c.group_dq);
+        CustomKernelInt8Override ck_int8(true);
+        grp_matmul_gated_act_params act {};
+        act.act = static_cast<grp_matmul_gated_act_t>(c.act_int);
+        expect_prompt_tile_matches_rounds(/*mask=*/2, /*mb=*/16, /*ns=*/64, src,
+                wei, bias, dst, c.act_int == 0 ? nullptr : &act, rows,
+                c.compute);
+    }
+}
+
+// The family bitmask defaults to BF16 only, so without the INT8 bit an INT8
+// custom-kernel prompt runs on the round executor.
+TEST(TestGroupMatmulInt8PromptTile, DefaultMaskKeepsRounds) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    namespace pt = zendnnl::lowoha::matmul::prompt_tile;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    if (std::getenv("ZENDNNL_GRP_MATMUL_PROMPT_TILE") != nullptr) {
+        GTEST_SKIP() << "ZENDNNL_GRP_MATMUL_PROMPT_TILE is set";
+    }
+    const std::vector<int> rows {64, 48, 80};
+    const int dim = 128, K = 256;
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    for (const int m : rows) {
+        const Int8AlgoCustomParam p {0, m, 1, dim};
+        std::vector<tensor_t> s, w, b, d;
+        ASSERT_NO_FATAL_FAILURE(build_int8_dq_inputs(
+                tf, p, dim, K, s, w, b, d, data_type_t::f32));
+        src.push_back(s[0]);
+        wei.push_back(w[0]);
+        bias.push_back(tensor_t {});
+        dst.push_back(tf.zero_tensor(
+                {static_cast<uint64_t>(m), static_cast<uint64_t>(dim)},
+                data_type_t::bf16));
+    }
+    AlgoEnvGuard algo(3);
+    CustomKernelOverride ck_on(true);
+    CustomKernelInt8Override ck_int8(true);
+    GemmModeCaptureGuard capture;
+    reset_grp_matmul_caches();
+    const long served0 = pt::test_api::s_calls_served.load();
+    ASSERT_EQ(group_matmul_kernel_test(src, wei, bias, dst,
+                      matmul_algo_t::aocl_dlp_blocked, 1.0f, 0.0f,
+                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr,
+                      /*pack_format_b=*/ {}, rows, data_type_t::s8),
+            status_t::success);
+    EXPECT_FALSE(pt::enabled(pt::Family::kInt8));
+    EXPECT_EQ(pt::test_api::s_calls_served.load(), served0);
+    const char *m = zendnnl::lowoha::matmul::test_api::
+                            s_last_group_matmul_direct_gemm_mode.load(
+                                    std::memory_order_relaxed);
+    const std::string mode = m != nullptr ? m : "";
+    EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
+    EXPECT_EQ(mode.find("ptile"), std::string::npos) << mode;
+}
+
+// ===============================================================================
 // [8a] TestGroupMatmulPhaseBRemainder — CK Single-round + non-zero-remainder
 //
 // Targets the planner+executor path that
@@ -1979,9 +2099,9 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
     // (force Rounds) that some surrounding benchmark / sweep might
     // have set.  Phase B's per-expert remainder distribution only
     // populates inside ManyExperts Single-round; values 1/2 would
-    // override the auto-mirror gate and the heuristic DecodeD
-    // attempt, taking different planner branches that bypass Phase B
-    // and leave `snap.per_expert_remainder = false`.
+    // override the heuristic DecodeD attempt, taking different
+    // planner branches that bypass Phase B and leave
+    // `snap.per_expert_remainder = false`.
     NTileStrategyOverride auto_strategy(0);
 
     // Defence-in-depth: the env-cache overrides force the planner's
@@ -2040,6 +2160,9 @@ TEST(TestGroupMatmulPhaseBRemainder, CkSingleRoundRemainderCorrectness) {
         SCOPED_TRACE(std::string("M variant: ") + var.label);
         const auto &Ms = var.Ms;
         ASSERT_EQ(static_cast<int>(Ms.size()), num_ops);
+        // The previous variant's ALGO 3 run packed its weights in place, and
+        // this variant's weights can land at the same addresses.
+        reset_grp_matmul_caches();
 
         // ── Prepare shared inputs sized to per-expert M ──
         std::vector<std::vector<bfloat16_t>> src(num_ops);
@@ -2678,22 +2801,19 @@ TEST(TestGroupMatmulPhaseBRemainder, DefaultAutoDeclinesNonUniformNK) {
 // [8b] TestGroupMatmulAutoSelectAlgo — pin down `select_grp_matmul_algo`'s
 //      decisions on the (max_M, num_threads, num_ops) grid.
 //
-// Auto-select is a top-level capacity carve-out (rule 0) and a decode
-// regime carve-out (rule 0.6) that both run BEFORE the legacy phase
-// cascade, evaluated in priority order:
+// Both phase settings are pinned to 0, the LEGACY cascade, evaluated in
+// priority order:
 //
 //   0.   num_ops > kNTilePlanMaxExperts (=256)          → ALGO 1   (capacity carve-out)
-//   0.6. decode (max_M ≤ kDecodeMaxM) AND
-//        active_ops > num_threads                       → ALGO 3   (Qwen decode; 1 if unsafe)
 //   1.   num_ops ≥ num_threads                          → ALGO 3   (Qwen-style)
 //   2.   num_ops ≤ kFewExpertsAlgo1 (= 8)               → ALGO 1   (Mixtral-style)
 //   3.   otherwise — M-driven:
 //          prompt (max_M > kDecodeMaxM=32)              → ALGO 1
 //          decode (max_M ≤ kDecodeMaxM)                 → ALGO 3   (gpt-oss-style)
 //
-// NOTE: rules 0 and 0.6 are STRUCTURAL — they fire regardless of the
-// phase-env pin, so clearing AUTO_{PROMPT,DECODE}_ALGO (below) only
-// restores the LEGACY behaviour for rules 1-3, not for these carve-outs.
+// Unpinned, a BF16 layer of several experts runs ALGO 3 in both phases and
+// every other call takes the shape rules; `TestGroupMatmulAutoPhaseEnv`
+// covers both.
 //
 // The matrix below covers each arrow explicitly with at least one
 // canonical workload (Qwen3-30B-A3B for rule 1, Mixtral 8x7B for
@@ -2912,22 +3032,11 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
             /*num_ops=*/8, /*num_threads=*/128, /*expected_algo=*/1,
             "mixtral_tallN_E8_t128"});
 
-    // ── Rule 1 (Qwen3-30B-A3B): num_ops ≥ num_threads → ALGO 3,
-    //    EXCEPT decode rows caught by the rule-0.6 carve-out ──
+    // ── Rule 1 (Qwen3-30B-A3B): num_ops ≥ num_threads → ALGO 3 ──
     // Qwen3-30B-A3B Op1 (gate+up) shape: K=2048, N=1536 (768×2 for
     // gate+up), BF16.  128 experts, top-k=8.  Pin both prompt and
-    // decode at the two host sizes the deployment targets (64t, 128t).
-    //
-    // PROMPT rows (max_M > kDecodeMaxM): num_ops=128 ≥ num_threads so
-    // rule 1 selects ALGO 3 at both host sizes.
-    //
-    // DECODE rows (max_M ≤ kDecodeMaxM): the rule-0.6 carve-out fires
-    // BEFORE rule 1 when active_ops (=128) > num_threads — i.e. at 64t —
-    // but under the default n_tile strategy (3 = decode_dynamic) it
-    // reroutes to ALGO 3 rather than ALGO 5, because DecodeDynamic maps
-    // whole experts onto CCDs and so has no one-thread-per-expert ceiling.
-    // At 128t (active_ops == num_threads) rule 0.6 does not fire and rule 1
-    // selects ALGO 3 anyway.
+    // decode at the two host sizes the deployment targets (64t, 128t):
+    // num_ops=128 ≥ num_threads, so rule 1 selects ALGO 3 for every row.
     //
     // EXECUTION TIME — known fallback for the prompt rows.
     //   At N=1536, `kMinNTile=512` → `1536 / 512 = 3` tiles per expert,
@@ -2951,10 +3060,6 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
             const bool is_decode_case
                     = (M_val <= zendnnl::lowoha::matmul::kDecodeMaxM);
             const char *phase = is_decode_case ? "decode" : "prompt";
-            // Every row here is ALGO 3: decode via Rule 0.6 (DecodeDynamic
-            // has no `active_ops <= num_threads` ceiling, so the regime no
-            // longer needs ALGO 5), prompt via Rule 1 (num_ops >=
-            // num_threads).
             const int expected_algo = 3;
             out.push_back(
                     {M_val, K_QW, N_QW, /*num_ops=*/128, nt, expected_algo,
@@ -2972,13 +3077,7 @@ static std::vector<AutoSelectParam> make_auto_select_params() {
     // beyond that ceiling the planner's R3 gate falls back to Sequential
     // anyway.
     //
-    // Three pins cover this boundary.  These use PROMPT-class M
-    // (max_M=128 > kDecodeMaxM) on purpose: the structural decode
-    // carve-out (rule 0.6: decode + active_ops > num_threads → ALGO 5)
-    // would otherwise shadow the capacity carve-out at these
-    // experts-exceed-threads counts and route E256 *and* E257 to ALGO 5
-    // via rule 0.6, leaving the 256-vs-257 boundary untested.  In prompt
-    // (rule 0.6 does not apply) the boundary is isolated to rule 0:
+    // Three pins cover this boundary:
     //   * E256 — exactly at capacity, still ALGO 3 (rule 1: num_ops ≥
     //     num_threads; ManyExperts handles 256 experts fine).
     //   * E257 — first value above capacity, must flip to ALGO 1.
@@ -3211,14 +3310,15 @@ TEST(TestGroupMatmulAutoSelectAlgo_DynamicQuant, AcceptsAlgo3ViaHoist) {
 //
 // New envs let an operator pin a specific ALGO per phase without
 // touching the global `ZENDNNL_GRP_MATMUL_ALGO`.  The raw phase-setting
-// defaults are PROMPT=2 and DECODE=3; latest main's default-only Rule 0.7
-// refines an unpinned prompt call to ALGO 1.
+// defaults are PROMPT=2 and DECODE=3; the default-only Rule 0.7 refines an
+// unpinned prompt call to ALGO 1, and a BF16 layer of several experts runs
+// ALGO 3 in both phases while unpinned.
 // Set the env to `0` for the legacy 3-rule cascade.  Tests here
 // pin both branches: explicit env=0 reproduces the legacy cascade,
 // env={1,2,3,5,6} is honoured for the matching generic phase, and value 4
 // requests the matching phase's W8A8 whole-call interceptor while mapping to
 // inherited default policy after a decline. Coverage also includes the safety
-// clamps (ALGO 3 on !n_tile_safe) and the structural R0 capacity gate.
+// clamps (ALGO 3 on !n_tile_safe) and the legacy cascade's R0 capacity gate.
 //
 // All tests use `select_grp_matmul_algo` directly with `ALGO=0` so
 // auto-select fires; the phase env is the only thing that varies.
@@ -3288,6 +3388,19 @@ static void apply_w4a8_auto_probe(AutoProbeShape &s) {
     }
 }
 
+// Rewrite a BF16 auto-select probe as f32.  Only a BF16 layer of several
+// experts runs ALGO 3 in both phases, so an f32 probe of the same shape
+// exercises the shape rules.
+static void apply_shape_rules_probe(AutoProbeShape &s) {
+    using namespace zendnnl::lowoha::matmul;
+    for (auto &p : s.params) {
+        p.dtypes.src = data_type_t::f32;
+        p.dtypes.wei = data_type_t::f32;
+        p.dtypes.dst = data_type_t::f32;
+        p.dtypes.bias = data_type_t::f32;
+    }
+}
+
 } // namespace
 
 // Explicit-zero phase env (escape hatch for legacy behaviour) — sets
@@ -3330,10 +3443,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExplicitZeroEnablesLegacyQwenPrompt) {
                "num_ops≥num_threads → Rule 1 → ALGO 3)";
 }
 
-// Default prompt policy: the raw setting retains cached value 2 for
-// compatibility, then latest main's default-only Rule 0.7 selects ALGO 1.
+// Default prompt policy for a BF16 layer of several experts: an unpinned
+// prompt runs ALGO 3, whatever the executor, ISA or custom-kernel setting.
 // No `Override` is set, so this exercises the actual out-of-box route.
-TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
+TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
@@ -3341,14 +3454,16 @@ TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
     // No AutoPromptAlgoOverride / AutoDecodeAlgoOverride — exercises
     // the unset-env default policy.
 
-    // Mixtral-class prompt — Rule 0.7 selects ALGO 1 unless the operator
-    // explicitly pins a prompt scheduler.
+    // Mixtral-class BF16 prompt.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
+    auto_algo_trace trace;
     EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "the unpinned prompt policy must route prompt → ALGO 1";
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            3)
+            << "the unpinned prompt policy must route prompt → ALGO 3";
+    EXPECT_STREQ(trace.reason, "auto_algo3");
+    EXPECT_EQ(get_grp_matmul_auto_prompt_algo(), 2);
 }
 
 // Default decode: phase env defaults to 3 (N-tile rounds + CK).
@@ -3569,8 +3684,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo5PinVerbatimWhenGateOff) {
 // Prompt occupancy qualifier: `AUTO_PROMPT_ALGO=5` on an UNDER-OCCUPIED prompt
 // frame (`active_ops < num_threads`) is DECLINED and redirected to ALGO 3.
 // ALGO 5 runs one expert per thread with no intra-expert split, so it cannot
-// fill the team; ALGO 3's N-split can.  Note the fallback is ALGO 3, NOT the
-// prompt default (ALGO 2) an unset pin would inherit.
+// fill the team; ALGO 3's N-split can.  The redirect and the unpinned
+// prompt default are both ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv, PromptPinAlgo5DeclinedUnderOccupancy) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -3710,9 +3825,10 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeAlgo3PinHonouredVerbatim) {
 // reaches the N-tile planner where the dense-FFN optimisations live
 // (adaptive tiling, ragged-N fallback, auto K-blocking).  Without the
 // rule, Rule 0.5's few-expert occupancy test sends one active expert to
-// ALGO 1, which never touches that planner. The four tests below pin the
-// rule's default and each of its three gates; all use the same
-// single-expert decode probe so only the gate under test varies.
+// ALGO 1, which never touches that planner. The three tests below and
+// `SingleDenseExpertDecodeEnvOffFallsBackToAlgo1` pin the rule's default
+// and each of its three gates; all use the same single-expert decode probe
+// so only the gate under test varies.
 TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -3731,30 +3847,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeRoutesToAlgo3) {
                "frame to ALGO 3 instead of Rule 0.5's low-occupancy ALGO 1";
 }
 
-// Env gate off (`ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE=0`) → the rule is
-// skipped and the frame falls through to Rule 0.5's low-occupancy ALGO 1
-// arm. This is the A/B escape hatch the knob exists for.
-TEST(TestGroupMatmulAutoPhaseEnv,
-        SingleDenseExpertDecodeEnvOffFallsBackToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-    DenseDecodeNTileOverride rule_off(0);
-
-    auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
-            /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "DENSE_DECODE_NTILE=0 must restore the generic few-expert "
-               "occupancy decision (Rule 0.5 → ALGO 1)";
-}
-
-// An explicit decode pin outranks the rule: Rule 0.45 only refines the
-// DEFAULT policy, so `AUTO_DECODE_ALGO=2` must still win.  Pinned to 2
-// rather than 1 so a pass cannot be confused with the ALGO 1 fallback
-// the other gates produce.
+// An explicit decode pin outranks the default, so `AUTO_DECODE_ALGO=2`
+// must still win.  Pinned to 2 rather than 1 so a pass cannot be confused
+// with the ALGO 1 safety fallback.
 TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeHonoursExplicitPin) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -3770,8 +3865,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertDecodeHonoursExplicitPin) {
             << "an explicit AUTO_DECODE_ALGO pin must outrank Rule 0.45";
 }
 
-// Safety clamp: the rule honours `n_tile_safe`.  A non-row-major layout
-// is n_tile-unsafe, so the frame must not be handed to ALGO 3.
+// Safety clamp: AUTO honours `n_tile_safe`.  A non-row-major layout is
+// n_tile-unsafe, so the frame must not be handed to ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv,
         SingleDenseExpertDecodeHonoursNTileSafetyClamp) {
     using namespace zendnnl::lowoha::matmul;
@@ -3788,29 +3883,6 @@ TEST(TestGroupMatmulAutoPhaseEnv,
             1)
             << "Rule 0.45 must honour the n_tile_safe clamp rather than hand "
                "an unsafe shape to ALGO 3";
-}
-
-// Phase gate: the rule is decode-only, so a single-expert PROMPT frame
-// is NOT pulled into ALGO 3 — it keeps the prompt policy and lands on
-// Rule 0.7's `kWideN → ALGO 1`.  One expert needs only `ceil(M /
-// slice_target)` M-slices, far fewer than the team, so `kWideN` (whose
-// ALGO 1 gives the full team an N-split) is the right prompt answer.
-// That same classification in DECODE is what Rule 0.45 exists to
-// override, so this test also pins the boundary between the two.
-TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPromptStaysOnWideNAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // Same expert, prompt-class M (> kDecodeMaxM).
-    auto s = build_auto_probe(/*M=*/256, /*K=*/2880, /*N=*/5760,
-            /*num_ops=*/1, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "Rule 0.45 is decode-only; a single-expert prompt frame must "
-               "stay on the prompt policy (kWideN → ALGO 1), not ALGO 3";
 }
 
 // AUTO_PROMPT_ALGO=3 forces ALGO 3 on a shape Rule 2 would have
@@ -3852,8 +3924,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, DecodeEnvForcesAlgo1OnGptOssDecode) {
                "for the decode phase";
 }
 
-// Rule 0.6 — more ACTIVE experts than threads → ALGO 3, and the N-tile
-// strategy no longer participates in that decision.  Pinned to strategy 2
+// More ACTIVE experts than threads → ALGO 3 (Rule 0.6 for a layer outside
+// the BF16 MoE scope), and the N-tile strategy does not participate in that
+// decision.  Pinned to strategy 2
 // (Rounds) precisely to show the strategy does NOT change the answer —
 // compare MoreExpertsThanThreadsRoutesToAlgo3UnderDefault below.
 TEST(TestGroupMatmulAutoPhaseEnv,
@@ -3874,7 +3947,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                "route AUTO to ALGO 3 (auto-select never emits ALGO 5)";
 }
 
-// Rule 0.6 under the DEFAULT strategy (3 = decode_dynamic): the same
+// Under the DEFAULT strategy (3 = decode_dynamic) the same
 // experts-exceed-threads decode frame stays on ALGO 3 so the CCD-cohesive
 // DecodeDynamic pool can engage.
 TEST(TestGroupMatmulAutoPhaseEnv,
@@ -3895,7 +3968,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 }
 
 // The same Qwen-class shape on 128 threads: num_ops(88) <= num_threads(128),
-// so Rule 0.6 does NOT fire and ALGO 3 single round stays selected.
+// and ALGO 3 single round stays selected.
 TEST(TestGroupMatmulAutoPhaseEnv, ExpertsLeqThreadsKeepsAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -3911,33 +3984,32 @@ TEST(TestGroupMatmulAutoPhaseEnv, ExpertsLeqThreadsKeepsAlgo3) {
                "Rule 0.6 must not fire";
 }
 
-// Rule 0.6 decides the experts-exceed-threads decode regime when the decode
-// phase env is UNPINNED.  Here the rule and the pin agree on ALGO 3, so this
-// locks in the answer rather than the precedence; the pin-outranks-policy
-// direction is covered by ExplicitPhasePinOutranksPolicyRule below.
-TEST(TestGroupMatmulAutoPhaseEnv,
-        MoreExpertsThanThreadsOverridesExplicitDecodePin) {
+// An explicit AUTO_DECODE_ALGO=3 pin and the default agree on ALGO 3 for
+// the experts-exceed-threads decode regime, so this locks in the answer
+// rather than the precedence; the pin-outranks-default direction is covered
+// by ExplicitPhasePinOutranksPolicyRule below.
+TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsDecodePin3RunsAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
     AutoPromptAlgoOverride no_prompt(0);
-    NTileStrategyOverride rounds(2); // legacy Rounds routing (ALGO 5 policy)
-    AutoDecodeAlgoOverride force_decode(3); // explicit decode pin (superseded)
+    NTileStrategyOverride rounds(2);
+    AutoDecodeAlgoOverride force_decode(3);
 
     auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
             /*num_ops=*/88, /*num_threads=*/64);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             3)
-            << "decode num_ops(88) > num_threads(64) must be decided by Rule "
-               "0.6 (ALGO 3) ahead of the explicit AUTO_DECODE_ALGO pin";
+            << "decode num_ops(88) > num_threads(64) with AUTO_DECODE_ALGO=3 "
+               "must run ALGO 3";
 }
 
-// An explicit phase pin outranks the POLICY rules.  Rule 0.6 would answer
+// An explicit phase pin outranks the AUTO default.  The default would answer
 // ALGO 3 on this experts-exceed-threads decode frame, but the operator asked
-// for ALGO 1 and policy does not get to overrule that.  Correctness gates
-// (R0 capacity, tile-safety) still do — see CapacityOverflowIgnoresPhaseEnv.
+// for ALGO 1 and policy does not get to overrule that.  The tile-safety
+// clamps still do.
 TEST(TestGroupMatmulAutoPhaseEnv, ExplicitPhasePinOutranksPolicyRule) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4008,15 +4080,11 @@ TEST(TestGroupMatmulAutoPhaseEnv, MoreExpertsThanThreadsGlobalForceWins) {
             << "global ZENDNNL_GRP_MATMUL_ALGO=3 must win over Rule 0.6";
 }
 
-// ── Forced DecodeDynamic re-routes the experts-exceed-threads decode ──
-// ── regime back to ALGO 3 (where DecodeDynamic lives). ───────────────
-// Rule 0.6 sends decode `active_ops > num_threads` to ALGO 5 by default
-// (parallel_per_expert).  When the operator FORCES the N-tile
-// DecodeDynamic strategy (`ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY=3`), this
-// regime must stay on ALGO 3 so the CCD-cohesive DecodeDynamic pool can
-// engage — it measures ~1.3x faster than ALGO 5 on Qwen-class decode.
-// This trio locks the gating: forced(safe)→3, unforced→5, forced but
-// n_tile-unsafe→5 (clamp).  AUTO env (env_algo=0) throughout.
+// ── The experts-exceed-threads decode regime runs ALGO 3 (where ────────
+// ── DecodeDynamic lives) under every N-tile strategy. ─────────────────
+// These tests lock the routing: strategies 3, 2 and 0
+// route the n_tile-safe shape to ALGO 3, and an n_tile-unsafe shape clamps
+// to ALGO 1.  AUTO env (env_algo=0) throughout.
 TEST(TestGroupMatmulAutoPhaseEnv,
         ForcedDecodeDynamicReroutesManyExpertsDecodeToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
@@ -4055,11 +4123,9 @@ TEST(TestGroupMatmulAutoPhaseEnv,
                "route to ALGO 3 — N_TILE_STRATEGY no longer gates the ALGO";
 }
 
-// Smart-AUTO (n_tile_strategy=0) re-routes the experts-exceed-threads
-// decode regime to ALGO 3 (where DecodeDynamic lives), same as the forced
-// (=3) path — so AUTO can pick up the DecodeDynamic win automatically.
-// Companion to the =3 (reroutes) and =2 (stays ALGO 5) trio above; locks
-// in that strategy 0 behaves like 3 for ALGO selection, not like 2.
+// Smart-AUTO (n_tile_strategy=0) routes the experts-exceed-threads decode
+// regime to ALGO 3 (where DecodeDynamic lives), same as strategies 3 and 2
+// above.
 TEST(TestGroupMatmulAutoPhaseEnv, SmartAutoManyExpertsDecodeRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -4185,6 +4251,76 @@ TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
             << "); max_abs_diff=" << max_d;
 }
 
+// Fewer active experts than L3 domains, each too large for one L3: on the
+// custom kernel a BF16 MoE expert takes several domains, the last one the
+// remainder and any partial domain.  Every column is still one tile over the
+// full K, so the output matches Rounds bit for bit.
+TEST(TestGroupMatmulDecodeDynamic,
+        FewLargeExpertsSpreadOverL3DomainsMatchRounds) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    // 2048 x 16384 bf16 = 64 MiB per expert, twice one L3.
+    constexpr int K = 2048, N = 16384, M = 2;
+    for (const int experts : {2, 3}) {
+        std::vector<std::vector<bfloat16_t>> src(experts), wei(experts);
+        std::vector<const void *> srcs(experts), weis(experts),
+                biases(experts, nullptr);
+        for (int e = 0; e < experts; ++e) {
+            src[e].resize(static_cast<size_t>(M) * K);
+            wei[e].resize(static_cast<size_t>(K) * N);
+            for (size_t i = 0; i < src[e].size(); ++i)
+                src[e][i] = bfloat16_t(0.02f * (float)((int)((i + e) % 5) - 2));
+            for (size_t i = 0; i < wei[e].size(); ++i)
+                wei[e][i] = bfloat16_t(0.01f * (float)((int)((i + e) % 7) - 3));
+            srcs[e] = src[e].data();
+            weis[e] = wei[e].data();
+        }
+        auto gv = GemmVecs::uniform(experts, M, N, K);
+        for (const int threads : {24, 28, 32}) {
+            auto params = make_uniform_params(experts, data_type_t::bf16);
+            for (auto &p : params)
+                p.num_threads = threads;
+            const auto run = [&](int strategy, std::string &mode_out) {
+                NTileStrategyOverride strat(strategy);
+                CustomKernelOverride ck_on(true);
+                AlgoEnvGuard algo3(3);
+                WeightCacheGuard wc(1);
+                reset_grp_matmul_caches();
+                std::vector<std::vector<bfloat16_t>> dst(experts);
+                std::vector<void *> dsts(experts);
+                for (int e = 0; e < experts; ++e) {
+                    dst[e].assign(static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+                    dsts[e] = dst[e].data();
+                }
+                const char *mode = nullptr;
+                group_matmul_run_parallel_dispatch(gv.layout, gv.transA,
+                        gv.transB, gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda,
+                        weis, gv.ldb, biases, gv.beta, dsts, gv.ldc, gv.is_wc,
+                        params, threads, &mode, grp_matmul_gated_act_t::none,
+                        data_type_t::bf16);
+                mode_out = (mode != nullptr) ? mode : "";
+                return dst;
+            };
+            std::string mode_decdyn, mode_rounds;
+            const auto decdyn = run(3, mode_decdyn);
+            const auto rounds = run(2, mode_rounds);
+            ASSERT_NE(mode_decdyn.find("decdyn_custom"), std::string::npos)
+                    << "experts=" << experts << " threads=" << threads
+                    << " gemm_mode=" << mode_decdyn;
+            for (int e = 0; e < experts; ++e) {
+                EXPECT_EQ(std::memcmp(decdyn[e].data(), rounds[e].data(),
+                                  decdyn[e].size() * sizeof(bfloat16_t)),
+                        0)
+                        << "experts=" << experts << " threads=" << threads
+                        << " expert " << e;
+            }
+        }
+    }
+}
+
 // ── WEIGHT_CACHE=2 (in-place) grouped-route policy ──────────────────
 // `group_matmul_run_parallel_dispatch` downgrades the process-wide
 // weight-cache mode 2 -> 1 ONLY for AUTO (env_algo=0), where an AOCL
@@ -4194,7 +4330,11 @@ TEST(TestGroupMatmulDecodeDynamic, NonCustomWideSwigluMatchesRounds) {
 // the pack layer (bf16/even-K packs in place into the single-consumer
 // weight buffer; int8/odd-K fall back to an out-of-place cache that
 // never mutates the weight).  Downgrade is process-wide + sticky, so
-// each test re-arms WC=2 via the RAII guard.
+// each test re-arms WC=2 via the RAII guard.  Under the mixed in-place
+// mode, a bf16 layer of several experts that AUTO keeps on ALGO 3 writes
+// its custom-kernel pack in place and keeps its AOCL reorders out-of-place;
+// the mixed-mode tests of the AOCL prompt reorder pin such a layer's prompt
+// to ALGO 1.
 namespace {
 // WeightCacheGuard (RAII: set weight-cache mode, restore the prior value on
 // scope exit so the sticky downgrade does not leak into sibling tests) is a
@@ -4310,8 +4450,10 @@ struct MinRunResultT {
 // `M_dim` selects the phase.  M <= kDecodeMaxM (32) is decode and, for a
 // few experts, Rule 0.5 may select ALGO 3, which never consults
 // `mixed_inplace_for_wei`.  M > 32 is prompt and Rule 0.7 selects ALGO 1,
-// the path that does.  `num_threads` and `num_ops` are likewise overridable
-// so a decode call can be forced onto ALGO 3's narrow-N full-weight arm.
+// the path that does; a bf16 layer of several experts runs ALGO 3 there
+// too unless its prompt is pinned to ALGO 1.  `num_threads` and `num_ops`
+// are likewise overridable so a decode call can be forced onto ALGO 3's
+// narrow-N full-weight arm.
 template <typename T>
 inline MinRunResultT<T> run_min_grp_matmul_typed(data_type_t dt,
         int K_dim = 256, int weight_offset_elems = 0, int N_dim = 256,
@@ -4403,6 +4545,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoDowngradesWc2WhenIneligible) {
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0); // AUTO — mixes AOCL prompt + decode
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     WeightCacheGuard wc(2);
     LruCapacityGuard cap(4096); // finite -> mixed-in-place ineligible
     run_min_grp_matmul();
@@ -4422,6 +4565,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceEnabledWc2) {
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     WeightCacheGuard wc(2); // capacity unlimited by default
     run_min_grp_matmul();
     auto &cfg = zendnnl::common::matmul_config_t::instance();
@@ -4439,6 +4583,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     WeightCacheGuard wc(2);
     auto &cfg = zendnnl::common::matmul_config_t::instance();
     const auto mixed_first = run_min_grp_matmul(/*weight_offset_elems=*/0,
@@ -4501,6 +4646,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2Downgrades) {
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0); // AUTO
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     CustomKernelOverride ck_off(false);
     WeightCacheGuard wc(2);
     run_min_grp_matmul();
@@ -4524,6 +4670,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkOffWc2MatchesWc1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     MinRunResult ref, downgraded;
     {
         reset_grp_matmul_caches();
@@ -4557,6 +4704,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoMixedInplaceMatchesWc1) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     MinRunResult ref, mixed;
     {
         reset_grp_matmul_caches();
@@ -4636,10 +4784,9 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2MixedInplaceMatchesWc1) {
 // arm regressed.  The mixed-mode assertion below is what pins that
 // distinction.
 //
-// M must be prompt.  The helper's default M=8 is decode, and Rule 0.5 sends
-// 4 experts x 8 threads to ALGO 3, which never consults
-// `mixed_inplace_for_wei`.  64 is above kDecodeMaxM (32), so Rule 0.7
-// selects ALGO 1.
+// The call must run ALGO 1, the path that consults `mixed_inplace_for_wei`:
+// a prompt M (64 is above kDecodeMaxM, 32) with the prompt phase pinned to
+// ALGO 1.  The pin leaves mixed mode eligible, which keys on AUTO alone.
 TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2CkRefusedKeepsWeightsRaw) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
     using namespace zendnnl::lowoha::matmul;
@@ -4694,13 +4841,12 @@ TEST(TestGroupMatmulWeightCacheDowngrade, AutoF16Wc2CkRefusedKeepsWeightsRaw) {
 // ALGO 3 narrow-N.  N=1 is CK-refused (`plan_pack_nr` returns 0) and the
 // blocked f16 image fits the plain allocation, so the full-weight warm
 // used to rewrite the buffer under `warm_aocl`'s default
-// `allow_inplace=true`.  A prompt M takes ALGO 1 and misses that arm.
-// 8 experts at M=8 with 32 threads stays on decode Rule 0.5
-// (8 * kDecodeNTileThreadFactor >= 32) and `stable = 32/16 = 2` exceeds
-// `N/nr_align = 1`, which is the narrow-N full-weight arm.  The
-// cross-warm skips that arm (`primary_did_aocl_fw`), so regime stays
-// `none` and `packed_ok` is exactly the expert count — a per-tile
-// primary would cross-warm the full weight and count both.
+// `allow_inplace=true`.  8 experts at M=8 with 32 threads is a decode on
+// ALGO 3, and `stable = 32/16 = 2` exceeds `N/nr_align = 1`, which is the
+// narrow-N full-weight arm.  The prompt pin to ALGO 1 makes the full-weight
+// cross-warm reachable; it skips that arm (`primary_did_aocl_fw`), so
+// regime stays `none` and `packed_ok` is exactly the expert count — a
+// per-tile primary would cross-warm the full weight and count both.
 TEST(TestGroupMatmulWeightCacheDowngrade,
         AutoF16Wc2NarrowNCkRefusedKeepsWeightsRaw) {
     SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
@@ -4771,6 +4917,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     constexpr int num_ops = 4, M = 8, K = 256, N = 256;
     const size_t wei_elems = static_cast<size_t>(K) * N;
 
@@ -5039,6 +5186,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard auto_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     CustomKernelOverride ck_on(true);
     WeightCacheGuard wc(2);
     LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
@@ -5130,6 +5278,7 @@ TEST(TestGroupMatmulWeightCacheDowngrade,
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_on_algo1(1); // split the phases
     CustomKernelOverride ck_on(true);
     MinRunResult ref, mixed;
     {
@@ -5229,164 +5378,513 @@ TEST(TestGroupMatmulWeightCacheDowngrade, Algo3OddKWc2StaysOutOfPlace) {
             << d;
 }
 
-// Latest main's Rule 0.7 routes every unpinned prompt to ALGO 1.  The pair
-// below pins both sides of the retired work-per-expert gate to ensure prompt
-// depth no longer changes that default.
-TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsDeepRoutesToAlgo1) {
+// ── AUTO custom-kernel in-place (both phases on ALGO 3) ─────────────
+
+namespace {
+
+// bf16 expert weights the test owns, so it can call the same layer twice and
+// ask which buffers an in-place pack rewrote.
+struct Bf16Layer {
+    int K, N;
+    std::vector<std::vector<bfloat16_t>> wei, raw;
+
+    Bf16Layer(int experts, int K_, int N_)
+        : K(K_), N(N_), wei(experts), raw(experts) {
+        for (int e = 0; e < experts; ++e) {
+            wei[e].resize(static_cast<size_t>(K) * N);
+            for (size_t i = 0; i < wei[e].size(); ++i)
+                wei[e][i] = bfloat16_t(0.01f * (float)((int)((i + e) % 7) - 3));
+            raw[e] = wei[e];
+        }
+    }
+
+    bool mutated(int e) const {
+        return std::memcmp(wei[e].data(), raw[e].data(),
+                       wei[e].size() * sizeof(bfloat16_t))
+                != 0;
+    }
+
+    // One call with `M[e]` rows for expert `e`; an idle expert gets a
+    // one-row buffer the call leaves untouched.  `tile_unsafe` gives the last
+    // expert a different bias dtype (there is no bias), which keeps the call
+    // off ALGO 3.
+    zendnnl::error_handling::status_t run(const std::vector<int> &M,
+            std::vector<std::vector<bfloat16_t>> &dst, float alpha = 1.0f,
+            int threads = 8, int32_t weight_cache_type = 2,
+            bool tile_unsafe = false) {
+        using namespace zendnnl::lowoha::matmul;
+        using namespace moe_test_utils;
+        const int E = static_cast<int>(wei.size());
+        std::vector<std::vector<bfloat16_t>> src(E);
+        std::vector<const void *> srcs(E), weis(E), biases(E, nullptr);
+        std::vector<void *> dsts(E);
+        dst.assign(E, {});
+        for (int e = 0; e < E; ++e) {
+            const int m = std::max(M[e], 1);
+            src[e].resize(static_cast<size_t>(m) * K);
+            for (size_t i = 0; i < src[e].size(); ++i)
+                src[e][i] = bfloat16_t(0.02f * (float)((int)((i + e) % 5) - 2));
+            dst[e].assign(static_cast<size_t>(m) * N, bfloat16_t(0.0f));
+            srcs[e] = src[e].data();
+            weis[e] = wei[e].data();
+            dsts[e] = dst[e].data();
+        }
+        auto gv = GemmVecs::uniform(E, 1, N, K, alpha);
+        gv.Ms = M;
+        auto params = make_uniform_params(E, data_type_t::bf16);
+        for (auto &p : params) {
+            p.num_threads = threads;
+            p.weight_cache_type = weight_cache_type;
+        }
+        if (tile_unsafe) { params.back().dtypes.bias = data_type_t::f32; }
+        return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
+                gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+    }
+
+    // The experts as a sequential chain (`src.size() == 1`): each op reads
+    // the previous op's output, so the layer must be square.
+    zendnnl::error_handling::status_t run_chain(
+            int M, std::vector<std::vector<bfloat16_t>> &dst) {
+        using namespace zendnnl::lowoha::matmul;
+        using namespace moe_test_utils;
+        const int E = static_cast<int>(wei.size());
+        std::vector<bfloat16_t> src(static_cast<size_t>(M) * K);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = bfloat16_t(0.02f * (float)((int)(i % 5) - 2));
+        std::vector<const void *> srcs {src.data()}, weis(E),
+                biases(E, nullptr);
+        std::vector<void *> dsts(E);
+        dst.assign(E, std::vector<bfloat16_t>(static_cast<size_t>(M) * N));
+        for (int e = 0; e < E; ++e) {
+            weis[e] = wei[e].data();
+            dsts[e] = dst[e].data();
+        }
+        auto gv = GemmVecs::uniform(E, M, N, K, 1.0f);
+        auto params = make_uniform_params(E, data_type_t::bf16);
+        return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
+                gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                /*moe_postop=*/nullptr, /*gated_act=*/nullptr);
+    }
+};
+
+} // namespace
+
+// Both phases run ALGO 3, so the custom-kernel pack is the only layout of the
+// weights: AUTO keeps WC=2 and the process mixed mode, packs the bf16 weights
+// in place, and matches the out-of-place run bit for bit.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceWc2MatchesWc1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+    MinRunResult ref, in_place;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        ref = run_min_grp_matmul();
+    }
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(2);
+        in_place = run_min_grp_matmul();
+        auto &cfg = zendnnl::common::matmul_config_t::instance();
+        EXPECT_EQ(cfg.get_weight_cache(), 2) << "no process-wide downgrade";
+        EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace());
+    }
+    EXPECT_FALSE(ref.weights_mutated) << "WC=1 must leave the weights raw";
+    EXPECT_TRUE(in_place.weights_mutated)
+            << "the custom-kernel pack must be written into the caller's "
+               "buffer";
+    EXPECT_EQ(max_abs_diff(ref.dst, in_place.dst), 0.0);
+}
+
+// A BF16 MoE call ALGO 3 cannot serve keeps the rules and the mixed mode of
+// every other call: its prompt AOCL reorder is written in place and the
+// decode reads it, the process keeps WC=2, and both phases match WC=1.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoBf16MoeOffAlgo3KeepsMixedMode) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+    const std::vector<int> prompt {64, 64, 64, 64}, decode {8, 8, 8, 8};
+    std::vector<std::vector<bfloat16_t>> ref_p, ref_d, dst_p, dst_d;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run(prompt, ref_p, 1.0f, 8, 2, /*tile_unsafe=*/true),
+                status_t::success);
+        ASSERT_EQ(layer.run(decode, ref_d, 1.0f, 8, 2, /*tile_unsafe=*/true),
+                status_t::success);
+    }
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer layer(4, 256, 256);
+    ASSERT_EQ(layer.run(prompt, dst_p, 1.0f, 8, 2, /*tile_unsafe=*/true),
+            status_t::success);
+    ASSERT_EQ(layer.run(decode, dst_d, 1.0f, 8, 2, /*tile_unsafe=*/true),
+            status_t::success);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    EXPECT_EQ(cfg.get_weight_cache(), 2) << "no process-wide downgrade";
+    EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace());
+    for (int e = 0; e < 4; ++e) {
+        EXPECT_TRUE(layer.mutated(e)) << "expert " << e;
+        EXPECT_FALSE(custom_kernel::weight_packed_in_place(layer.wei[e].data()))
+                << "expert " << e;
+        EXPECT_EQ(std::memcmp(ref_p[e].data(), dst_p[e].data(),
+                          ref_p[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "prompt expert " << e;
+        EXPECT_EQ(std::memcmp(ref_d[e].data(), dst_d[e].data(),
+                          ref_d[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "decode expert " << e;
+    }
+}
+
+// The licence is per call: after a BF16 MoE call packed its experts in place,
+// a single expert in the same process keeps the mixed in-place mode.  Its
+// ALGO 1 prompt reorder is written in place and its ALGO 3 decode pack is
+// not, and both outputs match WC=1.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoSingleExpertAfterLicensedCall) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    LruCapacityGuard unlimited(std::numeric_limits<uint32_t>::max());
+    const std::vector<int> moe_m {64, 64, 64, 64}, prompt {64}, decode {1};
+    std::vector<std::vector<bfloat16_t>> moe_ref, prompt_ref, decode_ref, out;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer moe(4, 256, 256), dense(1, 256, 256);
+        ASSERT_EQ(moe.run(moe_m, moe_ref), status_t::success);
+        ASSERT_EQ(dense.run(prompt, prompt_ref), status_t::success);
+        ASSERT_EQ(dense.run(decode, decode_ref), status_t::success);
+    }
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer moe(4, 256, 256), dense(1, 256, 256);
+    ASSERT_EQ(moe.run(moe_m, out), status_t::success);
+    for (int e = 0; e < 4; ++e) {
+        EXPECT_TRUE(moe.mutated(e)) << "expert " << e;
+        EXPECT_EQ(std::memcmp(moe_ref[e].data(), out[e].data(),
+                          out[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "expert " << e;
+    }
+    ASSERT_EQ(dense.run(prompt, out), status_t::success);
+    EXPECT_TRUE(dense.mutated(0)) << "the ALGO 1 prompt reorder goes in place";
+    EXPECT_EQ(max_abs_diff(prompt_ref, out), 0.0);
+    ASSERT_EQ(dense.run(decode, out), status_t::success);
+    EXPECT_FALSE(custom_kernel::weight_packed_in_place(dense.wei[0].data()))
+            << "the ALGO 3 decode pack stays out-of-place";
+    EXPECT_EQ(max_abs_diff(decode_ref, out), 0.0);
+    auto &cfg = zendnnl::common::matmul_config_t::instance();
+    EXPECT_EQ(cfg.get_weight_cache(), 2) << "no process-wide downgrade";
+    EXPECT_TRUE(cfg.get_grp_auto_mixed_inplace());
+}
+
+// The prepack writes the pack of every expert the call advertises into its
+// buffer, active or idle.  A later call on the experts that were idle reads
+// those packs and must match an out-of-place run.
+TEST(TestGroupMatmulWeightCacheDowngrade,
+        AutoCkInPlacePrepackPacksIdleExperts) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    const std::vector<int> first {8, 0, 8, 0}, second {0, 8, 0, 8};
+    std::vector<std::vector<bfloat16_t>> ref, dst;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run(first, ref), status_t::success);
+        ASSERT_EQ(layer.run(second, ref), status_t::success);
+    }
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer layer(4, 256, 256);
+    ASSERT_EQ(layer.run(first, dst), status_t::success);
+    for (int e = 0; e < 4; ++e) {
+        EXPECT_TRUE(custom_kernel::weight_packed_in_place(layer.wei[e].data()))
+                << "expert " << e;
+        EXPECT_TRUE(layer.mutated(e)) << "expert " << e;
+    }
+    ASSERT_EQ(layer.run(second, dst), status_t::success);
+    for (int e : {1, 3}) {
+        EXPECT_EQ(std::memcmp(ref[e].data(), dst[e].data(),
+                          ref[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "expert " << e;
+    }
+}
+
+// A call that caps its weight cache at 1 keeps every weight of the call raw,
+// idle experts included, and matches the out-of-place run.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceHonoursPerCallCap) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    const std::vector<int> M {8, 0, 8, 0};
+    std::vector<std::vector<bfloat16_t>> ref, dst;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run(M, ref), status_t::success);
+    }
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer layer(4, 256, 256);
+    ASSERT_EQ(layer.run(M, dst, 1.0f, 8, /*weight_cache_type=*/1),
+            status_t::success);
+    for (int e = 0; e < 4; ++e) {
+        EXPECT_FALSE(layer.mutated(e)) << "expert " << e;
+    }
+    for (int e : {0, 2}) {
+        EXPECT_EQ(std::memcmp(ref[e].data(), dst[e].data(),
+                          ref[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "expert " << e;
+    }
+}
+
+// A sequential chain runs every op on AOCL, so it fails on a weight the
+// custom kernel packed in place; on any other weight it runs as before.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceSequentialChain) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    std::vector<std::vector<bfloat16_t>> dst;
+    Bf16Layer packed(4, 256, 256);
+    ASSERT_EQ(packed.run({8, 8, 8, 8}, dst), status_t::success);
+    ASSERT_TRUE(packed.mutated(0));
+    EXPECT_EQ(packed.run_chain(8, dst), status_t::failure);
+
+    Bf16Layer chain(4, 256, 256);
+    EXPECT_EQ(chain.run_chain(8, dst), status_t::success);
+}
+
+// A weight the custom kernel does not pack keeps its raw bytes: AOCL DLP
+// layouts stay out-of-place, the process keeps WC=2 for every other path,
+// and the result matches WC=1.  An N no pack NR divides, and an odd K.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceLeavesOtherLayoutsRaw) {
+    SKIP_GRP_MATMUL_TESTS_WITHOUT_AOCL_DLP();
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck(true);
+    struct Case {
+        int K, N, M;
+    };
+    for (const Case c :
+            {Case {256, 200, 8}, Case {256, 200, 64}, Case {255, 256, 8}}) {
+        MinRunResultT<bfloat16_t> ref, test;
+        {
+            reset_grp_matmul_caches();
+            WeightCacheGuard wc(1);
+            ref = run_min_grp_matmul_typed<bfloat16_t>(data_type_t::bf16, c.K,
+                    /*weight_offset_elems=*/0, c.N, c.M);
+        }
+        {
+            reset_grp_matmul_caches();
+            WeightCacheGuard wc(2);
+            test = run_min_grp_matmul_typed<bfloat16_t>(data_type_t::bf16, c.K,
+                    /*weight_offset_elems=*/0, c.N, c.M);
+            EXPECT_EQ(zendnnl::common::matmul_config_t::instance()
+                              .get_weight_cache(),
+                    2);
+        }
+        EXPECT_FALSE(test.weights_mutated)
+                << "K=" << c.K << " N=" << c.N << " M=" << c.M;
+        EXPECT_LT(max_abs_diff_t(ref.dst, test.dst), 1e-2)
+                << "K=" << c.K << " N=" << c.N << " M=" << c.M;
+    }
+}
+
+// A weight the custom kernel rewrote has no other reader.  A later call the
+// kernel refuses (alpha != 1) fails instead of reading the image as a raw
+// weight.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceRefusedCallFailsClosed) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer layer(4, 256, 256);
+    std::vector<std::vector<bfloat16_t>> dst;
+    ASSERT_EQ(layer.run({8, 8, 8, 8}, dst), status_t::success);
+    ASSERT_TRUE(layer.mutated(0));
+    EXPECT_EQ(layer.run({8, 8, 8, 8}, dst, /*alpha=*/2.0f), status_t::failure);
+    EXPECT_EQ(layer.run({64, 64, 64, 64}, dst, /*alpha=*/2.0f),
+            status_t::failure);
+}
+
+// Concurrent calls on shared weights: each in-place pack runs under the pack
+// cache's lock, so every thread computes on a complete image and matches the
+// out-of-place reference.
+TEST(TestGroupMatmulWeightCacheDowngrade, AutoCkInPlaceConcurrentMatchesWc1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard reset_algo(0);
+    CustomKernelOverride ck_on(true);
+    const std::vector<int> M {8, 0, 8, 8};
+    std::vector<std::vector<bfloat16_t>> ref;
+    {
+        reset_grp_matmul_caches();
+        WeightCacheGuard wc(1);
+        Bf16Layer layer(4, 256, 256);
+        ASSERT_EQ(layer.run(M, ref), status_t::success);
+    }
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    Bf16Layer layer(4, 256, 256);
+    constexpr int kThreads = 8;
+    std::vector<std::vector<std::vector<bfloat16_t>>> dsts(kThreads);
+    std::vector<status_t> st(kThreads, status_t::failure);
+    std::vector<std::thread> ths;
+    for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() { st[t] = layer.run(M, dsts[t], 1.0f, 4); });
+    }
+    for (auto &th : ths)
+        th.join();
+    for (int t = 0; t < kThreads; ++t) {
+        ASSERT_EQ(st[t], status_t::success) << "thread " << t;
+        for (int e : {0, 2, 3}) {
+            EXPECT_EQ(std::memcmp(ref[e].data(), dsts[t][e].data(),
+                              ref[e].size() * sizeof(bfloat16_t)),
+                    0)
+                    << "thread " << t << " expert " << e;
+        }
+    }
+}
+
+// A call the custom kernel declines after its pack loop rewrote some experts
+// (here a second expert reads past the first one's image, so its pack fails)
+// must fail rather than run the AOCL fallback on the rewritten buffer.
+TEST(TestGroupMatmulWeightCacheDowngrade, Algo3PartialInPlacePackFailsClosed) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "the BF16 custom kernel needs AVX-512 BF16";
+    }
+    AlgoEnvGuard algo3(3);
+    CustomKernelOverride ck_on(true);
+    reset_grp_matmul_caches();
+    WeightCacheGuard wc(2);
+    constexpr int K = 128, M = 8;
+    // Expert 0 is the first 64 columns' worth of the buffer; expert 1 views
+    // the same buffer as 128 columns wide.
+    std::vector<bfloat16_t> buf(static_cast<size_t>(K) * 128);
+    for (size_t i = 0; i < buf.size(); ++i)
+        buf[i] = bfloat16_t(0.01f * (float)((int)(i % 7) - 3));
+    std::vector<std::vector<bfloat16_t>> src(2), dst(2);
+    std::vector<const void *> srcs(2), weis(2, buf.data()), biases(2, nullptr);
+    std::vector<void *> dsts(2);
+    auto gv = GemmVecs::uniform(2, M, 64, K);
+    gv.Ns = {64, 128};
+    gv.ldb = {64, 128};
+    gv.ldc = {64, 128};
+    for (int e = 0; e < 2; ++e) {
+        src[e].assign(static_cast<size_t>(M) * K, bfloat16_t(0.02f));
+        dst[e].assign(static_cast<size_t>(M) * gv.Ns[e], bfloat16_t(0.0f));
+        srcs[e] = src[e].data();
+        dsts[e] = dst[e].data();
+    }
+    auto params = make_uniform_params(2, data_type_t::bf16);
+    for (auto &p : params)
+        p.num_threads = 8;
+    EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms, gv.Ns,
+                      gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
+                      gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                      /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+            status_t::failure);
+}
+
+// The unpinned prompt of a BF16 layer of several experts runs ALGO 3
+// whatever its shape: many experts deep or thin, few experts on a wide team,
+// or a shape ALGO 2 could M-tile.
+// The tile executor is held off, so the route cannot depend on it.
+TEST(TestGroupMatmulAutoPhaseEnv, UnpinnedPromptRoutesToAlgo3AtEveryShape) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
-    // No phase-env override — exercises the default prompt policy.
+    PromptTileOverride tile_off(false);
 
-    // Prompt-class: max_M=768 > kDecodeMaxM(32); 88 active experts on 64
-    // threads (active_ops > num_threads).  Deep side of the retired gate:
-    // 768/88 = 8.7 rows per expert cleared 0.9*sqrt(64) = 7.2.
-    auto s = build_auto_probe(/*M=*/768, /*K=*/2048, /*N=*/1536,
-            /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "an unpinned prompt must route to ALGO 1 regardless of depth";
+    struct Shape {
+        int M, num_ops, num_threads;
+    };
+    for (const Shape &sh : {Shape {768, 88, 64}, Shape {64, 88, 64},
+                 Shape {40, 8, 64}, Shape {512, 16, 64}, Shape {256, 8, 1}}) {
+        auto s = build_auto_probe(
+                sh.M, /*K=*/2048, /*N=*/1536, sh.num_ops, sh.num_threads);
+        EXPECT_EQ(select_grp_matmul_algo(
+                          s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+                3)
+                << "M=" << sh.M << " num_ops=" << sh.num_ops
+                << " threads=" << sh.num_threads;
+    }
 }
 
-// Thin side of the same regime — also ALGO 1.
-TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsThinRoutesToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // Same 88-expert / 64-thread frame, but max_M=64 → 0.7 rows per expert,
-    // far under the 7.2 the retired gate demanded of a 64-thread team.
-    auto s = build_auto_probe(/*M=*/64, /*K=*/2048, /*N=*/1536,
-            /*num_ops=*/88, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "an unpinned prompt must route to ALGO 1 regardless of depth";
-}
-
-// Rule 0.7: a PROMPT-class wide-N frame (few actives × shallow M ×
-// large N: max_M>1 && total_need*2 <= num_threads) routes to ALGO 1
-// (sequential full-team) — reproducing flat_m_tile's old wide-N fallback,
-// now that ALGO 2 is pure M-tile.
-TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // 8 actives × M=8 on 64 threads: total_need = 8*ceil(8/16) = 8, 2*8=16
-    // <= 64; max_M=8 > 1 → wide-N regime.  Prompt-class because... max_M=8
-    // <= kDecodeMaxM(32) would be DECODE.  Use M=40 (>32 prompt) but keep
-    // total_need*2 <= num_threads: 8*ceil(40/16)=8*3=24, 2*24=48 <= 64. ✓
-    auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/1536,
-            /*num_ops=*/8, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "prompt-class wide-N (8 actives × M=40 / 64t: total_need*2=48 "
-               "<= 64, "
-               "max_M=40 > 1) must route to ALGO 1 (sequential full-team)";
-}
-
-// Rule 0.7 applies before M-tile regime classification for an unpinned prompt,
-// so even a genuine M-tile shape uses ALGO 1 by default.
-TEST(TestGroupMatmulAutoPhaseEnv, PromptMTileRegimeRoutesToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    auto s = build_auto_probe(/*M=*/512, /*K=*/2048, /*N=*/1536,
-            /*num_ops=*/16, /*num_threads=*/64);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "the unpinned prompt policy must route M-tile shapes to ALGO 1";
-}
-
-// Rule 0.6 counts ACTIVE experts (M[i] > 0), NOT the padded slot count.
-// A legacy caller may pass M with inactive (M[i]==0) placeholders in-range;
-// only the firing experts consume a thread, so a call whose SLOT count
-// exceeds the thread budget but whose ACTIVE count does not must stay on
-// ALGO 3 (the rule must not fire on padding alone).
-TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-    // Pinned to the Rounds strategy so "rule fired" is observable as ALGO 5.
-    // Under the default (3 = decode_dynamic) the rule reroutes to ALGO 3
-    // instead, which is the same answer as "rule did not fire" and would make
-    // this active-vs-slot distinction untestable.
-    NTileStrategyOverride rounds(2);
-
-    // 88 slots on 64 threads (slot count > threads) but only 58 fire — mark
-    // the trailing 30 inactive (M[i]=0).  active_ops(58) <= num_threads(64),
-    // so Rule 0.6 must NOT fire and decode stays on its ALGO 3 default.
-    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
-            /*num_ops=*/88, /*num_threads=*/64);
-    for (int i = 58; i < 88; ++i)
-        s.M[i] = 0;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            3)
-            << "decode slot count(88) > threads(64) but active(58) <= "
-               "threads(64): "
-               "Rule 0.6 must compare ACTIVE experts, so ALGO 3 stays selected";
-
-    // Now make 78 fire (active > threads) — Rule 0.6 fires. Both sides of the
-    // threshold answer ALGO 3 now, so assert on the RULE having fired rather
-    // than on a distinct algo: see the reason= telemetry for the split.
-    for (int i = 0; i < 88; ++i)
-        s.M[i] = (i < 78) ? 16 : 0;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            3)
-            << "decode active(78) > threads(64) must route to ALGO 3";
-}
-
-// Rule 0.5 is a dtype-agnostic occupancy test for few-expert decode.
-// Under-occupied frames use full-team sequential ALGO 1; frames with at most
-// four threads per active expert use N-tile ALGO 3.
-TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeShallowMRoutesToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // Mixtral-class decode: 8 active experts cannot fill a 128-thread team
-    // under the four-threads-per-expert threshold.
-    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "8 active * 4 < 128 threads must select full-team ALGO 1";
-}
-
-// M does not alter Rule 0.5's occupancy decision. A single-token frame with
-// 8 active experts and 128 threads remains under-occupied and takes ALGO 1.
-// AUTO must never emit ALGO 2; that requires an explicit pin — the
+// A BF16 layer of few experts decodes on ALGO 3 too, at any occupancy and
+// any M, and AUTO selects ALGO 2 only for W4A8 prompts — the
 // `ExplicitPromptAlgo2PinBeatsRegimeRouting` and
-// `SingleDenseExpertDecodeHonoursExplicitPin` tests cover that direction.
-TEST(TestGroupMatmulAutoPhaseEnv,
-        FewExpertsDecodeSingleTokenNeverAutoSelects2) {
+// `SingleDenseExpertDecodeHonoursExplicitPin` tests cover the pinned side.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeRoutesToAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // 8 active experts, M=1: 8 * 4 < 128.
-    auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/128);
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "AUTO must not select ALGO 2: a ≤8-expert single-token decode "
-               "uses Rule 0.5's low-occupancy ALGO 1 arm";
+    // Mixtral-class decode: 8 active experts on a 128-thread team, at M=16
+    // and at a single token.
+    for (const int m : {16, 1}) {
+        auto s = build_auto_probe(m, /*K=*/4096, /*N=*/14336,
+                /*num_ops=*/8, /*num_threads=*/128);
+        EXPECT_EQ(select_grp_matmul_algo(
+                          s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+                3)
+                << "M=" << m;
+    }
 }
 
 // PRECEDENCE: `AUTO_{DECODE,PROMPT}_ALGO` outranks `ZENDNNL_GRP_MATMUL_ALGO`.
@@ -5461,8 +5959,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, GlobalStillAppliesToTheUnsetPhase) {
 }
 
 // Non-W4A8 invariant guard: sweep the BF16 shape space AUTO can see and
-// assert ALGO 2 never comes back without an explicit env pin.  Rule 0.7's
-// measured W4A8 prompt exception is covered separately below.
+// assert ALGO 2 never comes back without an explicit env pin.  W4A8 prompt
+// routing is covered separately below.
 TEST(TestGroupMatmulAutoPhaseEnv,
         NonW4A8AutoNeverSelectsAlgo2AcrossShapeSweep) {
     using namespace zendnnl::lowoha::matmul;
@@ -5487,9 +5985,8 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     }
 }
 
-// The few-expert occupancy policy is a DEFAULT refinement: an explicit
-// decode phase pin still wins. AUTO_DECODE_ALGO=3 on the same
-// under-occupied shape must yield ALGO 3, not Rule 0.5's ALGO 1.
+// The default is not a floor: an explicit decode phase pin still wins on a
+// shape the default sends to ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -5507,81 +6004,9 @@ TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsExplicitDecodePinStillWins) {
                "occupancy policy";
 }
 
-// Rule 0.5 counts the TOTAL experts (framework `total_matmul`), not the
-// active op count.  An active-4 / total-16 decode shape exceeds the ≤8
-// threshold, so it falls through to the decode default ALGO 3.
-TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    // 4 ACTIVE experts but 16 TOTAL (framework opt-in: active_matmul=4,
-    // total_matmul=16).  total=16 > 8 → Rule 0.5 must NOT fire.
-    auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
-            /*num_ops=*/4, /*num_threads=*/64);
-    s.params[0].active_matmul = 4;
-    s.params[0].total_matmul = 16;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            3)
-            << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
-               "decode default ALGO 3";
-
-    // Same active count but total=8 → Rule 0.5 fires. Four active experts
-    // cannot satisfy 4*4 >= 64, so the occupancy arrow selects ALGO 1. The
-    // different outcome proves that TOTAL scopes entry to Rule 0.5 while
-    // ACTIVE count drives its occupancy decision.
-    s.params[0].total_matmul = 8;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "total=8 (≤ threshold) must fire Rule 0.5 even with only 4 "
-               "active experts; 4*4 < 64 → ALGO 1";
-}
-
-// ── W4A8 uses the generic Rule 0.5 decode occupancy policy ─────────────
-// There is no W4A8-only routing override.  Like every other dtype family,
-// few-expert decode takes ALGO 3 only when active_ops * factor fills the
-// requested team; otherwise full-team sequential ALGO 1 wins.
-
-TEST(TestGroupMatmulAutoPhaseEnv,
-        W4A8FewExpertsDecodeLowOccupancyRoutesToAlgo1) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/128);
-    apply_w4a8_auto_probe(s);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
-            1)
-            << "8 active * 4 < 128 threads must route W4A8 through the "
-               "generic Rule 0.5 ALGO 1 arm";
-    EXPECT_STREQ(trace.reason, "auto_rule05_few_active");
-}
-
-TEST(TestGroupMatmulAutoPhaseEnv,
-        W4A8FewExpertsDecodeFullOccupancyRoutesToAlgo3) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/32);
-    apply_w4a8_auto_probe(s);
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
-            3)
-            << "8 active * 4 >= 32 threads must route W4A8 through the "
-               "generic Rule 0.5 ALGO 3 arm";
-    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
-}
+// ── W4A8 decode follows the generic AUTO policy ──────────────────────
+// Decode runs ALGO 3 at any occupancy; only a W4A8 prompt has its own
+// default (ALGO 2, below).
 
 TEST(TestGroupMatmulW4A8RuntimeAlgo, AutoIgnoresInnerKernel) {
     using namespace zendnnl::lowoha::matmul;
@@ -5644,6 +6069,8 @@ TEST(TestGroupMatmulExpertKernel, AppliesPolicyOnlyToW4A8Experts) {
             << "non-W4A8 experts must preserve the selected inner kernel";
 }
 
+// An unpinned W4A8 prompt runs ALGO 2's row-disjoint M tiles; a prompt pin
+// still outranks it, and a declined `=5` pin falls back to it.
 TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptRoutesToAlgo2) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -5683,6 +6110,519 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8PromptUnsafeMTileClampsToAlgo1) {
     EXPECT_STREQ(trace.reason, "auto_rule07_prompt_w4a8_mtile");
 }
 
+// A BF16 layer of several experts runs both unset phases on ALGO 3, so its
+// cross-warm has a reader only when a pin sends a phase off ALGO 3.  Every
+// other layer keeps the shape rules, whose phases may land on either side.
+TEST(TestGroupMatmulAutoPhaseEnv, CrossWarmReachableFollowsLayerScope) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride prompt_unset(-1);
+    AutoDecodeAlgoOverride decode_unset(-1);
+
+    for (const int from : {1, 2, 3}) {
+        EXPECT_FALSE(grp_matmul_cross_warm_target_reachable(from, true))
+                << "BF16 MoE layer from ALGO " << from;
+        EXPECT_TRUE(grp_matmul_cross_warm_target_reachable(from, false))
+                << "shape-rule layer from ALGO " << from;
+    }
+    {
+        AutoPromptAlgoOverride prompt_pinned_1(1);
+        EXPECT_TRUE(grp_matmul_cross_warm_target_reachable(3, true))
+                << "the pinned prompt reads the full-weight layout";
+        EXPECT_TRUE(grp_matmul_cross_warm_target_reachable(1, true))
+                << "the unset decode reads the ALGO 3 arena";
+    }
+    {
+        AutoPromptAlgoOverride prompt_pinned_3(3);
+        for (const bool layer : {true, false}) {
+            EXPECT_FALSE(grp_matmul_cross_warm_target_reachable(3, layer))
+                    << "a prompt pinned to ALGO 3 reads no full-weight layout";
+        }
+    }
+    AutoPromptAlgoOverride prompt_pinned_1(1);
+    AutoDecodeAlgoOverride decode_pinned_1(1);
+    for (const int from : {1, 2}) {
+        for (const bool layer : {true, false}) {
+            EXPECT_FALSE(grp_matmul_cross_warm_target_reachable(from, layer))
+                    << "with both phases off ALGO 3 nothing reads its arena";
+        }
+    }
+}
+
+// Every non-BF16 layer keeps the shape rules: a per-group `{G, N}` INT8
+// weight, like a per-token one, runs its prompt on ALGO 1 (Rule 0.7) and its
+// decode by Rule 0.5's occupancy test or the ALGO 3 decode default.
+TEST(TestGroupMatmulAutoPhaseEnv, PerGroupInt8KeepsShapeRules) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    static float wei_scale_sentinel = 1.0f;
+
+    struct layer_case {
+        int groups, num_ops, m, algo;
+        const char *reason;
+    };
+    for (const auto &c : {layer_case {90, 4, 64, 1, "auto_rule07_prompt_seq"},
+                 layer_case {90, 4, 2, 1, "auto_rule05_few_active"},
+                 layer_case {90, 16, 2, 3, "auto_phase_env"},
+                 layer_case {1, 4, 64, 1, "auto_rule07_prompt_seq"}}) {
+        auto s = build_auto_probe(c.m, /*K=*/2880, /*N=*/5760, c.num_ops,
+                /*num_threads=*/32);
+        for (size_t i = 0; i < s.params.size(); ++i) {
+            auto &p = s.params[i];
+            p.dtypes.wei = data_type_t::s8;
+            p.dtypes.compute = data_type_t::s8;
+            p.dynamic_quant = true;
+            p.quant_params.src_scale.dims = {c.m, c.groups};
+            p.quant_params.src_scale.dt = data_type_t::f32;
+            p.quant_params.wei_scale.dims = {c.groups, s.N[i]};
+            p.quant_params.wei_scale.dt = data_type_t::f32;
+            p.quant_params.wei_scale.buff = &wei_scale_sentinel;
+        }
+        auto_algo_trace trace;
+        EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                          s.num_threads, &trace),
+                c.algo)
+                << "groups=" << c.groups << " experts=" << c.num_ops
+                << " M=" << c.m;
+        EXPECT_STREQ(trace.reason, c.reason);
+    }
+}
+
+// The BF16 MoE scope counts the declared expert pool: one firing expert of a
+// pool of several (the `active_matmul` opt-in the routed MoE fallback sets)
+// stays on ALGO 3, while the same call without the opt-in is a single expert
+// and takes Rule 0.7.  A layer whose weights the caller AOCL-prepacked keeps
+// the shape rules.
+TEST(TestGroupMatmulAutoPhaseEnv, Bf16MoeScopeCountsDeclaredPool) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    auto_algo_trace trace;
+
+    auto one = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/1, /*num_threads=*/64);
+    EXPECT_EQ(select_grp_matmul_algo(one.layout, one.M, one.N, one.K,
+                      one.params, one.num_threads, &trace),
+            1);
+    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
+    one.params[0].active_matmul = 1;
+    one.params[0].total_matmul = 8;
+    EXPECT_EQ(select_grp_matmul_algo(one.layout, one.M, one.N, one.K,
+                      one.params, one.num_threads, &trace),
+            3);
+    EXPECT_STREQ(trace.reason, "auto_algo3");
+
+    auto packed = build_auto_probe(/*M=*/256, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/8, /*num_threads=*/64);
+    for (auto &p : packed.params) {
+        p.mem_format_b = 'r';
+        p.lowoha_algo = matmul_algo_t::aocl_dlp_blocked;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(packed.layout, packed.M, packed.N,
+                      packed.K, packed.params, packed.num_threads, &trace),
+            1);
+    EXPECT_STREQ(trace.reason, "auto_rule07_prompt_seq");
+}
+
+// ── Shape rules: every call but a BF16 layer of several experts ──────────
+// A single expert of any dtype and a layer of any other dtype keep the
+// shape rules; the tests below drive them with f32 probes where the
+// shape is a BF16 layer of several experts.
+
+TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowIgnoresPhaseEnv) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride force_prompt(3);
+    AutoDecodeAlgoOverride force_decode(3);
+
+    // Decode-class with 300 experts > kNTilePlanMaxExperts(256).
+    // Phase env says 3, but R0 must win → ALGO 1.
+    auto s = build_auto_probe(/*M=*/4, /*K=*/2880, /*N=*/5760,
+            /*num_ops=*/300, /*num_threads=*/128);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "R0 capacity gate must override phase env "
+               "(num_ops > kNTilePlanMaxExperts → ALGO 1)";
+}
+
+// Rule 0.6 counts ACTIVE experts (M[i] > 0), NOT the padded slot count.
+// A legacy caller may pass M with inactive (M[i]==0) placeholders in-range;
+// only the firing experts consume a thread, so a call whose SLOT count
+// exceeds the thread budget but whose ACTIVE count does not must stay on
+// ALGO 3 (the rule must not fire on padding alone).
+TEST(TestGroupMatmulAutoPhaseEnv, DecodeUsesActiveExpertCountNotSlotCount) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    // Pinned to the Rounds strategy so "rule fired" is observable as ALGO 5.
+    // Under the default (3 = decode_dynamic) the rule reroutes to ALGO 3
+    // instead, which is the same answer as "rule did not fire" and would make
+    // this active-vs-slot distinction untestable.
+    NTileStrategyOverride rounds(2);
+
+    // 88 slots on 64 threads (slot count > threads) but only 58 fire — mark
+    // the trailing 30 inactive (M[i]=0).  active_ops(58) <= num_threads(64),
+    // so Rule 0.6 must NOT fire and decode stays on its ALGO 3 default.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/88, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    for (int i = 58; i < 88; ++i)
+        s.M[i] = 0;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "decode slot count(88) > threads(64) but active(58) <= "
+               "threads(64): "
+               "Rule 0.6 must compare ACTIVE experts, so ALGO 3 stays selected";
+
+    // Now make 78 fire (active > threads) — Rule 0.6 fires. Both sides of the
+    // threshold answer ALGO 3 now, so assert on the RULE having fired rather
+    // than on a distinct algo: see the reason= telemetry for the split.
+    for (int i = 0; i < 88; ++i)
+        s.M[i] = (i < 78) ? 16 : 0;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "decode active(78) > threads(64) must route to ALGO 3";
+}
+
+// Default prompt policy: the raw setting retains cached value 2 for
+// compatibility, then latest main's default-only Rule 0.7 selects ALGO 1.
+// No `Override` is set, so this exercises the actual out-of-box route.
+TEST(TestGroupMatmulAutoPhaseEnv, DefaultPromptRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    // No AutoPromptAlgoOverride / AutoDecodeAlgoOverride — exercises
+    // the unset-env default policy.
+
+    // Mixtral-class prompt — Rule 0.7 selects ALGO 1 unless the operator
+    // explicitly pins a prompt scheduler.
+    auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "the unpinned prompt policy must route prompt → ALGO 1";
+}
+
+// Rule 0.5 is a dtype-agnostic occupancy test for few-expert decode.
+// Under-occupied frames use full-team sequential ALGO 1; frames with at most
+// four threads per active expert use N-tile ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsDecodeShallowMRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // Mixtral-class decode: 8 active experts cannot fill a 128-thread team
+    // under the four-threads-per-expert threshold.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "8 active * 4 < 128 threads must select full-team ALGO 1";
+}
+
+// M does not alter Rule 0.5's occupancy decision. A single-token frame with
+// 8 active experts and 128 threads remains under-occupied and takes ALGO 1.
+// AUTO must never emit ALGO 2; that requires an explicit pin — the
+// `ExplicitPromptAlgo2PinBeatsRegimeRouting` and
+// `SingleDenseExpertDecodeHonoursExplicitPin` tests cover that direction.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        FewExpertsDecodeSingleTokenNeverAutoSelects2) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // 8 active experts, M=1: 8 * 4 < 128.
+    auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "AUTO must not select ALGO 2: a ≤8-expert single-token decode "
+               "uses Rule 0.5's low-occupancy ALGO 1 arm";
+}
+
+// Rule 0.5 counts the TOTAL experts (framework `total_matmul`), not the
+// active op count.  An active-4 / total-16 decode shape exceeds the ≤8
+// threshold, so it falls through to the decode default ALGO 3.
+TEST(TestGroupMatmulAutoPhaseEnv, FewExpertsUsesTotalNotActiveCount) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // 4 ACTIVE experts but 16 TOTAL (framework opt-in: active_matmul=4,
+    // total_matmul=16).  total=16 > 8 → Rule 0.5 must NOT fire.
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+            /*num_ops=*/4, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    s.params[0].active_matmul = 4;
+    s.params[0].total_matmul = 16;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "Rule 0.5 must use TOTAL (16), not active (4); total>8 → "
+               "decode default ALGO 3";
+
+    // Same active count but total=8 → Rule 0.5 fires. Four active experts
+    // cannot satisfy 4*4 >= 64, so the occupancy arrow selects ALGO 1. The
+    // different outcome proves that TOTAL scopes entry to Rule 0.5 while
+    // ACTIVE count drives its occupancy decision.
+    s.params[0].total_matmul = 8;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "total=8 (≤ threshold) must fire Rule 0.5 even with only 4 "
+               "active experts; 4*4 < 64 → ALGO 1";
+}
+
+// Rule 0.6 decides the experts-exceed-threads decode regime when the decode
+// phase env is UNPINNED.  Here the rule and the pin agree on ALGO 3, so this
+// locks in the answer rather than the precedence; the pin-outranks-policy
+// direction is covered by ExplicitPhasePinOutranksPolicyRule below.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        MoreExpertsThanThreadsOverridesExplicitDecodePin) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    AutoPromptAlgoOverride no_prompt(0);
+    NTileStrategyOverride rounds(2); // legacy Rounds routing (ALGO 5 policy)
+    AutoDecodeAlgoOverride force_decode(3); // explicit decode pin (superseded)
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/88, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "decode num_ops(88) > num_threads(64) must be decided by Rule "
+               "0.6 (ALGO 3) ahead of the explicit AUTO_DECODE_ALGO pin";
+}
+
+// Latest main's Rule 0.7 routes every unpinned prompt to ALGO 1.  The pair
+// below pins both sides of the retired work-per-expert gate to ensure prompt
+// depth no longer changes that default.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsDeepRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    // No phase-env override — exercises the default prompt policy.
+
+    // Prompt-class: max_M=768 > kDecodeMaxM(32); 88 active experts on 64
+    // threads (active_ops > num_threads).  Deep side of the retired gate:
+    // 768/88 = 8.7 rows per expert cleared 0.9*sqrt(64) = 7.2.
+    auto s = build_auto_probe(/*M=*/768, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/88, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "an unpinned prompt must route to ALGO 1 regardless of depth";
+}
+
+// Thin side of the same regime — also ALGO 1.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptManyExpertsThinRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // Same 88-expert / 64-thread frame, but max_M=64 → 0.7 rows per expert,
+    // far under the 7.2 the retired gate demanded of a 64-thread team.
+    auto s = build_auto_probe(/*M=*/64, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/88, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "an unpinned prompt must route to ALGO 1 regardless of depth";
+}
+
+// Rule 0.7 applies before M-tile regime classification for an unpinned prompt,
+// so even a genuine M-tile shape uses ALGO 1 by default.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptMTileRegimeRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/512, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/16, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "the unpinned prompt policy must route M-tile shapes to ALGO 1";
+}
+
+// Rule 0.7: a PROMPT-class wide-N frame (few actives × shallow M ×
+// large N: max_M>1 && total_need*2 <= num_threads) routes to ALGO 1
+// (sequential full-team) — reproducing flat_m_tile's old wide-N fallback,
+// now that ALGO 2 is pure M-tile.
+TEST(TestGroupMatmulAutoPhaseEnv, PromptWideNRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // 8 actives × M=8 on 64 threads: total_need = 8*ceil(8/16) = 8, 2*8=16
+    // <= 64; max_M=8 > 1 → wide-N regime.  Prompt-class because... max_M=8
+    // <= kDecodeMaxM(32) would be DECODE.  Use M=40 (>32 prompt) but keep
+    // total_need*2 <= num_threads: 8*ceil(40/16)=8*3=24, 2*24=48 <= 64. ✓
+    auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/1536,
+            /*num_ops=*/8, /*num_threads=*/64);
+    apply_shape_rules_probe(s);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "prompt-class wide-N (8 actives × M=40 / 64t: total_need*2=48 "
+               "<= 64, "
+               "max_M=40 > 1) must route to ALGO 1 (sequential full-team)";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    for (auto &p : s.params) {
+        p.dtypes.wei = data_type_t::s8;
+        p.dtypes.dst = data_type_t::bf16;
+        p.dtypes.compute = data_type_t::s8;
+    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "s8/W8A8 few-expert shallow-M decode must use Rule 0.5 → "
+               "ALGO 1";
+}
+
+// Env gate off (`ZENDNNL_GRP_MATMUL_DENSE_DECODE_NTILE=0`) → the rule is
+// skipped and the frame falls through to Rule 0.5's low-occupancy ALGO 1
+// arm. This is the A/B escape hatch the knob exists for.
+TEST(TestGroupMatmulAutoPhaseEnv,
+        SingleDenseExpertDecodeEnvOffFallsBackToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+    DenseDecodeNTileOverride rule_off(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/2880, /*N=*/5760,
+            /*num_ops=*/1, /*num_threads=*/64);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "DENSE_DECODE_NTILE=0 must restore the generic few-expert "
+               "occupancy decision (Rule 0.5 → ALGO 1)";
+}
+
+// Phase gate: the rule is decode-only, so a single-expert PROMPT frame
+// is NOT pulled into ALGO 3 — it keeps the prompt policy and lands on
+// Rule 0.7's `kWideN → ALGO 1`.  One expert needs only `ceil(M /
+// slice_target)` M-slices, far fewer than the team, so `kWideN` (whose
+// ALGO 1 gives the full team an N-split) is the right prompt answer.
+// That same classification in DECODE is what Rule 0.45 exists to
+// override, so this test also pins the boundary between the two.
+TEST(TestGroupMatmulAutoPhaseEnv, SingleDenseExpertPromptStaysOnWideNAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    // Same expert, prompt-class M (> kDecodeMaxM).
+    auto s = build_auto_probe(/*M=*/256, /*K=*/2880, /*N=*/5760,
+            /*num_ops=*/1, /*num_threads=*/64);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            1)
+            << "Rule 0.45 is decode-only; a single-expert prompt frame must "
+               "stay on the prompt policy (kWideN → ALGO 1), not ALGO 3";
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv,
+        W4A8FewExpertsDecodeFullOccupancyRoutesToAlgo3) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/1, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/32);
+    apply_w4a8_auto_probe(s);
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            3)
+            << "8 active * 4 >= 32 threads must route W4A8 through the "
+               "generic Rule 0.5 ALGO 3 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv,
+        W4A8FewExpertsDecodeLowOccupancyRoutesToAlgo1) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    apply_w4a8_auto_probe(s);
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            1)
+            << "8 active * 4 < 128 threads must route W4A8 through the "
+               "generic Rule 0.5 ALGO 1 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_few_active");
+}
+
+TEST(TestGroupMatmulAutoPhaseEnv, W4A8InactiveLeftoverUsesRule05Occupancy) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    reset_grp_matmul_caches();
+    AlgoEnvGuard reset_algo(0);
+
+    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/28);
+    apply_w4a8_auto_probe(s);
+    s.M[0] = 0;
+    s.params[0].dtypes.src = data_type_t::bf16;
+    s.params[0].dtypes.wei = data_type_t::bf16;
+    s.params[0].dynamic_quant = false;
+    s.params[0].quant_params = {};
+    auto_algo_trace trace;
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
+            3)
+            << "7 active * 4 >= 28 threads must use Rule 0.5's ALGO 3 arm";
+    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
+}
+
 TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursExplicitPin) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -5718,56 +6658,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, W4A8DecodeHonoursNTileSafetyClamp) {
     EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
 }
 
-TEST(TestGroupMatmulAutoPhaseEnv, S8FewExpertsDecodeStillTakesRule05) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/128);
-    for (auto &p : s.params) {
-        p.dtypes.wei = data_type_t::s8;
-        p.dtypes.dst = data_type_t::bf16;
-        p.dtypes.compute = data_type_t::s8;
-    }
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-            1)
-            << "s8/W8A8 few-expert shallow-M decode must use Rule 0.5 → "
-               "ALGO 1";
-}
-
-TEST(TestGroupMatmulAutoPhaseEnv, W4A8InactiveLeftoverUsesRule05Occupancy) {
-    using namespace zendnnl::lowoha::matmul;
-    using namespace moe_test_utils;
-    reset_grp_matmul_caches();
-    AlgoEnvGuard reset_algo(0);
-
-    auto s = build_auto_probe(/*M=*/16, /*K=*/4096, /*N=*/14336,
-            /*num_ops=*/8, /*num_threads=*/28);
-    apply_w4a8_auto_probe(s);
-    s.M[0] = 0;
-    s.params[0].dtypes.src = data_type_t::bf16;
-    s.params[0].dtypes.wei = data_type_t::bf16;
-    s.params[0].dynamic_quant = false;
-    s.params[0].quant_params = {};
-    auto_algo_trace trace;
-    EXPECT_EQ(select_grp_matmul_algo(
-                      s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace),
-            3)
-            << "7 active * 4 >= 28 threads must use Rule 0.5's ALGO 3 arm";
-    EXPECT_STREQ(trace.reason, "auto_rule05_ntile_occupancy");
-}
-
 // Grouped-s8 post-quant call with INACTIVE experts must NOT be vetoed to
 // ALGO 1.  The grouped/fallback DQ pre-pass leaves inactive (M==0)
 // experts at bf16 + dynamic_quant=false while active experts are s8 +
 // per-token src_scale.  check_m_tile_safe / check_n_tile_extra must skip
 // the inactive experts (and key dtype uniformity off the first active
-// one) so a >8-expert decode shape still routes to ALGO 3. More than 8
-// experts keeps Rule 0.5 out of the picture, isolating the n_tile/m_tile
-// eligibility veto.
+// one) so a >8-expert decode shape still routes to ALGO 3, isolating the
+// n_tile/m_tile eligibility veto.
 TEST(TestGroupMatmulAutoPhaseEnv, GroupedS8WithInactiveExpertsKeepsAlgo3) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -5992,7 +6889,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
 
 // Phase value 4 is a valid raw W8A8 request, but its generic effective value
 // is the inherited phase default. It must not count as a generic policy pin:
-// after an eligibility decline, default-only refinements still run.
+// after an eligibility decline, the default policy runs.
 TEST(TestGroupMatmulAutoPhaseEnv,
         PhaseValue4RequestsW8A8AndInheritsDefaultPolicy) {
     using namespace zendnnl::lowoha::matmul;
@@ -6029,6 +6926,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // default-only prompt refinement selects ALGO 1.
     auto s = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
             /*num_ops=*/8, /*num_threads=*/128);
+    apply_shape_rules_probe(s);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
@@ -6046,6 +6944,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // as a literal pin.
     auto wide_prompt = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/8, /*num_threads=*/64);
+    apply_shape_rules_probe(wide_prompt);
     auto_algo_trace prompt_trace;
     EXPECT_EQ(select_grp_matmul_algo(wide_prompt.layout, wide_prompt.M,
                       wide_prompt.N, wide_prompt.K, wide_prompt.params,
@@ -6056,6 +6955,7 @@ TEST(TestGroupMatmulAutoPhaseEnv,
     // Few-expert decode likewise refines inherited default 3 via Rule 0.5.
     auto few_decode = build_auto_probe(/*M=*/8, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/4, /*num_threads=*/64);
+    apply_shape_rules_probe(few_decode);
     auto_algo_trace decode_trace;
     EXPECT_EQ(select_grp_matmul_algo(few_decode.layout, few_decode.M,
                       few_decode.N, few_decode.K, few_decode.params,
@@ -6063,61 +6963,54 @@ TEST(TestGroupMatmulAutoPhaseEnv,
             1);
     ASSERT_NE(decode_trace.reason, nullptr);
     EXPECT_EQ(std::string(decode_trace.reason).rfind("auto_rule05_", 0), 0u);
+
+    // A BF16 layer of several experts runs ALGO 3 after the decline too.
+    auto moe = build_auto_probe(/*M=*/256, /*K=*/4096, /*N=*/14336,
+            /*num_ops=*/8, /*num_threads=*/128);
+    auto_algo_trace moe_trace;
+    EXPECT_EQ(select_grp_matmul_algo(moe.layout, moe.M, moe.N, moe.K,
+                      moe.params, moe.num_threads, &moe_trace),
+            3);
+    EXPECT_STREQ(moe_trace.reason, "auto_algo3");
 }
 
-// Structural R0 (capacity overflow num_ops > kNTilePlanMaxExperts=256)
-// fires BEFORE the phase env so num_ops=300 → ALGO 1 even with
-// AUTO_PROMPT_ALGO/AUTO_DECODE_ALGO forced to 3.  (ALGO 5's per-expert pool
-// was the old answer here and was the only PARALLEL option beyond the
-// planner's expert ceiling; under the invariant this group runs serially
-// unless `ZENDNNL_GRP_MATMUL_ALGO=5` is forced.)
-// `AUTO_PROMPT_ALGO=2` is a PIN, not a hint.  Rule 0.7's regime routing runs
-// on the inherited default only, so an operator that explicitly asks for
-// ALGO 2 gets ALGO 2 even on a wide-N prompt frame that the classifier would
-// otherwise divert to ALGO 1.
+// `AUTO_PROMPT_ALGO=2` is a PIN, not a hint: an operator that explicitly
+// asks for ALGO 2 gets ALGO 2 on a prompt frame the default sends to
+// ALGO 3.
 TEST(TestGroupMatmulAutoPhaseEnv, ExplicitPromptAlgo2PinBeatsRegimeRouting) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    // Wide-N prompt frame: few experts, modest M, large thread count — the
-    // shape classify_m_tile_regime reports as kWideN.
+    // Wide-N prompt frame: few experts, modest M, large thread count.
     auto s = build_auto_probe(/*M=*/40, /*K=*/2048, /*N=*/8192,
             /*num_ops=*/8, /*num_threads=*/64);
-
-    {
-        // Inherited default: the regime classifier owns the decision.
-        const int inherited = select_grp_matmul_algo(
-                s.layout, s.M, s.N, s.K, s.params, s.num_threads);
-        EXPECT_EQ(inherited, 1) << "kWideN under the inherited prompt default "
-                                   "must still route to ALGO 1";
-    }
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3)
+            << "the unpinned prompt default must route to ALGO 3";
 
     AutoPromptAlgoOverride pin_prompt(2);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             2)
-            << "an explicit AUTO_PROMPT_ALGO=2 must be honoured verbatim, not "
-               "re-routed by Rule 0.7";
+            << "an explicit AUTO_PROMPT_ALGO=2 must be honoured verbatim";
 }
 
 // The `[GRP_MATMUL.ALGO] reason=` field must name the rule that actually
-// matched.  It used to be reconstructed by a second copy of the rule table in
-// the logging block, which had already lost Rules 0.45 and 0.5 — a
-// single-expert decode routed by 0.45 was reported as `auto_phase_env`, and a
-// few-expert decode default could be labelled `auto_phase_env_clamp` with no
-// clamp in the call.  The selector now records it, so these assert the rules
-// that the mirror was missing along with a sample of the others.
+// matched, including the safety clamp and the legacy cascade's arms.
 TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
 
-    const auto reason_for = [](int M, int K, int N, int num_ops,
-                                    int num_threads, int *algo_out) {
+    const auto reason_for
+            = [](int M, int K, int N, int num_ops, int num_threads,
+                      int *algo_out, bool shape_rules = true) {
         auto s = build_auto_probe(M, K, N, num_ops, num_threads);
+        if (shape_rules) { apply_shape_rules_probe(s); }
         auto_algo_trace trace;
         const int algo = select_grp_matmul_algo(
                 s.layout, s.M, s.N, s.K, s.params, s.num_threads, &trace);
@@ -6163,6 +7056,15 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
             "auto_rule07_prompt_seq");
     EXPECT_EQ(algo, 1);
 
+    // A BF16 layer of several experts, in either phase.
+    for (const int M : {8, 40}) {
+        EXPECT_EQ(reason_for(M, /*K=*/2048, /*N=*/8192, /*num_ops=*/4,
+                          /*num_threads=*/64, &algo, /*shape_rules=*/false),
+                "auto_algo3")
+                << "M=" << M;
+        EXPECT_EQ(algo, 3);
+    }
+
     // An explicit pin reports itself, not the rule it pre-empted.
     {
         AutoPromptAlgoOverride pin_prompt(6);
@@ -6174,11 +7076,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, TraceNamesTheMatchedRule) {
 }
 
 // A value the getter refuses (outside 0..6 / requested selector identities) is
-// not a pin. It resolves to documented default 2, so if `is_set()` accepted it
-// the call would claim a pin that was never honoured and suppress the very
-// rules the inherited default runs — landing on ALGO 2 for a frame that should
-// route to ALGO 1.  The shape is the same wide-N one as above, where the two
-// answers differ, so the assertion has teeth.
+// not a pin.  If `is_set()` accepted it, the call would claim a pin that was
+// never honoured, which the trace would report as `auto_phase_env`.
 TEST(TestGroupMatmulAutoPhaseEnv, InvalidPromptValueFallsBackToDefault) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
@@ -6194,12 +7093,13 @@ TEST(TestGroupMatmulAutoPhaseEnv, InvalidPromptValueFallsBackToDefault) {
                 << "value " << bogus
                 << " is outside {0,1,2,3,4,5,6} and must not read as an "
                    "explicit pin";
-        EXPECT_EQ(select_grp_matmul_algo(
-                          s.layout, s.M, s.N, s.K, s.params, s.num_threads),
-                1)
-                << "value " << bogus
-                << " must behave as the inherited default (ALGO 1 on wide-N), "
-                   "not as a pin to the clamped value 2";
+        auto_algo_trace trace;
+        EXPECT_EQ(select_grp_matmul_algo(s.layout, s.M, s.N, s.K, s.params,
+                          s.num_threads, &trace),
+                3)
+                << "value " << bogus;
+        EXPECT_STREQ(trace.reason, "auto_algo3")
+                << "value " << bogus << " must behave as the inherited default";
     }
 }
 
@@ -6287,23 +7187,659 @@ TEST(TestGroupMatmulAutoPhaseEnv, CachedPhaseEnvironmentParsesFourStrictly) {
     }
 }
 
-TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowIgnoresPhaseEnv) {
+// More experts than the N-tile planner's arrays hold
+// (kNTilePlanMaxExperts=256) in a BF16 layer still run ALGO 3, unpinned or
+// pinned; only the legacy cascade keeps its capacity arm to ALGO 1.
+TEST(TestGroupMatmulAutoPhaseEnv, CapacityOverflowRoutesToAlgo3UnlessLegacy) {
     using namespace zendnnl::lowoha::matmul;
     using namespace moe_test_utils;
     reset_grp_matmul_caches();
     AlgoEnvGuard reset_algo(0);
-    AutoPromptAlgoOverride force_prompt(3);
-    AutoDecodeAlgoOverride force_decode(3);
 
-    // Decode-class with 300 experts > kNTilePlanMaxExperts(256).
-    // Phase env says 3, but R0 must win → ALGO 1.
     auto s = build_auto_probe(/*M=*/4, /*K=*/2880, /*N=*/5760,
             /*num_ops=*/300, /*num_threads=*/128);
     EXPECT_EQ(select_grp_matmul_algo(
                       s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+            3);
+    {
+        AutoDecodeAlgoOverride force_decode(3);
+        EXPECT_EQ(select_grp_matmul_algo(
+                          s.layout, s.M, s.N, s.K, s.params, s.num_threads),
+                3);
+    }
+    AutoDecodeAlgoOverride legacy_decode(0);
+    EXPECT_EQ(select_grp_matmul_algo(
+                      s.layout, s.M, s.N, s.K, s.params, s.num_threads),
             1)
-            << "R0 capacity gate must override phase env "
-               "(num_ops > kNTilePlanMaxExperts → ALGO 1)";
+            << "the legacy cascade must keep num_ops > kNTilePlanMaxExperts "
+               "on ALGO 1";
+}
+
+// ALGO 3 runs a call with more experts than the N-tile planner holds
+// (kNTilePlanMaxExperts) as consecutive slices on the custom kernel.  Each
+// case checks every firing expert against ALGO 1, that an idle expert's
+// dst is untouched, and that prepack warmed every expert the call
+// advertises: an idle slice's experts and the prepack-extras tail ride on
+// the first slice that runs.
+TEST(TestGroupMatmulManyExperts, Algo3SlicesPastPlanCapacity) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    // Out-of-place, so prepack warms the pack cache the probe reads and
+    // the ALGO 1 reference leaves the weights raw for the ALGO 3 run.
+    WeightCacheGuard wc_out_of_place(1);
+
+    struct Case {
+        const char *name;
+        int num_ops; // M.size()
+        int active; // params[0].active_matmul; 0 = legacy contract
+        int total; // weight-side length (params[0].total_matmul if opt-in)
+        int idle_lo, idle_hi; // legacy only: experts in [lo, hi) get M = 0
+    };
+    const Case cases[] = {
+            {"legacy_E257", 257, 0, 257, 0, 0},
+            {"legacy_E600_middle_slice_idle", 600, 0, 600, 200, 400},
+            {"legacy_E520_first_slice_only", 520, 0, 520, 100, 520},
+            {"padded_E300_active270", 300, 270, 300, 0, 0},
+            {"compact_E300_extras_to_400", 300, 300, 400, 0, 0},
+    };
+    const int K = 64, N = 64;
+    const bfloat16_t sentinel(7.0f);
+
+    for (const Case &c : cases) {
+        SCOPED_TRACE(c.name);
+        const int E = c.num_ops, W = c.total;
+        std::vector<int> Ms(E);
+        for (int e = 0; e < E; ++e) {
+            const bool fires = c.active > 0
+                    ? e < c.active
+                    : !(e >= c.idle_lo && e < c.idle_hi);
+            Ms[e] = fires ? 1 + e % 4 : 0;
+        }
+        std::vector<std::vector<bfloat16_t>> src(E), wei(W);
+        for (int e = 0; e < E; ++e) {
+            src[e].resize(static_cast<size_t>(std::max(Ms[e], 1)) * K);
+            fill_src(src[e], e, 0.5f);
+        }
+        for (int e = 0; e < W; ++e) {
+            wei[e].resize(static_cast<size_t>(K) * N);
+            fill_wei1(wei[e], e, 0.1f);
+        }
+
+        auto run = [&](int algo, std::vector<std::vector<bfloat16_t>> &dst,
+                           std::string &mode) {
+            AlgoEnvGuard algo_guard(algo);
+            dst.assign(E, {});
+            auto gv = GemmVecs::uniform(E, /*M=*/0, N, K);
+            gv.Ms = Ms;
+            gv.Ns.assign(W, N);
+            gv.Ks.assign(W, K);
+            gv.ldb.assign(W, N);
+            gv.transB.assign(W, false);
+            gv.is_wc.assign(W, true);
+            auto params = make_uniform_params(E, data_type_t::bf16);
+            params[0].active_matmul = static_cast<uint32_t>(c.active);
+            params[0].total_matmul
+                    = static_cast<uint32_t>(c.active > 0 ? c.total : 0);
+            std::vector<const void *> srcs(E), weis(W), biases(E, nullptr);
+            std::vector<void *> dsts(E);
+            for (int e = 0; e < E; ++e) {
+                dst[e].assign(
+                        static_cast<size_t>(std::max(Ms[e], 1)) * N, sentinel);
+                srcs[e] = src[e].data();
+                dsts[e] = dst[e].data();
+            }
+            for (int e = 0; e < W; ++e) {
+                weis[e] = wei[e].data();
+            }
+            GemmModeCaptureGuard capture;
+            ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB,
+                              gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis,
+                              gv.ldb, biases, gv.beta, dsts, gv.ldc, gv.is_wc,
+                              params, /*moe_postop=*/nullptr,
+                              /*gated_act=*/nullptr),
+                    status_t::success)
+                    << "algo=" << algo;
+            const char *m = zendnnl::lowoha::matmul::test_api::
+                                    s_last_group_matmul_direct_gemm_mode.load(
+                                            std::memory_order_relaxed);
+            mode = m != nullptr ? m : "";
+        };
+
+        reset_grp_matmul_caches();
+        std::vector<std::vector<bfloat16_t>> ref, got;
+        std::string ref_mode, got_mode;
+        ASSERT_NO_FATAL_FAILURE(run(/*algo=*/1, ref, ref_mode));
+        reset_grp_matmul_caches();
+        ASSERT_NO_FATAL_FAILURE(run(/*algo=*/3, got, got_mode));
+
+        EXPECT_NE(got_mode.find("_custom"), std::string::npos)
+                << "ALGO 3 ran '" << got_mode << "' off the custom kernel";
+        EXPECT_EQ(executed_algo_from_gemm_mode(got_mode.c_str()), 3)
+                << got_mode;
+
+        std::vector<const void *> weis(W);
+        for (int e = 0; e < W; ++e) {
+            weis[e] = wei[e].data();
+        }
+        prepack::custom_kernel::PackProbeStats probe;
+        prepack::custom_kernel::warm_pack_all_custom_kernel_experts(weis,
+                std::vector<int>(W, K), std::vector<int>(W, N),
+                std::vector<int>(W, N), std::vector<bool>(W, false),
+                /*is_weights_const=*/ {}, /*total_count=*/W, probe);
+        EXPECT_EQ(probe.cache_hits, W)
+                << "prepack left " << (W - probe.cache_hits)
+                << " advertised experts cold";
+
+        const Tol tol {0.02f, 0.02f};
+        for (int e = 0; e < E; ++e) {
+            if (Ms[e] == 0) {
+                for (const bfloat16_t v : got[e]) {
+                    ASSERT_EQ(
+                            static_cast<float>(v), static_cast<float>(sentinel))
+                            << "idle expert " << e << " was written";
+                }
+                continue;
+            }
+            for (size_t i = 0; i < got[e].size(); ++i) {
+                const float r = static_cast<float>(ref[e][i]);
+                ASSERT_NEAR(static_cast<float>(got[e][i]), r,
+                        std::abs(r) * tol.rel + tol.abs)
+                        << "expert " << e << " element " << i;
+            }
+        }
+    }
+}
+
+// Under N_TILE_STRATEGY=0 the planner sends a shape too thin to split
+// N-wise to Sequential, which runs every expert on AOCL from the caller's
+// weight buffer.  A call the custom kernel serves stays on it.
+TEST(TestGroupMatmulManyExperts, AutoStrategyKeepsCustomKernelOnThinN) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    NTileStrategyOverride auto_strategy(0);
+    // Out-of-place, so the ALGO 1 reference leaves the weights raw.
+    WeightCacheGuard wc_out_of_place(1);
+
+    // Two experts on 16 threads leave a team of 8 per expert, but N=128
+    // holds no full decode tile, so `ntile_viable` is false.
+    const int E = 2, M = 4, K = 64, N = 128;
+    std::vector<std::vector<bfloat16_t>> src(E), wei(E);
+    for (int e = 0; e < E; ++e) {
+        src[e].resize(static_cast<size_t>(M) * K);
+        wei[e].resize(static_cast<size_t>(K) * N);
+        fill_src(src[e], e, 0.5f);
+        fill_wei1(wei[e], e, 0.1f);
+    }
+    auto run = [&](int algo, std::vector<std::vector<bfloat16_t>> &dst,
+                       std::string &mode) {
+        AlgoEnvGuard algo_guard(algo);
+        dst.assign(E,
+                std::vector<bfloat16_t>(
+                        static_cast<size_t>(M) * N, bfloat16_t(0.0f)));
+        auto gv = GemmVecs::uniform(E, M, N, K);
+        auto params = make_uniform_params(E, data_type_t::bf16);
+        for (auto &p : params) {
+            p.num_threads = 16;
+        }
+        std::vector<const void *> srcs(E), weis(E), biases(E, nullptr);
+        std::vector<void *> dsts(E);
+        for (int e = 0; e < E; ++e) {
+            srcs[e] = src[e].data();
+            weis[e] = wei[e].data();
+            dsts[e] = dst[e].data();
+        }
+        GemmModeCaptureGuard capture;
+        ASSERT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                          gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                          biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                status_t::success)
+                << "algo=" << algo;
+        const char *m = zendnnl::lowoha::matmul::test_api::
+                                s_last_group_matmul_direct_gemm_mode.load(
+                                        std::memory_order_relaxed);
+        mode = m != nullptr ? m : "";
+    };
+
+    reset_grp_matmul_caches();
+    std::vector<std::vector<bfloat16_t>> ref, got;
+    std::string ref_mode, got_mode;
+    ASSERT_NO_FATAL_FAILURE(run(/*algo=*/1, ref, ref_mode));
+    reset_grp_matmul_caches();
+    ASSERT_NO_FATAL_FAILURE(run(/*algo=*/3, got, got_mode));
+    EXPECT_NE(got_mode.find("_custom"), std::string::npos) << got_mode;
+    EXPECT_EQ(got_mode.find("sequential"), std::string::npos) << got_mode;
+
+    const Tol tol {0.02f, 0.02f};
+    for (int e = 0; e < E; ++e) {
+        for (size_t i = 0; i < got[e].size(); ++i) {
+            const float r = static_cast<float>(ref[e][i]);
+            ASSERT_NEAR(static_cast<float>(got[e][i]), r,
+                    std::abs(r) * tol.rel + tol.abs)
+                    << "expert " << e << " element " << i;
+        }
+    }
+}
+
+// Under an explicit ALGO 3 pin a call outside a BF16 MoE layer keeps the
+// planner's gates: past the planner's capacity it runs Sequential instead of
+// slices, and under N_TILE_STRATEGY=0 a single expert that AUTO would send
+// to ALGO 1 runs Sequential.  A BF16 call of two experts stays on the custom
+// kernel.
+TEST(TestGroupMatmulManyExperts, PinnedAlgo3KeepsPlannerGatesOutsideBf16Moe) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    // Out-of-place, so the ALGO 1 reference leaves the weights raw.
+    WeightCacheGuard wc_out_of_place(1);
+
+    // One call of `E` experts of `dst`'s element type on ALGO `algo`; returns
+    // its gemm_mode and fills `dst`.
+    const auto run = [](auto &dst, data_type_t dt, int algo, int E, int M,
+                             int K, int N, int threads) {
+        using T = typename std::decay_t<decltype(dst)>::value_type::value_type;
+        reset_grp_matmul_caches();
+        AlgoEnvGuard algo_guard(algo);
+        std::vector<std::vector<T>> src(E), wei(E);
+        dst.assign(E, std::vector<T>(static_cast<size_t>(M) * N, T(0.0f)));
+        std::vector<const void *> srcs(E), weis(E), biases(E, nullptr);
+        std::vector<void *> dsts(E);
+        for (int e = 0; e < E; ++e) {
+            src[e].resize(static_cast<size_t>(M) * K);
+            wei[e].resize(static_cast<size_t>(K) * N);
+            fill_src(src[e], e, 0.5f);
+            fill_wei1(wei[e], e, 0.1f);
+            srcs[e] = src[e].data();
+            weis[e] = wei[e].data();
+            dsts[e] = dst[e].data();
+        }
+        auto gv = GemmVecs::uniform(E, M, N, K);
+        auto params = make_uniform_params(E, dt);
+        for (auto &p : params) {
+            p.num_threads = threads;
+        }
+        GemmModeCaptureGuard capture;
+        EXPECT_EQ(group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                          gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb,
+                          biases, gv.beta, dsts, gv.ldc, gv.is_wc, params,
+                          /*moe_postop=*/nullptr, /*gated_act=*/nullptr),
+                status_t::success)
+                << "algo=" << algo << " E=" << E;
+        const char *m = zendnnl::lowoha::matmul::test_api::
+                                s_last_group_matmul_direct_gemm_mode.load(
+                                        std::memory_order_relaxed);
+        return std::string(m != nullptr ? m : "");
+    };
+    const auto expect_near = [](const auto &got, const auto &ref) {
+        const Tol tol {0.02f, 0.02f};
+        for (size_t e = 0; e < got.size(); ++e) {
+            for (size_t i = 0; i < got[e].size(); ++i) {
+                const float r = static_cast<float>(ref[e][i]);
+                ASSERT_NEAR(static_cast<float>(got[e][i]), r,
+                        std::abs(r) * tol.rel + tol.abs)
+                        << "expert " << e << " element " << i;
+            }
+        }
+    };
+
+    {
+        SCOPED_TRACE("f32, 300 experts");
+        std::vector<std::vector<float>> ref, got;
+        run(ref, data_type_t::f32, 1, 300, 2, 64, 64, 0);
+        EXPECT_EQ(run(got, data_type_t::f32, 3, 300, 2, 64, 64, 0),
+                "flat_n_tile_sequential");
+        expect_near(got, ref);
+    }
+
+    NTileStrategyOverride auto_strategy(0);
+    for (const int E : {1, 2}) {
+        SCOPED_TRACE(std::string("bf16, experts=") + std::to_string(E));
+        std::vector<std::vector<bfloat16_t>> ref, got;
+        run(ref, data_type_t::bf16, 1, E, 64, 64, 256, 16);
+        const std::string mode
+                = run(got, data_type_t::bf16, 3, E, 64, 64, 256, 16);
+        if (E == 1) {
+            EXPECT_EQ(mode, "flat_n_tile_sequential");
+        } else {
+            EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
+        }
+        expect_near(got, ref);
+    }
+}
+
+// ===============================================================================
+// TestGroupMatmulInPlaceCkPack — under WEIGHT_CACHE=2 the custom kernel packs
+// a weight into the caller's buffer.  From then on only the custom kernel can
+// read that buffer: a call that cannot run it on the buffer fails without
+// writing dst, and a call that can is served whatever layout it asks for.
+//
+// References come from the same ALGO 3 calls on copies of the weights under
+// WEIGHT_CACHE=1, so a correct result is bit-identical to them.
+// ===============================================================================
+namespace in_place_ck {
+
+using Experts = std::vector<std::vector<bfloat16_t>>;
+
+constexpr int kE = 2, kM = 4, kK = 64, kN = 128;
+const bfloat16_t kSentinel(-3.0f);
+
+struct Inputs {
+    Experts src, wei;
+    Inputs() : src(kE), wei(kE) {
+        for (int e = 0; e < kE; ++e) {
+            src[e].resize(static_cast<size_t>(kM) * kK);
+            wei[e].resize(static_cast<size_t>(kK) * kN);
+            moe_test_utils::fill_src(src[e], e, 0.5f);
+            moe_test_utils::fill_wei1(wei[e], e, 0.1f);
+        }
+    }
+};
+
+bool same_bytes(const Experts &a, const Experts &b) {
+    if (a.size() != b.size()) { return false; }
+    for (size_t e = 0; e < a.size(); ++e) {
+        if (a[e].size() != b[e].size()
+                || std::memcmp(a[e].data(), b[e].data(),
+                           a[e].size() * sizeof(bfloat16_t))
+                        != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool all_sentinel(const Experts &dst) {
+    for (const auto &d : dst) {
+        for (const bfloat16_t v : d) {
+            if (static_cast<float>(v) != static_cast<float>(kSentinel)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// One call; `ldc < kN` is the tight layout of a gated activation.  `dst` is
+// refilled with `kSentinel` first.  `mode` receives the executed gemm_mode,
+// which is only recorded for a call that succeeds.
+status_t run(int algo, float alpha, grp_matmul_gated_act_t act, int ldc,
+        Experts &src, Experts &wei, Experts &dst, std::string *mode = nullptr) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    AlgoEnvGuard algo_guard(algo);
+    dst.assign(kE,
+            std::vector<bfloat16_t>(static_cast<size_t>(kM) * ldc, kSentinel));
+    auto gv = GemmVecs::uniform(kE, kM, kN, kK, alpha);
+    gv.ldc.assign(kE, ldc);
+    auto params = make_uniform_params(kE, data_type_t::bf16);
+    for (auto &p : params) {
+        p.num_threads = 16;
+    }
+    std::vector<const void *> srcs(kE), weis(kE), biases(kE, nullptr);
+    std::vector<void *> dsts(kE);
+    for (int e = 0; e < kE; ++e) {
+        srcs[e] = src[e].data();
+        weis[e] = wei[e].data();
+        dsts[e] = dst[e].data();
+    }
+    grp_matmul_gated_act_params gated {};
+    gated.act = act;
+    GemmModeCaptureGuard capture;
+    const status_t st = group_matmul_direct(gv.layout, gv.transA, gv.transB,
+            gv.Ms, gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, weis, gv.ldb, biases,
+            gv.beta, dsts, gv.ldc, gv.is_wc, params, /*moe_postop=*/nullptr,
+            act == grp_matmul_gated_act_t::none ? nullptr : &gated);
+    if (mode != nullptr) {
+        const char *m = test_api::s_last_group_matmul_direct_gemm_mode.load(
+                std::memory_order_relaxed);
+        *mode = (st == status_t::success && m != nullptr) ? m : "";
+    }
+    return st;
+}
+
+} // namespace in_place_ck
+
+// Once the image is written, a call off the custom kernel (alpha != 1 under
+// ALGO 3, or another ALGO) has no raw weight to read.
+TEST(TestGroupMatmulInPlaceCkPack, OffKernelCallsFailClosed) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using namespace in_place_ck;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    const auto none = grp_matmul_gated_act_t::none;
+    reset_grp_matmul_caches();
+
+    Inputs in;
+    const Experts raw = in.wei;
+    Experts ref, dst;
+    {
+        WeightCacheGuard out_of_place(1);
+        Experts copy = raw;
+        ASSERT_EQ(run(3, 1.0f, none, kN, in.src, copy, ref), status_t::success);
+        // On raw weights alpha != 1 is a valid call.
+        ASSERT_EQ(run(3, 0.5f, none, kN, in.src, copy, dst), status_t::success);
+        reset_grp_matmul_caches();
+    }
+
+    WeightCacheGuard in_place(2);
+    std::string mode;
+    ASSERT_EQ(run(3, 1.0f, none, kN, in.src, in.wei, dst, &mode),
+            status_t::success);
+    EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
+    EXPECT_TRUE(same_bytes(dst, ref));
+    ASSERT_FALSE(same_bytes(in.wei, raw))
+            << "the weights were not packed in "
+               "place, so nothing below is tested";
+
+    EXPECT_EQ(run(3, 0.5f, none, kN, in.src, in.wei, dst), status_t::failure);
+    EXPECT_TRUE(all_sentinel(dst)) << "alpha=0.5 wrote dst";
+    for (const int algo : {1, 2, 5}) {
+        EXPECT_EQ(run(algo, 1.0f, none, kN, in.src, in.wei, dst),
+                status_t::failure)
+                << "algo=" << algo;
+        EXPECT_TRUE(all_sentinel(dst)) << "algo=" << algo << " wrote dst";
+    }
+
+    ASSERT_EQ(run(3, 1.0f, none, kN, in.src, in.wei, dst), status_t::success);
+    EXPECT_TRUE(same_bytes(dst, ref));
+    reset_grp_matmul_caches();
+}
+
+// The plain layout and the interleaved one fused silu_and_mul reads can both
+// be served from one buffer, in either order.
+TEST(TestGroupMatmulInPlaceCkPack, ImageServesBothActivationLayouts) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using namespace in_place_ck;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    const auto none = grp_matmul_gated_act_t::none;
+    const auto silu = grp_matmul_gated_act_t::silu_and_mul;
+    const int tight = kN / 2;
+    reset_grp_matmul_caches();
+
+    Experts ref_none, ref_silu, dst;
+    {
+        WeightCacheGuard out_of_place(1);
+        Inputs in;
+        ASSERT_EQ(run(3, 1.0f, none, kN, in.src, in.wei, ref_none),
+                status_t::success);
+        ASSERT_EQ(run(3, 1.0f, silu, tight, in.src, in.wei, ref_silu),
+                status_t::success);
+        reset_grp_matmul_caches();
+    }
+
+    WeightCacheGuard in_place(2);
+    for (const bool plain_first : {true, false}) {
+        SCOPED_TRACE(plain_first ? "plain image first" : "interleaved first");
+        Inputs in;
+        const Experts raw = in.wei;
+        const auto check = [&](grp_matmul_gated_act_t act) {
+            const bool gated = act != none;
+            std::string mode;
+            ASSERT_EQ(run(3, 1.0f, act, gated ? tight : kN, in.src, in.wei, dst,
+                              &mode),
+                    status_t::success);
+            EXPECT_NE(mode.find("_custom"), std::string::npos) << mode;
+            EXPECT_TRUE(same_bytes(dst, gated ? ref_silu : ref_none))
+                    << "act=" << static_cast<int>(act);
+        };
+        ASSERT_NO_FATAL_FAILURE(check(plain_first ? none : silu));
+        ASSERT_FALSE(same_bytes(in.wei, raw)) << "nothing was packed in place";
+        const Experts image = in.wei;
+        ASSERT_NO_FATAL_FAILURE(check(plain_first ? silu : none));
+        ASSERT_NO_FATAL_FAILURE(check(plain_first ? none : silu));
+        EXPECT_TRUE(same_bytes(in.wei, image)) << "the image was rewritten";
+        reset_grp_matmul_caches();
+    }
+}
+
+// A wide dst cannot take the fused epilogue on the custom kernel, so the call
+// runs on AOCL from the caller's buffer and the pack must leave it raw.
+TEST(TestGroupMatmulInPlaceCkPack, WideFusedEpilogueKeepsTheWeightRaw) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    using namespace in_place_ck;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    if (!get_grp_n_tile_fused_act()) {
+        GTEST_SKIP() << "ZENDNNL_GRP_MATMUL_N_TILE_FUSED_ACT=0 leaves a wide "
+                        "swiglu unfused";
+    }
+    CustomKernelOverride ck_on(true);
+    const auto swiglu = grp_matmul_gated_act_t::swiglu_oai_mul;
+    reset_grp_matmul_caches();
+
+    Experts ref, dst;
+    {
+        WeightCacheGuard out_of_place(1);
+        Inputs in;
+        ASSERT_EQ(run(3, 1.0f, swiglu, kN, in.src, in.wei, ref),
+                status_t::success);
+        reset_grp_matmul_caches();
+    }
+
+    WeightCacheGuard in_place(2);
+    Inputs in;
+    for (int call = 0; call < 2; ++call) {
+        ASSERT_EQ(run(3, 1.0f, swiglu, kN, in.src, in.wei, dst),
+                status_t::success)
+                << "call " << call;
+        EXPECT_TRUE(same_bytes(dst, ref)) << "call " << call;
+    }
+    EXPECT_FALSE(custom_kernel::any_weight_packed_in_place(
+            {in.wei[0].data(), in.wei[1].data()}, {kM, kM}));
+    reset_grp_matmul_caches();
+}
+
+// The fused-MoE pipelines of ALGO 2 and 5, and the two-pass path behind them,
+// read W13 and W2 off the custom kernel.
+TEST(TestGroupMatmulInPlaceCkPack, FusedMoEOffKernelFailsClosed) {
+    using namespace zendnnl::lowoha::matmul;
+    using namespace moe_test_utils;
+    if (!custom_kernel::dispatch_supported()) {
+        GTEST_SKIP() << "needs the BF16 custom kernel (AVX512-BF16)";
+    }
+    CustomKernelOverride ck_on(true);
+    reset_grp_matmul_caches();
+
+    constexpr int E = 2, M = 4, H = 64, N1 = 128, K_down = N1 / 2;
+    const bfloat16_t sentinel(-3.0f);
+    TypedBuffers src, w1, w2;
+    src.alloc(E, static_cast<size_t>(M) * H, /*is_bf16=*/true);
+    w1.alloc(E, static_cast<size_t>(H) * N1, /*is_bf16=*/true);
+    w2.alloc(E, static_cast<size_t>(K_down) * H, /*is_bf16=*/true);
+    for (int e = 0; e < E; ++e) {
+        fill_src(src.bf16[e], e, 0.5f);
+        fill_wei1(w1.bf16[e], e, 0.1f);
+        fill_wei2(w2.bf16[e], e);
+    }
+    const auto w1_raw = w1.bf16;
+    const auto w2_raw = w2.bf16;
+
+    auto run_fused = [&](int algo, std::vector<std::vector<bfloat16_t>> &w1_v,
+                             std::vector<std::vector<bfloat16_t>> &w2_v,
+                             std::vector<std::vector<bfloat16_t>> &out) {
+        AlgoEnvGuard algo_guard(algo);
+        out.assign(E,
+                std::vector<bfloat16_t>(static_cast<size_t>(M) * H, sentinel));
+        auto gv = GemmVecs::uniform(E, M, N1, H);
+        auto params = make_uniform_params(E, data_type_t::bf16);
+        for (auto &p : params) {
+            p.num_threads = 16;
+        }
+        std::vector<const void *> srcs(E), wei1(E), wei2(E),
+                no_bias(E, nullptr);
+        std::vector<void *> d2(E), dst_null(E, nullptr);
+        for (int e = 0; e < E; ++e) {
+            srcs[e] = src.bf16[e].data();
+            wei1[e] = w1_v[e].data();
+            wei2[e] = w2_v[e].data();
+            d2[e] = out[e].data();
+        }
+        grp_matmul_gated_act_params act {};
+        act.act = grp_matmul_gated_act_t::silu_and_mul;
+        auto fused = make_fused_moe_op2(E, H, wei2, no_bias);
+        fused.dst_down = d2;
+        fused.ldc_down = std::vector<int>(E, H);
+        std::vector<int> ldc_null(E, 0);
+        return group_matmul_direct(gv.layout, gv.transA, gv.transB, gv.Ms,
+                gv.Ns, gv.Ks, gv.alpha, srcs, gv.lda, wei1, gv.ldb, no_bias,
+                gv.beta, dst_null, ldc_null, gv.is_wc, params, nullptr, &act,
+                &fused);
+    };
+    auto untouched = [&](const std::vector<std::vector<bfloat16_t>> &out) {
+        for (const auto &d : out) {
+            for (const bfloat16_t v : d) {
+                if (static_cast<float>(v) != static_cast<float>(sentinel)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    std::vector<std::vector<bfloat16_t>> ref, out;
+    {
+        WeightCacheGuard out_of_place(1);
+        auto w1_copy = w1_raw;
+        auto w2_copy = w2_raw;
+        ASSERT_EQ(run_fused(3, w1_copy, w2_copy, ref), status_t::success);
+        reset_grp_matmul_caches();
+    }
+
+    WeightCacheGuard in_place(2);
+    ASSERT_EQ(run_fused(3, w1.bf16, w2.bf16, out), status_t::success);
+    EXPECT_TRUE(in_place_ck::same_bytes(out, ref));
+    ASSERT_FALSE(in_place_ck::same_bytes(w1.bf16, w1_raw))
+            << "W13 was not packed in place, so nothing below is tested";
+
+    for (const int algo : {1, 2, 5}) {
+        EXPECT_EQ(run_fused(algo, w1.bf16, w2.bf16, out), status_t::failure)
+                << "algo=" << algo;
+        EXPECT_TRUE(untouched(out)) << "algo=" << algo << " wrote dst";
+    }
+    ASSERT_EQ(run_fused(3, w1.bf16, w2.bf16, out), status_t::success);
+    EXPECT_TRUE(in_place_ck::same_bytes(out, ref));
+    reset_grp_matmul_caches();
 }
 
 // ALGO 3 phase env clamps to ALGO 1 when the shape fails
@@ -6646,10 +8182,9 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
     // MANUAL HYBRID is now prompt-only (max_M > kDecodeMaxM=32).  Force
-    // `n_tile_strategy=2` (rounds, force) to bypass the auto-mirror that
-    // would otherwise route prompt-class shapes with `num_ops <
-    // num_threads` to Sequential via the AUTO-MIRROR rule 3 — keeps the
-    // planner in ManyExperts so the Single-round HYBRID dispatch fires.
+    // `n_tile_strategy=2` (rounds, force) so the planner stays in
+    // ManyExperts, where the Single-round HYBRID dispatch fires, whatever
+    // strategy the process runs with.
     NTileStrategyOverride force_rounds(2);
     // Threshold chosen so M > 200 = heavy AND every Ms entry crosses
     // the new `max_M > kDecodeMaxM=32` prompt gate.
@@ -6745,11 +8280,9 @@ TEST(TestGroupMatmulHybridMSplit, OnDistributesHeavyByM) {
 //     new decode gate (`apply_adaptive_tiers()` returns false on
 //     `max_M ≤ kDecodeMaxM`) makes the previous decode-class probe
 //     fall through to Phase B.  Use max_M=400 (firmly prompt-class).
-//   * Force `n_tile_strategy=2` (rounds) so the auto-mirror's
-//     prompt → ALGO 1 routing (`auto_select_would_pick_algo1`
-//     rule 3) does NOT fire for `num_ops < num_threads`.  Keeps
-//     the planner in ManyExperts where the Single-round HYBRID
-//     dispatch lives.
+//   * Force `n_tile_strategy=2` (rounds) so the planner stays in
+//     ManyExperts, where the Single-round HYBRID dispatch lives,
+//     whatever strategy the process runs with.
 //   * `N` chosen so `max_tiles = N/min_n_tile` lifts the per-expert
 //     cap above 2.  N=4096 with the prompt `min_n_tile=512` →
 //     max_tiles=8, cap=min(ccd_size=8, 8)=8.
@@ -6776,7 +8309,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierEngagesAtZero) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // bypass auto-mirror
+    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
     if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
@@ -6875,7 +8408,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsLowSkew) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // bypass auto-mirror
+    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
     if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
@@ -6954,7 +8487,7 @@ TEST(TestGroupMatmulHybridMSplit, AutoTierSkipsThreadStarvation) {
     CustomKernelOverride ck_on(true);
     NRoundsModeOverride single_round(1);
     CustomKernelNTileOverride default_n_tile(0);
-    NTileStrategyOverride force_rounds(2); // bypass auto-mirror
+    NTileStrategyOverride force_rounds(2); // stay in ManyExperts
     NTileHeavyThresholdOverride hybrid_auto(0); // AUTO mode
 
     if (!zendnnl::lowoha::matmul::custom_kernel::dispatch_supported()) {
@@ -7221,8 +8754,8 @@ TEST(TestGroupMatmulAutoPhaseEnv, Algo3PhaseEnvClampedOnNonNTileSafe) {
 // ALGO 2 is now PURE M-tile: a FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a
 // wide-N shape (`total_need*2 ≤ num_threads && max_M > 1`) no longer falls
 // back to the sequential-full-team loop — it runs the single-tier M-tile
-// plan (kPhase2Single).  (AUTO routes this regime to ALGO 1 via Rule 0.7;
-// see TestGroupMatmulAutoPhaseEnv.PromptWideNRoutesToAlgo1.)
+// plan (kPhase2Single).  (AUTO selects ALGO 2 only for W4A8 prompts; see
+// TestGroupMatmulAutoPhaseEnv.NonW4A8AutoNeverSelectsAlgo2AcrossShapeSweep.)
 TEST(TestGroupMatmulMTileBranches, ForcedAlgo2OnWideNRunsSingleTier) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;

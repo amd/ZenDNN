@@ -446,13 +446,15 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                 "to preserve raw weight for a future grouped CK call");
     }
 
-    // A CK-VNNI caller-prepacked weight has no scalar consumer. The grouped
+    // A custom-kernel image -- a CK-VNNI caller-prepacked weight, or one a
+    // grouped call packed in place -- has no scalar consumer. The grouped
     // route above is the only legal hand-off; if it did not engage, fail
-    // closed before kernel_select can reinterpret mem_format_b='r' as AOCL.
-    if (exec_params.mem_format_b == 'r'
-            && exec_params.lowoha_algo == matmul_algo_t::moe_custom_kernel) {
+    // closed before kernel_select reads the image as the weight.
+    if ((exec_params.mem_format_b == 'r'
+                && exec_params.lowoha_algo == matmul_algo_t::moe_custom_kernel)
+            || custom_kernel::weight_packed_in_place(weight)) {
         log_error(
-                "matmul_direct: CK-prepacked weight requires the grouped "
+                "matmul_direct: CK-packed weight requires the grouped "
                 "custom-kernel route; no scalar fallback can consume it");
         return status_t::failure;
     }

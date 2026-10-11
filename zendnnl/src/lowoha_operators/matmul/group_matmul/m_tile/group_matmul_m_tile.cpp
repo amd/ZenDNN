@@ -476,13 +476,10 @@ inline void dqint8_compact_and_requant_slice(
 //                        a FORCED ALGO 2 clamps to sequential full-team
 //                        (ALGO 1 equivalent) + a one-time WARN.
 //
-// The former internal "round-based" (per-expert) and "wide-N" (sequential
-// full-team) PERF fallbacks were removed: `auto_select_algo` (Rules 0.5 /
-// 0.6 / 0.7) now peels those regimes off at selection time, so ALGO 2 stays
-// a pure M-tile executor.  AUTO selects it only for Rule 0.7's measured,
-// structurally-safe W4A8 prompt route; other dtype families require an
-// explicit `ZENDNNL_GRP_MATMUL_ALGO=2` or
-// `AUTO_{DECODE,PROMPT}_ALGO=2`.
+// ALGO 2 is a pure M-tile executor, with no per-expert or sequential
+// full-team fallback.  AUTO selects it only for a structurally-safe W4A8
+// prompt; other dtype families require an explicit
+// `ZENDNNL_GRP_MATMUL_ALGO=2` or `AUTO_{DECODE,PROMPT}_ALGO=2`.
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
@@ -1312,15 +1309,12 @@ void flat_m_tile(const std::vector<char> &layout,
     const auto plan = plan_m_tile_single_tier_assignment(M, active_pos, num_ops,
             num_threads, active_ops, kSliceTarget, cores_per_ccd, num_ccds);
 
-    // ── Wide-N regime is no longer executed here (ALGO 2 is pure M-tile) ──
+    // ── Wide-N regime: no sequential fallback (ALGO 2 is pure M-tile) ──
     //
     // The wide-N memory-bound regime — few actives × shallow M × large N,
-    // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — used to fall back here
-    // to a sequential-full-team loop (an ALGO-1 equivalent).  That decision
-    // now lives in `auto_select_algo`, whose few-expert decode arrow
-    // (Rule 0.5) routes low-occupancy frames to ALGO 1 directly, so ALGO 2
-    // stays a PURE M-tile executor. AUTO selects ALGO 2 only for Rule 0.7's
-    // safe W4A8 prompt case; every other call requires an explicit pin.
+    // i.e. `max_M > 1 && total_need*2 ≤ num_threads` — runs the M-tile plan
+    // like any other shape.  AUTO selects ALGO 2 only for a safe W4A8
+    // prompt; every other call here comes from an explicit pin.
     //
     // A FORCED `ZENDNNL_GRP_MATMUL_ALGO=2` on a wide-N shape therefore runs
     // the single-tier M-tile plan below: this is CORRECT (the regime is
@@ -2580,6 +2574,13 @@ bool try_flat_m_tile_pipeline_bf16(const std::vector<char> &layout,
 
     if (!check_m_tile_safe(layout, M, params_w13, num_ops_int)) return false;
     if (!check_m_tile_safe(layout, M, params_w2, num_ops_int)) return false;
+    // A weight an earlier in-place custom-kernel pack rewrote is still marked
+    // 'n', so `check_m_tile_safe` cannot see it.  Declining sends the call to
+    // the two-pass, whose dispatcher fails it closed.
+    if (custom_kernel::any_weight_packed_in_place(weight_w13, M)
+            || custom_kernel::any_weight_packed_in_place(weight_w2, M)) {
+        return false;
+    }
 
     // WOQ-only check: AOCL DLP's WOQ fast path caches the dequant
     // prepack on the const-weight side (see `aocl_postop.cpp::416-479`

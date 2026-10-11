@@ -184,6 +184,10 @@ TEST(CkPackBf16, PrepareReportsPlanPackNr) {
     // self-contained and immune to externally cached env state.
     mt::CustomKernelNROverride nr_guard(0);
     for (int N : {32, 64, 96, 128, 256, 512, 1024, 1536, 2880, 5760}) {
+        // Each case frees its weight storage, and the next one can be
+        // allocated at the same address, which the in-place registry still
+        // lists as a pack of the previous shape.
+        ::reset_grp_matmul_caches();
         ck_test::PrepCallCase c {};
         c.N = N;
         c.label = std::string("ppnr_N") + std::to_string(N);
@@ -559,6 +563,217 @@ TEST(CkPackBf16NoCache, ResetReassignsPackedAliasAfterRepack) {
                "packed_ptrs without updating owned_packed_ptrs (or "
                "vice-versa), and dispatch_tile would read a stale or "
                "freed pointer.";
+}
+
+// ──────────────────────────────────────────────────────────────────
+// In-place pack (WEIGHT_CACHE=2): the first in-place request rewrites the
+// caller's buffer into its image.  Every later request for another layout
+// of that buffer must come out byte-identical to a pack of the original
+// weight -- served out of place, with the image left as it was.
+// ──────────────────────────────────────────────────────────────────
+namespace in_place {
+
+using zendnnl::error_handling::status_t;
+
+// Multiples of 1/16 in [-7, 8.7) are exact in bf16, and 251 is prime, so no
+// two columns of a row share a value.
+std::vector<bfloat16_t> make_weight(size_t elems) {
+    std::vector<bfloat16_t> w(elems);
+    for (size_t i = 0; i < w.size(); ++i) {
+        w[i] = bfloat16_t(static_cast<float>(i % 251) * 0.0625f - 7.0f);
+    }
+    return w;
+}
+
+// Pack of the untouched weight, the bytes every request must reproduce.
+std::vector<char> reference_pack(const std::vector<bfloat16_t> &raw, int K,
+        int N, int ldb, int pack_nr, bool transB, bool interleave) {
+    const size_t bytes = ck::packed_weight_size_bf16(K, N, pack_nr);
+    std::vector<char> out(bytes);
+    EXPECT_EQ(ck::prepack_weight_into_bf16(raw.data(), K, N, ldb, pack_nr,
+                      transB, interleave, out.data()),
+            status_t::success);
+    return out;
+}
+
+bool same_bytes(
+        const std::vector<bfloat16_t> &a, const std::vector<bfloat16_t> &b) {
+    return a.size() == b.size()
+            && std::memcmp(a.data(), b.data(), a.size() * sizeof(bfloat16_t))
+            == 0;
+}
+
+// Logical bytes of a `(K, N)` pack; `packed_weight_size_bf16` rounds up to 64.
+size_t logical_pack_bytes(int K, int N) {
+    return static_cast<size_t>((K + 1) / 2) * 2 * N * sizeof(bfloat16_t);
+}
+
+const bfloat16_t *pack(const std::vector<bfloat16_t> &w, int K, int N, int ldb,
+        int pack_nr, bool transB, bool interleave, bool disable_cache,
+        bool want_in_place) {
+    const bfloat16_t *out = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_bf16(w.data(), K, N, ldb, pack_nr, transB,
+                      interleave, &out, /*was_hit_out=*/nullptr, disable_cache,
+                      want_in_place),
+            status_t::success);
+    return out;
+}
+
+void expect_other_layouts_rebuilt(int K, int N, bool transB) {
+    ::reset_grp_matmul_caches();
+    const int ldb = transB ? K : N;
+    std::vector<bfloat16_t> w = make_weight(static_cast<size_t>(K) * N);
+    const std::vector<bfloat16_t> raw = w;
+    const size_t bytes = logical_pack_bytes(K, N);
+
+    const bfloat16_t *image = pack(w, K, N, ldb, /*pack_nr=*/32, transB,
+            /*interleave=*/false, /*disable_cache=*/false,
+            /*want_in_place=*/true);
+    ASSERT_EQ(image, w.data()) << "the first request must pack in place";
+    ASSERT_TRUE(ck::weight_packed_in_place(w.data()));
+    EXPECT_EQ(0,
+            std::memcmp(image,
+                    reference_pack(raw, K, N, ldb, 32, transB, false).data(),
+                    bytes));
+    const std::vector<bfloat16_t> image_bytes = w;
+
+    for (const int pack_nr : {32, 64}) {
+        for (const bool interleave : {false, true}) {
+            if (pack_nr == 32 && !interleave) { continue; }
+            SCOPED_TRACE("pack_nr=" + std::to_string(pack_nr)
+                    + " interleave=" + std::to_string(interleave));
+            const std::vector<char> ref = reference_pack(
+                    raw, K, N, ldb, pack_nr, transB, interleave);
+
+            const bfloat16_t *cached = pack(w, K, N, ldb, pack_nr, transB,
+                    interleave, /*disable_cache=*/false,
+                    /*want_in_place=*/true);
+            ASSERT_NE(cached, w.data()) << "an image was rewritten twice";
+            EXPECT_EQ(0, std::memcmp(cached, ref.data(), bytes));
+
+            const bfloat16_t *owned = pack(w, K, N, ldb, pack_nr, transB,
+                    interleave, /*disable_cache=*/true,
+                    /*want_in_place=*/false);
+            ASSERT_NE(owned, nullptr);
+            EXPECT_EQ(0, std::memcmp(owned, ref.data(), bytes));
+            ck::free_owned_packed_weight(owned);
+
+            std::vector<char> into(ck::packed_weight_size_bf16(K, N, pack_nr));
+            ASSERT_EQ(ck::prepack_weight_into_bf16(w.data(), K, N, ldb, pack_nr,
+                              transB, interleave, into.data()),
+                    status_t::success);
+            EXPECT_EQ(0, std::memcmp(into.data(), ref.data(), bytes));
+        }
+    }
+    EXPECT_TRUE(same_bytes(w, image_bytes))
+            << "the image changed after it was written";
+    EXPECT_EQ(pack(w, K, N, ldb, 32, transB, false, false, true), w.data())
+            << "the in-place key no longer serves the image";
+
+    ::reset_grp_matmul_caches();
+    EXPECT_FALSE(ck::weight_packed_in_place(w.data()));
+}
+
+} // namespace in_place
+
+TEST(CkPackBf16InPlace, OtherLayoutsArePackedFromTheRebuiltWeight) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    in_place::expect_other_layouts_rebuilt(/*K=*/64, /*N=*/128,
+            /*transB=*/false);
+}
+
+TEST(CkPackBf16InPlace, OtherLayoutsArePackedFromTheRebuiltTransposedWeight) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    in_place::expect_other_layouts_rebuilt(/*K=*/64, /*N=*/128,
+            /*transB=*/true);
+}
+
+// A view inside the image is rebuilt like the whole weight; one that reads
+// past it has no raw bytes to rebuild and must fail.
+TEST(CkPackBf16InPlace, ViewsAreBoundedByTheImage) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+    using in_place::status_t;
+    constexpr int K = 64, N = 128;
+    std::vector<bfloat16_t> w = in_place::make_weight(size_t {K} * N);
+    const std::vector<bfloat16_t> raw = w;
+    ASSERT_EQ(in_place::pack(w, K, N, N, 32, false, false, false, true),
+            w.data());
+
+    // The left half of every row.
+    const bfloat16_t *half
+            = in_place::pack(w, K, N / 2, N, 32, false, false, false, true);
+    ASSERT_NE(half, nullptr);
+    EXPECT_EQ(0,
+            std::memcmp(half,
+                    in_place::reference_pack(raw, K, N / 2, N, 32, false, false)
+                            .data(),
+                    in_place::logical_pack_bytes(K, N / 2)));
+
+    const bfloat16_t *out = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_bf16(w.data(), K, N, /*ldb=*/N + 32, 32,
+                      false, false, &out, nullptr, false, true),
+            status_t::failure);
+    std::vector<char> into(ck::packed_weight_size_bf16(K, N, 32));
+    EXPECT_EQ(ck::prepack_weight_into_bf16(
+                      w.data(), K, N, N + 32, 32, false, false, into.data()),
+            status_t::failure);
+    ::reset_grp_matmul_caches();
+}
+
+// A slice that starts inside the image is part of it: it is reported as packed
+// in place, and packing it fails instead of reading image bytes as the weight.
+TEST(CkPackBf16InPlace, SlicesInsideTheImageAreRefused) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+    using in_place::status_t;
+    constexpr int K = 64, N = 128;
+    std::vector<bfloat16_t> w = in_place::make_weight(size_t {K} * N);
+    ASSERT_EQ(in_place::pack(w, K, N, N, 32, false, false, false, true),
+            w.data());
+
+    // The lower half of the rows.
+    const bfloat16_t *rows = w.data() + size_t {K / 2} * N;
+    EXPECT_TRUE(ck::weight_packed_in_place(rows));
+    EXPECT_TRUE(ck::any_weight_packed_in_place({rows}, {1}));
+    const bfloat16_t *out = nullptr;
+    EXPECT_EQ(ck::get_or_pack_weight_bf16(rows, K / 2, N, N, 32, false, false,
+                      &out, nullptr, false, true),
+            status_t::failure);
+    ::reset_grp_matmul_caches();
+}
+
+// Odd K pads the image past the raw size, so the pack stays out of place and
+// the buffer is not recorded.
+TEST(CkPackBf16InPlace, OddKStaysOutOfPlace) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+    constexpr int K = 63, N = 128;
+    std::vector<bfloat16_t> w = in_place::make_weight(size_t {K} * N);
+    const std::vector<bfloat16_t> raw = w;
+    const bfloat16_t *out
+            = in_place::pack(w, K, N, N, 32, false, false, false, true);
+    ASSERT_NE(out, nullptr);
+    EXPECT_NE(out, w.data());
+    EXPECT_TRUE(in_place::same_bytes(w, raw));
+    EXPECT_FALSE(ck::weight_packed_in_place(w.data()));
+    ::reset_grp_matmul_caches();
+}
+
+TEST(CkPackBf16InPlace, AnyPackedInPlaceSkipsIdleExperts) {
+    CK_SKIP_IF_NO_BF16_ISA();
+    ::reset_grp_matmul_caches();
+    constexpr int K = 64, N = 128;
+    std::vector<bfloat16_t> packed = in_place::make_weight(size_t {K} * N);
+    std::vector<bfloat16_t> raw = in_place::make_weight(size_t {K} * N);
+    ASSERT_EQ(in_place::pack(packed, K, N, N, 32, false, false, false, true),
+            packed.data());
+    const std::vector<const void *> weights {raw.data(), packed.data()};
+    EXPECT_TRUE(ck::any_weight_packed_in_place(weights, {1, 1}));
+    EXPECT_FALSE(ck::any_weight_packed_in_place(weights, {1, 0}));
+    EXPECT_FALSE(ck::weight_packed_in_place(raw.data()));
+    EXPECT_FALSE(ck::weight_packed_in_place(nullptr));
+    ::reset_grp_matmul_caches();
 }
 
 } // namespace

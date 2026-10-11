@@ -122,11 +122,13 @@ struct PackProbeStats {
 /// const" (legacy behaviour for callers that don't pass the field).
 ///
 /// Production-cache gate (mirrors the AOCL DLP warmer):
-///   * `matmul_config_t::instance().get_weight_cache()` — when the
-///     environment variable `ZENDNNL_MATMUL_WEIGHT_CACHE` is not 1
-///     (e.g. set to 0 because the framework mutates weight
-///     addresses between calls and cannot tolerate a pointer-keyed
-///     cache), the CK runtime switches to caller-owned packs via
+///   * `matmul_config_t::instance().get_weight_cache()` — the warm runs
+///     only where the runtime reads the pack cache
+///     (`should_warm_weight_cache`).  When the environment variable
+///     `ZENDNNL_MATMUL_WEIGHT_CACHE` is 0 (e.g. because the framework
+///     mutates weight addresses between calls and cannot tolerate a
+///     pointer-keyed cache), the CK runtime switches to caller-owned
+///     packs via
 ///     `get_or_pack_weight_bf16(..., disable_cache=true)` —
 ///     allocating, packing, and freeing a fresh aligned buffer
 ///     per call rather than consulting the LRU singleton.  Since
@@ -168,6 +170,9 @@ enum class WarmDtypeFamily : uint8_t {
 /// `group_size` is consumed ONLY by `kS4` and is part of its pack
 /// cache key, so a wrong value warms a slab the runtime never looks
 /// up — and of the wrong SIZE, since the slab length depends on it.
+/// `in_place` writes a `kBF16` pack into the caller's weight buffer where
+/// `get_or_pack_weight_bf16` can (even K, contiguous rows); the other
+/// families have no in-place pack and ignore it.
 status_t warm_pack_all_custom_kernel_experts(
         const std::vector<const void *> &weight, const std::vector<int> &K,
         const std::vector<int> &N, const std::vector<int> &ldb,
@@ -175,7 +180,8 @@ status_t warm_pack_all_custom_kernel_experts(
         const std::vector<bool> &is_weights_const, int total_count,
         PackProbeStats &stats, bool interleave_split_halves = false,
         WarmDtypeFamily dtype_family = WarmDtypeFamily::kBF16,
-        int group_size = 0, int32_t weight_cache_type = -1);
+        int group_size = 0, int32_t weight_cache_type = -1,
+        bool in_place = false);
 
 } // namespace custom_kernel
 } // namespace group_matmul_prepack

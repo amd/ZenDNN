@@ -373,16 +373,10 @@ void parallel_multilevel(const std::vector<char> &layout,
 //   `n_tile_safe` ONLY at the ALGO 3 decision points:
 //
 //     * Forced `env_algo == 3`: rejected → falls back to ALGO 1.
-//     * Auto-select (`env_algo == 0`) on a shape that would
-//       otherwise pick ALGO 3: redirected to ALGO 1.  The current
-//       auto-select rule (see `auto_select_algo` below) picks
-//       ALGO 3 in two cases — `num_ops >= num_threads` (many experts)
-//       and the M-driven decode arrow (`max_M <= kDecodeMaxM`).
-//       Both honour `n_tile_safe`; on quantised inputs that fall
-//       outside the supported sub-set below, both arrows collapse
-//       to ALGO 1.  (Rule 0's capacity carve-out routes
-//       `num_ops > kNTilePlanMaxExperts` to ALGO 1 before either
-//       ALGO 3 arrow can fire, so it is unaffected by n_tile_safe.)
+//     * Auto-select (`env_algo == 0`): every ALGO 3 answer (see
+//       `auto_select_algo` below) honours `n_tile_safe`, so a
+//       quantised input outside the supported sub-set below runs on
+//       ALGO 1.
 //
 //   Other ALGOs are unaffected by this helper:
 //     * Forced `env_algo ∈ {1, 2, 5, 6}` is respected as-is
@@ -595,6 +589,12 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 
 // Auto-select (ALGO 0) heuristic — used when the caller leaves
 // ZENDNNL_GRP_MATMUL_ALGO unset.  The out-of-the-box routing is:
+//   * BF16 layer of at least two experts (`grp_matmul_auto_algo3_layer`)
+//     that ALGO 3 can serve (`n_tile_safe`) — ALGO 3 in both phases while
+//     the phase is not pinned: the custom kernel serves prompt and decode
+//     from one pack, so the layer keeps a single weight layout.  Every other
+//     call, including a single expert of any dtype such as a routed
+//     `matmul_direct`, takes the rules below.
 //   * Prompt — Rule 0.7 selects ALGO 2 (flat M-tile) for structurally-safe
 //     W4A8 and ALGO 1 (sequential full-team) for every other dtype unless
 //     AUTO_PROMPT_ALGO is explicitly set.  The W4A8 exception is measured:
@@ -616,6 +616,12 @@ static bool check_n_tile_extra(const std::vector<int> &M,
 // runs the inherited phase-default policy.
 //
 // Decision precedence (tightest first):
+//
+//   BF16 MoE — an `n_tile_safe` call of a `grp_matmul_auto_algo3_layer`
+//      layer whose phase is not pinned → 3 (label: auto_algo3).  Such a layer
+//      skips the single-thread exit and Rule 0, because ALGO 3 slices a call
+//      past `kNTilePlanMaxExperts`; a pinned phase follows Rules 1 and 2, and
+//      the legacy cascade still applies both exits.
 //
 //   0. STRUCTURAL — num_ops > kNTilePlanMaxExperts (=256) → ALGO 1
 //      Capacity carve-out: beyond `GroupNTilePlan::kMaxExperts` the
@@ -733,7 +739,9 @@ static int auto_select_algo(const std::vector<int> &M,
     };
 
     const int num_ops = static_cast<int>(M.size());
-    if (num_threads <= 1 || num_ops == 0) {
+    const bool algo3_layer
+            = n_tile_safe && grp_matmul_auto_algo3_call(M, params);
+    if (num_ops == 0 || (num_threads <= 1 && !algo3_layer)) {
         return pick(1, "auto_single_thread", 1);
     }
 
@@ -757,7 +765,7 @@ static int auto_select_algo(const std::vector<int> &M,
     // Rule 0 — STRUCTURAL capacity carve-out, placed before the phase env so
     // it catches every shape that would otherwise reach the N-tile planner's
     // R3 Sequential fallback.  See the rule table above for why it is ALGO 1.
-    if (num_ops > kNTilePlanMaxExperts) {
+    if (num_ops > kNTilePlanMaxExperts && !algo3_layer) {
         return pick(1, "auto_rule0_capacity", 1);
     }
 
@@ -805,6 +813,8 @@ static int auto_select_algo(const std::vector<int> &M,
     // silently preempt it.
     const bool phase_env_pinned
             = !decode_algo5_pin_declined && phase_setting.pins_generic_policy();
+
+    if (algo3_layer && !phase_env_pinned) { return pick(3, "auto_algo3", 3); }
 
     // Rule 0.45 — SINGLE DENSE EXPERT DECODE → ALGO 3 (N-tile).
     // A lone expert (`num_ops == 1`) in decode would otherwise be diverted by
@@ -948,6 +958,15 @@ static int auto_select_algo(const std::vector<int> &M,
 
     // Rule 2 — LEGACY RULES (phase env == 0).
     //
+    // A BF16 MoE layer skipped the single-thread and capacity exits above;
+    // the cascade applies them, as the callers that opt into it expect.
+    if (algo3_layer && num_threads <= 1) {
+        return pick(1, "auto_single_thread", 1);
+    }
+    if (algo3_layer && num_ops > kNTilePlanMaxExperts) {
+        return pick(1, "auto_rule0_capacity", 1);
+    }
+
     // 2a. num_ops ≥ num_threads (many experts).  Highest of the three
     //     legacy rules so an 8-expert deployment on a ≤ 8-thread host
     //     (rare but possible for local dev / single-CCD profiling)
@@ -1105,8 +1124,10 @@ int select_grp_matmul_algo(const std::vector<char> &layout,
 
 bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
         bool custom_kernel_effective,
-        std::vector<matmul_params> *secondary_params) {
+        std::vector<matmul_params> *secondary_params, bool auto_algo3_layer,
+        bool *ck_inplace_licence) {
     auto &config = matmul_config_t::instance();
+    if (ck_inplace_licence != nullptr) { *ck_inplace_licence = false; }
     if (config.get_weight_cache() != 2) { return false; }
 
     // A pinned ALGO has one weight layout. Mixed mode is AUTO-only; clear a
@@ -1173,6 +1194,36 @@ bool prepare_grouped_auto_weight_cache(std::vector<matmul_params> &params,
                     "weight buffer in place; CK / AOCL per-tile decode stay "
                     "out-of-place, pre-warmed from raw weights before the "
                     "mutation.");
+        }
+        // Per call, a BF16 MoE layer AUTO keeps on ALGO 3
+        // (`grp_matmul_auto_algo3_only`) has the custom-kernel pack as the
+        // only layout of a weight the kernel serves: the runtime and the
+        // prepack write the pack into the caller's buffer (bf16, even K), and
+        // the dispatcher caps the call's AOCL DLP reorders out-of-place.  A
+        // call capped below WC 2 writes nothing in place.  A later call that
+        // cannot run the custom kernel on a weight it rewrote fails closed
+        // (`kGrpMatmulErrPackedInPlaceNoCk`).
+        const auto at_wc2 = [](const std::vector<matmul_params> *pool) {
+            return pool != nullptr
+                    && std::any_of(pool->begin(), pool->end(),
+                            [](const matmul_params &p) {
+                return p.weight_cache_type >= 2;
+            });
+        };
+        if (ck_inplace_licence != nullptr
+                && grp_matmul_auto_algo3_only(auto_algo3_layer)
+                && (at_wc2(&params) || at_wc2(secondary_params))) {
+            *ck_inplace_licence = true;
+            static std::atomic<bool> s_wc2_ck_announced {false};
+            if (!s_wc2_ck_announced.exchange(true, std::memory_order_relaxed)) {
+                apilog_info(
+                        "[GRP_MATMUL.WEIGHT_CACHE] weight_cache_type=2 AUTO "
+                        "custom-kernel in-place ENABLED for bf16 layers of "
+                        "several experts (both phases run ALGO 3): their "
+                        "custom-kernel pack is written into the caller's "
+                        "buffer (even K); their AOCL DLP layouts stay "
+                        "out-of-place.");
+            }
         }
         return true;
     }
@@ -1241,9 +1292,9 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // ── WEIGHT_CACHE=2 (in-place) safety downgrade for grouped matmul ─────
     // In-place reorder/pack mutates the caller's weight buffer into a
     // backend-/layout-specific blocked form, so it is only safe when a
-    // SINGLE layout ever touches a given weight buffer.  AUTO scheduling
-    // violates that on the SAME W13/W2 buffers: the prompt phase routes to
-    // an AOCL full-weight reorder while decode routes to AOCL per-tile or
+    // SINGLE layout ever touches a given weight buffer.  A phase pin can
+    // violate that under AUTO on the SAME W13/W2 buffers: the prompt routes
+    // to an AOCL full-weight reorder while decode routes to AOCL per-tile or
     // the custom-kernel pack — two layouts over one buffer (corruption).
     // So under AUTO we take one of three deterministic verdicts (detailed at
     // the (A)/(B) branch below):
@@ -1259,6 +1310,11 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //       call's weights at out-of-place caching.
     // Process-wide verdicts (A)/(B) are derived from process-constant env, so
     // their decision (and one-shot log) is stable for the rest of the run.
+    // Under (A), a BF16 MoE call (`grp_matmul_auto_algo3_call`) that runs
+    // ALGO 3 while neither phase can leave it also gets a per-call
+    // custom-kernel in-place licence: its pack is the weight's only layout
+    // and is written in place, while its AOCL DLP reorders are capped
+    // out-of-place.
     //
     // PINNED algos keep a single layout per weight and so KEEP WC=2:
     //   * ALGO 1/2/5/6 — one AOCL reorder layout per buffer, via AOCL's
@@ -1271,14 +1327,35 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //     K-pair pad) fall back to an out-of-place cache that never
     //     mutates the weight (see prepare_for_call +
     //     get_or_pack_weight_bf16).
-    track_grouped_inplace_mutation
-            = prepare_grouped_auto_weight_cache(params, custom_kernel_en);
+    bool ck_inplace_licence = false;
+    track_grouped_inplace_mutation = prepare_grouped_auto_weight_cache(params,
+            custom_kernel_en, nullptr, grp_matmul_auto_algo3_call(M, params),
+            &ck_inplace_licence);
 
     mutation_tracking.set(track_grouped_inplace_mutation);
+
+    // The custom kernel packs with the cache mode neither the caller nor the
+    // pool policy capped; the cap below would hide it.
+    int32_t ck_weight_cache_mode
+            = matmul_config_t::instance().get_weight_cache();
+    for (size_t i = 0; i < params.size() && i < M.size(); ++i) {
+        if (M[i] <= 0) { continue; }
+        ck_weight_cache_mode
+                = std::min(ck_weight_cache_mode, params[i].weight_cache_type);
+    }
 
     auto_algo_trace algo_trace;
     const int use_algo = select_grp_matmul_algo(
             layout, M, N, K, params, num_threads, &algo_trace, fused_act);
+
+    // A call ALGO 3 cannot serve follows the mixed policy.  `params` is a
+    // per-call copy, so the cap does not reach the caller.
+    ck_inplace_licence = ck_inplace_licence && use_algo == 3;
+    if (ck_inplace_licence) {
+        for (auto &p : params) {
+            p.weight_cache_type = std::min<int32_t>(p.weight_cache_type, 1);
+        }
+    }
 
     // Decide whether the chosen ALGO fuses the gated activation inline.
     //   - ALGOs 1/2/5/6 always fuse (per-expert or per-M-tile).
@@ -1561,6 +1638,10 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     // `lowoha_algo == moe_custom_kernel`.  An AOCL-blocked / GGML-reordered
     // 'r' weight is legitimately consumable by the non-CK executors, so it
     // must NOT trip this guard.
+    //
+    // A buffer an earlier in-place CK pack (WEIGHT_CACHE=2) rewrote is in the
+    // same position while still marked 'n': it holds the custom-kernel image,
+    // not the raw weight.
     {
         bool has_prepacked_b = false;
         bool has_unsupported_prepacked_b = false;
@@ -1601,6 +1682,20 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
             set_mode(kGrpMatmulErrPrepackedNoCk);
             return false;
         }
+        if (use_algo != 3
+                && custom_kernel::any_weight_packed_in_place(weight, M)) {
+            log_error(
+                    "group_matmul: an active expert's weight was packed in "
+                    "place for the custom kernel by an earlier ALGO 3 call "
+                    "(ZENDNNL_MATMUL_WEIGHT_CACHE=2), but this call resolved "
+                    "to ALGO ",
+                    use_algo,
+                    ", which reads the raw weight.  Keep every call on these "
+                    "weights on ALGO 3, or use "
+                    "ZENDNNL_MATMUL_WEIGHT_CACHE=1.");
+            set_mode(kGrpMatmulErrPackedInPlaceNoCk);
+            return false;
+        }
     }
 
     // Tight-destination-without-a-tight-writer guard.
@@ -1616,11 +1711,12 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
     //
     // The caller-boundary check in `group_matmul_direct` rejects only a MIXED
     // tight/wide set, so a uniformly tight caller reaches here unscreened.
-    // Two ways in under the AUTO default:
+    // Two ways in under AUTO:
     //
-    //   * AUTO routes prompt-shaped calls to ALGO 1, so a tight caller that is
-    //     correct at decode (ALGO 3, fused) silently corrupts at prompt -- and
-    //     that happens for every activation family, custom kernel on or off.
+    //   * A prompt phase pin routes prompt-shaped calls to ALGO 1, and so does
+    //     the n_tile_safe clamp in either phase, so a tight caller that is
+    //     correct on ALGO 3 (fused) silently corrupts there -- for every
+    //     activation family, custom kernel on or off.
     //   * With the custom kernel off, `a3_can_fuse_act` declines silu/gelu, so
     //     those lose the tight writer at decode as well.
     //
@@ -1699,7 +1795,8 @@ bool group_matmul_run_parallel_dispatch(const std::vector<char> &layout,
                     num_threads,
                     a3_fuses ? fused_act : grp_matmul_gated_act_t::none,
                     act_dtype, gemm_mode_out,
-                    any_w4a8 ? &w4a8_s8_ptrs : nullptr);
+                    any_w4a8 ? &w4a8_s8_ptrs : nullptr, ck_weight_cache_mode,
+                    ck_inplace_licence);
             break;
         case kGrpMatmulAlgoMultilevel:
             // parallel_multilevel owns its gemm_mode (multilevel_concurrent /

@@ -71,6 +71,7 @@
 #include "../custom_kernel/dispatch.hpp"
 #include "../group_matmul_parallel_common.hpp"
 #include "../prepack/prepack.hpp"
+#include "../prompt_tile/prompt_tile_executor.hpp"
 #include "group_matmul_n_tile.hpp" // (re-includes planner header)
 #include "lowoha_operators/matmul/backends/aocl/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/quantization/reorder_quantization.hpp"
@@ -661,6 +662,11 @@ struct GroupNTileContext {
 
     // True when ALGO 3 W4A8 follows the aocl_dlp_blocked native s4 path.
     bool w4a8_native = false;
+
+    // A custom-kernel BF16 MoE call (`grp_matmul_auto_algo3_call`):
+    // DecodeDynamic splits the whole team over fewer active experts than
+    // L3 domains.
+    bool split_team_over_experts = false;
 
     // Substitute the column-sliced plain-s8 buffer.  Caller then sets
     // wei=s8 and runs aocl_dlp_blocked so run_dlp hits the per-tile
@@ -2715,6 +2721,11 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 //      to fall back to its unaligned even-split, breaking the
 //      kernel's nr-alignment contract.
 //
+// A call that must stay on the custom kernel
+// (`ck_required_at_plan_time`: a BF16 MoE call, or weights only the
+// kernel can read) skips the viability and auto-mirror gates, since
+// Sequential runs every expert on AOCL from the caller's weight buffer.
+//
 // Helper map (in execution order):
 //   0. n_tile_strategy read            — `ZENDNNL_GRP_MATMUL_N_TILE_STRATEGY`
 //                                        snapshot.  Drives the
@@ -2759,8 +2770,8 @@ inline void apply_round_pick(const GroupNTileTopology &topo,
 inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
         matmul_algo_t algo, int nr_align, bool fused_epilogue,
         bool use_custom_at_plan_time, bool ck_int8_at_plan_time,
-        const std::vector<int> &M, const std::vector<int> &N,
-        const std::vector<int> &K) {
+        bool ck_required_at_plan_time, const std::vector<int> &M,
+        const std::vector<int> &N, const std::vector<int> &K) {
 
     GroupNTilePlan plan {};
     plan.algo = algo;
@@ -2787,11 +2798,11 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     //     check — accessing memory past the array.  Both are fragile,
     //     so route the call to Sequential.  Sequential walks experts
     //     via `for (e=0; e<num_ops; ++e)` with no fixed-size lookup
-    //     arrays, so it is safe at any num_ops.  Auto-select's rule 0
-    //     capacity carve-out already routes `num_ops > kMaxExperts`
-    //     shapes to ALGO 5 upstream; R3 here is the second-line
-    //     defence for forced env=3 with `num_ops > kMaxExperts`.
-    //     FIRES REGARDLESS OF `n_tile_strategy`.
+    //     arrays, so it is safe at any num_ops.
+    //     FIRES REGARDLESS OF `n_tile_strategy`.  `flat_n_tile` hands a
+    //     call that must stay on the custom kernel to the planner in
+    //     slices of at most `kMaxExperts` experts, so R3 serves every
+    //     other call past the capacity.
     //
     //   * AUTO-MIRROR — PERF (auto mode only).  The auto-selector
     //     (`auto_select_algo` in `group_matmul_dispatch.cpp`) would
@@ -2839,9 +2850,12 @@ inline GroupNTilePlan plan_group_n_tile(const GroupNTileTopology &topo,
     // `!force_ntile`.  Values 1 and 2 are explicit user intent to run
     // N-tile and we honour that — Sequential under force_ntile is
     // reserved for genuinely structural reasons (R3, F3 narrow-N,
-    // tight split-halves CK refusal).
-    const bool auto_mirror = !force_ntile && auto_select_would_pick_algo1(topo);
-    const bool unviable_in_auto = !force_ntile && !viable;
+    // tight split-halves CK refusal).  A call that must stay on the
+    // custom kernel skips both.
+    const bool auto_mirror = !force_ntile && !ck_required_at_plan_time
+            && auto_select_would_pick_algo1(topo);
+    const bool unviable_in_auto
+            = !force_ntile && !viable && !ck_required_at_plan_time;
     if (r3 || auto_mirror || unviable_in_auto) {
         plan.strategy = GroupNTileStrategy::Sequential;
         static const bool s_fb_log = apilog_info_enabled();
@@ -3556,7 +3570,9 @@ inline void execute_decode_d(
 // N-split
 // the expert via `do_tile(e, lane, my_ccd_size, min_n_tile)`.  Confining
 // an expert to one CCD keeps its whole weight resident in that CCD's L3
-// rather than scattering tiles of one expert across CCDs.  Column
+// rather than scattering tiles of one expert across CCDs.  A custom-kernel
+// BF16 MoE call with fewer active experts than L3 domains is the exception:
+// each expert takes a group of domains instead (see the body).  Column
 // arithmetic is the SAME `aligned_n_split` the rounds / DecodeD
 // executors use, so per-tile numerics are identical; only the
 // expert→thread mapping changes.
@@ -3637,8 +3653,25 @@ inline void execute_decode_dynamic(
         // in `[0, num_ccds)` — every thread owns a valid CCD, no guard
         // needed.  This CCD owns sorted positions {my_ccd, my_ccd+num_ccds,
         // ...}; its lanes cooperatively N-split each owned expert in turn.
-        for (int p = my_ccd; p < num_active; p += num_ccds) {
-            ctx.do_tile(plan, active[p], lane, my_ccd_size, min_n_tile);
+        int first = my_ccd, step = num_ccds, my_lane = lane;
+        int my_team = my_ccd_size;
+        // With fewer active experts than L3 domains, one domain per expert
+        // leaves the rest of the team idle on a weight too large for one L3
+        // (the trigger for so few experts).  The custom kernel's pack is
+        // full-N, so on a BF16 MoE call its split widens: the team splits
+        // evenly over the active experts, each taking a contiguous run of
+        // lanes that split its N together.  AOCL tiles keep one domain,
+        // whose reorder keys follow the team size.
+        if (ctx.split_team_over_experts && num_active < num_ccds) {
+            first = tid * num_active / team;
+            step = num_active;
+            const int tid0 = (first * team + num_active - 1) / num_active;
+            const int tid1 = ((first + 1) * team + num_active - 1) / num_active;
+            my_lane = tid - tid0;
+            my_team = tid1 - tid0;
+        }
+        for (int p = first; p < num_active; p += step) {
+            ctx.do_tile(plan, active[p], my_lane, my_team, min_n_tile);
         }
 
         // Wide non-custom fused activation post-pass.  One team-wide barrier
@@ -3649,9 +3682,9 @@ inline void execute_decode_dynamic(
         // every matmul column has a row-reader and coverage matches.
         if (needs_activation_pass) {
 #pragma omp barrier
-            for (int p = my_ccd; p < num_active; p += num_ccds) {
+            for (int p = first; p < num_active; p += step) {
                 ctx.apply_swiglu_oai(
-                        plan, active[p], lane, my_ccd_size, min_n_tile);
+                        plan, active[p], my_lane, my_team, min_n_tile);
             }
         }
     }
@@ -3992,6 +4025,212 @@ inline const char *gemm_mode_label(GroupNTileStrategy strategy,
     return use_custom ? "flat_n_tile_custom" : "flat_n_tile";
 }
 
+// Expert slice `[b, e)` of a per-expert vector followed by the entries
+// `extra`.  Without `extra` the slice is clipped to `v.size()`, as the
+// call left it; with `extra` every position up to `e` is kept, filled
+// with `fill` where `v` ends, so the appended entries stay aligned
+// across the vectors that carry them.
+template <typename T>
+std::vector<T> slice_experts(const std::vector<T> &v, int b, int e,
+        const std::vector<int> &extra, const T &fill) {
+    std::vector<T> out;
+    out.reserve(static_cast<size_t>(e - b) + extra.size());
+    for (int i = b; i < e; ++i) {
+        if (static_cast<size_t>(i) < v.size()) {
+            out.push_back(v[i]);
+        } else if (!extra.empty()) {
+            out.push_back(fill);
+        } else {
+            break;
+        }
+    }
+    for (const int i : extra) {
+        out.push_back(static_cast<size_t>(i) < v.size() ? v[i] : fill);
+    }
+    return out;
+}
+
+static_assert(custom_kernel::CallContext::kMaxExperts >= kNTilePlanMaxExperts,
+        "an expert slice must fit the custom kernel's per-expert arrays");
+
+// Is an active weight readable only by the custom kernel: packed for it by
+// the caller (`moe_custom_kernel`), or rewritten by an in-place pack?
+static bool has_ck_only_weight(const std::vector<const void *> &weight,
+        const std::vector<int> &M, const std::vector<matmul_params> &params) {
+    for (size_t i = 0; i < M.size() && i < params.size(); ++i) {
+        if (M[i] > 0 && params[i].mem_format_b == 'r'
+                && params[i].lowoha_algo == matmul_algo_t::moe_custom_kernel) {
+            return true;
+        }
+    }
+    return custom_kernel::any_weight_packed_in_place(weight, M);
+}
+
+// A BF16 MoE call, or one whose weights only the custom kernel can read,
+// with more experts than the planner holds runs as consecutive slices of
+// at most `kNTilePlanMaxExperts` experts.  Past that bound the custom
+// kernel declines a call and the planner's R3 guard runs every expert on
+// AOCL, one at a time.  Each slice is a complete `flat_n_tile`
+// call over its own experts and their own dst, so running the slices back
+// to back writes what one call would.
+//
+// A slice with no active expert is skipped.  Its share of the prepack
+// range, and any prepack-extras tail past `M.size()`, rides along as
+// warm-only entries of the first slice that runs, so the call still
+// prepacks every expert it advertises.
+void flat_n_tile_in_slices(const std::vector<char> &layout,
+        const std::vector<bool> &transA, const std::vector<bool> &transB,
+        const std::vector<int> &M, const std::vector<int> &N,
+        const std::vector<int> &K, const std::vector<float> &alpha,
+        const std::vector<const void *> &src, const std::vector<int> &lda,
+        const std::vector<const void *> &weight, const std::vector<int> &ldb,
+        const std::vector<const void *> &bias, const std::vector<float> &beta,
+        const std::vector<void *> &dst, const std::vector<int> &ldc,
+        const std::vector<bool> &is_weights_const,
+        std::vector<matmul_params> &params, int num_threads,
+        grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
+        const char **gemm_mode_out,
+        const std::vector<void *> *w4a8_s8_weights_in,
+        int32_t ck_weight_cache_mode, bool ck_inplace_licence) {
+    const int num_ops = static_cast<int>(M.size());
+    const int n_slices
+            = (num_ops + kNTilePlanMaxExperts - 1) / kNTilePlanMaxExperts;
+    const auto slice_begin = [&](int s) {
+        return static_cast<int>(static_cast<int64_t>(num_ops) * s / n_slices);
+    };
+
+    // Active and prepack extents of the whole call, read from params[0]
+    // the way `build_prepack_params` reads them.
+    const bool opt_in = !params.empty() && params[0].active_matmul > 0;
+    const int active
+            = opt_in ? static_cast<int>(params[0].active_matmul) : num_ops;
+    const int warm_end = (opt_in && params[0].total_matmul > 0)
+            ? static_cast<int>(params[0].total_matmul)
+            : active;
+
+    std::vector<char> runs(static_cast<size_t>(n_slices), 0);
+    int anchor = -1;
+    for (int s = 0; s < n_slices; ++s) {
+        const int e = slice_begin(s + 1);
+        for (int i = slice_begin(s); i < e && !runs[s]; ++i) {
+            runs[s] = M[i] > 0;
+        }
+        if (runs[s] && anchor < 0) anchor = s;
+    }
+    // With no active expert at all, slice 0 still runs so the call warms.
+    if (anchor < 0) anchor = 0;
+    runs[anchor] = 1;
+
+    const size_t wei_bound = std::min(
+            {weight.size(), K.size(), N.size(), ldb.size(), transB.size()});
+    std::vector<int> warm_only;
+    for (int s = 0; s < n_slices; ++s) {
+        if (runs[s]) continue;
+        const int e = std::min(slice_begin(s + 1), warm_end);
+        for (int i = slice_begin(s); i < e; ++i) {
+            warm_only.push_back(i);
+        }
+    }
+    for (int i = num_ops; i < warm_end; ++i) {
+        warm_only.push_back(i);
+    }
+    warm_only.erase(
+            std::remove_if(warm_only.begin(), warm_only.end(),
+                    [&](int i) { return static_cast<size_t>(i) >= wei_bound; }),
+            warm_only.end());
+    std::vector<int> warm_only_params;
+    for (const int i : warm_only) {
+        if (static_cast<size_t>(i) < params.size()) {
+            warm_only_params.push_back(i);
+        }
+    }
+
+    static const bool s_log = apilog_info_enabled();
+    if (s_log) {
+        int n_run = 0;
+        for (const char r : runs) {
+            n_run += r ? 1 : 0;
+        }
+        apilog_info("[GRP_MATMUL.PLAN.SLICES] num_ops=", num_ops,
+                " plan_capacity=", kNTilePlanMaxExperts, " slices=", n_slices,
+                " run=", n_run, " warm_only=", warm_only.size());
+    }
+
+    const std::vector<int> none;
+    const char *last_mode = nullptr;
+    for (int s = 0; s < n_slices; ++s) {
+        if (!runs[s]) continue;
+        const int b = slice_begin(s);
+        const int e = slice_begin(s + 1);
+        const bool is_anchor = (s == anchor);
+        const std::vector<int> &w_extra = is_anchor ? warm_only : none;
+        const std::vector<int> &p_extra = is_anchor ? warm_only_params : none;
+
+        std::vector<int> M_c(M.begin() + b, M.begin() + e);
+        std::vector<char> layout_c = slice_experts(layout, b, e, none, 'r');
+        std::vector<bool> transA_c = slice_experts(transA, b, e, none, false);
+        std::vector<float> alpha_c = slice_experts(alpha, b, e, none, 1.0f);
+        std::vector<const void *> src_c
+                = slice_experts<const void *>(src, b, e, none, nullptr);
+        std::vector<int> lda_c = slice_experts(lda, b, e, none, 0);
+        std::vector<const void *> bias_c
+                = slice_experts<const void *>(bias, b, e, none, nullptr);
+        std::vector<float> beta_c = slice_experts(beta, b, e, none, 0.0f);
+        std::vector<void *> dst_c
+                = slice_experts<void *>(dst, b, e, none, nullptr);
+        std::vector<int> ldc_c = slice_experts(ldc, b, e, none, 0);
+
+        std::vector<const void *> weight_c
+                = slice_experts<const void *>(weight, b, e, w_extra, nullptr);
+        std::vector<int> K_c = slice_experts(K, b, e, w_extra, 0);
+        std::vector<int> N_c = slice_experts(N, b, e, w_extra, 0);
+        std::vector<int> ldb_c = slice_experts(ldb, b, e, w_extra, 0);
+        std::vector<bool> transB_c
+                = slice_experts(transB, b, e, w_extra, false);
+        // Empty means "every weight is constant"; keep it that way.
+        std::vector<bool> is_weights_const_c = is_weights_const.empty()
+                ? std::vector<bool>()
+                : slice_experts(is_weights_const, b, e, w_extra, true);
+        std::vector<matmul_params> params_c
+                = slice_experts(params, b, e, p_extra, matmul_params());
+
+        // Re-express the active/total contract for the slice so its
+        // prepack walks exactly its share of the call's range.
+        const int span = e - b;
+        const int own_active = opt_in ? std::clamp(active - b, 0, span) : span;
+        const int own_warm = std::clamp(warm_end - b, 0, span);
+        const int active_c = own_active > 0 ? own_active : span;
+        const int total_c = std::max(active_c,
+                w_extra.empty() ? own_warm
+                                : span + static_cast<int>(w_extra.size()));
+        if (!params_c.empty()) {
+            params_c[0].active_matmul = static_cast<uint32_t>(active_c);
+            params_c[0].total_matmul = static_cast<uint32_t>(total_c);
+        }
+
+        std::vector<void *> w4a8_c;
+        if (w4a8_s8_weights_in != nullptr) {
+            w4a8_c = slice_experts<void *>(
+                    *w4a8_s8_weights_in, b, e, none, nullptr);
+        }
+
+        const char *mode = nullptr;
+        flat_n_tile(layout_c, transA_c, transB_c, M_c, N_c, K_c, alpha_c, src_c,
+                lda_c, weight_c, ldb_c, bias_c, beta_c, dst_c, ldc_c,
+                is_weights_const_c, params_c, num_threads, fused_act, act_dtype,
+                &mode, w4a8_s8_weights_in != nullptr ? &w4a8_c : nullptr,
+                ck_weight_cache_mode, ck_inplace_licence);
+        if (gemm_mode_is_error(mode)) {
+            if (gemm_mode_out != nullptr) *gemm_mode_out = mode;
+            return;
+        }
+        if (mode != nullptr) last_mode = mode;
+    }
+    if (gemm_mode_out != nullptr && last_mode != nullptr) {
+        *gemm_mode_out = last_mode;
+    }
+}
+
 } // namespace
 
 // Drop every memoized f32 weight-scale view.  Mirrors the CK pack caches'
@@ -4039,10 +4278,23 @@ void flat_n_tile(const std::vector<char> &layout,
         std::vector<matmul_params> &params, int num_threads,
         grp_matmul_gated_act_t fused_act, data_type_t act_dtype,
         const char **gemm_mode_out,
-        const std::vector<void *> *w4a8_s8_weights_in) {
+        const std::vector<void *> *w4a8_s8_weights_in,
+        int32_t ck_weight_cache_mode, bool ck_inplace_licence) {
 
     const int num_ops = static_cast<int>(M.size());
     if (num_ops == 0 || num_threads <= 0) return;
+    // Slices keep a BF16 MoE call on the custom kernel past the planner's
+    // capacity, and weights only the kernel can read; any other call takes
+    // the planner's capacity guard.
+    const bool bf16_moe = grp_matmul_auto_algo3_call(M, params);
+    if (num_ops > kNTilePlanMaxExperts
+            && (bf16_moe || has_ck_only_weight(weight, M, params))) {
+        flat_n_tile_in_slices(layout, transA, transB, M, N, K, alpha, src, lda,
+                weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
+                num_threads, fused_act, act_dtype, gemm_mode_out,
+                w4a8_s8_weights_in, ck_weight_cache_mode, ck_inplace_licence);
+        return;
+    }
 
     // Engage the per-thread fused epilogue only for activations whose
     // interleaved layout puts complete (g, u) pairs on every thread's
@@ -4306,13 +4558,11 @@ void flat_n_tile(const std::vector<char> &layout,
     bool any_ck_prepacked_b = false;
     bool any_aocl_prepacked_b = false;
     bool any_unsupported_prepacked_b = false;
-    bool any_caller_prepacked_b = false;
     for (int i = 0; i < num_ops; ++i) {
         if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()
                 || params[i].mem_format_b != 'r') {
             continue;
         }
-        any_caller_prepacked_b = true;
         if (params[i].lowoha_algo == matmul_algo_t::moe_custom_kernel) {
             weights_prepacked[i] = true;
             any_ck_prepacked_b = true;
@@ -4356,12 +4606,13 @@ void flat_n_tile(const std::vector<char> &layout,
     }
 
     custom_kernel::CallContext kctx;
-    int32_t ck_weight_cache_mode
-            = matmul_config_t::instance().get_weight_cache();
-    for (int i = 0; i < num_ops; ++i) {
-        if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()) continue;
-        ck_weight_cache_mode
-                = std::min(ck_weight_cache_mode, params[i].weight_cache_type);
+    if (ck_weight_cache_mode < 0) {
+        ck_weight_cache_mode = matmul_config_t::instance().get_weight_cache();
+        for (int i = 0; i < num_ops; ++i) {
+            if (M[i] <= 0 || static_cast<size_t>(i) >= params.size()) continue;
+            ck_weight_cache_mode = std::min(
+                    ck_weight_cache_mode, params[i].weight_cache_type);
+        }
     }
     // All four dtypes come from `rep`, the first ACTIVE expert.  Mixing
     // `params[rep]` for src with `params[0]` for wei/dst/bias let a padded
@@ -4371,6 +4622,12 @@ void flat_n_tile(const std::vector<char> &layout,
     // call drops to the AOCL fallback for no reason.  Slot 0 is only a valid
     // source when it happens to be active, which is exactly what `rep`
     // already encodes.
+    // A wide fused epilogue never runs the kernel (see `use_custom` below),
+    // so its packs must leave the raw weight in place for the fallback.
+    // Under AUTO mixed in-place mode the AOCL prompt reorder is the one
+    // layout that may rewrite a weight, so the pack stays out-of-place
+    // unless the dispatcher licensed this call (`ck_inplace_licence`), whose
+    // weights no AOCL reorder rewrites.
     if (!ck_s4_src_per_group
             && grp_matmul_custom_kernel_effective(params, M, N, custom_act)) {
         engage_ntile_custom_kernel(custom_act,
@@ -4381,8 +4638,18 @@ void flat_n_tile(const std::vector<char> &layout,
                 ldb, alpha, beta, weight, is_weights_const, kctx,
                 ck_dynamic_quant, ck_compute_dtype, weights_prepacked,
                 ck_s4_group_size, ck_s4_wei_scale_grp_stride,
-                weights_aocl_prepacked, num_threads, ck_weight_cache_mode);
+                weights_aocl_prepacked, num_threads, ck_weight_cache_mode,
+                /*allow_in_place=*/(!fused_epilogue || tight_fused_epilogue)
+                        && (ck_inplace_licence
+                                || !is_grp_auto_mixed_inplace_active()));
     }
+    // A buffer an in-place pack (WEIGHT_CACHE=2) rewrote is CK-only in the
+    // same way, though still marked 'n'.  `prepare_for_call` serves it
+    // through the pack cache, which knows its layout, so it is not aliased.
+    // Read after the engage: a refused `prepare_for_call` may already have
+    // rewritten some of this call's experts.
+    const bool any_in_place_b
+            = custom_kernel::any_weight_packed_in_place(weight, M);
 
     // ── DQ-INT8 scale-path decision (uniform across experts) ──────────
     // The microkernel reads src/wei scales as bf16 or f32 (converting on
@@ -4559,20 +4826,46 @@ void flat_n_tile(const std::vector<char> &layout,
     // weight and silently corrupt results.  Abort instead: skip compute
     // and signal failure to `group_matmul_direct` via the gemm_mode
     // sentinel (it returns status_t::failure on this value).
-    if (any_ck_prepacked_b && !use_custom) {
-        apilog_error(
-                "flat_n_tile: mem_format_b='r' (pre-reordered VNNI weight) "
-                "but the custom kernel did not engage (kctx.enabled=",
-                kctx.enabled,
-                "); a prepacked weight has no safe non-CK "
-                "consumer. Failing the call. Enable the custom kernel "
-                "(ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1, ALGO 3, supported "
-                "shape) or pass the raw weight with mem_format_b='n'.");
-        if (gemm_mode_out != nullptr) {
-            *gemm_mode_out = kGrpMatmulErrPrepackedNoCk;
+    //
+    // A buffer an earlier in-place pack rewrote fails the same way, under
+    // its own sentinel.  This happens when a later call on the same weights
+    // is refused by the kernel (alpha, transA, bias dtype, non-const weight)
+    // or does not run it (wide fused epilogue).
+    //
+    // Checked again after the DQ-INT8 fused fallback below, which can still
+    // clear `use_custom`.
+    const auto ck_only_weights_without_ck = [&]() {
+        if (use_custom || (!any_ck_prepacked_b && !any_in_place_b)) {
+            return false;
         }
-        return;
-    }
+        if (any_ck_prepacked_b) {
+            apilog_error(
+                    "flat_n_tile: mem_format_b='r' (pre-reordered VNNI weight) "
+                    "but the custom kernel did not engage (kctx.enabled=",
+                    kctx.enabled,
+                    "); a prepacked weight has no safe non-CK "
+                    "consumer. Failing the call. Enable the custom kernel "
+                    "(ZENDNNL_GRP_MATMUL_CUSTOM_KERNEL=1, ALGO 3, supported "
+                    "shape) or pass the raw weight with mem_format_b='n'.");
+        } else {
+            apilog_error(
+                    "flat_n_tile: an active expert's weight was packed in "
+                    "place by an earlier custom-kernel call "
+                    "(ZENDNNL_MATMUL_WEIGHT_CACHE=2), but the custom kernel "
+                    "does not run for this call (kctx.enabled=",
+                    kctx.enabled,
+                    ").  The buffer no longer holds the raw weight.  Failing "
+                    "the call.  Use ZENDNNL_MATMUL_WEIGHT_CACHE=1 for weights "
+                    "that also feed calls the custom kernel cannot serve.");
+        }
+        if (gemm_mode_out != nullptr) {
+            *gemm_mode_out = any_ck_prepacked_b
+                    ? kGrpMatmulErrPrepackedNoCk
+                    : kGrpMatmulErrPackedInPlaceNoCk;
+        }
+        return true;
+    };
+    if (ck_only_weights_without_ck()) { return; }
 
     // AOCL-blocked bytes have a safe grouped fallback only when AOCL-DLP is
     // compiled in. Without AOCL, the generic fallback would hand blocked bytes
@@ -4634,21 +4927,23 @@ void flat_n_tile(const std::vector<char> &layout,
     // on `nr_align`, so an early call (pre-kctx) would warm a key set
     // the runtime never queries when the dispatcher widens nr_align to
     // the custom kernel's pack_nr or the tight-pair-align floor.
-    // Skip generic ahead-of-time warming when any active weight is already
-    // backend-packed (`mem_format_b='r'`). CK-VNNI is consumed directly;
-    // AOCL-blocked is either consumed by AOCL fallback or normalized inside
-    // validated CK preparation. Treating either representation as raw here
-    // would build a cache entry from packed bytes.
-    if (!any_caller_prepacked_b) {
-        group_matmul_prepack::prepack_for_algo_3(
-                group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
-                        transB, is_weights_const, params, M,
-                        /*custom_kernel_env=*/use_custom,
-                        /*num_threads=*/num_threads,
-                        /*nr_align=*/nr_align, fused_act, act_dtype,
-                        /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta,
-                        /*dynamic_quant=*/ck_dynamic_quant,
-                        /*compute_dtype=*/ck_compute_dtype));
+    // Skip the ahead-of-time warm when any expert, idle ones included, is
+    // already backend-packed (`mem_format_b='r'`).  CK-VNNI is consumed
+    // directly and AOCL-blocked by the AOCL fallback or the validated CK
+    // preparation, so a warm would build a cache entry from packed bytes or,
+    // packing in place, rewrite them.
+    if (std::none_of(params.begin(), params.end(),
+                [](const matmul_params &p) { return p.mem_format_b == 'r'; })) {
+        auto pp = group_matmul_prepack::build_prepack_params(weight, K, N, ldb,
+                transB, is_weights_const, params, M,
+                /*custom_kernel_env=*/use_custom,
+                /*num_threads=*/num_threads,
+                /*nr_align=*/nr_align, fused_act, act_dtype,
+                /*transA=*/&transA, /*alpha=*/&alpha, /*beta=*/&beta,
+                /*dynamic_quant=*/ck_dynamic_quant,
+                /*compute_dtype=*/ck_compute_dtype);
+        pp.ck_in_place = use_custom && kctx.pack_in_place;
+        group_matmul_prepack::prepack_for_algo_3(pp);
     }
 
     // APILOG moved below after the plan is built so the log line can
@@ -4984,6 +5279,7 @@ void flat_n_tile(const std::vector<char> &layout,
             use_custom = false;
         }
     }
+    if (ck_only_weights_without_ck()) { return; }
 
     // Caller CK-VNNI bytes have no non-CK interpretation. Hoist validation is
     // deliberately later than initial CK preparation, so re-check after it:
@@ -5017,6 +5313,7 @@ void flat_n_tile(const std::vector<char> &layout,
             use_custom ? &kctx : nullptr, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};
+    ctx.split_team_over_experts = use_custom && bf16_moe;
 
     // `is_int8` drives the planner's int8-variant per-thread N floor
     // (`kDecodeNTileInt8` / `kMinNTileInt8` via the `*_for_variant`
@@ -5036,9 +5333,13 @@ void flat_n_tile(const std::vector<char> &layout,
     // strict-stable plan for the non-custom path.
     // The custom path keeps the legacy cost-model picks because its
     // pack cache is shape-keyed, not tile-keyed.
-    GroupNTilePlan plan
-            = plan_group_n_tile(topo, algo, nr_align, fused_epilogue,
-                    use_custom, /*ck_int8_at_plan_time=*/is_int8_call, M, N, K);
+    // A call that must stay on the custom kernel skips the planner's AUTO
+    // demotions: a BF16 MoE call, or weights only the kernel can read.
+    const bool ck_required
+            = use_custom && (bf16_moe || any_ck_prepacked_b || any_in_place_b);
+    GroupNTilePlan plan = plan_group_n_tile(topo, algo, nr_align,
+            fused_epilogue, use_custom, /*ck_int8_at_plan_time=*/is_int8_call,
+            ck_required, M, N, K);
     if (force_aocl_prepacked_fallback) {
         plan.strategy = GroupNTileStrategy::Sequential;
         plan.algo = matmul_algo_t::aocl_dlp_blocked;
@@ -5186,8 +5487,10 @@ void flat_n_tile(const std::vector<char> &layout,
     // split-independent CK decode pack. If this call cannot use CK for any
     // reason (including a refusal before kctx was prepared), it must use the
     // whole-weight key. When CK is off process-wide, mixed mode is never
-    // enabled, so this fallback remains inactive.
-    if (!use_custom && is_grp_auto_mixed_inplace_active()
+    // enabled, so this fallback remains inactive.  A call holding the
+    // custom-kernel licence keeps its AOCL DLP layouts out-of-place, so it
+    // keeps its plan.
+    if (!use_custom && !ck_inplace_licence && is_grp_auto_mixed_inplace_active()
             && plan.strategy != GroupNTileStrategy::Sequential) {
         plan.strategy = GroupNTileStrategy::Sequential;
         // Sequential re-detects a tight caller from `ldc[e] < N[e]` and owns
@@ -5204,6 +5507,36 @@ void flat_n_tile(const std::vector<char> &layout,
                     "would re-reorder the mutated bytes as raw, so this call "
                     "is routed to the whole-weight key instead.");
         }
+    }
+
+    // ── Prompt tile executor (CK, prompt phase) ──────────────────────
+    // Takes over the calls the planner sent to the round executor; the
+    // decode strategies, Sequential and every non-custom path keep their
+    // executors.  See `prompt_tile/prompt_tile_executor.hpp`.
+    bool run_prompt_tile = prompt_tile::should_run(kctx, use_custom,
+            plan.strategy == GroupNTileStrategy::FewExperts
+                    || plan.strategy == GroupNTileStrategy::ManyExperts,
+            classify_grp_matmul_phase(M, static_cast<size_t>(num_ops))
+                    != grp_matmul_phase::decode,
+            M, N);
+    // INT8 and W4A8 tiles read the hoisted A and its CK scale views; an
+    // expert that `do_tile` would send to AOCL, or a static U8xS8 one (its
+    // per-tensor epilogue is not tiled), keeps the call on rounds.
+    const prompt_tile::QuantRow *pt_quant = nullptr;
+    if (run_prompt_tile
+            && custom_kernel::needs_quantized_src_setup(kctx.variant)) {
+        static thread_local std::vector<prompt_tile::QuantRow> rows;
+        rows.assign(num_ops, prompt_tile::QuantRow {});
+        for (int e = 0; e < num_ops && run_prompt_tile; ++e) {
+            if (M[e] <= 0) continue;
+            const HoistedSrcQuant &h = hoisted[e];
+            run_prompt_tile = ck_int8_tile_dispatches(h, kctx.compute_int)
+                    && !h.epilogue.src_quant_per_tensor;
+            rows[e] = {h.src_ptr, h.lda, h.src_scale_view,
+                    static_cast<const int32_t *>(h.src_zp.buff),
+                    h.wei_scale_view};
+        }
+        pt_quant = rows.data();
     }
 
     // ── Test-only snapshot of the finalised plan ─────────────────────
@@ -5263,9 +5596,11 @@ void flat_n_tile(const std::vector<char> &layout,
     // Static literals only — see `gemm_mode_label` above for the
     // full set of possible values and the labelling rationale.
     if (gemm_mode_out != nullptr) {
-        *gemm_mode_out = gemm_mode_label(plan.strategy, fused_act,
-                fused_epilogue, plan.tight_fused_epilogue, tight_fused_epilogue,
-                use_custom);
+        *gemm_mode_out = run_prompt_tile
+                ? prompt_tile::gemm_mode_label(fused_epilogue, fused_act)
+                : gemm_mode_label(plan.strategy, fused_act, fused_epilogue,
+                          plan.tight_fused_epilogue, tight_fused_epilogue,
+                          use_custom);
     }
 
     // ── APILOG: one line per flat_n_tile call ──────────────────────────
@@ -5338,6 +5673,7 @@ void flat_n_tile(const std::vector<char> &layout,
                         + std::to_string(
                                 get_grp_matmul_n_tile_heavy_threshold());
             }
+            if (run_prompt_tile) tunables += " executor=prompt_tile";
         } else {
             tunables = " aocl_target_slots="
                     + std::to_string(get_grp_matmul_aocl_target_slots())
@@ -5380,7 +5716,10 @@ void flat_n_tile(const std::vector<char> &layout,
             // `gemm_mode_out` already labels this as
             // `flat_n_tile_sequential`.  Planned follow-up: wire CK
             // through Sequential so the demotion can become a fast path
-            // instead of a fallback.
+            // instead of a fallback.  The planner keeps a call whose
+            // weights only the custom kernel can read off Sequential;
+            // should that ever change, the call fails rather than read
+            // them raw.
             if (use_custom) {
                 static const bool s_seq_demote = apilog_info_enabled();
                 if (s_seq_demote) {
@@ -5395,6 +5734,19 @@ void flat_n_tile(const std::vector<char> &layout,
                             "split. "
                             "Sequential CK wiring is a planned follow-up.");
                 }
+                if (any_ck_prepacked_b || any_in_place_b) {
+                    apilog_error(
+                            "flat_n_tile: the plan routes a call whose "
+                            "weights only the custom kernel can read to the "
+                            "Sequential strategy, which reads them raw.  "
+                            "Failing the call.");
+                    if (gemm_mode_out != nullptr) {
+                        *gemm_mode_out = any_ck_prepacked_b
+                                ? kGrpMatmulErrPrepackedNoCk
+                                : kGrpMatmulErrPackedInPlaceNoCk;
+                    }
+                    return;
+                }
             }
             execute_sequential(plan, ctx);
             break;
@@ -5403,7 +5755,16 @@ void flat_n_tile(const std::vector<char> &layout,
             execute_decode_dynamic(plan, ctx);
             break;
         case GroupNTileStrategy::FewExperts:
-        case GroupNTileStrategy::ManyExperts: execute_rounds(plan, ctx); break;
+        case GroupNTileStrategy::ManyExperts:
+            if (run_prompt_tile) {
+                prompt_tile::execute(kctx,
+                        prompt_tile::CallView {
+                                M, N, K, src, lda, bias, dst, ldc, pt_quant},
+                        num_threads, s_apilog);
+            } else {
+                execute_rounds(plan, ctx);
+            }
+            break;
     }
 
     // Post-exec abort check.  A worker that raised one of these left part

@@ -1627,10 +1627,10 @@ status_t group_matmul_fused_moe_execute(
             op1_internal, act, custom_kernel_en, env_algo_fused, resolved_algo);
 
     // Publish the arena the DECODE call will get, for the prompt-side
-    // cross-warm.  Under AUTO a prompt-shaped call resolves to ALGO 1, so
-    // `want_tight` above is false for it while the decode call -- same
-    // layer, same weights, same activation -- resolves to ALGO 3 and gets
-    // the tight arena.  A warmer that read this call's `ldc` would predict
+    // cross-warm.  Under AUTO a prompt-shaped call outside a BF16 layer of
+    // several experts resolves to ALGO 1, so `want_tight` above is false for
+    // it while the decode call -- same layer, same weights, same activation
+    // -- resolves to ALGO 3 and gets the tight arena.  A warmer that read this call's `ldc` would predict
     // the wide split and warm per-tile keys the decode never queries.
     // Asking the same predicate with `resolved_algo = 3` answers for the
     // decode instead.  Scoped to this call on this thread.
@@ -1742,8 +1742,9 @@ status_t group_matmul_fused_moe_execute(
     // RESOLVED algo for this call is ALGO 2: under a pinned env algo
     // ({1,2,3,5,6}) that is exactly the pinned value; under AUTO (env 0)
     // the resolved prompt algo is 2 for structurally-safe W4A8 and 1 for
-    // other dtypes (Rule 0.7), while decode defaults to 3.  Vertical fusion
-    // therefore remains an M-tile-path only.  This keeps vertical fusion inside the ALGO-2 decision
+    // other dtypes (Rule 0.7), while decode defaults to 3; a BF16 layer of
+    // several experts runs ALGO 3 when ALGO 3 can serve it.
+    // Vertical fusion therefore remains an M-tile-path only.  This keeps vertical fusion inside the ALGO-2 decision
     // tree and stops it from overriding a pinned ALGO 1/3/5/6 (e.g. an
     // ALGO-3 N-tile decode run, where it previously still *attempted*
     // before falling through to legacy two-pass).  Uses the same

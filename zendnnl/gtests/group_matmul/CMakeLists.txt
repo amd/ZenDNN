@@ -35,6 +35,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_group_reorder_e2e.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_wei_buffer_capacity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_int8_inplace_warm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_prompt_tile.cpp
     # Custom-kernel direct-surface tests — see gtests/group_matmul/
     # custom_kernel/ck_test_helpers.hpp for scope (unit-level on
     # `dispatch_supported`, `resolve_variant`, `prepare_for_call`,

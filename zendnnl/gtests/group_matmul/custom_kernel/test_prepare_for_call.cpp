@@ -52,6 +52,8 @@ class CkPrepareForCallTest
 
 TEST_P(CkPrepareForCallTest, MatchesExpectedVerdict) {
     CK_SKIP_IF_NO_BF16_ISA();
+    // An earlier case's in-place packed buffer may sit at this address.
+    ::reset_grp_matmul_caches();
 
     const auto &c = GetParam();
     ck_test::PrepCallStorage storage;

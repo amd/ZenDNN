@@ -737,8 +737,12 @@ status_t build_projection_params(
     // The routed entry point owns a second DA8W8 layout for these weights.
     // Its generic fallback must therefore remain out-of-place: allowing WC=2
     // could replace the row-major bytes before a later routed cache miss.
-    grouped_params.weight_cache_type
-            = std::min<int32_t>(grouped_params.weight_cache_type, 1);
+    // The routed executor never packs a BF16 weight, so a BF16 projection
+    // keeps the caller's mode.
+    if (grouped_params.dtypes.wei != data_type_t::bf16) {
+        grouped_params.weight_cache_type
+                = std::min<int32_t>(grouped_params.weight_cache_type, 1);
+    }
     // The projection-level capacity has already been used to slice expert
     // pointers. Do not forward it as mutation permission to group Matmul's
     // global-WC prepack warmers.

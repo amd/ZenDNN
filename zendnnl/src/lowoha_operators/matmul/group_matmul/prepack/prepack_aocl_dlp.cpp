@@ -113,8 +113,10 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
         weight_cache_type = effective_weight_cache_type(weight_cache_type);
     }
     // Warm the full-weight AOCL DLP cache when the runtime consults it:
-    // WC==1 (out-of-place), OR WC==2 under the grouped AUTO mixed-in-place
-    // mode.  In mixed mode this full-weight (prompt) reorder is THE single
+    // WC==1 (out-of-place), OR WC==2 under a grouped AUTO in-place mode.  The
+    // custom-kernel mode caps every grouped AOCL reorder to out-of-place, so
+    // this warm is out-of-place too.  In mixed mode this full-weight
+    // (prompt) reorder is THE single
     // in-place mutator of the weight buffer — it runs LAST in the prepack
     // sequence (after the out-of-place CK / per-tile decode warms), so by
     // the time it mutates W every other layout has already been packed from
@@ -223,6 +225,15 @@ status_t warm_pack_all_aocl_dlp_experts(const std::vector<const void *> &weight,
             continue;
         }
 
+        // A buffer an in-place custom-kernel pack rewrote holds the CK image,
+        // and the dispatcher fails any AOCL call on it, so there is nothing
+        // to warm -- and under mixed mode this warm would rewrite it again.
+        if (::zendnnl::lowoha::matmul::custom_kernel::weight_packed_in_place(
+                    weight[i])) {
+            ++stats.skipped_invalid;
+            continue;
+        }
+
         // Cache key matches the one `run_dlp(...)` builds for this weight,
         // hints included, so the warmer's MISS populates the same slot a
         // subsequent dispatcher will look up.
@@ -301,8 +312,10 @@ status_t warm_pack_all_aocl_dlp_experts_sym_quant(
 
     // Production-cache gate — the SAME predicate as the bf16 full-weight
     // warmer, which is the point: the runtime consults the LRU for WC==1, and
-    // for WC==2 only under AUTO mixed mode (where this layout is pre-warmed
-    // from the RAW weights before the full-weight in-place mutation).
+    // for WC==2 only under an AUTO in-place mode: mixed mode (where this
+    // layout is pre-warmed from the RAW weights before the full-weight
+    // in-place mutation), or the custom-kernel mode, which caps the grouped
+    // AOCL reorders to out-of-place.
     //
     // A PINNED ALGO leaves WC at 2 with the mixed flag clear, and warming
     // there is worse than useless: cross-warm has already returned early, so
@@ -540,6 +553,14 @@ status_t warm_pack_all_aocl_dlp_experts_n_tile(
         // `is_weights_const` gate: same as full-weight warmer.
         if (!is_weights_const.empty() && i < is_weights_const.size()
                 && !is_weights_const[i]) {
+            ++stats.total_attempted;
+            ++stats.skipped_invalid;
+            continue;
+        }
+
+        // In-place custom-kernel image: same as full-weight warmer.
+        if (::zendnnl::lowoha::matmul::custom_kernel::weight_packed_in_place(
+                    weight[i])) {
             ++stats.total_attempted;
             ++stats.skipped_invalid;
             continue;

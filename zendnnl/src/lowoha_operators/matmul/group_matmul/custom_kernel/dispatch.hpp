@@ -256,6 +256,34 @@ inline bool needs_quantized_src_setup(KernelVariant v) noexcept {
     return is_int8_variant(v) || is_s4_variant(v);
 }
 
+/// Kernel-store dtype of a resolved variant.  `fill_kfn_table`,
+/// `dispatch_tile` and the prompt tile executor share this table, so they
+/// agree with `resolve_variant` on the variant → DstDt mapping.
+inline DstDt dst_dt_for_variant(KernelVariant v) noexcept {
+    switch (v) {
+        case KernelVariant::kBF16_BF16_BF16: return DstDt::kBf16;
+        case KernelVariant::kBF16_BF16_F32: return DstDt::kF32;
+        case KernelVariant::kS8_S8_BF16_SYM: return DstDt::kBf16;
+        case KernelVariant::kU8_S8_BF16_ASYM: return DstDt::kBf16;
+        case KernelVariant::kS8_S8_F32_SYM: return DstDt::kF32;
+        case KernelVariant::kU8_S8_F32_ASYM: return DstDt::kF32;
+        case KernelVariant::kU8_S8_U8_ASYM: return DstDt::kU8;
+        case KernelVariant::kF16_F16_F16: return DstDt::kF16;
+        case KernelVariant::kF16_F16_F32: return DstDt::kF32;
+        case KernelVariant::kS8_S4_BF16_SYM: return DstDt::kBf16;
+        default: return DstDt::kBf16; // unreachable on the success path
+    }
+}
+
+/// Bytes per destination element of a resolved variant.
+inline size_t dst_elem_bytes(KernelVariant v) noexcept {
+    switch (dst_dt_for_variant(v)) {
+        case DstDt::kF32: return 4;
+        case DstDt::kU8: return 1;
+        default: return 2;
+    }
+}
+
 /// Map a (src, wei, dst, dynamic_quant, compute_dtype) tuple to a
 /// `KernelVariant`.  Returns `kUnsupported` for any combination the
 /// custom kernel cannot handle (caller then falls back to DLP).
@@ -345,6 +373,12 @@ struct CallContext {
     /// `aligned_n_split()` column-split alignment so each per-thread
     /// N-tile is a whole number of NR-blocks.
     int pack_nr = 0;
+
+    /// True when this call may pack in place (WEIGHT_CACHE=2, not mixed
+    /// mode, `allow_in_place`), so the caller's prepack of the call's other
+    /// experts must as well.  Set before the refusal gates; whether a buffer
+    /// holds an image is `weight_packed_in_place()`.
+    bool pack_in_place = false;
 
     // ── Internal — fields below are written by `prepare_for_call()`
     // and read only by `dispatch_tile()`.  Callers should not touch.
@@ -683,7 +717,12 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
         // unreordered and cached only after CK validation succeeds; AOCL
         // fallbacks continue to own and consume the original blocked pointer.
         const std::vector<bool> &weights_aocl_prepacked = {},
-        int32_t num_threads = 0, int32_t weight_cache_mode = -1);
+        int32_t num_threads = 0, int32_t weight_cache_mode = -1,
+        // False when the caller already knows it will not run the kernel
+        // on this context (e.g. a wide fused epilogue the kernel cannot
+        // write).  The packs then stay out of place under WEIGHT_CACHE=2,
+        // since the caller's fallback reads the raw weight.
+        bool allow_in_place = true);
 
 // (`PackProbeStats` and `warm_pack_all_custom_kernel_experts` moved
 // to `group_matmul/prepack/prepack_custom_kernel.{hpp,cpp}` so the

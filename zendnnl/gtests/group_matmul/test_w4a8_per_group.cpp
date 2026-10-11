@@ -31,6 +31,7 @@
 #include "group_matmul_test_helpers.hpp"
 #include "gtest_utils.hpp"
 #include "lowoha_operators/common/omp_thread_control.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/int8_microkernel.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
 #include "lowoha_operators/matmul/group_matmul/prepack/prepack.hpp"
 #include "moe_test_utils.hpp"
@@ -460,6 +461,42 @@ TEST(GroupMatmulW4A8PerGroup, Algo3MatchesAlgo1BF16) {
     }
 }
 
+// With the W4A8 bit of `ZENDNNL_GRP_MATMUL_PROMPT_TILE` set, ALGO 3 cuts a
+// W4A8 CK prompt into row and column tiles, which must write exactly what the
+// round executor writes.  Experts of 0 to 200 rows under small forced blocks
+// split into many tiles each.
+TEST(GroupMatmulW4A8PerGroup, Algo3PromptTileMatchesRoundsBF16) {
+    if (!zendnnl::lowoha::matmul::custom_kernel::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    const uint64_t K = 256, N = 256;
+    const std::vector<int> rows {0, 1, 2, 3, 45, 0, 130, 64, 9, 200, 17};
+    const int E = static_cast<int>(rows.size());
+    const data_type_t scale_dt = data_type_t::bf16;
+    for (const uint64_t group_size : {uint64_t(32), uint64_t(128)}) {
+        SCOPED_TRACE("group_size=" + std::to_string(group_size));
+        const uint64_t G = K / group_size;
+        tensor_factory_t tf;
+        std::vector<tensor_t> inp(E), wt(E), bias(E), out(E);
+        const int64_t saved_seed = seed;
+        for (int e = 0; e < E; ++e) {
+            seed = saved_seed + 1 + static_cast<int64_t>(e);
+            const uint64_t Mbuf = static_cast<uint64_t>(std::max(rows[e], 1));
+            auto ws = tf.uniform_dist_tensor({G, N}, scale_dt, 2.0);
+            wt[e] = tf.uniform_dist_tensor(
+                    {K, N}, data_type_t::s4, 7.0, false, ws);
+            auto ss = tf.zero_tensor({Mbuf, 1u}, scale_dt);
+            inp[e] = tf.uniform_dist_tensor(
+                    {Mbuf, K}, data_type_t::bf16, 2.0, false, ss, tensor_t());
+            bias[e] = tf.uniform_dist_tensor({1u, N}, data_type_t::bf16, 2.0);
+            out[e] = tf.zero_tensor({Mbuf, N}, data_type_t::bf16);
+        }
+        seed = saved_seed;
+        expect_prompt_tile_matches_rounds(/*mask=*/4, /*mb=*/16, /*ns=*/64, inp,
+                wt, bias, out, /*gated_act=*/nullptr, rows);
+    }
+}
+
 // The s4 microkernel applies one source scale per row.  A caller that supplies
 // per-group source scales `{M, G}` must therefore stay on ALGO 3's AOCL path;
 // only the production `{M, 1}` source + `{G, N}` weight combination may use CK.
@@ -543,10 +580,13 @@ TEST(GroupMatmulW4A8PerGroup, Algo3Qwen3DecodeBF16) {
 
 // Validate that prepack warms the W4A8 cache for ALL experts (including
 // inactive ones) so a later decode iteration that routes to a currently-cold
-// expert pays no first-fire reorder spike.
+// expert pays no first-fire reorder spike.  The decode runs ALGO 3 and the
+// layer's prompts ALGO 2, so the ALGO 3 prepack cross-warms the W4A8 layout
+// ALGO 2 reads.
 TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
     namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
     moe_test_utils::LastInvocationCaptureGuard prepack_capture;
+    moe_test_utils::AlgoEnvGuard auto_algo(0);
     prepack::clear_fingerprint_cache_for_test();
     prepack::test_api::clear_last_invocation_stats();
 
@@ -558,7 +598,13 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
 
     auto stats = prepack::test_api::get_last_invocation_stats();
     ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 per-group call";
+    EXPECT_EQ(stats.scheduling_algo, 3);
     if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
+        EXPECT_EQ(static_cast<int>(stats.cross_warm_regime),
+                static_cast<int>(
+                        prepack::CrossWarmRegime::aocl_full_weight_sym_quant))
+                << "the decode prepack must warm the layout the W4A8 prompt "
+                   "reads on ALGO 2";
         // The prepack warmer should attempt all 15 experts (total_attempted >= 15),
         // not just the 6 routed ones.
         EXPECT_GE(stats.aocl.total_attempted, 15)
@@ -576,6 +622,29 @@ TEST(GroupMatmulW4A8PerGroup, PrepackWarmsAllExpertsBF16) {
         // validated above by run_w4a8_per_group_scenario.
         EXPECT_EQ(stats.aocl.total_attempted, 0)
                 << "without AOCL-DLP no AOCL W4A8 cache warm is attempted";
+    }
+}
+
+// The mirror: the prompt runs ALGO 2, so its prepack warms the ALGO 3
+// layout the decode will read.
+TEST(GroupMatmulW4A8PerGroup, AutoPromptPrepackWarmsDecodeLayout) {
+    namespace prepack = zendnnl::lowoha::matmul::group_matmul_prepack;
+    moe_test_utils::LastInvocationCaptureGuard prepack_capture;
+    moe_test_utils::AlgoEnvGuard auto_algo(0);
+    prepack::clear_fingerprint_cache_for_test();
+    prepack::test_api::clear_last_invocation_stats();
+
+    run_w4a8_per_group_scenario("prompt prepack warm",
+            std::vector<int>(10, 128), /*K=*/128, /*N=*/64,
+            /*group_size=*/32);
+
+    const auto stats = prepack::test_api::get_last_invocation_stats();
+    ASSERT_TRUE(stats.valid) << "prepack must fire for the W4A8 prompt";
+    EXPECT_EQ(stats.scheduling_algo, 2);
+    if (moe_test_utils::k_grp_matmul_aocl_dlp_compiled) {
+        EXPECT_NE(static_cast<int>(stats.cross_warm_regime),
+                static_cast<int>(prepack::CrossWarmRegime::none))
+                << "the decode runs ALGO 3, so its layout has a reader";
     }
 }
 
