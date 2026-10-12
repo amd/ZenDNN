@@ -30,7 +30,9 @@ set(lowoha_group_matmul_sources
   group_matmul/prepack/prepack_custom_kernel.cpp
   group_matmul/custom_kernel/pack.cpp
   group_matmul/custom_kernel/ntile_flat_parallel_pack.cpp
+  group_matmul/custom_kernel/bf16_decode_policy.cpp
   group_matmul/custom_kernel/ukernel/bf16_microkernel.cpp
+  group_matmul/custom_kernel/ukernel/bf16_decode_microkernel.cpp
   group_matmul/custom_kernel/ukernel/int8_microkernel.cpp
   group_matmul/custom_kernel/ukernel/s4_microkernel.cpp
   group_matmul/custom_kernel/ukernel/f16_microkernel.cpp

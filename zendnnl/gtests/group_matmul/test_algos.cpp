@@ -11279,6 +11279,33 @@ TEST(TestGroupMatmulKblock, AutoEnablesOnSingleExpertDecode) {
             /*ldc_pad=*/0, /*expect_kblock=*/true, "kblock_auto_decode");
 }
 
+TEST(TestGroupMatmulKblock, DenseDecodeDownProjectionUsesSidecar) {
+    KblockThreadGuard tg(8);
+    if (!require_min_threads(8)) {
+        GTEST_SKIP() << "Requires >= 8 OMP threads.";
+    }
+    run_kblock_case(/*num_threads=*/8, /*M=*/32, /*N=*/4096,
+            /*K=*/12288, /*nr=*/32, /*kblock_mode=*/2,
+            /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
+            /*ldc_pad=*/0, /*expect_kblock=*/false,
+            "kblock_dense_decode_down_projection");
+}
+
+TEST(TestGroupMatmulKblock, DenseDecodeSidecarHandlesEveryMrTail) {
+    KblockThreadGuard tg(8);
+    if (!require_min_threads(8)) {
+        GTEST_SKIP() << "Requires >= 8 OMP threads.";
+    }
+    for (const int m : {31, 9}) {
+        run_kblock_case(/*num_threads=*/8, /*M=*/m, /*N=*/4096,
+                /*K=*/12288, /*nr=*/32, /*kblock_mode=*/2,
+                /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
+                /*ldc_pad=*/0, /*expect_kblock=*/false,
+                m == 31 ? "kblock_dense_decode_tail31"
+                        : "kblock_dense_decode_tail9");
+    }
+}
+
 // Same shape past the decode M ceiling: automatic enablement must stay off,
 // which is what keeps prompt-class calls on the straight-line path.
 TEST(TestGroupMatmulKblock, AutoStaysOffAboveDecodeM) {
