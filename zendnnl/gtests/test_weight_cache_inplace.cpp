@@ -63,6 +63,19 @@ protected:
     tensor_factory_t tensor_factory {};
 };
 
+// The scalar custom-kernel route caps a u8×s8 weight at weight-cache mode 1
+// so a later grouped pack still sees raw bytes. These direct tests turn that
+// route off; an environment variable is too late because the flag is cached.
+struct CustomKernelRouteGuard {
+    zendnnl::common::matmul_config_t &config
+            = zendnnl::common::matmul_config_t::instance();
+    bool previous = config.get_custom_kernel_route();
+    explicit CustomKernelRouteGuard(bool enable) {
+        config.set_custom_kernel_route(enable);
+    }
+    ~CustomKernelRouteGuard() { config.set_custom_kernel_route(previous); }
+};
+
 } // namespace
 
 // Common case: u8 activations (nonzero src_zp) x symmetric s8 weights
@@ -272,6 +285,7 @@ TEST_F(TestWeightCacheInplace, DeclaredCapacityRewritesInt8BufferInPlace) {
 
 // 130x130 u8 is larger than k*n, so cap 0 stays raw and a declared
 // capacity mutates. The output must still match the reference.
+// The custom-kernel route is off so this call is not capped at WC=1.
 TEST_F(TestWeightCacheInplace, MatmulDirectDeclaredCapacityInPlaceMatchesRef) {
     const uint64_t m = 32, k = 130, n = 130;
     const bool use_LOWOHA = true;
@@ -361,6 +375,7 @@ TEST_F(TestWeightCacheInplace, MatmulDirectDeclaredCapacityInPlaceMatchesRef) {
 
     WeightCacheGuard wc_guard(2);
     ZpCompCacheGuard zp_guard(true);
+    CustomKernelRouteGuard route_off(false);
     matmul_batch_params_t batch;
 
     std::vector<int8_t> plain_buf(pristine);
@@ -392,9 +407,8 @@ TEST_F(TestWeightCacheInplace, MatmulDirectDeclaredCapacityInPlaceMatchesRef) {
     ASSERT_EQ(status, status_t::success);
 
     EXPECT_NE(std::memcmp(padded.data(), pristine.data(), plain), 0)
-            << "matmul_direct did not mutate the padded INT8 weight under "
-               "WC=2 with a declared capacity — run_dlp is not forwarding "
-               "wei_buffer_capacity_bytes into reorderAndCacheWeights";
+            << "matmul_direct left the padded INT8 weight raw under WC=2 "
+               "with a declared capacity that covers the blocked image";
 
     bool ok = true;
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,

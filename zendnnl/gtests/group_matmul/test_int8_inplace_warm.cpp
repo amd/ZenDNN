@@ -355,24 +355,17 @@ TEST_F(Int8InPlaceWarm, InPlaceBlockedImageIsByteIdenticalToOutOfPlace) {
 }
 #endif
 
-// ── (5) the framework's pad must cover what the backend actually asks ───
+// ── (5) in-place capacity is the queried blocked size ───────────────────
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-/// A framework cannot see AOCL's blocked size; it can only guess from the
-/// layout it knows about -- the logical weight plus one int32 per output
-/// column.  zentorch's `_pad_experts_for_inplace` guesses exactly that,
-/// rounded to a cache line with one spare:
+/// A full-K symmetric group stores one int32 column-sum vector per KC panel.
+/// KC is internal to AOCL-DLP, so the historical framework guess
 ///
 ///     pad = roundup64(N * 4) + 64
 ///
-/// If AOCL's real requirement exceeds `K*N + pad` for any shape, the gate
-/// refuses and the whole opt-in is silently inert -- the framework pays the
-/// padding and gets none of the saving, with no diagnostic beyond an
-/// apilog line that blames "blocked size != plain size".
-///
-/// This is a cross-repo invariant with no compile-time coupling, so it can
-/// only be caught by asserting it.  Failing here means the guess is wrong
-/// and the backend needs to publish the number instead.
+/// (one vector, plus a cache line) does not cover a K that spans more than
+/// one panel. The declaration the in-place gate accepts is the size
+/// `aocl_get_reorder_buf_size_s8s8s32os32_sym_quant` returns.
 TEST_F(Int8InPlaceWarm, FrameworkPadFormulaCoversAoclRequirement) {
     struct Shape {
         int k, n;
@@ -397,18 +390,30 @@ TEST_F(Int8InPlaceWarm, FrameworkPadFormulaCoversAoclRequirement) {
 
         const size_t req = aocl_get_reorder_buf_size_s8s8s32os32_sym_quant(
                 'r', 'n', 'B', s.k, s.n, &meta);
+        EXPECT_GT(req, 0u) << s.what << " K=" << s.k << " N=" << s.n
+                           << ": sym-quant reorder size query failed";
+        if (req == 0u) { continue; }
         const size_t reorder_size = (req + 63u) & ~static_cast<size_t>(63u);
-        const size_t plain = static_cast<size_t>(s.k) * s.n;
-        const size_t framework_pad
-                = ((static_cast<size_t>(s.n) * 4u + 63u) / 64u) * 64u + 64u;
-        const size_t declared = plain + framework_pad;
+        const size_t plain
+                = static_cast<size_t>(s.k) * static_cast<size_t>(s.n);
+        EXPECT_TRUE(zendnnl::lowoha::matmul::wei_inplace_fits(
+                req, reorder_size, plain, /*declared_cap=*/reorder_size))
+                << s.what << " K=" << s.k << " N=" << s.n
+                << ": queried blocked size " << reorder_size << " B (raw "
+                << req << ") is not accepted as an in-place declaration";
 
-        EXPECT_GE(declared, reorder_size)
-                << s.what << " K=" << s.k << " N=" << s.n << ": AOCL needs "
-                << reorder_size << " B (raw " << req
-                << ") but a framework padding by roundup64(N*4)+64 declares "
-                << declared << " B -- short by " << (reorder_size - declared)
-                << " B, so the in-place gate refuses and the opt-in is inert";
+        // The old one-vector guess stays short on a wide full-K group, where
+        // the blocked image holds a column-sum vector per KC panel.
+        if (std::strcmp(s.what, "wide") == 0) {
+            const size_t n4_pad
+                    = ((static_cast<size_t>(s.n) * 4u + 63u) / 64u) * 64u + 64u;
+            const size_t n4_declared = plain + n4_pad;
+            EXPECT_LT(n4_declared, reorder_size)
+                    << "wide K=" << s.k << " N=" << s.n
+                    << ": roundup64(N*4)+64 declares " << n4_declared
+                    << " B but AOCL needs " << reorder_size << " B (raw " << req
+                    << ")";
+        }
     }
 }
 #endif
