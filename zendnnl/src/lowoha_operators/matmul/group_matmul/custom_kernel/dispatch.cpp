@@ -930,10 +930,10 @@ status_t prepare_for_call(grp_matmul_gated_act_t act, data_type_t src_dtype,
     }
     // AUTO deep-K K-blocking: engage for the single-expert (dense-FFN)
     // decode-class call only (see `is_dense_ffn_decode`, the decode-gated
-    // twin of the adaptive N-tile sizer's scope predicate).  MoE
-    // (num_ops>1) and prompt (m_max>kDecodeMaxM) leave this
-    // false; the bf16 / act=none / bias-free / deep-K / M>max_mr guards in
-    // dispatch_tile still apply, so only W2 decode actually K-blocks.
+    // twin of the adaptive N-tile sizer's scope predicate). MoE (num_ops>1)
+    // and prompt (m_max>kDecodeMaxM) leave this false; the BF16/INT8
+    // dtype-specific, act=none, bias-free, deep-K, and M>max_mr guards in
+    // dispatch_tile still apply, so only eligible W2 decode calls K-block.
     out.kblock_auto = is_dense_ffn_decode(num_ops, m_max);
     out.single_expert = (num_ops == 1);
     // Map framework activation → CK ActKind.  Order matters: refusal
@@ -1614,6 +1614,94 @@ inline void dispatch_tile_int8(const CallContext &ctx, int expert_idx, int M,
     }
 }
 
+// Deep-K blocked DQ-INT8 path for the dense symmetric W2 shape.  The normal
+// NR=32 kernel completes compensation/dequant after every MR call, forcing a
+// >L2 B block to be re-streamed once per MR call.  This path accumulates
+// L2-sized K chunks into s32 scratch, reuses each B chunk across all MR calls,
+// then applies the full-K compensation and dequant exactly once. O-block stays
+// outermost so each thread walks the full packed-weight block monotonically;
+// a K-major traversal won the isolated microbenchmark but regressed the Venice
+// model by 4.44% because it interleaved distant slices from several 1 MiB
+// blocks and defeated the cold-weight streaming pattern.
+inline void dispatch_tile_int8_kblocked(const CallContext &ctx, int expert_idx,
+        int M, int K, int n_tile, int col_start, const void *src, int lda,
+        void *dst, int ldc, const void *src_scale, const void *wei_scale) {
+    constexpr int pack_nr = 32;
+    assert(ctx.pack_nr == pack_nr && (K % kVNNIInt8Quad) == 0);
+    assert(src != nullptr && dst != nullptr && src_scale != nullptr
+            && wei_scale != nullptr);
+    const auto *A = static_cast<const uint8_t *>(src);
+    const int8_t *Bpacked_full = ctx.packed_ptrs_int8[expert_idx];
+    const int K_quad_total = K / kVNNIInt8Quad;
+    const size_t kq_stride_bytes = pack_nr * kVNNIInt8Quad;
+    const size_t weight_bytes_per_oblock
+            = static_cast<size_t>(K_quad_total) * kq_stride_bytes;
+    const size_t o_blk_stride_bytes
+            = weight_bytes_per_oblock + pack_nr * sizeof(int32_t);
+    const int n_blocks = n_tile / pack_nr;
+
+    thread_local std::vector<int32_t> c_accum;
+    c_accum.resize(static_cast<size_t>(M) * pack_nr);
+
+    const int n_calls = (M + ctx.max_mr - 1) / ctx.max_mr;
+    const int mr_base = M / n_calls;
+    const int n_big = M - mr_base * n_calls;
+    const int8_accum_ukernel_fn_t fn_small = select_int8_accum_ukernel(mr_base);
+    const int8_accum_ukernel_fn_t fn_big
+            = (n_big > 0) ? select_int8_accum_ukernel(mr_base + 1) : fn_small;
+    assert(fn_small != nullptr && fn_big != nullptr);
+
+    static const int64_t l2_budget = []() {
+        const int64_t l2
+                = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
+        const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
+        return (safe * 4) / 5;
+    }();
+    int kc = static_cast<int>(
+            l2_budget / static_cast<int64_t>(pack_nr + ctx.max_mr));
+    kc &= ~(kVNNIInt8Quad - 1);
+    if (kc < kVNNIInt8Quad) kc = kVNNIInt8Quad;
+
+    const size_t scale_elem_bytes = (ctx.scale_kind == ScaleKind::kBf16)
+            ? sizeof(bfloat16_t)
+            : sizeof(float);
+    for (int b = 0; b < n_blocks; ++b) {
+        const int global_block = col_start / pack_nr + b;
+        const int8_t *Bblock = Bpacked_full
+                + static_cast<size_t>(global_block) * o_blk_stride_bytes;
+
+        for (int kc_off = 0; kc_off < K; kc_off += kc) {
+            const int kc_now = std::min(kc, K - kc_off);
+            const size_t kq_off = static_cast<size_t>(kc_off / kVNNIInt8Quad);
+            const int8_t *Bpk = Bblock + kq_off * kq_stride_bytes;
+            const bool add = (kc_off != 0);
+            int m_off = 0;
+            for (int c = 0; c < n_calls; ++c) {
+                const int mr_now = (c < n_big) ? mr_base + 1 : mr_base;
+                const int8_accum_ukernel_fn_t kfn
+                        = (c < n_big) ? fn_big : fn_small;
+                const uint8_t *A_chunk = A + static_cast<size_t>(m_off) * lda
+                        + static_cast<size_t>(kc_off);
+                int32_t *C
+                        = c_accum.data() + static_cast<size_t>(m_off) * pack_nr;
+                kfn(A_chunk, lda, Bpk, kc_now, C, pack_nr, add);
+                m_off += mr_now;
+            }
+        }
+
+        const int32_t *comp = reinterpret_cast<const int32_t *>(
+                Bblock + weight_bytes_per_oblock);
+        const void *wei_scale_block
+                = static_cast<const void *>(static_cast<const char *>(wei_scale)
+                        + static_cast<size_t>(col_start + b * pack_nr)
+                                * scale_elem_bytes);
+        auto *dst_block = static_cast<bfloat16_t *>(dst) + col_start
+                + static_cast<size_t>(b) * pack_nr;
+        finish_int8_accum_nv2_sym_bf16(c_accum.data(), pack_nr, M, comp,
+                src_scale, wei_scale_block, ctx.scale_kind, dst_block, ldc);
+    }
+}
+
 // Sub-tile + per-MR loop for `kS8_S4_BF16_SYM`.  Shaped like
 // `dispatch_tile_int8`, minus `src_zp` (W4A8 is symmetric) and with a
 // constant BF16 dst.  The weight scale is sliced by COLUMN only; the
@@ -2090,6 +2178,37 @@ void dispatch_tile(const CallContext &ctx, int expert_idx, int M, int K,
     // branch up front avoids loading the bf16-specific stride
     // constants we don't need on this path.
     if (is_int8_variant(ctx.variant)) {
+        const bool simple_dynamic_epilogue = !int8_epilogue.src_quant_per_tensor
+                && !int8_epilogue.wei_scale_per_tensor
+                && int8_epilogue.binary_mul == nullptr
+                && int8_epilogue.binary_add == nullptr
+                && int8_epilogue.unary_postop == Int8UnaryPostOp::kNone;
+        static const int64_t int8_kblock_l2_budget = []() {
+            const int64_t l2
+                    = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
+            const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
+            return (safe * 4) / 5;
+        }();
+        const int64_t int8_oblock_bytes
+                = static_cast<int64_t>(K) * 32 + 32 * sizeof(int32_t);
+        const bool int8_kblock_policy
+                = grp_matmul_int8_kblock_enabled(ctx.kblock_auto);
+        const bool int8_kblock_shape
+                = ctx.variant == KernelVariant::kS8_S8_BF16_SYM
+                && ctx.compute_int == IntCompute::kS8_Sym && ctx.pack_nr == 32
+                && ctx.act_kind == ActKind::none && bias == nullptr
+                && src_zp == nullptr && simple_dynamic_epilogue
+                && M > ctx.max_mr && int8_oblock_bytes > int8_kblock_l2_budget;
+        if (int8_kblock_policy && int8_kblock_shape) {
+            if (test_api::s_capture_kblock.load(std::memory_order_relaxed)) {
+                test_api::s_last_kblock_used.store(
+                        true, std::memory_order_relaxed);
+            }
+            dispatch_tile_int8_kblocked(ctx, expert_idx, M, K, n_tile,
+                    col_start, src, lda, tight_dst, tight_ldc, src_scale,
+                    wei_scale);
+            return;
+        }
         dispatch_tile_int8(ctx, expert_idx, M, K, n_tile, col_start, src, lda,
                 bias, tight_dst, tight_ldc, src_scale, src_zp, wei_scale,
                 int8_epilogue);

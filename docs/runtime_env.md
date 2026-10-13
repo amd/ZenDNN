@@ -169,6 +169,19 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 | `ZENDNNL_EMBAG_THREAD_ALGO` | Selects the Embedding Bag threading algorithm to use | `1` (table_threaded) | `0` (dynamic_dispatch), `1` (table_threaded), `2` (batch_threaded), `3` (ccd_threaded), `4` (hybrid_threaded), `5` or `auto` (auto_tuner). The integer maps directly to the `eb_thread_algo_t` enum; `dynamic_dispatch` and `auto_tuner` both fall back to `table_threaded` at execution time.
 ---
 
+## Group MatMul Deep-K Blocking
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_GRP_MATMUL_KBLOCK` | Shared deep-K policy for supported BF16 and symmetric dynamic-INT8 custom-kernel tiles. Automatic mode is limited to single-expert decode; dtype, epilogue, M, and L2-capacity gates still apply. Cached on first read. | unset (automatic) | `0` (off), `1` (on where shape gates allow) |
+| `ZENDNNL_GRP_MATMUL_INT8_KBLOCK` | Narrow override for the symmetric dynamic-INT8 path only. Useful as an INT8 escape hatch or A/B switch without changing the established BF16 policy. Cached on first read. | unset (defer to shared policy) | `0` (INT8 off), `1` (INT8 on where shape gates allow) |
+
+The INT8 path is native custom-kernel execution; these controls do not add or
+select an AOCL fallback. Unsupported shapes continue through the pre-existing
+dispatcher.
+
+---
+
 ## Logging Configuration
 
 Log levels control the verbosity of messages for different modules.

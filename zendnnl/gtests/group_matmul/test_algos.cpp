@@ -11011,6 +11011,228 @@ struct KblockThreadGuard {
     ~KblockThreadGuard() { omp_set_num_threads(prev); }
 };
 
+// K-blocking L2 budget and NR32 INT8 o-block size (int8 weights plus the
+// int32 compensation row), mirroring the INT8 gate in
+// `custom_kernel/dispatch.cpp`.  Deriving K from the detected L2 keeps the
+// engage / fit cases correct on hosts whose L2 is not 1 MiB.
+static int64_t int8_kblock_l2_budget() {
+    const int64_t l2 = zendnnl::lowoha::matmul::native::detect_uarch().l2_bytes;
+    const int64_t safe = (l2 >= 64 * 1024) ? l2 : (256 * 1024);
+    return (safe * 4) / 5;
+}
+
+// Smallest multiple-of-4 K whose NR32 o-block exceeds the budget.
+static int int8_kblock_min_K() {
+    const int64_t k = (int8_kblock_l2_budget() - 32 * 4) / 32 + 1;
+    return static_cast<int>((k + 3) & ~int64_t {3});
+}
+
+// Largest multiple-of-4 K whose NR32 o-block still fits the budget.
+static int int8_kblock_max_fit_K() {
+    const int64_t k = (int8_kblock_l2_budget() - 32 * 4) / 32;
+    return static_cast<int>(k & ~int64_t {3});
+}
+
+// Straight vs K-blocked output must be bit-identical: s32 accumulation is
+// exact and the dequant epilogue runs once on the full-K sum either way.
+static void expect_int8_kblock_parity(
+        int M, int N, int K, data_type_t scale_dt) {
+    using namespace moe_test_utils;
+    const Int8AlgoCustomParam p {/*act_int=*/0, M, /*num_ops=*/1, N};
+    reset_grp_matmul_caches();
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_dq_inputs(tf, p, N, K, src, wei, bias, dst, scale_dt));
+
+    std::vector<std::vector<bfloat16_t>> straight, blocked;
+    {
+        KblockOverride kblock_off(0);
+        KblockCaptureGuard cap;
+        ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei,
+                bias, dst, grp_matmul_gated_act_t::none, straight, M, N));
+        ASSERT_FALSE(KblockCaptureGuard::used())
+                << "reference arm must run the straight kernel";
+    }
+    for (auto &d : dst) {
+        auto *raw = static_cast<bfloat16_t *>(d.get_raw_handle_unsafe());
+        std::fill(raw, raw + static_cast<size_t>(M) * N, bfloat16_t(0.0f));
+    }
+
+    bool kblock_ran = false;
+    {
+        KblockOverride kblock_auto(2);
+        KblockCaptureGuard cap;
+        ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei,
+                bias, dst, grp_matmul_gated_act_t::none, blocked, M, N));
+        kblock_ran = KblockCaptureGuard::used();
+    }
+    ASSERT_TRUE(kblock_ran);
+    ASSERT_EQ(straight.size(), blocked.size());
+    for (size_t e = 0; e < straight.size(); ++e) {
+        ASSERT_EQ(straight[e].size(), blocked[e].size());
+        ASSERT_EQ(std::memcmp(straight[e].data(), blocked[e].data(),
+                          straight[e].size() * sizeof(bfloat16_t)),
+                0)
+                << "e=" << e;
+    }
+}
+
+TEST(TestGroupMatmulInt8Kblock, DeepKMatchesStraightNativeKernel) {
+    using namespace moe_test_utils;
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    KblockThreadGuard tg(8);
+    if (!require_min_threads(8)) {
+        GTEST_SKIP() << "Requires >= 8 OMP threads.";
+    }
+
+    const int min_K = int8_kblock_min_K();
+    if (min_K > ck::kMaxSafeInt8AccumK) {
+        GTEST_SKIP() << "Deep-K threshold " << min_K
+                     << " exceeds the safe INT8 accumulation depth";
+    }
+    // Two full K chunks plus one VNNI quad, so the tail chunk is minimal.
+    const int max_mr = ck::max_mr_for_nv_int8(2, ck::IntCompute::kS8_Sym);
+    const int kc
+            = static_cast<int>(int8_kblock_l2_budget() / (32 + max_mr)) & ~3;
+    const int tail_K = 2 * kc + 4;
+    std::vector<int> depths {min_K};
+    if (tail_K > min_K && tail_K <= ck::kMaxSafeInt8AccumK) {
+        depths.push_back(tail_K);
+    }
+
+    // N = 1024 over 8 threads gives each tile four NR32 o-blocks.  M = 13,
+    // 24 and 32 cover the 7/6, 12/12 (no big call) and 11/11/10 MR splits.
+    const int N = 1024;
+    AlgoEnvGuard algo_guard(3);
+    CustomKernelNROverride nr_guard(32);
+    WeightCacheGuard wc_guard(1);
+    for (const int K : depths) {
+        for (const int M : {13, 24, 32}) {
+            for (const data_type_t scale_dt :
+                    {data_type_t::f32, data_type_t::bf16}) {
+                SCOPED_TRACE("K=" + std::to_string(K)
+                        + " M=" + std::to_string(M)
+                        + (scale_dt == data_type_t::f32 ? " scale=f32"
+                                                        : " scale=bf16"));
+                ASSERT_NO_FATAL_FAILURE(
+                        expect_int8_kblock_parity(M, N, K, scale_dt));
+            }
+        }
+    }
+}
+
+// `kblock_mode` is the shared K-block test override: 2 = automatic policy,
+// 1 = forced on (the positive control for shapes automatic mode excludes).
+static void expect_int8_kblock_gate(int M, int K, bool with_bias, bool expected,
+        int num_ops = 1, int kblock_mode = 2) {
+    using namespace moe_test_utils;
+    const Int8AlgoCustomParam p {/*act_int=*/0, M, num_ops, /*dim=*/256};
+    const int N = p.dim;
+    reset_grp_matmul_caches();
+
+    tensor_factory_t tf;
+    std::vector<tensor_t> src, wei, bias, dst;
+    ASSERT_NO_FATAL_FAILURE(
+            build_int8_dq_inputs(tf, p, N, K, src, wei, bias, dst));
+    if (with_bias) {
+        for (auto &b : bias) {
+            b = tf.uniform_dist_tensor(
+                    {1, static_cast<uint64_t>(N)}, data_type_t::bf16, 2.0);
+        }
+    }
+
+    AlgoEnvGuard algo_guard(3);
+    CustomKernelNROverride nr_guard(32);
+    WeightCacheGuard wc_guard(1);
+    KblockOverride kblock(kblock_mode);
+    KblockCaptureGuard cap;
+    std::vector<std::vector<bfloat16_t>> out;
+    ASSERT_NO_FATAL_FAILURE(run_int8_dq_pass(/*int8_on=*/true, src, wei, bias,
+            dst, grp_matmul_gated_act_t::none, out, M, N));
+    EXPECT_EQ(KblockCaptureGuard::used(), expected);
+}
+
+TEST(TestGroupMatmulInt8Kblock, AutomaticGateScope) {
+    namespace ck = zendnnl::lowoha::matmul::custom_kernel;
+    if (!ck::avx512vnni_available()) {
+        GTEST_SKIP() << "AVX-512 VNNI not available on this host";
+    }
+    KblockThreadGuard tg(8);
+    if (!require_min_threads(8)) {
+        GTEST_SKIP() << "Requires >= 8 OMP threads.";
+    }
+
+    const int deep_K = int8_kblock_min_K();
+    if (deep_K > ck::kMaxSafeInt8AccumK) {
+        GTEST_SKIP() << "Deep-K threshold " << deep_K
+                     << " exceeds the safe INT8 accumulation depth";
+    }
+    {
+        SCOPED_TRACE("single MR call");
+        expect_int8_kblock_gate(
+                /*M=*/8, deep_K, /*with_bias=*/false, /*expected=*/false);
+    }
+    {
+        SCOPED_TRACE("packed B block fits L2 budget");
+        expect_int8_kblock_gate(/*M=*/32, int8_kblock_max_fit_K(),
+                /*with_bias=*/false, /*expected=*/false);
+    }
+    {
+        SCOPED_TRACE("bias uses straight native epilogue");
+        expect_int8_kblock_gate(
+                /*M=*/32, deep_K, /*with_bias=*/true, /*expected=*/false);
+    }
+    // Automatic K-blocking is single-expert decode only.  Each exclusion is
+    // paired with a forced-on control at the same shape, so a `false` cannot
+    // come from the INT8 custom kernel not running at all.
+    {
+        SCOPED_TRACE("MoE stays straight in automatic mode");
+        expect_int8_kblock_gate(/*M=*/32, deep_K, /*with_bias=*/false,
+                /*expected=*/false, /*num_ops=*/2);
+        expect_int8_kblock_gate(/*M=*/32, deep_K, /*with_bias=*/false,
+                /*expected=*/true, /*num_ops=*/2, /*kblock_mode=*/1);
+    }
+    {
+        SCOPED_TRACE("prompt stays straight in automatic mode");
+        expect_int8_kblock_gate(/*M=*/64, deep_K, /*with_bias=*/false,
+                /*expected=*/false);
+        expect_int8_kblock_gate(/*M=*/64, deep_K, /*with_bias=*/false,
+                /*expected=*/true, /*num_ops=*/1, /*kblock_mode=*/1);
+    }
+}
+
+// `ZENDNNL_GRP_MATMUL_INT8_KBLOCK` beats the shared policy when set, and the
+// shared test override beats the cached INT8 env, so in-process A/B tests
+// stay valid even when the benchmark switch is exported.
+TEST(TestGroupMatmulInt8Kblock, OverridePrecedence) {
+    using namespace moe_test_utils;
+    using zendnnl::lowoha::matmul::grp_matmul_int8_kblock_enabled;
+    using zendnnl::lowoha::matmul::resolve_grp_matmul_int8_kblock;
+
+    EXPECT_FALSE(resolve_grp_matmul_int8_kblock(0, true));
+    EXPECT_TRUE(resolve_grp_matmul_int8_kblock(1, false));
+    EXPECT_TRUE(resolve_grp_matmul_int8_kblock(-1, true));
+    EXPECT_FALSE(resolve_grp_matmul_int8_kblock(-1, false));
+
+    {
+        KblockOverride off(0);
+        EXPECT_FALSE(grp_matmul_int8_kblock_enabled(/*kblock_auto=*/true));
+    }
+    {
+        KblockOverride on(1);
+        EXPECT_TRUE(grp_matmul_int8_kblock_enabled(/*kblock_auto=*/false));
+    }
+    {
+        KblockOverride automatic(2);
+        EXPECT_TRUE(grp_matmul_int8_kblock_enabled(/*kblock_auto=*/true));
+        EXPECT_FALSE(grp_matmul_int8_kblock_enabled(/*kblock_auto=*/false));
+    }
+}
+
 // Smallest even K whose packed B strip for one o-block exceeds the
 // K-blocking L2 budget, mirroring the gate in `custom_kernel/dispatch.cpp`.
 // Doubled because the packed NR the kernel settles on can be narrower than

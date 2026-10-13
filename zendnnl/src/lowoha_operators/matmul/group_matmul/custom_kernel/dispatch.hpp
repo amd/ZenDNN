@@ -384,12 +384,12 @@ struct CallContext {
     // and read only by `dispatch_tile()`.  Callers should not touch.
     int NV = 0; // = pack_nr / 16
     int max_mr = 0; // = max_mr_for_nv(NV)
-    /// AUTO deep-K K-blocking engage flag.  Set by `prepare_for_call()` only
-    /// for a single-expert (`num_ops == 1`) decode-class call, and ORed by
-    /// `dispatch_tile()` into the `ZENDNNL_GRP_MATMUL_KBLOCK` env gate so
-    /// that path engages K-blocking without the global env.  The remaining
-    /// correctness conditions (bf16 / act=none / bias-free / deep-K /
-    /// M > max_mr) are still enforced by the `dispatch_tile()` gate.
+    /// AUTO deep-K K-blocking engage flag. Set by `prepare_for_call()` only
+    /// for a single-expert (`num_ops == 1`) decode-class call and resolved by
+    /// `dispatch_tile()` against the shared K-block policy (plus the narrower
+    /// INT8-only benchmark override). The remaining dtype-specific,
+    /// act=none, bias-free, deep-K, and `M > max_mr` conditions are still
+    /// enforced by the per-tile gate.
     bool kblock_auto = false;
     /// True when this call has exactly one expert (`num_ops == 1`).
     /// Gates the o-block-outer loop nesting in `dispatch_tile()`: that

@@ -1073,10 +1073,10 @@ inline std::atomic<int> s_grp_matmul_custom_kernel_subtile_per_expert_override {
 inline std::atomic<bool> s_capture_gemm_mode {false};
 inline std::atomic<const char *> s_last_group_matmul_direct_gemm_mode {nullptr};
 
-// Whether the deep-K K-blocked BF16 custom-kernel tile ran.  Gated by its
-// own capture flag because the decision sits per TILE, not per call: an
-// unconditional store would write a shared line from every worker on every
-// tile.  The gating load is of a flag that only a test ever flips, so it
+// Whether a deep-K K-blocked custom-kernel tile ran (BF16 or symmetric INT8).
+// Gated by its own capture flag because the decision sits per TILE, not per
+// call: an unconditional store would write a shared line from every worker on
+// every tile.  The gating load is of a flag that only a test ever flips, so it
 // stays in shared state and costs nothing in production.
 inline std::atomic<bool> s_capture_kblock {false};
 inline std::atomic<bool> s_last_kblock_used {false};
@@ -1786,14 +1786,19 @@ inline bool get_grp_matmul_custom_kernel_subtile_per_expert() {
 //   1     : forced ON wherever the shape gates allow it.
 //   Anything else parses as unset, so a typo cannot silently enable a
 //   different numerical path.
-//   Deep-K single-thread K-blocking for the BF16 custom kernel (act=none,
-//   bias-free).  When ON, the per-tile dispatcher splits the K reduction
-//   into L2-resident chunks so each o-block's B strip is streamed ONCE and
-//   reused across all M-blocks instead of being re-streamed
-//   `ceil(M / max_mr)` times.  Engages only when the strip exceeds the L2
-//   budget and M > max_mr; every other shape and the fused / biased paths
-//   are untouched.  `CallContext::kblock_auto` turns it on for single-expert
-//   decode without the env.
+//   Deep-K single-thread K-blocking for the BF16 and symmetric dynamic-INT8
+//   custom kernels (act=none, bias-free).  When ON, the per-tile dispatcher
+//   splits the K reduction into L2-resident chunks so each o-block's B strip
+//   is streamed ONCE and reused across all M-blocks instead of being
+//   re-streamed `ceil(M / max_mr)` times.  Engages only when the strip exceeds
+//   the L2 budget and M > max_mr; every other shape and the fused / biased
+//   paths are untouched.  `CallContext::kblock_auto` turns it on for
+//   single-expert decode without the env.
+//   `ZENDNNL_GRP_MATMUL_INT8_KBLOCK={0,1}` is a narrower dispatch-side
+//   benchmark override: when set it controls only symmetric INT8 K-blocking,
+//   leaving this shared policy (and therefore BF16) unchanged.  When unset,
+//   INT8 defers to the shared policy above.  A set
+//   `test_api::s_grp_matmul_kblock_override` wins over both env vars.
 enum class kblock_env_t { kAuto, kOff, kOn };
 
 inline kblock_env_t get_grp_matmul_kblock_env() {
@@ -1825,6 +1830,35 @@ constexpr bool resolve_grp_matmul_kblock(kblock_env_t env, bool kblock_auto) {
 
 inline bool grp_matmul_kblock_enabled(bool kblock_auto) {
     return resolve_grp_matmul_kblock(get_grp_matmul_kblock_env(), kblock_auto);
+}
+
+// `ZENDNNL_GRP_MATMUL_INT8_KBLOCK`: -1 unset, 0 / 1 forced off / on for the
+// symmetric INT8 path only.  Cached on first read.
+inline int get_grp_matmul_int8_kblock_env() {
+    static const int v = []() {
+        const char *e = std::getenv("ZENDNNL_GRP_MATMUL_INT8_KBLOCK");
+        int parsed = 0;
+        if (!parse_env_int_strict(e, parsed)) return -1;
+        return (parsed == 0 || parsed == 1) ? parsed : -1;
+    }();
+    return v;
+}
+
+// A set INT8 value wins over the shared policy; unset defers to it.  Split
+// from the env read so the precedence is testable without the cache.
+constexpr bool resolve_grp_matmul_int8_kblock(int int8_env, bool shared) {
+    return int8_env == 0 ? false : (int8_env == 1 ? true : shared);
+}
+
+// The shared test override wins over the cached INT8 env, so an exported
+// benchmark switch cannot pin both arms of an in-process A/B test.
+inline bool grp_matmul_int8_kblock_enabled(bool kblock_auto) {
+    if (test_api::s_grp_matmul_kblock_override.load(std::memory_order_relaxed)
+            >= 0) {
+        return grp_matmul_kblock_enabled(kblock_auto);
+    }
+    return resolve_grp_matmul_int8_kblock(get_grp_matmul_int8_kblock_env(),
+            grp_matmul_kblock_enabled(kblock_auto));
 }
 
 // NOTE: `get_grp_matmul_custom_kernel_n_tile()`

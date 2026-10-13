@@ -54,6 +54,7 @@
 #include "int8_microkernel.hpp"
 #include "common/zendnnl_compat.hpp"
 
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -1003,6 +1004,98 @@ static void ukernel_impl_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
     }
 }
 
+// Accumulation-only sibling for deep-K blocking.  It intentionally stops
+// before compensation/dequant so partial K chunks can be summed exactly in
+// s32 scratch and receive the full-K compensation once at the end.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ZENDNNL_INT8_ACCUM_BARRIER(lo, hi)
+#else
+#define ZENDNNL_INT8_ACCUM_BARRIER(lo, hi) asm("" : "+v"(lo), "+v"(hi))
+#endif
+template <int MR>
+ZENDNNL_TARGET_NOINLINE("avx512f,avx512vnni,avx512bw,avx512vl,avx512dq")
+static void ukernel_accum_nv2_sym_scalar(const uint8_t *__restrict A, int lda,
+        const int8_t *__restrict Bpacked, int K, int32_t *__restrict C, int ldc,
+        bool add) {
+    static_assert(MR >= 1 && MR <= 12, "NV=2 accum kernel covers MR 1..12");
+    constexpr int NV = 2;
+    constexpr int kq_stride_bytes = NV * 16 * kVNNIInt8Quad;
+    constexpr int v_stride_bytes = 16 * kVNNIInt8Quad;
+    const int K_quad = K / kVNNIInt8Quad;
+
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i c00 = zero, c01 = zero, c10 = zero, c11 = zero;
+    __m512i c20 = zero, c21 = zero, c30 = zero, c31 = zero;
+    __m512i c40 = zero, c41 = zero, c50 = zero, c51 = zero;
+    __m512i c60 = zero, c61 = zero, c70 = zero, c71 = zero;
+    __m512i c80 = zero, c81 = zero, c90 = zero, c91 = zero;
+    __m512i c100 = zero, c101 = zero, c110 = zero, c111 = zero;
+
+    const __m512i s8_to_u8_bias_vec
+            = _mm512_set1_epi32(static_cast<int32_t>(0x80808080U));
+    for (int kq = 0; kq < K_quad; ++kq) {
+        const int8_t *bp = Bpacked + static_cast<size_t>(kq) * kq_stride_bytes;
+        const __m512i b0
+                = _mm512_load_si512(reinterpret_cast<const __m512i *>(bp));
+        const __m512i b1 = _mm512_load_si512(
+                reinterpret_cast<const __m512i *>(bp + v_stride_bytes));
+#define ZENDNNL_INT8_ACCUM_NV2_ROW(r) \
+    if constexpr (MR > r) { \
+        uint32_t a_quad; \
+        std::memcpy(&a_quad, \
+                A + static_cast<size_t>(r) * lda + kq * kVNNIInt8Quad, \
+                sizeof(a_quad)); \
+        const __m512i av = _mm512_xor_si512( \
+                _mm512_set1_epi32(static_cast<int32_t>(a_quad)), \
+                s8_to_u8_bias_vec); \
+        c##r##0 = _mm512_dpbusd_epi32(c##r##0, av, b0); \
+        c##r##1 = _mm512_dpbusd_epi32(c##r##1, av, b1); \
+        ZENDNNL_INT8_ACCUM_BARRIER(c##r##0, c##r##1); \
+    }
+        ZENDNNL_INT8_ACCUM_NV2_ROW(0)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(1)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(2)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(3)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(4)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(5)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(6)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(7)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(8)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(9)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(10)
+        ZENDNNL_INT8_ACCUM_NV2_ROW(11)
+#undef ZENDNNL_INT8_ACCUM_NV2_ROW
+    }
+
+#define ZENDNNL_INT8_ACCUM_NV2_STORE(r) \
+    if constexpr (MR > r) { \
+        int32_t *dst = C + static_cast<size_t>(r) * ldc; \
+        if (add) { \
+            c##r##0 = _mm512_add_epi32(c##r##0, \
+                    _mm512_loadu_si512(reinterpret_cast<const void *>(dst))); \
+            c##r##1 = _mm512_add_epi32(c##r##1, \
+                    _mm512_loadu_si512( \
+                            reinterpret_cast<const void *>(dst + 16))); \
+        } \
+        _mm512_storeu_si512(reinterpret_cast<void *>(dst), c##r##0); \
+        _mm512_storeu_si512(reinterpret_cast<void *>(dst + 16), c##r##1); \
+    }
+    ZENDNNL_INT8_ACCUM_NV2_STORE(0)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(1)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(2)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(3)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(4)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(5)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(6)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(7)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(8)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(9)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(10)
+    ZENDNNL_INT8_ACCUM_NV2_STORE(11)
+#undef ZENDNNL_INT8_ACCUM_NV2_STORE
+}
+#undef ZENDNNL_INT8_ACCUM_BARRIER
+
 } // namespace
 
 // ── Function-pointer table dispatch ─────────────────────────────
@@ -1104,6 +1197,60 @@ static int8_ukernel_fn_t select_none(int MR, int NV, IntCompute compute) {
                 : select_nv4_asym<ActKind::none, Dst>(MR);
     }
     return nullptr;
+}
+
+int8_accum_ukernel_fn_t select_int8_accum_ukernel(int MR) {
+    switch (MR) {
+        case 1: return ukernel_accum_nv2_sym_scalar<1>;
+        case 2: return ukernel_accum_nv2_sym_scalar<2>;
+        case 3: return ukernel_accum_nv2_sym_scalar<3>;
+        case 4: return ukernel_accum_nv2_sym_scalar<4>;
+        case 5: return ukernel_accum_nv2_sym_scalar<5>;
+        case 6: return ukernel_accum_nv2_sym_scalar<6>;
+        case 7: return ukernel_accum_nv2_sym_scalar<7>;
+        case 8: return ukernel_accum_nv2_sym_scalar<8>;
+        case 9: return ukernel_accum_nv2_sym_scalar<9>;
+        case 10: return ukernel_accum_nv2_sym_scalar<10>;
+        case 11: return ukernel_accum_nv2_sym_scalar<11>;
+        case 12: return ukernel_accum_nv2_sym_scalar<12>;
+        default: return nullptr;
+    }
+}
+
+ZENDNNL_TARGET("avx512f,avx512bw,avx512vl,avx512dq")
+void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
+        const int32_t *comp, const void *src_scale, const void *wei_scale,
+        ScaleKind scale_kind, bfloat16_t *dst, int ldc_dst) {
+    assert(C != nullptr && comp != nullptr && src_scale != nullptr
+            && wei_scale != nullptr && dst != nullptr);
+    const __m512i k_sym = _mm512_set1_epi32(128);
+    const __m512i comp0 = _mm512_mullo_epi32(
+            k_sym, _mm512_load_si512(reinterpret_cast<const __m512i *>(comp)));
+    const __m512i comp1 = _mm512_mullo_epi32(k_sym,
+            _mm512_load_si512(reinterpret_cast<const __m512i *>(comp + 16)));
+    __m512 wei_scale_v[2];
+    load_int8_weight_scales<2>(
+            wei_scale, scale_kind, /*per_tensor=*/false, wei_scale_v);
+    const __m512 zero = _mm512_setzero_ps();
+
+    for (int m = 0; m < M; ++m) {
+        const int32_t *src = C + static_cast<size_t>(m) * ldc_c;
+        const __m512 src_scale_m
+                = _mm512_set1_ps(load_int8_scale(src_scale, scale_kind, m));
+        const __m512 lo = dequant_finish(
+                _mm512_loadu_si512(reinterpret_cast<const void *>(src)), comp0,
+                _mm512_mul_ps(src_scale_m, wei_scale_v[0]), zero,
+                /*has_bias=*/false);
+        const __m512 hi = dequant_finish(
+                _mm512_loadu_si512(reinterpret_cast<const void *>(src + 16)),
+                comp1, _mm512_mul_ps(src_scale_m, wei_scale_v[1]), zero,
+                /*has_bias=*/false);
+        bfloat16_t *out = dst + static_cast<size_t>(m) * ldc_dst;
+        _mm256_storeu_si256(
+                reinterpret_cast<__m256i *>(out), f32_to_bf16x16(lo));
+        _mm256_storeu_si256(
+                reinterpret_cast<__m256i *>(out + 16), f32_to_bf16x16(hi));
+    }
 }
 
 int8_ukernel_fn_t select_int8_ukernel(

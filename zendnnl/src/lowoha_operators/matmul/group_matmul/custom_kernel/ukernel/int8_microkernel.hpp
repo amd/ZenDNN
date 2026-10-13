@@ -254,6 +254,23 @@ using int8_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
         BiasKind bias_kind, void *Cout, int ldc, void *Cout_tight,
         int ldc_tight, int K);
 
+/// Accumulation-only symmetric INT8 kernel used by the deep-K blocked path.
+/// It computes one NR=32 block into an s32 scratch tile without applying
+/// compensation, scales, bias, or destination conversion.  `add=true`
+/// accumulates onto an existing scratch tile; otherwise it overwrites it.
+using int8_accum_ukernel_fn_t = void (*)(const uint8_t *A, int lda,
+        const int8_t *Bpacked, int K, int32_t *C, int ldc, bool add);
+
+/// Select the NR=32 symmetric accumulation-only specialization for `MR`.
+/// Returns nullptr outside MR 1..12.
+int8_accum_ukernel_fn_t select_int8_accum_ukernel(int MR);
+
+/// Apply full-K compensation and dynamic per-token/per-channel dequantization
+/// to one NR=32 s32 scratch block, then store BF16 output.
+void finish_int8_accum_nv2_sym_bf16(const int32_t *C, int ldc_c, int M,
+        const int32_t *comp, const void *src_scale, const void *wei_scale,
+        ScaleKind scale_kind, bfloat16_t *dst, int ldc_dst);
+
 /// Runtime selector — returns the function pointer for the
 /// requested `(MR ∈ 1..max_mr_for_nv_int8(NV, Compute), NV ∈ {2, 4},
 /// Compute, Act, DstDt)` tuple, or `nullptr` if the combination is not
