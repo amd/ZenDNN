@@ -14,11 +14,10 @@
  * limitations under the License.
  *******************************************************************************/
 
-/// BF16 custom microkernel implementation — templated on (MR, NV, Act).
+/// Qwen BF16 decode microkernel specializations.
 ///
-/// See ukernel.hpp for the role this kernel plays in the group_matmul
-/// dispatch stack (both non-fused ALGO 3 and the fused-MoE tight-
-/// arena path).
+/// These kernels are selected only by `qwen/bf16_decode_policy.cpp` after the
+/// common group-matmul dispatcher has prepared the established ALGO 3 context.
 ///
 /// PER K-PAIR INNER LOOP (VDPBF16PS, AVX512_BF16):
 ///
@@ -41,7 +40,7 @@
 ///   the tight destination.  The epilogue runs NV/2 times per row,
 ///   producing NV*8 BF16 outputs in total (NV=2 → 16; NV=4 → 32).
 
-#include "bf16_microkernel.hpp"
+#include "bf16_decode_microkernel.hpp"
 #include "common/zendnnl_compat.hpp"
 
 #include <cstdint>
@@ -1121,8 +1120,7 @@ ukernel_fn_t select_plain_bf16_one_panel(int MR) {
 ukernel_fn_t select_plain_bf16_fixed_k(int MR, int K) {
 #define ZENDNNL_FIXED_K_CASE(MR_VALUE) \
     case MR_VALUE: \
-        return K == 2048 \
-                ? ukernel_plain_bf16_nr32_large_mr<MR_VALUE, 0, 2048> \
+        return K == 2048 ? ukernel_plain_bf16_nr32_large_mr<MR_VALUE, 0, 2048> \
                 : K == 4096 \
                 ? ukernel_plain_bf16_nr32_large_mr<MR_VALUE, 0, 4096> \
                 : nullptr

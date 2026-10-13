@@ -12,23 +12,23 @@
 #include <cstddef>
 #include <vector>
 
+#include "bf16_decode_microkernel.hpp"
 #include "common/zendnnl_compat.hpp"
 #include "lowoha_operators/matmul/group_matmul/group_matmul_parallel_common.hpp"
-#include "ukernel/bf16_decode_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace custom_kernel {
 
-MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
+QwenBf16DecodeRoute apply_qwen_bf16_decode_policy(CallContext &ctx,
         grp_matmul_gated_act_t act, const std::vector<int> &M,
         const std::vector<int> &N, const std::vector<int> &K) {
     if (!ctx.enabled || ctx.variant != KernelVariant::kBF16_BF16_BF16
             || ctx.NV != 2 || ctx.bias_kind != BiasKind::none || M.size() != 1
             || N.size() != 1 || K.size() != 1 || M[0] <= 0
             || M[0] > kDecodeMaxM) {
-        return MeasuredBf16DecodeRoute::none;
+        return QwenBf16DecodeRoute::none;
     }
 
     const int n = N[0];
@@ -36,10 +36,9 @@ MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
     const bool qwen35_gated = M[0] > 8
             && act == grp_matmul_gated_act_t::silu_and_mul && k == 4096
             && n == 24576;
-    const bool qwen35_w2 = M[0] > 8
-            && act == grp_matmul_gated_act_t::none && k == 12288 && n == 4096;
-    const bool qwen35_plain = M[0] > 8
-            && act == grp_matmul_gated_act_t::none
+    const bool qwen35_w2 = M[0] > 8 && act == grp_matmul_gated_act_t::none
+            && k == 12288 && n == 4096;
+    const bool qwen35_plain = M[0] > 8 && act == grp_matmul_gated_act_t::none
             && k == 4096
             && (n == 4096 || n == 10240 || n == 12288 || n == 248320);
     const bool qwen36_plain = act == grp_matmul_gated_act_t::none
@@ -49,13 +48,12 @@ MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
     if (qwen35_gated) {
         bool complete = true;
         for (int mr = 9; mr <= 12; ++mr) {
-            ctx.kfn_table[mr]
-                    = decode_specialized::select_gated_bf16_one_panel(
-                            mr, ctx.act_kind);
+            ctx.kfn_table[mr] = decode_specialized::select_gated_bf16_one_panel(
+                    mr, ctx.act_kind);
             complete = complete && ctx.kfn_table[mr] != nullptr;
         }
-        if (complete) ctx.max_mr = 12;
-        return MeasuredBf16DecodeRoute::none;
+        if (complete) { ctx.max_mr = 12; }
+        return QwenBf16DecodeRoute::none;
     }
     if (qwen35_w2) {
         const int max_mr = ctx.max_mr;
@@ -74,9 +72,9 @@ MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
                         mr_big, ctx.NV);
         if (initial_small != nullptr && initial_big != nullptr
                 && continue_small != nullptr && continue_big != nullptr) {
-            return MeasuredBf16DecodeRoute::qwen35_w2_resume;
+            return QwenBf16DecodeRoute::qwen35_w2_resume;
         }
-        return MeasuredBf16DecodeRoute::none;
+        return QwenBf16DecodeRoute::none;
     }
     if (qwen35_plain) {
         bool complete = true;
@@ -86,7 +84,7 @@ MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
             complete = complete && ctx.kfn_table[mr] != nullptr;
         }
         if (complete) ctx.max_mr = 12;
-        return MeasuredBf16DecodeRoute::none;
+        return QwenBf16DecodeRoute::none;
     }
     if (qwen36_plain) {
         bool complete = true;
@@ -97,13 +95,13 @@ MeasuredBf16DecodeRoute apply_measured_bf16_decode_policy(CallContext &ctx,
         }
         if (complete) ctx.max_mr = 12;
     }
-    return MeasuredBf16DecodeRoute::none;
+    return QwenBf16DecodeRoute::none;
 }
 
-bool dispatch_measured_bf16_decode_tile(MeasuredBf16DecodeRoute route,
+bool dispatch_qwen_bf16_decode_tile(QwenBf16DecodeRoute route,
         const CallContext &ctx, int expert_idx, int M, int K, int n_tile,
         int col_start, const void *src, int lda, void *dst, int ldc) {
-    if (route != MeasuredBf16DecodeRoute::qwen35_w2_resume) return false;
+    if (route != QwenBf16DecodeRoute::qwen35_w2_resume) return false;
 
     assert(ctx.enabled && ctx.variant == KernelVariant::kBF16_BF16_BF16);
     assert(ctx.pack_nr == 32 && ctx.NV == 2 && ctx.bias_kind == BiasKind::none);
@@ -131,8 +129,7 @@ bool dispatch_measured_bf16_decode_tile(MeasuredBf16DecodeRoute route,
             = decode_specialized::select_plain_bf16_f32_continue(
                     mr_small, ctx.NV);
     const ukernel_fn_t continue_big = (n_big > 0)
-            ? decode_specialized::select_plain_bf16_f32_continue(
-                      mr_big, ctx.NV)
+            ? decode_specialized::select_plain_bf16_f32_continue(mr_big, ctx.NV)
             : continue_small;
     assert(initial_small != nullptr && initial_big != nullptr);
     assert(continue_small != nullptr && continue_big != nullptr);
@@ -178,10 +175,9 @@ bool dispatch_measured_bf16_decode_tile(MeasuredBf16DecodeRoute route,
 
     auto *output = static_cast<bfloat16_t *>(dst);
     for (int m = 0; m < M; ++m) {
-        const float *accum_row
-                = accum.data() + static_cast<size_t>(m) * n_tile;
-        bfloat16_t *output_row = output + static_cast<size_t>(m) * ldc
-                + col_start;
+        const float *accum_row = accum.data() + static_cast<size_t>(m) * n_tile;
+        bfloat16_t *output_row
+                = output + static_cast<size_t>(m) * ldc + col_start;
         for (int n = 0; n < n_tile; ++n)
             output_row[n] = bfloat16_t(accum_row[n]);
     }

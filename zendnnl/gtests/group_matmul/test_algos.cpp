@@ -41,6 +41,7 @@
 
 #include "group_matmul_test_helpers.hpp"
 #include "gtest_utils.hpp"
+#include "kblock_test_hooks.hpp"
 #include "moe_test_utils.hpp"
 
 // Direct access to the dispatcher's ALGO selector — used by section
@@ -11854,9 +11855,9 @@ static void kblock_reference(const KblockProbe &p, std::vector<double> &ref) {
 // 2.6e-3 and the F32 case near 4e-6 — the latter being the interesting one,
 // since it holds the kernel to within a few ulp of an independent double
 // accumulation and no amount of misplaced or stale output survives it.
-static void run_kblock_case(int num_threads, int M, int N, int K, int nr,
-        int kblock_mode, bool with_bias, bool f32_dst, int lda_pad, int ldc_pad,
-        bool expect_kblock, const char *label) {
+void group_matmul_test::run_kblock_case(int num_threads, int M, int N, int K,
+        int nr, int kblock_mode, bool with_bias, bool f32_dst, int lda_pad,
+        int ldc_pad, bool expect_kblock, const char *label) {
     using namespace moe_test_utils;
     using zendnnl::lowoha::matmul::group_matmul_direct;
     using zendnnl::lowoha::matmul::status_t;
@@ -11929,6 +11930,8 @@ static void run_kblock_case(int num_threads, int M, int N, int K, int nr,
               << ", |ref[0]| = " << std::fabs(ref[0]) << std::endl;
 }
 
+using group_matmul_test::run_kblock_case;
+
 // Columns beyond the first NR block force tiles at nonzero `col_start`, and
 // M=64 spans several MR blocks.
 TEST(TestGroupMatmulKblock, BF16ParityNR64) {
@@ -11991,33 +11994,6 @@ TEST(TestGroupMatmulKblock, AutoEnablesOnSingleExpertDecode) {
             /*K=*/kblock_min_K(64), /*nr=*/64, /*kblock_mode=*/2,
             /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
             /*ldc_pad=*/0, /*expect_kblock=*/true, "kblock_auto_decode");
-}
-
-TEST(TestGroupMatmulKblock, DenseDecodeDownProjectionUsesSidecar) {
-    KblockThreadGuard tg(8);
-    if (!require_min_threads(8)) {
-        GTEST_SKIP() << "Requires >= 8 OMP threads.";
-    }
-    run_kblock_case(/*num_threads=*/8, /*M=*/32, /*N=*/4096,
-            /*K=*/12288, /*nr=*/32, /*kblock_mode=*/2,
-            /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
-            /*ldc_pad=*/0, /*expect_kblock=*/false,
-            "kblock_dense_decode_down_projection");
-}
-
-TEST(TestGroupMatmulKblock, DenseDecodeSidecarHandlesEveryMrTail) {
-    KblockThreadGuard tg(8);
-    if (!require_min_threads(8)) {
-        GTEST_SKIP() << "Requires >= 8 OMP threads.";
-    }
-    for (const int m : {31, 9}) {
-        run_kblock_case(/*num_threads=*/8, /*M=*/m, /*N=*/4096,
-                /*K=*/12288, /*nr=*/32, /*kblock_mode=*/2,
-                /*with_bias=*/false, /*f32_dst=*/false, /*lda_pad=*/0,
-                /*ldc_pad=*/0, /*expect_kblock=*/false,
-                m == 31 ? "kblock_dense_decode_tail31"
-                        : "kblock_dense_decode_tail9");
-    }
 }
 
 // Same shape past the decode M ceiling: automatic enablement must stay off,

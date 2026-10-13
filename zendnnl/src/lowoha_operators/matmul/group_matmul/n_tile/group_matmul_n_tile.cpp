@@ -68,8 +68,8 @@
 
 #include <omp.h>
 
-#include "../custom_kernel/bf16_decode_policy.hpp"
 #include "../custom_kernel/dispatch.hpp"
+#include "../custom_kernel/qwen/bf16_decode_policy.hpp"
 #include "../group_matmul_parallel_common.hpp"
 #include "../prepack/prepack.hpp"
 #include "../prompt_tile/prompt_tile_executor.hpp"
@@ -618,8 +618,8 @@ struct GroupNTileContext {
     // there.  Left as-is to keep Sequential a pure BLAS delegation.
     bool use_custom = false;
     const custom_kernel::CallContext *kctx = nullptr;
-    custom_kernel::MeasuredBf16DecodeRoute measured_bf16_route
-            = custom_kernel::MeasuredBf16DecodeRoute::none;
+    custom_kernel::QwenBf16DecodeRoute qwen_bf16_route
+            = custom_kernel::QwenBf16DecodeRoute::none;
 
     // Abort reason raised from inside the OMP region (see `NTileAbort`).
     // Read once after the region exits so the failure propagates to the
@@ -971,11 +971,11 @@ inline void GroupNTileContext::do_tile(const GroupNTilePlan &plan, int e,
             }
         }
         if (int8_hoist_ok) {
-            if (measured_bf16_route
-                            != custom_kernel::MeasuredBf16DecodeRoute::none
-                    && custom_kernel::dispatch_measured_bf16_decode_tile(
-                            measured_bf16_route, *kctx, e, M[e], K[e], n_tile,
-                            col_start, ck_src_ptr, ck_src_lda, dst[e], ldc[e])) {
+            if (qwen_bf16_route != custom_kernel::QwenBf16DecodeRoute::none
+                    && custom_kernel::dispatch_qwen_bf16_decode_tile(
+                            qwen_bf16_route, *kctx, e, M[e], K[e], n_tile,
+                            col_start, ck_src_ptr, ck_src_lda, dst[e],
+                            ldc[e])) {
                 return;
             }
             custom_kernel::dispatch_tile(*kctx, e, M[e], K[e], n_tile,
@@ -4653,12 +4653,11 @@ void flat_n_tile(const std::vector<char> &layout,
                         && (ck_inplace_licence
                                 || !is_grp_auto_mixed_inplace_active()));
     }
-    custom_kernel::MeasuredBf16DecodeRoute measured_bf16_route
-            = custom_kernel::MeasuredBf16DecodeRoute::none;
+    custom_kernel::QwenBf16DecodeRoute qwen_bf16_route
+            = custom_kernel::QwenBf16DecodeRoute::none;
     if (kctx.enabled && M.size() == 1
             && (K[0] == 2048 || K[0] == 4096 || K[0] == 12288)) {
-        measured_bf16_route
-                = custom_kernel::apply_measured_bf16_decode_policy(
+        qwen_bf16_route = custom_kernel::apply_qwen_bf16_decode_policy(
                 kctx, custom_act, M, N, K);
     }
     // A buffer an in-place pack (WEIGHT_CACHE=2) rewrote is CK-only in the
@@ -5328,7 +5327,7 @@ void flat_n_tile(const std::vector<char> &layout,
             weight, ldb, bias, beta, dst, ldc, is_weights_const, params,
             fused_act, act_dtype, wei_elem, dst_elem, bias_elem,
             is_single_dense_expert(num_ops), use_custom,
-            use_custom ? &kctx : nullptr, measured_bf16_route, &abort_code,
+            use_custom ? &kctx : nullptr, qwen_bf16_route, &abort_code,
             any_hoist ? &hoisted : nullptr, w4a8_s8_weights_in,
             w4a8_native_layout};
     ctx.split_team_over_experts = use_custom && auto_algo3_moe;

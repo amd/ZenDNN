@@ -14,10 +14,10 @@
  * limitations under the License.
  *******************************************************************************/
 
-#ifndef ZENDNNL_GROUP_MATMUL_BF16_DECODE_MICROKERNEL_HPP
-#define ZENDNNL_GROUP_MATMUL_BF16_DECODE_MICROKERNEL_HPP
+#ifndef ZENDNNL_GROUP_MATMUL_QWEN_BF16_DECODE_MICROKERNEL_HPP
+#define ZENDNNL_GROUP_MATMUL_QWEN_BF16_DECODE_MICROKERNEL_HPP
 
-#include "bf16_microkernel.hpp"
+#include "lowoha_operators/matmul/group_matmul/custom_kernel/ukernel/bf16_microkernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {

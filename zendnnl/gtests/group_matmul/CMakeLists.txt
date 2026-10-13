@@ -64,6 +64,7 @@ target_sources(gtests
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_ukernel_s4.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/test_dispatch_routing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/custom_kernel/qwen/test_bf16_decode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ntile_flat_parallel/test_ntile_flat_parallel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/routed_moe/test_routed_moe_s4.cpp
